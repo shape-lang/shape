@@ -376,6 +376,9 @@ impl MethodTable {
         // ---- string (monomorphic) --------------------------------------
         let str_methods: Vec<(&str, Vec<Type>, Type)> = vec![
             ("len", vec![], BuiltinTypes::integer()),
+            // PHF registry has len+length (method_registry.rs:901-902); both
+            // -> v2_string_len. Checker seed dropped one of the pair. A-final ROOT D.
+            ("length", vec![], BuiltinTypes::integer()),
             ("isEmpty", vec![], BuiltinTypes::boolean()),
             ("toLowerCase", vec![], BuiltinTypes::string()),
             ("toUpperCase", vec![], BuiltinTypes::string()),

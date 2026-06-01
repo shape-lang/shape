@@ -186,6 +186,14 @@ impl TypeInferenceEngine {
         }
     }
 
+    /// True when `ty` is still an unresolved inference variable (or a
+    /// constraint-bearing var) with no concrete shape yet. Used by the
+    /// overloaded `+` arm to defer the Numeric commitment when neither operand
+    /// can disambiguate numeric-add vs string-concat. A-final ROOT J3.
+    fn is_unresolved_var(ty: &Type) -> bool {
+        matches!(ty, Type::Variable(_) | Type::Constrained { .. })
+    }
+
     fn is_string_like(ty: &Type) -> bool {
         match ty {
             Type::Concrete(ann) if ann.as_type_name_str() == Some("string") => true,
@@ -366,6 +374,19 @@ impl TypeInferenceEngine {
                 // Operator trait fallback: if left type implements Add, return left type
                 if let Some(result_type) = self.check_operator_trait(left, "Add") {
                     return Ok(result_type);
+                }
+                // `+` is overloaded (numeric add OR string concat). When BOTH
+                // operands are still unresolved type variables there is nothing
+                // to disambiguate at body time — committing to a Numeric bound
+                // here is the J3 over-constraint (it later rejects a string call
+                // site). Defer: yield the left operand var and let
+                // callsite-union propagation pin the operands. A CONCRETE
+                // numeric on either side (e.g. `c + 1`) still flows to
+                // infer_numeric_arithmetic_op below and keeps the genuine
+                // Numeric requirement; `-`/`*`/`/`/`%` are numeric-only and are
+                // not in this arm, so they are unaffected. A-final ROOT J3.
+                if Self::is_unresolved_var(left) && Self::is_unresolved_var(right) {
+                    return Ok(left.clone());
                 }
                 self.infer_numeric_arithmetic_op(left, right, span)
             }

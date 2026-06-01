@@ -769,12 +769,27 @@ impl ConstraintSolver {
     fn check_constraint(&self, ty: &Type, constraint: &TypeConstraint) -> TypeResult<()> {
         match constraint {
             TypeConstraint::Comparable => match ty {
-                Type::Concrete(TypeAnnotation::Basic(name))
-                    if BuiltinTypes::is_numeric_type_name(name)
-                        || name == "string"
-                        || name == "bool" =>
-                {
-                    Ok(())
+                Type::Concrete(ann) => {
+                    // A match-accumulate union whose arms all yield the same
+                    // type (`Union([int])`) is just that type — collapse it
+                    // before the comparability check (mirrors the
+                    // ImplementsTrait arm at constraints.rs:991). A genuinely
+                    // heterogeneous union is left intact and still fails below.
+                    // A-final ROOT G.
+                    let ann = collapse_degenerate_union(ann);
+                    match ann {
+                        TypeAnnotation::Basic(name)
+                            if BuiltinTypes::is_numeric_type_name(name)
+                                || name == "string"
+                                || name == "bool" =>
+                        {
+                            Ok(())
+                        }
+                        _ => Err(TypeError::ConstraintViolation(format!(
+                            "{:?} is not comparable",
+                            ty
+                        ))),
+                    }
                 }
                 _ => Err(TypeError::ConstraintViolation(format!(
                     "{:?} is not comparable",

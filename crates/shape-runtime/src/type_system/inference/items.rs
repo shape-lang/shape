@@ -240,7 +240,27 @@ impl TypeInferenceEngine {
             Item::Extend(extend, _) => {
                 self.register_extend(extend)?;
             }
-            Item::Export(export, _) => match &export.item {
+            Item::Export(export, _) => {
+                // pub const/let/var NAME = expr : the VariableDecl rides in
+                // source_decl; infer + bind it exactly like a bare
+                // Item::VariableDecl so NAME is in scope and executes.
+                // A-final ROOT J1.
+                if let Some(decl) = &export.source_decl {
+                    let var_type = self.infer_variable_decl(decl)?;
+                    self.record_unannotated_let_origin(decl);
+                    if let Some(name) = decl.pattern.as_identifier() {
+                        types.insert(name.to_string(), var_type.clone());
+                    } else {
+                        for name in decl.pattern.get_identifiers() {
+                            let scheme = self.env.lookup(&name).cloned();
+                            let inferred = scheme
+                                .map(|s| s.instantiate(&mut self.type_var_gen))
+                                .unwrap_or_else(|| var_type.clone());
+                            types.insert(name, inferred);
+                        }
+                    }
+                }
+                match &export.item {
                 shape_ast::ast::ExportItem::Function(func) => {
                     let func_type = self.infer_function(func)?;
                     let scheme = self.make_function_scheme(func, func_type.clone());
@@ -278,7 +298,8 @@ impl TypeInferenceEngine {
                     self.register_trait(trait_def)?;
                 }
                 _ => {}
-            },
+                }
+            }
             Item::Comptime(stmts, _) => {
                 // J-CT.1: a top-level `comptime { ... }` item is itself a
                 // comptime context. Walk its statements with the comptime
