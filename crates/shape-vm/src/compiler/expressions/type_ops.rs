@@ -3,7 +3,7 @@
 use crate::bytecode::{Constant, Instruction, NumericWidth, OpCode, Operand};
 use shape_ast::ast::{Expr, Spanned, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
-use shape_runtime::type_system::{Type, annotation_to_string};
+use shape_runtime::type_system::{BuiltinTypes, Type, annotation_to_string};
 use std::collections::HashSet;
 
 use super::super::BytecodeCompiler;
@@ -364,6 +364,26 @@ impl BytecodeCompiler {
 
         // Identity cast: always valid
         if source_name == target_name {
+            return Ok(Some(CastLiftKind::Direct));
+        }
+
+        // D1 (numeric-conversion GREEN Stage 1) — primitive numeric cast.
+        // A cast between two primitive numeric types (`int`/`i64`, the width
+        // names, `number`/`f32`, `decimal`) is a BUILT-IN cast governed by
+        // the numeric lattice (spec §3 / §8), lowering to the already-existing
+        // typed `ConvertToInt`/`ConvertToNumber`/`ConvertToDecimal` opcodes via
+        // `convert_opcode_for_primitive` at the caller. It must NOT require a
+        // user `Into<Target>` impl: the prelude declares no `Into` for
+        // width-typed sources (`i32 as number`) nor for the lossy
+        // `number as int` direction. This mirrors the inference-side gate
+        // (`type_system/inference/expressions.rs` `Expr::TypeAssertion`) and
+        // the `CastWidth` width-cast bypass above. Direct (non-lift) so the
+        // result kind is re-stamped via `record_cast_result_kind`. No runtime
+        // coercion is introduced — the implicit-conversion paths are governed
+        // separately; this only accepts the EXPLICIT `as` cast.
+        if BuiltinTypes::is_numeric_type_name(&source_name)
+            && BuiltinTypes::is_numeric_type_name(target_name)
+        {
             return Ok(Some(CastLiftKind::Direct));
         }
 

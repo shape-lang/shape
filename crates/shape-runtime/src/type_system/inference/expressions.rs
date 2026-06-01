@@ -387,6 +387,37 @@ impl TypeInferenceEngine {
                     }
                 }
 
+                // D1 (numeric-conversion GREEN Stage 1) — primitive numeric
+                // cast gate. A cast whose TARGET is a primitive numeric type
+                // (`int`/`i64`, the width names, `number`/`f32`, `decimal`) and
+                // whose SOURCE is also a primitive numeric type is a BUILT-IN
+                // cast: it is unconditionally legal for the numeric lattice and
+                // lowers to the already-existing typed `ConvertToInt` /
+                // `ConvertToNumber` / `ConvertToDecimal` / `CastWidth` opcodes
+                // (`compiler/expressions/type_ops.rs:701`,`:878`,
+                // executor bodies `executor/builtins/type_ops.rs:591-659`).
+                // Per spec §3 / §8 (numeric-conversion-spec.md:404-405,:462) it
+                // is "always permitted for any numeric src→dst, with §3
+                // semantics, bypassing the user-`Into` requirement" — it must
+                // NOT route through `validate_infallible_conversion`'s
+                // Into-impl lookup (which has no entry for width-typed sources
+                // such as `i32 as number`, nor for the lossy `number as int`
+                // direction, since the prelude only declares the fallible
+                // `TryInto<int> for number`). This mirrors the width-cast
+                // bypass above and is COMPILE-TIME acceptance only — the
+                // runtime conversion correctness (truncation toward zero,
+                // out-of-range / non-finite handling) is a separate stage. No
+                // runtime coercion is introduced; the implicit-conversion paths
+                // are handled separately (constraint solver), this gate only
+                // governs the EXPLICIT `as` cast.
+                if let TypeAnnotation::Basic(target_name) = type_annotation {
+                    if BuiltinTypes::is_numeric_type_name(target_name)
+                        && self.source_is_numeric_for_cast(&expr_type)
+                    {
+                        return Ok(asserted_type);
+                    }
+                }
+
                 // Plain `as Type` is trait-dispatched conversion when Type is a
                 // concrete named target supported by Into<Target>.
                 if self.try_into_selector(&asserted_type).is_some() {
@@ -1953,6 +1984,23 @@ impl TypeInferenceEngine {
             .lookup_trait_impl_named("Into", source_type, target_selector)
             .is_some()
             || self.env.lookup_trait_impl("Into", source_type).is_some()
+    }
+
+    /// D1 (numeric-conversion GREEN Stage 1): whether a cast SOURCE type is a
+    /// concrete primitive numeric type (any int width, float width, or
+    /// `decimal`), eligible for the built-in primitive-numeric `as` cast gate
+    /// in `Expr::TypeAssertion`. Returns `false` for unresolved type vars (so
+    /// the gate never fires speculatively — the existing Into-dispatch /
+    /// strict-assertion path handles the unresolved case) and for any
+    /// non-numeric concrete type (so e.g. `myStruct as int` still falls through
+    /// to the normal validation and is rejected).
+    fn source_is_numeric_for_cast(&self, source: &Type) -> bool {
+        if self.type_contains_unresolved_vars(source) {
+            return false;
+        }
+        self.try_into_type_name(source)
+            .map(|name| BuiltinTypes::is_numeric_type_name(&name))
+            .unwrap_or(false)
     }
 
     fn try_into_type_name(&self, ty: &Type) -> Option<String> {

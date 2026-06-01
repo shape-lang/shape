@@ -826,6 +826,85 @@ impl TypeEnvironment {
                 vec!["shr".to_string()],
             );
         }
+
+        // D1 (numeric-conversion GREEN Stage 1): pre-register the prelude
+        // `Into<T>` / `TryInto<T>` primitive-conversion impls so that explicit
+        // `x as T` casts RESOLVE in the inference validation env.
+        //
+        // The stdlib declares these in `stdlib-src/core/into.shape` and
+        // `stdlib-src/core/try_into.shape`, each registered via
+        // `inference/items.rs:893` with `impl_name = the `as Target` selector`.
+        // But the production type-check path runs `analyze_program_with_mode`
+        // on the USER program ONLY — the prelude items never flow through
+        // `infer_item`/`register_impl` for that pass, so the impls are absent
+        // from this engine's `env.trait_impls` and EVERY Into/TryInto-dispatched
+        // cast (`int as number`, `number as int`, `int as string`,
+        // `int as decimal`, `string as int?`, …) rejects with
+        // "Cannot assert type X as Y" at `validate_infallible_conversion` /
+        // `validate_fallible_conversion` (`expressions.rs:1909`,`:1865`).
+        //
+        // Pre-registering here mirrors the Eq/Ord/Add/… bookkeeping pattern
+        // above: the named key (`Into::int::number`) is exactly what
+        // `has_into_impl`/`has_try_into_impl` look up via
+        // `lookup_trait_impl_named`. Re-registration is idempotent
+        // (`registry.rs:316-326`) so a user/stdlib module that declares the
+        // same impl explicitly is compatible. This is COMPILE-TIME acceptance
+        // only — the runtime conversion correctness (truncation, range,
+        // overflow) is handled by the conversion opcodes and is a separate
+        // stage. The matrix below is verbatim the `into.shape`/`try_into.shape`
+        // cells (source, target).
+        let into_conversions: &[(&str, &str)] = &[
+            ("int", "number"),
+            ("int", "decimal"),
+            ("int", "string"),
+            ("int", "bool"),
+            ("number", "string"),
+            ("number", "bool"),
+            ("decimal", "string"),
+            ("bool", "int"),
+            ("bool", "number"),
+            ("bool", "decimal"),
+            ("bool", "string"),
+        ];
+        for (source, target) in into_conversions {
+            let _ = self.type_registry.register_trait_impl_named(
+                "Into",
+                source,
+                target,
+                vec!["into".to_string()],
+            );
+        }
+
+        let try_into_conversions: &[(&str, &str)] = &[
+            ("int", "number"),
+            ("int", "decimal"),
+            ("int", "string"),
+            ("int", "bool"),
+            ("number", "int"),
+            ("number", "decimal"),
+            ("number", "string"),
+            ("number", "bool"),
+            ("decimal", "number"),
+            ("decimal", "int"),
+            ("decimal", "string"),
+            ("decimal", "bool"),
+            ("string", "int"),
+            ("string", "number"),
+            ("string", "decimal"),
+            ("string", "bool"),
+            ("bool", "int"),
+            ("bool", "number"),
+            ("bool", "decimal"),
+            ("bool", "string"),
+        ];
+        for (source, target) in try_into_conversions {
+            let _ = self.type_registry.register_trait_impl_named(
+                "TryInto",
+                source,
+                target,
+                vec!["tryInto".to_string()],
+            );
+        }
     }
 
     /// Register the Numeric marker trait and built-in implementations.

@@ -437,17 +437,26 @@ s as number
 }
 
 #[test]
-fn direct_number_as_int_rejected_at_compile_time() {
-    // number has no Into<int>, only TryInto<int>
+fn direct_number_as_int_accepts_at_compile_time() {
+    // THE RULE (user 2026-06-01) / numeric-conversion-spec §3.2: `number as int`
+    // is a LEGAL explicit infallible cast that truncates toward zero. It must
+    // COMPILE (the inference + compiler cast gates now recognize the primitive
+    // numeric lattice and bypass the user-`Into` requirement — D1 root fix). The
+    // runtime truncation semantics (`3.7 as int == 3`) are pinned by the
+    // permanent conformance suite (`tools/shape-test/tests/numeric_conversions`,
+    // category C) and finalized in the runtime stage; here we only assert the
+    // cast is accepted by the compiler. (Pre-RULE this test asserted a
+    // compile-reject because `number` has only `TryInto<int>`, not `Into<int>`;
+    // the RULE overturns that.)
     let source = r#"
 let x: number = 42.0
 let y = x as int
 "#;
     let result = compile_source(source);
     assert!(
-        result.is_err(),
-        "number as int should be a compile error (no Into<int> for number), got: {:?}",
-        result.ok()
+        result.is_ok(),
+        "number as int should compile (primitive numeric cast, truncates at runtime), got: {:?}",
+        result.err()
     );
 }
 
