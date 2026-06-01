@@ -150,6 +150,20 @@ fn builtin_return_numeric_type(name: &str) -> Option<NumericType> {
         // Number-returning builtins
         "abs" | "sqrt" | "ceil" | "floor" | "round" | "sum" | "mean" | "min" | "max" | "sin"
         | "cos" | "tan" | "exp" | "ln" | "log" | "stddev" | "std" | "variance"
+        // STRICT-FLIP (v0.3.3, STAGE-2 MATH): `pow`, `asin`, `acos`, `atan`
+        // were absent from this table, so the compiler's typed-opcode
+        // return-kind stamp (`last_expr_numeric_type` at function_calls.rs:1485)
+        // stayed unset for them — `pow(sin(x), 2.0) + pow(cos(x), 2.0)` then
+        // failed strict typing as `unknown + unknown` at binary_ops.rs:196 even
+        // though the inference checker had already proven each `pow(...)` /
+        // `acos(...)` is `number`. All return `number` per
+        // `stdlib-src/core/intrinsics.shape:42-67`; the bare names map to
+        // `BuiltinFunction::Pow/Asin/Acos/Atan` (compiler/helpers.rs:4419-4430)
+        // and execute at runtime by bare name. (`atan2`/`sinh`/`cosh`/`tanh`
+        // are intentionally omitted: their bare names are pure-Shape stdlib
+        // wrappers with no bare-name compiler mapping and do not resolve at
+        // runtime — see the matching note in environment/mod.rs init_builtins.)
+        | "pow" | "asin" | "acos" | "atan"
         // Strict-typing-sweep: __intrinsic_* aliases used by stdlib wrappers
         // such as `coefficient_of_variation` need return-type info too,
         // otherwise their `let std_val = __intrinsic_std(series)`

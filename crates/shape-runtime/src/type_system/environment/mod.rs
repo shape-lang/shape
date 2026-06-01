@@ -96,6 +96,52 @@ impl TypeEnvironment {
 
         self.define_builtin("ceil", vec![BuiltinTypes::number()], BuiltinTypes::number());
 
+        // STRICT-FLIP (v0.3.3, STAGE-2 MATH): the trig / transcendental /
+        // power math fns resolve at the bytecode-compiler level — bare `sin`,
+        // `acos`, `pow`, `round`, … map to `BuiltinFunction::*`
+        // (compiler/helpers.rs:4415-4430) and execute correctly in the VM — but
+        // were never registered in the inference env, so the strict checker
+        // rejected every `acos(-1.0)` / `sin(pi)` / `pow(x, 2.0)` with
+        // "Undefined function" at `access.rs:596` BEFORE the compiler ever ran.
+        // Same FAMILY as the SMOKE-s4 collection ctors (Set/Deque/…) and the D1
+        // Into/TryInto pre-registration above: the production type-check path
+        // (`analyze_program_with_mode`) runs on the USER program only, so stdlib
+        // prelude items never flow through `infer_item` for that pass — every
+        // stdlib-provided callable that the user invokes must be hand-registered
+        // here with its declared signature. Signatures are verbatim the
+        // `stdlib-src/core/intrinsics.shape:38-77` `builtin fn` declarations
+        // (all `(number) -> number`, the 2-arg `pow`, and `round` whose optional
+        // 2nd arg is already covered by `seed_builtin_callable_defaults` =
+        // `vec![false, true]`). `abs`/`sqrt`/`floor`/`ceil`/`min`/`max` were
+        // already registered above (which is why only THEY resolved pre-fix).
+        //
+        // SCOPE: only the fns that have a bare-name `BuiltinFunction::*`
+        // compiler mapping (and therefore EXECUTE at runtime by bare name) are
+        // registered. The `atan2` / `sinh` / `cosh` / `tanh` bare names are
+        // pure-Shape stdlib wrappers (`math.shape:161-177`) that route through
+        // `__intrinsic_*` and have NO bare-name compiler mapping — they still
+        // surface "Undefined function" at RUNTIME (a separate, broad
+        // prelude-export gap shared by `degrees`/`radians`/`PI`/`TAU`/`E`,
+        // tracked separately). Registering them here would make the checker
+        // accept calls that then crash at runtime, so they are intentionally
+        // left unregistered until the prelude-export gap is fixed.
+        for unary in ["sin", "cos", "tan", "asin", "acos", "atan", "log", "exp", "ln"] {
+            self.define_builtin(unary, vec![BuiltinTypes::number()], BuiltinTypes::number());
+        }
+        // pow(base, exponent) — 2-arg `(number, number) -> number`.
+        self.define_builtin(
+            "pow",
+            vec![BuiltinTypes::number(), BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+        // round(value, decimals = 0) — 2-arg shape; the 1-arg call is admitted
+        // by the `round` default-flag seed in `seed_builtin_callable_defaults`.
+        self.define_builtin(
+            "round",
+            vec![BuiltinTypes::number(), BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+
         // Array functions (polymorphic)
         let array_t = Type::Variable(TypeVar::new("T".to_string()));
         self.define_polymorphic(
