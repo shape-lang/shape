@@ -94,13 +94,20 @@ fn soak_mixed_types_100k() {
 
 #[test]
 fn soak_float_arithmetic_100k() {
-    // Compute pi approximation using Leibniz formula (many float ops)
+    // Compute pi approximation using Leibniz formula (many float ops).
+    //
+    // TP-REBASELINE (numeric-conversion GREEN Stage 2, THE RULE user
+    // 2026-06-01 / spec §5): `2.0 * i` with `i: int` (`let mut i = 0`) is a
+    // value-level cross-family mix — a silent `int -> number` promotion now
+    // FORBIDDEN (conformance `b_int_var_plus_number_var_rejected`). The soak
+    // intent (100K float ops) is preserved with the explicit `i as number` cast
+    // THE RULE requires.
     let source = r#"
         let mut sum = 0.0
         let mut sign = 1.0
         let mut i = 0
         while i < 100000 {
-            let denom = 2.0 * i + 1.0
+            let denom = 2.0 * (i as number) + 1.0
             sum = sum + sign / denom
             sign = sign * -1.0
             i = i + 1

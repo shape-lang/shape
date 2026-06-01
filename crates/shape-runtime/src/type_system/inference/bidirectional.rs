@@ -151,6 +151,21 @@ impl TypeInferenceEngine {
                 }
             }
 
+            // Numeric-conversion LITERAL ADOPTION (spec §4): a bare integer
+            // literal in a concrete numeric context adopts that context type
+            // when its value is losslessly representable in it. `let n: number =
+            // 5` types `5` as the number literal `5.0`; `let x: u8 = 200` types
+            // `200` as a u8 literal. NO rejecting constraint is pushed (the
+            // literal IS the expected type). An OUT-OF-RANGE literal does NOT
+            // adopt — it falls through to the default arm, where `(int, u8)`
+            // fails the tightened §2 lattice and `let x: u8 = 300` correctly
+            // compile-rejects (never a silent wrap).
+            Expr::Literal(..)
+                if Self::adopt_int_literal_in_context(expr, expected).is_some() =>
+            {
+                Ok(expected.clone())
+            }
+
             // Default: infer and constrain to expected
             _ => {
                 let inferred = self.infer_expr(expr)?;

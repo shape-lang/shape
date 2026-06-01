@@ -34,6 +34,42 @@ use super::*;
 use shape_ast::ast::{ObjectTypeField, TypeAnnotation};
 use std::collections::{HashMap, HashSet};
 
+/// The exactly-representable value domain of a fixed-width numeric type, used
+/// by the §2 lossless-implicit lattice (numeric-conversion-spec).
+///
+/// Integers carry their full `[lo, hi]` value range as `i128` (wide enough for
+/// the `u64`/`i64` extremes). Floats (`number`/f64, `f32`) carry their
+/// exact-integer range (`[-2^53, 2^53]` / `[-2^24, 2^24]`) and set `is_float`.
+///
+/// `src` is LOSSLESS-IMPLICIT into `dst` iff `src`'s range is a subset of
+/// `dst`'s exactly-representable range AND the source/destination float-ness is
+/// compatible (an integer source may widen into a float destination whose
+/// exact-integer range contains it; a float source may only flow into another
+/// float — never silently into an integer).
+#[derive(Clone, Copy)]
+struct NumericDomain {
+    lo: i128,
+    hi: i128,
+    is_float: bool,
+}
+
+impl NumericDomain {
+    /// Whether every value of `self` is exactly representable in `dst`.
+    fn is_subset_of(&self, dst: &NumericDomain) -> bool {
+        if self.is_float && !dst.is_float {
+            // A float source is never silently an integer (number -> int is
+            // CAST-required in both the spec and THE RULE).
+            return false;
+        }
+        // Integer -> float (dst.is_float, !self.is_float): legal iff the whole
+        // integer range fits the float exact-integer range. Float -> float and
+        // integer -> integer: legal iff the range is a subset. The single
+        // range-subset test covers all three cases since the float domain's
+        // `[lo, hi]` IS its exact-integer range.
+        dst.lo <= self.lo && self.hi <= dst.hi
+    }
+}
+
 /// Check if a Type::Generic base is "Array" or "Vec".
 fn is_array_or_vec_base(base: &Type) -> bool {
     match base {
@@ -226,9 +262,11 @@ impl ConstraintSolver {
             // Concrete type constraints
             (Type::Concrete(ann1), Type::Concrete(ann2)) => {
                 if self.unify_annotations(ann1, ann2)? {
-                    Ok(())
-                } else if Self::can_numeric_widen(ann1, ann2) {
-                    // Implicit numeric promotion (int → number/float)
+                    // `unify_annotations` accepts identity plus the directional
+                    // §2 lossless-widening lattice (`lossless_implicit(ann1=src,
+                    // ann2=dst)`). Every non-subset numeric pair — int<->number
+                    // both ways, lossy narrowing, sign reinterpretation,
+                    // int(i64)/u64 -> number — falls through to the mismatch.
                     Ok(())
                 } else if Self::is_any_error(ann1) || Self::is_any_error(ann2) {
                     // `AnyError` is the top of the error lattice: the default `E`
@@ -364,57 +402,101 @@ impl ConstraintSolver {
         }
     }
 
-    /// Check if a numeric type can widen to another (directional).
+    /// The numeric-conversion lossless lattice (numeric-conversion-spec §2).
     ///
-    /// Integer-family types (`int`, `i16`, `u32`, `byte`, ...) can widen to
-    /// number-family types (`number`, `f32`, `f64`, ...).
-    /// `number → int` does NOT widen (lossy). `decimal → number` does NOT widen
-    /// (different precision semantics).
-    fn can_numeric_widen(from: &TypeAnnotation, to: &TypeAnnotation) -> bool {
-        let from_name = match from {
-            TypeAnnotation::Basic(name) => Some(name.as_str()),
-            TypeAnnotation::Reference(name) => Some(name.as_str()),
-            _ => None,
-        };
-        let to_name = match to {
-            TypeAnnotation::Basic(name) => Some(name.as_str()),
-            TypeAnnotation::Reference(name) => Some(name.as_str()),
-            _ => None,
-        };
-
-        match (from_name, to_name) {
-            (Some(f), Some(t)) => {
-                BuiltinTypes::is_integer_type_name(f) && BuiltinTypes::is_number_type_name(t)
-            }
+    /// An ordered pair `(src, dst)` is **LOSSLESS-IMPLICIT** iff the entire
+    /// value range of `src` is a subset of the values exactly representable in
+    /// `dst`. This is the *only* implicit numeric conversion THE RULE (user
+    /// 2026-06-01) permits: every non-subset pair — `int <-> number` both
+    /// directions, lossy width narrowing (`u16 -> u8`, `i64 -> i32`), sign
+    /// reinterpretation (`i16 -> u16`, `u8 -> i8`), `int(i64) -> number`,
+    /// `u64 -> number`, `number -> int` — is CAST-REQUIRED.
+    ///
+    /// This replaces the two prior loose relaxations:
+    /// - `can_numeric_widen` (accepted *every* integer -> *any* float, so the
+    ///   lossy `int(i64) -> number` value-promotion silently passed), and
+    /// - `same_canonical_numeric_type` (collapsed all integer widths to a single
+    ///   `"int"` alias, so `u16 ~ u8` unified with no cast and silently wrapped
+    ///   300 -> 44).
+    ///
+    /// Identity (`src == dst`, after canonicalization) is trivially lossless.
+    ///
+    /// `decimal`/`bigint` are arbitrary/exact-precision heap types, NOT part of
+    /// the fixed-width lossless lattice: conversions to/from them are always an
+    /// explicit `as`-cast and are not accepted here (returns `false`).
+    fn lossless_implicit_names(src: &str, dst: &str) -> bool {
+        match (Self::numeric_domain(src), Self::numeric_domain(dst)) {
+            (Some(s), Some(d)) => s.is_subset_of(&d),
             _ => false,
         }
     }
 
-    /// Check if two type-annotation names canonicalize to the same script-level
-    /// numeric type.
-    ///
-    /// Width-aware integer aliases (`i8`/`i16`/`i32`/`i64`/`u8`/`u16`/`u32`/`u64`,
-    /// plus `byte`/`char`) all canonicalize to the script type `int`; the
-    /// float-family widths (`f32`/`f64`) canonicalize to `number`. At the
-    /// script-level type system these aliases denote the same logical type, so a
-    /// width-integer (e.g. `i8`) is interchangeable with `int` (and with other
-    /// integer widths) — `let a: i8 = 100` may be returned from a `-> int` fn.
-    ///
-    /// This is the same alias-resolution strategy already used by
-    /// [`Self::has_trait_impl`] (script-alias arm). It deliberately does NOT
-    /// collapse `int` and `number` together: they map to distinct script aliases
-    /// (`int` vs `number`), preserving the int/number separation. Cross-family
-    /// `int -> number` promotion remains the directional concern of
-    /// [`Self::can_numeric_widen`].
-    fn same_canonical_numeric_type(name1: &str, name2: &str) -> bool {
-        match (
-            BuiltinTypes::canonical_script_alias(name1),
-            BuiltinTypes::canonical_script_alias(name2),
-        ) {
-            (Some(a), Some(b)) => a == b,
+    /// Directional lossless-implicit check on annotations (src widens to dst).
+    fn lossless_implicit(src: &TypeAnnotation, dst: &TypeAnnotation) -> bool {
+        match (Self::annotation_name(src), Self::annotation_name(dst)) {
+            (Some(s), Some(d)) => Self::lossless_implicit_names(s, d),
             _ => false,
         }
     }
+
+    /// Resolve a numeric type name to its exactly-representable value domain.
+    ///
+    /// Integers carry their `[lo, hi]` value range (as `i128`, wide enough for
+    /// the full `u64`/`i64` range). `number`/`f32` carry the f64/f32
+    /// exact-integer range `[-2^53, 2^53]` / `[-2^24, 2^24]` plus a `float`
+    /// flag (a float domain is a *strict superset destination* only for integer
+    /// sources whose whole range fits — and for float->float widening). Returns
+    /// `None` for non-fixed-width-numeric names (`decimal`, named types, ...).
+    fn numeric_domain(name: &str) -> Option<NumericDomain> {
+        // Width names with a concrete [min, max] range.
+        if let Some(w) = shape_ast::IntWidth::from_name(name) {
+            let (lo, hi) = if w.is_signed() {
+                (w.min_value() as i128, w.max_value() as i128)
+            } else {
+                (0i128, w.max_unsigned() as i128)
+            };
+            return Some(NumericDomain {
+                lo,
+                hi,
+                is_float: false,
+            });
+        }
+        // The script primitives + aliases not covered by IntWidth.
+        match BuiltinTypes::canonical_numeric_runtime_name(name) {
+            // int / i64 — the default 64-bit signed integer.
+            Some("i64") => Some(NumericDomain {
+                lo: i64::MIN as i128,
+                hi: i64::MAX as i128,
+                is_float: false,
+            }),
+            // isize/usize are platform-width; treat as i64/u64 on 64-bit
+            // targets (spec §7 OD-4, convention adopted).
+            Some("isize") => Some(NumericDomain {
+                lo: i64::MIN as i128,
+                hi: i64::MAX as i128,
+                is_float: false,
+            }),
+            Some("usize") => Some(NumericDomain {
+                lo: 0,
+                hi: u64::MAX as i128,
+                is_float: false,
+            }),
+            // number / f64 — exactly represents every integer in [-2^53, 2^53].
+            Some("f64") => Some(NumericDomain {
+                lo: -(1i128 << 53),
+                hi: 1i128 << 53,
+                is_float: true,
+            }),
+            // f32 — exactly represents every integer in [-2^24, 2^24].
+            Some("f32") => Some(NumericDomain {
+                lo: -(1i128 << 24),
+                hi: 1i128 << 24,
+                is_float: true,
+            }),
+            _ => None,
+        }
+    }
+
 
     /// Extract the bare name from a `Basic` / `Reference` annotation (the only
     /// shapes a primitive numeric alias can take). Returns `None` for compound
@@ -441,12 +523,11 @@ impl ConstraintSolver {
         matches!(Self::annotation_name(ann), Some("AnyError"))
     }
 
-    /// Whether two annotations name the same script-level numeric type.
+    /// Whether `ann1` losslessly widens to `ann2` per the §2 numeric lattice
+    /// (directional, `(src, dst)`-ordered). Identity is handled by the caller's
+    /// `ann1 == ann2` check; this is purely the proper-widening relation.
     fn annotations_same_numeric(ann1: &TypeAnnotation, ann2: &TypeAnnotation) -> bool {
-        match (Self::annotation_name(ann1), Self::annotation_name(ann2)) {
-            (Some(n1), Some(n2)) => Self::same_canonical_numeric_type(n1, n2),
-            _ => false,
-        }
+        Self::lossless_implicit(ann1, ann2)
     }
 
     /// Unify two type annotations
@@ -458,27 +539,28 @@ impl ConstraintSolver {
             return Ok(true);
         }
         match (ann1, ann2) {
-            // Basic types
-            (TypeAnnotation::Basic(_), TypeAnnotation::Basic(_)) => Ok(ann1 == ann2
-                || Self::annotations_same_numeric(ann1, ann2)
-                || Self::can_numeric_widen(ann1, ann2)),
+            // Basic types. Numeric pairs unify implicitly ONLY when `ann1`
+            // (the src/value side) losslessly widens to `ann2` (the dst side)
+            // per the §2 lattice — `annotations_same_numeric` is now exactly
+            // `lossless_implicit(ann1, ann2)`. Identity stays `ann1 == ann2`.
+            (TypeAnnotation::Basic(_), TypeAnnotation::Basic(_)) => {
+                Ok(ann1 == ann2 || Self::annotations_same_numeric(ann1, ann2))
+            }
             (TypeAnnotation::Reference(n1), TypeAnnotation::Reference(n2)) => {
                 Ok(n1 == n2 || Self::annotations_same_numeric(ann1, ann2))
             }
             // Combined (merge r3 enum-nominal + r5 width-int): a `Basic` name
             // and a `Reference` path denote the same nominal type when their
             // names agree (`Color` carried as Basic at decl vs Reference at call
-            // site); OR they are the same numeric script (`i8` ~ `int`); OR a
-            // legal numeric-widen. Distinct names (`Color` vs `Dir`) still fail.
+            // site); OR `ann1` losslessly widens to `ann2` per the §2 lattice.
+            // Distinct names (`Color` vs `Dir`) still fail.
             (TypeAnnotation::Basic(_), TypeAnnotation::Reference(_))
             | (TypeAnnotation::Reference(_), TypeAnnotation::Basic(_)) => {
                 let names_match = matches!(
                     (ann1.as_type_name_str(), ann2.as_type_name_str()),
                     (Some(n1), Some(n2)) if n1 == n2
                 );
-                Ok(names_match
-                    || Self::annotations_same_numeric(ann1, ann2)
-                    || Self::can_numeric_widen(ann1, ann2))
+                Ok(names_match || Self::annotations_same_numeric(ann1, ann2))
             }
 
             // Array types
@@ -1423,14 +1505,21 @@ mod tests {
     }
 
     #[test]
-    fn test_numeric_widening_int_to_number() {
-        // (Concrete(int), Concrete(number)) should succeed via widening
+    fn test_int_to_number_is_cast_required() {
+        // TP-REBASELINE (numeric-conversion GREEN Stage 2, THE RULE user
+        // 2026-06-01 / spec §2): `int(i64) -> number` is CAST-REQUIRED, NOT an
+        // implicit widening — not every i64 is exactly representable in f64
+        // (e.g. 2^53+1). The prior test pinned the now-deleted loose
+        // `can_numeric_widen` (every integer -> any float). Value-level
+        // `let n: number = int_value` must reject and demand `int_value as
+        // number`. (`i32 -> number` stays IMPL because EVERY i32 fits — see
+        // `test_numeric_widening_width_aware_integer_to_float_family`.)
         let mut solver = ConstraintSolver::new();
         let mut constraints = vec![(
             Type::Concrete(TypeAnnotation::Basic("int".to_string())),
             Type::Concrete(TypeAnnotation::Basic("number".to_string())),
         )];
-        assert!(solver.solve(&mut constraints).is_ok());
+        assert!(solver.solve(&mut constraints).is_err());
     }
 
     #[test]
@@ -1455,20 +1544,37 @@ mod tests {
     }
 
     #[test]
-    fn test_width_int_unifies_with_int_both_directions() {
-        // Strict-flip root R5: a width-integer where `int` is expected (and
-        // vice versa) is a VALID program — `let a: i8 = 100` returned from a
-        // `-> int` fn. Both `i8` and `int` canonicalize to the script type
-        // `int`, so they must unify.
-        for (a, b) in [("i8", "int"), ("int", "i8"), ("u16", "int"), ("int", "u64")] {
+    fn test_width_int_widens_to_int_directionally() {
+        // TP-REBASELINE (numeric-conversion GREEN Stage 2, THE RULE / spec §2):
+        // the prior "both directions unify" premise is no longer correct — the
+        // §2 lattice is DIRECTIONAL `(src, dst)`. A narrower-or-cross-sign-fit
+        // integer widens INTO `int(i64)` (IMPL), but `int` does NOT implicitly
+        // narrow / sign-reinterpret back (CAST-REQUIRED). The prior test pinned
+        // the now-deleted width-collapse (`canonical_script_alias` -> single
+        // `"int"`) that let `int -> i8` and `int -> u64` silently pass.
+        //
+        // Widening INTO int (subset of i64) — IMPL (accept):
+        for (src, dst) in [("i8", "int"), ("u16", "int"), ("i32", "int"), ("u32", "int")] {
             let mut solver = ConstraintSolver::new();
             let mut constraints = vec![(
-                Type::Concrete(TypeAnnotation::Basic(a.to_string())),
-                Type::Concrete(TypeAnnotation::Basic(b.to_string())),
+                Type::Concrete(TypeAnnotation::Basic(src.to_string())),
+                Type::Concrete(TypeAnnotation::Basic(dst.to_string())),
             )];
             assert!(
                 solver.solve(&mut constraints).is_ok(),
-                "{a} should unify with {b} (both canonicalize to `int`)"
+                "{src} should losslessly widen to {dst}"
+            );
+        }
+        // `int` narrowing / sign-reinterpreting back — CAST-REQUIRED (reject):
+        for (src, dst) in [("int", "i8"), ("int", "u64"), ("int", "i32"), ("int", "u16")] {
+            let mut solver = ConstraintSolver::new();
+            let mut constraints = vec![(
+                Type::Concrete(TypeAnnotation::Basic(src.to_string())),
+                Type::Concrete(TypeAnnotation::Basic(dst.to_string())),
+            )];
+            assert!(
+                solver.solve(&mut constraints).is_err(),
+                "{src} must NOT implicitly convert to {dst} (cast required)"
             );
         }
     }

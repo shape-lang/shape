@@ -14,7 +14,7 @@
 
 use super::TypeInferenceEngine;
 use crate::type_system::*;
-use shape_ast::ast::{BinaryOp, Literal, Span, TypeAnnotation, UnaryOp};
+use shape_ast::ast::{BinaryOp, Expr, Literal, Span, TypeAnnotation, UnaryOp};
 
 impl TypeInferenceEngine {
     /// Infer type of a literal
@@ -36,6 +36,88 @@ impl TypeInferenceEngine {
             Literal::Unit => Type::Concrete(TypeAnnotation::Basic("()".to_string())),
             Literal::Timeframe(_) => Type::Concrete(TypeAnnotation::Basic("timeframe".to_string())),
         })
+    }
+
+    /// Numeric-conversion LITERAL ADOPTION (numeric-conversion-spec §4).
+    ///
+    /// An untyped integer literal adopts the numeric type required by its
+    /// context IFF the literal value is losslessly representable in that type.
+    /// `let n: number = 5` makes `5` the f64 literal `5.0`; `val: number > 10`
+    /// makes `10` a number literal; `P { x: 1 }` makes `1` a number. An
+    /// out-of-range literal does NOT adopt (it surfaces as a compile error
+    /// downstream — the literal type stays its natural `int`/`u64`, which then
+    /// fails the §2 lattice against the sized target).
+    ///
+    /// Returns the adopted (context) type when `expr` is a bare integer literal
+    /// (`Int`/`UInt`) whose value losslessly fits the concrete numeric
+    /// `context` type; otherwise `None` (the literal keeps its natural type).
+    /// Explicitly-typed literals (`42u8`) and float/decimal literals do NOT
+    /// adopt — they are already their declared type.
+    pub(crate) fn adopt_int_literal_in_context(expr: &Expr, context: &Type) -> Option<Type> {
+        let lit = match expr {
+            Expr::Literal(lit, _) => lit,
+            _ => return None,
+        };
+        let ctx_name = match context {
+            Type::Concrete(TypeAnnotation::Basic(n)) => n.as_str(),
+            Type::Concrete(TypeAnnotation::Reference(n)) => n.as_str(),
+            _ => return None,
+        };
+        if !BuiltinTypes::is_numeric_type_name(ctx_name) {
+            return None;
+        }
+        let fits = match lit {
+            Literal::Int(v) => Self::int_value_fits_numeric(*v as i128, ctx_name),
+            Literal::UInt(v) => Self::int_value_fits_numeric(*v as i128, ctx_name),
+            // Float/decimal/typed-int literals are already their own type and
+            // do not context-adopt (a `42u8` is a u8; `3.5` is a number).
+            _ => return None,
+        };
+        if fits {
+            Some(context.clone())
+        } else {
+            None
+        }
+    }
+
+    /// The concrete numeric type name of a `Type`, if it is a `Basic`/
+    /// `Reference` concrete numeric type. `None` for type vars, compound, or
+    /// non-numeric types. Used to gate numeric return-context literal adoption.
+    pub(crate) fn concrete_numeric_type_name(ty: &Type) -> Option<String> {
+        let name = match ty {
+            Type::Concrete(TypeAnnotation::Basic(n)) => n.as_str(),
+            Type::Concrete(TypeAnnotation::Reference(n)) => n.as_str(),
+            _ => return None,
+        };
+        if BuiltinTypes::is_numeric_type_name(name) {
+            Some(name.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Whether integer value `v` is losslessly representable in the numeric
+    /// type named `name` (numeric-conversion-spec §4 literal-adoption range
+    /// check). Width names use their concrete `[min, max]`; `int`/`i64` use the
+    /// i64 range; `u64`/`usize` the u64 range; `number`/`f64` the exact-integer
+    /// range `[-2^53, 2^53]`; `f32` the range `[-2^24, 2^24]`. `decimal` accepts
+    /// any integer literal (arbitrary precision).
+    fn int_value_fits_numeric(v: i128, name: &str) -> bool {
+        if let Some(w) = shape_ast::IntWidth::from_name(name) {
+            return if w.is_signed() {
+                v >= w.min_value() as i128 && v <= w.max_value() as i128
+            } else {
+                v >= 0 && v <= w.max_unsigned() as i128
+            };
+        }
+        match BuiltinTypes::canonical_numeric_runtime_name(name) {
+            Some("i64") | Some("isize") => v >= i64::MIN as i128 && v <= i64::MAX as i128,
+            Some("usize") => v >= 0 && v <= u64::MAX as i128,
+            Some("f64") => v >= -(1i128 << 53) && v <= (1i128 << 53),
+            Some("f32") => v >= -(1i128 << 24) && v <= (1i128 << 24),
+            // decimal: arbitrary precision, any integer literal fits.
+            _ => name == "decimal" || name == "Decimal",
+        }
     }
 
     /// Check if a type is Option<T> and extract the inner type
@@ -341,6 +423,30 @@ impl TypeInferenceEngine {
             span,
         );
 
+        // Numeric-conversion §5 value-level invariant: a cross-family mix of a
+        // concrete INT-family value and a concrete NUMBER-family value
+        // (`int_var + number_var`) is a silent int->number promotion and is
+        // FORBIDDEN — both operands must already be the same family; mixing
+        // requires an explicit cast. (Literal operands were already adopted into
+        // the other operand's type at the `Expr::BinaryOp` seam, so `a:number +
+        // 3` is `number + number` here and is unaffected.) Push the directional
+        // `(int, number)` same-type constraint so the tightened §2 lattice
+        // rejects it. Same-family arithmetic (int+int, i8+i16, number+number)
+        // and any var-involving op are untouched — only the concrete
+        // cross-family case gets the extra constraint.
+        if let (Some(lf), Some(rf)) = (
+            Self::concrete_numeric_family(&effective_left),
+            Self::concrete_numeric_family(&effective_right),
+        ) {
+            if lf != rf {
+                self.push_constraint_with_origin(
+                    effective_left.clone(),
+                    effective_right.clone(),
+                    span,
+                );
+            }
+        }
+
         // Compute result type based on operand types
         let result = Self::numeric_result_type(&effective_left, &effective_right);
 
@@ -349,6 +455,24 @@ impl TypeInferenceEngine {
         } else {
             Ok(result)
         }
+    }
+
+    /// The script-level numeric family of a CONCRETE numeric type: `"int"` for
+    /// any integer width (incl. `int`/`i64`/`u64`/sized), `"number"` for the
+    /// float family (`number`/`f64`/`f32`), `"decimal"` for decimal. Returns
+    /// `None` for type vars, non-numeric, or compound types. Used by the §5
+    /// cross-family arithmetic-rejection check; deliberately reuses
+    /// `canonical_script_alias` (which is the *family* collapse — correct here,
+    /// where we only want "are these the same family", not "are these the same
+    /// width").
+    fn concrete_numeric_family(ty: &Type) -> Option<&'static str> {
+        let name = match ty {
+            Type::Concrete(TypeAnnotation::Basic(n)) => n.as_str(),
+            Type::Concrete(TypeAnnotation::Reference(n)) => n.as_str(),
+            _ => return None,
+        };
+        BuiltinTypes::canonical_script_alias(name)
+            .filter(|fam| matches!(*fam, "int" | "number" | "decimal"))
     }
 
     /// Infer type of binary operation
@@ -474,9 +598,12 @@ impl TypeInferenceEngine {
             }
 
             BinaryOp::FuzzyEqual | BinaryOp::FuzzyLess | BinaryOp::FuzzyGreater => {
-                // Fuzzy comparison for numbers
-                self.push_constraint_with_origin(left.clone(), BuiltinTypes::number(), span);
-                self.push_constraint_with_origin(right.clone(), BuiltinTypes::number(), span);
+                // Fuzzy comparison for numbers. Numeric-conversion GREEN Stage 2:
+                // `Numeric` BOUND rather than a hard `~ number` so an `int`
+                // operand is not rejected by the tightened §2 lattice (parallel
+                // to `Pow` and array-index — preserves either-family operands).
+                self.push_numeric_operand_bound(left, span);
+                self.push_numeric_operand_bound(right, span);
                 Ok(BuiltinTypes::boolean())
             }
 
@@ -504,8 +631,17 @@ impl TypeInferenceEngine {
                         (None, None) => (left.clone(), right.clone(), false),
                     };
 
-                self.push_constraint_with_origin(effective_left, BuiltinTypes::number(), span);
-                self.push_constraint_with_origin(effective_right, BuiltinTypes::number(), span);
+                // Numeric-conversion GREEN Stage 2: the operands must be
+                // NUMERIC, but a hard `~ number` constraint would reject an
+                // `int` operand (`2 ** 8`) under the tightened §2 lattice
+                // (`int -> number` is now CAST-required, not the deleted
+                // `can_numeric_widen` free pass). Constrain to a `Numeric` BOUND
+                // — satisfied by both `int` and `number` operands — preserving
+                // the pre-Stage-2 acceptance of either-family `**` operands. The
+                // RESULT stays `number` (the established `**` result type), so
+                // `2 ** 8 = 256.0` is unchanged.
+                self.push_numeric_operand_bound(&effective_left, span);
+                self.push_numeric_operand_bound(&effective_right, span);
 
                 if is_optional {
                     Ok(Self::wrap_in_option(BuiltinTypes::number()))
@@ -537,6 +673,25 @@ impl TypeInferenceEngine {
                 Ok(self.fresh_type_var())
             }
         }
+    }
+
+    /// Push a `Numeric`-bound constraint on an operator operand. Both `int` and
+    /// `number` (and the numeric widths) satisfy `Numeric`, so this accepts an
+    /// operand of either family without forcing it to `number` (which the
+    /// tightened §2 lattice would reject for an `int` operand, since `int ->
+    /// number` is now CAST-required). Numeric-conversion GREEN Stage 2.
+    fn push_numeric_operand_bound(&mut self, operand: &Type, span: Span) {
+        let bound = self.fresh_var();
+        self.push_constraint_with_origin(
+            operand.clone(),
+            Type::Constrained {
+                var: bound,
+                constraint: Box::new(TypeConstraint::ImplementsTrait {
+                    trait_name: "Numeric".to_string(),
+                }),
+            },
+            span,
+        );
     }
 
     /// Infer type of unary operation

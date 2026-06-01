@@ -496,16 +496,23 @@ impl TypeInferenceEngine {
                 ))
             }
             Type::Concrete(TypeAnnotation::Array(elem_type)) => {
-                // Array indexing
-                self.constraints
-                    .push((index_type.clone(), BuiltinTypes::number()));
+                // Array indexing — the index must be NUMERIC. A hard `~ number`
+                // constraint would, under the tightened §2 lattice
+                // (numeric-conversion GREEN Stage 2), reject the dominant
+                // `arr[0]` / `arr[i]` cases where the index is an `int` literal
+                // or `int` variable (`int -> number` is now CAST-required, no
+                // longer the deleted `can_numeric_widen` free pass). Constrain
+                // to a `Numeric` BOUND instead, which both `int` and `number`
+                // indices satisfy — preserving the pre-Stage-2 acceptance of
+                // either-family indices without re-introducing implicit
+                // int->number value promotion.
+                self.push_numeric_index_constraint(index_type);
                 Ok(Type::Concrete(*elem_type.clone()))
             }
             Type::Concrete(TypeAnnotation::Basic(name)) => {
                 // Check if this is a registered record schema (e.g., "rows" returns "row")
                 if self.env.lookup_record_schema(name).is_some() {
-                    self.constraints
-                        .push((index_type.clone(), BuiltinTypes::number()));
+                    self.push_numeric_index_constraint(index_type);
                     Ok(Type::Concrete(TypeAnnotation::Basic(name.clone())))
                 } else {
                     // For unknown types, create an element-carrying index
@@ -520,6 +527,24 @@ impl TypeInferenceEngine {
                 Ok(self.push_indexable_constraint(object_type))
             }
         }
+    }
+
+    /// Push a `Numeric`-bound constraint on an array/record index type. Both
+    /// `int` and `number` (and any numeric width) satisfy `Numeric`, so this
+    /// accepts either-family indices without forcing the index to `number`
+    /// (which the tightened §2 lattice would reject for an `int` index, since
+    /// `int -> number` is now CAST-required). Numeric-conversion GREEN Stage 2.
+    fn push_numeric_index_constraint(&mut self, index_type: &Type) {
+        let bound = self.fresh_var();
+        self.constraints.push((
+            index_type.clone(),
+            Type::Constrained {
+                var: bound,
+                constraint: Box::new(TypeConstraint::ImplementsTrait {
+                    trait_name: "Numeric".to_string(),
+                }),
+            },
+        ));
     }
 
     /// Infer type of function call
@@ -705,7 +730,27 @@ impl TypeInferenceEngine {
 
         let inferred_result_type = Self::apply_substitutions_to_type(&returns, &substitutions);
 
-        let mut expected_param_types = arg_types.clone();
+        // Numeric-conversion §4 literal adoption (call-argument context): a bare
+        // integer literal argument adopts the corresponding parameter's concrete
+        // numeric type when its value losslessly fits, so `abs(-42)` (param
+        // `number`) and `(|y| y * 2.0)(3)` type-check without re-introducing the
+        // deleted implicit int->number value widening. A NON-literal int
+        // argument to a `number` parameter still rejects (§5 value-level
+        // invariant). The adoption substitutes the param's resolved concrete
+        // type for the literal's inferred type in the call-shape constraint.
+        let mut expected_param_types: Vec<Type> = Vec::with_capacity(arg_types.len());
+        for (i, arg_ty) in arg_types.iter().enumerate() {
+            let resolved_param = params
+                .get(i)
+                .map(|p| Self::apply_substitutions_to_type(p, &substitutions));
+            let adopted = match (&resolved_param, args.get(i)) {
+                (Some(param_ty), Some(arg_expr)) => {
+                    Self::adopt_int_literal_in_context(arg_expr, param_ty)
+                }
+                _ => None,
+            };
+            expected_param_types.push(adopted.unwrap_or_else(|| arg_ty.clone()));
+        }
         for param_ty in params.iter().skip(actual_arity) {
             expected_param_types.push(Self::apply_substitutions_to_type(param_ty, &substitutions));
         }

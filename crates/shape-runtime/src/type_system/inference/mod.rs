@@ -119,6 +119,15 @@ pub struct TypeInferenceEngine {
     /// Stack of expression-statement result types collected for callable
     /// bodies. Used to infer implicit return unions for expression-style code.
     pub(crate) implicit_return_scopes: Vec<Vec<Type>>,
+    /// Numeric-conversion §4 literal adoption (return context). Stack of the
+    /// currently-enclosing callables' DECLARED return types (one entry pushed
+    /// per callable body with an explicit numeric `-> T` annotation; `None`
+    /// otherwise). A bare integer `return <lit>` / tail-expression literal whose
+    /// value losslessly fits the top-of-stack numeric return type adopts it
+    /// (`fn f() -> number { return 42 }`, match-arm literals in a `-> number`
+    /// fn), instead of recording an `int` that the §2 lattice would reject
+    /// against `number`.
+    pub(crate) expected_return_types: Vec<Option<Type>>,
     /// Struct type definitions keyed by name for generic struct-literal inference.
     pub(crate) struct_type_defs: HashMap<String, StructTypeDef>,
     /// Resolved type parameter substitutions at generic call sites.
@@ -196,6 +205,7 @@ impl TypeInferenceEngine {
             return_var_aliases: HashMap::new(),
             return_scopes: Vec::new(),
             implicit_return_scopes: Vec::new(),
+            expected_return_types: Vec::new(),
             struct_type_defs: HashMap::new(),
             callsite_type_args: HashMap::new(),
             comptime_depth: 0,

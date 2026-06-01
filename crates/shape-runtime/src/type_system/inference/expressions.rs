@@ -85,8 +85,23 @@ impl TypeInferenceEngine {
                 right,
                 span,
             } => {
-                let left_type = self.infer_expr(left)?;
-                let right_type = self.infer_expr(right)?;
+                let mut left_type = self.infer_expr(left)?;
+                let mut right_type = self.infer_expr(right)?;
+
+                // Numeric-conversion LITERAL ADOPTION (spec §4): a bare integer
+                // literal operand adopts the OTHER operand's concrete numeric
+                // type when the literal value losslessly fits it. So
+                // `val:number > 10` (literal `10` adopts `number`),
+                // `val:number == 5`, `a:number * 3`, and `1 + 2.0` all unify as
+                // a same-family op instead of rejecting the int-literal vs
+                // number-value pair under the tightened §2 lattice. A value /
+                // variable (not a literal) never adopts — `int_var + number_var`
+                // still rejects. An out-of-range literal does not adopt.
+                if let Some(adopted) = Self::adopt_int_literal_in_context(left, &right_type) {
+                    left_type = adopted;
+                } else if let Some(adopted) = Self::adopt_int_literal_in_context(right, &left_type) {
+                    right_type = adopted;
+                }
 
                 self.infer_binary_op(&left_type, op, &right_type, *span)
             }
@@ -206,12 +221,36 @@ impl TypeInferenceEngine {
                     // spread element `...a` contributes the element type of `a`'s
                     // array (not the whole array type), so `[0, ...a, 3]` unifies
                     // `int` with `int`, not `int` with `Vec<int>`.
-                    let first_type = self.array_literal_element_contribution(&elements[0])?;
+                    let mut elem_types: Vec<Type> = Vec::with_capacity(elements.len());
+                    for elem in elements {
+                        elem_types.push(self.array_literal_element_contribution(elem)?);
+                    }
 
-                    // All elements should contribute the same element type.
-                    for elem in &elements[1..] {
-                        let elem_type = self.array_literal_element_contribution(elem)?;
-                        self.constraints.push((first_type.clone(), elem_type));
+                    // Numeric-conversion §4 literal adoption (array-element
+                    // context): if the array mixes bare int literals with a
+                    // float/number element (`[1, 2.5, 3]`), the int literals
+                    // adopt `number` so the element type unifies to `number`
+                    // instead of rejecting `(int, number)` under the tightened
+                    // §2 lattice. The unifying element type is the float family
+                    // when ANY element contributes it and EVERY non-float element
+                    // is a bare int literal that losslessly fits `number`.
+                    let elem_ctx = self.array_literal_numeric_element_context(elements, &elem_types);
+                    let first_type = elem_ctx
+                        .clone()
+                        .unwrap_or_else(|| elem_types[0].clone());
+
+                    for (i, elem_type) in elem_types.iter().enumerate() {
+                        // A bare int literal element that adopts the unified
+                        // numeric element type pushes no rejecting constraint.
+                        if let Some(ctx) = &elem_ctx {
+                            if Self::adopt_int_literal_in_context(&elements[i], ctx).is_some() {
+                                continue;
+                            }
+                        }
+                        if i == 0 && elem_ctx.is_none() {
+                            continue;
+                        }
+                        self.constraints.push((first_type.clone(), elem_type.clone()));
                     }
 
                     Ok(BuiltinTypes::array(first_type))
@@ -487,7 +526,23 @@ impl TypeInferenceEngine {
                             .map(|arg| self.infer_expr(arg))
                             .collect::<Result<_, _>>()?;
                         if params.len() == arg_types.len() {
-                            for (arg_ty, param_ty) in arg_types.iter().zip(params.iter()) {
+                            for (i, (arg_ty, param_ty)) in
+                                arg_types.iter().zip(params.iter()).enumerate()
+                            {
+                                // Numeric-conversion §4 literal adoption
+                                // (IIFE/value-call argument context): a bare int
+                                // literal arg adopts the closure parameter's
+                                // concrete numeric type when it losslessly fits
+                                // (`(|y| y * 2.0)(3)`), parallel to the named-call
+                                // adoption in `infer_function_call`. A non-literal
+                                // int arg into a `number` param still rejects.
+                                if args
+                                    .get(i)
+                                    .and_then(|a| Self::adopt_int_literal_in_context(a, param_ty))
+                                    .is_some()
+                                {
+                                    continue;
+                                }
                                 self.constraints.push((arg_ty.clone(), param_ty.clone()));
                             }
                             return Ok(returns);
@@ -1393,6 +1448,43 @@ impl TypeInferenceEngine {
     /// `a`'s array (so `[0, ...a, 3]` unifies `int` with `int`); a plain element
     /// contributes its own type. Spreading a value whose resolved type is a
     /// concrete non-array is a genuine error and is rejected here.
+    /// Numeric-conversion §4 literal adoption (array-element context): when an
+    /// array literal mixes bare int literals with a float/number element
+    /// (`[1, 2.5, 3]`), return the unifying `number` element type so the int
+    /// literals adopt it. Returns `Some(number)` ONLY when at least one element
+    /// is concretely float-family AND every other element is a bare int literal
+    /// that losslessly fits `number`. Otherwise `None` (keep the existing
+    /// first-element unification — homogeneous int / homogeneous number /
+    /// non-numeric arrays are unaffected). Conservative on purpose: a value
+    /// (non-literal) int element does NOT trigger adoption (a `Array<int>` with
+    /// a number element is still a genuine mismatch under §5).
+    fn array_literal_numeric_element_context(
+        &self,
+        elements: &[Expr],
+        elem_types: &[Type],
+    ) -> Option<Type> {
+        let is_float_concrete = |ty: &Type| {
+            let name = match ty {
+                Type::Concrete(TypeAnnotation::Basic(n)) => Some(n.as_str()),
+                Type::Concrete(TypeAnnotation::Reference(p)) => Some(&**p),
+                _ => None,
+            };
+            name.is_some_and(BuiltinTypes::is_number_type_name)
+        };
+        let any_float = elem_types.iter().any(is_float_concrete);
+        if !any_float {
+            return None;
+        }
+        let number_ty = BuiltinTypes::number();
+        // Every element must be either a float-family contribution or a bare int
+        // literal that fits `number`.
+        let all_adoptable = elements.iter().zip(elem_types.iter()).all(|(expr, ty)| {
+            is_float_concrete(ty)
+                || Self::adopt_int_literal_in_context(expr, &number_ty).is_some()
+        });
+        if all_adoptable { Some(number_ty) } else { None }
+    }
+
     fn array_literal_element_contribution(&mut self, elem: &Expr) -> TypeResult<Type> {
         if let Expr::Spread(inner, _) = elem {
             let spread_type = self.infer_expr(inner)?;
@@ -1454,6 +1546,60 @@ impl TypeInferenceEngine {
                 type_name.into(),
             )));
         };
+
+        // Numeric-conversion §5 (value-level invariant) + §4 (literal adoption),
+        // struct-field producer side. For each non-comptime field whose DECLARED
+        // type is a concrete numeric type, the field VALUE must satisfy the §2
+        // lattice against it: an `int` value into a `number` field rejects
+        // (`P { x: int_var }`), while a bare int literal adopts the field type
+        // when it losslessly fits (`P { x: 1 }`). A field whose declared type is
+        // a generic type parameter (`x: T`) is skipped — its concrete type is
+        // resolved by the monomorphization binding below. This is the
+        // inference-engine twin of the compiler-side construction check
+        // (`collections.rs::int_literal_adopts_field_type`); literals are
+        // accepted here without a rejecting constraint so the construction site
+        // can adopt them.
+        let struct_param_names: std::collections::HashSet<&str> = struct_def
+            .type_params
+            .as_ref()
+            .map(|ps| ps.iter().map(|p| p.name()).collect())
+            .unwrap_or_default();
+        for (field_name, value_expr) in fields {
+            let Some(field_def) = struct_def.fields.iter().find(|f| f.name == *field_name) else {
+                continue;
+            };
+            if field_def.is_comptime {
+                continue;
+            }
+            let declared_name = match &field_def.type_annotation {
+                TypeAnnotation::Basic(n) => n.as_str(),
+                TypeAnnotation::Reference(n) => n.as_str(),
+                _ => continue,
+            };
+            if struct_param_names.contains(declared_name)
+                || !BuiltinTypes::is_numeric_type_name(declared_name)
+            {
+                continue;
+            }
+            // LITERAL field values are validated (and adopted) by the
+            // compiler-side construction check
+            // (`collections.rs::int_literal_adopts_field_type` + the c2a E0100
+            // strict reject), which preserves the rich "cannot construct field"
+            // diagnostic for literal mismatches (`T { i: 10.2D }`). This
+            // inference-engine check only adds coverage for NON-LITERAL field
+            // values (`P { x: int_var }`), which the compiler-side check skips
+            // (`infer_field_type_from_expr` returns `None` for non-literals).
+            if matches!(value_expr, Expr::Literal(..)) {
+                continue;
+            }
+            let declared_type = self.resolve_type_annotation(&field_def.type_annotation);
+            // The §2 lattice governs the directional `(value, field)` flow: an
+            // `int` value into a `number` field rejects; a lossless-widening
+            // value (`i32` into `number`) is accepted.
+            if let Some(actual) = inferred_field_types.get(field_name) {
+                self.constraints.push((actual.clone(), declared_type));
+            }
+        }
 
         let type_params = struct_def.type_params.unwrap_or_default();
         if type_params.is_empty() {

@@ -32,7 +32,20 @@ impl TypeInferenceEngine {
                     return Err(TypeError::UndefinedVariable(name.to_string()));
                 }
             };
-            self.constraints.push((target_type, value_type));
+            // Numeric-conversion §4 / §5: a reassignment is a value-level flow
+            // `target = value`, so the §2 lattice constraint is the directional
+            // `(src=value, dst=target)` — NOT `(target, value)` (the prior
+            // ordering wrongly accepted `let mut x:u8=…; x = big_u16` because
+            // `u8` widens to the value's `u16`). A bare int-literal RHS adopts
+            // the target type when it losslessly fits (`let mut x:u8=0; x=200`),
+            // and is REJECTED when out of range (`x = 300` -> the natural-`int`
+            // literal fails `lossless_implicit(int, u8)`); a non-literal value
+            // follows the value-level lattice directly.
+            if Self::adopt_int_literal_in_context(&assign.value, &target_type).is_some() {
+                // literal fits the target — no rejecting constraint.
+            } else {
+                self.constraints.push((value_type, target_type));
+            }
         } else {
             // Destructuring assignment: conservatively constrain each bound name
             // to the assigned value until full pattern assignment inference lands.
@@ -62,6 +75,52 @@ impl TypeInferenceEngine {
         Ok(last_type)
     }
 
+    /// Infer a callable body, applying numeric-conversion §4 literal adoption to
+    /// the TAIL expression statement when the enclosing fn declares a numeric
+    /// return type. Only the final expression-style statement is checked against
+    /// the expected return type (a non-tail expression statement keeps plain
+    /// inference, so `foo(); 42` does not wrongly constrain `foo()`). A bare int
+    /// literal tail, or the int-literal arms of a tail `match`/`if`, adopt the
+    /// declared numeric return type via `check_against`.
+    fn infer_statements_with_return_adoption(
+        &mut self,
+        stmts: &[Statement],
+    ) -> TypeResult<Type> {
+        let expected = match self.expected_return_types.last().cloned() {
+            Some(Some(ty)) => ty,
+            _ => return self.infer_statements(stmts),
+        };
+        let mut last_type = BuiltinTypes::void();
+        let n = stmts.len();
+        for (idx, stmt) in stmts.iter().enumerate() {
+            let is_tail = idx + 1 == n;
+            if is_tail {
+                if let Statement::Expression(expr, _) = stmt {
+                    let expr_type = self.check_against(expr, &expected)?;
+                    self.record_implicit_return_type(expr_type.clone());
+                    last_type = expr_type;
+                    continue;
+                }
+            }
+            last_type = self.infer_statement(stmt)?;
+        }
+        Ok(last_type)
+    }
+
+    /// Numeric-conversion §4 literal adoption for an explicit `return <expr>`:
+    /// when the enclosing fn declares a numeric return type and `expr` is a bare
+    /// int literal that losslessly fits it, return the declared numeric type so
+    /// the recorded return is `number` (not `int`). Otherwise the originally
+    /// inferred type is returned unchanged.
+    fn adopt_return_literal(&self, expr: &Expr, inferred: Type) -> Type {
+        if let Some(Some(expected)) = self.expected_return_types.last() {
+            if let Some(adopted) = Self::adopt_int_literal_in_context(expr, expected) {
+                return adopted;
+            }
+        }
+        inferred
+    }
+
     /// Infer return type for a callable body.
     ///
     /// - If the body contains explicit `return` statements, aggregate all
@@ -75,7 +134,7 @@ impl TypeInferenceEngine {
     ) -> TypeResult<Type> {
         self.push_return_scope();
         self.push_implicit_return_scope();
-        let body_result = self.infer_statements(stmts);
+        let body_result = self.infer_statements_with_return_adoption(stmts);
         let explicit_returns = self.pop_return_scope();
         let implicit_returns = self.pop_implicit_return_scope();
         let body_type = body_result?;
@@ -130,7 +189,13 @@ impl TypeInferenceEngine {
         match stmt {
             Statement::Return(expr_opt, _) => {
                 let return_type = if let Some(expr) = expr_opt {
-                    self.infer_expr(expr)?
+                    let inferred = self.infer_expr(expr)?;
+                    // Numeric-conversion §4 literal adoption (return context): a
+                    // bare int literal `return <lit>` adopts the enclosing fn's
+                    // declared numeric return type when it losslessly fits, so
+                    // `fn f() -> number { return 42 }` returns `number` (not
+                    // `int`, which the §2 lattice would reject against `number`).
+                    self.adopt_return_literal(expr, inferred)
                 } else {
                     BuiltinTypes::void()
                 };

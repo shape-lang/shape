@@ -36,6 +36,42 @@ pub(super) fn infer_field_type_from_expr(expr: &Expr) -> Option<FieldType> {
     }
 }
 
+/// Numeric-conversion LITERAL ADOPTION (numeric-conversion-spec §4), struct
+/// construction site. A bare integer literal field value adopts the field's
+/// declared numeric `FieldType` IFF the literal value is losslessly
+/// representable in it (`P { x: 1 }` where `x: number` → `1` is the number
+/// literal `1.0`; `Sized { b: 200 }` where `b: u8` → ok). An out-of-range
+/// literal does NOT adopt (returns `false`) — the construction then rejects
+/// exactly as a non-literal value would. A non-`Int` value expr never adopts.
+///
+/// This is the construction-site twin of the inference-engine literal adoption
+/// (`adopt_int_literal_in_context`): the runtime already widens the literal to
+/// the field's declared kind at `object_creation.rs:448-487`, so adopting is
+/// value-correct. The c2a-cluster construction-side strict reject is preserved
+/// for non-literal mismatches and for out-of-range literals.
+fn int_literal_adopts_field_type(value_expr: &Expr, field_ty: &FieldType) -> bool {
+    let v: i128 = match value_expr {
+        Expr::Literal(Literal::Int(v), _) => *v as i128,
+        Expr::Literal(Literal::UInt(v), _) => *v as i128,
+        _ => return false,
+    };
+    match field_ty {
+        FieldType::I8 => v >= i8::MIN as i128 && v <= i8::MAX as i128,
+        FieldType::U8 => v >= 0 && v <= u8::MAX as i128,
+        FieldType::I16 => v >= i16::MIN as i128 && v <= i16::MAX as i128,
+        FieldType::U16 => v >= 0 && v <= u16::MAX as i128,
+        FieldType::I32 => v >= i32::MIN as i128 && v <= i32::MAX as i128,
+        FieldType::U32 => v >= 0 && v <= u32::MAX as i128,
+        FieldType::I64 => v >= i64::MIN as i128 && v <= i64::MAX as i128,
+        FieldType::U64 => v >= 0 && v <= u64::MAX as i128,
+        // number / f64 exact-integer range [-2^53, 2^53].
+        FieldType::F64 => v >= -(1i128 << 53) && v <= (1i128 << 53),
+        // decimal: arbitrary precision — any integer literal fits.
+        FieldType::Decimal => true,
+        _ => false,
+    }
+}
+
 fn infer_array_literal_numeric_type(elements: &[Expr]) -> Option<NumericType> {
     let mut acc: Option<NumericType> = None;
     for elem in elements {
@@ -1066,7 +1102,20 @@ impl BytecodeCompiler {
                                 // audit, the construction site should reject for symmetry instead
                                 // of mirroring the widening shape (which would be the W4-δ
                                 // Convert-opcode defection-attractor named in §Forbidden Patterns).
-                                if field_def.field_type != inferred {
+                                // Numeric-conversion §4 literal adoption: a bare
+                                // integer literal field value that losslessly
+                                // fits the declared numeric field type adopts it
+                                // (`P { x: 1 }`, `x: number` → ok), instead of the
+                                // strict reject below. An out-of-range literal
+                                // (`u8` field with `300`) does NOT adopt and still
+                                // rejects. Only literals adopt — a value/variable
+                                // mismatch keeps the c2a-cluster compile-reject.
+                                if field_def.field_type != inferred
+                                    && !int_literal_adopts_field_type(
+                                        value_expr,
+                                        &field_def.field_type,
+                                    )
+                                {
                                     let value_loc = self.span_to_source_location(value_expr.span());
                                     let mut loc = value_loc;
                                     loc.hints.push(format!(

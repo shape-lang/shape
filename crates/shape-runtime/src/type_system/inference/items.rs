@@ -582,10 +582,25 @@ impl TypeInferenceEngine {
         let allow_unresolved_return =
             func.return_type.is_some() || Self::fn_body_is_non_expansive(func);
 
+        // Numeric-conversion §4 literal adoption (return context): make the
+        // declared numeric return type visible to `return <lit>` / tail-literal
+        // adoption inside the body. `None` when the fn has no annotation or a
+        // non-numeric return — only a concrete numeric `-> T` enables adoption.
+        let expected_numeric_return = if func.return_type.is_some()
+            && Self::concrete_numeric_type_name(&declared_return_type).is_some()
+        {
+            Some(declared_return_type.clone())
+        } else {
+            None
+        };
+        self.expected_return_types.push(expected_numeric_return);
+
         // Infer callable return type from all explicit returns (or final expression)
         let local_constraint_start = self.constraints.len();
         let inferred_result =
             self.infer_callable_return_type(&func.body, allow_unresolved_return);
+
+        self.expected_return_types.pop();
         // `include_numeric_refinement: false` — defer the `number` default for
         // `Numeric`-bounded parameters. Eagerly collapsing a parameter like
         // `x` in `fn double(x) { x * 2 }` to `number` severs the call-graph
