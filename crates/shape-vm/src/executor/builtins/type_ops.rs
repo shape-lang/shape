@@ -61,19 +61,26 @@ fn read_as_i64(slot: &KindedSlot) -> Result<i64, VMError> {
         | NativeKind::NullableUInt64
         | NativeKind::NullableUIntSize => Ok(slot.slot.as_u64() as i64),
         NativeKind::Float64 | NativeKind::NullableFloat64 => {
+            // `number as int` truncates toward zero (user 2026-06-01 / spec
+            // §3.2, OD-1 resolved): `3.7 as int == 3`, `-3.7 as int == -3`.
+            // A non-finite (NaN / ±inf) or out-of-i64-range float is a
+            // structured RUNTIME error (D2) — never a panic, never a wrap.
             let n = slot.slot.as_f64();
             if !n.is_finite() {
                 return Err(VMError::RuntimeError(
                     "cannot convert non-finite number to int".to_string(),
                 ));
             }
-            let i = n as i64;
-            if (i as f64 - n).abs() > f64::EPSILON {
+            // `n.trunc()` drops the fraction toward zero; the range guard
+            // rejects magnitudes that have no i64 representation (`f64 as i64`
+            // saturates in Rust, which would silently clamp — we reject).
+            let truncated = n.trunc();
+            if truncated < i64::MIN as f64 || truncated >= 9_223_372_036_854_775_808.0 {
                 return Err(VMError::RuntimeError(format!(
-                    "cannot convert non-integer number '{n}' to int"
+                    "number '{n}' is out of range for int"
                 )));
             }
-            Ok(i)
+            Ok(truncated as i64)
         }
         NativeKind::String => {
             let bits = slot.slot.raw();
@@ -775,9 +782,26 @@ mod tests {
     }
 
     #[test]
-    fn read_as_i64_from_non_integer_float_errors() {
-        let s = KindedSlot::from_number(3.14);
-        assert!(read_as_i64(&s).is_err());
+    fn read_as_i64_from_non_integer_float_truncates_toward_zero() {
+        // `number as int` truncates toward zero (user 2026-06-01 / §3.2).
+        assert_eq!(read_as_i64(&KindedSlot::from_number(3.7)).unwrap(), 3);
+        assert_eq!(read_as_i64(&KindedSlot::from_number(-3.7)).unwrap(), -3);
+        assert_eq!(read_as_i64(&KindedSlot::from_number(3.14)).unwrap(), 3);
+        assert_eq!(read_as_i64(&KindedSlot::from_number(-0.9)).unwrap(), 0);
+    }
+
+    #[test]
+    fn read_as_i64_from_non_finite_float_errors() {
+        assert!(read_as_i64(&KindedSlot::from_number(f64::NAN)).is_err());
+        assert!(read_as_i64(&KindedSlot::from_number(f64::INFINITY)).is_err());
+        assert!(read_as_i64(&KindedSlot::from_number(f64::NEG_INFINITY)).is_err());
+    }
+
+    #[test]
+    fn read_as_i64_from_out_of_range_float_errors() {
+        // 1e30 exceeds i64::MAX — D2 out-of-range runtime error, not a wrap.
+        assert!(read_as_i64(&KindedSlot::from_number(1e30)).is_err());
+        assert!(read_as_i64(&KindedSlot::from_number(-1e30)).is_err());
     }
 
     #[test]

@@ -112,21 +112,15 @@ fn e_int_var_silently_promoted_in_arith_forbidden() {
 //     silently a number — silent promotion at overflow is forbidden.
 // =========================================================================
 
-/// WITNESS: `9007199254740990 + 10` silently yields 9007199254741000.0 (f64),
-/// crossing the value-level int/number boundary without a cast. THE RULE:
-/// silent int->number promotion is forbidden (the result must NOT be a
-/// `number`).
+/// WITNESS: pre-fix, `9223372036854775807 + 1` (i64::MAX + 1) either silently
+/// wrapped to i64::MIN or promoted to f64, crossing the value-level int/number
+/// boundary without a cast. THE RULE (user 2026-06-01 / D3): i64 arithmetic
+/// overflow is a structured RUNTIME error — never a silent wrap and never a
+/// silent f64 promotion. Widen explicitly via `as number` / `as bigint`.
 ///
-/// IGNORED (documented open decision): the *replacement* semantics for i64
-/// overflow are unresolved (spec blast-radius Bucket C / OD pending — error vs
-/// wrap-to-int vs explicit `as number` opt-in). `expect_run_err()` only holds
-/// under the error-replacement choice; if the fix wraps-to-int the result is a
-/// valid `int` and this assertion would be wrong. Left as an `#[ignore]`d
-/// witness of the forbidden silent promotion until the user rules on the
-/// replacement. The value-level int/number invariant it guards is covered
-/// non-ambiguously by E.4 (`e_int_value_read_as_number_forbidden`).
+/// The open decision (blast-radius Bucket C — error vs wrap vs opt-in) was
+/// RESOLVED to error by the D3 ruling, so this test is now active.
 #[test]
-#[ignore = "open decision: i64-overflow replacement semantics unresolved (blast-radius Bucket C)"]
-fn e_int_overflow_silent_float_promotion_forbidden() {
-    ShapeTest::new("let a: int = 9007199254740990\nlet b: int = 10\na + b").expect_run_err();
+fn e_int_overflow_is_runtime_error() {
+    ShapeTest::new("let a: int = 9223372036854775807\nlet b: int = 1\na + b").expect_run_err();
 }

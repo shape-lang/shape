@@ -179,16 +179,15 @@ fn test_division() {
     assert_eq!(f64::from_bits(result), 5.0);
 }
 
-/// Regression (R5c-2-β-γ checkpoint (a)): `int` is i64; arithmetic is EXACT
-/// across the full i64 range and overflow has two's-complement WRAPPING
-/// semantics — defined behavior per the 2026-05-20 integer-semantics ruling
-/// (#1 exact, #3 wrapping). The previous "promote to f64 on overflow"
-/// behavior was a vestige of the deleted v1 `ValueWord` i48-inline NaN-box
-/// encoding; it silently corrupted any `int` arithmetic above 2^53. `AddInt`
-/// now wraps and stays `Int64`.
+/// `int` (i64) arithmetic is EXACT across the full i64 range; overflow is a
+/// structured RUNTIME error (THE RULE, user 2026-06-01 / numeric-conversion
+/// D3) — never a silent two's-complement wrap and never a silent f64
+/// promotion. (This supersedes the 2026-05-20 wrapping ruling these tests
+/// previously pinned: a silent wrap is the same hidden-data-loss class as a
+/// silent narrowing cast.) Widen explicitly via `as number` / `as bigint`.
 #[test]
-fn test_integer_add_overflow_wraps_two_complement() {
-    // AddInt: i64::MAX + 1 wraps to i64::MIN, stays int.
+fn test_integer_add_overflow_is_runtime_error() {
+    // AddInt: i64::MAX + 1 overflows — D3 runtime error, no wrap.
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
@@ -196,14 +195,14 @@ fn test_integer_add_overflow_wraps_two_complement() {
     ];
     let constants = vec![Constant::Int(i64::MAX), Constant::Int(1)];
 
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result as i64, i64::MIN);
+    let err = execute_bytecode(instructions, constants).unwrap_err();
+    assert!(matches!(err, VMError::RuntimeError(ref m) if m.contains("overflow")));
 }
 
-/// `MulInt` wraps on overflow (two's-complement) and stays `Int64`.
+/// `MulInt` overflow is a structured RUNTIME error (D3), not a wrap.
 #[test]
-fn test_integer_mul_overflow_wraps_two_complement() {
-    // MulInt: 3037000500^2 overflows i64; result is the wrapped product.
+fn test_integer_mul_overflow_is_runtime_error() {
+    // MulInt: 3037000500^2 overflows i64 — D3 runtime error.
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
@@ -211,15 +210,14 @@ fn test_integer_mul_overflow_wraps_two_complement() {
     ];
     let constants = vec![Constant::Int(3_037_000_500), Constant::Int(3_037_000_500)];
 
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result as i64, 3_037_000_500i64.wrapping_mul(3_037_000_500));
-    assert_eq!(result as i64, -9_223_372_036_709_301_616);
+    let err = execute_bytecode(instructions, constants).unwrap_err();
+    assert!(matches!(err, VMError::RuntimeError(ref m) if m.contains("overflow")));
 }
 
-/// `SubInt` wraps on underflow (two's-complement) and stays `Int64`.
+/// `SubInt` underflow is a structured RUNTIME error (D3), not a wrap.
 #[test]
-fn test_integer_sub_overflow_wraps_two_complement() {
-    // SubInt: i64::MIN - 1 wraps to i64::MAX, stays int.
+fn test_integer_sub_overflow_is_runtime_error() {
+    // SubInt: i64::MIN - 1 underflows — D3 runtime error.
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
@@ -227,8 +225,8 @@ fn test_integer_sub_overflow_wraps_two_complement() {
     ];
     let constants = vec![Constant::Int(i64::MIN), Constant::Int(1)];
 
-    let result = execute_bytecode(instructions, constants).unwrap();
-    assert_eq!(result as i64, i64::MAX);
+    let err = execute_bytecode(instructions, constants).unwrap_err();
+    assert!(matches!(err, VMError::RuntimeError(ref m) if m.contains("overflow")));
 }
 
 #[test]
