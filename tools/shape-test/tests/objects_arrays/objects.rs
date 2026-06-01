@@ -330,7 +330,12 @@ print(m2.has("b"))"#;
 
 #[test]
 fn hashmap_is_empty() {
-    let code = r#"let m = HashMap()
+    // ROOT B (HashMap <K,V> infer-or-annotate): bare `let m = HashMap()` with
+    // no usage to pin K,V is rejected under strict typing; supply K,V via an
+    // explicit annotation for the empty-map intent. `<string, bool>` keeps the
+    // empty map on the legacy-ctor path (the typed-map fast path lacks an
+    // empty-map `.isEmpty()` lowering — a separate VM-codegen gap, not ROOT B).
+    let code = r#"let m: HashMap<string, bool> = HashMap()
 print(m.isEmpty())"#;
     ShapeTest::new(code).expect_run_ok().expect_output("true");
 }

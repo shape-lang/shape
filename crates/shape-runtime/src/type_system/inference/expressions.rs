@@ -577,16 +577,27 @@ impl TypeInferenceEngine {
                         .collect()
                 });
 
-                // Infer arguments WITH expected types (bidirectional)
+                // Infer arguments WITH expected types (bidirectional).
+                //
+                // Most args are checked with `CheckMode::Synth`: a SOFT probe
+                // that, on a successful `try_unify`, RETURNS the hint type. This
+                // is the established behavior (closures get their params from the
+                // method signature; an empty-array arg adopts an expected
+                // `Vec<int>`; etc.) and is preserved unchanged.
+                //
+                // The ONE exception is a bare receiver-type-param hint — a
+                // `Type::Variable` such as K or V on the fresh-per-callsite
+                // `HashMap<K, V>` minted by the `HashMap()` constructor. For
+                // those, `Synth` would collapse a concrete `string`/`int` arg
+                // back to the bare K/V variable, hiding the very type we need to
+                // flow into the receiver's `<K,V>` slots below. So a variable
+                // hint uses plain `infer_expr` to keep the concrete arg type.
                 let arg_types: Vec<Type> = if let Some(ref expected) = expected_arg_types {
                     args.iter()
                         .enumerate()
-                        .map(|(i, arg)| {
-                            if let Some(expected_ty) = expected.get(i) {
-                                self.check_expr(arg, CheckMode::Synth(expected_ty.clone()))
-                            } else {
-                                self.infer_expr(arg)
-                            }
+                        .map(|(i, arg)| match expected.get(i) {
+                            Some(Type::Variable(_)) | None => self.infer_expr(arg),
+                            Some(ty) => self.check_expr(arg, CheckMode::Synth(ty.clone())),
                         })
                         .collect::<Result<_, _>>()?
                 } else {
@@ -594,6 +605,66 @@ impl TypeInferenceEngine {
                         .map(|arg| self.infer_expr(arg))
                         .collect::<Result<_, _>>()?
                 };
+
+                // Bind value-position args into the receiver's type PARAMS.
+                //
+                // The generic-method signature resolution above (via
+                // `resolve_type_param_expr` against `receiver_params`) only
+                // computes the *expected* param types and the method's RETURN
+                // type — it never unifies the actual argument types back into
+                // the receiver's `<K,V>` slots. For a polymorphic receiver such
+                // as `HashMap<K, V>` minted fresh by the `HashMap()`
+                // constructor, that left K,V unbound and `.set(k, v)` returned
+                // `HashMap<_oob, _oob>` (the out-of-bounds placeholder). The
+                // `CheckMode::Synth` hint above is a SOFT constraint (a
+                // read-only `try_unify` probe), so it doesn't bind them either.
+                //
+                // This is bounded TIGHTLY to expected param types that are a
+                // bare `Type::Variable` — i.e. a `TypeParamExpr::ReceiverParam`
+                // that resolved to one of the receiver's own type-param vars
+                // (K/V on `HashMap<K, V>`). For each such arg we (a) push a hard
+                // constraint so the deferred solver binds the var, and (b) when
+                // the arg is fully concrete, eagerly bind it into the engine's
+                // unifier so the method-call RESULT type is concrete
+                // immediately (`HashMap<string, int>` rather than
+                // `HashMap<K, V>`). The eager concreteness matters for the
+                // let-gen function-return gate (`ensure_no_unresolved_generic_args`,
+                // which runs BEFORE the deferred solver), so
+                // `fn build() { HashMap().set("x", 42) }` no longer trips it.
+                // The fresh constructor vars are unique to this callsite, so the
+                // bind never aliases another use.
+                //
+                // Expected param types that are NOT a bare variable are LEFT
+                // ALONE: `E::SelfType` params (`concat`/`zip` → `Vec<int>`),
+                // concrete element params (`includes` on `Vec<int>` → `int`),
+                // and function params (closures, inferred bidirectionally) keep
+                // their prior soft-`Synth` behavior — force-constraining those
+                // would reject valid calls like `[1,2,3].concat([])`,
+                // `[1,2,3].zip(["a"])`, or `[1,2,3].includes(None)`.
+                if let Some(ref expected) = expected_arg_types {
+                    for (i, expected_ty) in expected.iter().enumerate() {
+                        let Type::Variable(var) = expected_ty else {
+                            continue;
+                        };
+                        if args
+                            .get(i)
+                            .and_then(|a| Self::adopt_int_literal_in_context(a, expected_ty))
+                            .is_some()
+                        {
+                            continue;
+                        }
+                        if let Some(arg_ty) = arg_types.get(i) {
+                            self.constraints
+                                .push((arg_ty.clone(), expected_ty.clone()));
+                            let resolved_arg = self.unifier.apply_substitutions(arg_ty);
+                            if !self.type_contains_unresolved_vars(&resolved_arg)
+                                && self.unifier.lookup(var).is_none()
+                            {
+                                self.unifier.bind(var.clone(), resolved_arg);
+                            }
+                        }
+                    }
+                }
 
                 // J-CT.1: reject calls to `comptime impl`-registered methods
                 // outside a `comptime { ... }` context. We check before the
@@ -651,7 +722,12 @@ impl TypeInferenceEngine {
                     &arg_types,
                     &mut self.type_var_gen,
                 ) {
-                    return Ok(result_type);
+                    // Apply substitutions so receiver type params bound just
+                    // above from the value-position args (e.g. K=string, V=int
+                    // for `HashMap().set("a", 1)`) are reflected in the result
+                    // type. Without this the result stays `HashMap<K, V>` and the
+                    // let-gen function-return gate rejects it as unresolved.
+                    return Ok(self.unifier.apply_substitutions(&result_type));
                 }
 
                 // Fallback: treat receiver.method(...) as a callable field access

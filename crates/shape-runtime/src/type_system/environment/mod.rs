@@ -1003,12 +1003,20 @@ impl TypeEnvironment {
             );
         }
 
-        // HashMap constructor: HashMap() -> HashMap<any, any>
-        self.define_builtin(
-            "HashMap",
-            vec![],
-            Type::Concrete(TypeAnnotation::Reference("HashMap".into())),
-        );
+        // HashMap constructor: HashMap() -> HashMap<K, V> (K,V inferred from
+        // first .set/usage). Mirrors the Some/Ok/Err polymorphic constructors
+        // below: each callsite instantiates fresh K,V so `.set(k, v)` can flow
+        // the key/value types into the receiver's `<K,V>` slots. A bare
+        // `HashMap()` whose K,V are never pinned by usage stays unresolved and
+        // is rejected by `ensure_no_unresolved_generic_args` (project ruling:
+        // un-pinnable generic construction requires an explicit annotation).
+        let hm_k = TypeVar::new("K".to_string());
+        let hm_v = TypeVar::new("V".to_string());
+        let hashmap_result = Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("HashMap".into()))),
+            args: vec![Type::Variable(hm_k.clone()), Type::Variable(hm_v.clone())],
+        };
+        self.define_polymorphic("HashMap", vec![hm_k, hm_v], vec![], hashmap_result);
 
         // Option/Result constructors are polymorphic and must never force `any`.
         let option_t = TypeVar::new("T".to_string());

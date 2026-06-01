@@ -5,9 +5,15 @@ use shape_test::shape_test::ShapeTest;
 /// Verifies creating an empty HashMap returns a valid HashMap.
 #[test]
 fn test_hashmap_create_empty() {
+    // ROOT B (HashMap <K,V> infer-or-annotate): bare `let m = HashMap()` with
+    // no usage to pin K,V is an un-pinnable generic construction and is
+    // rejected under strict typing; supply K,V via an explicit annotation for
+    // the empty-map intent. `<string, bool>` keeps the empty map on the
+    // legacy-ctor path (the typed-map fast path lacks an empty-map `.len()`
+    // lowering — a separate VM-codegen gap, not ROOT B).
     ShapeTest::new(
         r#"
-        let m = HashMap()
+        let m: HashMap<string, bool> = HashMap()
         print(m.len())
     "#,
     )

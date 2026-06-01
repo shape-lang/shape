@@ -463,12 +463,18 @@ mod compile_integration_tests {
 
     #[test]
     fn test_unannotated_hashmap_uses_legacy_ctor() {
-        // No annotation → no inference path → legacy BuiltinCall(HashMapCtor).
-        // Note: the linter may auto-add annotations, so we keep this test
-        // intentionally minimal.
+        // An unannotated HashMap whose K,V resolve to a combo OFF the typed-map
+        // fast path (here string→bool) uses the legacy BuiltinCall(HashMapCtor).
+        //
+        // ROOT B (HashMap <K,V> infer-or-annotate): a bare `let m = HashMap()`
+        // with no usage to pin K,V is now an un-pinnable generic construction
+        // and is rejected under strict typing, so K,V are pinned here via a
+        // `.set(...)` usage instead of an annotation — this still drives the
+        // legacy-ctor decision (the point of the test) without a typed-map
+        // fast-path combo.
         let prog = compile(
             r#"
-            let m = HashMap()
+            let m = HashMap().set("k", true)
             m
         "#,
         );

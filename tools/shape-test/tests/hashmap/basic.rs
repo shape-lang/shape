@@ -9,9 +9,17 @@ use shape_test::shape_test::ShapeTest;
 
 #[test]
 fn hashmap_create_empty() {
+    // ROOT B (HashMap <K,V> infer-or-annotate): a bare `let m = HashMap()`
+    // whose key/value types are never pinned by usage is an un-pinnable
+    // generic construction and is rejected under strict typing (sibling to the
+    // empty-array `let a: Array<int> = []` remedy). The working-map intent here
+    // is an empty map, so the K,V are supplied by an explicit annotation.
+    // `<string, bool>` keeps the empty map on the legacy-ctor path: the
+    // typed-map fast path (int/number values) lacks an empty-map `.len()`
+    // lowering for typed-map locals — a separate VM-codegen gap, not ROOT B.
     ShapeTest::new(
         r#"
-        let m = HashMap()
+        let m: HashMap<string, bool> = HashMap()
         print(m.len())
     "#,
     )
@@ -123,9 +131,13 @@ fn hashmap_delete_key() {
 
 #[test]
 fn hashmap_is_empty_true() {
+    // ROOT B (HashMap <K,V> infer-or-annotate): bare `let m = HashMap()` with
+    // no usage to pin K,V is rejected under strict typing; supply them via an
+    // explicit annotation for the empty-map intent. `<string, bool>` keeps the
+    // empty map on the legacy-ctor path (see hashmap_create_empty).
     ShapeTest::new(
         r#"
-        let m = HashMap()
+        let m: HashMap<string, bool> = HashMap()
         print(m.isEmpty())
     "#,
     )
