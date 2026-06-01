@@ -97,13 +97,24 @@ fn test_hashmap_set_array_value() {
 }
 
 /// Verifies nested HashMap as value.
+///
+/// STRICT-FLIP (v0.3.3, Option method-forwarding TP): `outer.get("child")`
+/// returns `Option<HashMap<..>>`, not `HashMap<..>`. Shape does NOT auto-forward
+/// methods on an `Option<T>` receiver to the inner `T` — the runtime method
+/// dispatch returns `None` for `HeapKind::Option` (objects/mod.rs:900) and the
+/// strict checker correctly rejects `.get`/`.has`/`.len` on `Option`. The inner
+/// HashMap must be unwrapped first (`match` / `?` / `!!`). The pre-strict-typing
+/// chain relied on a dynamic-dispatch quirk; rebaselined to explicit `match`.
 #[test]
 fn test_hashmap_set_nested_hashmap_value() {
     ShapeTest::new(
         r#"{
         let inner = HashMap().set("nested", true)
         let outer = HashMap().set("child", inner)
-        outer.get("child").get("nested")
+        match outer.get("child") {
+            Some(m) => m.get("nested"),
+            None => None,
+        }
     }"#,
     )
     .expect_bool(true);
@@ -507,19 +518,31 @@ fn test_hashmap_filter_immutability() {
 // =========================================================================
 
 /// Verifies nested get.
+///
+/// STRICT-FLIP (v0.3.3, Option method-forwarding TP): the inner `.get` returns
+/// `Option<HashMap<..>>`; chaining a method on the `Option` requires explicit
+/// unwrap (Shape does not auto-forward Option methods to the inner T). See
+/// `test_hashmap_set_nested_hashmap_value` for the full rationale.
 #[test]
 fn test_hashmap_nested_get() {
     ShapeTest::new(
         r#"{
         let inner = HashMap().set("deep", 42)
         let outer = HashMap().set("inner", inner)
-        outer.get("inner").get("deep")
+        match outer.get("inner") {
+            Some(m) => m.get("deep"),
+            None => None,
+        }
     }"#,
     )
     .expect_number(42.0);
 }
 
 /// Verifies double nested get.
+///
+/// STRICT-FLIP (v0.3.3, Option method-forwarding TP): each `.get` returns an
+/// `Option`; chaining requires unwrapping at every level. See
+/// `test_hashmap_set_nested_hashmap_value` for the full rationale.
 #[test]
 fn test_hashmap_double_nested() {
     ShapeTest::new(
@@ -527,33 +550,53 @@ fn test_hashmap_double_nested() {
         let level2 = HashMap().set("val", 99)
         let level1 = HashMap().set("child", level2)
         let root = HashMap().set("child", level1)
-        root.get("child").get("child").get("val")
+        match root.get("child") {
+            Some(c1) => match c1.get("child") {
+                Some(c2) => c2.get("val"),
+                None => None,
+            },
+            None => None,
+        }
     }"#,
     )
     .expect_number(99.0);
 }
 
 /// Verifies nested has.
+///
+/// STRICT-FLIP (v0.3.3, Option method-forwarding TP): `outer.get("inner")` is
+/// `Option<HashMap<..>>`; `.has` must be called after unwrapping. See
+/// `test_hashmap_set_nested_hashmap_value` for the full rationale.
 #[test]
 fn test_hashmap_nested_has() {
     ShapeTest::new(
         r#"{
         let inner = HashMap().set("key", 1)
         let outer = HashMap().set("inner", inner)
-        outer.get("inner").has("key")
+        match outer.get("inner") {
+            Some(m) => m.has("key"),
+            None => false,
+        }
     }"#,
     )
     .expect_bool(true);
 }
 
 /// Verifies nested len.
+///
+/// STRICT-FLIP (v0.3.3, Option method-forwarding TP): `outer.get("map")` is
+/// `Option<HashMap<..>>`; `.len()` must be called after unwrapping. See
+/// `test_hashmap_set_nested_hashmap_value` for the full rationale.
 #[test]
 fn test_hashmap_nested_len() {
     ShapeTest::new(
         r#"{
         let inner = HashMap().set("a", 1).set("b", 2)
         let outer = HashMap().set("map", inner)
-        outer.get("map").len()
+        match outer.get("map") {
+            Some(m) => m.len(),
+            None => 0,
+        }
     }"#,
     )
     .expect_number(2.0);
