@@ -179,7 +179,16 @@ impl TypeInferenceEngine {
                     for arg in args {
                         self.infer_expr(arg)?;
                     }
-                    Ok(Type::Concrete(TypeAnnotation::Reference(namespace.as_str().into())))
+                    // A module-qualified call's value is its RETURN value, never
+                    // the module. The inference tier has no module-export
+                    // signatures (Item::Import is a no-op in predeclare_item;
+                    // known bindings are bare fresh vars), so the precise return
+                    // type is unknown HERE — return a fresh result var rather than
+                    // the namespace Reference, which would wrongly type the result
+                    // as the module and reject any member access on it. The
+                    // bytecode compiler resolves the real signature via its module
+                    // schema registry. No concrete type is fabricated.
+                    Ok(self.fresh_type_var())
                 }
             }
 
@@ -362,6 +371,21 @@ impl TypeInferenceEngine {
                 }
 
                 let asserted_type = self.resolve_type_annotation(type_annotation);
+
+                // Width integer cast: `expr as i8`, `expr as u16`, etc. is a
+                // Rust-style bit-truncating conversion (the compiler emits
+                // `OpCode::CastWidth`, NOT an Into dispatch — see
+                // compiler/expressions/type_ops.rs:876-888). It is statically
+                // infallible (truncates, never rejects), so it must bypass the
+                // Into<Target> validation below. Mirrors the compiler's cast
+                // ordering. Scoped to the 7 real width names via
+                // IntWidth::from_name (i8/u8/i16/u16/i32/u32/u64); i64/int/number
+                // are intentionally NOT width names and are unaffected.
+                if let TypeAnnotation::Basic(name) = type_annotation {
+                    if shape_ast::IntWidth::from_name(name).is_some() {
+                        return Ok(asserted_type);
+                    }
+                }
 
                 // Plain `as Type` is trait-dispatched conversion when Type is a
                 // concrete named target supported by Into<Target>.
@@ -685,6 +709,113 @@ impl TypeInferenceEngine {
                     return Err(error);
                 }
 
+                // Reconcile match-arm result types before union formation.
+                //
+                // Two reconciliations, both established Shape behavior that the
+                // structural `all_types_equal` check misses:
+                //
+                // (1) Free-variable arms. A payload binder for a built-in
+                //     Result/Option whose element type was never pinned (e.g.
+                //     `match b { Ok(v) => v, ... }` where `b = Err("fail")`
+                //     leaves the success element a free var) yields an arm whose
+                //     type is a bare `Type::Variable`. A free variable has NO
+                //     committed type, so it must unify with the other arms'
+                //     common type — match arms share a single type. Constrain
+                //     each free-variable arm to the common concrete type rather
+                //     than poisoning the result with a `Union<unknown, …>`.
+                //
+                // (2) Numeric int/number arms. An integer literal arm
+                //     (`Err(_) => 0`) sitting beside a `number` arm collapses to
+                //     `number` — the integer literal is number-compatible (cf.
+                //     `let x: number = 0`, `match b { true => 1.0, false => 0 }`
+                //     typed `number`). This is not int↔number unification of
+                //     distinct values; it is literal widening at the arm join,
+                //     and a genuine int/number mismatch still rejects downstream
+                //     against an `-> int` return.
+                //
+                // Pure inference completeness; no coercion opcode, no dynamic
+                // fallback. A genuinely heterogeneous match (non-numeric,
+                // non-variable arms that disagree) still forms the nominal union
+                // below.
+                let non_var_types: Vec<Type> = arm_types
+                    .iter()
+                    .filter(|t| !matches!(t, Type::Variable(_)))
+                    .cloned()
+                    .collect();
+                let has_var_arm = non_var_types.len() < arm_types.len();
+
+                // Determine the common concrete arm type, if one exists:
+                //   - all non-var arms structurally equal → that type; or
+                //   - all non-var arms numeric (int/number) → `number` if any
+                //     is `number`, else `int`.
+                let is_int = |t: &Type| {
+                    matches!(t, Type::Concrete(TypeAnnotation::Basic(n)) if n == "int")
+                };
+                let is_number = |t: &Type| {
+                    matches!(t, Type::Concrete(TypeAnnotation::Basic(n)) if n == "number")
+                };
+                // Same-base generic arms (e.g. every arm a `Result<…>` /
+                // `Option<…>`): a match whose arms all build the same generic
+                // family yields that family, not a nominal union of the
+                // per-arm instantiations. Take the first arm's type and
+                // constrain the rest to it; the solver's (Generic, Generic)
+                // arm — including the Result error-param / AnyError lattice —
+                // reconciles the args (e.g. `Result<int, AnyError>` absorbs
+                // `Result<int, string>`). Without this, concretely-typed arms
+                // (now that the Ok/Some payload binder is no longer a free var)
+                // would form a nominal union that the constructor-pattern
+                // exhaustiveness path cannot cover.
+                let generic_base = |t: &Type| match t {
+                    Type::Generic { base, .. } => Some((**base).clone()),
+                    _ => None,
+                };
+                let all_same_base_generic = non_var_types.len() > 1
+                    && non_var_types.iter().all(|t| matches!(t, Type::Generic { .. }))
+                    && {
+                        let first_base = generic_base(&non_var_types[0]);
+                        first_base.is_some()
+                            && non_var_types
+                                .iter()
+                                .all(|t| match (&first_base, generic_base(t)) {
+                                    (Some(b0), Some(b)) => self.types_equal(b0, &b),
+                                    _ => false,
+                                })
+                    };
+
+                let common: Option<Type> = if non_var_types.is_empty() {
+                    None
+                } else if non_var_types
+                    .iter()
+                    .all(|t| self.types_equal(&non_var_types[0], t))
+                {
+                    Some(non_var_types[0].clone())
+                } else if non_var_types.iter().all(|t| is_int(t) || is_number(t)) {
+                    if non_var_types.iter().any(is_number) {
+                        Some(BuiltinTypes::number())
+                    } else {
+                        Some(BuiltinTypes::integer())
+                    }
+                } else if all_same_base_generic {
+                    let head = non_var_types[0].clone();
+                    for t in non_var_types.iter().skip(1) {
+                        self.constraints.push((t.clone(), head.clone()));
+                    }
+                    Some(head)
+                } else {
+                    None
+                };
+
+                if let Some(common) = common {
+                    if has_var_arm {
+                        for t in &arm_types {
+                            if matches!(t, Type::Variable(_)) {
+                                self.constraints.push((t.clone(), common.clone()));
+                            }
+                        }
+                    }
+                    return Ok(common);
+                }
+
                 // Determine result type: unify if same, create nominal union if different
                 let result_type = if arm_types.is_empty() {
                     self.fresh_type_var()
@@ -731,9 +862,41 @@ impl TypeInferenceEngine {
                 let iter_type = self.infer_expr(&for_expr.iterable)?;
                 let element_type = self.infer_iterator_element_type(&iter_type)?;
 
-                // Bind pattern variable
-                if let Some(name) = for_expr.pattern.as_simple_name() {
-                    self.env.define(name, TypeScheme::mono(element_type));
+                // Bind every identifier the loop pattern introduces — simple
+                // (`for n in ...`), object (`for {x, y} in ...`), or array
+                // (`for [a, b] in ...`). `as_simple_name()` returns `Some` only
+                // for Identifier/Typed, so object/array destructure patterns
+                // previously bound NOTHING and the body's references failed with
+                // `Undefined variable`. The element-type granularity matches the
+                // prior behavior (bind the WHOLE element type to each name);
+                // destructure-precise field typing is not required to keep the
+                // bindings in scope.
+                fn collect_pattern_names(
+                    p: &shape_ast::ast::Pattern,
+                    out: &mut Vec<String>,
+                ) {
+                    use shape_ast::ast::Pattern::*;
+                    match p {
+                        Identifier(n) => out.push(n.clone()),
+                        Typed { name, .. } => out.push(name.clone()),
+                        Object(fields) => {
+                            for (_k, sub) in fields {
+                                collect_pattern_names(sub, out);
+                            }
+                        }
+                        Array(items) => {
+                            for sub in items {
+                                collect_pattern_names(sub, out);
+                            }
+                        }
+                        Constructor { .. } | Literal(_) | Wildcard => {}
+                    }
+                }
+                let mut pattern_names = Vec::new();
+                collect_pattern_names(&for_expr.pattern, &mut pattern_names);
+                for name in pattern_names {
+                    self.env
+                        .define(&name, TypeScheme::mono(element_type.clone()));
                 }
 
                 self.infer_expr(&for_expr.body)?;
@@ -873,7 +1036,12 @@ impl TypeInferenceEngine {
                 let mut param_types = Vec::new();
                 for param in params {
                     let param_type = if let Some(ann) = &param.type_annotation {
-                        Type::Concrete(ann.clone())
+                        // Resolve through resolve_type_annotation (as
+                        // infer_function does for top-level fns) so a generic
+                        // annotation becomes canonical `Type::Generic { base,
+                        // args }` rather than the non-canonical
+                        // `Type::Concrete(Generic)` the solver has no arm for.
+                        self.resolve_type_annotation(ann)
                     } else {
                         self.fresh_type_var()
                     };
@@ -896,7 +1064,12 @@ impl TypeInferenceEngine {
                 let inferred_return = inferred_result?;
 
                 let ret_type = if let Some(ann) = return_type {
-                    let annotated = Type::Concrete(ann.clone());
+                    // Resolve through resolve_type_annotation (as infer_function
+                    // does) so a generic return annotation becomes canonical
+                    // `Type::Generic { base, args }`; the constraint then routes
+                    // through the existing (Generic, Generic) solver arm instead
+                    // of falling to the unsolved wildcard.
+                    let annotated = self.resolve_type_annotation(ann);
                     self.constraints.push((inferred_return, annotated.clone()));
                     annotated
                 } else {
@@ -1534,11 +1707,56 @@ impl TypeInferenceEngine {
                             }
                             _ => None,
                         };
+
+                        // Built-in Result<T,E> / Option<T> payload binders.
+                        // `Ok`/`Some` → args[0] (success/inner element); `Err` →
+                        // args[1] (error element). Result/Option are NOT user
+                        // enums (get_enum → None, so enum_kind is None and
+                        // payload_tys is None), so without this the binder is an
+                        // unconstrained fresh var that drifts the match result to
+                        // a `Union<unknown, …>` and widens later arithmetic to
+                        // `number`. Derive the binder type directly from the
+                        // scrutinee's already-resolved generic arg `Type` — no
+                        // re-resolution, no fabrication.
+                        let builtin_payload: Option<Type> = if payload_tys.is_none()
+                        {
+                            match scrutinee {
+                                Some(Type::Generic { base, args })
+                                    if matches!(
+                                        base.as_ref(),
+                                        Type::Concrete(ann)
+                                            if matches!(
+                                                ann.as_type_name_str(),
+                                                Some("Result") | Some("Option")
+                                            )
+                                    ) =>
+                                {
+                                    match variant.as_str() {
+                                        "Ok" | "Some" => args.first().cloned(),
+                                        "Err" => args.get(1).cloned(),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+
                         for (idx, p) in patterns.iter().enumerate() {
-                            let field_ty = payload_tys.as_ref().and_then(|tys| {
-                                tys.get(idx)
-                                    .map(|ann| self.resolve_type_annotation(ann))
-                            });
+                            let field_ty = payload_tys
+                                .as_ref()
+                                .and_then(|tys| {
+                                    tys.get(idx)
+                                        .map(|ann| self.resolve_type_annotation(ann))
+                                })
+                                .or_else(|| {
+                                    if idx == 0 {
+                                        builtin_payload.clone()
+                                    } else {
+                                        None
+                                    }
+                                });
                             self.bind_pattern_vars_typed(p, field_ty.as_ref())?;
                             // For a plain identifier binder, override the
                             // fresh-var define with the resolved payload
