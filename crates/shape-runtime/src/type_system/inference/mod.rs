@@ -139,6 +139,17 @@ pub struct TypeInferenceEngine {
     /// counter is zero. A counter (not a bool) keeps nested comptime
     /// blocks correct, but in practice the depth stays at 0 or 1.
     pub(crate) comptime_depth: usize,
+    /// Let-gen spec §4 (A-enforced): module-scope un-annotated `let`/`var`/`const`
+    /// binding name → (declaration span, init-is-a-function-application). After
+    /// constraint solving, a binding whose init is a bare APPLICATION (the
+    /// grounding's class-(2) `let x = get_none()`) and whose FINAL inferred type
+    /// is still a fully-polymorphic carrier is a compile error demanding an
+    /// annotation — mirroring the empty-array `let a: Array<T> = []` remedy. A
+    /// direct value binding (`let x = None`, the grounding's class-(3)) is NOT
+    /// flagged as an application and is left to compile, matching the language's
+    /// established acceptance of pure kind-erased `None`. Annotated bindings and
+    /// function symbols are never recorded.
+    pub(crate) unannotated_let_binding_origins: HashMap<String, (Span, bool)>,
 }
 
 impl Default for TypeInferenceEngine {
@@ -188,6 +199,7 @@ impl TypeInferenceEngine {
             struct_type_defs: HashMap::new(),
             callsite_type_args: HashMap::new(),
             comptime_depth: 0,
+            unannotated_let_binding_origins: HashMap::new(),
         }
     }
 
@@ -1302,6 +1314,7 @@ impl TypeInferenceEngine {
         self.return_var_aliases.clear();
         self.return_scopes.clear();
         self.implicit_return_scopes.clear();
+        self.unannotated_let_binding_origins.clear();
 
         // Hoisting pre-pass over the consumer (mirrors production).
         self.run_hoisting_prepass(consumer);
@@ -1334,6 +1347,9 @@ impl TypeInferenceEngine {
             *ty = self.unifier.apply_substitutions(ty);
         }
 
+        // Let-gen spec §4 (A-enforced): parity with `infer_program_best_effort`.
+        errors.extend(self.reject_unpinnable_let_bindings(&types));
+
         (types, errors)
     }
 
@@ -1360,6 +1376,7 @@ impl TypeInferenceEngine {
         self.unknown_property_origins.clear();
         self.undefined_variable_origins.clear();
         self.non_exhaustive_match_origins.clear();
+        self.unannotated_let_binding_origins.clear();
         // Run hoisting pre-pass first
         self.run_hoisting_prepass(program);
 
@@ -1432,6 +1449,11 @@ impl TypeInferenceEngine {
         for (_name, ty) in types.iter_mut() {
             *ty = self.unifier.apply_substitutions(ty);
         }
+
+        // Let-gen spec §4 (A-enforced): now that every binding has its FINAL
+        // type, reject any module-scope un-annotated `let` whose type still
+        // carries an un-pinnable generic argument.
+        errors.extend(self.reject_unpinnable_let_bindings(&types));
 
         (types, errors)
     }

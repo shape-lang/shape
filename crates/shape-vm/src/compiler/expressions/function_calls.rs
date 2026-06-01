@@ -4446,12 +4446,22 @@ mod ws2_zeta_b_tests {
         // `id<T>(x: T)` called with `None` — `None` has no ConcreteType, so
         // `T` cannot be bound. This must be a clean compile error, not a
         // fall-through onto the empty generic template (which hangs the VM).
+        //
+        // Under fn-boundary let-gen (let-gen-gating-predicate-spec.md §4), the
+        // bare-application binding `let y = id(None)` whose final type is a
+        // fully-polymorphic `Option<T>` is now caught at the INFERENCE binding
+        // level ("Cannot infer a concrete type for binding 'y'") rather than (or
+        // before) the bytecode generic-template guard ("cannot infer type
+        // argument"). Either is a valid clean compile error — the load-bearing
+        // contract is that it does NOT compile (and does not hang the VM).
         let err = try_compile("fn id<T>(x: T) -> T { x }\nlet y = id(None)\n")
             .expect_err("id(None) must not compile — T is unresolvable");
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("cannot infer type argument") && msg.contains("id"),
-            "expected a generic-type-arg inference error, got: {msg}"
+            (msg.contains("cannot infer type argument") && msg.contains("id"))
+                || (msg.contains("Cannot infer a concrete type for binding")
+                    && msg.contains('y')),
+            "expected a generic-type-arg / unpinnable-binding inference error, got: {msg}"
         );
     }
 

@@ -5,8 +5,8 @@
 use super::TypeInferenceEngine;
 use crate::type_system::*;
 use shape_ast::ast::{
-    DestructurePattern, ForeignFunctionDef, FunctionDef, TraitMemberSignature, Item, Statement,
-    TraitMember, TypeAnnotation, TypeName, VarKind, VariableDecl,
+    DestructurePattern, Expr, ForeignFunctionDef, FunctionDef, Literal, TraitMemberSignature,
+    Item, Statement, TraitMember, TypeAnnotation, TypeName, VarKind, VariableDecl,
 };
 use std::collections::HashMap;
 
@@ -162,6 +162,7 @@ impl TypeInferenceEngine {
             }
             Item::VariableDecl(decl, _) => {
                 let var_type = self.infer_variable_decl(decl)?;
+                self.record_unannotated_let_origin(decl);
                 if let Some(name) = decl.pattern.as_identifier() {
                     types.insert(name.to_string(), var_type.clone());
                 } else {
@@ -177,6 +178,7 @@ impl TypeInferenceEngine {
             Item::Statement(stmt, _) => {
                 if let Statement::VariableDecl(decl, _) = stmt {
                     let var_type = self.infer_variable_decl(decl)?;
+                    self.record_unannotated_let_origin(decl);
                     if let Some(name) = decl.pattern.as_identifier() {
                         types.insert(name.to_string(), var_type.clone());
                     } else {
@@ -542,10 +544,27 @@ impl TypeInferenceEngine {
             self.fresh_type_var()
         };
 
+        // Fn-boundary let-generalization (let-gen spec §1.2 / §2.1): for an
+        // unannotated fn whose body is NON-EXPANSIVE w.r.t. its to-be-quantified
+        // return vars (cond-4 — the returned value provably traces to a freshly
+        // constructed carrier `None`/`Some`/`Ok`/`Err`/struct-literal or to a
+        // fn-local IMMUTABLE `let`/`const` chain bottoming out in one, never a
+        // `var`/`let mut`/module-scope binding or a reference/deref into one),
+        // allow the single `Option<fresh>` / `Result<fresh, …>` candidate to
+        // survive un-concretized so `make_function_scheme` → `env.generalize`
+        // can quantify it into a `∀T. …` scheme. EXPANSIVE bodies keep the
+        // strict reject (the §3.2 value-restriction refusal: a shared mutable
+        // cell must not be generalized — that is the int+string-through-one-slot
+        // unsoundness). The flag is gated on cond-4 at THIS single call site
+        // only; it is NOT unconditionally `true` for every unannotated fn (spec
+        // §2.1 "Critical").
+        let allow_unresolved_return =
+            func.return_type.is_some() || Self::fn_body_is_non_expansive(func);
+
         // Infer callable return type from all explicit returns (or final expression)
         let local_constraint_start = self.constraints.len();
         let inferred_result =
-            self.infer_callable_return_type(&func.body, func.return_type.is_some());
+            self.infer_callable_return_type(&func.body, allow_unresolved_return);
         // `include_numeric_refinement: false` — defer the `number` default for
         // `Numeric`-bounded parameters. Eagerly collapsing a parameter like
         // `x` in `fn double(x) { x * 2 }` to `number` severs the call-graph
@@ -585,10 +604,28 @@ impl TypeInferenceEngine {
             if return_vars.iter().any(|var| !allowed_vars.contains(var))
                 && matches!(inferred_return_type, Type::Generic { .. })
             {
-                return Err(TypeError::GenericTypeError {
-                    message: format!("Could not infer generic return type for '{}'", func.name),
-                    symbol: Some(func.name.clone()),
-                });
+                // Fn-boundary let-gen (spec §1.2 cond-4 / §2.1): a
+                // return-position-only free var sitting in a generic carrier.
+                // If the body is NON-EXPANSIVE, QUANTIFY instead of reject —
+                // `make_function_scheme` → `env.generalize` turns this into a
+                // `∀T. …` scheme. If the body is EXPANSIVE (returns a `var` /
+                // `let mut` / module-scope binding or a reference into one), this
+                // is the §3.2 value-restriction refusal: a shared mutable cell's
+                // element type is not fixed and must not be generalized.
+                if !Self::fn_body_is_non_expansive(func) {
+                    return Err(TypeError::GenericTypeError {
+                        message: format!(
+                            "Cannot infer a polymorphic return type for '{}': its result is read \
+                             from a mutable/shared binding whose element type is not fixed. \
+                             Annotate the binding (e.g. `let x: Option<ConcreteT> = …`) or the \
+                             function's return type (e.g. `fn {}() -> Option<ConcreteT>`).",
+                            func.name, func.name
+                        ),
+                        symbol: Some(func.name.clone()),
+                    });
+                }
+                // Non-expansive: fall through. The free return var survives into
+                // `function_type` and is quantified by `make_function_scheme`.
             }
         }
 
@@ -1391,6 +1428,349 @@ impl TypeInferenceEngine {
             }
         } else {
             self.env.generalize(&func_type)
+        }
+    }
+
+    /// Let-gen spec §4 (A-enforced): record a module-scope `let`/`var`/`const`
+    /// binding with NO explicit type annotation, so the post-solve
+    /// [`reject_unpinnable_let_bindings`] pass can demand an annotation if its
+    /// init is a bare APPLICATION (class-(2)) and its final inferred type is still
+    /// a fully-polymorphic carrier. An annotated binding pins its own type and is
+    /// never recorded. The init-is-application flag distinguishes the class-(2)
+    /// `let x = get_none()` (reject) from the class-(3) direct value binding
+    /// `let x = None` (left to compile, like the language already does).
+    pub(crate) fn record_unannotated_let_origin(&mut self, decl: &VariableDecl) {
+        if decl.type_annotation.is_some() {
+            return;
+        }
+        // §4 A-enforced targets the grounding's class-(2) bare-FUNCTION-application
+        // (`let x = get_none()`). A method-call builder chain (`HashMap().set(..)`)
+        // is NOT in scope: its un-pinned type args are an ordinary inference gap,
+        // not an irreducibly-polymorphic value, so it is left to compile.
+        let is_application_init = matches!(
+            decl.value.as_ref(),
+            Some(Expr::FunctionCall { .. } | Expr::QualifiedFunctionCall { .. })
+        );
+        if let (Some(name), Some(span)) =
+            (decl.pattern.as_identifier(), decl.pattern.as_identifier_span())
+        {
+            self.unannotated_let_binding_origins
+                .insert(name.to_string(), (span, is_application_init));
+        }
+    }
+
+    /// Let-gen spec §4 (A-enforced): post-solve binding-level reject.
+    ///
+    /// A module-scope un-annotated `let`/`var`/`const` whose FINAL inferred type
+    /// (after constraint solving + substitution) still carries an un-pinnable
+    /// free generic arg — e.g. `let x = get_none()` where nothing downstream
+    /// constrains `T` — is a compile error demanding an annotation. This keeps
+    /// the "always-concrete `let`" contract: the fn-boundary fix makes
+    /// `get_none : ∀T. () -> Option<T>`, so the bare application would otherwise
+    /// bind an un-pinned `Option<T>` mono into `let` with no re-check. Mirrors
+    /// the empty-array `let a: Array<T> = []` remedy.
+    ///
+    /// Only fires for a FULLY-polymorphic `Type::Generic` carrier — one whose
+    /// generic args are EVERY unresolved (e.g. `Option<T>` from a pure
+    /// `get_none()`, no concrete payload anywhere). A carrier with at least one
+    /// concrete arg (e.g. `Result<T, string>` from `Err("boom")`, or
+    /// `Result<T, AnyError>` from a `find` over a typed array) is left to
+    /// compile: its concrete payload proves the value is not irreducibly
+    /// polymorphic, and per §1.4 the un-concretized arg is kind-erased and never
+    /// reaches a `NativeKind` stamp. A bare unresolved `Type::Variable` is a
+    /// different (ordinary inference-loss) class and is also left untouched. This
+    /// narrowness is exactly the A1-vs-A3 split in spec §5.1.
+    pub(crate) fn reject_unpinnable_let_bindings(
+        &self,
+        types: &HashMap<String, Type>,
+    ) -> Vec<TypeError> {
+        let mut errors = Vec::new();
+        for (name, (span, is_application_init)) in &self.unannotated_let_binding_origins {
+            // §4 A-enforced fires ONLY for the class-(2) bare-application case
+            // (`let x = get_none()`). A class-(3) direct value binding
+            // (`let x = None`) is left to compile, matching the language's
+            // established acceptance of pure kind-erased `None` literals.
+            if !is_application_init {
+                continue;
+            }
+            let Some(ty) = types.get(name) else { continue };
+            let fully_polymorphic = match ty {
+                Type::Generic { args, .. } => {
+                    !args.is_empty()
+                        && args
+                            .iter()
+                            .all(|arg| matches!(arg, Type::Variable(_) | Type::Constrained { .. }))
+                }
+                _ => false,
+            };
+            if fully_polymorphic {
+                let _ = span; // span carried by origins map; message is self-describing
+                errors.push(TypeError::GenericTypeError {
+                    message: format!(
+                        "Cannot infer a concrete type for binding '{}': its inferred type '{}' \
+                         still has an un-pinnable generic argument. Add a type annotation (e.g. \
+                         `let {}: Option<ConcreteT> = …`) or use the value at a site that fixes \
+                         the type.",
+                        name,
+                        self.render_type_for_diag(ty),
+                        name
+                    ),
+                    symbol: Some(name.clone()),
+                });
+            }
+        }
+        errors
+    }
+
+    /// Fn-boundary let-gen cond-4 (let-gen spec §1.2 / §3.2): is `func`'s body
+    /// NON-EXPANSIVE w.r.t. the to-be-quantified return vars?
+    ///
+    /// This is a purely-syntactic body scan — no solver, no inference state, no
+    /// variance lattice (spec §6 "No new modal-types subsystem"). It returns
+    /// `true` iff EVERY return-reachable returned value provably traces to a
+    /// freshly-constructed carrier (`None` / `Some(..)` / `Ok(..)` / `Err(..)` /
+    /// enum-constructor / struct-literal / array/object literal) or to a fn-local
+    /// IMMUTABLE `let`/`const` chain bottoming out in such a value. A returned
+    /// value sourced from a `var` / `let mut` / module-scope binding, a
+    /// parameter, a reference/deref into one, or a general function application
+    /// is EXPANSIVE → `false` (the strict reject / §3.2 refusal stands).
+    ///
+    /// The default is conservative: any expression shape this scan does not
+    /// positively recognize as non-expansive is treated as EXPANSIVE, so the
+    /// scan never widens generalization beyond provably-fresh carriers.
+    fn fn_body_is_non_expansive(func: &FunctionDef) -> bool {
+        // Fn-local immutable `let`/`const` bindings (name -> initializer). A name
+        // qualifies ONLY if it is declared immutable AND never also declared as a
+        // `var` / `let mut` anywhere in the body (conservative against shadowing).
+        let mut immutable_lets: HashMap<String, &Expr> = HashMap::new();
+        let mut mutable_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        Self::collect_body_bindings(&func.body, &mut immutable_lets, &mut mutable_names);
+        immutable_lets.retain(|name, _| !mutable_names.contains(name));
+
+        // Every return-reachable returned value (explicit `return` + implicit
+        // tail) must be non-expansive.
+        let mut returned: Vec<&Expr> = Vec::new();
+        Self::collect_explicit_returns(&func.body, &mut returned);
+        Self::collect_tail_values(&func.body, &mut returned);
+
+        // A body with no recognizable returned value (e.g. a `void` body) is not
+        // a generalization target anyway; treat the empty-set as non-expansive so
+        // it is governed solely by gates (a)-(c) upstream.
+        returned
+            .iter()
+            .all(|expr| Self::expr_is_nonexpansive(expr, &immutable_lets, 0))
+    }
+
+    /// Collect fn-local binding names. Immutable `let`/`const` bindings are
+    /// recorded with their initializer; `var` / `let mut` names are recorded as
+    /// mutable so [`fn_body_is_non_expansive`] can exclude them.
+    fn collect_body_bindings<'a>(
+        stmts: &'a [Statement],
+        immutable_lets: &mut HashMap<String, &'a Expr>,
+        mutable_names: &mut std::collections::HashSet<String>,
+    ) {
+        for stmt in stmts {
+            match stmt {
+                Statement::VariableDecl(decl, _) => {
+                    let is_immutable = match decl.kind {
+                        VarKind::Let => !decl.is_mut,
+                        VarKind::Const => true,
+                        VarKind::Var => false,
+                    };
+                    if is_immutable {
+                        if let (Some(name), Some(init)) =
+                            (decl.pattern.as_identifier(), decl.value.as_ref())
+                        {
+                            immutable_lets.insert(name.to_string(), init);
+                        } else {
+                            // Destructured / un-initialized immutable bindings are
+                            // not chased — mark their names mutable-equivalent so a
+                            // read of them is treated as expansive.
+                            for name in decl.pattern.get_identifiers() {
+                                mutable_names.insert(name);
+                            }
+                        }
+                    } else {
+                        for name in decl.pattern.get_identifiers() {
+                            mutable_names.insert(name);
+                        }
+                    }
+                }
+                Statement::If(if_stmt, _) => {
+                    Self::collect_body_bindings(&if_stmt.then_body, immutable_lets, mutable_names);
+                    if let Some(else_body) = &if_stmt.else_body {
+                        Self::collect_body_bindings(else_body, immutable_lets, mutable_names);
+                    }
+                }
+                Statement::For(for_loop, _) => {
+                    Self::collect_body_bindings(&for_loop.body, immutable_lets, mutable_names);
+                }
+                Statement::While(while_loop, _) => {
+                    Self::collect_body_bindings(&while_loop.body, immutable_lets, mutable_names);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Collect the value expression of every explicit `return <expr>` reachable
+    /// in the body, recursing through control-flow statement bodies.
+    fn collect_explicit_returns<'a>(stmts: &'a [Statement], out: &mut Vec<&'a Expr>) {
+        for stmt in stmts {
+            match stmt {
+                Statement::Return(Some(expr), _) => out.push(expr),
+                Statement::If(if_stmt, _) => {
+                    Self::collect_explicit_returns(&if_stmt.then_body, out);
+                    if let Some(else_body) = &if_stmt.else_body {
+                        Self::collect_explicit_returns(else_body, out);
+                    }
+                }
+                Statement::For(for_loop, _) => {
+                    Self::collect_explicit_returns(&for_loop.body, out);
+                }
+                Statement::While(while_loop, _) => {
+                    Self::collect_explicit_returns(&while_loop.body, out);
+                }
+                Statement::Expression(expr, _) => {
+                    // `return` can hide inside an expression-position statement
+                    // (e.g. an `if`/`match`/block expression).
+                    Self::collect_returns_in_expr(expr, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Collect explicit `return` value expressions nested inside an expression
+    /// (if/match/block/conditional arms).
+    fn collect_returns_in_expr<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match expr {
+            Expr::Return(Some(inner), _) => out.push(inner),
+            Expr::Block(block, _) => {
+                for item in &block.items {
+                    if let shape_ast::ast::BlockItem::Statement(stmt) = item {
+                        Self::collect_explicit_returns(std::slice::from_ref(stmt), out);
+                    } else if let shape_ast::ast::BlockItem::Expression(e) = item {
+                        Self::collect_returns_in_expr(e, out);
+                    }
+                }
+            }
+            Expr::If(if_expr, _) => {
+                Self::collect_returns_in_expr(&if_expr.then_branch, out);
+                if let Some(else_branch) = &if_expr.else_branch {
+                    Self::collect_returns_in_expr(else_branch, out);
+                }
+            }
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                Self::collect_returns_in_expr(then_expr, out);
+                if let Some(else_expr) = else_expr {
+                    Self::collect_returns_in_expr(else_expr, out);
+                }
+            }
+            Expr::Match(match_expr, _) => {
+                for arm in &match_expr.arms {
+                    Self::collect_returns_in_expr(&arm.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Collect the implicit tail-expression value(s) of a body block — the value
+    /// the function yields when control falls off the end without an explicit
+    /// `return`. Recurses into the tail position of if/match/block expressions.
+    fn collect_tail_values<'a>(stmts: &'a [Statement], out: &mut Vec<&'a Expr>) {
+        if let Some(Statement::Expression(expr, _)) = stmts.last() {
+            Self::collect_tail_value_expr(expr, out);
+        }
+    }
+
+    fn collect_tail_value_expr<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match expr {
+            Expr::Block(block, _) => {
+                // The block's value is its final `Expression` item.
+                if let Some(shape_ast::ast::BlockItem::Expression(e)) = block.items.last() {
+                    Self::collect_tail_value_expr(e, out);
+                } else {
+                    // A non-expression tail (e.g. a trailing statement) yields no
+                    // recognizable value — treat conservatively as expansive.
+                    out.push(expr);
+                }
+            }
+            Expr::If(if_expr, _) => {
+                Self::collect_tail_value_expr(&if_expr.then_branch, out);
+                if let Some(else_branch) = &if_expr.else_branch {
+                    Self::collect_tail_value_expr(else_branch, out);
+                }
+            }
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                Self::collect_tail_value_expr(then_expr, out);
+                if let Some(else_expr) = else_expr {
+                    Self::collect_tail_value_expr(else_expr, out);
+                }
+            }
+            Expr::Match(match_expr, _) => {
+                for arm in &match_expr.arms {
+                    Self::collect_tail_value_expr(&arm.body, out);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+
+    /// cond-4 leaf test (spec §1.2): is `expr` provably a freshly-constructed
+    /// carrier or a fn-local immutable `let`/`const` chain bottoming out in one?
+    fn expr_is_nonexpansive(
+        expr: &Expr,
+        immutable_lets: &HashMap<String, &Expr>,
+        depth: u32,
+    ) -> bool {
+        // Bound the immutable-let chase to defeat any pathological cycle.
+        if depth > 64 {
+            return false;
+        }
+        match expr {
+            // Freshly-constructed carriers — the value is allocated anew on every
+            // call, so its element/payload var is genuinely free, not aliased to a
+            // shared mutable cell.
+            Expr::Literal(Literal::None, _) => true,
+            Expr::FunctionCall { name, .. }
+                if name == "Some" || name == "Ok" || name == "Err" =>
+            {
+                true
+            }
+            Expr::EnumConstructor { .. }
+            | Expr::StructLiteral { .. }
+            | Expr::Object(_, _)
+            | Expr::Array(_, _) => true,
+            // A transformation method call (`.map` / `.filter` / …) whose RECEIVER
+            // is itself non-expansive yields a freshly-allocated collection: it
+            // cannot alias a shared-mutable cell because its receiver provably does
+            // not. The only free var is the element/return type, which downstream
+            // constraint solving pins (e.g. `[1,2,3].map(|x| x*2)` → `Vec<int>`).
+            // A method call on a mutable/module receiver stays EXPANSIVE because
+            // the receiver test below fails.
+            Expr::MethodCall { receiver, .. } => {
+                Self::expr_is_nonexpansive(receiver, immutable_lets, depth + 1)
+            }
+            // A fn-local immutable `let`/`const` chase: the binding is immutable
+            // and its initializer is itself non-expansive.
+            Expr::Identifier(name, _) => match immutable_lets.get(name) {
+                Some(init) => Self::expr_is_nonexpansive(init, immutable_lets, depth + 1),
+                None => false,
+            },
+            // Everything else — reads of mutable/module bindings, parameters,
+            // references/derefs, general function applications, index/field reads
+            // — is EXPANSIVE (the §3.2 refusal / value restriction).
+            _ => false,
         }
     }
 

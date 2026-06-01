@@ -293,8 +293,14 @@ fn test() {
     }
 }
 
+/// Pre-let-gen this rejected with `GenericTypeError`. Fn-boundary
+/// let-generalization (docs/design/let-gen-gating-predicate-spec.md §1.2) now
+/// GENERALIZES an unannotated fn whose body is a freshly-constructed `Err(..)`
+/// carrier (cond-4 non-expansive) into `∀T. () -> Result<T, string>` instead of
+/// rejecting — the success branch's `T` is a return-position-only free var that
+/// the scheme quantifies. The former reject behavior is superseded.
 #[test]
-fn test_expression_style_err_only_without_context_reports_generic_error() {
+fn test_expression_style_err_only_generalizes_under_let_gen() {
     use shape_ast::parser::parse_program;
 
     let code = r#"
@@ -305,14 +311,11 @@ fn test() {
 
     let program = parse_program(code).expect("program should parse");
     let mut engine = TypeInferenceEngine::new();
-    let err = engine
-        .infer_program(&program)
-        .expect_err("inference should fail for unconstrained Result<T>");
-
+    let (_types, errors) = engine.infer_program_best_effort(&program);
     assert!(
-        matches!(err, TypeError::GenericTypeError { .. }),
-        "expected GenericTypeError, got {:?}",
-        err
+        errors.is_empty(),
+        "fn-boundary let-gen should generalize a pure `Err(..)` body, got: {:?}",
+        errors
     );
 }
 
@@ -2179,5 +2182,254 @@ fn test_ws9c_unresolved_factory_field_marker_round_trips() {
         annotation_as_tyvar(&shape_ast::ast::TypeAnnotation::Basic("T42".to_string())),
         None,
         "a bare `T42` user type must not be decoded as a tyvar marker",
+    );
+}
+
+// ===========================================================================
+// Fn-boundary let-generalization corpus
+// (docs/design/let-gen-gating-predicate-spec.md §5)
+//
+// cond-4 (§1.2) is the syntactic non-expansiveness gate at the fn-boundary;
+// §3.2 is the value-restriction refusal for mutable/shared provenance; §4
+// (A-enforced) is the post-solve binding-level reject for a bare-application
+// `let` whose final type is still a fully-polymorphic carrier.
+// ===========================================================================
+
+/// Assert a program type-checks (let-gen accepts it).
+#[cfg(test)]
+fn letgen_accepts(code: &str) {
+    use shape_ast::parser::parse_program;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let (_types, errors) = engine.infer_program_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "let-gen should ACCEPT this program, got errors: {:?}\ncode:\n{}",
+        errors,
+        code
+    );
+}
+
+/// Assert a program is REJECTED with a `GenericTypeError` (cond-4 / §3.2 / §4).
+#[cfg(test)]
+fn letgen_rejects(code: &str) {
+    use shape_ast::parser::parse_program;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let (_types, errors) = engine.infer_program_best_effort(&program);
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, TypeError::GenericTypeError { .. })),
+        "let-gen should REJECT this program with GenericTypeError, got errors: {:?}\ncode:\n{}",
+        errors,
+        code
+    );
+}
+
+// --- §5.1 ACCEPT --------------------------------------------------------
+
+/// A2: `?? 42` pins the carrier's inner type to int ⇒ fn generalizes, binding
+/// is concrete.
+#[test]
+fn letgen_a2_null_coalesce_pins_inner() {
+    letgen_accepts(
+        r#"
+        fn get_val() { return None }
+        let v = get_val() ?? 42
+        v
+    "#,
+    );
+}
+
+/// A3: a pure `Err("boom")` carrier — `Result<T, string>` has a concrete arg,
+/// so the §4 binding-level reject does NOT fire (the A1-vs-A3 split). The
+/// kind-erased carrier compiles (§1.4).
+#[test]
+fn letgen_a3_err_carrier_concrete_arg_compiles() {
+    letgen_accepts(
+        r#"
+        fn step1() { return Err("boom") }
+        let y = step1()
+        y
+    "#,
+    );
+}
+
+/// A4: `find_user()` returning `None` consumed at a site that pins `T` via a
+/// declared `-> Result<number>` and the `!! ?` chain.
+#[test]
+fn letgen_a4_pinned_by_callsite() {
+    letgen_accepts(
+        r#"
+        fn find_user() { None }
+        fn use_it() -> Result<number> {
+            let v = (find_user() !! "missing")?
+            Ok(v + 1.0)
+        }
+        use_it()
+    "#,
+    );
+}
+
+/// A_pure_local (§1.2 cond-4 accept): a fn-local IMMUTABLE `let` chain bottoming
+/// out in a literal `None` is non-expansive ⇒ generalizes.
+#[test]
+fn letgen_a_pure_local_immutable_let_chain() {
+    letgen_accepts(
+        r#"
+        fn get_none() { let inner = None; return inner }
+        let v = get_none() ?? 7
+        v
+    "#,
+    );
+}
+
+/// A_rec (§5.1): mixed None/recursive return takes the union branch yielding a
+/// bare var (not `Type::Generic`) ⇒ gate (c) false ⇒ the fix's path is not even
+/// taken. Guards against a polymorphic-recursion regression.
+#[test]
+fn letgen_a_rec_recursive_none_union() {
+    letgen_accepts(
+        r#"
+        fn rec(n) { if n <= 0 { return None } return rec(n - 1) }
+        let r = rec(3) ?? 0
+        r
+    "#,
+    );
+}
+
+/// A direct `let x = None` (grounding class-(3) value binding) is NOT a
+/// bare-application and compiles — the §4 reject only targets class-(2)
+/// applications. Matches the language's established acceptance of `None`.
+#[test]
+fn letgen_direct_none_value_binding_compiles() {
+    letgen_accepts(
+        r#"
+        let x = None
+        match x { Some(v) => v, None => -1 }
+    "#,
+    );
+}
+
+/// `[1,2,3].map(|x| x*2)` as a fn body is a fresh-collection method call over a
+/// non-expansive receiver ⇒ cond-4 non-expansive ⇒ the unresolved element var
+/// survives to the solver, which pins it to `int`.
+#[test]
+fn letgen_fresh_collection_method_body_compiles() {
+    letgen_accepts(
+        r#"
+        fn double_all() { [1, 2, 3].map(|x| x * 2) }
+        double_all()[0]
+    "#,
+    );
+}
+
+// --- §4 A-enforced ------------------------------------------------------
+
+/// A1 under A-enforced: a bare-application `let x = get_none()` whose final type
+/// is a fully-polymorphic `Option<T>` is a COMPILE ERROR demanding an
+/// annotation (§4 / §5.1 A1 "§4 user decision governs whether this errors").
+#[test]
+fn letgen_a1_bare_application_unpinned_rejects() {
+    letgen_rejects(
+        r#"
+        fn get_none() { return None }
+        let x = get_none()
+        x
+    "#,
+    );
+}
+
+/// A1 remedy: annotating the binding pins `T` ⇒ compiles.
+#[test]
+fn letgen_a1_annotated_binding_compiles() {
+    letgen_accepts(
+        r#"
+        fn get_none() { return None }
+        let x: Option<int> = get_none()
+        x
+    "#,
+    );
+}
+
+// --- §5.2 MUST-REJECT (the §3.2 value-restriction leak repros) -----------
+
+/// R1 (=T17): `get_slot` returns a module-level mutable `var slot` ⇒ cond-4
+/// expansive ⇒ COMPILE ERROR instead of the former runtime `TypeError`.
+#[test]
+fn letgen_r1_returns_module_var_rejects() {
+    letgen_rejects(
+        r#"
+        var slot = None
+        fn get_slot() { return slot }
+        slot = Some(5)
+        let b: string = get_slot()!
+        print(b)
+    "#,
+    );
+}
+
+/// R2 (=T18): same shared-mutable provenance, consumed via `match`.
+#[test]
+fn letgen_r2_module_var_through_match_rejects() {
+    letgen_rejects(
+        r#"
+        var slot = None
+        fn get_slot() { return slot }
+        slot = Some(5)
+        let r = get_slot()
+        match r { Some(s) => { let z: string = s; print(z) } None => {} }
+    "#,
+    );
+}
+
+/// R3 (=T20): one shared cell typed both int AND string through `get_slot` — the
+/// core unsoundness. MUST reject (on `main`/ReliableOnly it compiled + ran).
+#[test]
+fn letgen_r3_one_cell_int_and_string_rejects() {
+    letgen_rejects(
+        r#"
+        var slot = None
+        fn get_slot() { return slot }
+        fn put_int() { slot = Some(1) }
+        fn put_str() { slot = Some("a") }
+        put_int()
+        let x: int = get_slot() ?? 0
+        put_str()
+        let y: string = get_slot() ?? ""
+        print(x)
+        print(y)
+    "#,
+    );
+}
+
+/// R4 (ref): a fn returning a reference into a mutable binding — cond-4 treats
+/// `&slot` as expansive (a reference/deref is never a fresh carrier).
+#[test]
+fn letgen_r4_reference_into_mutable_rejects() {
+    letgen_rejects(
+        r#"
+        var slot = None
+        fn get_ref() { return &slot }
+        slot = Some(5)
+        let b: string = get_ref()!
+        print(b)
+    "#,
+    );
+}
+
+/// §5.3 empty-array boundary: the empty-array seam is a separate bytecode-level
+/// check; this fix does not move it. A `let a = []` still requires an
+/// annotation. (Asserted at the inference level: the bare binding does not
+/// silently type-check to a concrete array.)
+#[test]
+fn letgen_empty_array_remedy_unchanged() {
+    // `let a: Array<int> = []` (annotated) must still type-check.
+    letgen_accepts(
+        r#"
+        let a: Array<int> = []
+        a.length
+    "#,
     );
 }
