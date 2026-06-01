@@ -521,6 +521,102 @@ impl MethodTable {
         for (name, mtp, params, ret) in map_methods {
             self.register_user_generic_method("HashMap", name, mtp, params, ret, vec![]);
         }
+
+        // ---- Set<T> (receiver param 0 = T) -----------------------------
+        // STRICT-FLIP (v0.3.3, SMOKE-s4): mirror the PHF `SET_METHODS`
+        // (shape-vm method_registry.rs:492) so `.add` / `.len` / etc. resolve
+        // in the strict checker. The ctor is registered in
+        // `environment/mod.rs::define_builtin_functions`. `add` / `delete` are
+        // `&mut self` mutators at runtime; for the checker they return Self
+        // (the s4 fixture discards the result either way).
+        let set_methods: Vec<(&str, usize, Vec<E>, E)> = vec![
+            ("add", 0, vec![E::ReceiverParam(0)], E::SelfType),
+            ("delete", 0, vec![E::ReceiverParam(0)], E::SelfType),
+            ("has", 0, vec![E::ReceiverParam(0)], boolean()),
+            ("includes", 0, vec![E::ReceiverParam(0)], boolean()),
+            ("len", 0, vec![], int()),
+            ("length", 0, vec![], int()),
+            ("isEmpty", 0, vec![], boolean()),
+            ("toArray", 0, vec![], vec_of(E::ReceiverParam(0))),
+            ("union", 0, vec![E::SelfType], E::SelfType),
+            ("intersection", 0, vec![E::SelfType], E::SelfType),
+            ("difference", 0, vec![E::SelfType], E::SelfType),
+            (
+                "forEach",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], void())],
+                void(),
+            ),
+            (
+                "map",
+                1,
+                vec![func(vec![E::ReceiverParam(0)], E::MethodParam(0))],
+                E::GenericContainer {
+                    name: "Set".to_string(),
+                    args: vec![E::MethodParam(0)],
+                },
+            ),
+            (
+                "filter",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                E::SelfType,
+            ),
+        ];
+        for (name, mtp, params, ret) in set_methods {
+            self.register_user_generic_method("Set", name, mtp, params, ret, vec![]);
+        }
+
+        // ---- Deque<T> (receiver param 0 = T) ---------------------------
+        // Mirrors PHF `DEQUE_METHODS` (method_registry.rs:517). Mutators
+        // return Self for the checker; `popBack`/`popFront`/`peek*`/`get`
+        // return the element type T.
+        let deque_methods: Vec<(&str, usize, Vec<E>, E)> = vec![
+            ("pushBack", 0, vec![E::ReceiverParam(0)], E::SelfType),
+            ("pushFront", 0, vec![E::ReceiverParam(0)], E::SelfType),
+            ("popBack", 0, vec![], E::ReceiverParam(0)),
+            ("popFront", 0, vec![], E::ReceiverParam(0)),
+            ("peekBack", 0, vec![], E::ReceiverParam(0)),
+            ("peekFront", 0, vec![], E::ReceiverParam(0)),
+            ("get", 0, vec![int()], E::ReceiverParam(0)),
+            ("size", 0, vec![], int()),
+            ("len", 0, vec![], int()),
+            ("length", 0, vec![], int()),
+            ("isEmpty", 0, vec![], boolean()),
+            ("toArray", 0, vec![], vec_of(E::ReceiverParam(0))),
+        ];
+        for (name, mtp, params, ret) in deque_methods {
+            self.register_user_generic_method("Deque", name, mtp, params, ret, vec![]);
+        }
+
+        // ---- PriorityQueue<T> (receiver param 0 = T) -------------------
+        // Mirrors PHF `PRIORITY_QUEUE_METHODS` (method_registry.rs:539).
+        let pq_methods: Vec<(&str, usize, Vec<E>, E)> = vec![
+            ("push", 0, vec![E::ReceiverParam(0)], E::SelfType),
+            ("pop", 0, vec![], E::ReceiverParam(0)),
+            ("peek", 0, vec![], E::ReceiverParam(0)),
+            ("size", 0, vec![], int()),
+            ("len", 0, vec![], int()),
+            ("length", 0, vec![], int()),
+            ("isEmpty", 0, vec![], boolean()),
+            ("toArray", 0, vec![], vec_of(E::ReceiverParam(0))),
+            ("toSortedArray", 0, vec![], vec_of(E::ReceiverParam(0))),
+        ];
+        for (name, mtp, params, ret) in pq_methods {
+            self.register_user_generic_method("PriorityQueue", name, mtp, params, ret, vec![]);
+        }
+
+        // FOLLOW-UP (concurrency-method seeds): `Mutex`/`Atomic`/`Lazy`/
+        // `Channel` ctors ARE registered in `environment/mod.rs` (clears the
+        // undefined-function FP class), but their PHF method sets
+        // (`MUTEX_METHODS`/`ATOMIC_METHODS`/`LAZY_METHODS`/`CHANNEL_METHODS`,
+        // method_registry.rs:820-850) are NOT seeded here. Their signatures
+        // are non-trivial to express precisely (e.g. `mutex.lock()` /
+        // `lazy.get()` return the wrapped `T`; `channel.recv()` blocks and
+        // returns `Option<T>`; `atomic.compare_exchange` is multi-arg over
+        // int). Per the SMOKE-s4-s5 spec ("if a sibling is complex/ambiguous,
+        // register its ctor + flag its methods as a follow-up rather than
+        // guess"), these are deliberately left for a precise follow-up.
     }
 
     /// Register generic builtin methods for types with type parameters.

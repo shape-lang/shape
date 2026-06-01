@@ -697,6 +697,30 @@ impl ConstraintSolver {
                 self.unify_object_with_named_struct(obj_fields, path.as_str())
             }
 
+            // Concrete nominal type coerces into a trait object iff it
+            // implements every trait in the dyn set (standard trait-object
+            // upcast). STRICT-FLIP (v0.3.3, SMOKE-s5): `let arr: Array<dyn
+            // HasX> = [Bar { .. }]` decomposes the element constraint to
+            // `Bar ~ dyn HasX`; without these arms it fell through to
+            // `_ => Ok(false)` and surfaced an unsolved-constraint error.
+            // Sound: succeeds ONLY when the impl is actually registered
+            // (`has_trait_impl` over `self.trait_impls`, keyed `"Trait::Type"`);
+            // a type that does not implement the trait still correctly rejects.
+            // Both `Basic` and `Reference` because a struct/enum name may infer
+            // as either (`format_annotation` renders them identically).
+            (TypeAnnotation::Basic(name), TypeAnnotation::Dyn(traits))
+            | (TypeAnnotation::Dyn(traits), TypeAnnotation::Basic(name)) => {
+                Ok(traits
+                    .iter()
+                    .all(|t| self.has_trait_impl(t.as_str(), name)))
+            }
+            (TypeAnnotation::Reference(path), TypeAnnotation::Dyn(traits))
+            | (TypeAnnotation::Dyn(traits), TypeAnnotation::Reference(path)) => {
+                Ok(traits
+                    .iter()
+                    .all(|t| self.has_trait_impl(t.as_str(), path.as_str())))
+            }
+
             // Different types don't unify
             _ => Ok(false),
         }

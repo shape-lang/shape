@@ -1018,6 +1018,94 @@ impl TypeEnvironment {
         };
         self.define_polymorphic("HashMap", vec![hm_k, hm_v], vec![], hashmap_result);
 
+        // STRICT-FLIP (v0.3.3, SMOKE-s4): the non-HashMap collection /
+        // concurrency constructors are real `BuiltinFunction::*Ctor`
+        // (compiler/helpers.rs:4382-4388) executed by the VM
+        // (vm_impl/builtins.rs:680-832), but were never registered in the type
+        // env — so the strict checker rejected every valid `Set()` / `Deque()`
+        // / etc. with "Undefined function". Register each one with the SAME
+        // polymorphic shape as HashMap above (fresh element/payload type vars
+        // so element typing flows from usage). Arities mirror the VM ctor:
+        //   Set/Deque/PriorityQueue/Channel  -> 0 args
+        //   Mutex(initial: T)                -> 1 arg  (initial value)
+        //   Atomic(initial: int)             -> 1 arg  (int-only at landing)
+        //   Lazy(init: () -> T)              -> 1 arg  (initializer closure)
+        // A bare `Set()` whose element type is never pinned stays unresolved
+        // and is rejected by `ensure_no_unresolved_generic_args`, exactly like
+        // `HashMap()` — un-pinnable generic construction needs an annotation.
+
+        // Set() -> Set<T>
+        {
+            let set_t = TypeVar::new("T".to_string());
+            let set_result = Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Set".into()))),
+                args: vec![Type::Variable(set_t.clone())],
+            };
+            self.define_polymorphic("Set", vec![set_t], vec![], set_result);
+        }
+
+        // Deque() -> Deque<T>
+        {
+            let deque_t = TypeVar::new("T".to_string());
+            let deque_result = Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Deque".into()))),
+                args: vec![Type::Variable(deque_t.clone())],
+            };
+            self.define_polymorphic("Deque", vec![deque_t], vec![], deque_result);
+        }
+
+        // PriorityQueue() -> PriorityQueue<T>
+        {
+            let pq_t = TypeVar::new("T".to_string());
+            let pq_result = Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference(
+                    "PriorityQueue".into(),
+                ))),
+                args: vec![Type::Variable(pq_t.clone())],
+            };
+            self.define_polymorphic("PriorityQueue", vec![pq_t], vec![], pq_result);
+        }
+
+        // Channel() -> Channel<T>
+        {
+            let chan_t = TypeVar::new("T".to_string());
+            let chan_result = Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Channel".into()))),
+                args: vec![Type::Variable(chan_t.clone())],
+            };
+            self.define_polymorphic("Channel", vec![chan_t], vec![], chan_result);
+        }
+
+        // Mutex(initial: T) -> Mutex<T>
+        {
+            let mutex_t = TypeVar::new("T".to_string());
+            let mutex_inner = Type::Variable(mutex_t.clone());
+            let mutex_result = Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Mutex".into()))),
+                args: vec![mutex_inner.clone()],
+            };
+            self.define_polymorphic("Mutex", vec![mutex_t], vec![mutex_inner], mutex_result);
+        }
+
+        // Atomic(initial: int) -> Atomic  (int-only at landing — monomorphic).
+        self.define_builtin(
+            "Atomic",
+            vec![BuiltinTypes::integer()],
+            Type::Concrete(TypeAnnotation::Reference("Atomic".into())),
+        );
+
+        // Lazy(init: () -> T) -> Lazy<T>
+        {
+            let lazy_t = TypeVar::new("T".to_string());
+            let lazy_inner = Type::Variable(lazy_t.clone());
+            let lazy_init = BuiltinTypes::function(vec![], lazy_inner.clone());
+            let lazy_result = Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Lazy".into()))),
+                args: vec![lazy_inner],
+            };
+            self.define_polymorphic("Lazy", vec![lazy_t], vec![lazy_init], lazy_result);
+        }
+
         // Option/Result constructors are polymorphic and must never force `any`.
         let option_t = TypeVar::new("T".to_string());
         let option_inner = Type::Variable(option_t.clone());

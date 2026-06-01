@@ -730,6 +730,43 @@ impl TypeInferenceEngine {
                     return Ok(self.unifier.apply_substitutions(&result_type));
                 }
 
+                // STRICT-FLIP (v0.3.3, SMOKE-s5): method call on a `dyn Trait`
+                // receiver resolves against the trait's declared method
+                // signatures. `let arr: Array<dyn HasX> = [...]` makes
+                // `arr[0]` a `dyn HasX`; `arr[0].x_str()` must find `x_str`'s
+                // return type on the trait. Without this the call falls through
+                // to `infer_property_access` → a `HasField` constraint on the
+                // Dyn type → "cannot have fields". Look up each trait in the
+                // dyn set and return the first matching method's return type.
+                // Sound: only resolves a method the trait actually declares
+                // (required signature or default body); an unknown method still
+                // falls through and is rejected.
+                if let Type::Concrete(TypeAnnotation::Dyn(traits)) = &receiver_type {
+                    use shape_ast::ast::{TraitMember, TraitMemberSignature};
+                    for trait_path in traits {
+                        let Some(trait_def) = self.env.lookup_trait(trait_path.as_str())
+                        else {
+                            continue;
+                        };
+                        for member in &trait_def.members {
+                            let method_return = match member {
+                                TraitMember::Required(TraitMemberSignature::Method {
+                                    name,
+                                    return_type,
+                                    ..
+                                }) if name == method => Some(return_type.clone()),
+                                TraitMember::Default(method_def) if method_def.name == *method => {
+                                    method_def.return_type.clone()
+                                }
+                                _ => None,
+                            };
+                            if let Some(ret_ann) = method_return {
+                                return Ok(Type::Concrete(ret_ann));
+                            }
+                        }
+                    }
+                }
+
                 // Fallback: treat receiver.method(...) as a callable field access
                 // when the receiver is concretely object-like.
                 //
