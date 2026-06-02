@@ -1314,16 +1314,29 @@ fn serializable_to_heap_slot(
             Ok((raw, NativeKind::Ptr(HeapKind::Option)))
         }
 
+        // Clean-refuse-by-design arms (RULED disposition) — these heap
+        // kinds wrap a *live, in-process resource* (an in-flight
+        // iterator cursor, a deque/channel buffer, a query-DSL filter
+        // node) that is intrinsically not snapshot-restorable. The wire
+        // shape is discriminator-only by design; restoration refuses
+        // cleanly rather than fabricating a placeholder. This is not a
+        // pending follow-up — it is the terminal behavior (§2.7.4
+        // invariant).
+        (SV::IteratorOpaque, HeapKind::Iterator)
+        | (SV::DequeOpaque { .. }, HeapKind::Deque)
+        | (SV::ChannelOpaque { .. }, HeapKind::Channel)
+        | (SV::FilterExprOpaque, HeapKind::FilterExpr) => Err(format!(
+            "serializable_to_slot: W17-snapshot-roundtrip surface — \
+             {heap_kind:?} is clean-refuse by design (live in-process \
+             resource, not snapshot-restorable). ADR-006 §2.7.5.1.",
+        )),
+
         // Opaque arms — surface-and-stop on restore. These produced
         // discriminator-only wire shapes; the inner payload is lost.
         // Restoring as a structured runtime error rather than a
         // placeholder lets the caller observe the missing capability
         // cleanly (§2.7.4 invariant).
-        (SV::IteratorOpaque, HeapKind::Iterator)
-        | (SV::DequeOpaque { .. }, HeapKind::Deque)
-        | (SV::ChannelOpaque { .. }, HeapKind::Channel)
-        | (SV::ReferenceOpaque, HeapKind::Reference)
-        | (SV::FilterExprOpaque, HeapKind::FilterExpr)
+        (SV::ReferenceOpaque, HeapKind::Reference)
         | (SV::SharedCellOpaque, HeapKind::SharedCell)
         | (SV::MutexOpaque { .. }, HeapKind::Mutex)
         | (SV::LazyOpaque { .. }, HeapKind::Lazy) => Err(format!(
@@ -1476,5 +1489,95 @@ fn deserialize_datatable(
         dt = dt.with_schema_id(schema_id);
     }
     Ok(dt)
+}
+
+#[cfg(test)]
+mod opaque_disposition_tests {
+    //! Track A / A3 (2026-06-02): the restore-side opaque arms split into
+    //! two dispositions. Iterator / Deque / Channel / FilterExpr wrap a
+    //! live in-process resource and are **clean-refuse by design** (the
+    //! RULED terminal behavior, not a pending follow-up). Reference /
+    //! SharedCell / Mutex / Lazy keep the "deep payload reconstruction is
+    //! the W17-snapshot follow-up" wording (Mutex/Lazy reset disposition +
+    //! Reference/SharedCell identity-handle disposition are owned by other
+    //! workstreams). All eight still surface-and-stop; only the message
+    //! text differs.
+
+    use super::*;
+    use shape_value::{HeapKind, NativeKind};
+
+    fn store() -> (tempfile::TempDir, SnapshotStore) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let st = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        (tmp, st)
+    }
+
+    /// A3: the four live-resource arms read as clean-refuse-by-design.
+    #[test]
+    fn clean_refuse_by_design_arms_carry_design_wording() {
+        let (_tmp, st) = store();
+        let cases = [
+            (
+                SerializableVMValue::IteratorOpaque,
+                HeapKind::Iterator,
+            ),
+            (
+                SerializableVMValue::DequeOpaque { len: 0 },
+                HeapKind::Deque,
+            ),
+            (
+                SerializableVMValue::ChannelOpaque {
+                    closed: false,
+                    len: 0,
+                },
+                HeapKind::Channel,
+            ),
+            (
+                SerializableVMValue::FilterExprOpaque,
+                HeapKind::FilterExpr,
+            ),
+        ];
+        for (sv, hk) in cases {
+            let err = serializable_to_slot(&sv, NativeKind::Ptr(hk), &st)
+                .expect_err("live-resource arm must surface-and-stop");
+            assert!(
+                err.contains("clean-refuse by design"),
+                "{hk:?} should read clean-refuse-by-design, got: {err}"
+            );
+            assert!(
+                !err.contains("follow-up"),
+                "{hk:?} is terminal, not a follow-up, got: {err}"
+            );
+        }
+    }
+
+    /// A3: Reference / SharedCell / Mutex / Lazy stay on the follow-up
+    /// wording (their dispositions belong to other workstreams).
+    #[test]
+    fn deferred_arms_keep_followup_wording() {
+        let (_tmp, st) = store();
+        let cases = [
+            (
+                SerializableVMValue::ReferenceOpaque,
+                HeapKind::Reference,
+            ),
+            (
+                SerializableVMValue::SharedCellOpaque,
+                HeapKind::SharedCell,
+            ),
+        ];
+        for (sv, hk) in cases {
+            let err = serializable_to_slot(&sv, NativeKind::Ptr(hk), &st)
+                .expect_err("deferred arm must surface-and-stop");
+            assert!(
+                err.contains("follow-up"),
+                "{hk:?} should keep follow-up wording, got: {err}"
+            );
+            assert!(
+                !err.contains("clean-refuse by design"),
+                "{hk:?} must not be relabeled clean-refuse, got: {err}"
+            );
+        }
+    }
 }
 

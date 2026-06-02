@@ -409,17 +409,20 @@ impl super::VirtualMachine {
                 } else {
                     // No layout — store the raw payload bits as the
                     // legacy Vec<u64> upvalue carrier so the frame
-                    // remains structurally complete. Heap-bearing
-                    // upvalues in this path surface clean on read.
+                    // remains structurally complete. A payload this
+                    // path cannot project surfaces-and-stops (no
+                    // Bool-default fabrication — ADR-006 §2.7.5.1 /
+                    // §2.7.7; matches the typed-closure branch above).
                     let mut raw: Vec<u64> = Vec::with_capacity(svec.len());
-                    for sv in svec {
-                        // Bool fallback is OK here: this branch is the
-                        // pre-typed-closure path that never carried
-                        // kind metadata anyway. Bool-zero-on-mismatch
-                        // is the legacy contract.
+                    for (i, sv) in svec.iter().enumerate() {
                         let expected = NativeKind::Bool;
-                        let (bits, _) =
-                            serializable_to_slot(sv, expected, store).unwrap_or((0, NativeKind::Bool));
+                        let (bits, _kind) =
+                            serializable_to_slot(sv, expected, store).map_err(|msg| {
+                                VMError::NotImplemented(format!(
+                                    "VirtualMachine::from_snapshot frame[{frame_idx}] \
+                                     legacy-upvalue[{i}]: {msg}"
+                                ))
+                            })?;
                         raw.push(bits);
                     }
                     upvalues_raw = Some(raw);
@@ -1074,6 +1077,71 @@ mod tests {
         assert!(
             msg.contains("W17-snapshot-roundtrip surface"),
             "expected W17 surface error, got: {msg}"
+        );
+    }
+
+    /// W17 A1 regression (Track A, 2026-06-02): the legacy no-ClosureLayout
+    /// upvalue branch in `restore_call_stack` must surface-and-stop on a
+    /// payload it cannot project — NOT fabricate a Bool-default slot.
+    ///
+    /// Pre-fix the branch defaulted `serializable_to_slot`'s failure to a
+    /// Bool-zero slot (the `.unwrap_or(...)`-with-a-Bool-zero-default shape),
+    /// swallowing the restore failure (ADR-006 §2.7.7 forbidden). Post-fix it
+    /// `?`-propagates a structured `NotImplemented` carrying the W17-snapshot
+    /// surface string.
+    ///
+    /// The frame carries `function_id = Some(0)` with an `IteratorOpaque`
+    /// upvalue; `BytecodeProgram::default()` has no `closure_function_layouts`
+    /// entry for id 0, so restoration takes the legacy branch, and the
+    /// opaque payload has no scalar projection under `expected = Bool`.
+    #[test]
+    fn test_w17_legacy_upvalue_unsupported_payload_surfaces_clean() {
+        use crate::bytecode::BytecodeProgram;
+        use shape_runtime::snapshot::{
+            SerializableCallFrame, SerializableVMValue as SV, VmSnapshot,
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+
+        let frame = SerializableCallFrame {
+            return_ip: 0,
+            locals_base: 0,
+            locals_count: 0,
+            // No registered ClosureLayout for id 0 in a default program →
+            // restore_call_stack takes the legacy no-layout upvalue branch.
+            function_id: Some(0),
+            upvalues: Some(vec![SV::IteratorOpaque]),
+            blob_hash: None,
+            local_ip: None,
+        };
+        let snap = VmSnapshot {
+            ip: 0,
+            stack: vec![],
+            locals: vec![],
+            module_bindings: vec![],
+            call_stack: vec![frame],
+            loop_stack: vec![],
+            timeframe_stack: vec![],
+            exception_handlers: vec![],
+            ip_blob_hash: None,
+            ip_local_offset: None,
+            ip_function_id: None,
+        };
+
+        let result =
+            VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store);
+        let err = match result {
+            Ok(_) => panic!(
+                "legacy-upvalue branch must surface-and-stop on an \
+                 unsupported payload, not Bool-default a slot"
+            ),
+            Err(e) => e,
+        };
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("legacy-upvalue") && msg.contains("W17-snapshot-roundtrip surface"),
+            "expected legacy-upvalue surface error, got: {msg}"
         );
     }
 

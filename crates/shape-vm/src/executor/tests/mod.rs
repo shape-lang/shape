@@ -29,6 +29,10 @@ mod decimal_ops;
 mod deque_ops;
 mod io_integration;
 mod jit_abi_tests;
+// Strict-typing defection sentinel — scans the source tree for the
+// Bool-default slot-fabrication pattern (ADR-006 §2.7.7 forbidden),
+// mirroring scripts/check-no-dynamic.sh at the Rust-test layer.
+mod no_dynamic;
 mod matrix_ops;
 // ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback, 2026-05-12):
 // source-level smoke tests for `&mut self` method writeback semantics.
