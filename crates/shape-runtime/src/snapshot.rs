@@ -959,7 +959,7 @@ pub fn slot_to_serializable(
             let value = unsafe { shape_value::v2::decimal_obj::DecimalObj::value(ptr) };
             Ok(SV::Decimal(value))
         }
-        NativeKind::Ptr(heap_kind) => slot_heap_to_serializable(bits, heap_kind),
+        NativeKind::Ptr(heap_kind) => slot_heap_to_serializable(bits, heap_kind, _store),
     }
 }
 
@@ -975,6 +975,7 @@ pub fn slot_to_serializable(
 fn slot_heap_to_serializable(
     bits: u64,
     expected_kind: HeapKind,
+    store: &SnapshotStore,
 ) -> std::result::Result<SerializableVMValue, String> {
     use SerializableVMValue as SV;
     use shape_value::heap_value::{
@@ -1108,15 +1109,220 @@ fn slot_heap_to_serializable(
         // Future is inline u64 per §2.7.4.
         HeapKind::Future => Ok(SV::Future(bits)),
 
+        // ── W17-snapshot-roundtrip container arms (2026-06-02) ─────────
+        // TypedObject / TypedArray / HashMap<string,string> / Range —
+        // the four §2.7.5.1 container/value shapes that the VmState
+        // round-trip (frames Array<FrameState> + module_bindings
+        // Map<string,any>) consumes. Each reconstructs the typed `Arc<T>`
+        // (or v2-raw carrier) via the canonical 5-arm receiver-recovery
+        // pattern, reads through a borrow (no ownership taken), and
+        // projects to the matching `SerializableVMValue` arm. No
+        // `Box<HeapValue>`, no ValueWord, no Bool-default.
+        HeapKind::Range => {
+            // SAFETY: bits = `Arc::into_raw(Arc<RangeData>)` per the
+            // `ValueSlot::from_range` construction contract (slot.rs:309).
+            // Clone-on-read + restore-share leaves the slot's share intact.
+            unsafe {
+                let arc = Arc::<shape_value::heap_value::RangeData>::from_raw(
+                    bits as *const shape_value::heap_value::RangeData,
+                );
+                let start = arc.start;
+                let end = arc.end;
+                let inclusive = arc.inclusive;
+                let _ = Arc::into_raw(arc);
+                Ok(SV::Range {
+                    start: Some(Box::new(SV::Int(start))),
+                    end: Some(Box::new(SV::Int(end))),
+                    inclusive,
+                })
+            }
+        }
+        HeapKind::TypedObject => {
+            // The slot bits are a `*const TypedObjectStorage` carrier
+            // (`from_typed_object` legacy Arc carrier OR `from_typed_object_raw`
+            // v2-raw carrier — identical `#[repr(C)]` layout, HeapHeader
+            // at offset 0). We read the struct fields through a borrow
+            // WITHOUT touching the refcount (no ownership taken on the
+            // way out); the schema_id + per-field parallel kind track
+            // (`field_kinds[i]`) drive a per-field `slot_to_serializable`
+            // recursion. ADR-006 §2.5 / §2.3.
+            //
+            // SAFETY: per the slot construction contract the bits point
+            // to a live `TypedObjectStorage`; the borrow is valid for the
+            // duration of the field reads (the slot keeps its share).
+            let storage: &shape_value::heap_value::TypedObjectStorage =
+                unsafe { &*(bits as *const shape_value::heap_value::TypedObjectStorage) };
+            let schema_id = storage.schema_id;
+            let heap_mask = storage.heap_mask;
+            let n = storage.slots.len();
+            let mut slot_data: Vec<SerializableVMValue> = Vec::with_capacity(n);
+            for i in 0..n {
+                let field_bits = storage.slots[i].raw();
+                let field_kind = storage.field_kinds[i];
+                let sv = slot_to_serializable(field_bits, field_kind, store)?;
+                slot_data.push(sv);
+            }
+            Ok(SV::TypedObject {
+                schema_id,
+                slot_data,
+                heap_mask,
+            })
+        }
+        HeapKind::TypedArray => {
+            // v2-raw flat-struct monomorphic carrier (`docs/runtime-v2-spec.md`):
+            // the element-type discriminant is stamped at HeapHeader offset 7.
+            // Scalar element kinds project to a generic `SV::Array(Vec<scalar>)`
+            // — a store-free, lossless in-session round-trip. Heap-element
+            // arrays (String / Decimal / TypedObject element type) surface
+            // clean: their deep element walk lands in follow-up (and the
+            // VmState `frames` array-of-FrameState path reads its elements
+            // through the bespoke decode walk in `executor/resume.rs`, not
+            // through this scalar projection).
+            use shape_value::v2::typed_array::{
+                read_elem_type, TypedArray, ELEM_TYPE_BOOL, ELEM_TYPE_F32,
+                ELEM_TYPE_F64, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64,
+                ELEM_TYPE_I8, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8,
+            };
+            let ptr = bits as *const u8;
+            // SAFETY: the slot construction contract guarantees a live,
+            // element-type-stamped TypedArray carrier at `bits`.
+            let elem = unsafe { read_elem_type(ptr) };
+            let elems: Vec<SerializableVMValue> = unsafe {
+                match elem {
+                    ELEM_TYPE_F64 => {
+                        TypedArray::<f64>::as_slice(ptr as *const TypedArray<f64>)
+                            .iter()
+                            .map(|v| SV::Number(*v))
+                            .collect()
+                    }
+                    ELEM_TYPE_I64 => {
+                        TypedArray::<i64>::as_slice(ptr as *const TypedArray<i64>)
+                            .iter()
+                            .map(|v| SV::Int(*v))
+                            .collect()
+                    }
+                    ELEM_TYPE_I32 => {
+                        TypedArray::<i32>::as_slice(ptr as *const TypedArray<i32>)
+                            .iter()
+                            .map(|v| SV::Int(*v as i64))
+                            .collect()
+                    }
+                    ELEM_TYPE_I16 => {
+                        TypedArray::<i16>::as_slice(ptr as *const TypedArray<i16>)
+                            .iter()
+                            .map(|v| SV::Int(*v as i64))
+                            .collect()
+                    }
+                    ELEM_TYPE_I8 => {
+                        TypedArray::<i8>::as_slice(ptr as *const TypedArray<i8>)
+                            .iter()
+                            .map(|v| SV::Int(*v as i64))
+                            .collect()
+                    }
+                    ELEM_TYPE_BOOL | ELEM_TYPE_U8 => {
+                        TypedArray::<u8>::as_slice(ptr as *const TypedArray<u8>)
+                            .iter()
+                            .map(|v| {
+                                if elem == ELEM_TYPE_BOOL {
+                                    SV::Bool(*v != 0)
+                                } else {
+                                    SV::Int(*v as i64)
+                                }
+                            })
+                            .collect()
+                    }
+                    ELEM_TYPE_U16 => {
+                        TypedArray::<u16>::as_slice(ptr as *const TypedArray<u16>)
+                            .iter()
+                            .map(|v| SV::Int(*v as i64))
+                            .collect()
+                    }
+                    ELEM_TYPE_U32 => {
+                        TypedArray::<u32>::as_slice(ptr as *const TypedArray<u32>)
+                            .iter()
+                            .map(|v| SV::Int(*v as i64))
+                            .collect()
+                    }
+                    ELEM_TYPE_F32 => {
+                        TypedArray::<f32>::as_slice(ptr as *const TypedArray<f32>)
+                            .iter()
+                            .map(|v| SV::Number(f64::from(*v)))
+                            .collect()
+                    }
+                    other_elem => {
+                        return Err(format!(
+                            "slot_to_serializable: W17-snapshot-roundtrip surface — \
+                             TypedArray element-type discriminant {other_elem} is \
+                             not in the scalar round-trip set (heap-element arrays \
+                             — String / Decimal / TypedObject — land in follow-up). \
+                             ADR-006 §2.7.5.1."
+                        ));
+                    }
+                }
+            };
+            Ok(SV::Array(elems))
+        }
+        HeapKind::HashMap => {
+            // K1 string→string monomorphization only. The slot bits are
+            // `Arc::into_raw(Arc<HashMapKindedRef>)` per `from_hashmap`
+            // (slot.rs:244). We clone-on-read the outer Arc, dispatch on
+            // the `HashMapKindedRef::String` variant, and read the
+            // `*const StringObj` keys + values via the v2-raw TypedArray
+            // walk (mirror of `json_value.rs::heap_to_json_value`). All
+            // other value monomorphizations are K3 (heap-value track
+            // amendment) and surface clean.
+            use shape_value::heap_value::HashMapKindedRef;
+            // SAFETY: bits = `Arc::into_raw(Arc<HashMapKindedRef>)`.
+            let arc = unsafe {
+                Arc::<HashMapKindedRef>::from_raw(bits as *const HashMapKindedRef)
+            };
+            let kref: HashMapKindedRef = (*arc).clone();
+            let _ = Arc::into_raw(arc); // restore the slot's original share
+            match &kref {
+                HashMapKindedRef::String(map_arc) => {
+                    let n = map_arc.len();
+                    let mut keys: Vec<SerializableVMValue> = Vec::with_capacity(n);
+                    let mut values: Vec<SerializableVMValue> = Vec::with_capacity(n);
+                    for i in 0..n {
+                        // SAFETY: keys/values buffers are live for the
+                        // lifetime of `map_arc`; elements are `*const
+                        // StringObj` per the String monomorphization.
+                        unsafe {
+                            let kp =
+                                shape_value::v2::typed_array::TypedArray::get_unchecked(
+                                    map_arc.keys,
+                                    i as u32,
+                                );
+                            let vp: *const shape_value::v2::string_obj::StringObj =
+                                *(*map_arc.values).data.add(i);
+                            keys.push(SV::String(
+                                shape_value::v2::string_obj::StringObj::as_str(kp)
+                                    .to_owned(),
+                            ));
+                            values.push(SV::String(
+                                shape_value::v2::string_obj::StringObj::as_str(vp)
+                                    .to_owned(),
+                            ));
+                        }
+                    }
+                    Ok(SV::HashMap { keys, values })
+                }
+                other_v => Err(format!(
+                    "slot_to_serializable: W17-snapshot-roundtrip surface — \
+                     HashMap value-monomorphization {} is K3 (the heap-value \
+                     kinded-track amendment); only HashMap<string,string> \
+                     round-trips at this scope. ADR-006 §2.7.5.1.",
+                    hashmap_kinded_ref_arm_name(other_v),
+                )),
+            }
+        }
+
         // Pre-existing complex shapes: surface-and-stop per §2.7.5.1.
         // These have rich pre-bulldozer SerializableVMValue arms whose
-        // construction requires more than typed-Arc recovery (Range
-        // bounds carry KindedSlot endpoints; TypedObject carries the
-        // schema_id + parallel-kind track over its fields; TypedArray
-        // carries a typed-buffer payload and lands in a sidecar blob;
-        // DataTable / TableView / HashMap / Temporal / TaskGroup /
-        // IoHandle / NativeView / NativeScalar / Content / ClosureRaw
-        // each have their own multi-step landing path).
+        // construction requires more than typed-Arc recovery (DataTable /
+        // TableView / Temporal / TaskGroup / IoHandle / NativeView /
+        // NativeScalar / Content / ClosureRaw each have their own
+        // multi-step landing path).
         other => Err(format!(
             "slot_to_serializable: W17-snapshot-roundtrip surface — \
              HeapKind::{other:?} arm has no in-session SerializableVMValue \
@@ -1174,7 +1380,7 @@ fn serializable_inner_kinded(
 pub fn serializable_to_slot(
     sv: &SerializableVMValue,
     expected_kind: NativeKind,
-    _store: &SnapshotStore,
+    store: &SnapshotStore,
 ) -> std::result::Result<(u64, NativeKind), String> {
     use SerializableVMValue as SV;
     // Scalar projections — discriminator must match `expected_kind`'s
@@ -1202,7 +1408,7 @@ pub fn serializable_to_slot(
         // Heap kinds — discriminator must align with `expected_kind`'s
         // `HeapKind::*`. Reconstructing typed-Arc payloads is the
         // inverse of `slot_heap_to_serializable`; see per-arm coverage.
-        (sv, NativeKind::Ptr(hk)) => serializable_to_heap_slot(sv, hk),
+        (sv, NativeKind::Ptr(hk)) => serializable_to_heap_slot(sv, hk, store),
 
         // Wildcards — surface-and-stop. No Bool-default fallback.
         (other_sv, other_kind) => Err(format!(
@@ -1216,6 +1422,35 @@ pub fn serializable_to_slot(
     }
 }
 
+/// Map a `SerializableVMValue` to the `NativeKind` its restored field
+/// slot should carry — the per-field analogue of the shape-vm
+/// `expected_kind_from_serializable`. Used by the TypedObject restore arm
+/// to pick each field's `expected_kind` from its discriminator. The
+/// returned kind is a hint; `serializable_to_slot` re-derives the actual
+/// kind from the arm and surfaces on mismatch (no Bool-default).
+fn expected_heap_field_kind(sv: &SerializableVMValue) -> NativeKind {
+    use SerializableVMValue as SV;
+    match sv {
+        SV::Int(_) => NativeKind::Int64,
+        SV::Number(_) => NativeKind::Float64,
+        SV::Bool(_) => NativeKind::Bool,
+        SV::String(_) => NativeKind::String,
+        SV::None | SV::Unit => NativeKind::Bool,
+        SV::Decimal(_) => NativeKind::Ptr(HeapKind::Decimal),
+        SV::BigInt(_) => NativeKind::Ptr(HeapKind::BigInt),
+        SV::Char(_) => NativeKind::Ptr(HeapKind::Char),
+        SV::Range { .. } => NativeKind::Ptr(HeapKind::Range),
+        SV::TypedObject { .. } => NativeKind::Ptr(HeapKind::TypedObject),
+        SV::HashMap { .. } => NativeKind::Ptr(HeapKind::HashMap),
+        SV::Array(_) => NativeKind::Ptr(HeapKind::TypedArray),
+        SV::HashSet { .. } => NativeKind::Ptr(HeapKind::HashSet),
+        SV::ResultData { .. } => NativeKind::Ptr(HeapKind::Result),
+        SV::OptionData { .. } => NativeKind::Ptr(HeapKind::Option),
+        // Pre-existing complex arms — surface clean rather than guess.
+        _ => NativeKind::Bool,
+    }
+}
+
 /// Inverse of [`slot_heap_to_serializable`] — reconstruct a heap-kinded
 /// slot from its serialized arm. Returns `(bits, NativeKind)` ready
 /// to push to a slot. The reconstructed slot owns one strong-count
@@ -1223,6 +1458,7 @@ pub fn serializable_to_slot(
 fn serializable_to_heap_slot(
     sv: &SerializableVMValue,
     heap_kind: HeapKind,
+    store: &SnapshotStore,
 ) -> std::result::Result<(u64, NativeKind), String> {
     use SerializableVMValue as SV;
     use shape_value::heap_value::{
@@ -1314,6 +1550,197 @@ fn serializable_to_heap_slot(
             Ok((raw, NativeKind::Ptr(HeapKind::Option)))
         }
 
+        // ── W17-snapshot-roundtrip container restore arms (2026-06-02) ──
+        // Inverse of the `slot_heap_to_serializable` container arms.
+        (SV::Range { start, end, inclusive }, HeapKind::Range) => {
+            // RangeData carries i64 bounds + step + inclusive. The wire
+            // shape only persists start/end/inclusive; step defaults to 1
+            // (the surface-syntax `start..end` shape per RangeData docstring).
+            let start_i = match start.as_deref() {
+                Some(SV::Int(i)) => *i,
+                _ => return Err(
+                    "serializable_to_slot: Range restore — start bound is not \
+                     an Int (only i64 ranges are representable). ADR-006 §2.7.23."
+                        .to_string(),
+                ),
+            };
+            let end_i = match end.as_deref() {
+                Some(SV::Int(i)) => *i,
+                _ => return Err(
+                    "serializable_to_slot: Range restore — end bound is not \
+                     an Int (only i64 ranges are representable). ADR-006 §2.7.23."
+                        .to_string(),
+                ),
+            };
+            let data = shape_value::heap_value::RangeData::new(
+                start_i, end_i, 1, *inclusive,
+            );
+            let arc = Arc::new(data);
+            let raw = Arc::into_raw(arc) as u64;
+            Ok((raw, NativeKind::Ptr(HeapKind::Range)))
+        }
+        (SV::TypedObject { schema_id, slot_data, heap_mask }, HeapKind::TypedObject) => {
+            // Rebuild a `TypedObjectStorage` from the per-field restored
+            // slots. Each field restores through `serializable_to_slot`
+            // (recursion); the returned `(bits, kind)` populate the slot
+            // array and the parallel `field_kinds` track. The
+            // `from_typed_object` (Arc carrier) constructor moves one
+            // strong-count share into the slot. ADR-006 §2.3 / §2.5.
+            use shape_value::ValueSlot;
+            let n = slot_data.len();
+            let mut slots: Vec<ValueSlot> = Vec::with_capacity(n);
+            let mut field_kinds: Vec<NativeKind> = Vec::with_capacity(n);
+            for (i, fsv) in slot_data.iter().enumerate() {
+                let expected = expected_heap_field_kind(fsv);
+                let (fbits, fkind) =
+                    serializable_to_slot(fsv, expected, store).map_err(|msg| {
+                        format!(
+                            "serializable_to_slot: TypedObject restore field[{i}] \
+                             (schema_id={schema_id}): {msg}"
+                        )
+                    })?;
+                slots.push(ValueSlot::from_raw(fbits));
+                field_kinds.push(fkind);
+            }
+            let field_kinds_arc: Arc<[NativeKind]> = field_kinds.into();
+            // Allocate via the v2-raw `_new` carrier (refcount=1 on the
+            // HeapHeader at offset 0) so the slot's release path
+            // (`drop_with_kind` → `TypedObjectStorage::release_elem` →
+            // carrier-side `_drop` + `std::alloc::dealloc`) matches the
+            // allocation. The legacy `Arc::new(...)` + `Arc::into_raw`
+            // carrier would mismatch the allocator at drop time (the
+            // `length_typed_object_empty` allocator-pair SIGABRT class
+            // per the v2-raw-heap-audit). ADR-006 §2.3 amendment (Wave 2
+            // Agent D1/D2).
+            let ptr = shape_value::heap_value::TypedObjectStorage::_new(
+                *schema_id,
+                slots.into_boxed_slice(),
+                *heap_mask,
+                field_kinds_arc,
+            );
+            Ok((ptr as u64, NativeKind::Ptr(HeapKind::TypedObject)))
+        }
+        (SV::HashMap { keys, values }, HeapKind::HashMap) => {
+            // K1 string→string restore only — mirror of the K1
+            // `project_concrete_return::HashMapStringString` builder.
+            // Non-string value arms (K3) never produce an `SV::HashMap`
+            // with string values, so a non-String value here is a
+            // malformed wire shape; surface clean.
+            use shape_value::heap_value::{HashMapData, HashMapKindedRef};
+            use shape_value::v2::string_obj::StringObj;
+            if keys.len() != values.len() {
+                return Err(format!(
+                    "serializable_to_slot: HashMap restore — keys/values length \
+                     mismatch (keys={}, values={}). Malformed wire shape. \
+                     ADR-006 §2.7.5.1.",
+                    keys.len(),
+                    values.len(),
+                ));
+            }
+            let mut data: HashMapData<*const StringObj> = HashMapData::new();
+            for (k, v) in keys.iter().zip(values.iter()) {
+                let (ks, vs) = match (k, v) {
+                    (SV::String(ks), SV::String(vs)) => (ks, vs),
+                    _ => return Err(
+                        "serializable_to_slot: HashMap restore — only \
+                         HashMap<string,string> round-trips at this scope; \
+                         a non-String key/value pair is K3 (heap-value track) \
+                         or malformed. ADR-006 §2.7.5.1."
+                            .to_string(),
+                    ),
+                };
+                let value_ptr = StringObj::new(vs.as_str()) as *const StringObj;
+                // SAFETY: `value_ptr` is a fresh StringObj (refcount = 1);
+                // `insert` takes ownership of that single share + allocates
+                // a fresh key StringObj internally.
+                unsafe {
+                    data.insert(ks.as_str(), value_ptr);
+                }
+            }
+            let kref = Arc::new(HashMapKindedRef::String(Arc::new(data)));
+            let raw = Arc::into_raw(kref) as u64;
+            Ok((raw, NativeKind::Ptr(HeapKind::HashMap)))
+        }
+        (SV::Array(elems), HeapKind::TypedArray) => {
+            // Restore a scalar-element TypedArray. The wire shape lost the
+            // exact element type (an `SV::Array` of `SV::Int` could have
+            // been i8/i16/i32/i64/u*); we pick the widest matching scalar
+            // carrier from the first element's discriminator (Int → i64,
+            // Number → f64, Bool → u8/ELEM_TYPE_BOOL). An empty array maps
+            // to a stamped zero-length i64 carrier. Heterogeneous or
+            // non-scalar elements surface clean — those came from a
+            // non-scalar source and don't round-trip through this arm.
+            use shape_value::v2::typed_array::{
+                stamp_elem_type, TypedArray, ELEM_TYPE_BOOL, ELEM_TYPE_F64,
+                ELEM_TYPE_I64,
+            };
+            // Classify by the first element (empty → i64).
+            let first = elems.first();
+            let raw_bits = match first {
+                None | Some(SV::Int(_)) => {
+                    let mut v: Vec<i64> = Vec::with_capacity(elems.len());
+                    for e in elems {
+                        match e {
+                            SV::Int(i) => v.push(*i),
+                            _ => return Err(
+                                "serializable_to_slot: TypedArray restore — \
+                                 heterogeneous element (expected all Int). \
+                                 ADR-006 §2.7.5.1."
+                                    .to_string(),
+                            ),
+                        }
+                    }
+                    let arr = TypedArray::<i64>::from_slice(&v);
+                    unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64) };
+                    arr as usize as u64
+                }
+                Some(SV::Number(_)) => {
+                    let mut v: Vec<f64> = Vec::with_capacity(elems.len());
+                    for e in elems {
+                        match e {
+                            SV::Number(f) => v.push(*f),
+                            _ => return Err(
+                                "serializable_to_slot: TypedArray restore — \
+                                 heterogeneous element (expected all Number). \
+                                 ADR-006 §2.7.5.1."
+                                    .to_string(),
+                            ),
+                        }
+                    }
+                    let arr = TypedArray::<f64>::from_slice(&v);
+                    unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_F64) };
+                    arr as usize as u64
+                }
+                Some(SV::Bool(_)) => {
+                    let mut v: Vec<u8> = Vec::with_capacity(elems.len());
+                    for e in elems {
+                        match e {
+                            SV::Bool(b) => v.push(if *b { 1 } else { 0 }),
+                            _ => return Err(
+                                "serializable_to_slot: TypedArray restore — \
+                                 heterogeneous element (expected all Bool). \
+                                 ADR-006 §2.7.5.1."
+                                    .to_string(),
+                            ),
+                        }
+                    }
+                    let arr = TypedArray::<u8>::from_slice(&v);
+                    unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_BOOL) };
+                    arr as usize as u64
+                }
+                Some(other) => {
+                    return Err(format!(
+                        "serializable_to_slot: TypedArray restore — element arm \
+                         {} is not in the scalar round-trip set (Int / Number / \
+                         Bool). Heap-element arrays land in follow-up. \
+                         ADR-006 §2.7.5.1.",
+                        serializable_arm_name(other),
+                    ));
+                }
+            };
+            Ok((raw_bits, NativeKind::Ptr(HeapKind::TypedArray)))
+        }
+
         // Clean-refuse-by-design arms (RULED disposition) — these heap
         // kinds wrap a *live, in-process resource* (an in-flight
         // iterator cursor, a deque/channel buffer, a query-DSL filter
@@ -1391,6 +1818,25 @@ fn inner_kinded_from_serializable(
              projection. Tracked as follow-up. ADR-006 §2.7.5.1.",
             serializable_arm_name(other),
         )),
+    }
+}
+
+/// One-line discriminator name for `HashMapKindedRef` value
+/// monomorphizations (K3 surface diagnostics).
+fn hashmap_kinded_ref_arm_name(
+    kref: &shape_value::heap_value::HashMapKindedRef,
+) -> &'static str {
+    use shape_value::heap_value::HashMapKindedRef as K;
+    match kref {
+        K::I64(_) => "I64",
+        K::F64(_) => "F64",
+        K::Bool(_) => "Bool",
+        K::Char(_) => "Char",
+        K::String(_) => "String",
+        K::Decimal(_) => "Decimal",
+        K::TypedObject(_) => "TypedObject",
+        K::TraitObject(_) => "TraitObject",
+        K::HashMap(_) => "HashMap",
     }
 }
 

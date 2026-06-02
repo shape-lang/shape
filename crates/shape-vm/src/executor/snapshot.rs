@@ -628,6 +628,12 @@ fn expected_kind_from_serializable(
         SV::SharedCellOpaque => NativeKind::Ptr(HeapKind::SharedCell),
         SV::MutexOpaque { .. } => NativeKind::Ptr(HeapKind::Mutex),
         SV::LazyOpaque { .. } => NativeKind::Ptr(HeapKind::Lazy),
+        // W17-snapshot-roundtrip container arms (2026-06-02): the four
+        // container/value shapes restored by `serializable_to_heap_slot`.
+        SV::TypedObject { .. } => NativeKind::Ptr(HeapKind::TypedObject),
+        SV::Range { .. } => NativeKind::Ptr(HeapKind::Range),
+        SV::HashMap { .. } => NativeKind::Ptr(HeapKind::HashMap),
+        SV::Array(_) => NativeKind::Ptr(HeapKind::TypedArray),
         // Pre-existing complex arms — surface clean rather than guess.
         _ => NativeKind::Bool,
     }
@@ -1232,6 +1238,234 @@ mod tests {
         assert_eq!(restored_frame.locals_count, 2);
         assert!(restored_frame.upvalues.is_none());
         assert!(restored_frame.closure_heap_bits.is_none());
+    }
+
+    /// STAGE Snapshot-roundtrip (2026-06-02): the W17 deep-restore close.
+    ///
+    /// Captures a MULTI-FRAME VM whose live state carries non-trivial
+    /// module bindings (an `int` and a `string`), then round-trips it
+    /// through `vm.snapshot(&store)` → `VirtualMachine::from_snapshot`.
+    /// Asserts the restored VM observes BOTH call_stack AND module_bindings
+    /// restored NON-EMPTY with the correct values.
+    ///
+    /// This is the run-verified identity round-trip for the
+    /// `serializable_to_slot` container/value restore arms landed alongside
+    /// it (the Int + String module-binding arms; the call_stack restore is
+    /// the existing W17-state-tier path). `from_snapshot` is the capable
+    /// consumer; this test feeds it a POPULATED VmSnapshot produced by a
+    /// real live-state capture.
+    #[test]
+    fn test_snapshot_roundtrip_multiframe_bindings_nonempty() {
+        use crate::bytecode::BytecodeProgram;
+        use crate::executor::CallFrame;
+        use shape_runtime::snapshot::SerializableVMValue as SV;
+        use shape_value::NativeKind;
+        use std::sync::Arc;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        // Two module bindings: binding[0] = int 99, binding[1] = "world".
+        vm.module_binding_write_kinded(0, 99i64 as u64, NativeKind::Int64);
+        let str_arc = Arc::new("world".to_string());
+        let str_bits = Arc::into_raw(str_arc) as u64;
+        vm.module_binding_write_kinded(1, str_bits, NativeKind::String);
+
+        // Push four scalars to back two frames' local windows, then two
+        // non-closure CallFrames (a multi-frame call stack).
+        vm.push_kinded(7i64 as u64, NativeKind::Int64).expect("push 7");
+        vm.push_kinded(1, NativeKind::Bool).expect("push true");
+        vm.push_kinded(11i64 as u64, NativeKind::Int64).expect("push 11");
+        vm.push_kinded(2.5f64.to_bits(), NativeKind::Float64).expect("push 2.5");
+        vm.call_stack.push(CallFrame {
+            return_ip: 0,
+            base_pointer: 0,
+            locals_count: 2,
+            function_id: None,
+            upvalues: None,
+            blob_hash: None,
+            closure_heap_bits: None,
+            closure_heap_kind: None,
+        });
+        vm.call_stack.push(CallFrame {
+            return_ip: 5,
+            base_pointer: 2,
+            locals_count: 2,
+            function_id: None,
+            upvalues: None,
+            blob_hash: None,
+            closure_heap_bits: None,
+            closure_heap_kind: None,
+        });
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+
+        // Capture: a populated VmSnapshot with multi-frame call stack +
+        // two module bindings.
+        let snap = vm.snapshot(&store).expect("snapshot multi-frame state");
+        assert_eq!(snap.call_stack.len(), 2, "two frames captured");
+        assert_eq!(snap.module_bindings.len(), 2, "two bindings captured");
+        assert!(matches!(snap.module_bindings[0], SV::Int(99)));
+        assert!(matches!(&snap.module_bindings[1], SV::String(s) if s == "world"));
+
+        // Restore: from_snapshot rebuilds the VM in place.
+        let restored = VirtualMachine::from_snapshot(
+            BytecodeProgram::default(),
+            &snap,
+            &store,
+        )
+        .expect("restore multi-frame state");
+
+        // call_stack restored NON-EMPTY with correct structural values.
+        assert_eq!(restored.call_stack.len(), 2, "call_stack restored non-empty");
+        assert_eq!(restored.call_stack[0].locals_count, 2);
+        assert_eq!(restored.call_stack[0].base_pointer, 0);
+        assert_eq!(restored.call_stack[1].return_ip, 5);
+        assert_eq!(restored.call_stack[1].base_pointer, 2);
+
+        // module_bindings restored NON-EMPTY with correct values — re-snapshot
+        // and read the projected arms back. `from_snapshot`'s
+        // `module_binding_pad_to_kinded(needed)` pads to `needed + 1`
+        // (the `while len <= index` semantics), so index `needed` is a
+        // trailing None-sentinel padding slot; the two written bindings
+        // (0, 1) carry the round-tripped values.
+        let re = restored.snapshot(&store).expect("re-snapshot restored state");
+        assert!(
+            re.module_bindings.len() >= 2,
+            "module_bindings restored non-empty, got {}",
+            re.module_bindings.len()
+        );
+        assert!(
+            matches!(re.module_bindings[0], SV::Int(99)),
+            "binding[0] int 99 round-tripped, got {:?}",
+            re.module_bindings[0]
+        );
+        assert!(
+            matches!(&re.module_bindings[1], SV::String(s) if s == "world"),
+            "binding[1] string 'world' round-tripped, got {:?}",
+            re.module_bindings[1]
+        );
+        assert_eq!(re.call_stack.len(), 2, "call_stack survives re-snapshot");
+    }
+
+    /// STAGE Snapshot-roundtrip (2026-06-02): the four container/value
+    /// arms (`TypedObject` / `TypedArray` / `HashMap<string,string>` /
+    /// `Range`) round-trip through `slot_to_serializable` /
+    /// `serializable_to_slot` as live VM stack slots. Exercises the
+    /// serialize + restore directions for each new arm.
+    #[test]
+    fn test_snapshot_roundtrip_container_arms() {
+        use crate::bytecode::BytecodeProgram;
+        use shape_runtime::snapshot::SerializableVMValue as SV;
+        use shape_value::heap_value::{
+            HashMapData, HashMapKindedRef, RangeData, TypedObjectStorage,
+        };
+        use shape_value::v2::string_obj::StringObj;
+        use shape_value::v2::typed_array::{
+            stamp_elem_type, TypedArray, ELEM_TYPE_I64,
+        };
+        use shape_value::{HeapKind, NativeKind, ValueSlot};
+        use std::sync::Arc;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        // (1) Range 3..=7
+        let range = Arc::new(RangeData::new(3, 7, 1, true));
+        vm.push_kinded(
+            Arc::into_raw(range) as u64,
+            NativeKind::Ptr(HeapKind::Range),
+        )
+        .expect("push range");
+
+        // (2) TypedArray<i64> [10, 20, 30]
+        let arr = TypedArray::<i64>::from_slice(&[10, 20, 30]);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64) };
+        vm.push_kinded(
+            arr as usize as u64,
+            NativeKind::Ptr(HeapKind::TypedArray),
+        )
+        .expect("push typed array");
+
+        // (3) HashMap<string,string> {"k" -> "v"}
+        let mut map: HashMapData<*const StringObj> = HashMapData::new();
+        unsafe {
+            map.insert("k", StringObj::new("v") as *const StringObj);
+        }
+        let kref = Arc::new(HashMapKindedRef::String(Arc::new(map)));
+        vm.push_kinded(
+            Arc::into_raw(kref) as u64,
+            NativeKind::Ptr(HeapKind::HashMap),
+        )
+        .expect("push hashmap");
+
+        // (4) TypedObject with two scalar fields {a: i64=5, b: f64=1.5}.
+        let slots: Box<[ValueSlot]> = vec![
+            ValueSlot::from_raw(5u64),
+            ValueSlot::from_raw(1.5f64.to_bits()),
+        ]
+        .into_boxed_slice();
+        let field_kinds: Arc<[NativeKind]> =
+            vec![NativeKind::Int64, NativeKind::Float64].into();
+        // v2-raw `_new` carrier — matches the slot release path
+        // (`release_elem` + carrier-side `_drop`) per the allocator-pair
+        // contract (ADR-006 §2.3 amendment Wave 2 D1/D2).
+        let to_ptr = TypedObjectStorage::_new(42, slots, 0, field_kinds);
+        vm.push_kinded(
+            to_ptr as u64,
+            NativeKind::Ptr(HeapKind::TypedObject),
+        )
+        .expect("push typed object");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+
+        let snap = vm.snapshot(&store).expect("snapshot container arms");
+        assert_eq!(snap.stack.len(), 4);
+        // serialize-side projections
+        assert!(
+            matches!(&snap.stack[0], SV::Range { start, end, inclusive: true }
+                if matches!(start.as_deref(), Some(SV::Int(3)))
+                && matches!(end.as_deref(), Some(SV::Int(7)))),
+            "range arm, got {:?}", snap.stack[0]
+        );
+        assert!(
+            matches!(&snap.stack[1], SV::Array(v)
+                if v.len() == 3
+                && matches!(v[0], SV::Int(10))
+                && matches!(v[2], SV::Int(30))),
+            "typed-array arm, got {:?}", snap.stack[1]
+        );
+        assert!(
+            matches!(&snap.stack[2], SV::HashMap { keys, values }
+                if keys.len() == 1
+                && matches!(&keys[0], SV::String(k) if k == "k")
+                && matches!(&values[0], SV::String(v) if v == "v")),
+            "hashmap arm, got {:?}", snap.stack[2]
+        );
+        assert!(
+            matches!(&snap.stack[3], SV::TypedObject { schema_id: 42, slot_data, .. }
+                if slot_data.len() == 2
+                && matches!(slot_data[0], SV::Int(5))
+                && matches!(slot_data[1], SV::Number(f) if (f - 1.5).abs() < 1e-9)),
+            "typed-object arm, got {:?}", snap.stack[3]
+        );
+
+        // restore-side: from_snapshot → re-snapshot → identical projections.
+        let restored = VirtualMachine::from_snapshot(
+            BytecodeProgram::default(),
+            &snap,
+            &store,
+        )
+        .expect("restore container arms");
+        let re = restored.snapshot(&store).expect("re-snapshot");
+        assert_eq!(re.stack.len(), 4);
+        assert!(matches!(&re.stack[0], SV::Range { start, .. }
+            if matches!(start.as_deref(), Some(SV::Int(3)))));
+        assert!(matches!(&re.stack[1], SV::Array(v) if v.len() == 3));
+        assert!(matches!(&re.stack[2], SV::HashMap { values, .. }
+            if matches!(&values[0], SV::String(v) if v == "v")));
+        assert!(matches!(&re.stack[3], SV::TypedObject { schema_id: 42, slot_data, .. }
+            if matches!(slot_data[0], SV::Int(5))));
     }
 
     /// W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12):
