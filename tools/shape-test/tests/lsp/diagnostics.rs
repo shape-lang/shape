@@ -218,13 +218,21 @@ fn semantic_diagnostic_reports_unknown_property_access() {
 
 #[test]
 fn semantic_diagnostic_reports_unconstrained_result_generic_from_err_only() {
+    // TP-rebaseline (A-final STAGE-3, let-gen): under the ratified HM
+    // let-generalization feature (project_let_generalization.md; user 2026-05-31,
+    // the `fn get_none() { None } => fn get_none<T>() -> Option<T>` rule), an
+    // `Err`-only function body is NO LONGER an "unconstrained generic" error — the
+    // unconstrained success type generalizes to a fresh return generic param, so
+    // `fn test() { Err("some error") }` becomes `fn test<T>() -> Result<T, AnyError>`
+    // and is instantiable at any success type (verified: usable at both
+    // `Result<int, string>` and `Result<string, string>`). The pre-let-gen
+    // "Could not infer generic type arguments for 'Result'" diagnostic no longer
+    // fires; asserting it would assert a non-occurring diagnostic. The function is
+    // well-typed, so we assert there is NO such diagnostic.
     let code = "fn test() {\n  Err(\"some error\")\n}\n";
-    ShapeTest::new(code)
-        .expect_semantic_diagnostic_contains("Could not infer generic type arguments for 'Result'")
-        .expect_semantic_diagnostic_at_line_contains(
-            1,
-            "Could not infer generic type arguments for 'Result'",
-        );
+    ShapeTest::new(code).expect_no_semantic_diagnostic_contains(
+        "Could not infer generic type arguments for 'Result'",
+    );
 }
 
 // == Comptime diagnostics (from lsp_comptime) ================================
