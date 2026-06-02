@@ -206,6 +206,37 @@ impl BytecodeCompiler {
     /// - The function must have at least one such unresolved param; a function
     ///   with zero unannotated value params is never implicitly generic.
     fn is_uninstantiated_implicit_generic(&self, func_def: &FunctionDef) -> bool {
+        // A-final ROOT-1 (closure-layout gap): a closure literal is NOT a
+        // deferrable template. Unlike a named `fn f<T>(...)` — whose body the
+        // deferral skips because each concrete call site re-emits a
+        // monomorphized specialization — a closure literal is the value
+        // constructed by the enclosing `MakeClosure`, and there is no
+        // per-call-site re-emit path that would ever build its body later.
+        // Skipping the body here would emit a `MakeClosure` that references a
+        // function with no compiled blob (and hence no registered
+        // `ClosureLayout`), which surfaces at runtime as
+        // `op_make_closure: no ClosureLayout registered for function N`.
+        //
+        // The deferral guard exists only to avoid stamping a typed numeric
+        // opcode on a value of unproven `NativeKind`. A closure whose param
+        // stays an unresolved type variable (e.g. `let id = |x| x`, or a
+        // collection HOF `arr.map(|x| ...)` whose param is resolved at the
+        // call site) reaches this point only after `compile_expr_closure`
+        // has already run the closure-body param-type inference
+        // (`infer_param_type_from_body` + HOF `pending_closure_param_types`
+        // hints). Any param still unannotated here is genuinely pass-through
+        // / opaque inside the body — it never feeds a typed numeric opcode —
+        // so the body compiles soundly without widening or fabricating a
+        // kind. Always emit it.
+        if self
+            .program
+            .functions
+            .iter()
+            .any(|f| f.is_closure && f.name == func_def.name)
+        {
+            return false;
+        }
+
         let hints = self.inferred_param_type_hints.get(&func_def.name);
         let object_fields = self.inferred_param_object_fields.get(&func_def.name);
 
