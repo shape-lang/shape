@@ -673,6 +673,39 @@ impl TypeInferenceEngine {
         // concrete type. No type kind is fabricated.
         self.propagate_hof_arg_callsites(name, args, &arg_types);
 
+        // v0.3.3 ref-param caller->param inference (sibling of the closure /
+        // HOF caller->param propagation above). For a reference argument
+        // `f(&x, …)`, the callee's reference parameter (`fn f(&p, …)`) carries
+        // NO annotation and its body (`p = p + v`) imposes no concrete type
+        // when both operands are still unresolved vars (the J3 `Add`-defer in
+        // `infer_binary_op` pushes no Numeric bound). So the param stays a
+        // `Type::Variable` that NEITHER the callsite-union fixpoint resolves in
+        // time (the call-shape constraint binds the arg occurrence-var into the
+        // per-call param INSTANCE var, not the body's SOURCE var) NOR the
+        // numeric default touches (the param is not in
+        // `callable_numeric_param_indices`). The runtime symptom is a wrong
+        // result, because the unannotated reference param's slot kind is never
+        // proven.
+        //
+        // The fix flows the caller's ref-target type into the param's SOURCE
+        // var directly, BEFORE the constraint solver runs: pushing
+        // `Variable(param_source_var) ~ ref_target_type` makes the solver unify
+        // the param's body variable with the ref target's binding (e.g. the
+        // `int` of `let mut total = 0`). The body's `Add` then types as
+        // `AddInt`. This mirrors the closure caller->param inference (R4 /
+        // ROOT-2): an unannotated callable param adopts the type the caller
+        // supplies at the call site. `infer_expr(&x)` already inferred the
+        // ref-target's type into `arg_types[i]` (the `Expr::Reference` arm
+        // forwards to its inner expr).
+        //
+        // Multiple ref call sites each push their own target type at the SAME
+        // source var, so the solver UNIFIES them: matching targets collapse to
+        // one type; CONFLICTING targets (int at one site, number at another)
+        // produce a genuine unification mismatch the solver rejects — the
+        // annotation-required error the bug specifies (no silent pick, no value
+        // widening, no fabricated kind).
+        self.propagate_ref_arg_param_types(name, args, &arg_types);
+
         let origin = self
             .lookup_callable_origin_for_name(name)
             .unwrap_or(call_span);
@@ -1140,6 +1173,102 @@ impl TypeInferenceEngine {
                 // pick it up exactly as if `callee_name(arg_ty)` had been
                 // written directly.
                 self.record_function_callsite(callee_name, &synthetic_arg_types);
+            }
+        }
+    }
+
+    /// v0.3.3 ref-param caller->param inference. For a call `f(&x, …)` where
+    /// argument `i` is a reference expression and the callee's parameter `i` is
+    /// an UNANNOTATED parameter (source var present), push a direct constraint
+    /// unifying the parameter's BODY source variable with the ref-target's
+    /// already-inferred type (`arg_types[i]`).
+    ///
+    /// This is the reference sibling of the closure caller->param inference (R4
+    /// / ROOT-2): an unannotated reference parameter adopts the type the caller
+    /// supplies through the reference, the same way `apply(|x| …, 21)` binds the
+    /// closure's `x`. Without it, the call-shape constraint binds only the
+    /// per-call param INSTANCE var (a fresh instantiation), never the SOURCE var
+    /// the body uses, so a body like `p = p + v` (whose `Add` defers under J3
+    /// when both operands are unresolved vars) leaves the param a bare
+    /// `Type::Variable` whose slot kind is never proven — the wrong-result bug.
+    ///
+    /// Constraining the source var directly lets the constraint solver (which
+    /// runs after all items are inferred) propagate the ref-target's concrete
+    /// type (`int` for `let mut total = 0`) into the body; the body's `Add` then
+    /// types as `AddInt`. Each ref call site pushes its own constraint at the
+    /// SAME source var, so the solver UNIFIES them: matching targets collapse;
+    /// CONFLICTING targets (int at one site, number at another) are a genuine
+    /// unification mismatch the solver rejects — the annotation-required error
+    /// the bug specifies, not a silent pick. No new opcode, no fabricated kind,
+    /// no value widening: the constraint is the same `(Type, Type)` shape every
+    /// other call-arg uses.
+    pub(crate) fn propagate_ref_arg_param_types(
+        &mut self,
+        callee_name: &str,
+        args: &[Expr],
+        arg_types: &[Type],
+    ) {
+        // Only named functions whose parameter source vars are tracked
+        // participate. Annotated params have a `None` source-var slot and are
+        // skipped — their type is already fixed and the normal call-arg
+        // constraint already validates the ref target against the annotation.
+        let Some(source_vars) = self.callable_param_source_vars.get(callee_name).cloned() else {
+            return;
+        };
+
+        let origin = self.lookup_callable_origin_for_name(callee_name);
+        for (i, arg) in args.iter().enumerate() {
+            // Only reference arguments. A plain `f(x)` arg already flows through
+            // the call-shape constraint normally.
+            if !matches!(arg, Expr::Reference { .. }) {
+                continue;
+            }
+            // The callee's i-th parameter must be an unannotated (source-var
+            // present) slot.
+            let Some(Some(param_src)) = source_vars.get(i) else {
+                continue;
+            };
+            let Some(target_ty) = arg_types.get(i) else {
+                continue;
+            };
+            // Skip a vacuous self-constraint: when the ref target is itself the
+            // param's source variable (a forwarded `&p` of an outer reference
+            // param), the constraint adds nothing. Such transitive chains
+            // resolve via the other call site's concrete target.
+            if let Type::Variable(tv) = target_ty {
+                if tv == param_src {
+                    continue;
+                }
+            }
+            // Scope this inference to the SCALAR accumulator case it exists for
+            // (`fn add_to(&sum, val) { sum = sum + val }` — `sum`'s slot kind
+            // must be proven so the body binop emits `AddInt`/`AddNumber`). A
+            // CONCRETE non-numeric ref target — most importantly a nominal
+            // struct `Reference("Point")` for `fn get_x(&obj) { obj.x }` called
+            // as `get_x(&p)` — must NOT be unified into the param var: doing so
+            // freezes the param to the nominal name and the body's `obj.x`
+            // field access then fails to resolve through the struct's
+            // structural object shape ("Reference(Point) cannot have fields").
+            // Those params don't need this inference at all — their
+            // field/index/method resolution already works with the param left
+            // as a fresh var. A still-unresolved type VARIABLE target is kept:
+            // it is exactly the `&total` (`let mut total = 0`) accumulator whose
+            // var only chases to `int` later via the constraint solver, and the
+            // constraint is what links the param's source var into that chain.
+            // No silent numeric pick, no widening: a concrete numeric stays
+            // exact, a var stays linked, a concrete non-numeric is left to the
+            // existing (correct) resolution path.
+            if matches!(target_ty, Type::Concrete(_))
+                && Self::concrete_numeric_type_name(target_ty).is_none()
+            {
+                continue;
+            }
+            let param_var_ty = Type::Variable(param_src.clone());
+            match origin {
+                Some(span) => {
+                    self.push_constraint_with_origin(param_var_ty, target_ty.clone(), span)
+                }
+                None => self.constraints.push((param_var_ty, target_ty.clone())),
             }
         }
     }

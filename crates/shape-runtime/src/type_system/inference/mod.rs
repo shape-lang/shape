@@ -1545,6 +1545,24 @@ impl TypeInferenceEngine {
         self.default_unresolved_closure_numeric_params();
         self.default_unresolved_constructor_literal_payload_vars();
 
+        // v0.3.3 ref-param caller->param inference (second ACU pass). The
+        // first `apply_callsite_unions` runs before `refine_numeric_*` and the
+        // closure/constructor defaults; an observed call-site argument whose
+        // type variable only becomes concrete THROUGH one of those later steps
+        // (e.g. a `let mut i = 1` loop counter whose var chases to `int` only
+        // once the surrounding numeric chain is fully pinned) was therefore
+        // still a bare variable at the first union and produced an empty union.
+        // A SECOND pass after every binding-adding step has been applied lets
+        // such a now-concrete observed argument resolve the corresponding
+        // by-value parameter — the `val` of `fn add_to(&sum, val) { sum = sum +
+        // val }` called as `add_to(&total, i)` in a `while` loop. (The for-in
+        // sibling already passed because the loop element type is concrete at
+        // the call site; only the `let mut` counter chained through the late
+        // numeric default.) This is the same union mechanism, re-applied once
+        // more — no new opcode, no fabricated kind, no value widening; a
+        // CONFLICTING observed pair still produces the genuine union mismatch.
+        self.apply_callsite_unions(&mut types);
+
         // Apply substitutions to get final types
         for (_name, ty) in types.iter_mut() {
             *ty = self.unifier.apply_substitutions(ty);
