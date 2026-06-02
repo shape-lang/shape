@@ -919,7 +919,13 @@ pub fn type_to_string(ty: &Type) -> String {
 /// Returns `None` when inference fails or resolves to unknown.
 pub fn infer_expr_type_via_engine(expr: &Expr) -> Option<String> {
     let mut engine = TypeInferenceEngine::new();
-    match engine.infer_expr(expr) {
+    // `infer_expr_finalized` solves the expression's constraints and grounds a
+    // DEFERRED `Ok`/`Err`/`Some` bare-int-literal payload var to its natural
+    // `int` before substitution — so `let r = Ok(1)?` displays `: int` rather
+    // than the unresolved `: T` that bare `infer_expr` would leak (the
+    // payload-deferral introduced for ROOT-B never runs its post-solve default
+    // on the single-expr path otherwise).
+    match engine.infer_expr_finalized(expr) {
         Ok(ty) => {
             let s = type_to_string(&ty);
             if s == "unknown" { None } else { Some(s) }

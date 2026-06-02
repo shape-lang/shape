@@ -317,11 +317,18 @@ fn inlay_hint_function_return_result_from_expression_style_ok_err() {
 
 #[test]
 fn inlay_hint_function_return_result_union_for_mixed_ok_values() {
+    // Strict-flip rebaseline (STAGE-2): only the TRAILING expression is the
+    // function's return value. `Ok(1)` is a discarded non-tail expression
+    // statement; the return is `Ok("str")` → `Result<string>`. The prior
+    // `Result<int | string>` label unioned both `Ok` constructors, which was a
+    // pre-strict over-approximation (a non-tail statement is not a return).
+    // Expectation-drift toward the more-correct trailing-expr return type, not a
+    // code rejection.
     let code = "fn test() {\n  Ok(1)\n  Ok(\"str\")\n}\n";
     ShapeTest::new(code)
-        .expect_type_hint_label("-> Result<int | string>")
+        .expect_type_hint_label("-> Result<string>")
         .at(pos(0, 4))
-        .expect_hover_contains("-> Result<int | string>");
+        .expect_hover_contains("-> Result<string>");
 }
 
 #[test]

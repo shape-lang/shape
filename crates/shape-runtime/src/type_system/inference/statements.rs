@@ -41,7 +41,47 @@ impl TypeInferenceEngine {
             // and is REJECTED when out of range (`x = 300` -> the natural-`int`
             // literal fails `lossless_implicit(int, u8)`); a non-literal value
             // follows the value-level lattice directly.
-            if Self::adopt_int_literal_in_context(&assign.value, &target_type).is_some() {
+            // ROOT-B narrowing (STAGE-2 soundness regression close): a MUTABLE
+            // unannotated `let mut x = <int literal>` binding DEFERS its seed to
+            // a fresh var (see `items.rs`) so an accumulator (`sum = sum + v`,
+            // `v: number`) can adopt `number`. But that open var must NOT absorb
+            // a NON-numeric reassignment (`x = None`, `x = "hello"`): the int
+            // literal's family is numeric, so a non-numeric RHS is the same
+            // value-level mismatch main rejects (`int := None`). When the target
+            // resolves to such a deferred-literal var AND the assigned value
+            // resolves to a definitely-non-numeric type, ground the var to its
+            // NATURAL `int` type FIRST so the constraint below surfaces the
+            // mismatch (`Option<T> !~ int`). A numeric RHS (`sum + v`) or an
+            // as-yet-unresolved var RHS is left alone — ROOT-B keeps adopting.
+            let mut grounded_seed_mismatch = false;
+            if let Type::Variable(target_var) = self.unifier.apply_substitutions(&target_type) {
+                if self
+                    .deferred_constructor_literal_payload_vars
+                    .contains(&target_var)
+                {
+                    let resolved_value = self.unifier.apply_substitutions(&value_type);
+                    if Self::is_definitely_non_numeric(&resolved_value) {
+                        // Ground the seed to its NATURAL `int` and surface the
+                        // mismatch directly as `value ~ int` (a clean
+                        // "<value> is not compatible with int" render). The
+                        // constraint SOLVER owns a separate unifier, so binding
+                        // `self.unifier` here would be invisible to it — we push
+                        // the grounding constraint AND the explicit
+                        // `value ~ int` mismatch, and skip the usual
+                        // `value ~ target` constraint (its var-side would render
+                        // as the still-unresolved "unknown"). Matches main's
+                        // `int := None` / `int := string` rejection.
+                        self.constraints
+                            .push((value_type.clone(), BuiltinTypes::integer()));
+                        self.constraints
+                            .push((Type::Variable(target_var), BuiltinTypes::integer()));
+                        grounded_seed_mismatch = true;
+                    }
+                }
+            }
+            if grounded_seed_mismatch {
+                // mismatch constraint already pushed above.
+            } else if Self::adopt_int_literal_in_context(&assign.value, &target_type).is_some() {
                 // literal fits the target — no rejecting constraint.
             } else {
                 self.constraints.push((value_type, target_type));
@@ -62,6 +102,28 @@ impl TypeInferenceEngine {
             }
         }
         Ok(())
+    }
+
+    /// Whether a (substitution-resolved) type is DEFINITELY non-numeric — i.e.
+    /// a concrete non-numeric basic type (`string`, `bool`, `Option`/`Result`
+    /// carriers as a bare name, …) or any generic instantiation (`Option<T>`,
+    /// `Result<T>`, `Array<T>`). Used by the ROOT-B reassignment narrowing to
+    /// decide whether a deferred int-literal seed var should be grounded to
+    /// `int` (surfacing a mismatch) before a non-numeric RHS would otherwise
+    /// silently bind it. CONSERVATIVE: an unresolved `Type::Variable`, a
+    /// `Constrained` var, a `Function`, or a numeric concrete returns `false`
+    /// (the var keeps deferring), so ROOT-B's numeric accumulation is never
+    /// disturbed — only a committed non-numeric RHS grounds the seed.
+    fn is_definitely_non_numeric(ty: &Type) -> bool {
+        match ty {
+            Type::Concrete(ann) => ann
+                .as_type_name_str()
+                .is_some_and(|n| !BuiltinTypes::is_numeric_type_name(n)),
+            // Any generic instantiation (Option<_>, Result<_>, Array<_>, …) is a
+            // non-numeric carrier — None infers `Option<T>`, a string→`string`.
+            Type::Generic { .. } => true,
+            _ => false,
+        }
     }
 
     /// Infer type of statements

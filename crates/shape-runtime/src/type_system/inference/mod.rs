@@ -1913,6 +1913,29 @@ impl TypeInferenceEngine {
         }
     }
 
+    /// Infer a single expression's type AND finalize it the way `infer_program`
+    /// does for the whole-program pass: solve the accumulated constraints,
+    /// ground any DEFERRED `Ok`/`Err`/`Some` bare-int-literal payload var to its
+    /// natural `int` (the ROOT-B post-solve default), then apply substitutions.
+    ///
+    /// Bare `infer_expr` leaves the constraints unsolved and never runs the
+    /// post-solve default pass, so a `let r = Ok(1)?` payload var flows out as an
+    /// unresolved `Type::Variable` (rendered `T`) — wrong for the LSP inlay/hover
+    /// display. This finalized variant resolves it to `int`, matching what the
+    /// program-level inference would record. Used by LSP single-expr display
+    /// inference; it does NOT clear engine state, so callers should use a fresh
+    /// engine per expression (as the LSP helpers already do).
+    pub fn infer_expr_finalized(&mut self, expr: &shape_ast::ast::Expr) -> TypeResult<Type> {
+        let ty = self.infer_expr(expr)?;
+        // Solve the constraints this expression accumulated, then merge the
+        // solver's bindings back into the engine unifier so the deferred-var
+        // grounding + final `apply_substitutions` see them.
+        let _ = self.solver.solve(&mut self.constraints);
+        self.unifier.merge(self.solver.unifier());
+        self.default_unresolved_constructor_literal_payload_vars();
+        Ok(self.unifier.apply_substitutions(&ty))
+    }
+
     fn propagate_return_alias_substitution(
         &self,
         return_type: Type,
