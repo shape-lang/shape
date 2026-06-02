@@ -163,11 +163,99 @@ impl TypeInferenceEngine {
                 if matches!(name.as_str(), "Ok" | "Err" | "Some") =>
             {
                 // Only intercept when the argument is a bare numeric literal
-                // that adopts the expected payload — a non-literal `Ok(x)` is
-                // left to `infer_function_call` (same constraint, but keeps the
-                // unannotated-param callsite refinement the default path feeds).
+                // that adopts the expected payload — a non-literal `Ok(x)` /
+                // `Ok(x * 2)` is left to `infer_function_call` (its success var
+                // links to the carrier's success type via the lenient
+                // `Result<var> ~ Result<number>` unification, with no hard
+                // per-operand constraint that would conflict with an int-pinning
+                // guard).
                 self.constructor_arg_adopts_literal(name, args, expected)
             }
+            // A tail `if`/`else` that PARSES as an expression-valued
+            // `Expr::Conditional` (`if c { Ok(42) } else { Err("…") }` in tail
+            // position). Each branch is an `Expr::Block` (the `{ … }` body), so
+            // the structural / adopts checks recurse through the block tail.
+            // Routed through `check_against` (which propagates the expected
+            // carrier into each branch and threads through the block to its tail
+            // constructor) ONLY when BOTH branch tails are structurally carrier
+            // constructors AND at least one branch's constructor argument adopts
+            // a numeric literal — mirroring the `if_branches_all_carrier_
+            // constructors` gate used for the `Statement::If` parse. A branch
+            // whose constructor argument is a NON-literal (`Ok(x*2)`, `Err("…")`)
+            // routes through the default `check_against` path inside the block
+            // (plain inference + lenient `Result<var> ~ Result<number>`), so the
+            // literal `then` branch adopts without forcing the non-literal one.
+            Expr::Conditional {
+                then_expr,
+                else_expr: Some(else_expr),
+                ..
+            } if self.block_tail_is_carrier_constructor(then_expr, expected)
+                && self.block_tail_is_carrier_constructor(else_expr, expected)
+                && (self.block_tail_adopts_literal(then_expr, expected)
+                    || self.block_tail_adopts_literal(else_expr, expected)) =>
+            {
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `expr` is an `Expr::Block` whose tail expression item is
+    /// STRUCTURALLY a carrier constructor (or nested carrier conditional) for
+    /// `expected`. Used by the tail-`Conditional` gate to require both branches
+    /// be constructors before threading. Recurses through nested blocks /
+    /// conditionals.
+    fn block_tail_is_carrier_constructor(&self, expr: &Expr, expected: &Type) -> bool {
+        match expr {
+            Expr::FunctionCall { name, args, .. }
+                if matches!(name.as_str(), "Ok" | "Err" | "Some") =>
+            {
+                self.constructor_payload_types_from_expected(name, args.len(), expected)
+                    .is_some()
+            }
+            Expr::Conditional {
+                then_expr,
+                else_expr: Some(else_expr),
+                ..
+            } => {
+                self.block_tail_is_carrier_constructor(then_expr, expected)
+                    && self.block_tail_is_carrier_constructor(else_expr, expected)
+            }
+            Expr::Block(block, _) => match block.items.last() {
+                Some(shape_ast::ast::BlockItem::Expression(tail)) => {
+                    self.block_tail_is_carrier_constructor(tail, expected)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Whether `expr` is an `Expr::Block` whose tail constructor argument ADOPTS
+    /// a numeric literal — i.e. threading the carrier into this branch would
+    /// actually change the outcome. Recurses through nested blocks /
+    /// conditionals.
+    fn block_tail_adopts_literal(&self, expr: &Expr, expected: &Type) -> bool {
+        match expr {
+            Expr::FunctionCall { name, args, .. }
+                if matches!(name.as_str(), "Ok" | "Err" | "Some") =>
+            {
+                self.constructor_arg_adopts_literal(name, args, expected)
+            }
+            Expr::Conditional {
+                then_expr,
+                else_expr: Some(else_expr),
+                ..
+            } => {
+                self.block_tail_adopts_literal(then_expr, expected)
+                    || self.block_tail_adopts_literal(else_expr, expected)
+            }
+            Expr::Block(block, _) => match block.items.last() {
+                Some(shape_ast::ast::BlockItem::Expression(tail)) => {
+                    self.block_tail_adopts_literal(tail, expected)
+                }
+                _ => false,
+            },
             _ => false,
         }
     }

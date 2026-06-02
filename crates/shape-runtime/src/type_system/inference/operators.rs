@@ -635,41 +635,20 @@ impl TypeInferenceEngine {
             }
 
             BinaryOp::Pow => {
-                // Exponentiation with Option propagation
-                let left_inner = Self::unwrap_option_type(left);
-                let right_inner = Self::unwrap_option_type(right);
-
-                let (effective_left, effective_right, is_optional) =
-                    match (&left_inner, &right_inner) {
-                        (Some(l), Some(r)) => (l.clone(), r.clone(), true),
-                        (Some(l), None) => (l.clone(), right.clone(), true),
-                        (None, Some(r)) => (left.clone(), r.clone(), true),
-                        (None, None) => (left.clone(), right.clone(), false),
-                    };
-
-                // Numeric-conversion GREEN Stage 2: the operands must be
-                // NUMERIC, but a hard `~ number` constraint would reject an
-                // `int` operand (`2 ** 8`) under the tightened §2 lattice
-                // (`int -> number` is now CAST-required, not the deleted
-                // `can_numeric_widen` free pass). Constrain to a `Numeric` BOUND
-                // — satisfied by both `int` and `number` operands — preserving
-                // the pre-Stage-2 acceptance of either-family `**` operands. The
-                // RESULT stays `number` (the established `**` result type), so
-                // `2 ** 8 = 256.0` is unchanged.
-                //
-                // R3 (int ** int -> int vs number) is classified NEEDS_RULING and
-                // is intentionally NOT applied here — the result-family question
-                // (inference says `number`, the shipped VM/JIT say `int`) is a
-                // user decision, flagged in the run report. Leaving the declared
-                // result as `number` preserves pre-existing main behavior.
-                self.push_numeric_operand_bound(&effective_left, span);
-                self.push_numeric_operand_bound(&effective_right, span);
-
-                if is_optional {
-                    Ok(Self::wrap_in_option(BuiltinTypes::number()))
-                } else {
-                    Ok(BuiltinTypes::number())
-                }
+                // R3 (USER-RULED 2026-06-01): `**` is family-preserving exactly
+                // like `*`/`-`/`/`. int ** int -> int, number ** number ->
+                // number; a cross-family concrete mix (int ** number) is a
+                // silent int->number promotion and is REJECTED — an explicit
+                // cast is required (no loose `can_numeric_widen`). This matches
+                // the shipped VM `PowInt`/JIT codegen, which already produce an
+                // `int` for an all-int base+exponent. Routing through the shared
+                // `infer_numeric_arithmetic_op` gives the identical operand
+                // Numeric-bound + §5 cross-family rejection + family-preserving
+                // `numeric_result_type` used by the other arithmetic ops, so
+                // `2 ** 8` is now `256: int` (was `256.0: number`) and
+                // `2.0 ** 8.0` stays `number`. Option propagation is handled by
+                // `infer_numeric_arithmetic_op` itself.
+                self.infer_numeric_arithmetic_op(left, right, span)
             }
 
             BinaryOp::NullCoalesce => {

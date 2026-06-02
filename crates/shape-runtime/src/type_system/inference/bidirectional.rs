@@ -151,6 +151,52 @@ impl TypeInferenceEngine {
                 }
             }
 
+            // Block: the branch bodies of a tail `if`/`else` parse as
+            // `Expr::Block`s, so the expected carrier must thread THROUGH the
+            // block to its tail expression item for the constructor-payload
+            // adoption to reach `Ok(x*2)` / `Err("…")`. Mirrors the `infer_expr`
+            // block walk (same scope + per-item inference, so callsites and
+            // bindings are still recorded), but routes the FINAL expression item
+            // through `check_against(expected)` instead of plain inference. A
+            // non-expression tail (a block ending in a statement / decl) keeps
+            // the inferred type and is unified with `expected` like the default
+            // arm.
+            Expr::Block(block, block_span) => {
+                self.env.push_scope();
+                let mut last_type = BuiltinTypes::void();
+                let n = block.items.len();
+                for (idx, item) in block.items.iter().enumerate() {
+                    let is_tail = idx + 1 == n;
+                    last_type = match item {
+                        shape_ast::ast::BlockItem::VariableDecl(decl) => {
+                            self.infer_variable_decl(decl)?;
+                            BuiltinTypes::void()
+                        }
+                        shape_ast::ast::BlockItem::Assignment(assign) => {
+                            self.infer_assignment(assign, *block_span)?;
+                            BuiltinTypes::void()
+                        }
+                        shape_ast::ast::BlockItem::Statement(stmt) => self.infer_statement(stmt)?,
+                        shape_ast::ast::BlockItem::Expression(expr) if is_tail => {
+                            self.check_against(expr, expected)?
+                        }
+                        shape_ast::ast::BlockItem::Expression(expr) => self.infer_expr(expr)?,
+                    };
+                }
+                self.env.pop_scope();
+                // A block whose tail was a non-expression item never reached
+                // `check_against`, so its inferred type still has to be unified
+                // with `expected` (the default-arm contract); a block whose tail
+                // WAS routed through `check_against` already returns `expected`.
+                if !matches!(
+                    block.items.last(),
+                    Some(shape_ast::ast::BlockItem::Expression(_))
+                ) {
+                    self.constraints.push((last_type.clone(), expected.clone()));
+                }
+                Ok(last_type)
+            }
+
             // Numeric-conversion LITERAL ADOPTION through an ENUM-CONSTRUCTOR
             // payload (spec §4, constructor-payload-vs-expected path). When an
             // `Ok`/`Err`/`Some` constructor (parsed as a `FunctionCall`) whose
@@ -162,17 +208,21 @@ impl TypeInferenceEngine {
             // already get. `fn f() -> Result<number> { Ok(42) }` then accepts
             // (42 adopts `number`).
             //
-            // GATED on the argument being a literal that ACTUALLY adopts
-            // (`constructor_arg_adopts_literal`). A non-literal argument
-            // (`Ok(x)` / `Ok(x * 2)`) is LEFT to the default `infer_function_call`
-            // path: it carries the same `arg_type ~ payload` constraint via the
-            // builtin `Ok`/`Err`/`Some` signature + `push_return_constraint`, and
-            // intercepting it here would bypass the unannotated-param callsite
-            // refinement that `infer_function_call` feeds (which `Ok(x)` with an
-            // unannotated `x` relies on). An out-of-range literal also does not
-            // adopt, so it too falls through and correctly rejects. This keeps
-            // the intercept to exactly the bare-literal FP-regression class and
-            // never introduces loose numeric widening of a VALUE.
+            // GATED on the argument being a bare numeric LITERAL that ACTUALLY
+            // adopts the expected payload (`constructor_arg_adopts_literal`). A
+            // non-literal argument (`Ok(x)` / `Ok(x * 2)`) is LEFT to the
+            // default `infer_function_call` path: it produces a `Result<var>`
+            // whose success var is linked to the carrier's success type by the
+            // lenient `Result<var> ~ Result<number>` unification (the var
+            // resolves to `number` with no hard per-operand constraint), exactly
+            // as the plain-tail `fn f(x) -> Result<number> { Ok(x * 2) }` case
+            // already resolves on the baseline. Intercepting a non-literal here
+            // with `check_against(arg, payload)` instead pushes a HARD
+            // `arg ~ number` equality, which conflicts with an int-pinning guard
+            // (`if x > 0 { … }` types `x` as `int` via the literal `0`) and
+            // regressed previously-accepted programs — so the intercept stays
+            // bounded to the bare-literal FP-regression class. A `number` VALUE /
+            // non-literal `int` still does NOT widen.
             Expr::FunctionCall { name, args, .. }
                 if matches!(name.as_str(), "Ok" | "Err" | "Some")
                     && self.constructor_arg_adopts_literal(name, args, expected) =>
