@@ -441,39 +441,122 @@ impl FromSlot for Vec<Arc<String>> {
 /// Read a `Vec<Arc<HeapValue>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
 /// slot.
 ///
-/// V3-S5 ckpt-5-prime²c (2026-05-15) SURFACE-AND-STOP: the
-/// `materialize_heap_arcs` helper (deleted alongside this comment block)
-/// re-wrapped each strict-typed element into a `HeapValue::*` Arc by
-/// pattern-matching the deleted `TypedArrayData` enum. The new
-/// `*mut TypedArray<T>` flat-struct carrier needs a per-`T` dispatcher
-/// (one impl per element width: `*const StringObj`, `*const DecimalObj`,
-/// `TypedObjectPtr`, char, etc.) plus a parallel element-kind discriminator
-/// in the marshal layer to know which `T` the slot was constructed for.
-/// The element discriminator already exists at the VM level
-/// (`stamp_elem_type` at `crates/shape-vm/src/executor/v2_handlers/array.rs`)
-/// but isn't yet exposed at the marshal-`FromSlot` boundary.
+/// STAGE K2 (2026-06-02) — per-element-T marshal dispatcher over the v2-raw
+/// `*mut TypedArray<T>` flat-struct carrier. The element type `T` was
+/// monomorphized at compile time by the `NewTypedArray*` allocation opcodes
+/// and is recorded at runtime by `stamp_elem_type` in the `_pad` byte
+/// (offset 7) of the array's `HeapHeader` (`crates/shape-vm/src/executor/
+/// v2_handlers/v2_array_detect.rs::stamp_elem_type`, canonical discriminants
+/// at `crates/shape-value/src/v2/typed_array.rs`). This reader threads that
+/// existing discriminator to the marshal boundary via the public
+/// `TypedArray::read_elem_type` accessor — no new side-channel, no kind
+/// fabrication, no `is_heap()` probe.
 ///
-/// Adding this dispatcher is the Round 2 `Vec<Arc<HeapValue>>` rewire
-/// follow-up; pairs with the `from_typed_array_<T>` constructor wave at
-/// `crates/shape-value/src/slot.rs:142` and the matching ckpt-6 JIT FFI
-/// String/Decimal build work. Until that lands, the marshal-FromSlot panics
-/// with a structured error pointing at the follow-up — any stdlib body
-/// declaring `Vec<Arc<HeapValue>>` and reaching this from_slot is currently
-/// dead at the marshal boundary (consistent with V3-S5 ckpt-5's wholesale
-/// `HeapValue::TypedArray` outer-arm deletion).
+/// Each element projects into the canonical `Arc<HeapValue>` arm (ADR-005
+/// §1 single-discriminator):
+///
+///   `ELEM_TYPE_CHAR`         → `HeapValue::Char(c)`
+///   `ELEM_TYPE_STRING`       → `HeapValue::String(Arc::new(s.to_owned()))`
+///   `ELEM_TYPE_DECIMAL`      → `HeapValue::Decimal(Arc::new(d))`
+///   `ELEM_TYPE_TYPED_OBJECT` → `HeapValue::TypedObject(TypedObjectPtr::new(p))`
+///                              (per-element `v2_retain` — owns-clone share)
+///
+/// Owns-clone semantics: the returned `Vec<Arc<HeapValue>>` is independent of
+/// the source array. String/Decimal elements are deep-copied into fresh
+/// `Arc<String>` / `Arc<Decimal>` payloads; each TypedObject element bumps the
+/// pointed-to v2-raw HeapHeader refcount so the wrapper owns a real share.
+///
+/// Scalar element kinds (`F64`/`I64`/`I32`/`Bool`/sized-ints/`F32`) have **no
+/// canonical `Arc<HeapValue>` arm** — `number`/`int`/`bool`/etc. are
+/// inline-scalar NativeKinds, not heap values (same contract as the
+/// `Vec<(Arc<String>, Arc<HeapValue>)>` HashMap reader above). Those arrays
+/// marshal via the dedicated `Arc<Vec<T>>` impls; reaching this reader with a
+/// scalar-stamped array is a marshal kind-contract violation by the caller and
+/// SURFACEs (panic with a precise message — the established surface mechanism
+/// for a `from_slot` that cannot return `Result`). A nested-array element
+/// (`Array<Array<...>>`) has no `ELEM_TYPE_*` discriminant at the producer
+/// (`stamp_elem_type` never stamps one), so it cannot reach this reader; if a
+/// nested-array carrier is ever added it lands here as a new arm, not a shim.
 impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
-    fn from_slot(_bits: u64) -> Self {
-        panic!(
-            "FromSlot<Vec<Arc<HeapValue>>>: V3-S5 ckpt-5-prime²c SURFACE — \
-             the polymorphic Vec<Arc<HeapValue>> marshal path needs a \
-             per-element-T dispatcher over the v2-raw *mut TypedArray<T> \
-             carrier. Round 2 `Vec<Arc<HeapValue>>` rewire follow-up \
-             (pairs with from_typed_array_<T> constructor wave). \
-             ADR-006 §2.7.24 Q25.A SUPERSEDED."
-        )
+    fn from_slot(bits: u64) -> Self {
+        use shape_value::heap_value::{HeapValue, TypedObjectPtr, TypedObjectStorage};
+        use shape_value::v2::decimal_obj::DecimalObj;
+        use shape_value::v2::refcount::v2_retain;
+        use shape_value::v2::string_obj::StringObj;
+        use shape_value::v2::typed_array::{
+            read_elem_type, TypedArray, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL,
+            ELEM_TYPE_STRING, ELEM_TYPE_TYPED_OBJECT,
+        };
+
+        let base = bits as usize as *const u8;
+        if base.is_null() {
+            return Vec::new();
+        }
+        // SAFETY: NATIVE_KIND::Ptr(HeapKind::TypedArray) pins the slot bits to
+        // a live `*mut TypedArray<T>` (HeapHeader at offset 0, element-type
+        // byte stamped at offset 7 by the producer).
+        let elem_type = unsafe { read_elem_type(base) };
+        unsafe {
+            match elem_type {
+                ELEM_TYPE_CHAR => {
+                    let arr = base as *const TypedArray<char>;
+                    let slice = TypedArray::<char>::as_slice(arr);
+                    slice
+                        .iter()
+                        .map(|&c| Arc::new(HeapValue::Char(c)))
+                        .collect()
+                }
+                ELEM_TYPE_STRING => {
+                    let arr = base as *const TypedArray<*const StringObj>;
+                    let slice = TypedArray::<*const StringObj>::as_slice(arr);
+                    slice
+                        .iter()
+                        .map(|&p| {
+                            Arc::new(HeapValue::String(Arc::new(
+                                StringObj::as_str(p).to_owned(),
+                            )))
+                        })
+                        .collect()
+                }
+                ELEM_TYPE_DECIMAL => {
+                    let arr = base as *const TypedArray<*const DecimalObj>;
+                    let slice = TypedArray::<*const DecimalObj>::as_slice(arr);
+                    slice
+                        .iter()
+                        .map(|&p| {
+                            Arc::new(HeapValue::Decimal(Arc::new(DecimalObj::value(p))))
+                        })
+                        .collect()
+                }
+                ELEM_TYPE_TYPED_OBJECT => {
+                    let arr = base as *const TypedArray<*const TypedObjectStorage>;
+                    let slice = TypedArray::<*const TypedObjectStorage>::as_slice(arr);
+                    slice
+                        .iter()
+                        .map(|&p| {
+                            // The array owns one share per stored pointer; the
+                            // returned wrapper gets a fresh share retired by
+                            // TypedObjectPtr::drop.
+                            v2_retain(&(*p).header);
+                            Arc::new(HeapValue::TypedObject(TypedObjectPtr::new(p)))
+                        })
+                        .collect()
+                }
+                other => panic!(
+                    "FromSlot<Vec<Arc<HeapValue>>>: TypedArray element-type \
+                     discriminant {} has no canonical Arc<HeapValue> arm. \
+                     Scalar element kinds (number/int/bool/sized-ints/f32) are \
+                     inline-scalar NativeKinds with no HeapValue projection and \
+                     marshal via Arc<Vec<T>>; an unstamped (0) array means the \
+                     producer-side stamp_elem_type contract was violated. \
+                     Marshal kind contract violated by caller (STAGE K2).",
+                    other
+                ),
+            }
+        }
     }
 }
 
@@ -507,27 +590,146 @@ impl ToSlot for Vec<Arc<String>> {
 /// Project a `Vec<Arc<HeapValue>>` into a `NativeKind::Ptr(HeapKind::TypedArray)`
 /// slot.
 ///
-/// V3-S5 ckpt-5-prime²c (2026-05-15) SURFACE-AND-STOP: same per-element-T
-/// dispatcher gap as the `FromSlot<Vec<Arc<HeapValue>>>` reader above.
-/// The pre-deletion `build_specialized_from_heap_arcs` helper dispatched
-/// each `HeapValue` arm into the matching `TypedArrayData::*` variant; the
-/// new flat-struct carrier needs to pick the matching
-/// `TypedArray<T>::from_slice` instantiation per element kind and
-/// stamp the element discriminator before push. Pairs with the
-/// Round 2 follow-up cited in the FromSlot impl.
+/// STAGE K2 (2026-06-02) — mirror of the `FromSlot<Vec<Arc<HeapValue>>>`
+/// reader above. The element kind is chosen by inspecting the first element's
+/// `HeapValue` variant (ADR-005 §1: `HeapValue` IS the discriminator); the
+/// matching `TypedArray<T>` monomorphization is allocated, stamped with the
+/// element discriminator via `stamp_elem_type`, and each element is pushed
+/// after building its v2-raw carrier:
+///
+///   `HeapValue::Char(c)`      → `TypedArray<char>`               (`ELEM_TYPE_CHAR`)
+///   `HeapValue::String(s)`    → `TypedArray<*const StringObj>`   (`ELEM_TYPE_STRING`)
+///   `HeapValue::Decimal(d)`   → `TypedArray<*const DecimalObj>`  (`ELEM_TYPE_DECIMAL`)
+///   `HeapValue::TypedObject`  → `TypedArray<*const TypedObjectStorage>`
+///                               (`ELEM_TYPE_TYPED_OBJECT`)
+///
+/// Owns-clone / refcount discipline: String and Decimal elements allocate
+/// fresh `StringObj` / `DecimalObj` (refcount = 1) — the new array owns those
+/// allocations outright. TypedObject elements `v2_retain` the pointed-to
+/// HeapHeader before pushing the raw pointer, so the array's one share per
+/// element is independent of the input `Vec`'s share (which Drop retires when
+/// the `Vec<Arc<HeapValue>>` is dropped by the caller).
+///
+/// The array must be homogeneous (a single `HeapValue` variant) — a mixed
+/// `Vec` cannot map to one monomorphized `TypedArray<T>` and SURFACEs.
+/// Variants with no v2-raw element carrier (scalar `HeapValue`s, `HashMap`,
+/// nested arrays, etc.) SURFACE rather than shim. An empty `Vec` returns a
+/// null pointer (bits = 0); the reader maps null → `Vec::new()`, preserving
+/// round-trip identity for the empty case.
 impl ToSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
     const NATIVE_KIND: NativeKind =
         NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
     fn to_slot(self) -> u64 {
-        panic!(
-            "ToSlot<Vec<Arc<HeapValue>>>: V3-S5 ckpt-5-prime²c SURFACE — \
-             polymorphic Vec<Arc<HeapValue>> projection needs a per-element-T \
-             dispatcher over the v2-raw *mut TypedArray<T> carrier (mirror \
-             of the deleted build_specialized_from_heap_arcs). Round 2 \
-             `Vec<Arc<HeapValue>>` rewire follow-up. ADR-006 §2.7.24 Q25.A \
-             SUPERSEDED."
-        )
+        use shape_value::heap_value::{HeapValue, TypedObjectStorage};
+        use shape_value::v2::decimal_obj::DecimalObj;
+        use shape_value::v2::refcount::v2_retain;
+        use shape_value::v2::string_obj::StringObj;
+        use shape_value::v2::typed_array::{
+            stamp_elem_type, TypedArray, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL,
+            ELEM_TYPE_STRING, ELEM_TYPE_TYPED_OBJECT,
+        };
+
+        let first = match self.first() {
+            // Empty array: null carrier; the reader maps null → Vec::new().
+            None => return 0,
+            Some(arc) => arc,
+        };
+
+        // Per-variant homogeneity guard: every element must share the first
+        // element's variant. A heterogeneous Vec cannot project to a single
+        // monomorphized TypedArray<T>.
+        macro_rules! assert_homogeneous {
+            ($variant:literal, $pat:pat) => {
+                for (i, arc) in self.iter().enumerate() {
+                    if !matches!(&**arc, $pat) {
+                        panic!(
+                            "ToSlot<Vec<Arc<HeapValue>>>: heterogeneous array — \
+                             element 0 is {} but element {} is HeapValue::{:?}. \
+                             A v2-raw TypedArray<T> is monomorphic; mixed-variant \
+                             arrays have no single-T carrier (STAGE K2).",
+                            $variant, i, arc.kind()
+                        );
+                    }
+                }
+            };
+        }
+
+        match &**first {
+            HeapValue::Char(_) => {
+                assert_homogeneous!("Char", HeapValue::Char(_));
+                let out = TypedArray::<char>::with_capacity(self.len() as u32);
+                unsafe {
+                    stamp_elem_type(out as *mut u8, ELEM_TYPE_CHAR);
+                    for arc in &self {
+                        if let HeapValue::Char(c) = &**arc {
+                            TypedArray::<char>::push(out, *c);
+                        }
+                    }
+                }
+                out as usize as u64
+            }
+            HeapValue::String(_) => {
+                assert_homogeneous!("String", HeapValue::String(_));
+                let out =
+                    TypedArray::<*const StringObj>::with_capacity(self.len() as u32);
+                unsafe {
+                    stamp_elem_type(out as *mut u8, ELEM_TYPE_STRING);
+                    for arc in &self {
+                        if let HeapValue::String(s) = &**arc {
+                            // Fresh StringObj (refcount = 1); the array owns it.
+                            let p = StringObj::new(s.as_str())
+                                as *const StringObj;
+                            TypedArray::<*const StringObj>::push(out, p);
+                        }
+                    }
+                }
+                out as usize as u64
+            }
+            HeapValue::Decimal(_) => {
+                assert_homogeneous!("Decimal", HeapValue::Decimal(_));
+                let out =
+                    TypedArray::<*const DecimalObj>::with_capacity(self.len() as u32);
+                unsafe {
+                    stamp_elem_type(out as *mut u8, ELEM_TYPE_DECIMAL);
+                    for arc in &self {
+                        if let HeapValue::Decimal(d) = &**arc {
+                            // Fresh DecimalObj (refcount = 1); the array owns it.
+                            let p = DecimalObj::new(**d) as *const DecimalObj;
+                            TypedArray::<*const DecimalObj>::push(out, p);
+                        }
+                    }
+                }
+                out as usize as u64
+            }
+            HeapValue::TypedObject(_) => {
+                assert_homogeneous!("TypedObject", HeapValue::TypedObject(_));
+                let out = TypedArray::<*const TypedObjectStorage>::with_capacity(
+                    self.len() as u32,
+                );
+                unsafe {
+                    stamp_elem_type(out as *mut u8, ELEM_TYPE_TYPED_OBJECT);
+                    for arc in &self {
+                        if let HeapValue::TypedObject(tp) = &**arc {
+                            let p = tp.as_ptr();
+                            // Array takes its own share; input Vec keeps its
+                            // share (released on the caller's Vec Drop).
+                            v2_retain(&(*p).header);
+                            TypedArray::<*const TypedObjectStorage>::push(out, p);
+                        }
+                    }
+                }
+                out as usize as u64
+            }
+            other => panic!(
+                "ToSlot<Vec<Arc<HeapValue>>>: HeapValue::{:?} has no v2-raw \
+                 TypedArray<T> element carrier. Only Char / String / Decimal / \
+                 TypedObject elements have a stamped ELEM_TYPE_* monomorphization; \
+                 scalar / HashMap / nested-array variants SURFACE rather than \
+                 shim (STAGE K2).",
+                other.kind()
+            ),
+        }
     }
 }
 
@@ -2098,4 +2300,130 @@ pub fn register_typed_async_function<F, Fut>(
             arg_kinds,
         },
     );
+}
+
+// ───────── STAGE K2 — Vec<Arc<HeapValue>> round-trip identity tests ─────────
+#[cfg(test)]
+mod heap_value_vec_marshal_tests {
+    use super::{FromSlot, ToSlot};
+    use shape_value::heap_value::{HeapValue, TypedObjectStorage};
+    use shape_value::v2::typed_array::release_v2_typed_array;
+    use std::sync::Arc;
+
+    type HeapVec = Vec<Arc<HeapValue>>;
+
+    /// Build a heap-kinded-field-free `HeapValue::TypedObject` for the given
+    /// schema id (no slots → `heap_mask = 0`, so Drop touches no element
+    /// shares). Identity for round-trip is the `schema_id`.
+    fn make_typed_object(schema_id: u64) -> Arc<HeapValue> {
+        let ptr = TypedObjectStorage::_new(
+            schema_id,
+            Box::new([]),
+            0,
+            Arc::from(Vec::<shape_value::NativeKind>::new()),
+        );
+        Arc::new(HeapValue::TypedObject(
+            shape_value::heap_value::TypedObjectPtr::new(ptr),
+        ))
+    }
+
+    #[test]
+    fn array_string_round_trips_fromslot_toslot_identity() {
+        let original: HeapVec = vec![
+            Arc::new(HeapValue::String(Arc::new("alpha".to_string()))),
+            Arc::new(HeapValue::String(Arc::new(String::new()))),
+            Arc::new(HeapValue::String(Arc::new("βγδ unicode".to_string()))),
+        ];
+
+        // ToSlot: project into the v2-raw *mut TypedArray<*const StringObj>.
+        let bits = original.clone().to_slot();
+        assert_ne!(bits, 0, "non-empty Array<string> must carry a real pointer");
+
+        // FromSlot: read back into a fresh Vec<Arc<HeapValue>>.
+        let round: HeapVec = <HeapVec as FromSlot>::from_slot(bits);
+
+        assert_eq!(round.len(), original.len());
+        for (a, b) in original.iter().zip(round.iter()) {
+            match (&**a, &**b) {
+                (HeapValue::String(sa), HeapValue::String(sb)) => {
+                    assert_eq!(sa.as_str(), sb.as_str(), "string element identity");
+                }
+                (x, _) => panic!("expected String/String, got {:?}", x.kind()),
+            }
+        }
+
+        // Release the carrier (drops the per-element StringObj allocations).
+        unsafe { release_v2_typed_array(bits as usize as *mut u8) };
+    }
+
+    #[test]
+    fn array_typed_object_round_trips_fromslot_toslot_identity() {
+        let original: HeapVec =
+            vec![make_typed_object(7), make_typed_object(42), make_typed_object(7)];
+
+        let bits = original.clone().to_slot();
+        assert_ne!(bits, 0, "non-empty Array<TypedObject> must carry a pointer");
+
+        let round: HeapVec = <HeapVec as FromSlot>::from_slot(bits);
+
+        assert_eq!(round.len(), original.len());
+        for (a, b) in original.iter().zip(round.iter()) {
+            match (&**a, &**b) {
+                (HeapValue::TypedObject(ta), HeapValue::TypedObject(tb)) => {
+                    assert_eq!(
+                        ta.schema_id, tb.schema_id,
+                        "typed-object schema-id identity"
+                    );
+                }
+                (x, _) => panic!("expected TypedObject/TypedObject, got {:?}", x.kind()),
+            }
+        }
+
+        // Release the read-back wrappers (each owns one v2_retain'd share),
+        // then the carrier array (owns one share per stored pointer), then the
+        // original Vec (Drop of each Arc<HeapValue::TypedObject> releases its
+        // own share). The underlying TypedObjectStorage allocations are freed
+        // when the last of those three shares is retired.
+        drop(round);
+        unsafe { release_v2_typed_array(bits as usize as *mut u8) };
+        drop(original);
+    }
+
+    #[test]
+    fn empty_array_round_trips_via_null_carrier() {
+        let original: HeapVec = Vec::new();
+        let bits = original.to_slot();
+        assert_eq!(bits, 0, "empty array projects to the null carrier");
+        let round: HeapVec = <HeapVec as FromSlot>::from_slot(bits);
+        assert!(round.is_empty(), "null carrier reads back as empty");
+    }
+
+    #[test]
+    fn array_char_round_trips_fromslot_toslot_identity() {
+        let original: HeapVec = vec![
+            Arc::new(HeapValue::Char('a')),
+            Arc::new(HeapValue::Char('Z')),
+            Arc::new(HeapValue::Char('λ')),
+        ];
+        let bits = original.clone().to_slot();
+        let round: HeapVec = <HeapVec as FromSlot>::from_slot(bits);
+        assert_eq!(round.len(), original.len());
+        for (a, b) in original.iter().zip(round.iter()) {
+            match (&**a, &**b) {
+                (HeapValue::Char(ca), HeapValue::Char(cb)) => assert_eq!(ca, cb),
+                (x, _) => panic!("expected Char/Char, got {:?}", x.kind()),
+            }
+        }
+        unsafe { release_v2_typed_array(bits as usize as *mut u8) };
+    }
+
+    #[test]
+    #[should_panic(expected = "heterogeneous array")]
+    fn heterogeneous_array_surfaces_on_toslot() {
+        let mixed: HeapVec = vec![
+            Arc::new(HeapValue::String(Arc::new("x".to_string()))),
+            Arc::new(HeapValue::Char('y')),
+        ];
+        let _ = mixed.to_slot();
+    }
 }

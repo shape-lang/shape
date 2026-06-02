@@ -382,6 +382,26 @@ pub unsafe fn read_elem_type(ptr: *const u8) -> u8 {
     unsafe { *ptr.add(7) }
 }
 
+/// Stamp the element-type discriminant into the `_pad` byte (offset 7) of a
+/// freshly-allocated `TypedArray<T>` header.
+///
+/// This is the write-side sibling of [`read_elem_type`] and the canonical
+/// home of the stamp (alongside the `ELEM_TYPE_*` constants). `shape-vm`'s
+/// `v2_handlers::v2_array_detect::stamp_elem_type` is the VM-side allocation
+/// helper (with a null guard for the producer opcodes); this `shape-value`
+/// entry lets cross-crate carrier producers that cannot reach the `shape-vm`
+/// crate (the marshal-layer `ToSlot<Vec<Arc<HeapValue>>>` in `shape-runtime`,
+/// STAGE K2) stamp the discriminant without duplicating the offset constant.
+///
+/// # Safety
+/// `ptr` must point to a live `TypedArray<T>` (HeapHeader at offset 0) and be
+/// non-null. `elem_type` must be the discriminant matching the array's
+/// element monomorphization `T`.
+#[inline]
+pub unsafe fn stamp_elem_type(ptr: *mut u8, elem_type: u8) {
+    unsafe { *ptr.add(7) = elem_type };
+}
+
 /// Retain (bump the refcount of) a v2-raw `*mut TypedArray<T>` carrier.
 ///
 /// This is the retain half of the `NativeKind::Ptr(HeapKind::TypedArray)`
