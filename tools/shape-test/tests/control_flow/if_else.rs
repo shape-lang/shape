@@ -442,16 +442,16 @@ print(x)
     ShapeTest::new(code).expect_run_ok().expect_output("42");
 }
 
-/// If/else with mismatched branch types -- dynamic typing allows it.
+/// If/else with mismatched branch types -- strict checker rejects: the two
+/// branches must unify to a single type, and `int` does not unify with `string`.
 #[test]
 fn cf_22_if_else_type_mismatch() {
     let code = r#"
 // Test 22: If/else with mismatched types
 let x = if true { 42 } else { "hello" }
 print(x)
-// Expected: error or dynamic typing allows it
 "#;
-    ShapeTest::new(code).expect_run_ok().expect_output("42");
+    ShapeTest::new(code).expect_run_err_contains("int is not compatible with string");
 }
 
 // =========================================================================

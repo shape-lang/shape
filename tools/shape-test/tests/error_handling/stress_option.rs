@@ -366,16 +366,20 @@ fn null_assigned_to_variable() {
     ShapeTest::new("let x = None\nx").expect_none();
 }
 
-/// Null reassigned.
+/// Null reassigned. Strict-flip: `x` is inferred `int` from its initializer, so
+/// reassigning `None` (an `Option`) is a type error — no loose let-mut retype.
 #[test]
 fn null_reassigned() {
-    ShapeTest::new("let mut x = 42\nx = None\nx").expect_none();
+    ShapeTest::new("let mut x = 42\nx = None\nx")
+        .expect_run_err_contains("is not compatible with int");
 }
 
-/// Variable starts null then assigned.
+/// Variable starts null then assigned. Strict-flip: `x` is inferred `Option`
+/// from `None`, so reassigning `10` (an `int`) is a type error.
 #[test]
 fn variable_starts_null_then_assigned() {
-    ShapeTest::new("let mut x = None\nx = 10\nx").expect_number(10.0);
+    ShapeTest::new("let mut x = None\nx = 10\nx")
+        .expect_run_err_contains("int is not compatible with");
 }
 
 /// Null in array.

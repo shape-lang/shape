@@ -346,7 +346,12 @@ comptime {
 }
 print("done")
 "#;
-    ShapeTest::new(code).expect_run_err_contains("Undefined variable: marker");
+    // Strict checker rejects the comptime body up front: comptime blocks do not
+    // capture runtime locals, so `marker` is undefined in comptime scope. The
+    // canonical type-system diagnostic quotes the identifier
+    // (TypeError::UndefinedVariable, errors.rs:18) rather than the late
+    // comptime-VM fallback string.
+    ShapeTest::new(code).expect_run_err_contains("Undefined variable: 'marker'");
 }
 
 #[test]

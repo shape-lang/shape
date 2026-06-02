@@ -482,13 +482,14 @@ fn test_enum_match_as_fn_argument() {
 // SECTION 64: Enum Match — Exhaustiveness Concerns
 // =============================================================================
 
-/// Verifies non-exhaustive match succeeds when a matching arm exists.
+/// Strict exhaustiveness: a `match` on `RGB` that omits `Blue` is rejected at
+/// compile time, even when the scrutinee is statically `RGB::Red`.
 #[test]
 fn test_enum_non_exhaustive_match_may_fail() {
     ShapeTest::new(
         "enum RGB { Red, Green, Blue }\nlet c = RGB::Red\nmatch c { RGB::Red => 1, RGB::Green => 2, }",
     )
-    .expect_number(1.0);
+    .expect_run_err_contains("Non-exhaustive match on 'RGB': missing variants Blue");
 }
 
 // =============================================================================
