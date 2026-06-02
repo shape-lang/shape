@@ -1,7 +1,22 @@
 # Team-lead handover — Shape v0.3.3 fix cycle
 
 ---
-## ⟢ ROTATION UPDATE 2026-06-01 (READ FIRST — supersedes stale sections below)
+## ⟢ ROTATION UPDATE 2026-06-02 (READ FIRST — latest; supersedes 2026-06-01 below)
+
+**main HEAD `705cd854`** (compile-cache + parse-memo + docs; NO fix branches merged — fix-then-flip, merge at tag). All correctness work is on branch **`strict-flip-collection-dispatch`** (the cumulative strict-flip branch + everything below), gates green throughout (numeric 104/0, smoke 5/5 VM==JIT, check-clean, check-no-dynamic EXIT 0).
+
+**STRICT-FLIP (workstream A) — NEAR CLOSE.** The branch now stacks: strict-flip + compile-cache + parse-memo + **let-gen** (cond-4 sound) + **A-final FP batches C–J** + **ROOT B** (HashMap `<K,V>` infer-or-annotate) + **numeric-conversion GREEN** + **s4/s5** (collection ctors + concrete→dyn) + **R1/R4/R5** (recursive-param/closure-from-sig/min-max). A FINAL ROUND is in flight (R3 `int**int->int` + the 23 let-gen/Result-Option FP family + 1 diag-bug + 12 TP→negative-suite migration). **A-final FP trend: 78→51→38→(target 0).** Cleared FP families: original A–J, truthiness (28), numeric-inference (R1–R5), literal-ctor regression, stdlib-fn visibility, Option-forwarding, smoke s4/s5. PATH TO FLIP: final round → A-final **0 FP** + smoke 5/5 + numeric 104/0 → strict default flips (merge the strict-flip branch at tag).
+
+**NUMERIC-CONVERSION MODEL — foundational v0.3.3 win, TDD'd.** User-ruled lossless-or-cast; **104-case regression suite** at `tools/shape-test/tests/numeric_conversions/`. Fixed: silent `u16→u8` data-loss, broken `as` casts (the prelude Into-registration root — also restored `int↔string`/`decimal`), ROOT G literal-in-comparison, i64-overflow-silent-promote. Spec/map/blast-radius in `docs/design/numeric-conversion/`.
+
+**NEW USER RULINGS this stretch (all in memory):** numeric-conversion lossless-or-cast + `int**int→int` ([[project-numeric-conversion-rule]]); `HashMap()`/`Array`/`Option` construction infer-or-annotate ([[project-generic-types-require-args]]); no-truthiness ([[project-no-truthiness-coercion]]). Plus let-gen ([[project-let-generalization]]).
+
+**REMAINING v0.3.3 (the bulk, after strict-flip flips):** the **migration debt** — V3-S5 TypedArray (~520), W17/keystone, crate-units (~305 shape-vm-lib fails incl. 169 gutted bodies), book runnable+VM==JIT + book-acceptance gate. Tracked in `docs/cluster-audits/phase-2d-stub-inventory.md`.
+
+**PROCESS NOTE:** the strict-flip close is ITERATIVE — each round clears a FP family and the full-corpus re-run reveals the next; the iterative re-run + Q3-self-verify caught (a) the numeric-GREEN's literal-ctor regression, (b) the compile-cache's test-gate parse-memo gap, (c) a fail-fast-truncation that masked the real corpus state. Always re-run the FULL corpus after a checker change; never trust a sub-suite alone.
+
+---
+## ⟢ ROTATION UPDATE 2026-06-01 (superseded by 2026-06-02 above; kept for history)
 
 **main HEAD `705cd854`.** First non-docs merges of the cycle landed — both are
 **infra (RESULTS-IDENTICAL, zero semantic effect), landed early per "land it FIRST"**;
