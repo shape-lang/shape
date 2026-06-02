@@ -102,6 +102,28 @@ impl TypeInferenceEngine {
                 } else if let Some(adopted) = Self::adopt_int_literal_in_context(right, &left_type) {
                     right_type = adopted;
                 }
+                // ROOT-1 (comparison-literal-adoption ordering): when the
+                // concrete-context adoption above does NOT fire because the
+                // literal's partner is a still-unresolved inference VARIABLE
+                // (not a concrete numeric type), the literal must adopt the
+                // partner var's identity rather than staying its natural `int`.
+                // Otherwise the comparison/equality arm's same-type constraint
+                // (`effective_left ~ effective_right` at operators.rs) PINS the
+                // var to `int` from the literal — colliding with a later
+                // `number` resolution (e.g. `Ok(n)` into `Result<number>`) and
+                // spuriously rejecting valid code. Arithmetic ops were already
+                // immune (they route through `numeric_result_type`, whose
+                // `(Variable, Concrete-numeric)` arm propagates the var instead
+                // of pinning). This makes the literal defer to the var
+                // uniformly at the BinaryOp seam — pure literal deferral, no
+                // int-VALUE->number widening (delegates the literal-shape gate
+                // to `adopt_int_literal_in_context`, which rejects every
+                // non-literal operand).
+                else if let Some(adopted) = Self::adopt_int_literal_into_var(left, &right_type) {
+                    left_type = adopted;
+                } else if let Some(adopted) = Self::adopt_int_literal_into_var(right, &left_type) {
+                    right_type = adopted;
+                }
 
                 self.infer_binary_op(&left_type, op, &right_type, *span)
             }
@@ -1266,11 +1288,24 @@ impl TypeInferenceEngine {
 
                 let local_constraint_start = self.constraints.len();
                 let inferred_result = self.infer_callable_return_type(body, return_type.is_some());
-                self.refine_callable_param_types_from_local_constraints(
-                    &mut param_types,
-                    &self.constraints[local_constraint_start..],
-                    true,
-                );
+                let numeric_param_indices = self
+                    .refine_callable_param_types_from_local_constraints(
+                        &mut param_types,
+                        &self.constraints[local_constraint_start..],
+                        true,
+                    );
+                // ROOT-2: a `Numeric`-bounded unannotated closure param is no
+                // longer collapsed to `number` inside the refine helper (that
+                // severed the call-site link for `let f = |x| x * 2; f(i: int)`).
+                // Record its source variable so a NEVER-called closure still
+                // defaults to `number` post-solve
+                // (`default_unresolved_closure_numeric_params`), while a called
+                // closure resolves its param from the concrete argument type.
+                for &index in &numeric_param_indices {
+                    if let Some(Type::Variable(var)) = param_types.get(index) {
+                        self.deferred_closure_numeric_param_vars.insert(var.clone());
+                    }
+                }
                 let is_fallible = self.pop_fallible_scope();
                 self.env.pop_scope();
                 let inferred_return = inferred_result?;
@@ -1977,7 +2012,9 @@ impl TypeInferenceEngine {
                 }
             }
             Pattern::Constructor {
-                variant, fields, ..
+                enum_name,
+                variant,
+                fields,
             } => {
                 // R8 W7: resolve the enum's `EnumDef` from the scrutinee
                 // type so enum-payload binders carry the variant's
@@ -1987,8 +2024,32 @@ impl TypeInferenceEngine {
                 // payloads. Falls back to fresh vars when the scrutinee
                 // is non-enum (e.g. a registered struct via the Struct
                 // arm, or no scrutinee at all).
+                //
+                // ROOT-3 (v0.3.3 strict-flip): a `match s { Shape::Circle(r)
+                // => … }` where `s` is an UNANNOTATED parameter has a
+                // scrutinee that is still a bare type variable, so
+                // `enum_name_of_type` returns `None` and every payload binder
+                // (`r`, `side`) degrades to an unconstrained fresh var. The
+                // arm bodies (`3 * r * r`) then carry only a `Numeric` bound,
+                // never a concrete `number`, so the match — and therefore the
+                // function's inferred return type — stays an unresolved type
+                // variable. `inferred_type_to_hint_name` yields `None`, the
+                // compiler's `function_return_types` hint is empty, and a
+                // downstream `"area=" + area(s)` rejects with `string` and
+                // `unknown`.
+                //
+                // The constructor pattern itself names the enum + variant
+                // (`Shape::Circle`), so the variant's DECLARED payload type
+                // (`number`) is known WITHOUT the scrutinee type. Resolve the
+                // `EnumDef` from the pattern's own `enum_name` when the
+                // scrutinee could not supply it. This is the standard payload
+                // propagation, just keyed off the pattern instead of the
+                // scrutinee — it does not fabricate a kind and does not widen
+                // an int value to number: the `number` comes verbatim from the
+                // enum's declared `Circle(number)` payload annotation.
                 let enum_kind = scrutinee
                     .and_then(|ty| self.enum_name_of_type(ty))
+                    .or_else(|| enum_name.as_ref().map(|p| p.name().to_string()))
                     .and_then(|name| {
                         self.env.get_enum(&name).and_then(|def| {
                             def.members

@@ -178,6 +178,79 @@ impl BytecodeCompiler {
         modes
     }
 
+    /// A-final ROOT-4 J3 (no-callsite gap). Returns `true` when `func_def` is
+    /// an *implicitly generic* function whose body cannot be soundly emitted
+    /// because at least one of its value parameters stayed an unresolved type
+    /// variable after program-wide inference — i.e. no concrete call site and
+    /// no body-literal pairing pinned the param's kind.
+    ///
+    /// Such a function is the unannotated analogue of `fn f<T>(...)`: the
+    /// inference tier generalizes it (J3 `infer_binary_op` Add-arm + let-gen),
+    /// but the emit tier has no proven `NativeKind` to stamp a typed opcode
+    /// with. The correct disposition is to DEFER body emission (the same
+    /// `return Ok(())` skip that explicit `<T>` templates take), not to widen
+    /// to a default kind. When a concrete call site later exists,
+    /// `inferred_param_type_hints` carries a concrete name, this predicate is
+    /// `false`, and the body is emitted with proven kinds.
+    ///
+    /// Narrowing rules (avoid skipping a body that legitimately compiles):
+    /// - Only unannotated, non-reference, simple-identifier value params count
+    ///   (annotated params carry a proven kind; reference params re-stamp via
+    ///   `infer_param_type_from_body`; destructuring params are handled
+    ///   elsewhere).
+    /// - A param with a concrete `inferred_param_type_hints` entry is pinned —
+    ///   it does NOT make the function generic.
+    /// - A param with an inferred anonymous-object field schema
+    ///   (`inferred_param_object_fields`) resolves to a structural type and is
+    ///   likewise not generic.
+    /// - The function must have at least one such unresolved param; a function
+    ///   with zero unannotated value params is never implicitly generic.
+    fn is_uninstantiated_implicit_generic(&self, func_def: &FunctionDef) -> bool {
+        let hints = self.inferred_param_type_hints.get(&func_def.name);
+        let object_fields = self.inferred_param_object_fields.get(&func_def.name);
+
+        let mut saw_unannotated_value_param = false;
+        for (idx, param) in func_def.params.iter().enumerate() {
+            // Only bare, by-value, unannotated identifier params can be
+            // implicitly generic. Everything else carries (or recovers) a kind.
+            if param.type_annotation.is_some()
+                || param.is_reference
+                || param.is_mut_reference
+                || param.is_const
+                || param.simple_name().is_none()
+            {
+                continue;
+            }
+            saw_unannotated_value_param = true;
+
+            // A concrete program-wide hint pins this param's kind.
+            let pinned_by_hint = hints
+                .and_then(|h| h.get(idx))
+                .map(|entry| entry.is_some())
+                .unwrap_or(false);
+            if pinned_by_hint {
+                continue;
+            }
+
+            // An inferred anonymous-object field schema resolves this param to
+            // a structural type (handled in `compile_function_body`).
+            let pinned_by_object_schema = object_fields
+                .and_then(|f| f.get(idx))
+                .map(|entry| entry.is_some())
+                .unwrap_or(false);
+            if pinned_by_object_schema {
+                continue;
+            }
+
+            // This param stayed an unresolved type variable: the function is
+            // implicitly generic and its body must be deferred.
+            return true;
+        }
+
+        let _ = saw_unannotated_value_param;
+        false
+    }
+
     pub(super) fn compile_function(&mut self, func_def: &FunctionDef) -> Result<()> {
         // Validate annotation target kinds before compilation
         self.validate_annotation_targets(func_def)?;
@@ -203,6 +276,26 @@ impl BytecodeCompiler {
             .as_ref()
             .is_some_and(|tps| !tps.is_empty())
         {
+            return Ok(());
+        }
+
+        // A-final ROOT-4 J3 (no-callsite gap): an unannotated function whose
+        // value param(s) stay UNRESOLVED type variables after program-wide
+        // inference (no concrete call site pinned them, no body-literal
+        // pairing narrowed them) is *implicitly generic* — exactly like an
+        // explicit `fn add<T>(a: T, b: T) -> T`. The inference tier already
+        // generalizes such a body (operators.rs `infer_binary_op` Add-arm
+        // yields the left operand var for two unresolved operands; let-gen
+        // §cond-4 ∀-generalizes the return). The body therefore has NO proven
+        // NativeKind for its operands, so a typed numeric opcode cannot be
+        // emitted — emitting one would stamp a default kind on a value of
+        // unknown type (the forbidden silent-widening path). Defer the body
+        // like every other template: its AST is preserved in `function_defs`
+        // and re-emitted with proven kinds per concrete call site (the path
+        // that fires once `inferred_param_type_hints` carries a concrete name).
+        // Skipping here emits NOTHING — no opcode, no default kind, no
+        // int-VALUE->number widening — which is why it is sound.
+        if self.is_uninstantiated_implicit_generic(func_def) {
             return Ok(());
         }
 

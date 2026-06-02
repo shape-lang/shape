@@ -80,6 +80,44 @@ impl TypeInferenceEngine {
         }
     }
 
+    /// A bare integer literal whose comparison/arithmetic partner is still an
+    /// UNRESOLVED inference variable adopts that variable's identity rather than
+    /// staying its natural `int`. This is the var-side analogue of
+    /// `adopt_int_literal_in_context`: there the literal adopts a *concrete*
+    /// numeric context (`val:number > 10` → `10:number`); here the context is a
+    /// not-yet-resolved var (`fn check(n) -> Result<number> { if n > 5 ...; Ok(n)
+    /// }` — `n` is a free var when `n > 5` is inferred, later pinned to `number`
+    /// by `Ok(n)`). Without this, the comparison arm's `effective_left ~
+    /// effective_right` same-type constraint would pin the var to `int` from the
+    /// literal, colliding with the eventual `number` and spuriously rejecting
+    /// valid code (R1 comparison-literal-adoption-ordering).
+    ///
+    /// Mirrors the var-propagation arm of `numeric_result_type` (a `(Variable,
+    /// Concrete numeric)` pair yields the variable, not the concrete): the var is
+    /// the operand the call graph will resolve, so the literal must defer to it.
+    ///
+    /// SOUNDNESS: fires ONLY for a bare `Int`/`UInt` literal (delegates the
+    /// literal-shape gate to `adopt_int_literal_in_context`, which rejects
+    /// float/decimal/typed-int literals and any non-literal value) paired with an
+    /// unresolved `Type::Variable`. A non-literal operand never adopts, so no
+    /// `int`-VALUE silently becomes a `number` and no `number`-VALUE becomes an
+    /// `int` — this is pure literal deferral, identical in spirit to the existing
+    /// concrete-context adoption. The literal has no committed family until the
+    /// var resolves, so adopting the var's identity introduces no widening.
+    pub(crate) fn adopt_int_literal_into_var(expr: &Expr, context: &Type) -> Option<Type> {
+        // Only adopt when the partner is a still-unresolved inference variable.
+        if !matches!(context, Type::Variable(_)) {
+            return None;
+        }
+        // Reuse the literal-shape + value-fits gate. `decimal` accepts any
+        // integer literal, so it is a stable proxy for "this expr is a bare
+        // adoptable integer literal" without re-implementing the match.
+        let decimal_probe = Type::Concrete(TypeAnnotation::Basic("decimal".to_string()));
+        Self::adopt_int_literal_in_context(expr, &decimal_probe)?;
+        // The literal adopts the partner var's identity (defers to it).
+        Some(context.clone())
+    }
+
     /// The concrete numeric type name of a `Type`, if it is a `Basic`/
     /// `Reference` concrete numeric type. `None` for type vars, compound, or
     /// non-numeric types. Used to gate numeric return-context literal adoption.

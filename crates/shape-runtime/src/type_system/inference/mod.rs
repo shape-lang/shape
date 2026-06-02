@@ -103,6 +103,20 @@ pub struct TypeInferenceEngine {
     /// parameters that are *still* unresolved variables to `number` as a
     /// last-resort default.
     pub(crate) callable_numeric_param_indices: HashMap<String, Vec<usize>>,
+    /// ROOT-2 (closure-param defaults to number vs int call-site): source type
+    /// variables for `Numeric`-bounded UNANNOTATED CLOSURE parameters (e.g. `x`
+    /// in `let f = |x| x * 2`). Recorded by the `Expr::FunctionExpr` arm but
+    /// NOT eagerly collapsed to `number` — eager collapse stored the closure as
+    /// `(number) -> _`, so a later same-scope call site `f(i)` with `i: int`
+    /// failed the §2 numeric lattice as `(number) -> _ !~ (int) -> _`. The
+    /// closure's param variable flows unchanged into its stored function type,
+    /// so the call-site constraint `func_type ~ (int) -> result` resolves it to
+    /// the concrete argument type during `solver.solve`. Only a closure that is
+    /// NEVER called leaves its var unresolved; `default_unresolved_closure_numeric_params`
+    /// then applies the same last-resort `number` default as the named-function
+    /// `refine_numeric_params_post_callsite` path. No int VALUE is widened: an
+    /// unresolved var adopts `number` only when no concrete arg ever pins it.
+    pub(crate) deferred_closure_numeric_param_vars: std::collections::HashSet<TypeVar>,
     /// Deferred return unions for callables where one branch returned an unresolved type variable
     /// and another returned a concrete type (e.g. `return c` and `return "hi"`).
     /// We preserve precision by materializing these unions only after call-site widening.
@@ -201,6 +215,7 @@ impl TypeInferenceEngine {
             callable_param_source_vars: HashMap::new(),
             callable_param_defaults,
             callable_numeric_param_indices: HashMap::new(),
+            deferred_closure_numeric_param_vars: std::collections::HashSet::new(),
             pending_return_unions: HashMap::new(),
             return_var_aliases: HashMap::new(),
             return_scopes: Vec::new(),
@@ -642,9 +657,19 @@ impl TypeInferenceEngine {
                 matches!(constraint, TypeConstraint::ImplementsTrait { trait_name } if trait_name == "Numeric")
             }) {
                 numeric_indices.push(index);
-                if is_closure {
-                    *param_type = BuiltinTypes::number();
-                }
+                // ROOT-2: closures used to be eagerly collapsed to `number`
+                // here. That stored `let f = |x| x * 2` as `(number) -> _`, so a
+                // later same-scope call `f(i)` with `i: int` failed the strict
+                // §2 numeric lattice (`(number) -> _ !~ (int) -> _`). Leave the
+                // param a `Type::Variable` so the call-site constraint
+                // (`func_type ~ (int) -> result`, pushed by `infer_function_call`)
+                // resolves it to the concrete argument type during
+                // `solver.solve`. A never-called closure leaves its var
+                // unresolved; the caller records it (via the returned index +
+                // `deferred_closure_numeric_param_vars`) so the last-resort
+                // `number` default is applied post-solve — the same deferred
+                // default the named-function path uses. No int VALUE is widened.
+                let _ = is_closure;
             }
         }
         numeric_indices
@@ -1363,6 +1388,7 @@ impl TypeInferenceEngine {
         self.callable_param_source_vars.clear();
         self.callable_param_defaults.clear();
         self.callable_numeric_param_indices.clear();
+        self.deferred_closure_numeric_param_vars.clear();
         Self::seed_builtin_callable_defaults(&mut self.callable_param_defaults);
         self.return_var_aliases.clear();
         self.return_scopes.clear();
@@ -1395,6 +1421,8 @@ impl TypeInferenceEngine {
 
         self.apply_callsite_unions(&mut types);
         errors.extend(self.refine_numeric_params_post_callsite(&mut types));
+        // ROOT-2: closure params that no call site resolved fall back to `number`.
+        self.default_unresolved_closure_numeric_params();
 
         for (_name, ty) in types.iter_mut() {
             *ty = self.unifier.apply_substitutions(ty);
@@ -1419,6 +1447,7 @@ impl TypeInferenceEngine {
         self.callable_param_source_vars.clear();
         self.callable_param_defaults.clear();
         self.callable_numeric_param_indices.clear();
+        self.deferred_closure_numeric_param_vars.clear();
         Self::seed_builtin_callable_defaults(&mut self.callable_param_defaults);
         self.return_var_aliases.clear();
         self.return_scopes.clear();
@@ -1497,6 +1526,8 @@ impl TypeInferenceEngine {
         // whose body imposes `Numeric` must not be widened to a non-numeric
         // type by callsite propagation — that mismatch is a type error.
         errors.extend(self.refine_numeric_params_post_callsite(&mut types));
+        // ROOT-2: closure params that no call site resolved fall back to `number`.
+        self.default_unresolved_closure_numeric_params();
 
         // Apply substitutions to get final types
         for (_name, ty) in types.iter_mut() {
@@ -1782,6 +1813,43 @@ impl TypeInferenceEngine {
             );
         }
         errors
+    }
+
+    /// ROOT-2 last-resort default for unannotated `Numeric`-bounded CLOSURE
+    /// parameters that NO call site ever resolved.
+    ///
+    /// Closures are not in `callable_numeric_param_indices` (that table is keyed
+    /// by named-function symbol), so `refine_numeric_params_post_callsite` does
+    /// not touch them. Their param source variables are recorded in
+    /// `deferred_closure_numeric_param_vars` by the `Expr::FunctionExpr` arm.
+    /// After `solver.solve` has unified every call site, a called closure's
+    /// param var is already bound to the concrete argument type (e.g. `int` for
+    /// `let f = |x| x * 2; f(i)` where `i: int`); only a NEVER-called closure
+    /// leaves the var unresolved. We bind those leftovers to `number` — the same
+    /// last-resort default the named-function path applies, and the same default
+    /// that the pre-ROOT-2 eager closure collapse provided. Binding flows through
+    /// the unifier so the substitution loop propagates it into the closure's
+    /// stored function type.
+    ///
+    /// Soundness: this only fires for a variable that NO concrete argument ever
+    /// pinned. It never converts a resolved `int` param to `number` — a bound
+    /// var is `Type::Concrete`/`Type::Generic` after `apply_substitutions`, not
+    /// `Type::Variable`/`Type::Constrained`, so it is skipped. No int VALUE is
+    /// widened.
+    fn default_unresolved_closure_numeric_params(&mut self) {
+        let vars: Vec<TypeVar> = self
+            .deferred_closure_numeric_param_vars
+            .iter()
+            .cloned()
+            .collect();
+        for var in vars {
+            match self.unifier.apply_substitutions(&Type::Variable(var.clone())) {
+                Type::Variable(_) | Type::Constrained { .. } => {
+                    self.unifier.bind(var, BuiltinTypes::number());
+                }
+                _ => {}
+            }
+        }
     }
 
     fn propagate_return_alias_substitution(
