@@ -743,7 +743,29 @@ impl TypeInferenceEngine {
 
         let mut substitutions: std::collections::HashMap<TypeVar, Type> =
             std::collections::HashMap::new();
-        for (param_ty, arg_ty) in params.iter().zip(arg_types.iter()) {
+        for (i, (param_ty, arg_ty)) in params.iter().zip(arg_types.iter()).enumerate() {
+            // ROOT-B: a bare int LITERAL payload of an `Ok`/`Err`/`Some`
+            // constructor DEFERS to its fresh payload var instead of pinning it
+            // to `int`. Skipping the `T -> int` substitution here (and the
+            // matching call-shape constraint below) leaves `T` unresolved, so
+            // the constructor's `Result<T>` / `Option<T>` later unifies with the
+            // function's `Result<number>` / `Option<number>` return carrier
+            // (T = number) rather than conflicting as `Result<int> !~
+            // Result<number>`. LITERALS ONLY — a non-literal int VALUE keeps its
+            // normal pinning (no value widening).
+            if args
+                .get(i)
+                .is_some_and(|arg| Self::constructor_literal_payload_defers_to_var(name, arg, param_ty))
+            {
+                // Record the (unresolved) payload var so the post-solve
+                // `default_unresolved_constructor_literal_payload_vars` pass can
+                // bind it to `int` if no carrier ever resolves it.
+                if let Type::Variable(var) = param_ty {
+                    self.deferred_constructor_literal_payload_vars
+                        .insert(var.clone());
+                }
+                continue;
+            }
             Self::collect_call_substitutions(param_ty, arg_ty, &mut substitutions);
         }
 
@@ -771,6 +793,17 @@ impl TypeInferenceEngine {
             let resolved_param = params
                 .get(i)
                 .map(|p| Self::apply_substitutions_to_type(p, &substitutions));
+            // ROOT-B: for a deferred `Ok`/`Err`/`Some` literal payload, push the
+            // (unresolved) payload param itself as the expected type so the
+            // call-shape constraint stays `T ~ T` (a no-op) rather than pinning
+            // `T ~ int`. The literal defers to `T`; the return carrier resolves
+            // it. Matches the substitution skip above.
+            if let (Some(param_ty), Some(arg_expr)) = (params.get(i), args.get(i)) {
+                if Self::constructor_literal_payload_defers_to_var(name, arg_expr, param_ty) {
+                    expected_param_types.push(resolved_param.unwrap_or_else(|| param_ty.clone()));
+                    continue;
+                }
+            }
             let adopted = match (&resolved_param, args.get(i)) {
                 (Some(param_ty), Some(arg_expr)) => {
                     Self::adopt_int_literal_in_context(arg_expr, param_ty)

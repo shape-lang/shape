@@ -175,6 +175,7 @@ impl BytecodeCompiler {
             current_function_params: Vec::new(),
             stdlib_function_names: HashSet::new(),
             allow_internal_builtins: false,
+            deferring_uninstantiated_template_body: false,
             native_resolution_context: None,
             non_function_mir_context_stack: Vec::new(),
             mir_functions: HashMap::new(),

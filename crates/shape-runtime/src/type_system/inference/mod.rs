@@ -117,6 +117,17 @@ pub struct TypeInferenceEngine {
     /// `refine_numeric_params_post_callsite` path. No int VALUE is widened: an
     /// unresolved var adopts `number` only when no concrete arg ever pins it.
     pub(crate) deferred_closure_numeric_param_vars: std::collections::HashSet<TypeVar>,
+    /// ROOT-B: payload type variables of `Ok`/`Err`/`Some` constructors whose
+    /// argument was a bare int LITERAL that DEFERRED to the var instead of
+    /// pinning it to `int` (see `constructor_literal_payload_defers_to_var` and
+    /// the deferral in `infer_function_call`). Mirrors
+    /// `deferred_closure_numeric_param_vars`: the var flows unresolved so a
+    /// later carrier (`Result<number>` / `Option<number>` return) can resolve
+    /// it; if NOTHING resolves it (`let x = Some(42); x`, x used bare) the
+    /// post-solve `default_unresolved_constructor_literal_payload_vars` pass
+    /// binds it to `int` — the literal's NATURAL type — so the binding stays
+    /// concrete (no `Option<T>` un-pinnable error) and no value is widened.
+    pub(crate) deferred_constructor_literal_payload_vars: std::collections::HashSet<TypeVar>,
     /// Deferred return unions for callables where one branch returned an unresolved type variable
     /// and another returned a concrete type (e.g. `return c` and `return "hi"`).
     /// We preserve precision by materializing these unions only after call-site widening.
@@ -216,6 +227,7 @@ impl TypeInferenceEngine {
             callable_param_defaults,
             callable_numeric_param_indices: HashMap::new(),
             deferred_closure_numeric_param_vars: std::collections::HashSet::new(),
+            deferred_constructor_literal_payload_vars: std::collections::HashSet::new(),
             pending_return_unions: HashMap::new(),
             return_var_aliases: HashMap::new(),
             return_scopes: Vec::new(),
@@ -1389,6 +1401,7 @@ impl TypeInferenceEngine {
         self.callable_param_defaults.clear();
         self.callable_numeric_param_indices.clear();
         self.deferred_closure_numeric_param_vars.clear();
+        self.deferred_constructor_literal_payload_vars.clear();
         Self::seed_builtin_callable_defaults(&mut self.callable_param_defaults);
         self.return_var_aliases.clear();
         self.return_scopes.clear();
@@ -1423,6 +1436,7 @@ impl TypeInferenceEngine {
         errors.extend(self.refine_numeric_params_post_callsite(&mut types));
         // ROOT-2: closure params that no call site resolved fall back to `number`.
         self.default_unresolved_closure_numeric_params();
+        self.default_unresolved_constructor_literal_payload_vars();
 
         for (_name, ty) in types.iter_mut() {
             *ty = self.unifier.apply_substitutions(ty);
@@ -1448,6 +1462,7 @@ impl TypeInferenceEngine {
         self.callable_param_defaults.clear();
         self.callable_numeric_param_indices.clear();
         self.deferred_closure_numeric_param_vars.clear();
+        self.deferred_constructor_literal_payload_vars.clear();
         Self::seed_builtin_callable_defaults(&mut self.callable_param_defaults);
         self.return_var_aliases.clear();
         self.return_scopes.clear();
@@ -1528,6 +1543,7 @@ impl TypeInferenceEngine {
         errors.extend(self.refine_numeric_params_post_callsite(&mut types));
         // ROOT-2: closure params that no call site resolved fall back to `number`.
         self.default_unresolved_closure_numeric_params();
+        self.default_unresolved_constructor_literal_payload_vars();
 
         // Apply substitutions to get final types
         for (_name, ty) in types.iter_mut() {
@@ -1846,6 +1862,33 @@ impl TypeInferenceEngine {
             match self.unifier.apply_substitutions(&Type::Variable(var.clone())) {
                 Type::Variable(_) | Type::Constrained { .. } => {
                     self.unifier.bind(var, BuiltinTypes::number());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// ROOT-B post-solve default: an `Ok`/`Err`/`Some` constructor's
+    /// bare-int-literal payload var that DEFERRED (see
+    /// `deferred_constructor_literal_payload_vars`) and was NEVER resolved by a
+    /// carrier (`let x = Some(42); x` — x used bare, nothing pins `T`) defaults
+    /// to `int`, the literal's NATURAL type. Mirrors
+    /// `default_unresolved_closure_numeric_params` but uses `int` (not
+    /// `number`): the deferred value is an integer literal, so its default
+    /// family is `int`. This keeps the binding concrete (`Option<int>` rather
+    /// than an un-pinnable `Option<T>`) and introduces no widening — a resolved
+    /// var keeps whatever the flow pinned it to (`number` for the
+    /// `Result<number>` return class).
+    fn default_unresolved_constructor_literal_payload_vars(&mut self) {
+        let vars: Vec<TypeVar> = self
+            .deferred_constructor_literal_payload_vars
+            .iter()
+            .cloned()
+            .collect();
+        for var in vars {
+            match self.unifier.apply_substitutions(&Type::Variable(var.clone())) {
+                Type::Variable(_) | Type::Constrained { .. } => {
+                    self.unifier.bind(var, BuiltinTypes::integer());
                 }
                 _ => {}
             }

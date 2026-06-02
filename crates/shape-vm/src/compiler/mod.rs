@@ -1459,6 +1459,22 @@ pub struct BytecodeCompiler {
     /// Toggled during compilation for definitions originating from `std::*`.
     pub(crate) allow_internal_builtins: bool,
 
+    /// A-final ROOT-C: set while compiling the body of an *uninstantiated
+    /// implicit-generic* function (an unannotated, never-called `fn add(a, b)
+    /// { a + b }` whose value params stay unresolved type variables). Such a
+    /// body is a deferred template — its bytecode is DEAD (re-emitted with
+    /// proven kinds per concrete call site), so the polymorphic-numeric
+    /// proof-gap (and the sibling "cannot infer types for binary operation"
+    /// strict-typing error) on its unproven operands must NOT abort
+    /// compilation. When set, the numeric binop emitter defers that specific
+    /// typed-OPCODE emission (emits a stack-balancing `Pop` placeholder into
+    /// the dead blob — never a fabricated typed numeric opcode), while every
+    /// STRUCTURAL/schema body check (e.g. object-spread-without-known-schema)
+    /// still surfaces its `Err`. This narrows the prior whole-body skip so a
+    /// genuine structural error is no longer suppressed alongside the benign
+    /// numeric proof-gap.
+    pub(crate) deferring_uninstantiated_template_body: bool,
+
     /// Package-scoped native library resolutions for the current host.
     pub(crate) native_resolution_context:
         Option<shape_runtime::native_resolution::NativeResolutionSet>,

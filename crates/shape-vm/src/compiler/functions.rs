@@ -320,16 +320,32 @@ impl BytecodeCompiler {
         // §cond-4 ∀-generalizes the return). The body therefore has NO proven
         // NativeKind for its operands, so a typed numeric opcode cannot be
         // emitted — emitting one would stamp a default kind on a value of
-        // unknown type (the forbidden silent-widening path). Defer the body
-        // like every other template: its AST is preserved in `function_defs`
-        // and re-emitted with proven kinds per concrete call site (the path
-        // that fires once `inferred_param_type_hints` carries a concrete name).
-        // Skipping here emits NOTHING — no opcode, no default kind, no
-        // int-VALUE->number widening — which is why it is sound.
-        if self.is_uninstantiated_implicit_generic(func_def) {
-            return Ok(());
+        // unknown type (the forbidden silent-widening path).
+        //
+        // A-final ROOT-C (narrowing): the prior unconditional `return Ok(())`
+        // skipped the WHOLE body — which also suppressed a legitimate
+        // STRUCTURAL error (a `{ ...x }` object spread whose source `x` has no
+        // compile-time-known schema, which `main` correctly rejects). Defer
+        // ONLY the typed-OPCODE emission (the polymorphic-numeric proof-gap),
+        // not the structural/schema checks: set
+        // `deferring_uninstantiated_template_body` so the numeric binop emitter
+        // drops a stack-balancing `Pop` placeholder into this DEAD blob instead
+        // of stamping a default kind / raising the proof-gap, while every
+        // structural body check still surfaces its `Err`. The blob is dead
+        // anyway — its AST is preserved in `function_defs` and re-emitted with
+        // proven kinds per concrete call site — so the placeholder never runs
+        // and introduces no int-VALUE->number widening.
+        let deferring_template = self.is_uninstantiated_implicit_generic(func_def);
+        let saved_deferring_template = self.deferring_uninstantiated_template_body;
+        if deferring_template {
+            self.deferring_uninstantiated_template_body = true;
         }
+        let result = self.compile_function_inner(func_def);
+        self.deferring_uninstantiated_template_body = saved_deferring_template;
+        result
+    }
 
+    fn compile_function_inner(&mut self, func_def: &FunctionDef) -> Result<()> {
         let mut effective_def = func_def.clone();
         let effective_pass_modes = self.effective_function_like_pass_modes(
             Some(&effective_def.name),

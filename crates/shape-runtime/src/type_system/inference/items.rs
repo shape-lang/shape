@@ -1838,9 +1838,51 @@ impl TypeInferenceEngine {
             }
             declared_type
         } else if let Some(init_expr) = &decl.value {
-            // When no annotation is provided, keep the inferred initializer type
-            // so subsequent expressions can immediately use structural info.
-            self.infer_expr(init_expr)?
+            // ROOT-B: an unannotated bare int-LITERAL initializer of a MUTABLE
+            // binding (`let mut sum = 0`) DEFERS to a fresh type variable
+            // instead of committing to `int`. The accumulator / seed class
+            //   `fn run() -> Result<number> { let mut sum = 0;
+            //      for … { sum = sum + v /* v: number */ } Ok(sum) }`
+            // needs the literal `0` to stay adoptable: without deferral `sum`
+            // pins to `int`, then the `sum + v` accumulation and the `Ok(sum)`
+            // tail both conflict with the `Result<number>` carrier
+            // (`int !~ number`, `Result<int> !~ Result<number>`). Binding the
+            // seed to a fresh var lets the downstream flow resolve it (to
+            // `number` via the accumulation / return carrier, or to `int` if
+            // nothing else constrains it — the literal has no committed numeric
+            // family, so this is pure literal deferral with NO value widening,
+            // mirroring `adopt_int_literal_into_var`). The unresolved var is
+            // recorded so the post-solve int-default pass grounds it.
+            //
+            // SCOPE: restricted to MUTABLE (`is_mut`) bindings. An immutable
+            // `let x = 0` keeps its concrete `int` type so the strict
+            // no-truthiness enforcement still rejects `let x = 0; if x { … }`
+            // ("int is not compatible with bool") — deferring `x` to a var
+            // would hide its concrete kind from the bool-condition check. Const
+            // is excluded (must be fully known); a non-literal / float /
+            // typed-int initializer keeps its inferred type. `decl.value` is
+            // `Some(init_expr)` here.
+            let defers_literal = decl.is_mut && decl.kind != VarKind::Const && {
+                let decimal_probe =
+                    Type::Concrete(TypeAnnotation::Basic("decimal".to_string()));
+                Self::adopt_int_literal_in_context(init_expr, &decimal_probe).is_some()
+            };
+            if defers_literal {
+                // Infer the literal (commits no constraint) then return a fresh
+                // var so the binding stays unresolved-but-adoptable. Record the
+                // var so the post-solve int-default pass binds it to `int` when
+                // no carrier resolves it (`let x = 0; x` used bare).
+                let _ = self.infer_expr(init_expr)?;
+                let var = self.type_var_gen.fresh_var();
+                self.deferred_constructor_literal_payload_vars
+                    .insert(var.clone());
+                Type::Variable(var)
+            } else {
+                // When no annotation is provided, keep the inferred initializer
+                // type so subsequent expressions can immediately use structural
+                // info.
+                self.infer_expr(init_expr)?
+            }
         } else {
             self.fresh_type_var()
         };

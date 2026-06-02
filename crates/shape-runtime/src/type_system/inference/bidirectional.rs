@@ -320,6 +320,51 @@ impl TypeInferenceEngine {
         })
     }
 
+    /// ROOT-B: whether a bare int LITERAL payload of an `Ok`/`Err`/`Some`
+    /// constructor should DEFER to its fresh payload type-variable instead of
+    /// pinning that variable to `int`.
+    ///
+    /// `fn run() -> Result<number> { let v = Ok(7)?; Ok(v) }` and
+    /// `fn check(n) -> Result<number> { Ok(0) }` (and the `let mut sum = 0;
+    /// … Ok(sum)` accumulator class) construct an `Ok`/`Some` whose argument is
+    /// a bare int literal at a site WITHOUT a bidirectional expected carrier —
+    /// the `?`-strips-then-rewraps chain, a recursion base case, or an
+    /// accumulator seed. Without deferral the polymorphic constructor's payload
+    /// var `T` is pinned to `int` by the literal (`Ok(7) : Result<int>`), and
+    /// the resulting `Result<int>` / `Option<int>` then conflicts with the
+    /// function's `Result<number>` / `Option<number>` return carrier
+    /// (`Result<int> !~ Result<number>`).
+    ///
+    /// This mirrors `adopt_int_literal_into_var` (the comparison-partner var
+    /// case): a bare int literal has no committed numeric family, so deferring
+    /// it to the still-unresolved payload var introduces NO value widening —
+    /// the var resolves later (to `number` from the return carrier, or to `int`
+    /// if nothing else constrains it). LITERALS ONLY: a non-literal `int`
+    /// VALUE payload (`Ok(x)`, `Ok(x * 2)`) is left untouched, so an int-VALUE
+    /// never silently becomes a `number` (§5 value-level invariant). Gated to
+    /// the three success/error carriers, and only when the corresponding param
+    /// is a bare, still-unresolved `Type::Variable` (the freshly-instantiated
+    /// `T`/`E` payload var) — a concrete or annotated payload type keeps its
+    /// normal `int`-pinning behavior.
+    pub(crate) fn constructor_literal_payload_defers_to_var(
+        name: &str,
+        arg: &Expr,
+        param: &Type,
+    ) -> bool {
+        if !matches!(name, "Ok" | "Err" | "Some") {
+            return false;
+        }
+        // The param must be the freshly-instantiated payload var (unresolved).
+        if !matches!(param, Type::Variable(_)) {
+            return false;
+        }
+        // Reuse the literal-shape + value-fits gate (decimal accepts any integer
+        // literal, so it is a stable proxy for "this expr is a bare adoptable
+        // integer literal"). Non-literal / float / typed-int args do not defer.
+        let decimal_probe = Type::Concrete(TypeAnnotation::Basic("decimal".to_string()));
+        Self::adopt_int_literal_in_context(arg, &decimal_probe).is_some()
+    }
+
     /// Synthesize type with a hint (soft constraint)
     ///
     /// The hint guides inference but doesn't force the type.

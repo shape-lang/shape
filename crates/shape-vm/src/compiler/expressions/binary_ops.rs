@@ -297,6 +297,36 @@ impl BytecodeCompiler {
         })
     }
 
+    /// A-final ROOT-C: deferred-template numeric-binop placeholder.
+    ///
+    /// Returns `true` (and emits a stack-balancing `Pop`) when this binop is
+    /// being compiled inside the body of an *uninstantiated implicit-generic*
+    /// function (`fn add(a, b) { a + b }`, never called, params stay
+    /// unresolved type variables — see `is_uninstantiated_implicit_generic`).
+    /// Such a body is a deferred template whose bytecode is DEAD (re-emitted
+    /// with proven kinds per concrete call site), so the polymorphic-numeric
+    /// proof-gap (no proven `NativeKind` on the operands) must NOT abort
+    /// compilation with a typed-opcode / strict-typing error.
+    ///
+    /// Both operand values are already on the stack at every binop terminal
+    /// that calls this (compiled before the numeric-emit decision), so a single
+    /// `Pop` (2 → 1) keeps the dead blob stack-balanced. NO fabricated typed
+    /// numeric opcode, no default kind, no int-VALUE->number widening is
+    /// emitted — and the blob never runs. STRUCTURAL/schema body checks
+    /// (object-spread-without-known-schema, etc.) are unaffected: they
+    /// `return Err` from their own emit paths and never reach this numeric-only
+    /// deferral. This narrows the prior whole-body skip so a genuine structural
+    /// error is no longer suppressed alongside the benign numeric proof-gap.
+    fn defer_template_numeric_binop(&mut self) -> bool {
+        if !self.deferring_uninstantiated_template_body {
+            return false;
+        }
+        self.emit(Instruction::new(OpCode::Pop, None));
+        self.last_expr_numeric_type = None;
+        self.last_expr_schema = None;
+        true
+    }
+
     fn infer_numeric_pair(
         &mut self,
         left: &Expr,
@@ -1439,6 +1469,12 @@ impl BytecodeCompiler {
                             // sweep (Phase 1): that dynamic-fallback emission
                             // is now a hard compile error.
                             if !try_emit_trait_dispatch(self, &BinaryOp::Add, left_schema, left, op_span) {
+                                // A-final ROOT-C: defer the dead deferred-template
+                                // body's unprovable-kind `a + b` (emit Pop, no
+                                // typed opcode) instead of the strict-typing error.
+                                if self.defer_template_numeric_binop() {
+                                    return Ok(());
+                                }
                                 return Err(strict_typing_binop_error(
                                     self,
                                     &BinaryOp::Add,
@@ -2021,9 +2057,16 @@ impl BytecodeCompiler {
                 // default kind and emitting a typed opcode (the silent-wrong
                 // path that produced the `2e-321` denormal).
                 if let Some(gap) = self.numeric_operand_proof_gap(op, left, left_numeric) {
+                    // A-final ROOT-C: defer dead-template proof-gap (emit Pop).
+                    if self.defer_template_numeric_binop() {
+                        return Ok(());
+                    }
                     return Err(gap);
                 }
                 if let Some(gap) = self.numeric_operand_proof_gap(op, right, right_numeric) {
+                    if self.defer_template_numeric_binop() {
+                        return Ok(());
+                    }
                     return Err(gap);
                 }
 
@@ -2044,6 +2087,10 @@ impl BytecodeCompiler {
                         // Strict-typing sweep (Phase 1): the historical
                         // dynamic-opcode fallback is now a hard compile error.
                         if !try_emit_trait_dispatch(self, op, left_schema, left, op_span) {
+                            // A-final ROOT-C: defer dead-template numeric binop.
+                            if self.defer_template_numeric_binop() {
+                                return Ok(());
+                            }
                             return Err(strict_typing_binop_error(self, op, left, right));
                         }
                     }
@@ -2063,6 +2110,10 @@ impl BytecodeCompiler {
                                 // Strict-typing sweep (Phase 1): the historical
                                 // dynamic-opcode fallback is now a hard compile error.
                                 if !try_emit_trait_dispatch(self, op, left_schema, left, op_span) {
+                                    // A-final ROOT-C: defer dead-template numeric binop.
+                                    if self.defer_template_numeric_binop() {
+                                        return Ok(());
+                                    }
                                     return Err(strict_typing_binop_error(
                                         self, op, left, right,
                                     ));
