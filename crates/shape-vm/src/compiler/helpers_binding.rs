@@ -149,6 +149,24 @@ impl BytecodeCompiler {
             .or_else(|| plan.slot_classes.get(&crate::mir::SlotId(slot)).copied())
     }
 
+    /// ADR-006 §2.7.30 (R3): is this bytecode-local slot the referent of a
+    /// reference that escapes via a flipped FLOOR sink (`return &x` /
+    /// module-binding `let r = &x`)? When true AND the storage class is
+    /// `SharedCow`, the let/const def-site emits `AllocSharedLocal` so the
+    /// `PromotedCell` owning carrier (R3) keeps the referent alive past
+    /// frame-pop. Uses the same +1 SlotId-offset convention as
+    /// `mir_storage_class_for_slot`.
+    pub(super) fn slot_is_reference_escape_promotion(&self, slot: u16) -> bool {
+        let Some(plan) = self.current_storage_plan() else {
+            return false;
+        };
+        plan.reference_escape_promotion_slots
+            .contains(&crate::mir::SlotId(slot.saturating_add(1)))
+            || plan
+                .reference_escape_promotion_slots
+                .contains(&crate::mir::SlotId(slot))
+    }
+
     /// MIR analysis is authoritative for both function bodies and top-level code.
     /// `analyze_non_function_items_with_mir` runs in the main pipeline before
     /// compilation, so MIR write authority applies universally.

@@ -1159,6 +1159,10 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
         });
     }
 
+    // ADR-006 §2.7.30 (R2): sink-discriminated reference-escape promotions.
+    // Accumulated ONLY for the two flipped floor sinks below; every other sink
+    // keeps emitting its B0003/B0004/B0006/B0012 reject.
+    let mut reference_escape_promotions: Vec<PromotionTrigger> = Vec::new();
     let mut seen_sinks = std::collections::HashSet::new();
     for sink in &facts.loan_sinks {
         let key = (
@@ -1177,6 +1181,21 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
             .sink_slot
             .and_then(|slot| facts.slot_escape_status.get(&slot).copied())
             == Some(EscapeStatus::Local);
+
+        // ADR-006 §2.7.30 (R2): the two flipped floor sinks no longer reject —
+        // they request escape→RC promotion of the borrowed referent. The flip
+        // set is EXACTLY {ReturnSlot, ModuleBindingStore}; all other sink arms
+        // below keep emitting B0003/B0004/B0006/B0012.
+        if matches!(
+            sink.kind,
+            LoanSinkKind::ReturnSlot | LoanSinkKind::ModuleBindingStore
+        ) {
+            reference_escape_promotions.push(PromotionTrigger {
+                referent_local: info.borrowed_place.root_local(),
+                sink_kind: sink.kind,
+            });
+            continue;
+        }
 
         let kind = match sink.kind {
             LoanSinkKind::ReturnSlot => continue,
@@ -1248,6 +1267,7 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
         errors,
         loan_info: facts.loan_info.clone(),
         return_reference_summary,
+        reference_escape_promotions,
     }
 }
 
@@ -1322,6 +1342,8 @@ pub struct SolverResult {
     pub errors: Vec<BorrowError>,
     pub loan_info: HashMap<u32, LoanInfo>,
     pub return_reference_summary: Option<ReturnReferenceSummary>,
+    /// ADR-006 §2.7.30 (R2): referent slots to promote to RC'd cells.
+    pub reference_escape_promotions: Vec<PromotionTrigger>,
 }
 
 /// Run the complete borrow analysis pipeline for a MIR function.
@@ -1638,6 +1660,7 @@ pub fn analyze(mir: &MirFunction, callee_summaries: &CalleeSummaries) -> BorrowA
         ownership_decisions,
         mutability_errors: Vec::new(), // filled by binding resolver (Phase 1)
         return_reference_summary: solver_result.return_reference_summary,
+        reference_escape_promotions: solver_result.reference_escape_promotions,
     }
 }
 
@@ -2269,6 +2292,125 @@ mod tests {
                 .any(|error| error.kind == BorrowErrorKind::ReferenceEscape),
             "expected reference-escape error, got {:?}",
             analysis.errors
+        );
+    }
+
+    /// ADR-006 §2.7.30 (R2): a `return &local` borrow flowing directly into
+    /// the return slot (SlotId(0)) derives exactly ONE
+    /// `PromotionTrigger { referent_local: <the borrowed local>, sink_kind:
+    /// ReturnSlot }`. Proves the sink-discriminated promotion list is
+    /// populated for the ReturnSlot floor sink and references the correct
+    /// referent. (The parallel `escaped_loans` reject still fires — that is
+    /// the SURFACE documented in the close-relay; the promotion DERIVATION is
+    /// what this test locks in.)
+    #[test]
+    fn r2_return_ref_derives_exactly_one_returnslot_promotion() {
+        let mir = MirFunction {
+            name: "make".to_string(),
+            blocks: vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    // _1 = 5
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Use(Operand::Constant(MirConstant::Int(5))),
+                        ),
+                        0,
+                    ),
+                    // _0 = &_1   (borrow flows straight into the return slot)
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Borrow(BorrowKind::Shared, Place::Local(SlotId(1))),
+                        ),
+                        1,
+                    ),
+                ],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            num_locals: 2,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![LocalTypeInfo::NonCopy, LocalTypeInfo::NonCopy],
+            span: span(),
+            field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
+            local_declared_scalar_types: std::collections::HashMap::new(),
+        };
+
+        let analysis = analyze(&mir, &Default::default());
+
+        // Exactly one promotion, naming the borrowed local (_1) via the
+        // ReturnSlot floor sink. Prove promoted set == exactly the floor sink.
+        assert_eq!(
+            analysis.reference_escape_promotions.len(),
+            1,
+            "expected exactly one ReturnSlot promotion, got {:?}",
+            analysis.reference_escape_promotions
+        );
+        let trigger = analysis.reference_escape_promotions[0];
+        assert_eq!(trigger.referent_local, SlotId(1));
+        assert_eq!(trigger.sink_kind, LoanSinkKind::ReturnSlot);
+    }
+
+    /// ADR-006 §2.7.30 (R2): a B0004 container-store escape (`[&x]`) must NOT
+    /// derive a promotion — the flip set is EXACTLY {ReturnSlot,
+    /// ModuleBindingStore}. Every other sink keeps rejecting.
+    #[test]
+    fn r2_container_store_escape_derives_no_promotion() {
+        let mir = MirFunction {
+            name: "make_arr".to_string(),
+            blocks: vec![BasicBlock {
+                id: BasicBlockId(0),
+                statements: vec![
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(1)),
+                            Rvalue::Use(Operand::Constant(MirConstant::Int(5))),
+                        ),
+                        0,
+                    ),
+                    // _2 = &_1
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(2)),
+                            Rvalue::Borrow(BorrowKind::Shared, Place::Local(SlotId(1))),
+                        ),
+                        1,
+                    ),
+                    // _0 = [_2]   (reference stored into an array aggregate)
+                    make_stmt(
+                        StatementKind::Assign(
+                            Place::Local(SlotId(0)),
+                            Rvalue::Aggregate(vec![Operand::Move(Place::Local(SlotId(2)))]),
+                        ),
+                        2,
+                    ),
+                ],
+                terminator: make_terminator(TerminatorKind::Return),
+            }],
+            num_locals: 3,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+                LocalTypeInfo::NonCopy,
+            ],
+            span: span(),
+            field_name_table: std::collections::HashMap::new(),
+            local_struct_type_names: std::collections::HashMap::new(),
+            local_typed_array_element_types: std::collections::HashMap::new(),
+            local_declared_scalar_types: std::collections::HashMap::new(),
+        };
+
+        let analysis = analyze(&mir, &Default::default());
+        assert!(
+            analysis.reference_escape_promotions.is_empty(),
+            "container-store escape must NOT promote (flip set excludes it), got {:?}",
+            analysis.reference_escape_promotions
         );
     }
 

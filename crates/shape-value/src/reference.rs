@@ -30,6 +30,8 @@
 // / `Arc<TypedArray<i64>>` / etc. — not a single `Arc<T>` enum).
 use crate::heap_value::TypedObjectPtr;
 use crate::native_kind::NativeKind;
+use crate::v2::closure_layout::SharedCell;
+use std::sync::Arc;
 
 /// Kinded reference target.
 ///
@@ -87,6 +89,27 @@ pub enum RefTarget {
         kind: NativeKind,
     },
 
+    /// ADR-006 §2.7.30 (R3): owning carrier for a reference that escapes via
+    /// a flipped FLOOR sink (`return &x` / module-binding `let r = &x`).
+    ///
+    /// `cell` holds an OWNING `Arc<SharedCell>` share — the referent slot was
+    /// promoted to a `SharedCell` at its definition site (R2's `SharedCow`
+    /// storage class), and `op_make_ref` cloned one strong-count share into
+    /// this carrier. The owning share keeps the referent alive past lexical
+    /// frame-pop (refcount ≥ 1 while any reference exists) → frame-independent
+    /// identity. Deref reads/writes go through `cell.lock()`, never a raw
+    /// frozen-kind slot read. `kind` is the projected slot's `NativeKind`
+    /// (the cell's value kind, sourced from `cell.kind()` at construction).
+    ///
+    /// The non-owning `Local`-coordinate alternative is the PROVEN round-1
+    /// UAF on `return &local` and is FORBIDDEN (§2.7.30.2 / .7). Release
+    /// rides the `Arc<SharedCell>` field-`Drop` through the existing
+    /// `HeapKind::Reference` clone/drop arms — no new dispatch-table arm.
+    PromotedCell {
+        cell: Arc<SharedCell>,
+        kind: NativeKind,
+    },
+
     // V3-S5 ckpt-4 (2026-05-15): `TypedIndex { receiver: Arc<
     // TypedArrayData>, index, elem_kind }` variant DELETED. The
     // `TypedArrayData` enum + `TypedBuffer<T>` wrapper layer were
@@ -108,7 +131,8 @@ impl RefTarget {
             // lockstep with the variant.
             RefTarget::Local { kind, .. }
             | RefTarget::ModuleBinding { kind, .. }
-            | RefTarget::TypedField { kind, .. } => *kind,
+            | RefTarget::TypedField { kind, .. }
+            | RefTarget::PromotedCell { kind, .. } => *kind,
         }
     }
 }

@@ -5216,6 +5216,42 @@ impl BytecodeCompiler {
                                         }
                                     }
                                 }
+
+                                // ADR-006 §2.7.30 (R3): def-site cell allocation
+                                // for a referent promoted by R2 because a
+                                // reference escapes it via a flipped FLOOR sink
+                                // (`return &x` / module-binding `let r = &x`).
+                                // The borrow planner assigned `SharedCow` AND
+                                // flagged the slot in the sink-discriminated
+                                // promotion set; promote the just-stored value
+                                // into an RC'd `SharedCell` here so `op_make_ref`
+                                // builds an OWNING `PromotedCell` carrier that
+                                // outlives this frame. Reuses the closures.rs
+                                // `LoadLocal + AllocSharedLocal` sequence. The
+                                // `shared_locals` membership makes subsequent
+                                // reads of this binding route through the cell;
+                                // the `shared_drop_locals` registration releases
+                                // the def-site share at scope exit (R3 keep-alive
+                                // is the ref's owning share, NOT this one).
+                                if matches!(
+                                    self.mir_storage_class_for_slot(local_idx),
+                                    Some(crate::type_tracking::BindingStorageClass::SharedCow)
+                                ) && self.slot_is_reference_escape_promotion(local_idx)
+                                    && !self.shared_locals.contains(name)
+                                {
+                                    self.emit(Instruction::new(
+                                        OpCode::LoadLocal,
+                                        Some(Operand::Local(local_idx)),
+                                    ));
+                                    self.emit(Instruction::new(
+                                        OpCode::AllocSharedLocal,
+                                        Some(Operand::Local(local_idx)),
+                                    ));
+                                    self.shared_locals.insert(name.to_string());
+                                    if let Some(scope) = self.shared_drop_locals.last_mut() {
+                                        scope.push(local_idx);
+                                    }
+                                }
                             }
                         }
                     }

@@ -2537,21 +2537,40 @@ impl VirtualMachine {
                 // construction time. The producing typed-Store / typed-
                 // initial-write emitted this kind; refs capture it
                 // verbatim, no fabrication.
-                let (_bits, kind) = self.stack_read_kinded_raw(slot);
-                shape_value::RefTarget::Local {
-                    frame_index,
-                    slot_index: local_idx as u32,
-                    kind,
+                let (bits, kind) = self.stack_read_kinded_raw(slot);
+                // ADR-006 §2.7.30 (R3): if the referent slot was promoted
+                // to a `SharedCell` (R2's `SharedCow` storage class for a
+                // flipped-floor reference escape), this `&x` must produce an
+                // OWNING `PromotedCell` carrier — not a non-owning `Local`
+                // coordinate (the proven round-1 UAF). Clone one strong-count
+                // `Arc<SharedCell>` share out of the slot bits; the def-site
+                // slot retains its own share. The projected kind is the
+                // cell's interior value kind (§2.7.8 lockstep companion).
+                if kind == NativeKind::Ptr(HeapKind::SharedCell) {
+                    self.make_promoted_cell_ref(bits)
+                } else {
+                    shape_value::RefTarget::Local {
+                        frame_index,
+                        slot_index: local_idx as u32,
+                        kind,
+                    }
                 }
             }
             Some(Operand::ModuleBinding(binding_idx)) => {
                 // Kind sourced from the §2.7.8 module-binding parallel-
                 // kind track at construction time.
-                let (_bits, kind) =
+                let (bits, kind) =
                     self.module_binding_read_kinded_raw(binding_idx as usize);
-                shape_value::RefTarget::ModuleBinding {
-                    binding_idx: binding_idx as u32,
-                    kind,
+                // ADR-006 §2.7.30 (R3): same promotion discrimination as the
+                // local path — a promoted module-binding referent yields an
+                // owning `PromotedCell`, never a `ModuleBinding` coordinate.
+                if kind == NativeKind::Ptr(HeapKind::SharedCell) {
+                    self.make_promoted_cell_ref(bits)
+                } else {
+                    shape_value::RefTarget::ModuleBinding {
+                        binding_idx: binding_idx as u32,
+                        kind,
+                    }
                 }
             }
             _ => return Err(VMError::InvalidOperand),
@@ -2563,6 +2582,33 @@ impl VirtualMachine {
         let arc = std::sync::Arc::new(rt);
         let bits = std::sync::Arc::into_raw(arc) as u64;
         self.push_kinded(bits, NativeKind::Ptr(HeapKind::Reference))
+    }
+
+    /// ADR-006 §2.7.30 (R3): build an owning `RefTarget::PromotedCell` from
+    /// a referent slot whose bits are `Arc::into_raw(Arc<SharedCell>)` (the
+    /// R2 `SharedCow` promotion of a flipped-floor reference escape).
+    ///
+    /// Clones ONE strong-count share out of the slot bits via
+    /// `Arc::increment_strong_count` + `Arc::from_raw` (the def-site slot
+    /// keeps its own share). The owning share is what keeps the referent
+    /// alive past lexical frame-pop. Projected kind is the cell's interior
+    /// value kind (`cell.kind()` — §2.7.8 lockstep companion), NOT the
+    /// `SharedCell` pointer kind.
+    fn make_promoted_cell_ref(&self, cell_bits: u64) -> shape_value::RefTarget {
+        use shape_value::v2::closure_layout::SharedCell;
+        let raw = cell_bits as *const SharedCell;
+        // SAFETY: kind == Ptr(HeapKind::SharedCell) guarantees `cell_bits`
+        // is a live `Arc::into_raw(Arc<SharedCell>)` pointer. Bump the
+        // strong count, then reconstruct an owning `Arc<SharedCell>` — the
+        // increment balances the `from_raw` so the def-site slot retains its
+        // original share. This is the cluster-1.5 share-accounting pattern:
+        // explicit retain before claim (§2.7.30.2).
+        let cell = unsafe {
+            std::sync::Arc::increment_strong_count(raw);
+            std::sync::Arc::from_raw(raw)
+        };
+        let kind = cell.kind();
+        shape_value::RefTarget::PromotedCell { cell, kind }
     }
 
     /// `MakeFieldRef { Operand::TypedField{type_id, field_idx,
@@ -2949,6 +2995,24 @@ impl VirtualMachine {
                 }
                 Ok(TypedObjectPtr::new(ptr))
             }
+            // ADR-006 §2.7.30 (R3): a promoted referent that is itself a
+            // TypedObject. The cell's interior bits are the v2-raw `_new`
+            // `*const TypedObjectStorage`; retain the on-header refcount to
+            // hand back an independent share (the cell retains its own).
+            shape_value::RefTarget::PromotedCell { cell, kind } => {
+                if *kind != NativeKind::Ptr(HeapKind::TypedObject) {
+                    return Err(VMError::RuntimeError(format!(
+                        "MakeFieldRef base (promoted) must reference a TypedObject; got {:?}",
+                        kind
+                    )));
+                }
+                let bits = *cell.lock();
+                let ptr = bits as *const TypedObjectStorage;
+                unsafe {
+                    shape_value::v2::refcount::v2_retain(&(*ptr).header);
+                }
+                Ok(TypedObjectPtr::new(ptr))
+            }
             // V3-S5 ckpt-6 STRICT close (2026-05-15):
             // `RefTarget::TypedIndex { .. }` arm DELETED in lockstep with
             // the variant retirement at `shape-value/src/reference.rs`
@@ -3008,6 +3072,16 @@ impl VirtualMachine {
                 kind,
             } => {
                 let bits = receiver.slots[*field_offset as usize].raw();
+                Ok((bits, *kind))
+            }
+            // ADR-006 §2.7.30 (R3): read the promoted referent through the
+            // owning cell. The owning `Arc<SharedCell>` share guarantees the
+            // cell (and its interior value) outlives this read regardless of
+            // whether the def-site frame has popped. Returns borrowed bits;
+            // the caller `clone_with_kind`s before pushing per the helper
+            // contract.
+            shape_value::RefTarget::PromotedCell { cell, kind } => {
+                let bits = *cell.lock();
                 Ok((bits, *kind))
             }
             // V3-S5 ckpt-5: `RefTarget::TypedIndex` arm deleted (variant
@@ -3142,6 +3216,29 @@ impl VirtualMachine {
                     "DerefStore: write_slot_in_place prior_bits mismatch — \
                      concurrent write detected? ADR-006 §2.7.13 / Q14",
                 );
+                // Release the prior occupant's share via the kind-aware
+                // dispatch table (§2.7.7 WB2.4).
+                crate::executor::vm_impl::stack::drop_with_kind(
+                    prior_bits, *kind,
+                );
+                Ok(())
+            }
+            // ADR-006 §2.7.30 (R3): write the new occupant through the owning
+            // cell, releasing the prior occupant's share. The cell's `kind`
+            // companion is invariant for the cell's lifetime (§2.7.8 lockstep)
+            // and equals the ref's captured projected kind by construction.
+            shape_value::RefTarget::PromotedCell { cell, kind } => {
+                debug_assert_eq!(
+                    cell.kind(), *kind,
+                    "DerefStore: promoted-cell kind drift (cell {:?}, ref {:?}) \
+                     — ADR-006 §2.7.30",
+                    cell.kind(), kind
+                );
+                let mut guard = cell.lock();
+                let prior_bits = *guard;
+                write_barrier_slot(prior_bits, val_bits);
+                *guard = val_bits;
+                drop(guard);
                 // Release the prior occupant's share via the kind-aware
                 // dispatch table (§2.7.7 WB2.4).
                 crate::executor::vm_impl::stack::drop_with_kind(

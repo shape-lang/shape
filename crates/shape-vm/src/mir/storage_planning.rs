@@ -105,6 +105,15 @@ pub struct StoragePlan {
     /// recorded so the specialization pass can activate without re-running
     /// escape analysis.
     pub non_escaping_closure_slots: HashSet<SlotId>,
+    /// ADR-006 §2.7.30 (R2/R3): referent slots promoted to `SharedCow` because
+    /// a reference escapes them via a flipped FLOOR sink (`ReturnSlot` /
+    /// `ModuleBindingStore`). The bytecode compiler reads this set at the
+    /// let/const def-site to emit `AllocSharedLocal` for the referent so the
+    /// `PromotedCell` owning carrier (R3) keeps it alive past frame-pop. This
+    /// is the SINK-DISCRIMINATED gate — `SharedCow` alone is insufficient (a
+    /// `var` binding is also `SharedCow` but must NOT get the def-site cell
+    /// for a reference escape it never had).
+    pub reference_escape_promotion_slots: HashSet<SlotId>,
 }
 
 /// Input bundle for the storage planner.
@@ -310,6 +319,7 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
             slot_semantics,
             inline_array_sizes: HashMap::new(),
             non_escaping_closure_slots: HashSet::new(),
+            reference_escape_promotion_slots: HashSet::new(),
         };
     }
 
@@ -360,11 +370,31 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
         &mut slot_semantics,
     );
 
+    // ADR-006 §2.7.30 (R2/R3): record the sink-discriminated reference-escape
+    // promotion slots so the bytecode compiler can emit the def-site
+    // `AllocSharedLocal`. Only slots that BOTH appear in the promotion list
+    // AND landed on `SharedCow` (decide_slot_storage Rule 3c) are recorded —
+    // a promotion whose slot was already aliased/captured into a different
+    // class is not double-promoted.
+    let reference_escape_promotion_slots: HashSet<SlotId> = input
+        .analysis
+        .reference_escape_promotions
+        .iter()
+        .map(|t| t.referent_local)
+        .filter(|slot| {
+            matches!(
+                slot_classes.get(slot),
+                Some(BindingStorageClass::SharedCow)
+            )
+        })
+        .collect();
+
     StoragePlan {
         slot_classes,
         slot_semantics,
         inline_array_sizes,
         non_escaping_closure_slots,
+        reference_escape_promotion_slots,
     }
 }
 
@@ -956,6 +986,26 @@ fn decide_slot_storage(
     } else if is_escaped && is_aliased && is_mutated {
         // Rule 3b: Escaped mutable aliased bindings → SharedCow.
         // Even non-Flexible bindings need COW when they escape with aliasing.
+        BindingStorageClass::SharedCow
+    } else if input
+        .analysis
+        .reference_escape_promotions
+        .iter()
+        .any(|t| t.referent_local == slot)
+    {
+        // Rule 3c (ADR-006 §2.7.30, R2): reference-escape→RC promotion — the
+        // fourth escape→RC trigger. The solver flagged this slot as the
+        // referent of a reference that escapes via a flipped FLOOR sink
+        // (`ReturnSlot` / `ModuleBindingStore`). Promote to a `SharedCow` RC'd
+        // `SharedCell` so the escaping reference's `PromotedCell` carrier owns
+        // a share that keeps the referent alive past lexical frame-pop. Both
+        // floor sinks promote to `SharedCow` (ReturnSlot must NOT be Box/
+        // UniqueHeap — see R3: the binding-ownership-drop early-out keys on
+        // slot_is_shared, so a Box would re-introduce the def-site free → the
+        // round-1 dangle). Gated STRICTLY on the sink-discriminated promotion
+        // list — NOT the sink-blind `detect_escape_status`, which would admit
+        // a B0004 container referent (it counts `Rvalue::Aggregate [&x]` as
+        // return-flow).
         BindingStorageClass::SharedCow
     } else {
         // Rule 4: Captured by closure (immutably) — still Direct.

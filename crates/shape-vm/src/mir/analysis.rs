@@ -63,6 +63,22 @@ pub enum LoanSinkKind {
     ModuleBindingStore,
 }
 
+/// ADR-006 §2.7.30 (R2): a sink-discriminated reference-escape promotion
+/// request. Derived by the solver ONLY for the two flipped floor sinks
+/// (`ReturnSlot` + `ModuleBindingStore`); every other sink keeps emitting its
+/// B0003/B0004/B0006/B0012 reject. The storage planner promotes the referent
+/// slot named by `referent_local` to a `SharedCow` (RC'd `SharedCell`) so the
+/// escaping reference's owning `PromotedCell` carrier keeps the referent alive
+/// past frame-pop. The flip set is EXACTLY these two sinks — widening requires
+/// a further ADR amendment (§2.7.30.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PromotionTrigger {
+    /// The referent slot to promote (the root local being borrowed).
+    pub referent_local: SlotId,
+    /// Which flipped floor sink requested the promotion.
+    pub sink_kind: LoanSinkKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LoanSink {
     pub loan_id: u32,
@@ -93,6 +109,12 @@ pub struct BorrowAnalysis {
     /// projection), records which parameter flows out and whether it is
     /// shared/exclusive.
     pub return_reference_summary: Option<ReturnReferenceSummary>,
+    /// ADR-006 §2.7.30 (R2): sink-discriminated reference-escape promotions.
+    /// One entry per loan that escapes via a flipped floor sink (`ReturnSlot`
+    /// or `ModuleBindingStore`); the named referent slot is promoted to a
+    /// `SharedCow` RC'd cell so the `PromotedCell` carrier can outlive the
+    /// referent's lexical frame. Every other sink keeps rejecting (B0003/etc).
+    pub reference_escape_promotions: Vec<PromotionTrigger>,
 }
 
 /// Information about a single loan (borrow).
@@ -419,6 +441,7 @@ impl BorrowAnalysis {
             ownership_decisions: HashMap::new(),
             mutability_errors: Vec::new(),
             return_reference_summary: None,
+            reference_escape_promotions: Vec::new(),
         }
     }
 
