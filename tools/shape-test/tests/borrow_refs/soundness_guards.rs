@@ -9,13 +9,15 @@ use shape_test::shape_test::ShapeTest;
 // FIRES at run-level. A regression that silently admits one of these escapes is
 // a soundness hole; this module is the tripwire.
 //
-// NOTE (run-verified 2026-06-03): at branch HEAD the flip is NOT yet
-// run-observable — the parallel `escaped_loans` B0003 reject (solver.rs:1147)
-// fires alongside the §2.7.30 promotion derivation, and `-> &int` return-type
-// unification rejects `return &x`. So the two "flipped" sinks STILL reject too.
-// That is a SURFACE on the keystone (the promotion is dead-derived), tracked in
-// docs/cluster-audits/. It does NOT weaken these guards — it strengthens them:
-// no reference-escape is currently admitted, so no UAF is reachable.
+// NOTE (FlipLive, 2026-06-03): the flip is now run-observable. The parallel
+// `escaped_loans` B0003 reject (solver.rs) is suppressed for EXACTLY the two
+// promoted floor sinks via a `(loan_id, span)` match, and `&expr` infers to
+// `&T` so `-> &int` return-type unification succeeds (Borrow-vs-Borrow). The two
+// flipped sinks ({ReturnSlot, ModuleBindingStore}) now COMPILE + RUN; every
+// OTHER reference-escape below STILL hard-rejects. A referent that is BOTH
+// returned AND stored into an escaping container still rejects via the container
+// store's own (different-span) `loan_sinks` entry — the suppression cannot reach
+// it.
 // =============================================================================
 
 // B0004 — `&x` stored into an Array that escapes -> ReferenceStoredInArray.
@@ -110,45 +112,51 @@ fn guard_b0001_double_exclusive_same_referent_rejects() {
     .expect_run_err_contains("B0013");
 }
 
-// Flipped-sink CURRENT-STATE lock (ModuleBindingStore): `let r = &x` at module
-// scope still rejects at HEAD (parallel escaped_loans reject; promotion derived
-// but not run-observable). Locks the current behavior so the keystone's
-// suppression-landing flips this test deliberately (red->green) rather than
-// silently.
+// Flipped-sink FLIP lock (ModuleBindingStore): `let r = &x` at module scope now
+// COMPILES + RUNS via the §2.7.30 ModuleBindingStore floor sink. `x` is itself a
+// program-lifetime module binding, so the reference (a `RefTarget::ModuleBinding`
+// carrier) reads through to `5` and outlives every reference to it — the floor
+// case where escape→RC promotion is unconditionally sound. FlipLive flipped this
+// test red->green deliberately.
 #[test]
-fn flipped_sink_module_binding_still_rejects_at_head() {
+fn flipped_sink_module_binding_reads_through() {
     ShapeTest::new(
         r#"
         let x = 5
         let r = &x
+        print(r)
     "#,
     )
-    .expect_run_err_contains("B0003");
+    .expect_output_contains("5");
 }
 
-// Flipped-sink CURRENT-STATE lock (ReturnSlot, bare return): `return &x` from an
-// un-annotated fn still rejects at HEAD via the same parallel reject.
+// Flipped-sink FLIP lock (ReturnSlot, bare return): `return &x` from an
+// un-annotated fn now compiles + runs via the ReturnSlot floor sink (the parallel
+// `escaped_loans` B0003 reject is suppressed for EXACTLY this promoted sink).
 #[test]
-fn flipped_sink_return_ref_still_rejects_at_head() {
+fn flipped_sink_return_ref_compiles_and_runs() {
     ShapeTest::new(
         r#"
-        fn f() {
+        fn f() -> &int {
             let x = 5
             return &x
         }
         f()
+        print("ok")
     "#,
     )
-    .expect_run_err_contains("cannot return or store a reference");
+    .expect_output_contains("ok");
 }
 
-// UAF-probe boundary: the §2.7.30 round-1 UAF shape `fn make() -> &int { let
-// x = 5; return &x }` is NOT yet expressible end-to-end — `&int`-typed return
-// expressions fail unification (`int is not compatible with &int`) before any
-// PromotedCell is built. No live PromotedCell => no UAF reachable. This locks
-// that the carrier is unreachable at HEAD (the keystone makes it reachable).
+// UAF-probe on a LIVE PromotedCell: the §2.7.30 round-1 shape
+// `fn make() -> &int { let x = 5; return &x }` is now expressible end-to-end.
+// `&x` infers to `&int` and unifies against the `-> &int` annotation (Borrow-vs-
+// Borrow), the ReturnSlot floor sink promotes the referent to a `SharedCow`
+// PromotedCell, and reading the returned reference after the def-site frame has
+// popped reads the live value `5` through the owning `Arc<SharedCell>` share — NO
+// use-after-free (the owning share keeps the referent alive past frame-pop).
 #[test]
-fn uaf_probe_typed_return_ref_not_yet_expressible() {
+fn uaf_probe_typed_return_ref_reads_live_promoted_cell() {
     ShapeTest::new(
         r#"
         fn make() -> &int {
@@ -156,8 +164,8 @@ fn uaf_probe_typed_return_ref_not_yet_expressible() {
             return &x
         }
         let r = make()
-        r
+        print(r)
     "#,
     )
-    .expect_run_err_contains("&int");
+    .expect_run_ok();
 }

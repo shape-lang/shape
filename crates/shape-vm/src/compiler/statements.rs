@@ -799,7 +799,21 @@ impl BytecodeCompiler {
                     // claim "MIR is the sole authority" only holds inside
                     // function bodies; module-scope top-level statements
                     // need a dedicated guard.
-                    if ref_borrow.is_some() {
+                    //
+                    // ADR-006 §2.7.30 (FlipLive): the guard now flips for the
+                    // EXACT `ModuleBindingStore` floor sink — `let r = &x`
+                    // where `x` is itself a program-lifetime module binding.
+                    // Such a referent outlives every reference to it, so the
+                    // escape→RC promotion is unconditionally sound and the
+                    // binding compiles + reads through the `RefTarget::
+                    // ModuleBinding` carrier. Any OTHER reference escape
+                    // (referent rooted at a local, etc.) is NOT a floor sink
+                    // and still rejects with B0003.
+                    let referent_is_module_floor = var_decl
+                        .value
+                        .as_ref()
+                        .is_some_and(|expr| self.reference_root_is_module_binding(expr));
+                    if ref_borrow.is_some() && !referent_is_module_floor {
                         return Err(ShapeError::SemanticError {
                             message:
                                 "[B0003] cannot return or store a reference that outlives its owner"
@@ -961,7 +975,13 @@ impl BytecodeCompiler {
                         self.pending_variable_typed_array_kind =
                             saved_pending_variable_typed_array_kind;
                         ref_borrow = compile_result?;
-                        if ref_borrow.is_some() {
+                        // ADR-006 §2.7.30 (FlipLive): flip EXACTLY the
+                        // `ModuleBindingStore` floor sink — `pub let r = &x`
+                        // where `x` is a program-lifetime module binding.
+                        // Same scoping predicate as the non-export site above.
+                        let referent_is_module_floor =
+                            self.reference_root_is_module_binding(init_expr);
+                        if ref_borrow.is_some() && !referent_is_module_floor {
                             return Err(ShapeError::SemanticError {
                                 message:
                                     "[B0003] cannot return or store a reference that outlives its owner"
@@ -4569,6 +4589,27 @@ impl BytecodeCompiler {
         match stmt {
             Statement::Return(expr_opt, _span) => {
                 if let Some(expr) = expr_opt {
+                    // ADR-006 §2.7.30 (FlipLive): the `return &local` floor
+                    // promotion is admitted ONLY under a `&T` return contract.
+                    // An UNANNOTATED `return &local` (no `-> &T`, and not a
+                    // safe param-reborrow which sets the return-reference
+                    // summary) does NOT build a sound PromotedCell carrier on
+                    // the return path — the raw ref bits would escape without
+                    // an owning carrier (dangling ref / UAF). Keep rejecting it
+                    // with B0003. The annotated `-> &T` form (carrier built)
+                    // and the param-reborrow form (summary set) both fall
+                    // through and compile.
+                    if matches!(expr, shape_ast::ast::Expr::Reference { .. })
+                        && self.current_function_return_reference_summary.is_none()
+                        && !self.current_function_returns_borrow
+                    {
+                        return Err(ShapeError::SemanticError {
+                            message:
+                                "[B0003] cannot return or store a reference that outlives its owner"
+                                    .to_string(),
+                            location: Some(self.span_to_source_location(expr.span())),
+                        });
+                    }
                     self.plan_flexible_binding_escape_from_expr(expr);
                     // Phase F: when the returned expression is a closure
                     // literal, the closure escapes by definition (it is
@@ -4864,7 +4905,18 @@ impl BytecodeCompiler {
                         // this on the basis that "MIR is the sole
                         // authority" — but MIR never sees module-scope
                         // statements.
-                        if ref_borrow.is_some() {
+                        //
+                        // ADR-006 §2.7.30 (FlipLive): flip EXACTLY the
+                        // `ModuleBindingStore` floor sink — a top-level
+                        // `let r = &x` where `x` is a program-lifetime module
+                        // binding. Same scoping predicate as the
+                        // `Item::VariableDecl` sites; non-floor escapes
+                        // (referent rooted at a local) still reject.
+                        let referent_is_module_floor = var_decl
+                            .value
+                            .as_ref()
+                            .is_some_and(|expr| self.reference_root_is_module_binding(expr));
+                        if ref_borrow.is_some() && !referent_is_module_floor {
                             return Err(ShapeError::SemanticError {
                                 message:
                                     "[B0003] cannot return or store a reference that outlives its owner"

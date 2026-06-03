@@ -60,6 +60,7 @@ impl BytecodeCompiler {
             dyn_module_bindings: HashMap::new(),
             function_return_reference_summaries: HashMap::new(),
             current_function_return_reference_summary: None,
+            current_function_returns_borrow: false,
             type_inference: shape_runtime::type_system::inference::TypeInferenceEngine::new(),
             type_aliases: HashMap::new(),
             current_line: 1,

@@ -324,16 +324,21 @@ fn test_ref_chain_through_three_functions() {
     .expect_number(4.0);
 }
 
+// FlipLive (ADR-006 §2.7.30): a module-scope `let r = &x` where `x` is itself a
+// program-lifetime module binding now COMPILES + reads through the
+// `ModuleBindingStore` floor sink (the referent outlives every reference to it).
+// Renamed from `test_ref_not_allowed_in_let_binding` — the flip deliberately
+// turns this red->green.
 #[test]
-fn test_ref_not_allowed_in_let_binding() {
+fn ref_in_module_let_binding_reads_through() {
     ShapeTest::new(
         r#"
         let x = 5
         let r = &x
-        r
+        print(r)
     "#,
     )
-    .expect_run_err_contains("B0003");
+    .expect_output_contains("5");
 }
 
 #[test]

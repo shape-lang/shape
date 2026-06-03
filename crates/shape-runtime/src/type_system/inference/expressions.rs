@@ -1599,8 +1599,34 @@ impl TypeInferenceEngine {
                 Ok(Type::Concrete(TypeAnnotation::Void))
             }
 
-            // Reference expression - infer the inner expression type
-            Expr::Reference { expr: inner, .. } => self.infer_expr(inner),
+            // Reference expression (R1/GAP-2): `&expr` / `&mut expr`.
+            // `&expr` where `expr: T` is typed as `&T`
+            // (`Type::Concrete(Borrow { mutable, inner: T })`), NOT as the bare
+            // referent `T`. This lets a `-> &int` return annotation unify
+            // against the inferred `&int` (Borrow-vs-Borrow recursion in
+            // `annotations_equal`) instead of reporting "int is not compatible
+            // with &int". The inner type is resolved through substitutions; if
+            // it is still an unresolved variable (no annotation), fall back to
+            // the bare inner type rather than fabricating a kind.
+            Expr::Reference {
+                expr: inner,
+                is_mutable,
+                ..
+            } => {
+                let inner_ty = self.infer_expr(inner)?;
+                let resolved_inner = self.unifier.apply_substitutions(&inner_ty);
+                match resolved_inner.to_annotation() {
+                    Some(inner_ann) => Ok(Type::Concrete(TypeAnnotation::Borrow {
+                        mutable: *is_mutable,
+                        inner: Box::new(inner_ann),
+                    })),
+                    // Inner type not yet known concretely — cannot build a
+                    // Borrow annotation. Keep the bare inner type (honest
+                    // "not inferred"); a later pass / explicit annotation
+                    // resolves it. No Bool-default, no fabricated kind.
+                    None => Ok(inner_ty),
+                }
+            }
         }
     }
 

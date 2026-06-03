@@ -589,6 +589,26 @@ impl TypeInferenceEngine {
                 }
                 _ => self.infer_expr(arg)?,
             };
+            // GAP-2 boundary: in pass-by-reference ARGUMENT position, `&x` is the
+            // by-reference call mechanism, NOT a `&T` Borrow value. The call-shape
+            // constraint + `propagate_ref_arg_param_types` both expect the
+            // REFERENT type here (`fn triple(&x) { x = x * 3 }` requires `x: int`
+            // from the `triple(&val)` site, not `&int`). The standalone
+            // `Expr::Reference` inference correctly yields `&T` (needed for
+            // `-> &T` return unification); we unwrap that Borrow back to its
+            // referent for argument flow only. `&mut` unwraps identically — the
+            // mutability lives in the param's `is_reference`/`is_mut_reference`
+            // flags, not the arg type.
+            let arg_type = if matches!(arg, Expr::Reference { .. }) {
+                match self.unifier.apply_substitutions(&arg_type) {
+                    Type::Concrete(TypeAnnotation::Borrow { inner, .. }) => {
+                        Type::Concrete(*inner)
+                    }
+                    other => other,
+                }
+            } else {
+                arg_type
+            };
             arg_types.push(arg_type);
         }
 

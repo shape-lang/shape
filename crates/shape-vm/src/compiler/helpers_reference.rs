@@ -491,6 +491,52 @@ impl BytecodeCompiler {
             || self.exclusive_reference_value_locals.contains(&slot)
     }
 
+    /// ADR-006 §2.7.30 (R2/FlipLive): is `expr` a `&place` / `&mut place`
+    /// whose referent ROOT resolves to a program-lifetime MODULE BINDING
+    /// (never an enclosing-frame local)?
+    ///
+    /// Used to scope the module-scope `let r = &x` flip EXACTLY to the
+    /// `ModuleBindingStore` floor sink. At module top-level, `x` is itself a
+    /// module binding with program lifetime, so `&x` references a slot that
+    /// outlives every reference to it — the §2.7.30 floor case where escape→RC
+    /// promotion is unconditionally sound. A reference rooted at anything that
+    /// resolves as a LOCAL (a real enclosing-frame slot) is NOT a floor sink
+    /// and is rejected by the caller (keeps B0003). A non-place referent
+    /// (`&foo()`) is already rejected earlier by `compile_reference_expr`.
+    ///
+    /// Soundness scope (CLAUDE.md §Forbidden + §2.7.30.7): this predicate is
+    /// the sole gate for suppressing the module-scope B0003 narrow guard. It
+    /// returns true ONLY when the root identifier resolves to a module binding
+    /// AND does NOT resolve to a local — so a closure-captured / container /
+    /// task escape of a transient local cannot match (those roots resolve as
+    /// locals, or are not `&place` at all).
+    pub(super) fn reference_root_is_module_binding(&self, expr: &Expr) -> bool {
+        let Expr::Reference { expr: inner, .. } = expr else {
+            return false;
+        };
+        // Walk the place chain (`x`, `obj.field`, `arr[i]`) to its root
+        // identifier.
+        let mut cursor: &Expr = inner;
+        loop {
+            match cursor {
+                Expr::Identifier(name, _) | Expr::PatternRef(name, _) => {
+                    // A root that resolves as a LOCAL is an enclosing-frame
+                    // slot — NOT the program-lifetime module floor sink.
+                    if self.resolve_local(name).is_some() {
+                        return false;
+                    }
+                    return self
+                        .resolve_scoped_module_binding_name(name)
+                        .and_then(|scoped| self.module_bindings.get(&scoped).copied())
+                        .is_some();
+                }
+                Expr::PropertyAccess { object, .. } => cursor = object,
+                Expr::IndexAccess { object, .. } => cursor = object,
+                _ => return false,
+            }
+        }
+    }
+
     fn track_reference_binding_slot(&mut self, _slot: u16, _is_local: bool) {
         // Lexical reference tracking removed — MIR borrow checker is sole authority.
     }

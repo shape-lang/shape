@@ -563,6 +563,26 @@ impl ConstraintSolver {
                 Ok(names_match || Self::annotations_same_numeric(ann1, ann2))
             }
 
+            // Borrow types (R1/GAP-2): `&T` / `&mut T`. A distinct constructor:
+            // never unwrapped on one side (a bare `int` does NOT unify with
+            // `&int`, which keeps the value/reference distinction intact).
+            // Mutability must match exactly, and the inner annotation must be
+            // structurally equal — references do NOT participate in the §2
+            // numeric-widening lattice (`&int` is not a `&number`), so the
+            // inner is compared via exact `annotations_equal`, mirroring the
+            // unifier's `try_unify` Borrow path.
+            (
+                TypeAnnotation::Borrow {
+                    mutable: m1,
+                    inner: i1,
+                },
+                TypeAnnotation::Borrow {
+                    mutable: m2,
+                    inner: i2,
+                },
+            ) => Ok(m1 == m2
+                && crate::type_system::unification::annotations_equal(i1, i2)),
+
             // Array types
             (TypeAnnotation::Array(e1), TypeAnnotation::Array(e2)) => {
                 self.unify_annotations(e1, e2)

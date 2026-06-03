@@ -1370,6 +1370,16 @@ impl BytecodeCompiler {
             .function_return_reference_summaries
             .get(&func_def.name)
             .cloned();
+        // ADR-006 §2.7.30 (FlipLive): record whether this function declares a
+        // `&T` / `&mut T` return so the `Statement::Return` + implicit-return
+        // sites can admit the `return &local` floor promotion ONLY under the
+        // reference-return contract (an unannotated `return &local` keeps
+        // rejecting — see the guard in `statements.rs`).
+        let saved_current_function_returns_borrow = self.current_function_returns_borrow;
+        self.current_function_returns_borrow = matches!(
+            func_def.return_type,
+            Some(shape_ast::ast::TypeAnnotation::Borrow { .. })
+        );
 
         // If this is a `comptime fn`, mark the compilation context as comptime
         // so that calls to other `comptime fn` functions within the body are allowed.
@@ -1750,6 +1760,22 @@ impl BytecodeCompiler {
             if is_last {
                 match stmt {
                     Statement::Expression(expr, _) => {
+                        // ADR-006 §2.7.30 (FlipLive): same guard as the
+                        // `Statement::Return` site — an UNANNOTATED implicit
+                        // `&local` tail-return (no `-> &T`, no param-reborrow
+                        // summary) does not build a sound carrier; reject B0003.
+                        if matches!(expr, shape_ast::ast::Expr::Reference { .. })
+                            && self.current_function_return_reference_summary.is_none()
+                            && !self.current_function_returns_borrow
+                        {
+                            use shape_ast::ast::Spanned as _;
+                            return Err(ShapeError::SemanticError {
+                                message:
+                                    "[B0003] cannot return or store a reference that outlives its owner"
+                                        .to_string(),
+                                location: Some(self.span_to_source_location(expr.span())),
+                            });
+                        }
                         // Compile expression and keep value on stack for implicit return.
                         if self.current_function_return_reference_summary.is_some() {
                             self.compile_expr_preserving_refs(expr)?;
@@ -1824,6 +1850,8 @@ impl BytecodeCompiler {
                         self.comptime_mode = saved_comptime_mode;
                         self.current_function_return_reference_summary =
                             saved_current_function_return_reference_summary;
+                        self.current_function_returns_borrow =
+                            saved_current_function_returns_borrow;
                         // WS-1b: surface-and-stop any unresolved empty-array
                         // accumulator, then restore the caller's maps.
                         let acc_result =
@@ -1945,6 +1973,7 @@ impl BytecodeCompiler {
         self.comptime_mode = saved_comptime_mode;
         self.current_function_return_reference_summary =
             saved_current_function_return_reference_summary;
+        self.current_function_returns_borrow = saved_current_function_returns_borrow;
 
         // WS-1b: surface-and-stop any unresolved empty-array accumulator,
         // then restore the caller's maps.

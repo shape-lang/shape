@@ -792,6 +792,17 @@ pub struct BytecodeCompiler {
     /// The return-reference summary of the function currently being compiled, if any.
     pub(crate) current_function_return_reference_summary: Option<FunctionReturnReferenceSummary>,
 
+    /// ADR-006 §2.7.30 (FlipLive): true iff the function currently being
+    /// compiled declares a `&T` / `&mut T` (Borrow) RETURN type. The
+    /// reference-escape→RC promotion floor (`return &local`) is admitted ONLY
+    /// when the function expresses this reference-return contract — the
+    /// `-> &T` annotation is what drives the sound PromotedCell carrier on the
+    /// return path. An UNANNOTATED `return &local` does NOT promote soundly
+    /// (the raw ref bits escape without an owning carrier → dangling ref /
+    /// UAF), so it keeps its B0003 reject via the compiler guard at the
+    /// `Statement::Return` + implicit-return sites.
+    pub(crate) current_function_returns_borrow: bool,
+
     /// Type inference engine for match exhaustiveness and type checking
     pub(crate) type_inference: shape_runtime::type_system::inference::TypeInferenceEngine,
 

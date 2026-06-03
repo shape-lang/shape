@@ -70,6 +70,22 @@ pub fn annotations_equal(a: &TypeAnnotation, b: &TypeAnnotation) -> bool {
         // Reference types
         (TypeAnnotation::Reference(n1), TypeAnnotation::Reference(n2)) => n1 == n2,
 
+        // Borrow types (R1/GAP-2): `&T` / `&mut T`. A distinct constructor —
+        // never unwrapped on one side. Match the mutability flag and recurse on
+        // the inner annotation so `&int` matches `&int` but NOT `&number` /
+        // bare `int`. Value-level int != number etc. stays intact because the
+        // recursion bottoms out in the existing Basic arm.
+        (
+            TypeAnnotation::Borrow {
+                mutable: m1,
+                inner: i1,
+            },
+            TypeAnnotation::Borrow {
+                mutable: m2,
+                inner: i2,
+            },
+        ) => m1 == m2 && annotations_equal(i1, i2),
+
         // Array types
         (TypeAnnotation::Array(e1), TypeAnnotation::Array(e2)) => annotations_equal(e1, e2),
 
