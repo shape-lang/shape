@@ -834,7 +834,8 @@ primary_type = {
 }
 
 non_array_type = {
-    tuple_type
+    reference_type
+    | tuple_type
     | object_type
     | function_type
     | dyn_type
@@ -844,6 +845,14 @@ non_array_type = {
     | unit_type
     | "(" ~ type_annotation ~ ")"
 }
+
+// Reference type in type position: `&T`, `&mut T`.
+// Placed before basic_type/generic_type so `&Foo` does not bind `Foo` alone.
+// Orthogonal to param_ref_keyword (the NAME modifier `fn f(&x: T)`).
+// `param_mut_keyword` is atomic (`@`), so the `mut`/identifier boundary
+// check happens before whitespace is skipped — a bare `"mut" ~ !(..)`
+// here would let `~` consume the space and false-fail on `&mut int`.
+reference_type = { "&" ~ param_mut_keyword? ~ primary_type }
 
 unit_type = { "(" ~ ")" }
 

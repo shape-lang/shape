@@ -1133,6 +1133,9 @@ fn annotation_mentions_outside_closure_position(
     match annotation {
         TypeAnnotation::Basic(name) => name.as_str() == generic,
         TypeAnnotation::Reference(path) => path.as_str() == generic,
+        TypeAnnotation::Borrow { inner, .. } => {
+            annotation_mentions_outside_closure_position(inner, generic)
+        }
         TypeAnnotation::Array(inner) => {
             annotation_mentions_outside_closure_position(inner, generic)
         }
@@ -1327,6 +1330,7 @@ fn annotation_mentions_any(annotation: &TypeAnnotation, generics: &[&str]) -> bo
     match annotation {
         TypeAnnotation::Basic(name) => generics.iter().any(|g| *g == name.as_str()),
         TypeAnnotation::Reference(path) => generics.iter().any(|g| *g == path.as_str()),
+        TypeAnnotation::Borrow { inner, .. } => annotation_mentions_any(inner, generics),
         TypeAnnotation::Array(inner) => annotation_mentions_any(inner, generics),
         TypeAnnotation::Tuple(items) => items.iter().any(|t| annotation_mentions_any(t, generics)),
         TypeAnnotation::Generic { args, .. } => {
@@ -1440,6 +1444,13 @@ fn unify_annotation_with_concrete(
             // `resolve_call_site_type_args` will still bail if no parameter
             // ever bound a required generic.
             true
+        }
+        // A borrow `&T` / `&mut T` (R1) unwraps transparently to its
+        // referent for monomorphization — references carry no distinct
+        // `ConcreteType` carrier, so unify the inner annotation against the
+        // actual value (a `&T` param bound by a `T`-typed arg binds `T`).
+        TypeAnnotation::Borrow { inner, .. } => {
+            unify_annotation_with_concrete(inner, actual, generics, bindings)
         }
         TypeAnnotation::Object(_)
         | TypeAnnotation::Union(_)

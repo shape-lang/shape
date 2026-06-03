@@ -109,6 +109,11 @@ impl Unifier {
             };
         }
         match ann {
+            TypeAnnotation::Borrow { mutable, inner } => TypeAnnotation::Borrow {
+                mutable: *mutable,
+                inner: Box::new(self.apply_to_annotation(inner)),
+            },
+
             TypeAnnotation::Array(elem) => {
                 TypeAnnotation::Array(Box::new(self.apply_to_annotation(elem)))
             }

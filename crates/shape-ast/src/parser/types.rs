@@ -96,6 +96,27 @@ pub fn parse_type_annotation(pair: Pair<Rule>) -> Result<TypeAnnotation> {
             }
             parse_type_annotation(inner_pair)
         }
+        Rule::reference_type => {
+            // `&T` / `&mut T`. Inner pairs: an optional `param_mut_keyword`
+            // followed by the `primary_type` referent. Mutability is driven
+            // by the presence of the `param_mut_keyword` pair, not raw text.
+            let mut mutable = false;
+            let mut inner_ty = None;
+            for child in pair.clone().into_inner() {
+                match child.as_rule() {
+                    Rule::param_mut_keyword => mutable = true,
+                    _ => inner_ty = Some(parse_type_annotation(child)?),
+                }
+            }
+            let inner = inner_ty.ok_or_else(|| ShapeError::ParseError {
+                message: "expected inner type in reference type annotation".to_string(),
+                location: Some(pair_loc),
+            })?;
+            Ok(TypeAnnotation::Borrow {
+                mutable,
+                inner: Box::new(inner),
+            })
+        }
         Rule::basic_type => parse_basic_type(pair.as_str()),
         Rule::tuple_type => {
             let mut members = Vec::new();

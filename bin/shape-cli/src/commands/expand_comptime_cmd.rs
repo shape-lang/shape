@@ -301,6 +301,13 @@ fn format_type_annotation(ta: &TypeAnnotation) -> String {
     match ta {
         TypeAnnotation::Basic(name) => name.clone(),
         TypeAnnotation::Reference(name) => name.to_string(),
+        TypeAnnotation::Borrow { mutable, inner } => {
+            if *mutable {
+                format!("&mut {}", format_type_annotation(inner))
+            } else {
+                format!("&{}", format_type_annotation(inner))
+            }
+        }
         TypeAnnotation::Generic { name, args } => {
             let args = args
                 .iter()

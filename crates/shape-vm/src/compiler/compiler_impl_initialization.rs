@@ -940,7 +940,9 @@ impl BytecodeCompiler {
         match ann {
             TypeAnnotation::Basic(name) => !Self::is_primitive_value_type_name(name),
             TypeAnnotation::Reference(name) => !Self::is_primitive_value_type_name(name),
-            TypeAnnotation::Array(_)
+            // A borrow `&T` / `&mut T` is a pointer carrier — heap-like.
+            TypeAnnotation::Borrow { .. }
+            | TypeAnnotation::Array(_)
             | TypeAnnotation::Tuple(_)
             | TypeAnnotation::Object(_)
             | TypeAnnotation::Function { .. }

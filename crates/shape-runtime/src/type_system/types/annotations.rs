@@ -60,6 +60,13 @@ pub fn annotation_to_string(ann: &TypeAnnotation) -> String {
             .map(annotation_to_string)
             .collect::<Vec<_>>()
             .join(" + "),
+        TypeAnnotation::Borrow { mutable, inner } => {
+            if *mutable {
+                format!("&mut {}", annotation_to_string(inner))
+            } else {
+                format!("&{}", annotation_to_string(inner))
+            }
+        }
         TypeAnnotation::Void => "()".to_string(),
         TypeAnnotation::Never => "never".to_string(),
         TypeAnnotation::Null => "None".to_string(),
@@ -124,6 +131,14 @@ pub fn annotation_to_semantic(ann: &TypeAnnotation) -> SemanticType {
             }
         }
         TypeAnnotation::Reference(name) => scalar_name_to_semantic(name),
+        TypeAnnotation::Borrow { mutable, inner } => {
+            let inner_ty = Box::new(annotation_to_semantic(inner));
+            if *mutable {
+                SemanticType::RefMut(inner_ty)
+            } else {
+                SemanticType::Ref(inner_ty)
+            }
+        }
         TypeAnnotation::Void => SemanticType::Void,
         TypeAnnotation::Never => SemanticType::Never,
         TypeAnnotation::Function { params, returns } => {

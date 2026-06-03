@@ -38,6 +38,15 @@ pub fn type_annotation_to_string(ta: &TypeAnnotation) -> Option<String> {
             type_annotation_to_string(inner).map(|s| format!("{}[]", s))
         }
         TypeAnnotation::Reference(s) => Some(s.to_string()),
+        TypeAnnotation::Borrow { mutable, inner } => {
+            type_annotation_to_string(inner).map(|s| {
+                if *mutable {
+                    format!("&mut {}", s)
+                } else {
+                    format!("&{}", s)
+                }
+            })
+        }
         TypeAnnotation::Generic { name, args } => {
             let arg_strs: Vec<String> = args.iter().filter_map(type_annotation_to_string).collect();
             Some(format!("{}<{}>", name, arg_strs.join(", ")))

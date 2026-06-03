@@ -352,6 +352,9 @@ impl<'a> TokenCollector<'a> {
             TypeAnnotation::Reference(name) => {
                 out.push(name.as_str());
             }
+            TypeAnnotation::Borrow { inner, .. } => {
+                Self::collect_type_annotation_identifiers(inner, out);
+            }
             TypeAnnotation::Generic { name, args } => {
                 out.push(name.as_str());
                 for arg in args {

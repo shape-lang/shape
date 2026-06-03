@@ -419,6 +419,13 @@ fn type_annotation_to_string(ta: &TypeAnnotation) -> String {
     match ta {
         TypeAnnotation::Basic(name) => name.clone(),
         TypeAnnotation::Reference(name) => name.to_string(),
+        TypeAnnotation::Borrow { mutable, inner } => {
+            if *mutable {
+                format!("&mut {}", type_annotation_to_string(inner))
+            } else {
+                format!("&{}", type_annotation_to_string(inner))
+            }
+        }
         TypeAnnotation::Array(inner) => format!("[{}]", type_annotation_to_string(inner)),
         TypeAnnotation::Union(types) => types
             .iter()

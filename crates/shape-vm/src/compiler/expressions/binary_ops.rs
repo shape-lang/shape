@@ -919,6 +919,35 @@ impl BytecodeCompiler {
         }
     }
 
+    /// R4 c6-widen helper. Return the span of a reference-TYPED binop
+    /// operand (one whose inferred type is `&T` / `&mut T`, expressible in
+    /// type position after R1), if either side has such a type. Used by
+    /// `compile_expr_binary_op` to refuse e.g. `make() + 1` where
+    /// `fn make() -> &int`. The syntactic `&x` form is caught separately by
+    /// `reference_operand_span`; this covers the typed form that has no
+    /// immediate `&` token. Returns the operand's own span so the diagnostic
+    /// underlines the offending operand.
+    fn reference_typed_operand_span(&mut self, left: &Expr, right: &Expr) -> Option<Span> {
+        for operand in [left, right] {
+            if self.expr_has_reference_type(operand) {
+                return Some(operand.span());
+            }
+        }
+        None
+    }
+
+    /// True iff the inferred type of `expr` is a borrow (`&T` / `&mut T`).
+    /// The borrow type flows as `Type::Concrete(TypeAnnotation::Borrow{..})`
+    /// (R1) — no parallel `Type` enum variant.
+    fn expr_has_reference_type(&mut self, expr: &Expr) -> bool {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+        matches!(
+            self.infer_expr_type(expr),
+            Ok(Type::Concrete(TypeAnnotation::Borrow { .. }))
+        )
+    }
+
     /// Compile a binary operation expression.
     ///
     /// `op_span` is the source span of the parent `Expr::BinaryOp` node
@@ -958,6 +987,28 @@ impl BytecodeCompiler {
                      references. Hint: dereference the operand with `*ref` to use \
                      its underlying value, or restructure to keep refs out of \
                      binary expressions.",
+                    op
+                ),
+                location: Some(self.span_to_source_location(ref_span)),
+            });
+        }
+        // R4 c6-widen (v0.3.3 strict-flip): the syntactic check above only
+        // catches `&x` operands. Now that `&T` / `&mut T` is expressible in
+        // type position (R1), a reference-TYPED operand — e.g. the result of
+        // `fn make() -> &int { ... }` used as `make() + 1` — must be refused
+        // here too, before any code reaches the JIT `jit_call_method`
+        // misaligned-pointer dispatch. Same diagnostic shape as the
+        // syntactic case; underline the operator span (the typed operand has
+        // no single `&` token to point at).
+        if let Some(ref_span) = self.reference_typed_operand_span(left, right) {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Cannot apply binary operator `{:?}` to a reference-typed \
+                     operand. The operand has a reference (borrow) type `&T` — \
+                     arithmetic, comparison, and other binary operators are not \
+                     defined on references. Hint: dereference the operand with \
+                     `*ref` to use its underlying value, or restructure to keep \
+                     refs out of binary expressions.",
                     op
                 ),
                 location: Some(self.span_to_source_location(ref_span)),
@@ -2914,5 +2965,71 @@ mod ws9c_anonymous_object_factory_tests {
             print(xs)
             "#
         ));
+    }
+}
+
+#[cfg(test)]
+mod r1_r4_reference_type_tests {
+    //! R1 grammar (`&T` / `&mut T` in type position) + R4 c6-widen.
+    //!
+    //! R1: `fn f(x: &int) -> int` and `-> &int` must PARSE (were E0001
+    //! parse errors before the `reference_type` grammar alternative +
+    //! `TypeAnnotation::Borrow` cascade landed).
+    //!
+    //! R4: a reference-TYPED binop operand must be a CLEAN compile-reject
+    //! (an `Err`, never a panic / SIGSEGV) so nothing reaches the JIT
+    //! `jit_call_method::read_heap_kind` misaligned-pointer dispatch. At
+    //! this intermediate stage `return &local` is still B0003-rejected
+    //! (R2 not yet landed), so the reject may surface at inference time;
+    //! the binder is *clean rejection without a crash*, not the specific
+    //! diagnostic.
+    use shape_ast::parser::parse_program;
+
+    #[test]
+    fn r1_reference_param_and_return_type_parse() {
+        // Was E0001 (parse error). After R1 the `&int` param and `&int`
+        // return both parse — `parse_program` returns `Ok`.
+        let code = r#"
+            fn f(x: &int) -> int { 5 }
+            fn g() -> &int { let a = 3; &a }
+            fn main() { print(0) }
+        "#;
+        let parsed = parse_program(code);
+        assert!(
+            parsed.is_ok(),
+            "`&int` in param and return position must PARSE (R1): {:?}",
+            parsed.err()
+        );
+    }
+
+    #[test]
+    fn r1_reference_mut_type_parses() {
+        let code = r#"
+            fn h(x: &mut int) -> int { 7 }
+            fn main() { print(0) }
+        "#;
+        let parsed = parse_program(code);
+        assert!(
+            parsed.is_ok(),
+            "`&mut int` in param position must PARSE (R1): {:?}",
+            parsed.err()
+        );
+    }
+
+    #[test]
+    fn r4_reference_typed_operand_is_clean_compile_reject() {
+        // `x` has reference type `&int`; `x + 1` must be refused at compile
+        // time with a clean `Err` — not a panic, not a crash. (The parse
+        // itself succeeds courtesy of R1.)
+        let code = r#"
+            fn use_ref(x: &int) -> int { x + 1 }
+            fn main() { print(0) }
+        "#;
+        let program = parse_program(code).expect("R1: `&int` param must parse");
+        let result = crate::compiler::BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_err(),
+            "a reference-typed binop operand must be a clean compile-reject (R4)"
+        );
     }
 }

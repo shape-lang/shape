@@ -1020,6 +1020,13 @@ impl TypeInferenceEngine {
         match ann {
             TypeAnnotation::Basic(name) => name.clone(),
             TypeAnnotation::Reference(name) => name.to_string(),
+            TypeAnnotation::Borrow { mutable, inner } => {
+                if *mutable {
+                    format!("&mut {}", self.annotation_name(inner))
+                } else {
+                    format!("&{}", self.annotation_name(inner))
+                }
+            }
             TypeAnnotation::Array(_) => "array".to_string(),
             TypeAnnotation::Object(_) => "object".to_string(),
             TypeAnnotation::Function { .. } => "function".to_string(),
@@ -2141,6 +2148,10 @@ impl TypeInferenceEngine {
             };
         }
         match ann {
+            TypeAnnotation::Borrow { mutable, inner } => TypeAnnotation::Borrow {
+                mutable: *mutable,
+                inner: Box::new(Self::apply_substitutions_to_annotation(inner, substitutions)),
+            },
             TypeAnnotation::Array(elem) => TypeAnnotation::Array(Box::new(
                 Self::apply_substitutions_to_annotation(elem, substitutions),
             )),

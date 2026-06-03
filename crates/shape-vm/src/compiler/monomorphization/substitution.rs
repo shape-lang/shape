@@ -216,6 +216,11 @@ pub fn substitute_type_annotation(
             }
         }
 
+        TypeAnnotation::Borrow { mutable, inner } => TypeAnnotation::Borrow {
+            mutable: *mutable,
+            inner: Box::new(substitute_type_annotation(inner, subs)),
+        },
+
         TypeAnnotation::Array(inner) => {
             TypeAnnotation::Array(Box::new(substitute_type_annotation(inner, subs)))
         }

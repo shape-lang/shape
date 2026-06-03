@@ -5075,6 +5075,12 @@ impl BytecodeCompiler {
                 other => FieldType::Object(other.to_string()),
             },
             TypeAnnotation::Reference(s) => FieldType::Object(s.to_string()),
+            // Borrow `&T` / `&mut T` (R1) — references are not yet valid
+            // struct-field slot storage (escape semantics land in R2/R3).
+            // Intermediate-tier Any with the post_inference_verify E0900
+            // safety net, same disposition as the other non-storage arms
+            // below per audit §4.D.8 explicit-per-variant discipline.
+            TypeAnnotation::Borrow { .. } => FieldType::Any,
             TypeAnnotation::Array(inner) => {
                 FieldType::Array(Box::new(Self::type_annotation_to_field_type(inner)))
             }

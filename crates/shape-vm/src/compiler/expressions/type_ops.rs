@@ -59,6 +59,9 @@ impl BytecodeCompiler {
         match ann {
             TypeAnnotation::Basic(name) => type_params.contains(name),
             TypeAnnotation::Reference(name) => type_params.contains(name.as_str()),
+            TypeAnnotation::Borrow { inner, .. } => {
+                Self::annotation_contains_type_param(inner, type_params)
+            }
             TypeAnnotation::Array(inner) => {
                 Self::annotation_contains_type_param(inner, type_params)
             }

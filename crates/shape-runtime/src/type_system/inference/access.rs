@@ -366,6 +366,10 @@ impl TypeInferenceEngine {
                     .cloned()
                     .unwrap_or_else(|| annotation.clone())
             }
+            TypeAnnotation::Borrow { mutable, inner } => TypeAnnotation::Borrow {
+                mutable: *mutable,
+                inner: Box::new(Self::substitute_type_params_in_annotation(inner, bindings)),
+            },
             TypeAnnotation::Array(inner) => TypeAnnotation::Array(Box::new(
                 Self::substitute_type_params_in_annotation(inner, bindings),
             )),
