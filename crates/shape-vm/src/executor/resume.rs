@@ -542,6 +542,10 @@ fn decode_vmstate_typed_object(
         ip_blob_hash: None,
         ip_local_offset: None,
         ip_function_id: None,
+        // STAGE-R5: VmState introspection restore carries no live stack /
+        // promoted-cell slots, so the per-slot kind tracks are empty.
+        stack_kinds: Vec::new(),
+        module_binding_kinds: Vec::new(),
     })
     // `reader` Drop runs here, retiring the read-window retain share.
     // The slot's original share remains intact for the caller's
@@ -738,9 +742,10 @@ fn arm_name_for_diag(sv: &shape_runtime::snapshot::SerializableVMValue) -> &'sta
         SV::IteratorOpaque => "IteratorOpaque",
         SV::DequeOpaque { .. } => "DequeOpaque",
         SV::ChannelOpaque { .. } => "ChannelOpaque",
-        SV::ReferenceOpaque => "ReferenceOpaque",
+        SV::Reference { .. } => "Reference",
+        SV::SharedCell { .. } => "SharedCell",
+        SV::SharedCellRef { .. } => "SharedCellRef",
         SV::FilterExprOpaque => "FilterExprOpaque",
-        SV::SharedCellOpaque => "SharedCellOpaque",
         SV::MutexOpaque { .. } => "MutexOpaque",
         SV::LazyOpaque { .. } => "LazyOpaque",
         SV::TypedObject { .. } => "TypedObject",

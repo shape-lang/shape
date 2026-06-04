@@ -235,7 +235,7 @@ pub struct SuspensionStateSnapshot {
     pub saved_stack: Vec<SerializableVMValue>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VmSnapshot {
     pub ip: usize,
     pub stack: Vec<SerializableVMValue>,
@@ -258,6 +258,20 @@ pub struct VmSnapshot {
     /// Used as a fallback when `ip_blob_hash` is not available.
     #[serde(default)]
     pub ip_function_id: Option<u16>,
+    /// STAGE-R5 (ADR-006 §2.7.30.5 + §2.7.7 parallel-kind track): the
+    /// per-slot `NativeKind` for `stack`, captured at serialize time. The
+    /// `SV::SharedCell` BODY arm is carrier-ambiguous from its
+    /// discriminator alone (it may sit in a Reference-kinded slot or a
+    /// SharedCell-kinded slot); the restore driver reads the REAL kind
+    /// here to pick the carrier (`link_promoted_reference` vs
+    /// `link_shared_cell`). Empty (`serde(default)`) on pre-R5 snapshots —
+    /// restore then falls back to the SV discriminator heuristic.
+    #[serde(default)]
+    pub stack_kinds: Vec<shape_value::NativeKind>,
+    /// Per-slot `NativeKind` for `module_bindings` (same role as
+    /// `stack_kinds`).
+    #[serde(default)]
+    pub module_binding_kinds: Vec<shape_value::NativeKind>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -505,11 +519,43 @@ pub enum SerializableVMValue {
     PriorityQueueHeap { heap: Vec<i64> },
 
     /// `HeapKind::Reference` — `&expr` / `&mut expr` reference handle
-    /// (Wave 8). The reference's target lives inside the same VM's
-    /// heap; round-tripping requires tracking target identity across
-    /// snapshot boundaries which is unspecified by ADR-006 §2.7. The
-    /// W17-snapshot-references follow-up answers the identity question.
-    ReferenceOpaque,
+    /// (Wave 8; STAGE-R5 serialize-through, ADR-006 §2.7.30.5).
+    ///
+    /// This is the **back-edge** form for a reference into a promoted
+    /// cell: the cell BODY was already emitted (by whichever slot — a
+    /// sibling `Reference` OR the `SharedCell` module binding — first
+    /// reached the cell ptr; see `SerializeIdentityCtx`). `handle` keys
+    /// the shared identity-map so this reference and the body's cell
+    /// dedupe to ONE restored `Arc<SharedCell>`. `is_mut` is carried,
+    /// reserved-not-read in v0.3.3 (§2.7.30.5).
+    ///
+    /// ONLY `RefTarget::PromotedCell` reaches this arm (KL-4 guard,
+    /// §2.7.30.7): a non-promoted `Local` / `ModuleBinding` /
+    /// `TypedField` reference has no owning cell, so reading its bits as
+    /// `*const SharedCell` would be a wild-free — those arms keep the
+    /// opaque clean-refuse.
+    Reference { handle: u64, is_mut: bool },
+
+    /// `HeapKind::SharedCell` BODY (STAGE-R5, ADR-006 §2.7.30.5).
+    ///
+    /// The once-emitted payload of a promoted cell. `handle` is the
+    /// cell's identity token (assigned by the FIRST arm — `Reference`
+    /// or `SharedCell` — to reach the cell ptr); `inner` is the deep
+    /// walk of `cell.value` + `cell.kind()` via `slot_to_serializable`.
+    /// On restore Pass 1 materializes exactly one `Arc<SharedCell>` per
+    /// handle into the identity-map; Pass 2 links every back-edge
+    /// (`SharedCellRef` / `Reference`) carrying the same handle.
+    SharedCell { handle: u64, inner: Box<SerializableVMValue> },
+
+    /// `HeapKind::SharedCell` back-edge (STAGE-R5, ADR-006 §2.7.30.5).
+    ///
+    /// A later `SharedCell`-kinded slot reaching an already-emitted cell
+    /// ptr emits this instead of re-emitting the body. `handle` resolves
+    /// to the once-materialized `Arc<SharedCell>` in the restore
+    /// identity-map (Pass 2, `Arc::increment_strong_count`). NOT a new
+    /// `HeapKind` ordinal — a WIRE discriminator resolving to
+    /// `Ptr(HeapKind::SharedCell)` (§2.7.5.1 4-table lockstep unchanged).
+    SharedCellRef { handle: u64 },
 
     /// `HeapKind::FilterExpr` — query-DSL AST tree (Wave-γ §2.7.9).
     /// Carries `Arc<FilterNode>` whose `And/Or/Not` branches recurse
@@ -519,14 +565,11 @@ pub enum SerializableVMValue {
     /// follow-up lands the tree serializer.
     FilterExprOpaque,
 
-    /// `HeapKind::SharedCell` — binding-storage interior-mutability
-    /// carrier (Wave 8 §2.7.8). Carries the parallel-kind track and
-    /// reaches into the cell payload's HeapKind dispatch; same per-
-    /// element-projection blocker as Deque/Channel. Round-tripping
-    /// also bumps into the binding-identity question (two `var x`
-    /// bindings that share a cell observe each other's mutations,
-    /// so cell identity must survive the snapshot).
-    SharedCellOpaque,
+    // NOTE (STAGE-R5): the old discriminator-only `SharedCellOpaque`
+    // arm is REPLACED by the `SharedCell { handle, inner }` BODY arm +
+    // `SharedCellRef { handle }` back-edge arm declared above. Cell
+    // identity now survives the snapshot via the shared identity-map
+    // (ADR-006 §2.7.30.5).
 
     /// `HeapKind::Mutex` — single-typed-payload exclusion cell
     /// (Wave 2.5 §2.7.25). Inner `Option<KindedSlot>` payload of
@@ -828,6 +871,141 @@ fn slice_as_bytes<T>(data: &[T]) -> &[u8] {
 use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
 use std::sync::Arc;
 
+/// STAGE-R5 serialize-side shared identity context (ADR-006 §2.7.30.5).
+///
+/// Threaded through every slot of a single VM-state snapshot walk so that
+/// a promoted cell reached by N carriers (a `Reference(PromotedCell)` on
+/// the stack + the `SharedCell` module binding it points at) is emitted
+/// EXACTLY ONCE (the BODY, `SV::SharedCell { handle, inner }`) and every
+/// later carrier emits a back-edge handle. `handle_of` keys on the
+/// underlying `Arc<SharedCell>` allocation pointer (cast to `*const ()`),
+/// so two carriers pointing at the same cell intern to the same handle.
+///
+/// `in_progress` is the reserve-before-recurse cycle guard: a cell whose
+/// interior reaches back into itself finds its handle already present and
+/// emits a back-edge rather than re-recursing.
+///
+/// NO `ValueWord`-shape carrier, NO tagged token: `handle` is a plain
+/// `u64` counter and the key is a raw provenance pointer used only as a
+/// `HashMap` key (never dereferenced for the key role).
+#[derive(Default)]
+pub struct SerializeIdentityCtx {
+    /// `Arc<SharedCell>` allocation ptr → assigned handle.
+    handle_of: std::collections::HashMap<*const (), u64>,
+    /// Next handle to assign (monotonic).
+    next_handle: u64,
+    /// Cells whose BODY emission is mid-recursion (cycle guard).
+    in_progress: std::collections::HashSet<*const ()>,
+}
+
+impl SerializeIdentityCtx {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// STAGE-R5 restore-side two-pass link context with abort-ledger
+/// (ADR-006 §2.7.30.5 / §2.7.30.4).
+///
+/// Pass 1 materializes each `SV::SharedCell` BODY into exactly one
+/// `Arc<SharedCell>` (recorded in `identity_map` as the raw ptr + a base
+/// share held by the map). Pass 2 resolves every back-edge
+/// (`SV::SharedCellRef` / `SV::Reference`) and every body-slot to that one
+/// cell via `Arc::increment_strong_count`.
+///
+/// `retained` is the ABORT-LEDGER: every share handed out (base
+/// materialization + each link increment) is recorded. On `Err` the
+/// caller reverse-walks (LIFO) and releases each, so a mid-link failure
+/// leaves NO leaked strong-count (which would break §2.7.30.4
+/// deferred-Drop) and NO double-free. Mirrors the W5 / cluster-1.5
+/// `clone_slot_kinded` retain-before-claim discipline
+/// (`vm_state_snapshot.rs:295`).
+///
+/// `in_progress` is the Pass-1 VISITED-SET cycle guard: a cell whose
+/// interior is itself a `Ptr(HeapKind::Reference)` back into a cell mid-
+/// materialization is detected here and cleanly surface-refused (NOT a
+/// depth bound), with the ledger balancing all retained shares.
+#[derive(Default)]
+pub struct RestoreLinkCtx {
+    /// handle → materialized `*const SharedCell` (one base share held).
+    identity_map: std::collections::HashMap<u64, u64>,
+    /// Pass-1 cycle guard: handles whose body is mid-materialization.
+    in_progress: std::collections::HashSet<u64>,
+    /// Abort-ledger: every share handed out, in claim order. Reverse-walk
+    /// (LIFO) to release on `Err`.
+    retained: Vec<RetainedShare>,
+}
+
+/// One abort-ledger entry: a strong-count share to release on abort.
+enum RetainedShare {
+    /// An `Arc<SharedCell>` share at this raw ptr.
+    SharedCell(u64),
+}
+
+impl RestoreLinkCtx {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of un-released base shares currently in the abort-ledger.
+    pub fn ledger_len(&self) -> usize {
+        self.retained.len()
+    }
+
+    /// Reverse-walk (LIFO) the ledger, releasing every base materialization
+    /// share. Called on BOTH abort and restore-finish:
+    ///
+    /// - **Abort:** the per-slot link shares already returned to installed
+    ///   slots are owned by those slots (their Drop releases them); the
+    ///   ledger holds ONLY the Pass-1 base shares held by the identity-map,
+    ///   so releasing them here balances the materialization with no
+    ///   double-free of any slot-owned share. On a mid-link failure the
+    ///   driver also drops the slots it already pushed (standard VM
+    ///   teardown), so the net is balanced.
+    /// - **Finish (success):** the identity-map was scaffolding; every real
+    ///   Reference / SharedCell slot holds its OWN share (Pass 2), so the
+    ///   base shares are surplus and must be released exactly once. Same
+    ///   reverse-walk.
+    ///
+    /// Idempotent: `retained` is drained, so a second call is a no-op.
+    pub fn release_base_shares(&mut self) {
+        use shape_value::v2::closure_layout::SharedCell;
+        while let Some(entry) = self.retained.pop() {
+            match entry {
+                RetainedShare::SharedCell(ptr) => unsafe {
+                    Arc::decrement_strong_count(ptr as *const SharedCell);
+                },
+            }
+        }
+        self.identity_map.clear();
+        self.in_progress.clear();
+    }
+}
+
+/// Project a `(bits, kind)` slot pair into its `SerializableVMValue` arm.
+///
+/// This is the single-slot public entry. It owns a fresh
+/// [`SerializeIdentityCtx`], so promoted-cell dedupe spans only this one
+/// slot's deep walk. The whole-VM snapshot driver instead threads ONE
+/// ctx across every slot via [`slot_to_serializable_ctx`] so a reference
+/// and its referent cell — living in different slots — dedupe to one
+/// restored cell (ADR-006 §2.7.30.5).
+pub fn slot_to_serializable_ctx(
+    bits: u64,
+    kind: NativeKind,
+    store: &SnapshotStore,
+    ctx: &mut SerializeIdentityCtx,
+) -> std::result::Result<SerializableVMValue, String> {
+    match kind {
+        NativeKind::Ptr(heap_kind) => {
+            slot_heap_to_serializable(bits, heap_kind, store, ctx)
+        }
+        // Scalar + string + v2-raw kinds carry no promoted-cell identity;
+        // delegate to the ctx-free body (it never touches `ctx`).
+        _ => slot_to_serializable(bits, kind, store),
+    }
+}
+
 /// Project a `(bits, kind)` slot pair into its `SerializableVMValue` arm.
 ///
 /// Per ADR-006 §2.7.5.1: scalar kinds project from raw u64 bits via the
@@ -959,7 +1137,13 @@ pub fn slot_to_serializable(
             let value = unsafe { shape_value::v2::decimal_obj::DecimalObj::value(ptr) };
             Ok(SV::Decimal(value))
         }
-        NativeKind::Ptr(heap_kind) => slot_heap_to_serializable(bits, heap_kind, _store),
+        NativeKind::Ptr(heap_kind) => {
+            // Fresh per-slot identity ctx: single-slot dedupe only. The
+            // whole-VM driver uses `slot_to_serializable_ctx` to share
+            // one ctx across slots (ADR-006 §2.7.30.5).
+            let mut ctx = SerializeIdentityCtx::new();
+            slot_heap_to_serializable(bits, heap_kind, _store, &mut ctx)
+        }
     }
 }
 
@@ -976,6 +1160,7 @@ fn slot_heap_to_serializable(
     bits: u64,
     expected_kind: HeapKind,
     store: &SnapshotStore,
+    ctx: &mut SerializeIdentityCtx,
 ) -> std::result::Result<SerializableVMValue, String> {
     use SerializableVMValue as SV;
     use shape_value::heap_value::{
@@ -1098,13 +1283,15 @@ fn slot_heap_to_serializable(
             let _ = Arc::into_raw(arc);
             Ok(SV::OptionData { is_some, payload })
         },
-        // Reference/FilterExpr/SharedCell/Iterator: discriminator-only
-        // round-trip. The typed Arcs exist but their deep walks are
-        // follow-up work; we don't even need to touch the Arc on the
-        // way out for the opaque round-trip path.
-        HeapKind::Reference => Ok(SV::ReferenceOpaque),
+        // STAGE-R5 serialize-through (ADR-006 §2.7.30.5). The Reference
+        // arm DISCRIMINATES on the `RefTarget` variant (KL-4 guard,
+        // §2.7.30.7): only `PromotedCell` has an owning `Arc<SharedCell>`
+        // and serializes-through; `Local` / `ModuleBinding` / `TypedField`
+        // have NO owning cell — reading their bits as `*const SharedCell`
+        // would be a wild-free, so they keep the opaque clean-refuse.
+        HeapKind::Reference => serialize_reference(bits, store, ctx),
         HeapKind::FilterExpr => Ok(SV::FilterExprOpaque),
-        HeapKind::SharedCell => Ok(SV::SharedCellOpaque),
+        HeapKind::SharedCell => serialize_shared_cell(bits, store, ctx),
         HeapKind::Iterator => Ok(SV::IteratorOpaque),
         // Future is inline u64 per §2.7.4.
         HeapKind::Future => Ok(SV::Future(bits)),
@@ -1159,7 +1346,7 @@ fn slot_heap_to_serializable(
             for i in 0..n {
                 let field_bits = storage.slots[i].raw();
                 let field_kind = storage.field_kinds[i];
-                let sv = slot_to_serializable(field_bits, field_kind, store)?;
+                let sv = slot_to_serializable_ctx(field_bits, field_kind, store, ctx)?;
                 slot_data.push(sv);
             }
             Ok(SV::TypedObject {
@@ -1333,6 +1520,140 @@ fn slot_heap_to_serializable(
     }
 }
 
+/// STAGE-R5: serialize a `HeapKind::Reference` slot (ADR-006 §2.7.30.5).
+///
+/// The slot bits are `Arc::into_raw(Arc<RefTarget>) as u64` (reference.rs).
+/// We recover the `Arc<RefTarget>` (restoring the share on the way out)
+/// and DISCRIMINATE on the variant (the KL-4 guard, §2.7.30.7):
+///
+/// - `PromotedCell { cell, .. }` — the owning carrier. Recover the
+///   underlying `Arc<SharedCell>` ptr, intern it in the identity-map. If
+///   this is the FIRST carrier to reach the cell, emit the BODY
+///   (`SV::SharedCell { handle, inner }`); otherwise emit the back-edge
+///   (`SV::Reference { handle, is_mut }`).
+/// - `Local` / `ModuleBinding` / `TypedField` — NO owning cell. Reading
+///   their bits as `*const SharedCell` is a wild-free. Keep the opaque
+///   clean-refuse: surface a structured error, never serialize-through.
+fn serialize_reference(
+    bits: u64,
+    store: &SnapshotStore,
+    ctx: &mut SerializeIdentityCtx,
+) -> std::result::Result<SerializableVMValue, String> {
+    use shape_value::reference::RefTarget;
+    // SAFETY: kind == Ptr(HeapKind::Reference) ⇒ bits = Arc::into_raw(
+    // Arc<RefTarget>) per reference.rs:11-12. Recover, inspect, restore
+    // the original share (we do NOT consume it).
+    let arc = unsafe { Arc::<RefTarget>::from_raw(bits as *const RefTarget) };
+    let result = match &*arc {
+        RefTarget::PromotedCell { cell, .. } => {
+            // Recover the underlying Arc<SharedCell> allocation ptr as the
+            // identity key. `Arc::as_ptr` does NOT touch the refcount.
+            // `is_mut` is reserved-not-read in v0.3.3 (§2.7.30.5 option a);
+            // the PromotedCell carrier records no mutability today, so the
+            // back-edge defaults to `is_mut: false`.
+            let cell_ptr = Arc::as_ptr(cell) as *const ();
+            emit_or_backedge_cell(cell_ptr, cell, store, ctx, RefArmKind::Reference)
+        }
+        RefTarget::Local { .. }
+        | RefTarget::ModuleBinding { .. }
+        | RefTarget::TypedField { .. } => Err(
+            "serialize_reference: STAGE-R5 KL-4 guard — a non-promoted \
+             reference (Local / ModuleBinding / TypedField) has no owning \
+             SharedCell; serializing-through would read its bits as \
+             *const SharedCell (a wild-free). Clean-refuse by design. \
+             ADR-006 §2.7.30.7."
+                .to_string(),
+        ),
+    };
+    let _ = Arc::into_raw(arc); // restore the slot's original share
+    result
+}
+
+/// STAGE-R5: serialize a `HeapKind::SharedCell` slot (ADR-006 §2.7.30.5).
+///
+/// The slot bits are `Arc::into_raw(Arc<SharedCell>) as u64`. Recover the
+/// `Arc<SharedCell>` (restoring the share) and intern it. First carrier
+/// emits the BODY; a later carrier emits the `SV::SharedCellRef` back-edge.
+fn serialize_shared_cell(
+    bits: u64,
+    store: &SnapshotStore,
+    ctx: &mut SerializeIdentityCtx,
+) -> std::result::Result<SerializableVMValue, String> {
+    use shape_value::v2::closure_layout::SharedCell;
+    // SAFETY: kind == Ptr(HeapKind::SharedCell) ⇒ bits = Arc::into_raw(
+    // Arc<SharedCell>) per `op_alloc_shared_*` (stack.rs:376). Recover,
+    // inspect, restore the original share.
+    let arc = unsafe { Arc::<SharedCell>::from_raw(bits as *const SharedCell) };
+    let cell_ptr = Arc::as_ptr(&arc) as *const ();
+    let result = emit_or_backedge_cell(cell_ptr, &arc, store, ctx, RefArmKind::SharedCell);
+    let _ = Arc::into_raw(arc); // restore the slot's original share
+    result
+}
+
+/// Which serialize arm reached the cell — selects the back-edge shape.
+#[derive(Clone, Copy)]
+enum RefArmKind {
+    Reference,
+    SharedCell,
+}
+
+/// The either-arm body: the FIRST arm to reach a cell ptr emits the BODY
+/// (`SV::SharedCell { handle, inner }`); a LATER arm emits a back-edge
+/// (`SV::Reference` for the Reference arm / `SV::SharedCellRef` for the
+/// SharedCell arm). This is the round-3 fix for the asymmetry where only
+/// the SharedCell arm emitted the body — so `return &x` with the stack
+/// reference serialized before the module binding never emitted the body.
+///
+/// `cell` is a borrow of the live `Arc<SharedCell>` (the caller restored
+/// the slot's share); we read its `value` + `kind()` through `lock()` and
+/// recurse via `slot_to_serializable_ctx` (so a cell whose interior
+/// contains another reference participates in the same dedupe + cycle
+/// guard).
+fn emit_or_backedge_cell(
+    cell_ptr: *const (),
+    cell: &Arc<shape_value::v2::closure_layout::SharedCell>,
+    store: &SnapshotStore,
+    ctx: &mut SerializeIdentityCtx,
+    arm: RefArmKind,
+) -> std::result::Result<SerializableVMValue, String> {
+    use SerializableVMValue as SV;
+    // Already interned → back-edge. (Either a sibling carrier emitted the
+    // body, OR we are mid-recursion on this very cell — the cycle case;
+    // `in_progress` makes the back-edge terminate.)
+    if let Some(&handle) = ctx.handle_of.get(&cell_ptr) {
+        return Ok(match arm {
+            RefArmKind::Reference => SV::Reference {
+                handle,
+                is_mut: false,
+            },
+            RefArmKind::SharedCell => SV::SharedCellRef { handle },
+        });
+    }
+    // First reach → assign handle, reserve-before-recurse (cycle guard),
+    // deep-walk the cell payload, emit the BODY.
+    let handle = ctx.next_handle;
+    ctx.next_handle += 1;
+    ctx.handle_of.insert(cell_ptr, handle);
+    ctx.in_progress.insert(cell_ptr);
+
+    // Read the cell's value bits + kind under the lock (the kind companion
+    // is fixed at construction; the value bits are stable while we hold
+    // the lock). Drop the guard before recursing so a re-entrant reach on
+    // the SAME cell (cycle) does not deadlock — the `in_progress` /
+    // `handle_of` entry already routes it to a back-edge.
+    let (value_bits, value_kind) = {
+        let guard = cell.lock();
+        (*guard, cell.kind())
+    };
+    let inner = slot_to_serializable_ctx(value_bits, value_kind, store, ctx)?;
+
+    ctx.in_progress.remove(&cell_ptr);
+    Ok(SV::SharedCell {
+        handle,
+        inner: Box::new(inner),
+    })
+}
+
 /// Inner KindedSlot serialization for Result/Option payloads.
 /// Bool-zero short-circuit (unit-shape None marker) returns
 /// `SerializableVMValue::Unit`; other kinds route through the
@@ -1377,6 +1698,201 @@ fn serializable_inner_kinded(
 /// stack-kind track). A discriminator-vs-expected-kind mismatch
 /// surfaces as a structured error rather than a Bool-default
 /// fallback (§2.7.7 #9 / §2.7.5.1 forbidden).
+/// STAGE-R5 Pass 1 — materialize every `SV::SharedCell` BODY reachable
+/// from `sv` into exactly one `Arc<SharedCell>` per handle, recorded in
+/// `ctx.identity_map` (ADR-006 §2.7.30.5). Recurses through the cell
+/// interior so nested-body cells are materialized too. The base
+/// materialization share is recorded in the abort-ledger.
+///
+/// A cell whose interior is a `Ptr(HeapKind::Reference)` cycle back into a
+/// cell mid-materialization is detected via `ctx.in_progress` (the
+/// VISITED-SET, NOT a depth bound) and cleanly surface-refused; the caller
+/// runs `ctx.abort_release()` so all retained shares balance.
+pub fn materialize_cell_bodies(
+    sv: &SerializableVMValue,
+    store: &SnapshotStore,
+    ctx: &mut RestoreLinkCtx,
+) -> std::result::Result<(), String> {
+    use SerializableVMValue as SV;
+    use shape_value::v2::closure_layout::SharedCell;
+    match sv {
+        SV::SharedCell { handle, inner } => {
+            if ctx.identity_map.contains_key(handle) {
+                // Already materialized by a sibling body slot — the wire
+                // shape should only emit one body per handle, but be
+                // idempotent: do not double-materialize.
+                return Ok(());
+            }
+            if ctx.in_progress.contains(handle) {
+                return Err(format!(
+                    "materialize_cell_bodies: STAGE-R5 cycle surface — cell \
+                     handle {handle} reached itself mid-materialization \
+                     (Ptr(HeapKind::Reference) interior cycle). Clean-refuse \
+                     with abort-ledger balancing. ADR-006 §2.7.30.5."
+                ));
+            }
+            ctx.in_progress.insert(*handle);
+            // First materialize any nested bodies in the interior.
+            materialize_cell_bodies(inner, store, ctx)?;
+            // Reconstruct the cell's interior slot (bits + kind). For a
+            // back-edge interior (Reference/SharedCellRef) Pass 1 has
+            // already materialized the target body, so the link resolves.
+            let expected = expected_kind_for_cell_inner(inner);
+            let (value_bits, value_kind) =
+                serializable_to_slot_ctx(inner, expected, store, ctx)?;
+            // Build the one owning cell. `Arc::into_raw` hands the base
+            // share to the identity-map; record it in the ledger.
+            let cell = Arc::new(SharedCell::new(value_bits, value_kind));
+            let ptr = Arc::into_raw(cell) as u64;
+            ctx.identity_map.insert(*handle, ptr);
+            ctx.retained.push(RetainedShare::SharedCell(ptr));
+            ctx.in_progress.remove(handle);
+            Ok(())
+        }
+        // Recurse into compound arms that can carry a nested body.
+        SV::TypedObject { slot_data, .. } => {
+            for f in slot_data {
+                materialize_cell_bodies(f, store, ctx)?;
+            }
+            Ok(())
+        }
+        // Back-edges + leaf arms hold no body to materialize.
+        _ => Ok(()),
+    }
+}
+
+/// Pick the `expected_kind` for a cell BODY's interior slot from its
+/// serialized discriminator. The cell `value` is restored through
+/// `serializable_to_slot_ctx`; a Reference/SharedCellRef interior resolves
+/// to its `Ptr(HeapKind::*)` so the link path fires.
+fn expected_kind_for_cell_inner(sv: &SerializableVMValue) -> NativeKind {
+    use SerializableVMValue as SV;
+    match sv {
+        SV::Reference { .. } => NativeKind::Ptr(HeapKind::Reference),
+        SV::SharedCell { .. } | SV::SharedCellRef { .. } => {
+            NativeKind::Ptr(HeapKind::SharedCell)
+        }
+        SV::Int(_) => NativeKind::Int64,
+        SV::Number(_) => NativeKind::Float64,
+        SV::Bool(_) => NativeKind::Bool,
+        SV::String(_) => NativeKind::String,
+        SV::None | SV::Unit => NativeKind::Null,
+        other => expected_heap_field_kind(other),
+    }
+}
+
+/// STAGE-R5 restore entry with the shared two-pass link context.
+///
+/// The whole-VM restore driver runs Pass 1 ([`materialize_cell_bodies`])
+/// over every slot first, then Pass 2 by calling this per slot. The new
+/// `Reference` / `SharedCell` / `SharedCellRef` arms resolve their handle
+/// against `ctx.identity_map` (materialized in Pass 1); everything else
+/// delegates to the ctx-free [`serializable_to_slot`].
+pub fn serializable_to_slot_ctx(
+    sv: &SerializableVMValue,
+    expected_kind: NativeKind,
+    store: &SnapshotStore,
+    ctx: &mut RestoreLinkCtx,
+) -> std::result::Result<(u64, NativeKind), String> {
+    use SerializableVMValue as SV;
+    match (sv, expected_kind) {
+        // Body / back-edge into a Reference slot → an Arc<RefTarget::
+        // PromotedCell> owning one share on the resolved cell.
+        (SV::SharedCell { handle, .. }, NativeKind::Ptr(HeapKind::Reference))
+        | (SV::Reference { handle, .. }, NativeKind::Ptr(HeapKind::Reference)) => {
+            link_promoted_reference(*handle, ctx)
+        }
+        // Body / back-edge into a SharedCell slot → an Arc<SharedCell>
+        // owning one share on the resolved cell.
+        (SV::SharedCell { handle, .. }, NativeKind::Ptr(HeapKind::SharedCell))
+        | (SV::SharedCellRef { handle }, NativeKind::Ptr(HeapKind::SharedCell)) => {
+            link_shared_cell(*handle, ctx)
+        }
+        // Everything else — ctx-free.
+        _ => serializable_to_slot(sv, expected_kind, store),
+    }
+}
+
+/// Pass 2 — resolve a handle to its materialized `Arc<SharedCell>` and
+/// hand out ONE owned share for a SharedCell-kinded slot.
+///
+/// Share accounting: the identity-map holds the base materialization
+/// share (recorded in the ledger, released at restore-finish). We
+/// `increment_strong_count` then `from_raw` + `into_raw` so the returned
+/// slot bits own exactly ONE share, transferred to the caller's slot — it
+/// is NOT in the abort-ledger (the slot's own Drop owns it once installed).
+fn link_shared_cell(
+    handle: u64,
+    ctx: &mut RestoreLinkCtx,
+) -> std::result::Result<(u64, NativeKind), String> {
+    use shape_value::v2::closure_layout::SharedCell;
+    if ctx.in_progress.contains(&handle) {
+        return Err(format!(
+            "link_shared_cell: STAGE-R5 cycle surface — handle {handle} is \
+             still mid-materialization (in_progress VISITED-SET): a \
+             SharedCell whose interior is a Ptr(HeapKind::Reference) cycles \
+             back into itself. Clean-refuse with abort-ledger balancing. \
+             ADR-006 §2.7.30.5."
+        ));
+    }
+    let ptr = *ctx.identity_map.get(&handle).ok_or_else(|| {
+        format!(
+            "link_shared_cell: STAGE-R5 surface — handle {handle} has no \
+             materialized cell (Pass-1 body missing). ADR-006 §2.7.30.5."
+        )
+    })?;
+    // SAFETY: ptr is a live Arc<SharedCell> (Pass 1 materialized it; the
+    // identity-map holds the base share). Bump one share, transfer it into
+    // the returned slot bits via into_raw.
+    unsafe {
+        Arc::increment_strong_count(ptr as *const SharedCell);
+        let cell = Arc::<SharedCell>::from_raw(ptr as *const SharedCell);
+        let raw = Arc::into_raw(cell) as u64;
+        Ok((raw, NativeKind::Ptr(HeapKind::SharedCell)))
+    }
+}
+
+/// Pass 2 — resolve a handle to its materialized `Arc<SharedCell>`, hand
+/// out one owned share, and wrap it in an `Arc<RefTarget::PromotedCell>`
+/// for a Reference-kinded slot. The cell's `kind()` is the ref's projected
+/// kind. The returned slot bits own one `Arc<RefTarget>` share whose inner
+/// `cell` field owns one `Arc<SharedCell>` share — both released by the
+/// Reference slot's normal Drop (NOT in the abort-ledger).
+fn link_promoted_reference(
+    handle: u64,
+    ctx: &mut RestoreLinkCtx,
+) -> std::result::Result<(u64, NativeKind), String> {
+    use shape_value::reference::RefTarget;
+    use shape_value::v2::closure_layout::SharedCell;
+    if ctx.in_progress.contains(&handle) {
+        return Err(format!(
+            "link_promoted_reference: STAGE-R5 cycle surface — handle \
+             {handle} is still mid-materialization (in_progress VISITED-SET): \
+             a SharedCell whose interior references back into itself. \
+             Clean-refuse with abort-ledger balancing. ADR-006 §2.7.30.5."
+        ));
+    }
+    let ptr = *ctx.identity_map.get(&handle).ok_or_else(|| {
+        format!(
+            "link_promoted_reference: STAGE-R5 surface — handle {handle} has \
+             no materialized cell (Pass-1 body missing). ADR-006 §2.7.30.5."
+        )
+    })?;
+    // SAFETY: ptr is a live Arc<SharedCell>. Bump one share and reconstruct
+    // the Arc so the RefTarget::PromotedCell owns exactly that share.
+    let (raw, _kind) = unsafe {
+        Arc::increment_strong_count(ptr as *const SharedCell);
+        let cell = Arc::<SharedCell>::from_raw(ptr as *const SharedCell);
+        let projected_kind = cell.kind();
+        let rt = Arc::new(RefTarget::PromotedCell {
+            cell,
+            kind: projected_kind,
+        });
+        (Arc::into_raw(rt) as u64, projected_kind)
+    };
+    Ok((raw, NativeKind::Ptr(HeapKind::Reference)))
+}
+
 pub fn serializable_to_slot(
     sv: &SerializableVMValue,
     expected_kind: NativeKind,
@@ -1758,14 +2274,24 @@ fn serializable_to_heap_slot(
              resource, not snapshot-restorable). ADR-006 §2.7.5.1.",
         )),
 
+        // STAGE-R5: the Reference / SharedCell serialize-through arms
+        // require the two-pass `RestoreLinkCtx` (identity-map resolution).
+        // Reaching them via the ctx-FREE `serializable_to_slot` path means
+        // a caller restored a promoted-reference snapshot without the
+        // whole-VM two-pass driver — surface-and-stop, never fabricate.
+        (SV::Reference { .. }, HeapKind::Reference)
+        | (SV::SharedCell { .. }, HeapKind::SharedCell)
+        | (SV::SharedCell { .. }, HeapKind::Reference)
+        | (SV::SharedCellRef { .. }, HeapKind::SharedCell) => Err(format!(
+            "serializable_to_slot: STAGE-R5 surface — {heap_kind:?} \
+             serialize-through arm requires the two-pass RestoreLinkCtx \
+             driver (serializable_to_slot_ctx); the ctx-free path cannot \
+             resolve the identity-map handle. ADR-006 §2.7.30.5.",
+        )),
+
         // Opaque arms — surface-and-stop on restore. These produced
         // discriminator-only wire shapes; the inner payload is lost.
-        // Restoring as a structured runtime error rather than a
-        // placeholder lets the caller observe the missing capability
-        // cleanly (§2.7.4 invariant).
-        (SV::ReferenceOpaque, HeapKind::Reference)
-        | (SV::SharedCellOpaque, HeapKind::SharedCell)
-        | (SV::MutexOpaque { .. }, HeapKind::Mutex)
+        (SV::MutexOpaque { .. }, HeapKind::Mutex)
         | (SV::LazyOpaque { .. }, HeapKind::Lazy) => Err(format!(
             "serializable_to_slot: W17-snapshot-roundtrip surface — \
              {heap_kind:?} arm restored from opaque wire shape; \
@@ -1891,9 +2417,10 @@ fn serializable_arm_name(sv: &SerializableVMValue) -> &'static str {
         SV::DequeOpaque { .. } => "DequeOpaque",
         SV::ChannelOpaque { .. } => "ChannelOpaque",
         SV::PriorityQueueHeap { .. } => "PriorityQueueHeap",
-        SV::ReferenceOpaque => "ReferenceOpaque",
+        SV::Reference { .. } => "Reference",
+        SV::SharedCell { .. } => "SharedCell",
+        SV::SharedCellRef { .. } => "SharedCellRef",
         SV::FilterExprOpaque => "FilterExprOpaque",
-        SV::SharedCellOpaque => "SharedCellOpaque",
         SV::MutexOpaque { .. } => "MutexOpaque",
         SV::AtomicI64 { .. } => "AtomicI64",
         SV::LazyOpaque { .. } => "LazyOpaque",
@@ -1997,19 +2524,23 @@ mod opaque_disposition_tests {
         }
     }
 
-    /// A3: Reference / SharedCell / Mutex / Lazy stay on the follow-up
-    /// wording (their dispositions belong to other workstreams).
+    /// A3: Mutex / Lazy stay on the follow-up wording (their dispositions
+    /// belong to other workstreams). Reference / SharedCell migrated to
+    /// STAGE-R5 serialize-through; their ctx-free path surfaces the
+    /// two-pass-required message (see `reference_arms_require_ctx_driver`).
     #[test]
     fn deferred_arms_keep_followup_wording() {
         let (_tmp, st) = store();
         let cases = [
             (
-                SerializableVMValue::ReferenceOpaque,
-                HeapKind::Reference,
+                SerializableVMValue::MutexOpaque { has_value: false },
+                HeapKind::Mutex,
             ),
             (
-                SerializableVMValue::SharedCellOpaque,
-                HeapKind::SharedCell,
+                SerializableVMValue::LazyOpaque {
+                    is_initialized: false,
+                },
+                HeapKind::Lazy,
             ),
         ];
         for (sv, hk) in cases {
@@ -2024,6 +2555,322 @@ mod opaque_disposition_tests {
                 "{hk:?} must not be relabeled clean-refuse, got: {err}"
             );
         }
+    }
+
+    /// STAGE-R5: the Reference / SharedCell serialize-through arms surface
+    /// cleanly when reached via the ctx-free `serializable_to_slot` path —
+    /// they require the two-pass `RestoreLinkCtx` driver. No fabrication,
+    /// no wild-free.
+    #[test]
+    fn reference_arms_require_ctx_driver() {
+        let (_tmp, st) = store();
+        let cases = [
+            (
+                SerializableVMValue::Reference {
+                    handle: 0,
+                    is_mut: false,
+                },
+                HeapKind::Reference,
+            ),
+            (
+                SerializableVMValue::SharedCellRef { handle: 0 },
+                HeapKind::SharedCell,
+            ),
+        ];
+        for (sv, hk) in cases {
+            let err = serializable_to_slot(&sv, NativeKind::Ptr(hk), &st)
+                .expect_err("ctx-free serialize-through arm must surface");
+            assert!(
+                err.contains("STAGE-R5") && err.contains("RestoreLinkCtx"),
+                "{hk:?} should require the two-pass driver, got: {err}"
+            );
+        }
+    }
+
+    // ── STAGE-R5 serialize-through round-trip (ADR-006 §2.7.30.5) ────────
+    use shape_value::reference::RefTarget;
+    use shape_value::v2::closure_layout::SharedCell;
+
+    /// Build slot bits for a `Ptr(HeapKind::SharedCell)` slot owning one
+    /// share on `cell`.
+    fn shared_cell_slot(cell: &Arc<SharedCell>) -> u64 {
+        Arc::into_raw(Arc::clone(cell)) as u64
+    }
+
+    /// Build slot bits for a `Ptr(HeapKind::Reference)` slot holding a
+    /// `RefTarget::PromotedCell` that owns one share on `cell`.
+    fn promoted_ref_slot(cell: &Arc<SharedCell>) -> u64 {
+        let rt = RefTarget::PromotedCell {
+            cell: Arc::clone(cell),
+            kind: cell.kind(),
+        };
+        Arc::into_raw(Arc::new(rt)) as u64
+    }
+
+    /// Drop a `Ptr(HeapKind::Reference)` slot's owned share.
+    fn drop_ref_slot(bits: u64) {
+        unsafe { Arc::decrement_strong_count(bits as *const RefTarget) };
+    }
+
+    /// Drop a `Ptr(HeapKind::SharedCell)` slot's owned share.
+    fn drop_cell_slot(bits: u64) {
+        unsafe { Arc::decrement_strong_count(bits as *const SharedCell) };
+    }
+
+    /// A LIVE promoted return-ref + its referent SharedCell round-trip:
+    /// the stack reference is serialized FIRST (emits the BODY), the module
+    /// binding cell SECOND (emits the back-edge). On restore BOTH dedupe to
+    /// ONE cell; the restored reference reads the correct value.
+    #[test]
+    fn promoted_ref_and_referent_dedupe_to_one_cell() {
+        let (_tmp, st) = store();
+        // The referent cell holds int 99.
+        let cell = Arc::new(SharedCell::new(99u64, NativeKind::Int64));
+        let ref_bits = promoted_ref_slot(&cell);
+        let cell_bits = shared_cell_slot(&cell);
+
+        // SERIALIZE — one shared ctx, reference slot FIRST (the asymmetry
+        // case the round-3 design fixes).
+        let mut ictx = SerializeIdentityCtx::new();
+        let sv_ref = serialize_reference(ref_bits, &st, &mut ictx).unwrap();
+        let sv_cell = serialize_shared_cell(cell_bits, &st, &mut ictx).unwrap();
+
+        // First arm (reference) emitted the BODY; second arm (cell) the
+        // back-edge — same handle.
+        match (&sv_ref, &sv_cell) {
+            (
+                SerializableVMValue::SharedCell { handle: h1, inner },
+                SerializableVMValue::SharedCellRef { handle: h2 },
+            ) => {
+                assert_eq!(h1, h2, "both carriers share one handle");
+                assert!(
+                    matches!(**inner, SerializableVMValue::Int(99)),
+                    "body inner = Int(99), got {inner:?}"
+                );
+            }
+            other => panic!("expected body+back-edge, got {other:?}"),
+        }
+
+        // RESTORE — two-pass with the real per-slot kinds.
+        let mut link = RestoreLinkCtx::new();
+        materialize_cell_bodies(&sv_ref, &st, &mut link).unwrap();
+        materialize_cell_bodies(&sv_cell, &st, &mut link).unwrap();
+        let (r_ref_bits, r_ref_kind) = serializable_to_slot_ctx(
+            &sv_ref,
+            NativeKind::Ptr(HeapKind::Reference),
+            &st,
+            &mut link,
+        )
+        .unwrap();
+        let (r_cell_bits, r_cell_kind) = serializable_to_slot_ctx(
+            &sv_cell,
+            NativeKind::Ptr(HeapKind::SharedCell),
+            &st,
+            &mut link,
+        )
+        .unwrap();
+        assert_eq!(r_ref_kind, NativeKind::Ptr(HeapKind::Reference));
+        assert_eq!(r_cell_kind, NativeKind::Ptr(HeapKind::SharedCell));
+
+        // Recover the restored reference's cell + the restored cell slot;
+        // assert they alias ONE allocation (dedupe) and read value 99.
+        unsafe {
+            let rt = Arc::<RefTarget>::from_raw(r_ref_bits as *const RefTarget);
+            let restored_cell = Arc::<SharedCell>::from_raw(r_cell_bits as *const SharedCell);
+            match &*rt {
+                RefTarget::PromotedCell { cell: ref_cell, kind } => {
+                    assert_eq!(*kind, NativeKind::Int64);
+                    assert_eq!(
+                        Arc::as_ptr(ref_cell),
+                        Arc::as_ptr(&restored_cell),
+                        "reference and module-binding dedupe to ONE restored cell"
+                    );
+                    let guard = ref_cell.lock();
+                    assert_eq!(*guard, 99, "restored ref reads the correct value");
+                }
+                other => panic!("expected PromotedCell, got {other:?}"),
+            }
+            // Balance the restored slot shares.
+            drop(rt);
+            drop(restored_cell);
+        }
+        // base scaffolding share + finish.
+        link.release_base_shares();
+        // Balance the original serialize-side slot shares.
+        drop_ref_slot(ref_bits);
+        drop_cell_slot(cell_bits);
+    }
+
+    /// Module-scope `let r = &x` shape: the SharedCell binding is reached
+    /// FIRST (emits body), the reference SECOND (emits back-edge). Mirror
+    /// ordering of the test above — both orders must round-trip.
+    #[test]
+    fn shared_cell_first_then_reference_roundtrips() {
+        let (_tmp, st) = store();
+        let cell = Arc::new(SharedCell::new(7u64, NativeKind::Int64));
+        let cell_bits = shared_cell_slot(&cell);
+        let ref_bits = promoted_ref_slot(&cell);
+
+        let mut ictx = SerializeIdentityCtx::new();
+        let sv_cell = serialize_shared_cell(cell_bits, &st, &mut ictx).unwrap();
+        let sv_ref = serialize_reference(ref_bits, &st, &mut ictx).unwrap();
+
+        match (&sv_cell, &sv_ref) {
+            (
+                SerializableVMValue::SharedCell { handle: h1, .. },
+                SerializableVMValue::Reference { handle: h2, .. },
+            ) => assert_eq!(h1, h2),
+            other => panic!("expected cell-body + ref-back-edge, got {other:?}"),
+        }
+
+        let mut link = RestoreLinkCtx::new();
+        materialize_cell_bodies(&sv_cell, &st, &mut link).unwrap();
+        materialize_cell_bodies(&sv_ref, &st, &mut link).unwrap();
+        let (r_cell_bits, _) = serializable_to_slot_ctx(
+            &sv_cell,
+            NativeKind::Ptr(HeapKind::SharedCell),
+            &st,
+            &mut link,
+        )
+        .unwrap();
+        let (r_ref_bits, _) = serializable_to_slot_ctx(
+            &sv_ref,
+            NativeKind::Ptr(HeapKind::Reference),
+            &st,
+            &mut link,
+        )
+        .unwrap();
+        unsafe {
+            let rt = Arc::<RefTarget>::from_raw(r_ref_bits as *const RefTarget);
+            let restored_cell = Arc::<SharedCell>::from_raw(r_cell_bits as *const SharedCell);
+            if let RefTarget::PromotedCell { cell: ref_cell, .. } = &*rt {
+                assert_eq!(Arc::as_ptr(ref_cell), Arc::as_ptr(&restored_cell));
+                assert_eq!(*ref_cell.lock(), 7);
+            } else {
+                panic!("expected PromotedCell");
+            }
+            drop(rt);
+            drop(restored_cell);
+        }
+        link.release_base_shares();
+        drop_cell_slot(cell_bits);
+        drop_ref_slot(ref_bits);
+    }
+
+    /// KL-4 guard: a non-promoted reference (Local / ModuleBinding /
+    /// TypedField) in a snapshot CLEAN-REFUSES on serialize — reading its
+    /// bits as `*const SharedCell` would be a wild-free.
+    #[test]
+    fn non_promoted_reference_clean_refuses() {
+        let (_tmp, st) = store();
+        for rt in [
+            RefTarget::Local {
+                frame_index: 0,
+                slot_index: 3,
+                kind: NativeKind::Int64,
+            },
+            RefTarget::ModuleBinding {
+                binding_idx: 1,
+                kind: NativeKind::Int64,
+            },
+        ] {
+            let bits = Arc::into_raw(Arc::new(rt)) as u64;
+            let mut ictx = SerializeIdentityCtx::new();
+            let err = serialize_reference(bits, &st, &mut ictx)
+                .expect_err("non-promoted ref must clean-refuse");
+            assert!(
+                err.contains("KL-4 guard") && err.contains("wild-free"),
+                "expected KL-4 wild-free refusal, got: {err}"
+            );
+            unsafe { Arc::decrement_strong_count(bits as *const RefTarget) };
+        }
+    }
+
+    /// The abort-ledger balances on an injected mid-link failure: after a
+    /// Pass-2 error and `release_base_shares`, the cell's strong count
+    /// returns to the caller's single original share (no leak, no
+    /// double-free → no SIGABRT at drop).
+    #[test]
+    fn abort_ledger_balances_on_midlink_failure() {
+        let (_tmp, st) = store();
+        let cell = Arc::new(SharedCell::new(5u64, NativeKind::Int64));
+
+        // A body emitted by a reference slot.
+        let ref_bits = promoted_ref_slot(&cell);
+        // Capture the baseline AFTER the serialize-side slot exists, so the
+        // abort must return to exactly this count.
+        let start = Arc::strong_count(&cell);
+        let mut ictx = SerializeIdentityCtx::new();
+        let sv_ref = serialize_reference(ref_bits, &st, &mut ictx).unwrap();
+
+        let mut link = RestoreLinkCtx::new();
+        materialize_cell_bodies(&sv_ref, &st, &mut link).unwrap();
+        // Pass-2 link succeeds for the ref slot...
+        let (r_ref_bits, _) = serializable_to_slot_ctx(
+            &sv_ref,
+            NativeKind::Ptr(HeapKind::Reference),
+            &st,
+            &mut link,
+        )
+        .unwrap();
+        // ...then a SUBSEQUENT slot fails (inject a back-edge with an
+        // unknown handle).
+        let bad = SerializableVMValue::SharedCellRef { handle: 9999 };
+        let res = serializable_to_slot_ctx(
+            &bad,
+            NativeKind::Ptr(HeapKind::SharedCell),
+            &st,
+            &mut link,
+        );
+        assert!(res.is_err(), "unknown-handle back-edge must surface");
+
+        // ABORT: release the slot we already built + the base shares.
+        drop_ref_slot(r_ref_bits);
+        link.release_base_shares();
+
+        // The cell is back to exactly the original share count.
+        assert_eq!(
+            Arc::strong_count(&cell),
+            start,
+            "abort-ledger balanced: no leaked / double-freed share"
+        );
+        drop_ref_slot(ref_bits);
+    }
+
+    /// A SharedCell whose interior is a `Ptr(HeapKind::Reference)` cycle
+    /// back into itself is detected via the in_progress VISITED-SET (NOT a
+    /// depth bound) and cleanly surface-refused; the abort-ledger balances
+    /// every retained share (no leaked Arc strong-count cycle that would
+    /// break §2.7.30.4 deferred-Drop).
+    #[test]
+    fn self_referential_cell_cycle_surface_refuses() {
+        let (_tmp, st) = store();
+        // Wire shape: cell handle 0 whose value is a reference back to
+        // handle 0 (a self-cycle). This is the topology a runtime Arc cycle
+        // (cell A → ref → cell A) serializes to.
+        let cyclic_body = SerializableVMValue::SharedCell {
+            handle: 0,
+            inner: Box::new(SerializableVMValue::Reference {
+                handle: 0,
+                is_mut: false,
+            }),
+        };
+        let mut link = RestoreLinkCtx::new();
+        let err = materialize_cell_bodies(&cyclic_body, &st, &mut link)
+            .expect_err("self-referential cell cycle must surface-refuse");
+        assert!(
+            err.contains("cycle surface") && err.contains("VISITED-SET"),
+            "expected in_progress cycle refusal, got: {err}"
+        );
+        // The ledger holds no completed base share for the aborted body
+        // (the body never finished materializing), so release is a clean
+        // no-op — no leaked strong-count.
+        let before = link.ledger_len();
+        link.release_base_shares();
+        assert_eq!(
+            before, 0,
+            "no base share was committed for the cycle-aborted body"
+        );
     }
 }
 

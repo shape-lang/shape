@@ -141,9 +141,17 @@ impl super::VirtualMachine {
         store: &shape_runtime::snapshot::SnapshotStore,
     ) -> Result<shape_runtime::snapshot::VmSnapshot, VMError> {
         use shape_runtime::snapshot::{
-            SerializableExceptionHandler, SerializableLoopContext, VmSnapshot,
-            slot_to_serializable,
+            SerializableExceptionHandler, SerializableLoopContext, SerializeIdentityCtx,
+            VmSnapshot, slot_to_serializable_ctx,
         };
+
+        // STAGE-R5 (ADR-006 §2.7.30.5): ONE shared identity ctx threaded
+        // across every slot of this snapshot so a promoted-cell reference
+        // and the cell it points at — living in different slots (e.g. a
+        // `return &x` stack ref + the module binding holding the cell) —
+        // dedupe to one body + back-edges. The FIRST slot to reach a cell
+        // emits the body; later slots emit handle back-edges.
+        let mut ident = SerializeIdentityCtx::new();
 
         // Project the live `(stack[0..sp], kinds[0..sp])` pair through
         // the kind-threaded API. Per-slot errors surface as
@@ -154,7 +162,7 @@ impl super::VirtualMachine {
         for i in 0..self.sp {
             let bits = self.stack[i];
             let kind = self.kinds[i];
-            let sv = slot_to_serializable(bits, kind, store).map_err(|msg| {
+            let sv = slot_to_serializable_ctx(bits, kind, store, &mut ident).map_err(|msg| {
                 VMError::NotImplemented(format!(
                     "VirtualMachine::snapshot stack[{i}] kind={kind:?}: {msg}"
                 ))
@@ -172,7 +180,10 @@ impl super::VirtualMachine {
         for i in 0..mb_len {
             let bits = self.module_bindings[i];
             let kind = self.module_binding_kinds[i];
-            let sv = slot_to_serializable(bits, kind, store).map_err(|msg| {
+            // Same shared `ident` ctx as the stack walk above — this is
+            // where a module-binding SharedCell dedupes against a stack
+            // reference into the same cell (STAGE-R5, §2.7.30.5).
+            let sv = slot_to_serializable_ctx(bits, kind, store, &mut ident).map_err(|msg| {
                 VMError::NotImplemented(format!(
                     "VirtualMachine::snapshot module_binding[{i}] kind={kind:?}: {msg}"
                 ))
@@ -199,6 +210,13 @@ impl super::VirtualMachine {
         let _: &Vec<SerializableLoopContext> = &loop_stack;
         let _: &Vec<SerializableExceptionHandler> = &exception_handlers;
 
+        // STAGE-R5: persist the per-slot kind tracks so restore can
+        // disambiguate the carrier-ambiguous `SV::SharedCell` body arm
+        // (§2.7.30.5 / §2.7.7).
+        let stack_kinds: Vec<shape_value::NativeKind> = self.kinds[0..self.sp].to_vec();
+        let module_binding_kinds: Vec<shape_value::NativeKind> =
+            self.module_binding_kinds[0..mb_len].to_vec();
+
         Ok(VmSnapshot {
             ip: self.snapshot_ip(),
             stack,
@@ -211,6 +229,8 @@ impl super::VirtualMachine {
             ip_blob_hash: None,
             ip_local_offset: None,
             ip_function_id: None,
+            stack_kinds,
+            module_binding_kinds,
         })
     }
 
@@ -237,44 +257,84 @@ impl super::VirtualMachine {
         snapshot: &shape_runtime::snapshot::VmSnapshot,
         store: &shape_runtime::snapshot::SnapshotStore,
     ) -> Result<Self, VMError> {
-        use shape_runtime::snapshot::serializable_to_slot;
+        use shape_runtime::snapshot::{
+            RestoreLinkCtx, materialize_cell_bodies, serializable_to_slot_ctx,
+        };
         use shape_value::NativeKind;
 
         let mut vm = super::VirtualMachine::new(crate::VMConfig::default());
         vm.load_program(program);
 
-        // Stack restoration: each `SerializableVMValue` arm picks its
-        // own kind from the discriminator. We use `expected_kind = Bool`
-        // for scalar/heap-light arms whose discriminator pins the kind
-        // unambiguously (Int→Int64, Number→Float64, etc.). The
-        // `serializable_to_slot` body either accepts a matching pair
-        // or surfaces a kind-mismatch error.
-        for (i, sv) in snapshot.stack.iter().enumerate() {
-            let expected = expected_kind_from_serializable(sv);
-            let (bits, kind) = serializable_to_slot(sv, expected, store).map_err(|msg| {
-                VMError::NotImplemented(format!(
-                    "VirtualMachine::from_snapshot stack[{i}]: {msg}"
-                ))
-            })?;
-            // push_kinded transfers the share into the stack.
-            vm.push_kinded(bits, kind)?;
-        }
-
-        // Module bindings: same per-slot kind threading.
-        if !snapshot.module_bindings.is_empty() {
-            // Pad the parallel tracks first per §2.7.8 / Q10 lockstep.
-            let needed = snapshot.module_bindings.len();
-            vm.module_binding_pad_to_kinded(needed);
-            for (i, sv) in snapshot.module_bindings.iter().enumerate() {
-                let expected = expected_kind_from_serializable(sv);
-                let (bits, kind) = serializable_to_slot(sv, expected, store).map_err(|msg| {
+        // STAGE-R5 two-pass restore (ADR-006 §2.7.30.5). Pass 1
+        // materializes every `SV::SharedCell` BODY into ONE Arc<SharedCell>
+        // per handle (recorded in `link.identity_map`, base share in the
+        // abort-ledger). Pass 2 builds each slot — body slots and
+        // back-edge slots resolve to that one cell via the identity-map,
+        // so a promoted return-ref and its referent dedupe to one cell.
+        // On ANY Pass-2 error the ledger reverse-walk (LIFO) releases every
+        // base share so no leak / no double-free; on success the base
+        // shares are surplus scaffolding and released identically.
+        let mut link = RestoreLinkCtx::new();
+        let restore_result = (|| -> Result<(), VMError> {
+            // Pass 1 — materialize bodies across stack + module bindings.
+            for (i, sv) in snapshot.stack.iter().enumerate() {
+                materialize_cell_bodies(sv, store, &mut link).map_err(|msg| {
                     VMError::NotImplemented(format!(
-                        "VirtualMachine::from_snapshot module_binding[{i}]: {msg}"
+                        "VirtualMachine::from_snapshot Pass1 stack[{i}]: {msg}"
                     ))
                 })?;
-                vm.module_binding_write_kinded(i, bits, kind);
             }
-        }
+            for (i, sv) in snapshot.module_bindings.iter().enumerate() {
+                materialize_cell_bodies(sv, store, &mut link).map_err(|msg| {
+                    VMError::NotImplemented(format!(
+                        "VirtualMachine::from_snapshot Pass1 module_binding[{i}]: {msg}"
+                    ))
+                })?;
+            }
+
+            // Pass 2 — build each slot. Use the REAL per-slot kind when
+            // persisted (STAGE-R5 `stack_kinds`/`module_binding_kinds`),
+            // else the SV-discriminator heuristic (pre-R5 snapshots).
+            for (i, sv) in snapshot.stack.iter().enumerate() {
+                let expected = snapshot
+                    .stack_kinds
+                    .get(i)
+                    .copied()
+                    .unwrap_or_else(|| expected_kind_from_serializable(sv));
+                let (bits, kind) =
+                    serializable_to_slot_ctx(sv, expected, store, &mut link).map_err(|msg| {
+                        VMError::NotImplemented(format!(
+                            "VirtualMachine::from_snapshot stack[{i}]: {msg}"
+                        ))
+                    })?;
+                vm.push_kinded(bits, kind)?;
+            }
+
+            if !snapshot.module_bindings.is_empty() {
+                let needed = snapshot.module_bindings.len();
+                vm.module_binding_pad_to_kinded(needed);
+                for (i, sv) in snapshot.module_bindings.iter().enumerate() {
+                    let expected = snapshot
+                        .module_binding_kinds
+                        .get(i)
+                        .copied()
+                        .unwrap_or_else(|| expected_kind_from_serializable(sv));
+                    let (bits, kind) = serializable_to_slot_ctx(sv, expected, store, &mut link)
+                        .map_err(|msg| {
+                            VMError::NotImplemented(format!(
+                                "VirtualMachine::from_snapshot module_binding[{i}]: {msg}"
+                            ))
+                        })?;
+                    vm.module_binding_write_kinded(i, bits, kind);
+                }
+            }
+            Ok(())
+        })();
+
+        // Release base materialization shares (abort OR success — they are
+        // scaffolding; every real slot holds its own Pass-2 share).
+        link.release_base_shares();
+        restore_result?;
 
         // IP restoration.
         vm.snapshot_set_ip(snapshot.ip);
@@ -623,9 +683,18 @@ fn expected_kind_from_serializable(
         SV::IteratorOpaque => NativeKind::Ptr(HeapKind::Iterator),
         SV::DequeOpaque { .. } => NativeKind::Ptr(HeapKind::Deque),
         SV::ChannelOpaque { .. } => NativeKind::Ptr(HeapKind::Channel),
-        SV::ReferenceOpaque => NativeKind::Ptr(HeapKind::Reference),
+        // STAGE-R5 serialize-through (ADR-006 §2.7.30.5). The back-edge
+        // arms pin their carrier unambiguously. The BODY arm
+        // (`SV::SharedCell`) is carrier-ambiguous from the discriminator
+        // alone — it may sit in a Reference-kinded slot (first-reach by a
+        // PromotedCell ref) OR a SharedCell-kinded slot. The whole-VM
+        // restore driver threads the REAL per-slot kind to
+        // `serializable_to_slot_ctx`; this heuristic is the fallback for
+        // callers that pass it directly and defaults to the cell carrier.
+        SV::Reference { .. } => NativeKind::Ptr(HeapKind::Reference),
+        SV::SharedCell { .. } => NativeKind::Ptr(HeapKind::SharedCell),
+        SV::SharedCellRef { .. } => NativeKind::Ptr(HeapKind::SharedCell),
         SV::FilterExprOpaque => NativeKind::Ptr(HeapKind::FilterExpr),
-        SV::SharedCellOpaque => NativeKind::Ptr(HeapKind::SharedCell),
         SV::MutexOpaque { .. } => NativeKind::Ptr(HeapKind::Mutex),
         SV::LazyOpaque { .. } => NativeKind::Ptr(HeapKind::Lazy),
         // W17-snapshot-roundtrip container arms (2026-06-02): the four
@@ -816,6 +885,7 @@ mod tests {
             ip_blob_hash: Some([0xAB; 32]),
             ip_local_offset: Some(10),
             ip_function_id: Some(1),
+            ..Default::default()
         };
         assert_eq!(snapshot.ip, 42);
         assert_eq!(snapshot.ip_blob_hash, Some([0xAB; 32]));
@@ -839,6 +909,7 @@ mod tests {
             ip_blob_hash: None,
             ip_local_offset: None,
             ip_function_id: None,
+            ..Default::default()
         };
         // Without relocation info, from_snapshot should fall back to absolute IP
         assert!(snapshot.ip_blob_hash.is_none());
@@ -860,6 +931,7 @@ mod tests {
             ip_blob_hash: Some([0xCD; 32]),
             ip_local_offset: Some(7),
             ip_function_id: Some(2),
+            ..Default::default()
         };
         let json = serde_json::to_string(&snapshot).unwrap();
         let restored: VmSnapshot = serde_json::from_str(&json).unwrap();
@@ -1071,6 +1143,7 @@ mod tests {
             ip_blob_hash: None,
             ip_local_offset: None,
             ip_function_id: None,
+            ..Default::default()
         };
 
         let result =
@@ -1133,6 +1206,7 @@ mod tests {
             ip_blob_hash: None,
             ip_local_offset: None,
             ip_function_id: None,
+            ..Default::default()
         };
 
         let result =
