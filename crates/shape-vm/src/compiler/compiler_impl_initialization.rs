@@ -586,6 +586,7 @@ impl BytecodeCompiler {
                 has_imported_const_inline: self.program.has_imported_const_inline,
                 has_w17_marshal_residual: self.program.has_w17_marshal_residual,
                 has_try_unwrap_residual: self.program.has_try_unwrap_residual,
+                has_reference_escape_promotion: self.program.has_reference_escape_promotion,
             });
         }
     }

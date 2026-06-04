@@ -798,6 +798,17 @@ impl BytecodeCompiler {
             }
             if let Some(return_reference_summary) = return_reference_summary {
                 self.set_last_expr_reference_result(return_reference_summary.mode, true);
+            } else if let Some(borrow_mode) = self.function_declares_borrow_return(name) {
+                // ADR-006 §2.7.30 (GapA): a `-> &T` callee with no param-reborrow
+                // summary (the PromotedCell ReturnSlot floor) returns a reference
+                // value; mark it auto-deref so value position reads THROUGH it.
+                self.set_last_expr_reference_result(borrow_mode, true);
+                // The returned reference rides the §2.7.30 escape-promote
+                // `PromotedCell` carrier, which the JIT has no lowering for (it
+                // models refs as per-function stack-cell/field addresses only and
+                // would read the raw reference pointer). Force whole-program JIT
+                // deopt to the interpreter, which resolves the referent soundly.
+                self.program.has_reference_escape_promotion = true;
             } else {
                 self.clear_last_expr_reference_result();
             }
@@ -1402,6 +1413,12 @@ impl BytecodeCompiler {
                 .and_then(|rt| return_type_to_numeric(rt));
             if let Some(return_reference_summary) = return_reference_summary {
                 self.set_last_expr_reference_result(return_reference_summary.mode, true);
+            } else if let Some(borrow_mode) = self.function_declares_borrow_return(&call_name) {
+                // ADR-006 §2.7.30 (GapA): `-> &T` callee returns a reference value;
+                // value position reads THROUGH it (no param-reborrow summary).
+                self.set_last_expr_reference_result(borrow_mode, true);
+                // JIT has no §2.7.30 PromotedCell lowering — deopt to interpreter.
+                self.program.has_reference_escape_promotion = true;
             } else {
                 self.clear_last_expr_reference_result();
             }

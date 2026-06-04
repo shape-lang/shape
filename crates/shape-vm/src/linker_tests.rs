@@ -77,6 +77,7 @@ fn make_program(blobs: Vec<FunctionBlob>, entry: FunctionHash) -> Program {
         has_imported_const_inline: false,
         has_w17_marshal_residual: false,
         has_try_unwrap_residual: false,
+        has_reference_escape_promotion: false,
     }
 }
 

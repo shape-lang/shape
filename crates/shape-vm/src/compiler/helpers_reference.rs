@@ -724,6 +724,46 @@ impl BytecodeCompiler {
         }
     }
 
+    /// ADR-006 §2.7.30 (GapA — value-position auto-deref): does the function
+    /// named `name` declare a `&T` (Borrow) return type?
+    ///
+    /// A `-> &T` callee returns a reference value (a `RefTarget`-bearing slot,
+    /// `NativeKind::Ptr(HeapKind::Reference)`). In VALUE position the call site
+    /// must read THROUGH that reference to its referent `T` — a fundamental
+    /// reference-read (not a numeric coercion). This mirrors the existing
+    /// identifier / param-reborrow-summary auto-deref: setting `auto_deref=true`
+    /// on the call's `ExprReferenceResult` makes
+    /// `auto_deref_last_expr_result_if_needed` emit a `DerefLoad` in
+    /// `compile_expr` (value position), while `compile_expr_preserving_refs`
+    /// (ref-expecting position — a ref-typed param, a `let r = &…` reference
+    /// binding) keeps the raw reference. Context-sensitivity is therefore
+    /// enforced by the EXISTING preserve-vs-value split; this helper only
+    /// supplies the missing "callee returns a ref" signal for the §2.7.30
+    /// PromotedCell ReturnSlot floor (which produces no param-reborrow
+    /// `ReturnReferenceSummary`).
+    ///
+    /// Returns the borrow mode so the call site stamps the matching `BorrowMode`
+    /// (shared `&T` vs exclusive `&mut T`).
+    pub(super) fn function_declares_borrow_return(&self, name: &str) -> Option<BorrowMode> {
+        // Only top-level user functions are resolved here: a local/module
+        // closure binding that returns `&T` is a distinct (rarer) shape whose
+        // return-reference tracking flows through the callable-summary maps.
+        // Resolving as a local first keeps a same-named local closure from being
+        // shadowed by a top-level def of the same name.
+        if self.resolve_local(name).is_some() {
+            return None;
+        }
+        let def = self.function_defs.get(name)?;
+        match def.return_type.as_ref()? {
+            shape_ast::ast::TypeAnnotation::Borrow { mutable, .. } => Some(if *mutable {
+                BorrowMode::Exclusive
+            } else {
+                BorrowMode::Shared
+            }),
+            _ => None,
+        }
+    }
+
     pub(super) fn update_callable_binding_from_expr(
         &mut self,
         slot: u16,

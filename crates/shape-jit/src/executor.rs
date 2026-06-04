@@ -423,6 +423,41 @@ impl JITExecutor {
             });
         }
 
+        // ADR-006 §2.7.30 (GapA value-position auto-deref) SURFACE: the program
+        // value-derefs a reference returned via the reference-escape→RC
+        // `PromotedCell` carrier (`fn make() -> &int { let x = 5; return &x }`
+        // then `print(make())` / `make() + 1`). The VM resolves the returned
+        // reference through the owning `Arc<SharedCell>` share
+        // (`read_ref_target` PromotedCell arm at `executor/variables/mod.rs`),
+        // reading the live referent. The JIT models references ONLY as
+        // per-function stack-cell / typed-field addresses (`mir_compiler/
+        // rvalues.rs` Borrow path / `places.rs` `emit_typed_field_address`) — it
+        // has NO PromotedCell lowering, so its `DerefLoad` reads the raw
+        // reference pointer instead of the referent: silent-wrong-output
+        // (`VM=5`, `JIT=<stack-pointer>`) observed at module scope. Whole-program
+        // deopt to the (correct) interpreter preserves VM == JIT semantics. Same
+        // surface-and-stop shape as the W17-marshal / c4-4B TryUnwrap deopts
+        // above; root-cause JIT PromotedCell lowering is a v0.4 JIT-lowering
+        // followup.
+        if bytecode.has_reference_escape_promotion {
+            return Err(shape_runtime::error::ShapeError::RuntimeError {
+                message: "ADR-006 §2.7.30 reference-escape-promotion SURFACE: the \
+                          program value-derefs a reference returned via the \
+                          escape→RC `PromotedCell` carrier (`fn f() -> &T { … return \
+                          &local }` consumed in value position). The JIT has no \
+                          PromotedCell deref lowering (it models refs as \
+                          per-function stack-cell / typed-field addresses only) and \
+                          would read the raw reference pointer instead of the \
+                          referent. Whole-program deopting to the bytecode \
+                          interpreter via this `[jit-fallback]` path preserves \
+                          VM == JIT semantics (the VM `read_ref_target` PromotedCell \
+                          arm reads the live referent through the owning \
+                          `Arc<SharedCell>` share)."
+                    .to_string(),
+                location: None,
+            });
+        }
+
         // R8 W9 B3 Drop-bearing-scope-exit SURFACE (v0.3 divergence-elimination
         // per supervisor 2026-05-25 G.2 Step 2 ruling, ADR-006 §2.7.14):
         // Refuse to JIT-compile programs that register a user `impl Drop for T`

@@ -1406,6 +1406,19 @@ impl BytecodeCompiler {
         // the authoritative source for inferred return types in the
         // compiler's strict-typing decisions.
         if let Expr::FunctionCall { name, .. } = expr {
+            // ADR-006 §2.7.30 (GapA): a `-> &T` callee's result is read THROUGH
+            // the reference in value position (where `infer_expr_type` is asked —
+            // binop operands, comparison sides). Project the declared `&T` return
+            // to its referent `T` so the strict-typing operand check sees `T`,
+            // mirroring the bytecode-side `DerefLoad`. NOT a numeric coercion: the
+            // inner annotation is forwarded verbatim (`&int` -> `int`).
+            if let Some(def) = self.function_defs.get(name) {
+                if let Some(TypeAnnotation::Borrow { inner, .. }) = def.return_type.as_ref() {
+                    if self.resolve_local(name).is_none() {
+                        return Ok(Type::Concrete((**inner).clone()));
+                    }
+                }
+            }
             if let Some(rt_name) = self
                 .type_tracker
                 .get_function_return_type(name)

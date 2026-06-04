@@ -359,6 +359,13 @@ pub struct Program {
     /// NOT serialised — compile-time state.
     #[serde(skip, default)]
     pub has_try_unwrap_residual: bool,
+
+    /// ADR-006 §2.7.30 (GapA): mirror of
+    /// `BytecodeProgram::has_reference_escape_promotion` — forces JIT deopt for
+    /// programs whose functions return a reference via the `PromotedCell`
+    /// escape carrier (no JIT lowering; VM is correct). NOT serialised.
+    #[serde(skip, default)]
+    pub has_reference_escape_promotion: bool,
 }
 
 /// A linked function ready for execution in a flat instruction array.
@@ -595,4 +602,11 @@ pub struct LinkedProgram {
     /// NOT serialised — compile-time state.
     #[serde(skip, default)]
     pub has_try_unwrap_residual: bool,
+
+    /// ADR-006 §2.7.30 (GapA): mirror of
+    /// `BytecodeProgram::has_reference_escape_promotion` — forces JIT deopt for
+    /// programs whose functions return a reference via the `PromotedCell`
+    /// escape carrier (no JIT lowering; VM is correct). NOT serialised.
+    #[serde(skip, default)]
+    pub has_reference_escape_promotion: bool,
 }

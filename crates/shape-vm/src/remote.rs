@@ -567,6 +567,7 @@ pub fn program_from_blobs_by_hash(
         has_w17_marshal_residual: source.has_w17_marshal_residual,
         // c4-4B TryUnwrap (`?` operator) surface-and-stop flag propagation.
         has_try_unwrap_residual: source.has_try_unwrap_residual,
+        has_reference_escape_promotion: source.has_reference_escape_promotion,
     })
 }
 
@@ -953,6 +954,7 @@ fn create_stub_program(program: &BytecodeProgram) -> BytecodeProgram {
             has_w17_marshal_residual: ca.has_w17_marshal_residual,
             // c4-4B TryUnwrap (`?` operator) surface-and-stop flag propagation.
             has_try_unwrap_residual: ca.has_try_unwrap_residual,
+            has_reference_escape_promotion: ca.has_reference_escape_promotion,
         });
     }
     // Copy top-level metadata needed by program_from_blobs
@@ -1871,6 +1873,7 @@ mod tests {
             has_imported_const_inline: false,
             has_w17_marshal_residual: false,
             has_try_unwrap_residual: false,
+            has_reference_escape_promotion: false,
         });
 
         assert!(
@@ -2026,6 +2029,7 @@ mod tests {
             has_imported_const_inline: false,
             has_w17_marshal_residual: false,
             has_try_unwrap_residual: false,
+            has_reference_escape_promotion: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),
@@ -2387,6 +2391,7 @@ mod tests {
             has_imported_const_inline: false,
             has_w17_marshal_residual: false,
             has_try_unwrap_residual: false,
+            has_reference_escape_promotion: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),
@@ -2452,6 +2457,7 @@ mod tests {
             has_imported_const_inline: false,
             has_w17_marshal_residual: false,
             has_try_unwrap_residual: false,
+            has_reference_escape_promotion: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),

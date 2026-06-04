@@ -501,6 +501,7 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
             has_imported_const_inline: program.has_imported_const_inline,
             has_w17_marshal_residual: program.has_w17_marshal_residual,
             has_try_unwrap_residual: program.has_try_unwrap_residual,
+            has_reference_escape_promotion: program.has_reference_escape_promotion,
         });
     }
 
@@ -626,6 +627,7 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
         has_imported_const_inline: program.has_imported_const_inline,
         has_w17_marshal_residual: program.has_w17_marshal_residual,
         has_try_unwrap_residual: program.has_try_unwrap_residual,
+        has_reference_escape_promotion: program.has_reference_escape_promotion,
     })
 }
 
@@ -689,6 +691,7 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
         has_imported_const_inline: linked.has_imported_const_inline,
         has_w17_marshal_residual: linked.has_w17_marshal_residual,
         has_try_unwrap_residual: linked.has_try_unwrap_residual,
+        has_reference_escape_promotion: linked.has_reference_escape_promotion,
         debug_info: linked.debug_info.clone(),
         data_schema: linked.data_schema.clone(),
         module_binding_names: linked.module_binding_names.clone(),

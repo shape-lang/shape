@@ -692,6 +692,18 @@ pub struct BytecodeProgram {
     /// runtime-mutated, just compile-time state.
     #[serde(skip, default)]
     pub has_try_unwrap_residual: bool,
+
+    /// ADR-006 §2.7.30 (GapA): set when a function returns a reference via the
+    /// reference-escape→RC `PromotedCell` carrier (`return &local` consumed in
+    /// value position). The VM resolves the returned reference through the owning
+    /// `Arc<SharedCell>` share (`read_ref_target` PromotedCell arm); the JIT
+    /// models references as per-function stack-cell / field addresses only and
+    /// has no PromotedCell lowering, so it reads the raw reference pointer
+    /// instead of the referent — silent-wrong-output at module scope. Whole-
+    /// program deopt to the (correct) interpreter preserves VM == JIT semantics.
+    /// Same surface-and-stop shape as `has_try_unwrap_residual`. NOT serialised.
+    #[serde(skip, default)]
+    pub has_reference_escape_promotion: bool,
 }
 
 /// Constants in the constant pool

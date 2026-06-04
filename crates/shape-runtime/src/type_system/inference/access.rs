@@ -876,6 +876,29 @@ impl TypeInferenceEngine {
             BuiltinTypes::function(expected_param_types, inferred_result_type.clone());
         self.push_constraint_with_origin(func_type, expected_func_type, origin);
 
+        // ADR-006 §2.7.30 (GapA — value-position auto-deref): a `-> &T` callee
+        // returns a reference value. In a VALUE-expecting context (arithmetic
+        // operand, comparison, `print` arg, a `-> T` return), the call result is
+        // READ THROUGH the reference to its referent `T`. This is a fundamental
+        // reference-read — NOT a numeric coercion: `&int` derefs to `int`, never
+        // to `number` (`Borrow` is a distinct constructor; the inner is forwarded
+        // verbatim). It mirrors the bytecode-side auto-deref wired at the
+        // `function_declares_borrow_return` call sites (which emit `DerefLoad` in
+        // value position via `auto_deref_last_expr_result_if_needed`).
+        //
+        // Context-sensitivity: the inferred return type is derefed here so the
+        // call flows as `T`. The remaining ref-EXPECTING position is a literal
+        // `&x` passed to a ref-typed param — that is an `Expr::Reference`
+        // argument handled by the unwrap above (GAP-2 boundary), never a
+        // `FunctionCall` result, so it is untouched. The constraint pushed above
+        // still carries the `&T` return so the callee's own `-> &T` annotation
+        // unification (Borrow-vs-Borrow) is unaffected.
+        if let Type::Concrete(TypeAnnotation::Borrow { inner, .. }) =
+            self.unifier.apply_substitutions(&inferred_result_type)
+        {
+            return Ok(Type::Concrete(*inner));
+        }
+
         Ok(inferred_result_type)
     }
 

@@ -155,6 +155,15 @@ fn flipped_sink_return_ref_compiles_and_runs() {
 // PromotedCell, and reading the returned reference after the def-site frame has
 // popped reads the live value `5` through the owning `Arc<SharedCell>` share — NO
 // use-after-free (the owning share keeps the referent alive past frame-pop).
+//
+// GapA upgrade (ADR-006 §2.7.30 value-position auto-deref, 2026-06-04): the
+// returned `&int` is now READ THROUGH the live PromotedCell in value position —
+// `print(r)` emits the deref (`make()` call-site auto-deref) and prints the
+// referent `5`, NOT the opaque `<ref>` tag. Asserting the VALUE (not just
+// `expect_run_ok`) locks in that the read resolves the live referent through the
+// owning `Arc<SharedCell>` share — a use-after-free would print garbage / a
+// stack pointer, not `5`. VM == JIT: the JIT clean-deopts to the interpreter
+// (no PromotedCell lowering) so both paths print `5`.
 #[test]
 fn uaf_probe_typed_return_ref_reads_live_promoted_cell() {
     ShapeTest::new(
@@ -167,5 +176,27 @@ fn uaf_probe_typed_return_ref_reads_live_promoted_cell() {
         print(r)
     "#,
     )
-    .expect_run_ok();
+    .expect_output_contains("5");
+}
+
+// GapA companion (ADR-006 §2.7.30): the returned `&int` auto-derefs in
+// arithmetic + comparison value positions too. `make() + 1` reads the referent
+// `5` through the live PromotedCell and adds → `6`; `make() == 5` derefs both
+// then `EqInt` → `true`. Confirms the deref is a reference-READ (int stays int),
+// not a numeric coercion, and that the live referent survives frame-pop.
+#[test]
+fn gapa_typed_return_ref_derefs_in_value_positions() {
+    ShapeTest::new(
+        r#"
+        fn make() -> &int {
+            let x = 5
+            return &x
+        }
+        print(make() + 1)
+        let r = make()
+        print(r == 5)
+    "#,
+    )
+    .expect_output_contains("6")
+    .expect_output_contains("true");
 }
