@@ -88,18 +88,15 @@ fn return_type_annotation() {
     .expect_number(42.0);
 }
 
-// W14.2-G6 e2e-functions triage SURFACE-AND-STOP: multi-return-array
-// hits V3-S5 ckpt-5 consumer-cascade tier 3 op_new_array(2) panic via
-// crates/shape-vm/src/executor/objects/object_creation.rs (deleted
-// TypedArrayData enum + Buf<T> wrapper; construction-site rebuild lands
-// at ckpt-6 STRICT close per W12-typed-array-data-deletion audit §3.5
-// + §3.6 + ADR-006 §2.7.24 Q25.A SUPERSEDED). Annotation-fix attempted:
-// `fn min_max(arr: Array<int>) -> Array<int>` + `let mut lo: int =
-// arr[0]` + intermediate `let result: Array<int> = ...` — VM AND JIT
-// both panic with the same V3-S5 SURFACE message. Routed to
-// W14.2-H1 exception registry as `v0.4-v3-s5-ckpt-6-strict-close`.
-// Test reflects the gap via expect_run_err_contains to anchor the
-// architectural defect.
+// V3-S5 construction close (2026-06-05): a function returning a typed array
+// (`fn min_max(...) -> Array<int> { ... [lo, hi] }`) now CONSTRUCTS through
+// the v2-raw `TypedArray<i64>` carrier — the prior `op_new_array(2)` ckpt-5
+// SURFACE was retired when strict array-construction landed
+// (commit e01d29a1) + the binary-op / identifier element-type inference
+// closed the resolvable-element gap. The receiver round-trips: `min_max` of
+// `[3,1,4,1,5]` yields `[1, 5]`, so `result[0]` is the minimum (1). Test
+// rebaselined from `expect_run_err_contains` (stale surface-pin) to the
+// correct value.
 #[test]
 fn multi_return_array() {
     ShapeTest::new(
@@ -117,7 +114,7 @@ fn multi_return_array() {
         result[0]
     "#,
     )
-    .expect_run_err_contains("V3-S5 ckpt-5 consumer-cascade");
+    .expect_number(1.0);
 }
 
 #[test]

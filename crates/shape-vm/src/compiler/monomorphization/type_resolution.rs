@@ -1540,6 +1540,70 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
             concrete_type_for_expr(compiler, operand)
         }
 
+        // Construction strict-typing close (2026-06-05): a binary-op element
+        // (`[x, x * 10]`, `[a + b, c - d]`) has a statically-known result
+        // ConcreteType when both operands resolve to the SAME concrete type
+        // (no coercion per CLAUDE.md §Type-System-Rules). Arithmetic / bitwise
+        // ops preserve the operand type; comparison / logical / fuzzy ops
+        // yield `bool` regardless of operand type. Without this arm an array
+        // literal whose elements are arithmetic expressions
+        // (`fn pair(x: int) -> Array<int> { [x, x * 10] }`) could not resolve
+        // its element `TypedArrayKind` and surfaced "cannot infer element
+        // type" — the inner-literal element-type-inference hole behind the
+        // flatMap consumer surface. Per ADR-006 §2.7.5 stamp-at-compile-time:
+        // the result type is the operands' proven type, not a runtime probe.
+        Expr::BinaryOp {
+            left, op, right, ..
+        } => {
+            use shape_ast::ast::BinaryOp;
+            match op {
+                // Comparison / logical / fuzzy → bool (operands need not
+                // resolve here; the result kind is bool unconditionally).
+                BinaryOp::Greater
+                | BinaryOp::Less
+                | BinaryOp::GreaterEq
+                | BinaryOp::LessEq
+                | BinaryOp::Equal
+                | BinaryOp::NotEqual
+                | BinaryOp::FuzzyEqual
+                | BinaryOp::FuzzyGreater
+                | BinaryOp::FuzzyLess
+                | BinaryOp::And
+                | BinaryOp::Or => Some(ConcreteType::Bool),
+                // Arithmetic / bitwise → operand type (both must agree; a
+                // mismatch or unresolved operand yields None, falling back to
+                // the generic path / clean compile error — no fabrication).
+                BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Mod
+                | BinaryOp::Pow
+                | BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::BitShl
+                | BinaryOp::BitShr => {
+                    let lt = concrete_type_for_expr(compiler, left)?;
+                    let rt = concrete_type_for_expr(compiler, right)?;
+                    if lt == rt {
+                        Some(lt)
+                    } else {
+                        None
+                    }
+                }
+                // NullCoalesce (`a ?? b`): result is the non-null branch type.
+                // Both branches should agree; resolve the right (default) type.
+                BinaryOp::NullCoalesce => {
+                    let rt = concrete_type_for_expr(compiler, right)?;
+                    Some(rt)
+                }
+                // Pipe / ErrorContext are opaque here (callee-dependent /
+                // Result-unwrapping); fall back to None.
+                BinaryOp::Pipe | BinaryOp::ErrorContext => None,
+            }
+        }
+
         // Phase 4b Round 3 Surface-1B LANG-W13-3-double-filter-chain:
         // Chained method-call receivers like `v.filter(|x|...).filter(|y|...)`
         // need the inner `.filter(...)`'s return ConcreteType to resolve at

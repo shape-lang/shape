@@ -114,7 +114,13 @@ fn window_over_partition_by() {
         print(result.length)
     "#,
     )
-    .expect_run_err_contains("map: SURFACE");
+    // V3-S5 consumer-cascade close (2026-06-05): `handle_map_v2` now
+    // delegates to `array_query::handle_select_v2`, so the ckpt-2
+    // `map: SURFACE` stub is gone. `select s.region` returns a legacy
+    // `NativeKind::String` (not the v2-raw `StringV2` carrier), which has no
+    // `TypedArray<T>` monomorphization — a distinct, cleaner surface in the
+    // String→StringV2 producer-cascade class. Still INCOMPLETE-CLEAN.
+    .expect_run_err_contains("has no `TypedArray<T>` carrier monomorphization");
 }
 
 // =========================================================================

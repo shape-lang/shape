@@ -42,8 +42,8 @@
 //! Bodies REFUSED ON SIGHT under Refusal #1 (resurrection under rename
 //! per ckpt-1 close-marker at `heap_value.rs:3956`).
 
-use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
+use shape_runtime::context::ExecutionContext;
 use shape_value::{HeapKind, KindedSlot, NativeKind, VMError};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -128,6 +128,17 @@ enum V2RawSetOp {
     Unique,
 }
 
+impl V2RawSetOp {
+    fn name(self) -> &'static str {
+        match self {
+            V2RawSetOp::Union => "union",
+            V2RawSetOp::Intersect => "intersect",
+            V2RawSetOp::Except => "except",
+            V2RawSetOp::Unique => "unique",
+        }
+    }
+}
+
 /// Probe whether a `KindedSlot` is a v2-raw `*mut TypedArray<*const StringObj>`
 /// (`V2ElemType::String`) or `*mut TypedArray<*const DecimalObj>`
 /// (`V2ElemType::Decimal`) carrier. Returns the matched `V2ElemType` plus the
@@ -139,8 +150,12 @@ enum V2RawSetOp {
 #[inline]
 fn as_v2_raw_string_decimal(
     slot: &KindedSlot,
-) -> Option<(crate::executor::v2_handlers::v2_array_detect::V2ElemType, u64, u32)> {
-    use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, V2ElemType};
+) -> Option<(
+    crate::executor::v2_handlers::v2_array_detect::V2ElemType,
+    u64,
+    u32,
+)> {
+    use crate::executor::v2_handlers::v2_array_detect::{V2ElemType, as_v2_typed_array};
     // r5c-2-β-CKPT-C: the v2-raw `*mut TypedArray<T>` carrier kind is
     // `NativeKind::Ptr(HeapKind::TypedArray)`.
     if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
@@ -176,20 +191,21 @@ fn set_op_v2_raw_string_decimal(
     rhs_args: Option<&KindedSlot>,
 ) -> Result<KindedSlot, VMError> {
     use crate::executor::v2_handlers::v2_array_detect::{
-        stamp_elem_type, V2ElemType, ELEM_TYPE_DECIMAL, ELEM_TYPE_STRING,
+        ELEM_TYPE_DECIMAL, ELEM_TYPE_STRING, V2ElemType, stamp_elem_type,
     };
+    use shape_value::ValueSlot;
     use shape_value::v2::decimal_obj::DecimalObj;
     use shape_value::v2::refcount::v2_retain;
     use shape_value::v2::string_obj::StringObj;
     use shape_value::v2::typed_array::TypedArray;
-    use shape_value::ValueSlot;
 
     let (lhs_elem, lhs_bits, lhs_len) = as_v2_raw_string_decimal(lhs_args)
         .ok_or_else(|| type_error("set op v2-raw: lhs not a v2-raw String/Decimal array"))?;
     let rhs_triple = match rhs_args {
         Some(rhs) => {
-            let (re, rb, rl) = as_v2_raw_string_decimal(rhs)
-                .ok_or_else(|| type_error("set op v2-raw: rhs not a v2-raw String/Decimal array"))?;
+            let (re, rb, rl) = as_v2_raw_string_decimal(rhs).ok_or_else(|| {
+                type_error("set op v2-raw: rhs not a v2-raw String/Decimal array")
+            })?;
             if re != lhs_elem {
                 return Err(type_error(
                     "set op v2-raw: lhs/rhs element-type mismatch (String vs Decimal)",
@@ -259,13 +275,19 @@ fn set_op_v2_raw_string_decimal(
         V2ElemType::String => unsafe {
             let lhs_arr = lhs_bits as *const TypedArray<*const StringObj>;
             let lhs_keys: Vec<&str> = (0..lhs_len)
-                .map(|i| StringObj::as_str(TypedArray::<*const StringObj>::get_unchecked(lhs_arr, i)))
+                .map(|i| {
+                    StringObj::as_str(TypedArray::<*const StringObj>::get_unchecked(lhs_arr, i))
+                })
                 .collect();
             let rhs_keys_storage: Vec<&str> = match rhs_triple {
                 Some((rb, rl)) => {
                     let rhs_arr = rb as *const TypedArray<*const StringObj>;
                     (0..rl)
-                        .map(|i| StringObj::as_str(TypedArray::<*const StringObj>::get_unchecked(rhs_arr, i)))
+                        .map(|i| {
+                            StringObj::as_str(TypedArray::<*const StringObj>::get_unchecked(
+                                rhs_arr, i,
+                            ))
+                        })
                         .collect()
                 }
                 None => Vec::new(),
@@ -294,13 +316,19 @@ fn set_op_v2_raw_string_decimal(
         V2ElemType::Decimal => unsafe {
             let lhs_arr = lhs_bits as *const TypedArray<*const DecimalObj>;
             let lhs_keys: Vec<rust_decimal::Decimal> = (0..lhs_len)
-                .map(|i| DecimalObj::value(TypedArray::<*const DecimalObj>::get_unchecked(lhs_arr, i)))
+                .map(|i| {
+                    DecimalObj::value(TypedArray::<*const DecimalObj>::get_unchecked(lhs_arr, i))
+                })
                 .collect();
             let rhs_keys_storage: Vec<rust_decimal::Decimal> = match rhs_triple {
                 Some((rb, rl)) => {
                     let rhs_arr = rb as *const TypedArray<*const DecimalObj>;
                     (0..rl)
-                        .map(|i| DecimalObj::value(TypedArray::<*const DecimalObj>::get_unchecked(rhs_arr, i)))
+                        .map(|i| {
+                            DecimalObj::value(TypedArray::<*const DecimalObj>::get_unchecked(
+                                rhs_arr, i,
+                            ))
+                        })
                         .collect()
                 }
                 None => Vec::new(),
@@ -336,10 +364,170 @@ fn set_op_v2_raw_string_decimal(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MethodFnV2 (native ABI) public handlers — ckpt-2 surface-and-stop stubs
-// Signatures preserved for `method_registry.rs` PHF integrity. Heap-Arc
-// receiver arm surface-and-stops; v2-raw String/Decimal arm reachable via
-// `set_op_v2_raw_string_decimal` post-A2-followup-gate-flip.
+// V3-S5 consumer-cascade close (2026-06-05) — generic v2-raw set-op driver.
+//
+// Every previous `Arc<TypedArrayData>` per-variant set-op helper migrates to
+// a single kind-generic driver over the v2-raw `TypedArray<T>` flat-struct
+// carrier (`Ptr(HeapKind::TypedArray)`). Membership / dedup use the
+// `v2_array_detect::eq_element` value-equality primitive (per-`V2ElemType`
+// bitwise / content compare — String/Decimal/TypedObject deref the carrier).
+// Output element kind = the receiver view's elem_type (set ops never change
+// the carrier monomorphization). Per ADR-006 §2.7.5 the output is stamped
+// at allocation; per §2.7.14 no Bool-default. The heap String/Decimal
+// `set_op_v2_raw_string_decimal` fast path stays wired ahead of this driver
+// for content-equality on those carriers.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Run a v2-raw set op generically over the receiver view's element kind.
+/// `lhs` is the receiver, `rhs` the other operand (None for `unique`).
+fn run_v2_set_op(
+    op: V2RawSetOp,
+    lhs: &KindedSlot,
+    rhs: Option<&KindedSlot>,
+) -> Result<KindedSlot, VMError> {
+    use crate::executor::v2_handlers::v2_array_detect::{
+        allocate_empty_typed_array, as_v2_typed_array, eq_element, push_element, read_element,
+    };
+    use shape_value::ValueSlot;
+    use shape_value::v2::typed_array::release_v2_typed_array;
+
+    if lhs.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err(ckpt2_surface(op.name(), std::slice::from_ref(lhs)));
+    }
+    let lhs_view = as_v2_typed_array(lhs.slot.raw(), lhs.kind)
+        .ok_or_else(|| type_error("set op: receiver failed v2 TypedArray detection"))?;
+
+    // Optional rhs view; for binary ops both must share the element kind
+    // (strict — no coercion).
+    let rhs_view = match rhs {
+        Some(r) => {
+            if r.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+                return Err(type_error(format!(
+                    "{}: argument must be an array, got kind {:?}",
+                    op.name(),
+                    r.kind
+                )));
+            }
+            let rv = as_v2_typed_array(r.slot.raw(), r.kind)
+                .ok_or_else(|| type_error("set op: argument failed v2 TypedArray detection"))?;
+            if rv.elem_type != lhs_view.elem_type {
+                return Err(type_error(format!(
+                    "{}: element kind mismatch — receiver is {:?}, argument is {:?} \
+                     (CLAUDE.md \"No runtime coercion\")",
+                    op.name(),
+                    lhs_view.elem_type,
+                    rv.elem_type
+                )));
+            }
+            Some(rv)
+        }
+        None => None,
+    };
+
+    let elem_type = lhs_view.elem_type;
+    // Worst-case capacity: union = |lhs| + |rhs|, others ≤ |lhs|.
+    let cap = lhs_view.len + rhs_view.as_ref().map(|v| v.len).unwrap_or(0);
+    let out_ptr = allocate_empty_typed_array(elem_type, cap);
+    let out_view = as_v2_typed_array(
+        out_ptr as usize as u64,
+        NativeKind::Ptr(HeapKind::TypedArray),
+    )
+    .ok_or_else(|| {
+        unsafe { release_v2_typed_array(out_ptr) };
+        type_error("set op: freshly-allocated array failed re-detection")
+    })?;
+
+    // Membership test against a slice of already-collected bits.
+    let seen_eq = |needle: u64, collected: &[u64]| -> bool {
+        collected.iter().any(|&b| eq_element(needle, b, elem_type))
+    };
+
+    // Helper to read rhs into a bits vec once (for intersect / except).
+    let mut rhs_bits: Vec<u64> = Vec::new();
+    if let Some(rv) = rhs_view.as_ref() {
+        for i in 0..rv.len {
+            match read_element(rv, i) {
+                Some((b, _)) => rhs_bits.push(b),
+                None => {
+                    unsafe { release_v2_typed_array(out_ptr) };
+                    return Err(type_error("set op: rhs read_element returned None"));
+                }
+            }
+        }
+    }
+
+    let mut pushed: Vec<u64> = Vec::new();
+    for i in 0..lhs_view.len {
+        let (bits, kind) = match read_element(&lhs_view, i) {
+            Some(p) => p,
+            None => {
+                unsafe { release_v2_typed_array(out_ptr) };
+                return Err(type_error("set op: lhs read_element returned None"));
+            }
+        };
+        let in_rhs = seen_eq(bits, &rhs_bits);
+        let already = seen_eq(bits, &pushed);
+        let include = match op {
+            // union: all distinct lhs first (rhs distinct appended after loop)
+            V2RawSetOp::Union => !already,
+            // intersect: present in rhs AND not already emitted
+            V2RawSetOp::Intersect => in_rhs && !already,
+            // except: absent from rhs AND not already emitted
+            V2RawSetOp::Except => !in_rhs && !already,
+            // unique: distinct
+            V2RawSetOp::Unique => !already,
+        };
+        if include {
+            let elem = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+            if let Err(msg) = push_element(&out_view, elem.slot.raw(), elem.kind) {
+                unsafe { release_v2_typed_array(out_ptr) };
+                return Err(type_error(format!("set op: push_element failed: {msg}")));
+            }
+            std::mem::forget(elem);
+            pushed.push(bits);
+        } else {
+            // The read share (heap carriers) is not stored — drop it.
+            drop(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+        }
+    }
+
+    // union: append rhs elements not already present.
+    if op == V2RawSetOp::Union {
+        if let Some(rv) = rhs_view.as_ref() {
+            for j in 0..rv.len {
+                let (bits, kind) = match read_element(rv, j) {
+                    Some(p) => p,
+                    None => {
+                        unsafe { release_v2_typed_array(out_ptr) };
+                        return Err(type_error("set op: union rhs read_element returned None"));
+                    }
+                };
+                if !seen_eq(bits, &pushed) {
+                    let elem = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+                    if let Err(msg) = push_element(&out_view, elem.slot.raw(), elem.kind) {
+                        unsafe { release_v2_typed_array(out_ptr) };
+                        return Err(type_error(format!("set op: push_element failed: {msg}")));
+                    }
+                    std::mem::forget(elem);
+                    pushed.push(bits);
+                } else {
+                    drop(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+                }
+            }
+        }
+    }
+
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(out_ptr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MethodFnV2 (native ABI) public handlers
+// Signatures preserved for `method_registry.rs` PHF integrity. v2-raw
+// String/Decimal arm reachable via `set_op_v2_raw_string_decimal`; the
+// scalar / other-heap arms route through the generic `run_v2_set_op` driver.
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// v2 `union` — set union of two arrays (deduplicated, order-preserving).
@@ -354,7 +542,7 @@ pub(crate) fn handle_union_v2(
     if as_v2_raw_string_decimal(&args[0]).is_some() {
         return set_op_v2_raw_string_decimal(V2RawSetOp::Union, &args[0], Some(&args[1]));
     }
-    Err(ckpt2_surface("union", args))
+    run_v2_set_op(V2RawSetOp::Union, &args[0], Some(&args[1]))
 }
 
 /// v2 `intersect` — set intersection of two arrays.
@@ -371,7 +559,7 @@ pub(crate) fn handle_intersect_v2(
     if as_v2_raw_string_decimal(&args[0]).is_some() {
         return set_op_v2_raw_string_decimal(V2RawSetOp::Intersect, &args[0], Some(&args[1]));
     }
-    Err(ckpt2_surface("intersect", args))
+    run_v2_set_op(V2RawSetOp::Intersect, &args[0], Some(&args[1]))
 }
 
 /// v2 `except` — set difference of two arrays.
@@ -386,7 +574,7 @@ pub(crate) fn handle_except_v2(
     if as_v2_raw_string_decimal(&args[0]).is_some() {
         return set_op_v2_raw_string_decimal(V2RawSetOp::Except, &args[0], Some(&args[1]));
     }
-    Err(ckpt2_surface("except", args))
+    run_v2_set_op(V2RawSetOp::Except, &args[0], Some(&args[1]))
 }
 
 /// v2 `unique` — deduplicate array elements.
@@ -401,7 +589,7 @@ pub(crate) fn handle_unique_v2(
     if as_v2_raw_string_decimal(&args[0]).is_some() {
         return set_op_v2_raw_string_decimal(V2RawSetOp::Unique, &args[0], None);
     }
-    Err(ckpt2_surface("unique", args))
+    run_v2_set_op(V2RawSetOp::Unique, &args[0], None)
 }
 
 /// v2 `distinct` — alias for `unique`.

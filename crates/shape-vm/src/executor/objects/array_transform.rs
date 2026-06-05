@@ -88,13 +88,13 @@
 //! ckpt-3 / ckpt-4 / ckpt-5 v2-raw monomorphization landing per audit
 //! §A.3 per-variant migration disposition.
 
-use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
 use crate::executor::v2_handlers::v2_array_detect::{
-    as_v2_typed_array, concat_arrays, drop_array_n, slice_array, take_array, V2TypedArrayView,
+    V2TypedArrayView, as_v2_typed_array, concat_arrays, drop_array_n, slice_array, take_array,
 };
+use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
-use shape_value::{KindedSlot, NativeKind, ValueSlot, VMError};
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 
 // ───────────────────────────────────────────────────────────────────────────
 // Wave 2 Round 3a' sub-cluster α — v2-raw `TypedArray<*const StringObj>` /
@@ -121,7 +121,7 @@ use shape_value::{KindedSlot, NativeKind, ValueSlot, VMError};
 pub(super) fn detect_v2_raw_string_or_decimal_receiver(
     slot: &KindedSlot,
 ) -> Option<crate::executor::v2_handlers::v2_array_detect::V2TypedArrayView> {
-    use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, V2ElemType};
+    use crate::executor::v2_handlers::v2_array_detect::{V2ElemType, as_v2_typed_array};
     // r5c-2-β-CKPT-C: the v2-raw `*mut TypedArray<T>` carrier kind is
     // `NativeKind::Ptr(HeapKind::TypedArray)` — the kind track is the
     // carrier discriminator.
@@ -182,9 +182,9 @@ pub(super) fn v2_raw_string_decimal_surface_error(
 /// `array_query.rs`); the imports stay live across the chain.
 #[inline]
 pub(super) fn bump_closure_share(slot: &KindedSlot) {
-    use shape_value::heap_value::HeapKind;
     use shape_value::HeapValue;
     use shape_value::NativeKind;
+    use shape_value::heap_value::HeapKind;
     if let NativeKind::Ptr(HeapKind::Closure) = slot.kind {
         let bits = slot.slot.raw();
         if bits != 0 {
@@ -282,7 +282,11 @@ fn new_array_slot(ptr: *mut u8) -> KindedSlot {
 /// Coerce an integer-family `KindedSlot` to a clamped `u32` count, treating
 /// negatives as 0. Used by `take` / `drop` / `slice` arg parsing.
 #[inline]
-fn clamp_count(slot: &KindedSlot, op: &'static str, arg_name: &'static str) -> Result<u32, VMError> {
+fn clamp_count(
+    slot: &KindedSlot,
+    op: &'static str,
+    arg_name: &'static str,
+) -> Result<u32, VMError> {
     let n = slot.as_i64().ok_or_else(|| {
         VMError::RuntimeError(format!(
             "Array.{}: {} must be an integer, got kind {:?}",
@@ -304,37 +308,40 @@ fn clamp_count(slot: &KindedSlot, op: &'static str, arg_name: &'static str) -> R
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// `arr.map(|x| ...)` — per-element transform.
+///
+/// V3-S5 consumer-cascade close (2026-06-05): `map` is the canonical
+/// per-element transform — identical body shape to `select`
+/// (`array_query::run_select_builder`): two-pass scan-then-allocate, output
+/// element kind = closure-return kind established on the first invocation,
+/// subsequent kind mismatch surfaces a structured `RuntimeError` per
+/// supervisor D3 (no coercion, no `Array<Any>`). Kind-generic via the
+/// `v2_array_detect` `read_element` / `push_element` / `native_kind_to_v2_elem_type`
+/// primitives + the §2.7.11 / Q12 closure-callback ABI. The native handler
+/// only fires for receiver/closure shapes the monomorphized Shape stdlib
+/// `Vec.map` path doesn't cover (e.g. capturing closures).
 pub(crate) fn handle_map_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() >= 2
-        && args[1].kind != NativeKind::Ptr(HeapKind::Closure)
-    {
-        return Err(VMError::RuntimeError(format!(
-            "map: second argument must be a closure, got kind {:?}",
-            args[1].kind
-        )));
-    }
-    Err(ckpt2_surface("map", args))
+    crate::executor::objects::array_query::handle_select_v2(vm, args, ctx)
 }
 
 /// `arr.filter(|x| ...)` — per-element predicate keep-mask.
+///
+/// V3-S5 consumer-cascade close (2026-06-05): `filter` is the canonical
+/// keep-all-matching projection — identical body shape to `where`
+/// (`array_query::handle_where_v2` → `run_filter_builder(FilterMode::All)`):
+/// output element kind = input view's elem_type (filter preserves carrier
+/// monomorphization), single-pass with `slot_truthy(closure_result)`
+/// deciding inclusion. Kind-generic via the same `v2_array_detect`
+/// primitives + the §2.7.11 / Q12 closure-callback ABI.
 pub(crate) fn handle_filter_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() >= 2
-        && args[1].kind != NativeKind::Ptr(HeapKind::Closure)
-    {
-        return Err(VMError::RuntimeError(format!(
-            "filter: second argument must be a closure, got kind {:?}",
-            args[1].kind
-        )));
-    }
-    Err(ckpt2_surface("filter", args))
+    crate::executor::objects::array_query::handle_where_v2(vm, args, ctx)
 }
 
 /// `arr.sort()` / `arr.sort(|a, b| ...)` — per-element comparator sort.
@@ -493,20 +500,188 @@ pub(crate) fn handle_flatten_v2(
 }
 
 /// `arr.flatMap(|x| ...)` — map-then-flatten.
+///
+/// V3-S5 consumer-cascade close (2026-06-05): per-element transform whose
+/// closure returns an INNER array; the inner elements are concatenated into
+/// a single flat output array. Kind-generic via the `v2_array_detect`
+/// `read_element` / `push_element` / `allocate_empty_typed_array` primitives
+/// + the §2.7.11 / Q12 closure-callback ABI.
+///
+/// Output element kind = the inner arrays' element kind, established by the
+/// first NON-EMPTY inner array (empty inner arrays carry no kind to
+/// establish per ADR-006 §2.7.14 — no Bool-default). A subsequent inner
+/// array whose element kind differs surfaces a structured `RuntimeError`
+/// (no coercion, no `Array<Any>`). If every inner array is empty, the output
+/// is an empty array stamped with that (well-typed) inner elem_type.
+///
+/// Refcount: each `read_element` on the inner array returns a fresh share
+/// for heap-element carriers; `push_element` into the output transfers that
+/// share, so the inner-element slot is `mem::forget`-ed after a successful
+/// push. The closure-returned inner-array slot owns one share; it is
+/// released via `release_v2_typed_array` once its elements are drained.
 pub(crate) fn handle_flat_map_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() >= 2
-        && args[1].kind != NativeKind::Ptr(HeapKind::Closure)
-    {
-        return Err(VMError::RuntimeError(format!(
-            "flatMap: second argument must be a closure, got kind {:?}",
-            args[1].kind
-        )));
+    use crate::executor::v2_handlers::v2_array_detect::{
+        V2ElemType, allocate_empty_typed_array, push_element, read_element,
+    };
+    use shape_value::v2::typed_array::release_v2_typed_array;
+
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.flatMap expects 1 argument: (transform)".into(),
+        ));
     }
-    Err(ckpt2_surface("flatMap", args))
+    // Closure or function-ref (function refs flow as UInt64, mirroring
+    // array_sort / array_query require_closure).
+    match args[1].kind {
+        NativeKind::Ptr(HeapKind::Closure) | NativeKind::UInt64 => {}
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "flatMap: second argument must be a closure, got kind {:?}",
+                other
+            )));
+        }
+    }
+    let view = extract_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.flatMap: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    let closure = &args[1];
+
+    // Output allocation is deferred until the first non-empty inner array
+    // establishes the element kind. `pending` holds the inner-element slots
+    // collected before the kind is known (only possible when leading inner
+    // arrays are empty — in which case `pending` stays empty too, so this is
+    // effectively a one-shot allocate-on-first-element).
+    let mut out: Option<(*mut u8, V2TypedArrayView)> = None;
+    let mut established_elem: Option<V2ElemType> = None;
+
+    // Cleanup helper closure isn't ergonomic with `?`; use explicit drops.
+    for i in 0..view.len {
+        let (bits, kind) = match read_element(&view, i) {
+            Some(p) => p,
+            None => {
+                if let Some((ptr, _)) = out {
+                    unsafe { release_v2_typed_array(ptr) };
+                }
+                return Err(VMError::RuntimeError(format!(
+                    "Array.flatMap: read_element({i}) returned None for element kind {:?}",
+                    view.elem_type
+                )));
+            }
+        };
+        let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        bump_closure_share(closure);
+        let inner = match vm.call_value_immediate_nb(closure, &[elem_slot], ctx.as_deref_mut()) {
+            Ok(r) => r,
+            Err(e) => {
+                if let Some((ptr, _)) = out {
+                    unsafe { release_v2_typed_array(ptr) };
+                }
+                return Err(e);
+            }
+        };
+        // The closure must return an array (nested TypedArray carrier).
+        if inner.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+            if let Some((ptr, _)) = out {
+                unsafe { release_v2_typed_array(ptr) };
+            }
+            return Err(VMError::RuntimeError(format!(
+                "Array.flatMap: transform must return an array, got kind {:?} at index {i}. \
+                 flatMap flattens one level — use `map` for a non-array transform.",
+                inner.kind
+            )));
+        }
+        let inner_view = match as_v2_typed_array(inner.slot.raw(), inner.kind) {
+            Some(v) => v,
+            None => {
+                if let Some((ptr, _)) = out {
+                    unsafe { release_v2_typed_array(ptr) };
+                }
+                unsafe { release_v2_typed_array(inner.slot.raw() as *mut u8) };
+                return Err(VMError::RuntimeError(
+                    "Array.flatMap: inner array failed v2 TypedArray detection".into(),
+                ));
+            }
+        };
+
+        // Establish / validate the output element kind from the inner array.
+        if inner_view.len > 0 {
+            match established_elem {
+                None => {
+                    established_elem = Some(inner_view.elem_type);
+                    let ptr = allocate_empty_typed_array(inner_view.elem_type, view.len);
+                    let ov = as_v2_typed_array(
+                        ptr as usize as u64,
+                        NativeKind::Ptr(HeapKind::TypedArray),
+                    )
+                    .expect("freshly-allocated typed array re-detects");
+                    out = Some((ptr, ov));
+                }
+                Some(prev) if prev != inner_view.elem_type => {
+                    if let Some((ptr, _)) = out {
+                        unsafe { release_v2_typed_array(ptr) };
+                    }
+                    unsafe { release_v2_typed_array(inner.slot.raw() as *mut u8) };
+                    return Err(VMError::RuntimeError(format!(
+                        "Array.flatMap: inner-array element kind mismatch at index {i}: \
+                         expected {prev:?} (established by an earlier inner array), got {:?}. \
+                         flatMap requires a single output element kind per CLAUDE.md \
+                         \"No `any` type\" rule (no coercion).",
+                        inner_view.elem_type
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        // Drain the inner array's elements into the output. `read_element`
+        // hands a fresh share (heap carriers); `push_element` transfers it,
+        // so we `mem::forget` the local slot after a successful push.
+        if let Some((ptr, ov)) = out {
+            for j in 0..inner_view.len {
+                let (ib, ik) = match read_element(&inner_view, j) {
+                    Some(p) => p,
+                    None => {
+                        unsafe { release_v2_typed_array(ptr) };
+                        unsafe { release_v2_typed_array(inner.slot.raw() as *mut u8) };
+                        return Err(VMError::RuntimeError(format!(
+                            "Array.flatMap: inner read_element({j}) returned None"
+                        )));
+                    }
+                };
+                let inner_elem = KindedSlot::new(ValueSlot::from_raw(ib), ik);
+                if let Err(msg) = push_element(&ov, inner_elem.slot.raw(), inner_elem.kind) {
+                    unsafe { release_v2_typed_array(ptr) };
+                    unsafe { release_v2_typed_array(inner.slot.raw() as *mut u8) };
+                    return Err(VMError::RuntimeError(format!(
+                        "Array.flatMap: push_element failed: {msg}"
+                    )));
+                }
+                std::mem::forget(inner_elem);
+            }
+        }
+
+        // Release the inner array's owning share (its elements were drained
+        // by value into the output above; the inner carrier itself is no
+        // longer needed).
+        unsafe { release_v2_typed_array(inner.slot.raw() as *mut u8) };
+        std::mem::forget(inner);
+    }
+
+    // No non-empty inner array → no established kind. Return an empty array
+    // stamped with the receiver's elem_type as a well-typed neutral fallback
+    // (matches `select`'s empty-input contract; no Bool-default, no Any).
+    let out_ptr = match out {
+        Some((ptr, _)) => ptr,
+        None => allocate_empty_typed_array(established_elem.unwrap_or(view.elem_type), 0),
+    };
+    Ok(new_array_slot(out_ptr))
 }
 
 /// `arr.groupBy(|x| ...)` — group-by-key projection.
@@ -515,9 +690,7 @@ pub(crate) fn handle_group_by_v2(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() >= 2
-        && args[1].kind != NativeKind::Ptr(HeapKind::Closure)
-    {
+    if args.len() >= 2 && args[1].kind != NativeKind::Ptr(HeapKind::Closure) {
         return Err(VMError::RuntimeError(format!(
             "groupBy: second argument must be a closure, got kind {:?}",
             args[1].kind

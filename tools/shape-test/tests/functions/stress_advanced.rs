@@ -181,14 +181,12 @@ fn test_fn_iterative_fibonacci() {
     .expect_number(55.0);
 }
 
-/// Verifies fn returns array. W14.2-G6 e2e-functions triage
-/// SURFACE-AND-STOP: V3-S5 ckpt-5 consumer-cascade tier 3 op_new_array(2)
-/// panic at object_creation.rs (TypedArrayData enum + Buf<T> deleted per
-/// W12-typed-array-data-deletion audit §3.5+§3.6 + ADR-006 §2.7.24 Q25.A
-/// SUPERSEDED; construction-site rebuild lands at ckpt-6 STRICT close).
-/// Test pinned via expect_run_err_contains to anchor the architectural
-/// gap; routed to W14.2-H1 exception registry as
-/// `v0.4-v3-s5-ckpt-6-strict-close`.
+/// Verifies fn returns array. V3-S5 construction close (2026-06-05): a
+/// function returning a typed array (`fn make_pair(...) -> Array<int> {
+/// [a, b] }`) now CONSTRUCTS through the v2-raw `TypedArray<i64>` carrier —
+/// the prior `op_new_array(2)` ckpt-5 SURFACE was retired when strict
+/// array-construction landed (commit e01d29a1). `make_pair(1, 2).length()`
+/// is 2. Rebaselined from `expect_run_err_contains` (stale surface-pin).
 #[test]
 fn test_fn_returns_array() {
     ShapeTest::new(
@@ -198,12 +196,13 @@ fn test_fn_returns_array() {
         pair.length()
     "#,
     )
-    .expect_run_err_contains("V3-S5 ckpt-5 consumer-cascade");
+    .expect_number(2.0);
 }
 
-/// Verifies fn returns array access. W14.2-G6 e2e-functions triage
-/// SURFACE-AND-STOP — same V3-S5 ckpt-5 op_new_array(2) panic class as
-/// `test_fn_returns_array` above.
+/// Verifies fn returns array access. V3-S5 construction close (2026-06-05):
+/// same construction-now-works case as `test_fn_returns_array`.
+/// `make_pair(10, 20)[1]` is 20. Rebaselined from the stale ckpt-5
+/// surface-pin.
 #[test]
 fn test_fn_returns_array_access() {
     ShapeTest::new(
@@ -213,7 +212,7 @@ fn test_fn_returns_array_access() {
         pair[1]
     "#,
     )
-    .expect_run_err_contains("V3-S5 ckpt-5 consumer-cascade");
+    .expect_number(20.0);
 }
 
 /// Verifies many functions defined.
