@@ -74,7 +74,7 @@ fn test_select_double() {
 fn test_select_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.select(|x| x + 1).length
     "#,
     )
@@ -154,7 +154,7 @@ fn test_order_by_negative_key() {
 fn test_order_by_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.orderBy(|x| x).length
     "#,
     )
@@ -473,7 +473,7 @@ fn test_chain_four_ops() {
 fn test_empty_through_map_filter() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.map(|x| x * 2).filter(|x| x > 0).length
     "#,
     )
@@ -485,7 +485,7 @@ fn test_empty_through_map_filter() {
 fn test_empty_through_sort_unique() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.sort().unique().length
     "#,
     )

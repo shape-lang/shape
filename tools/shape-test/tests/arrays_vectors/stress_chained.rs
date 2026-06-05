@@ -115,7 +115,7 @@ fn test_concat_two_arrays() {
 fn test_concat_with_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         [1, 2, 3].concat(empty).length
     "#,
     )
@@ -149,7 +149,7 @@ fn test_join_str_custom_separator() {
 fn test_join_empty_array() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.join(",")
     "#,
     )

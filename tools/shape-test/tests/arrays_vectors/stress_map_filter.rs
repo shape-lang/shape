@@ -64,7 +64,7 @@ fn test_map_to_float() {
 fn test_map_empty_array() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.map(|x| x * 2).length
     "#,
     )
@@ -211,7 +211,7 @@ fn test_filter_some_match() {
 fn test_filter_empty_array() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.filter(|x| x > 0).length
     "#,
     )
@@ -352,7 +352,7 @@ fn test_reduce_single_element() {
 fn test_reduce_empty_returns_initial() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.reduce(|acc, x| acc + x, 99)
     "#,
     )
@@ -473,7 +473,7 @@ fn test_sort_single_element() {
 fn test_sort_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.sort().length
     "#,
     )
@@ -592,7 +592,7 @@ fn test_unique_all_same() {
 fn test_unique_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.unique().length
     "#,
     )

@@ -69,7 +69,7 @@ fn test_flatmap_identity_nested() {
 fn test_flatmap_empty_results() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         [1, 2, 3].flatMap(|x| empty).length
     "#,
     )
@@ -115,7 +115,7 @@ fn test_flatmap_triple() {
 fn test_flatmap_on_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.flatMap(|x| [x, x]).length
     "#,
     )
@@ -160,7 +160,7 @@ fn test_find_first_element() {
 fn test_find_on_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.find(|x| x > 0)
     "#,
     )
@@ -205,7 +205,7 @@ fn test_find_index_first() {
 fn test_find_index_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.findIndex(|x| x > 0)
     "#,
     )
@@ -239,7 +239,7 @@ fn test_some_false() {
 fn test_some_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.some(|x| x > 0)
     "#,
     )
@@ -284,7 +284,7 @@ fn test_every_false() {
 fn test_every_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.every(|x| x > 0)
     "#,
     )
@@ -362,7 +362,7 @@ fn test_count_returns_length() {
 fn test_count_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.count()
     "#,
     )

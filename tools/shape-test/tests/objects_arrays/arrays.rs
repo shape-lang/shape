@@ -360,7 +360,7 @@ print(nums.length)"#;
 
 #[test]
 fn empty_array() {
-    let code = r#"let a = []
+    let code = r#"let a: Array<int> = []
 print(a)"#;
     ShapeTest::new(code).expect_run_ok();
 }
@@ -401,11 +401,14 @@ print(matrix[1][1])"#;
 // Mixed Types in Arrays
 // =====================================================================
 
+// Strict typing forbids heterogeneous array literals: `[1, "hello", true]`
+// mixes int/string/bool, which no longer share a proven element type, so the
+// literal is a compile-time rejection (no `any`, no runtime coercion).
 #[test]
 fn array_of_mixed_types() {
     let code = r#"let mixed = [1, "hello", true]
 print(mixed)"#;
-    ShapeTest::new(code).expect_run_ok();
+    ShapeTest::new(code).expect_run_err_contains("not compatible");
 }
 
 #[test]
@@ -460,13 +463,16 @@ print(nums[-5])"#;
 // Array Concatenation
 // =====================================================================
 
+// Strict typing: `+` requires the `Numeric` trait, which `Array` does not
+// implement. Concatenating arrays with `+` is a compile-time rejection;
+// `.concat()` is the supported form (see `array_length_after_concat`).
 #[test]
 fn array_concatenation_with_plus() {
     let code = r#"let a = [1, 2]
 let b = [3, 4]
 let c = a + b
 print(c)"#;
-    ShapeTest::new(code).expect_run_ok();
+    ShapeTest::new(code).expect_run_err_contains("Numeric");
 }
 
 // =====================================================================
@@ -482,7 +488,7 @@ print(nums.len())"#;
 
 #[test]
 fn empty_array_len() {
-    let code = r#"let a = []
+    let code = r#"let a: Array<int> = []
 print(a.len())"#;
     ShapeTest::new(code).expect_run_ok().expect_output("0");
 }

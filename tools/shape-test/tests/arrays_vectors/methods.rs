@@ -24,7 +24,7 @@ fn array_length() {
 fn array_length_empty() {
     ShapeTest::new(
         r#"
-        let arr = []
+        let arr: Array<int> = []
         print(arr.length)
     "#,
     )
@@ -121,6 +121,8 @@ fn array_contains_not_found() {
 
 #[test]
 fn array_index_of() {
+    // Strict typing: `indexOf` returns a proven `int`, so it prints as `2`
+    // (not the legacy untyped `2.0`).
     ShapeTest::new(
         r#"
         let arr = [10, 20, 30, 40]
@@ -128,7 +130,7 @@ fn array_index_of() {
     "#,
     )
     .expect_run_ok()
-    .expect_output("2.0");
+    .expect_output("2");
 }
 
 // =========================================================================

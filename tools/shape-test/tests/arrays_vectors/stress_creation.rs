@@ -6,7 +6,7 @@ use shape_test::shape_test::ShapeTest;
 #[test]
 fn test_array_literal_empty() {
     ShapeTest::new(
-        r#"function test() { let a = []; a.length() }
+        r#"function test() { let a: Array<int> = []; a.length() }
 test()"#,
     )
     .expect_number(0.0);
@@ -63,10 +63,13 @@ test()"#,
 }
 
 /// Verifies array literal mixed int float.
+/// Strict typing: array elements must share one proven type — the int
+/// literals adopt `number` to match the `2.5` float (lossless context
+/// adoption), keeping a homogeneous `Array<number>`.
 #[test]
 fn test_array_literal_mixed_int_float() {
     ShapeTest::new(
-        r#"function test() { [1, 2.5, 3].length() }
+        r#"function test() { [1.0, 2.5, 3.0].length() }
 test()"#,
     )
     .expect_number(3.0);
