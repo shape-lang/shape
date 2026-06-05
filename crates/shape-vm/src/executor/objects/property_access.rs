@@ -442,26 +442,95 @@ impl VirtualMachine {
         Ok(())
     }
 
-    /// `SetLocalIndex`: in-place index assignment on a local. SURFACE.
+    /// `SetLocalIndex { Operand::Local(idx) }`: `arr[i] = value` where the
+    /// local at `idx` holds the array directly (`*mut TypedArray<T>`,
+    /// kind `Ptr(HeapKind::TypedArray)`).
+    ///
+    /// ## V3-S5 Seam #2 (2026-06-05)
+    ///
+    /// Routes through the live flat-struct `TypedArray<T>` carrier — the
+    /// `write_element` per-element-kind dispatch (NOT a resurrected
+    /// `Arc<TypedArrayData>` heterogeneous-element carrier; REFUSED ON
+    /// SIGHT, Refusal #1). Mirrors `op_set_index_ref` but reads the array
+    /// pointer straight from the local slot instead of through a `RefTarget`.
+    ///
+    /// Stack discipline: pops [index, value] (value on top). The value
+    /// share is transferred to the array element by `write_element`; the
+    /// index share is retired. The local retains its own array share (we
+    /// only borrow the pointer).
     pub(in crate::executor) fn op_set_local_index(
         &mut self,
-        _instruction: &Instruction,
+        instruction: &Instruction,
     ) -> Result<(), VMError> {
+        use crate::executor::v2_handlers::v2_array_detect::{
+            as_v2_typed_array, write_element,
+        };
+        let Some(Operand::Local(local_idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        // Pop value (top) then index — we own both shares.
         let (val_bits, val_kind) = self.pop_kinded()?;
         let (key_bits, key_kind) = self.pop_kinded()?;
-        drop_with_kind(val_bits, val_kind);
+        let index = match numeric_index_from_kinded(key_bits, key_kind) {
+            Ok(i) => i as u32,
+            Err(e) => {
+                drop_with_kind(key_bits, key_kind);
+                drop_with_kind(val_bits, val_kind);
+                return Err(e);
+            }
+        };
         drop_with_kind(key_bits, key_kind);
-        Err(VMError::NotImplemented(format!(
-            "SURFACE: SetLocalIndex requires the W17-typed-carrier-\
-             monomorphization replacement for the deleted \
-             the-deleted-heterogeneous-element-carrier heterogeneous-element carrier \
-             (ADR-006 §2.7.24 Q25.A). Typed-array fast path \
-             (TypedArraySet{{I64,F64,Bool,...}}) is the supported \
-             surface today; this opcode covers the fallback shapes \
-             that need the carrier-monomorphization rebuild. Key \
-             kind observed: {:?}.",
-            key_kind,
-        )))
+
+        // Borrow the array pointer from the local slot — the local retains
+        // its own share.
+        let bp = self.current_locals_base();
+        let slot = bp + local_idx as usize;
+        if slot >= self.stack.len() {
+            drop_with_kind(val_bits, val_kind);
+            return Err(VMError::RuntimeError(format!(
+                "SetLocalIndex slot {} out of bounds (stack len {})",
+                local_idx,
+                self.stack.len()
+            )));
+        }
+        let (arr_bits, arr_kind) = self.stack_read_kinded_raw(slot);
+        if arr_kind != NativeKind::Ptr(HeapKind::TypedArray) {
+            drop_with_kind(val_bits, val_kind);
+            return Err(VMError::TypeError {
+                expected: "array (TypedArray) local for index assignment",
+                got: "non-array local",
+            });
+        }
+        let view = match as_v2_typed_array(arr_bits, arr_kind) {
+            Some(v) => v,
+            None => {
+                drop_with_kind(val_bits, val_kind);
+                return Err(VMError::NotImplemented(
+                    "SetLocalIndex: TypedArray local did not resolve to a v2 \
+                     typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY header \
+                     missing). ADR-006 §2.7.6 / §2.7.7."
+                        .to_string(),
+                ));
+            }
+        };
+        if index >= view.len {
+            drop_with_kind(val_bits, val_kind);
+            return Err(VMError::IndexOutOfBounds {
+                index: index as i32,
+                length: view.len as usize,
+            });
+        }
+        crate::memory::record_heap_write();
+        match write_element(&view, index, val_bits, val_kind) {
+            Ok(()) => Ok(()),
+            Err(msg) => {
+                drop_with_kind(val_bits, val_kind);
+                Err(VMError::TypeError {
+                    expected: "v2 typed-array element",
+                    got: msg,
+                })
+            }
+        }
     }
 
     /// `SetModuleBindingIndex`: in-place index assignment on a module

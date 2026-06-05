@@ -60,7 +60,7 @@ pub use iterator_state::{IteratorSource, IteratorState, IteratorTransform};
 pub use kinded_slot::KindedSlot;
 pub use method_id::MethodId;
 pub use native_kind::NativeKind;
-pub use reference::RefTarget;
+pub use reference::{RefTarget, TypedArrayPtr};
 pub use scalar::{ScalarKind, TypedScalar};
 pub use shape_graph::{
     Shape, ShapeId, ShapeTransitionTable, drain_shape_transitions, hash_property_name,

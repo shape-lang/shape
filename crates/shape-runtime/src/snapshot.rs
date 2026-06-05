@@ -1556,11 +1556,17 @@ fn serialize_reference(
         }
         RefTarget::Local { .. }
         | RefTarget::ModuleBinding { .. }
-        | RefTarget::TypedField { .. } => Err(
+        | RefTarget::TypedField { .. }
+        // V3-S5 Seam #2 (2026-06-05): an `IndexedElement` ref owns a
+        // `TypedArrayPtr` array share but has no owning `SharedCell` identity
+        // to serialize — same clean-refuse class as the other non-promoted
+        // refs. Snapshotting an array-element reference is out-of-territory
+        // (no cycle/identity participation); surface rather than fabricate.
+        | RefTarget::IndexedElement { .. } => Err(
             "serialize_reference: STAGE-R5 KL-4 guard — a non-promoted \
-             reference (Local / ModuleBinding / TypedField) has no owning \
-             SharedCell; serializing-through would read its bits as \
-             *const SharedCell (a wild-free). Clean-refuse by design. \
+             reference (Local / ModuleBinding / TypedField / IndexedElement) \
+             has no owning SharedCell; serializing-through would read its bits \
+             as *const SharedCell (a wild-free). Clean-refuse by design. \
              ADR-006 §2.7.30.7."
                 .to_string(),
         ),
