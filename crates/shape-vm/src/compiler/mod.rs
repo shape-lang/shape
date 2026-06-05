@@ -948,6 +948,18 @@ pub struct BytecodeCompiler {
     pub(crate) pending_variable_typed_array_kind:
         Option<crate::compiler::v2_typed_emission::TypedArrayKind>,
 
+    /// Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+    /// When `pending_variable_typed_array_kind == Some(TraitObject)`, this
+    /// carries the trait name extracted from the `Array<dyn Trait>` annotation
+    /// so `compile_expr_array`'s element loop can emit `BoxTraitObject` (with
+    /// the trait-name `Operand::Name`) after each concrete struct element is
+    /// compiled — converting the `Ptr(HeapKind::TypedObject)` struct value into
+    /// the `Ptr(HeapKind::TraitObject)` fat-pointer the
+    /// `TypedArrayPushTraitObject` opcode requires. Reset alongside
+    /// `pending_variable_typed_array_kind`. Per ADR-006 §2.7.5 the trait name
+    /// is the producer-side proof (explicit annotation), never runtime-derived.
+    pub(crate) pending_trait_object_array_trait: Option<String>,
+
     /// R5.4B: nested-array-literal depth.
     ///
     /// Incremented while `compile_expr_array` compiles the elements of an

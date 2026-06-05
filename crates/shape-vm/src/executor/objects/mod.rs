@@ -246,6 +246,11 @@ fn typed_array_method_registry(
         | V2ElemType::String
         | V2ElemType::Decimal
         | V2ElemType::TypedObject
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+        // no dedicated TRAIT_OBJECT_ARRAY_METHODS PHF at HEAD; `arr[i].method()`
+        // lowers to `TypedArrayGetTraitObject` then `DynMethodCall`. Generic
+        // ARRAY_METHODS covers `.length`/`.first`/etc.
+        | V2ElemType::TraitObject
         | V2ElemType::TypedArray => None,
     }
 }

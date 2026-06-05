@@ -965,6 +965,14 @@ impl VirtualMachine {
             | TypedArrayGetNested
             | TypedArrayPushNested
             | TypedArraySetNested
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+            // v2-raw TypedArray<*const TraitObjectStorage> heap-element carrier per
+            // ADR-006 §2.7.5 + §2.7.24 Q25.C. Mirror of the W16.2-A TypedObject
+            // arms above; element values produced by `BoxTraitObject`.
+            | NewTypedArrayTraitObject
+            | TypedArrayGetTraitObject
+            | TypedArrayPushTraitObject
+            | TypedArraySetTraitObject
             // Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade (2026-05-15) —
             // v2-raw String/Decimal literal constructors (closes the literal-element
             // kind mismatch surfaced at Round 3a' gate-flip: `let xs: Array<string>

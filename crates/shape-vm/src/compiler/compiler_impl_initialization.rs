@@ -95,6 +95,7 @@ impl BytecodeCompiler {
             hoisted_field_types: HashMap::new(),
             pending_variable_name: None,
             pending_variable_typed_array_kind: None,
+            pending_trait_object_array_trait: None,
             nested_array_literal_depth: 0,
             v2_typed_array_locals: HashMap::new(),
             v2_typed_array_module_bindings: HashMap::new(),

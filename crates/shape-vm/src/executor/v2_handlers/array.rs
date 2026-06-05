@@ -77,7 +77,7 @@
 
 use crate::bytecode::{Instruction, OpCode, Operand};
 use crate::executor::vm_impl::stack::drop_with_kind;
-use shape_value::heap_value::TypedObjectStorage;
+use shape_value::heap_value::{TraitObjectStorage, TypedObjectStorage};
 use shape_value::v2::decimal_obj::DecimalObj;
 use shape_value::v2::heap_element::HeapElement;
 use shape_value::v2::refcount::v2_retain;
@@ -88,8 +88,9 @@ use shape_value::{HeapKind, NativeKind, VMError};
 use super::super::VirtualMachine;
 use super::v2_array_detect::{
     ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I16,
-    ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING, ELEM_TYPE_TYPED_ARRAY,
-    ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8, stamp_elem_type,
+    ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT,
+    ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8,
+    stamp_elem_type,
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -627,6 +628,25 @@ define_exec_v2_typed_array! {
             elem_kind: NativeKind::Ptr(HeapKind::TypedObject),
             elem_tag: ELEM_TYPE_TYPED_OBJECT,
             err_label: "TypedArrayPush/SetTypedObject",
+        }
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+        // `Array<dyn Trait>` element carrier per ADR-006 §2.7.5 + §2.7.24
+        // Q25.C. Mirror of the TypedObject heap row above; `heap_obj =
+        // TraitObjectStorage` (the fat-pointer carrier `{ value: *const
+        // TypedObjectStorage, vtable: Arc<VTable> }`). Its `HeapElement::
+        // release_elem` (heap_value.rs:3092) calls `v2_release` on the
+        // on-header refcount; on refcount=0 the inner `_drop` releases the
+        // inner TypedObject share + the vtable Arc. Element values are
+        // produced by `OpCode::BoxTraitObject` (already `_new`-allocated,
+        // already labeled `Ptr(HeapKind::TraitObject)`), so the push strict-
+        // kind check accepts them with no carrier translation.
+        {
+            ops: NewTypedArrayTraitObject / TypedArrayGetTraitObject
+                / TypedArrayPushTraitObject / TypedArraySetTraitObject,
+            heap_obj: TraitObjectStorage,
+            elem_kind: NativeKind::Ptr(HeapKind::TraitObject),
+            elem_tag: ELEM_TYPE_TRAIT_OBJECT,
+            err_label: "TypedArrayPush/SetTraitObject",
         }
         // Construction strict-typing close (USER RULING 2026-06-05) —
         // nested-array element. `heap_obj = TypedArrayElem` is the

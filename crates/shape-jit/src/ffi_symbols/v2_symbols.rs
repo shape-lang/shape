@@ -60,6 +60,11 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
         "jit_new_typed_array_typed_object",
         v2::jit_new_typed_array_typed_object as *const u8,
     );
+    // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+    builder.symbol(
+        "jit_new_typed_array_trait_object",
+        v2::jit_new_typed_array_trait_object as *const u8,
+    );
 
     // W16.2-J.3 (2026-05-22): macro-uniform per-kind allocator aliases +
     // get/set entries for the 3 heap-element kinds. The legacy
@@ -105,6 +110,19 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     builder.symbol(
         "jit_v2_array_set_typed_object",
         v2::jit_v2_array_set_typed_object as *const u8,
+    );
+    // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+    builder.symbol(
+        "jit_v2_array_new_trait_object",
+        v2::jit_v2_array_new_trait_object as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_get_trait_object",
+        v2::jit_v2_array_get_trait_object as *const u8,
+    );
+    builder.symbol(
+        "jit_v2_array_set_trait_object",
+        v2::jit_v2_array_set_trait_object as *const u8,
     );
 
     // W16.2-J.3 (2026-05-22): macro-generated per-kind new/get/set FFI
@@ -533,6 +551,20 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         );
     }
 
+    // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+    // jit_new_typed_array_trait_object(capacity: u32) -> ptr
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I32)); // capacity
+        sig.returns.push(AbiParam::new(types::I64)); // *mut TypedArray<*const TraitObjectStorage>
+        declare(
+            module,
+            ffi_funcs,
+            "jit_new_typed_array_trait_object",
+            &sig,
+        );
+    }
+
     // ========================================================================
     // W16.2-J.3 (2026-05-22): per-kind get/set + macro-uniform new aliases
     // for the 3 heap-element kinds (String / Decimal / TypedObject). Pointer
@@ -544,6 +576,8 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         "jit_v2_array_new_string",
         "jit_v2_array_new_decimal",
         "jit_v2_array_new_typed_object",
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        "jit_v2_array_new_trait_object",
     ] {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I32)); // capacity
@@ -554,6 +588,8 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         "jit_v2_array_get_string",
         "jit_v2_array_get_decimal",
         "jit_v2_array_get_typed_object",
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        "jit_v2_array_get_trait_object",
     ] {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // arr ptr
@@ -565,6 +601,8 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         "jit_v2_array_set_string",
         "jit_v2_array_set_decimal",
         "jit_v2_array_set_typed_object",
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        "jit_v2_array_set_trait_object",
     ] {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // arr ptr

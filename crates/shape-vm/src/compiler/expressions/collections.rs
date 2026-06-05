@@ -416,6 +416,24 @@ impl BytecodeCompiler {
             // Until then, non-literal elements emit through the legacy path
             // and surface the same structured kind-mismatch RuntimeError at
             // push time that Round 3a' gate-flip introduced — NOT a SIGSEGV.
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+            // for an `Array<dyn Trait>`, snapshot the trait name resolved from
+            // the annotation BEFORE the element loop (compiling an element may
+            // clobber `pending_trait_object_array_trait`). Each concrete struct
+            // element is compiled to a `Ptr(HeapKind::TypedObject)` value, then
+            // boxed via `BoxTraitObject(trait_name)` into a
+            // `Ptr(HeapKind::TraitObject)` fat pointer that
+            // `TypedArrayPushTraitObject` requires. The trait-name operand
+            // drives the runtime `(concrete_type, trait_name) → vtable` lookup
+            // per ADR-006 §2.7.24 Q25.C (all-traits-dyn-able).
+            let trait_object_box_sid: Option<u32> =
+                if kind == TypedArrayKind::TraitObject {
+                    self.pending_trait_object_array_trait
+                        .clone()
+                        .map(|t| self.program.add_string(t) as u32)
+                } else {
+                    None
+                };
             for elem in elements {
                 self.plan_flexible_binding_escape_from_expr(elem);
                 self.emit(Instruction::simple(OpCode::Dup));
@@ -430,6 +448,14 @@ impl BytecodeCompiler {
                     self.pending_variable_typed_array_kind = saved;
                 } else {
                     self.compile_typed_array_element_value(kind, elem)?;
+                }
+                // W16.2-B: box the concrete struct element into a trait object
+                // before pushing into the `TypedArray<*const TraitObjectStorage>`.
+                if let Some(sid) = trait_object_box_sid {
+                    self.emit(Instruction::new(
+                        OpCode::BoxTraitObject,
+                        Some(Operand::Name(shape_value::StringId(sid))),
+                    ));
                 }
                 self.emit(Instruction::simple(kind.push_opcode()));
             }
@@ -1686,6 +1712,8 @@ impl BytecodeCompiler {
                 TypedArrayKind::String => Some(Family::StringF),
                 TypedArrayKind::Char
                 | TypedArrayKind::TypedObject
+                // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+                | TypedArrayKind::TraitObject
                 | TypedArrayKind::TypedArray => None,
             };
             if let (Some(lf), Some(af)) = (literal_family, array_family) {

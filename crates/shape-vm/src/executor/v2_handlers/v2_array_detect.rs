@@ -32,7 +32,7 @@
 //! pair, decode bits per kind, and reject incompatible kinds.
 
 use shape_value::NativeKind;
-use shape_value::heap_value::TypedObjectStorage;
+use shape_value::heap_value::{TraitObjectStorage, TypedObjectStorage};
 use shape_value::v2::decimal_obj::DecimalObj;
 use shape_value::v2::heap_element::HeapElement;
 use shape_value::v2::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
@@ -59,8 +59,8 @@ use shape_value::HeapKind;
 pub use shape_value::v2::typed_array::{
     ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64,
     ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING,
-    ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8,
-    ELEM_TYPE_UNKNOWN,
+    ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16,
+    ELEM_TYPE_U32, ELEM_TYPE_U8, ELEM_TYPE_UNKNOWN,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +91,13 @@ pub enum V2ElemType {
     // pushes the carrier pointer with `NativeKind::Ptr(HeapKind::TypedObject)`
     // after per-element `v2_retain` of the header.
     TypedObject,
+    // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+    // v2-raw heap-pointer carrier (`*const TraitObjectStorage`); element-read
+    // pushes the carrier pointer with `NativeKind::Ptr(HeapKind::TraitObject)`
+    // after per-element `v2_retain` of the header. Per ADR-006 §2.7.24 Q25.C
+    // this is the `Array<dyn Trait>` carrier; element values are boxed at the
+    // producer site via `BoxTraitObject`.
+    TraitObject,
     // Construction strict-typing close (USER RULING 2026-06-05) — nested
     // array. The element is a `*const TypedArrayElem` (an inner
     // `TypedArray<U>` viewed through its HeapHeader); element-read pushes the
@@ -123,6 +130,8 @@ impl V2ElemType {
             ELEM_TYPE_DECIMAL => Some(V2ElemType::Decimal),
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
             ELEM_TYPE_TYPED_OBJECT => Some(V2ElemType::TypedObject),
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+            ELEM_TYPE_TRAIT_OBJECT => Some(V2ElemType::TraitObject),
             // Construction strict-typing close (2026-06-05) — nested array.
             ELEM_TYPE_TYPED_ARRAY => Some(V2ElemType::TypedArray),
             _ => None,
@@ -151,6 +160,11 @@ impl V2ElemType {
             // element-read result carries the existing TypedObject pointer kind label.
             V2ElemType::TypedObject => {
                 NativeKind::Ptr(shape_value::HeapKind::TypedObject)
+            }
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+            // element-read result carries the existing TraitObject pointer kind.
+            V2ElemType::TraitObject => {
+                NativeKind::Ptr(shape_value::HeapKind::TraitObject)
             }
             // Nested array — the element carrier kind is the SAME as the outer
             // array's own carrier kind (a v2-raw `*mut TypedArray<U>`).
@@ -424,6 +438,17 @@ pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<(u64, NativeK
             v2_retain(&(*elem_ptr).header);
             (elem_ptr as u64, NativeKind::Ptr(HeapKind::TypedObject))
         },
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+        // mirror of the TypedObject arm. Each element is a `*const
+        // TraitObjectStorage`; retain its on-header refcount and return with
+        // `Ptr(HeapKind::TraitObject)` (the kind DynMethodCall dispatches on).
+        V2ElemType::TraitObject => unsafe {
+            let arr = view.ptr as *const TypedArray<*const TraitObjectStorage>;
+            let elem_ptr =
+                TypedArray::<*const TraitObjectStorage>::get_unchecked(arr, index);
+            v2_retain(&(*elem_ptr).header);
+            (elem_ptr as u64, NativeKind::Ptr(HeapKind::TraitObject))
+        },
         // Construction strict-typing close (2026-06-05) — nested array.
         // Element is an inner `*mut TypedArray<U>` viewed through its
         // HeapHeader; retain its on-header refcount and return with the same
@@ -584,6 +609,24 @@ pub fn write_element(
                 TypedArray::<*const TypedObjectStorage>::set(arr, index, new_ptr);
             }
         }
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+        // mirror of the TypedObject write arm. Kind discriminator strict:
+        // only `NativeKind::Ptr(HeapKind::TraitObject)` accepted.
+        V2ElemType::TraitObject => {
+            if kind != NativeKind::Ptr(HeapKind::TraitObject) {
+                return Err(
+                    "expected NativeKind::Ptr(HeapKind::TraitObject) for Array<dyn Trait> write",
+                );
+            }
+            let new_ptr = bits as usize as *const TraitObjectStorage;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<*const TraitObjectStorage>;
+                let old_ptr =
+                    TypedArray::<*const TraitObjectStorage>::get_unchecked(arr, index);
+                <TraitObjectStorage as HeapElement>::release_elem(old_ptr);
+                TypedArray::<*const TraitObjectStorage>::set(arr, index, new_ptr);
+            }
+        }
         // Construction strict-typing close (2026-06-05) — nested array write.
         V2ElemType::TypedArray => {
             if kind != NativeKind::Ptr(HeapKind::TypedArray) {
@@ -729,6 +772,19 @@ pub fn push_element(
                 TypedArray::<*const TypedObjectStorage>::push(arr, new_ptr);
             }
         }
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        V2ElemType::TraitObject => {
+            if kind != NativeKind::Ptr(HeapKind::TraitObject) {
+                return Err(
+                    "expected NativeKind::Ptr(HeapKind::TraitObject) for Array<dyn Trait> push",
+                );
+            }
+            let new_ptr = bits as usize as *const TraitObjectStorage;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<*const TraitObjectStorage>;
+                TypedArray::<*const TraitObjectStorage>::push(arr, new_ptr);
+            }
+        }
         // Construction strict-typing close (2026-06-05) — nested array push.
         V2ElemType::TypedArray => {
             if kind != NativeKind::Ptr(HeapKind::TypedArray) {
@@ -816,6 +872,12 @@ pub fn pop_element(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             TypedArray::<*const TypedObjectStorage>::pop(arr)
                 .map(|v| (v as u64, NativeKind::Ptr(HeapKind::TypedObject)))
         },
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        V2ElemType::TraitObject => unsafe {
+            let arr = view.ptr as *mut TypedArray<*const TraitObjectStorage>;
+            TypedArray::<*const TraitObjectStorage>::pop(arr)
+                .map(|v| (v as u64, NativeKind::Ptr(HeapKind::TraitObject)))
+        },
         // Construction strict-typing close (2026-06-05) — nested array pop.
         V2ElemType::TypedArray => unsafe {
             let arr = view.ptr as *mut TypedArray<*const TypedArrayElem>;
@@ -894,6 +956,7 @@ pub fn sum_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::String
         | V2ElemType::Decimal
         | V2ElemType::TypedObject
+            | V2ElemType::TraitObject
             | V2ElemType::TypedArray => None,
     }
 }
@@ -1140,6 +1203,7 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::String
             | V2ElemType::Decimal
             | V2ElemType::TypedObject
+            | V2ElemType::TraitObject
             | V2ElemType::TypedArray => None,
         };
     }
@@ -1190,6 +1254,7 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::String
         | V2ElemType::Decimal
         | V2ElemType::TypedObject
+            | V2ElemType::TraitObject
             | V2ElemType::TypedArray => None,
     }
 }
@@ -1219,6 +1284,7 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::String
             | V2ElemType::Decimal
             | V2ElemType::TypedObject
+            | V2ElemType::TraitObject
             | V2ElemType::TypedArray => None,
         };
     }
@@ -1273,6 +1339,7 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::String
         | V2ElemType::Decimal
         | V2ElemType::TypedObject
+            | V2ElemType::TraitObject
             | V2ElemType::TypedArray => None,
     }
 }
@@ -1297,6 +1364,7 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::String
             | V2ElemType::Decimal
             | V2ElemType::TypedObject
+            | V2ElemType::TraitObject
             | V2ElemType::TypedArray => None,
         };
     }
@@ -1351,6 +1419,7 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::String
         | V2ElemType::Decimal
         | V2ElemType::TypedObject
+            | V2ElemType::TraitObject
             | V2ElemType::TypedArray => None,
     }
 }
@@ -1736,6 +1805,28 @@ pub fn clone_array(view: &V2TypedArrayView) -> *mut u8 {
                 (*new_arr).len = view.len;
                 let p = new_arr as *mut u8;
                 stamp_elem_type(p, ELEM_TYPE_TYPED_OBJECT);
+                p
+            }
+        }
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+        // shallow clone; retain per-element TraitObject share.
+        V2ElemType::TraitObject => {
+            let new_arr =
+                TypedArray::<*const TraitObjectStorage>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<*const TraitObjectStorage>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                if view.len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    for i in 0..(view.len as usize) {
+                        let elem = *src_data.add(i);
+                        v2_retain(&(*elem).header);
+                        *dst_data.add(i) = elem;
+                    }
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_TRAIT_OBJECT);
                 p
             }
         }
@@ -2147,6 +2238,29 @@ pub fn reverse_array(view: &V2TypedArrayView) -> *mut u8 {
                 p
             }
         }
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+        // reverse; retain per-element TraitObject share.
+        V2ElemType::TraitObject => {
+            let new_arr =
+                TypedArray::<*const TraitObjectStorage>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<*const TraitObjectStorage>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                let len = view.len as usize;
+                if len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    for i in 0..len {
+                        let elem = *src_data.add(len - 1 - i);
+                        v2_retain(&(*elem).header);
+                        *dst_data.add(i) = elem;
+                    }
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_TRAIT_OBJECT);
+                p
+            }
+        }
         // Construction strict-typing close (2026-06-05) — nested array.
         V2ElemType::TypedArray => {
             let new_arr =
@@ -2477,6 +2591,37 @@ pub fn concat_arrays(
             stamp_elem_type(p, ELEM_TYPE_TYPED_OBJECT);
             p
         },
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        V2ElemType::TraitObject => unsafe {
+            let new_arr =
+                TypedArray::<*const TraitObjectStorage>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<*const TraitObjectStorage>;
+            let b_arr = b.ptr as *const TypedArray<*const TraitObjectStorage>;
+            let dst_data = (*new_arr).data;
+            let a_data = (*a_arr).data;
+            let b_data = (*b_arr).data;
+            if !dst_data.is_null() {
+                if a.len > 0 && !a_data.is_null() {
+                    for i in 0..(a.len as usize) {
+                        let elem = *a_data.add(i);
+                        v2_retain(&(*elem).header);
+                        *dst_data.add(i) = elem;
+                    }
+                }
+                if b.len > 0 && !b_data.is_null() {
+                    let off = a.len as usize;
+                    for i in 0..(b.len as usize) {
+                        let elem = *b_data.add(i);
+                        v2_retain(&(*elem).header);
+                        *dst_data.add(off + i) = elem;
+                    }
+                }
+            }
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_TRAIT_OBJECT);
+            p
+        },
         // Construction strict-typing close (2026-06-05) — nested array.
         V2ElemType::TypedArray => unsafe {
             let new_arr =
@@ -2699,6 +2844,25 @@ fn copy_range_to_new_array(
             stamp_elem_type(p, ELEM_TYPE_TYPED_OBJECT);
             p
         },
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        V2ElemType::TraitObject => unsafe {
+            let new_arr =
+                TypedArray::<*const TraitObjectStorage>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<*const TraitObjectStorage>;
+            let src_data = (*src).data;
+            let dst_data = (*new_arr).data;
+            if n > 0 && !src_data.is_null() && !dst_data.is_null() {
+                for i in 0..n {
+                    let elem = *src_data.add(s + i);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(i) = elem;
+                }
+            }
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_TRAIT_OBJECT);
+            p
+        },
         // Construction strict-typing close (2026-06-05) — nested array.
         V2ElemType::TypedArray => unsafe {
             let new_arr =
@@ -2827,6 +2991,10 @@ pub fn allocate_empty_typed_array(elem_type: V2ElemType, capacity: u32) -> *mut 
             V2ElemType::TypedObject => {
                 TypedArray::<*const TypedObjectStorage>::with_capacity(capacity) as *mut u8
             }
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+            V2ElemType::TraitObject => {
+                TypedArray::<*const TraitObjectStorage>::with_capacity(capacity) as *mut u8
+            }
             V2ElemType::TypedArray => {
                 TypedArray::<*const shape_value::v2::typed_array::TypedArrayElem>::with_capacity(
                     capacity,
@@ -2848,6 +3016,8 @@ pub fn allocate_empty_typed_array(elem_type: V2ElemType, capacity: u32) -> *mut 
             V2ElemType::String => ELEM_TYPE_STRING,
             V2ElemType::Decimal => ELEM_TYPE_DECIMAL,
             V2ElemType::TypedObject => ELEM_TYPE_TYPED_OBJECT,
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+            V2ElemType::TraitObject => ELEM_TYPE_TRAIT_OBJECT,
             V2ElemType::TypedArray => ELEM_TYPE_TYPED_ARRAY,
         };
         stamp_elem_type(p, stamp_byte);
@@ -2988,6 +3158,14 @@ pub fn eq_element(a_bits: u64, b_bits: u64, elem_type: V2ElemType) -> bool {
             // bounded to this scope; no share is retained or released.
             unsafe { typed_object_deep_eq(&*a_ptr, &*b_ptr) }
         }
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+        // trait-object element equality. Pointer-identity only: two trait
+        // objects are equal iff they are the same allocation. Structural deep-
+        // equality across `dyn`-erased aggregates would require an Eq-trait
+        // projection mechanism (v0.4 territory, mirrors the cmp_element_natural
+        // SURFACE below). Distinct allocations compare unequal (no false
+        // positives); the null-guard mirrors the TypedObject arm.
+        V2ElemType::TraitObject => a_bits == b_bits,
         // Construction strict-typing close (2026-06-05) — nested array
         // element equality. Pointer-identity only: structural deep-equality
         // of nested arrays is a separate stage. Distinct inner-array
@@ -3189,6 +3367,17 @@ pub fn position_of(view: &V2TypedArrayView, needle_bits: u64) -> Option<u32> {
             for i in 0..n {
                 let elem_ptr = TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, i);
                 if eq_element(elem_ptr as u64, needle_bits, V2ElemType::TypedObject) {
+                    return Some(i);
+                }
+            }
+            None
+        }
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        V2ElemType::TraitObject => unsafe {
+            let arr = view.ptr as *const TypedArray<*const TraitObjectStorage>;
+            for i in 0..n {
+                let elem_ptr = TypedArray::<*const TraitObjectStorage>::get_unchecked(arr, i);
+                if eq_element(elem_ptr as u64, needle_bits, V2ElemType::TraitObject) {
                     return Some(i);
                 }
             }
@@ -3539,6 +3728,30 @@ pub fn permute_array(view: &V2TypedArrayView, indices: &[u32]) -> *mut u8 {
             (*new_arr).len = w;
             let p = new_arr as *mut u8;
             stamp_elem_type(p, ELEM_TYPE_TYPED_OBJECT);
+            p
+        },
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        V2ElemType::TraitObject => unsafe {
+            let new_arr =
+                TypedArray::<*const TraitObjectStorage>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<*const TraitObjectStorage>;
+            let src_data = (*src).data;
+            let dst_data = (*new_arr).data;
+            let mut w: u32 = 0;
+            if !src_data.is_null() && !dst_data.is_null() {
+                for &idx in indices {
+                    if idx >= view.len {
+                        continue;
+                    }
+                    let elem = *src_data.add(idx as usize);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(w as usize) = elem;
+                    w += 1;
+                }
+            }
+            (*new_arr).len = w;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_TRAIT_OBJECT);
             p
         },
         // Construction strict-typing close (2026-06-05) — nested array.

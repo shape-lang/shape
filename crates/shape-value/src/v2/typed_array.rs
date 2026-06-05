@@ -383,6 +383,16 @@ pub const ELEM_TYPE_TYPED_OBJECT: u8 = 15;
 /// runtime NativeKind probe at the outer layer; the inner discriminant is the
 /// inner array's own producer-side stamp (ADR-006 §2.7.5).
 pub const ELEM_TYPE_TYPED_ARRAY: u8 = 16;
+/// `_pad`-byte discriminant for `TypedArray<*const TraitObjectStorage>` —
+/// the backing carrier for `Array<dyn Trait>` literals (Phase 4b W16.2-B
+/// op_new_array-trait-object-element, 2026-06-05). Per ADR-006 §2.7.5
+/// stamp-at-compile-time + §2.7.24 Q25.C, the stored element is a
+/// `*const TraitObjectStorage` (HeapHeader at offset 0); per-element release
+/// dispatches through `TraitObjectStorage::release_elem` (heap_value.rs:3092)
+/// which calls `v2_release` on the on-header refcount and, at refcount=0,
+/// `_drop`s the inner TypedObject share + the vtable Arc. Mirror of
+/// `ELEM_TYPE_TYPED_OBJECT`.
+pub const ELEM_TYPE_TRAIT_OBJECT: u8 = 17;
 
 /// Read the element-type discriminant stamped in the `_pad` byte (offset 7).
 ///
@@ -507,6 +517,16 @@ pub unsafe fn release_v2_typed_array(ptr: *mut u8) {
             ELEM_TYPE_TYPED_OBJECT => {
                 TypedArray::<*const crate::heap_value::TypedObjectStorage>::drop_array_heap(
                     ptr as *mut TypedArray<*const crate::heap_value::TypedObjectStorage>,
+                )
+            }
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+            // `Array<dyn Trait>` carrier. Each element is a `*const
+            // TraitObjectStorage`; `TraitObjectStorage::release_elem`
+            // (heap_value.rs:3092) retires one share via the on-header
+            // refcount, `_drop`-ing the inner TypedObject + vtable at 0.
+            ELEM_TYPE_TRAIT_OBJECT => {
+                TypedArray::<*const crate::heap_value::TraitObjectStorage>::drop_array_heap(
+                    ptr as *mut TypedArray<*const crate::heap_value::TraitObjectStorage>,
                 )
             }
             ELEM_TYPE_TYPED_ARRAY => {

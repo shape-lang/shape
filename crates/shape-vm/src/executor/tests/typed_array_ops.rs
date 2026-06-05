@@ -614,6 +614,110 @@ fn test_typed_object_array_struct_with_number_field() {
     assert_eq!(result.as_f64(), Some(3.5));
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05)
+//
+// Per ADR-006 §2.7.5 stamp-at-compile-time + §2.7.24 Q25.C (TraitObject
+// re-introduction, all-traits-dyn-able). Verifies that `Array<dyn Trait>`
+// literals route through the v2-raw `TypedArray<*const TraitObjectStorage>`
+// carrier (`NewTypedArrayTraitObject` + per-element `BoxTraitObject` +
+// `TypedArrayPushTraitObject` + `TypedArrayGetTraitObject`), and that
+// `arr[i].method()` dispatches through the vtable (`DynMethodCall`), NOT
+// through a concrete struct method on a TypedObject carrier. This is the
+// distinguishing property: the elements MUST be boxed trait objects so
+// vtable dispatch is exercised — a coincidental TypedObject-carrier fix
+// would not box and would dispatch on the concrete type directly.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_trait_object_array_dyn_method_dispatch() {
+    // The s5 smoke-fixture shape: `Array<dyn HasX>` of struct literals,
+    // index-access + trait-method call. The method MUST dispatch via the
+    // vtable on a boxed TraitObject element.
+    let result = eval(
+        "trait HasX { method x_str() -> string; }\n\
+         type Bar { v: int }\n\
+         impl HasX for Bar { method x_str() -> string { \"x\" } }\n\
+         let arr: Array<dyn HasX> = [Bar { v: 1 }, Bar { v: 2 }]\n\
+         arr[0].x_str()",
+    );
+    assert_eq!(result.as_str(), Some("x"));
+}
+
+#[test]
+fn test_trait_object_array_index_one_dispatch() {
+    // Index 1 round-trip — distinct element, same trait dispatch. The
+    // method body returns a per-instance value so a wrong element or a
+    // missing box would surface.
+    let result = eval(
+        "trait Label { method tag() -> string; }\n\
+         type A { v: int }\n\
+         type B { v: int }\n\
+         impl Label for A { method tag() -> string { \"a\" } }\n\
+         impl Label for B { method tag() -> string { \"b\" } }\n\
+         let arr: Array<dyn Label> = [A { v: 1 }, B { v: 2 }]\n\
+         arr[1].tag()",
+    );
+    // Per-type vtable dispatch: arr[1] is a `B`, so `tag()` returns "b".
+    // This is the load-bearing assertion that the element is BOXED with
+    // its own vtable — a TypedObject carrier would still pick the right
+    // concrete method here, but `test_trait_object_array_emits_trait_carrier`
+    // below pins the carrier opcode directly.
+    assert_eq!(result.as_str(), Some("b"));
+}
+
+#[test]
+fn test_trait_object_array_field_returning_method() {
+    // The trait method reads a struct field — exercises self.field access
+    // through the boxed TraitObject's inner TypedObject value.
+    let result = eval(
+        "trait Named { method name() -> string; }\n\
+         type Person { name: string }\n\
+         impl Named for Person { method name() -> string { self.name } }\n\
+         let arr: Array<dyn Named> = [Person { name: \"alice\" }, Person { name: \"bob\" }]\n\
+         arr[1].name()",
+    );
+    assert_eq!(result.as_str(), Some("bob"));
+}
+
+#[test]
+fn test_trait_object_array_emits_trait_carrier() {
+    // Producer-side proof: `Array<dyn Trait>` MUST emit the v2-raw
+    // `TypedArray<*const TraitObjectStorage>` carrier (NewTypedArrayTraitObject
+    // + per-element BoxTraitObject + TypedArrayPushTraitObject), NOT the
+    // TypedObject carrier (NewTypedArrayTypedObject). This is the load-bearing
+    // distinction from W16.2-A's coincidental bare-struct-literal path.
+    use crate::bytecode::OpCode;
+    use crate::executor::tests::test_utils::compile_with_prelude;
+    let prog = compile_with_prelude(
+        "trait HasX { method x_str() -> string; }\n\
+         type Bar { v: int }\n\
+         impl HasX for Bar { method x_str() -> string { \"x\" } }\n\
+         let arr: Array<dyn HasX> = [Bar { v: 1 }, Bar { v: 2 }]\n\
+         arr[0].x_str()",
+    )
+    .expect("compile failed");
+    // The array literal + box + push live in the module-scope top-level
+    // instruction stream (`prog.instructions`).
+    let has = |op: OpCode| prog.instructions.iter().any(|i| i.opcode == op);
+    assert!(
+        has(OpCode::NewTypedArrayTraitObject),
+        "Array<dyn Trait> must emit NewTypedArrayTraitObject (trait carrier), not the TypedObject carrier"
+    );
+    assert!(
+        has(OpCode::TypedArrayPushTraitObject),
+        "Array<dyn Trait> must emit per-element TypedArrayPushTraitObject"
+    );
+    assert!(
+        has(OpCode::BoxTraitObject),
+        "Array<dyn Trait> must box each concrete element via BoxTraitObject"
+    );
+    assert!(
+        !has(OpCode::NewTypedArrayTypedObject),
+        "Array<dyn Trait> must NOT route through the TypedObject carrier (coincidental-fix guard)"
+    );
+}
+
 // ── r5c-2-β-δ-(α): `Ptr(HeapKind::TypedArray)` carrier regression tests ─────
 //
 // Before the fix, both trigger paths panicked at the vacated

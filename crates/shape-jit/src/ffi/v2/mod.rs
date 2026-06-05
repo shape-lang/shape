@@ -21,7 +21,7 @@ pub mod typed_map;
 // consumer + `jit_call_method` shell to dispatch through these
 // entry-points; until then they are inert at the program surface.
 
-use shape_value::heap_value::TypedObjectStorage;
+use shape_value::heap_value::{TraitObjectStorage, TypedObjectStorage};
 use shape_value::v2::decimal_obj::DecimalObj;
 use shape_value::v2::heap_header::HeapHeader;
 use shape_value::v2::string_obj::StringObj;
@@ -50,7 +50,7 @@ use shape_value::v2::typed_array::TypedArray;
 use shape_vm::executor::v2_handlers::v2_array_detect::{
     stamp_elem_type, ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32,
     ELEM_TYPE_F64, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8,
-    ELEM_TYPE_STRING, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8,
+    ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8,
 };
 
 // ============================================================================
@@ -490,6 +490,40 @@ v2_typed_array_heap_get_set! {
     set = jit_v2_array_set_typed_object,
     elem_obj_ty = TypedObjectStorage,
     kind_label = "typed_object",
+}
+
+/// Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+///
+/// JIT-side allocator for `TypedArray<*const TraitObjectStorage>` carriers —
+/// the `Array<dyn Trait>` backing per ADR-006 §2.7.5 + §2.7.24 Q25.C. Mirror
+/// of `jit_new_typed_array_typed_object`, swapping `TypedObjectStorage` →
+/// `TraitObjectStorage` and `ELEM_TYPE_TYPED_OBJECT` → `ELEM_TYPE_TRAIT_OBJECT`.
+/// Element values are boxed at the producer site via `BoxTraitObject` (which
+/// `_new`-allocates the `TraitObjectStorage`), then transferred per-element via
+/// the matching `TypedArrayPushTraitObject` opcode.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_new_typed_array_trait_object(
+    capacity: u32,
+) -> *mut TypedArray<*const TraitObjectStorage> {
+    let ptr = TypedArray::<*const TraitObjectStorage>::with_capacity(capacity);
+    unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_TRAIT_OBJECT) };
+    ptr
+}
+
+/// Macro-uniform alias for `jit_new_typed_array_trait_object`. See
+/// `jit_v2_array_new_string` for rationale.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_v2_array_new_trait_object(
+    capacity: u32,
+) -> *mut TypedArray<*const TraitObjectStorage> {
+    jit_new_typed_array_trait_object(capacity)
+}
+
+v2_typed_array_heap_get_set! {
+    get = jit_v2_array_get_trait_object,
+    set = jit_v2_array_set_trait_object,
+    elem_obj_ty = TraitObjectStorage,
+    kind_label = "trait_object",
 }
 
 /// JIT-compile-time per-element materializer for `*const StringObj` constants

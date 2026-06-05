@@ -754,7 +754,7 @@ impl BytecodeCompiler {
                     self.pending_variable_typed_array_kind = var_decl
                         .type_annotation
                         .as_ref()
-                        .and_then(|ann| self.resolve_typed_array_kind_from_annotation(ann));
+                        .and_then(|ann| self.resolve_typed_array_kind_and_record_trait(ann));
                     match self.compile_expr_for_reference_binding(init_expr) {
                         Ok(tracked_borrow) => {
                             ref_borrow = tracked_borrow;
@@ -969,7 +969,7 @@ impl BytecodeCompiler {
                         self.pending_variable_typed_array_kind = var_decl
                             .type_annotation
                             .as_ref()
-                            .and_then(|ann| self.resolve_typed_array_kind_from_annotation(ann));
+                            .and_then(|ann| self.resolve_typed_array_kind_and_record_trait(ann));
                         let compile_result = self.compile_expr_for_reference_binding(init_expr);
                         self.pending_variable_name = saved_pending_variable_name;
                         self.pending_variable_typed_array_kind =
@@ -4713,7 +4713,7 @@ impl BytecodeCompiler {
                 self.pending_variable_typed_array_kind = var_decl
                     .type_annotation
                     .as_ref()
-                    .and_then(|ann| self.resolve_typed_array_kind_from_annotation(ann));
+                    .and_then(|ann| self.resolve_typed_array_kind_and_record_trait(ann));
                 // v2 Phase 3.2: when the binding has an explicit
                 // `HashMap<K, V>` annotation whose key/value pair maps to a
                 // typed-map kind, signal it to `compile_expr_function_call`

@@ -38,14 +38,25 @@ canonical harness at branch HEAD `5d842283`.
 | `s2-oneliner.shape` | one-line equivalent of `s2` | `(30, 0)` | `(30, 0)` | PASS |
 | `s3.shape` | UFCS-dispatch `impl HasX for Foo` returning `"x"` | `(x, 0)` | `(x, 0)` | PASS |
 | `s4.shape` | `Set()` basics: `add("a"); add("b"); len()` | `(2, 0)` | `(2, 0)` | PASS (R7-F: `.size` deleted, `.len` only) |
-| `s5.shape` | `Array<dyn HasX>` trait-object reproducer | SURFACE `op_new_array(2)` | SURFACE `op_new_array(2)` | SURFACE — W16.2-B target |
+| `s5.shape` | `Array<dyn HasX>` trait-object reproducer | `(x, 0)` | `(x, 0)` | PASS (W16.2-B LANDED 2026-06-05) |
 | `s5-kickoff-literal.shape` | kickoff prose Rust-syntax variant (`box(X{})`) | parse error | parse error | informational — NOT in canonical s1-s5 matrix |
 
-`s5` SURFACE is the V3-S5 ckpt-5 consumer-cascade tier 3 surface (per
-ADR-006 §2.7.24 Q25.A SUPERSEDED + W12-typed-array-data-deletion audit
-§3.5 + §3.6). It is the **W16.2-B target**: preserve fixture as-is until
-ckpt-6 STRICT close (after ckpt-5-prime + ckpt-5-prime² land). Refused on
-sight: `TypedArrayData` resurrection under any rename (Refusal #1).
+`s5` is now CARRIED by the v2-raw `TypedArray<*const TraitObjectStorage>`
+trait-object element carrier (Phase 4b W16.2-B op_new_array-trait-object-element,
+2026-06-05, per ADR-006 §2.7.5 + §2.7.24 Q25.C all-traits-dyn-able). The
+`Array<dyn HasX>` annotation routes to `TypedArrayKind::TraitObject`
+(`NewTypedArrayTraitObject` + per-element `BoxTraitObject` +
+`TypedArrayPushTraitObject` + `TypedArrayGetTraitObject`); `arr[0].x_str()`
+dispatches through the vtable (`DynMethodCall`), NOT a concrete struct method.
+This is distinct from the W16.2-A bare-struct-literal TypedObject path: the
+elements are BOXED trait objects, so vtable dispatch is exercised (the
+`test_trait_object_array_emits_trait_carrier` regression test pins the carrier
+opcode + boxing directly, guarding against a coincidental TypedObject-carrier
+fix). The `--mode jit` run falls through to the interpreter via the
+pre-existing R8 W7 G.5 FrameDescriptor SURFACE (ADR-006 §2.7.14) — same
+boundary every v2-typed-array opcode hits at HEAD; the JIT runtime surface
+agrees byte-for-byte with `--mode vm`. Refused on sight: `TypedArrayData`
+resurrection under any rename (Refusal #1).
 
 ## Reproducer recipe (5 smokes × 2 modes = 10 results)
 

@@ -280,6 +280,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             NativeKind::Ptr(shape_value::HeapKind::TypedObject) => {
                 Some(self.ffi.v2_array_new_typed_object)
             }
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+            // v2-raw `TypedArray<*const TraitObjectStorage>` allocator per
+            // ADR-006 §2.7.5 + §2.7.24 Q25.C. 8-byte `*const TraitObjectStorage`
+            // raw pointer payload; mirrors the TypedObject carrier.
+            NativeKind::Ptr(shape_value::HeapKind::TraitObject) => {
+                Some(self.ffi.v2_array_new_trait_object)
+            }
             _ => None,
         }
     }
@@ -303,6 +310,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
             // 8-byte raw pointer carrier (`*const TypedObjectStorage`).
             NativeKind::Ptr(shape_value::HeapKind::TypedObject) => Some(8),
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+            // 8-byte raw pointer carrier (`*const TraitObjectStorage`).
+            NativeKind::Ptr(shape_value::HeapKind::TraitObject) => Some(8),
             _ => None,
         }
     }
@@ -417,6 +427,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
             // 8-byte raw pointer carrier, no coercion.
             NativeKind::Ptr(shape_value::HeapKind::TypedObject) => val,
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+            // 8-byte raw pointer carrier, no coercion.
+            NativeKind::Ptr(shape_value::HeapKind::TraitObject) => val,
             _ => val,
         }
     }

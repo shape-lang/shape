@@ -98,6 +98,19 @@ pub enum TypedArrayKind {
     /// `*mut Self` with `HeapHeader` + `:4058` `unsafe impl HeapElement for
     /// TypedObjectStorage`).
     TypedObject,
+    /// `TypedArray<*const TraitObjectStorage>` — backing for `Array<dyn Trait>`
+    /// (Phase 4b W16.2-B op_new_array-trait-object-element, 2026-06-05). Per
+    /// ADR-006 §2.7.5 stamp-at-compile-time + §2.7.24 Q25.C (TraitObject
+    /// re-introduction, all-traits-dyn-able), the v2-raw TraitObject element
+    /// carrier. Element-read pushes `NativeKind::Ptr(HeapKind::TraitObject)`
+    /// (the kind `DynMethodCall` dispatches on for vtable method calls).
+    /// Distinct from `TypedObject`: each element literal is BOXED via
+    /// `OpCode::BoxTraitObject` (with the trait-name operand) at the producer
+    /// site before push, converting the concrete `Ptr(HeapKind::TypedObject)`
+    /// struct value to a fat-pointer `Ptr(HeapKind::TraitObject)`. The
+    /// `HeapElement` impl + `_new`/`_drop` allocators are RESOLVED at HEAD
+    /// (heap_value.rs:2948 `_new` / :3092 `impl HeapElement`).
+    TraitObject,
     /// `TypedArray<*const TypedArrayElem>` — backing for a NESTED array
     /// (`[[1,2],[3,4]]`, Construction strict-typing close, USER RULING
     /// 2026-06-05). Each element is itself a v2-raw `*mut TypedArray<U>`
@@ -130,6 +143,8 @@ impl TypedArrayKind {
             TypedArrayKind::Decimal => OpCode::NewTypedArrayDecimal,
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
             TypedArrayKind::TypedObject => OpCode::NewTypedArrayTypedObject,
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+            TypedArrayKind::TraitObject => OpCode::NewTypedArrayTraitObject,
             // Construction strict-typing close (2026-06-05) — nested array.
             TypedArrayKind::TypedArray => OpCode::NewTypedArrayNested,
         }
@@ -155,6 +170,8 @@ impl TypedArrayKind {
             TypedArrayKind::Decimal => OpCode::TypedArrayGetDecimal,
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
             TypedArrayKind::TypedObject => OpCode::TypedArrayGetTypedObject,
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+            TypedArrayKind::TraitObject => OpCode::TypedArrayGetTraitObject,
             // Construction strict-typing close (2026-06-05) — nested array.
             TypedArrayKind::TypedArray => OpCode::TypedArrayGetNested,
         }
@@ -180,6 +197,8 @@ impl TypedArrayKind {
             TypedArrayKind::Decimal => OpCode::TypedArrayPushDecimal,
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
             TypedArrayKind::TypedObject => OpCode::TypedArrayPushTypedObject,
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+            TypedArrayKind::TraitObject => OpCode::TypedArrayPushTraitObject,
             // Construction strict-typing close (2026-06-05) — nested array.
             TypedArrayKind::TypedArray => OpCode::TypedArrayPushNested,
         }
@@ -205,6 +224,8 @@ impl TypedArrayKind {
             TypedArrayKind::Decimal => OpCode::TypedArraySetDecimal,
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
             TypedArrayKind::TypedObject => OpCode::TypedArraySetTypedObject,
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+            TypedArrayKind::TraitObject => OpCode::TypedArraySetTraitObject,
             // Construction strict-typing close (2026-06-05) — nested array.
             TypedArrayKind::TypedArray => OpCode::TypedArraySetNested,
         }
@@ -320,6 +341,16 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
         // literal site (which records the resolved struct schema, NOT this
         // round-trip placeholder).
         TypedArrayKind::TypedObject => ConcreteType::placeholder_struct(
+            shape_value::v2::concrete_type::StructLayoutId(0),
+        ),
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        // ConcreteType has no `dyn Trait` variant; the kind→ConcreteType
+        // round-trip cannot recover the trait identity (every `Array<dyn T>`
+        // collapses to the same TraitObject carrier, slot-bits kind uniformly
+        // `Ptr(HeapKind::TraitObject)`). Return a placeholder_struct mirroring
+        // the TypedObject arm; the bytecode compiler's `array_element_types`
+        // side-table records the trait name at the literal site.
+        TypedArrayKind::TraitObject => ConcreteType::placeholder_struct(
             shape_value::v2::concrete_type::StructLayoutId(0),
         ),
         // Construction strict-typing close (2026-06-05) — nested array. The
@@ -474,6 +505,8 @@ pub fn vec_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'static str 
         TypedArrayKind::String => "Vec<string>",
         TypedArrayKind::Decimal => "Vec<decimal>",
         TypedArrayKind::TypedObject => "Vec<object>",
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        TypedArrayKind::TraitObject => "Vec<dyn>",
         TypedArrayKind::TypedArray => "Vec<array>",
     }
 }
@@ -499,6 +532,8 @@ pub fn vec_element_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'sta
         TypedArrayKind::String => "string",
         TypedArrayKind::Decimal => "decimal",
         TypedArrayKind::TypedObject => "object",
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+        TypedArrayKind::TraitObject => "dyn",
         TypedArrayKind::TypedArray => "array",
     }
 }
@@ -686,9 +721,34 @@ impl super::BytecodeCompiler {
                 return Some(kind);
             }
         }
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+        // `Array<dyn Trait>` annotation. The inner type is `TypeAnnotation::Dyn`,
+        // NOT a struct, so this MUST be checked before the struct branch below
+        // (the struct branch's `inner_name?` would early-return None on a Dyn
+        // inner). Per ADR-006 §2.7.5 + §2.7.24 Q25.C (all-traits-dyn-able): the
+        // producer-side proof is the explicit `dyn Trait` annotation. Maps to
+        // `TypedArrayKind::TraitObject`; each element literal is boxed via
+        // `BoxTraitObject` at the emission site (the trait name is recovered
+        // there from the same annotation).
+        use shape_ast::ast::TypeAnnotation;
+        let dyn_inner: Option<&TypeAnnotation> = match annotation {
+            TypeAnnotation::Generic { name, args }
+                if name.as_str() == "Array" && args.len() == 1 =>
+            {
+                Some(&args[0])
+            }
+            TypeAnnotation::Array(inner) => Some(inner.as_ref()),
+            _ => None,
+        };
+        if let Some(inner) = dyn_inner {
+            if crate::compiler::trait_object_emission::trait_name_from_annotation(inner)
+                .is_some()
+            {
+                return Some(TypedArrayKind::TraitObject);
+            }
+        }
         // User-struct annotation: `Array<B>` / `B[]` where B is a registered
         // struct type. Map to TypedArrayKind::TypedObject per §2.1 + §3.A row 1.
-        use shape_ast::ast::TypeAnnotation;
         let inner_name = match annotation {
             TypeAnnotation::Generic { name, args }
                 if name.as_str() == "Array" && args.len() == 1 =>
@@ -717,6 +777,42 @@ impl super::BytecodeCompiler {
         } else {
             None
         }
+    }
+
+    /// Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+    ///
+    /// Wrapper over [`resolve_typed_array_kind_from_annotation`] that ALSO, as
+    /// a side effect, stashes the trait name into
+    /// `self.pending_trait_object_array_trait` when the annotation resolves to
+    /// [`TypedArrayKind::TraitObject`] (`Array<dyn Trait>`). The element-loop in
+    /// `compile_expr_array` reads that field to emit the per-element
+    /// `BoxTraitObject`. For all non-dyn kinds the trait field is cleared.
+    /// Per ADR-006 §2.7.5 the trait name is the producer-side proof (explicit
+    /// annotation), never runtime-derived.
+    pub(crate) fn resolve_typed_array_kind_and_record_trait(
+        &mut self,
+        annotation: &shape_ast::ast::TypeAnnotation,
+    ) -> Option<TypedArrayKind> {
+        let kind = self.resolve_typed_array_kind_from_annotation(annotation);
+        if kind == Some(TypedArrayKind::TraitObject) {
+            // Recover the trait name from `Array<dyn Trait>` / `(dyn Trait)[]`.
+            use shape_ast::ast::TypeAnnotation;
+            let inner: Option<&TypeAnnotation> = match annotation {
+                TypeAnnotation::Generic { name, args }
+                    if name.as_str() == "Array" && args.len() == 1 =>
+                {
+                    Some(&args[0])
+                }
+                TypeAnnotation::Array(inner) => Some(inner.as_ref()),
+                _ => None,
+            };
+            self.pending_trait_object_array_trait = inner
+                .and_then(crate::compiler::trait_object_emission::trait_name_from_annotation)
+                .map(|s| s.to_string());
+        } else {
+            self.pending_trait_object_array_trait = None;
+        }
+        kind
     }
 
     /// Resolve an array receiver expression (`Identifier(name)`) to a

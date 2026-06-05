@@ -519,6 +519,30 @@ fn slice_v2_typed_array(
             stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_TYPED_OBJECT);
             new_ptr as *mut u8
         },
+        // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+        // slice of an `Array<dyn Trait>`. Retain per-element so both source and
+        // slice arrays own valid shares of each TraitObjectStorage.
+        V2ElemType::TraitObject => unsafe {
+            use shape_value::heap_value::TraitObjectStorage;
+            use shape_value::v2::refcount::v2_retain;
+            use crate::executor::v2_handlers::v2_array_detect::ELEM_TYPE_TRAIT_OBJECT;
+            let src = view.ptr as *const TypedArray<*const TraitObjectStorage>;
+            let count = e.saturating_sub(s);
+            let new_ptr =
+                TypedArray::<*const TraitObjectStorage>::with_capacity(count as u32);
+            if count > 0 {
+                let src_data = (*src).data;
+                let dst_data = (*new_ptr).data;
+                for i in 0..count {
+                    let elem = *src_data.add(s + i);
+                    v2_retain(&(*elem).header);
+                    *dst_data.add(i) = elem;
+                }
+                (*new_ptr).len = count as u32;
+            }
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_TRAIT_OBJECT);
+            new_ptr as *mut u8
+        },
         // Construction strict-typing close (2026-06-05) — nested array slice.
         // Mirror of the TypedObject slice arm; retain each inner-array share.
         V2ElemType::TypedArray => unsafe {

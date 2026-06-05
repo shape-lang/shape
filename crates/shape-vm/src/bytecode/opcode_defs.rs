@@ -785,6 +785,41 @@ define_opcodes! {
     /// pushes nothing. Releases prior element, transfers new value's refcount share.
     TypedArraySetNested = 0x1BC, Object, pops: 3, pushes: 0;
 
+    // ── Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) ──
+    //
+    // Per ADR-006 §2.7.5 stamp-at-compile-time + §2.7.24 Q25.C (TraitObject
+    // re-introduction, all-traits-dyn-able): `Array<dyn Trait>` literals route
+    // through the v2-raw `TypedArray<*const TraitObjectStorage>` element
+    // carrier. Mirror of the W16.2-A TypedObject opcodes (0x1B5..0x1B8 above),
+    // swapping `TypedObjectStorage` → `TraitObjectStorage` and
+    // `NativeKind::Ptr(HeapKind::TypedObject)` →
+    // `NativeKind::Ptr(HeapKind::TraitObject)`.
+    //
+    // The TraitObjectStorage HeapElement impl is wired at
+    // `crates/shape-value/src/heap_value.rs:3092`; `TraitObjectStorage::_new`
+    // / `_drop` raw-pointer allocators at `:2948`/`:2987` (Wave 2 Agent E +
+    // D4 close, audit §4.3 O-3a RESOLVED). The element values are produced by
+    // `OpCode::BoxTraitObject` (`trait_object_ops.rs:205`) which already
+    // allocates via `TraitObjectStorage::_new` and pushes
+    // `Ptr(HeapKind::TraitObject)` — the producer/consumer carrier shapes are
+    // already in lockstep (no Arc-vs-raw split). The 4-table HeapKind dispatch
+    // for `HeapKind::TraitObject` (stack.rs:224/584 / kinded_slot.rs /
+    // closure_layout.rs:491 / heap_value.rs) is pre-existing.
+
+    /// Create a new TypedArray<*const TraitObjectStorage> with given capacity.
+    /// Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayTraitObject = 0x1BD, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<*const TraitObjectStorage>: pops (arr_ptr, index),
+    /// pushes (*const TraitObjectStorage) bits with
+    /// NativeKind::Ptr(HeapKind::TraitObject) (retains element).
+    TypedArrayGetTraitObject = 0x1BE, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<*const TraitObjectStorage>: pops (arr_ptr, value),
+    /// pushes nothing. Caller transfers their refcount share to the array.
+    TypedArrayPushTraitObject = 0x1BF, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<*const TraitObjectStorage>: pops (arr_ptr, index, value),
+    /// pushes nothing. Releases prior element, transfers new value's refcount share.
+    TypedArraySetTraitObject = 0x1C0, Object, pops: 3, pushes: 0;
+
     // ===== v2 Typed Map Operations =====
     /// Allocate a new TypedMap<*const StringObj, f64>. Pushes ptr.
     NewTypedMapStringF64 = 0xCD, Object, pops: 0, pushes: 1;
@@ -2065,6 +2100,11 @@ impl OpCode {
             | OpCode::TypedArrayGetNested
             | OpCode::TypedArrayPushNested
             | OpCode::TypedArraySetNested
+            // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+            | OpCode::NewTypedArrayTraitObject
+            | OpCode::TypedArrayGetTraitObject
+            | OpCode::TypedArrayPushTraitObject
+            | OpCode::TypedArraySetTraitObject
             // Local-slot-based typed array element access
             | OpCode::GetElemI64
             | OpCode::GetElemF64

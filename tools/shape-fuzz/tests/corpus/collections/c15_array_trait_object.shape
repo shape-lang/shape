@@ -1,0 +1,14 @@
+// CLASS: W16.2-B op_new_array-trait-object-element (2026-06-05)
+// Per ADR-006 §2.7.5 + §2.7.24 Q25.C (TraitObject re-introduction,
+// all-traits-dyn-able) — `Array<dyn Trait>` literal + index access + vtable
+// method dispatch. Mirror of the W16.2-A typed-object corpus c11, swapping the
+// struct-element TypedObject carrier for the trait-object carrier. Both VM and
+// JIT Convergent at `x` via the v2-raw `TypedArray<*const TraitObjectStorage>`
+// carrier (`NewTypedArrayTraitObject` + per-element `BoxTraitObject` +
+// `TypedArrayPushTraitObject` + `TypedArrayGetTraitObject`); `arr[0].x_str()`
+// dispatches through the vtable (`DynMethodCall`), NOT a concrete struct method.
+trait HasX { method x_str() -> string; }
+type Bar { v: int }
+impl HasX for Bar { method x_str() -> string { "x" } }
+let arr: Array<dyn HasX> = [Bar { v: 1 }, Bar { v: 2 }]
+print(arr[0].x_str())

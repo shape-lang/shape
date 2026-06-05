@@ -272,6 +272,11 @@ pub struct FFIFuncRefs {
     // `v0.3-w16-v3s5-ckpt56-strict-close-audit.md` §2.1 + §3.A row 1. Routed
     // by `v2_array_new_func` for `NativeKind::Ptr(HeapKind::TypedObject)`.
     pub(crate) v2_array_new_typed_object: FuncRef,
+    // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
+    // v2-raw `TypedArray<*const TraitObjectStorage>` heap-element allocator
+    // per ADR-006 §2.7.5 + §2.7.24 Q25.C. Routed by `v2_array_new_func` for
+    // `NativeKind::Ptr(HeapKind::TraitObject)`.
+    pub(crate) v2_array_new_trait_object: FuncRef,
 
     // v2 typed-array element push — single generic helper that dispatches
     // on the `elem_size` byte immediate. Callers zero/sign-extend the native

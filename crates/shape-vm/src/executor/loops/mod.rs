@@ -470,6 +470,23 @@ impl VirtualMachine {
                         NativeKind::Ptr(HeapKind::TypedObject),
                     )
                 }
+                // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
+                // `for t in arr` where arr: Array<dyn Trait>. Retain per-element
+                // so the loop body owns a valid TraitObject share; push with
+                // `Ptr(HeapKind::TraitObject)` (DynMethodCall dispatches on it).
+                V2ElemType::TraitObject => {
+                    use shape_value::heap_value::TraitObjectStorage;
+                    use shape_value::v2::refcount::v2_retain;
+                    let arr = view.ptr as *const TypedArray<*const TraitObjectStorage>;
+                    let elem_ptr = unsafe {
+                        TypedArray::<*const TraitObjectStorage>::get_unchecked(arr, i)
+                    };
+                    unsafe { v2_retain(&(*elem_ptr).header) };
+                    self.push_kinded(
+                        elem_ptr as u64,
+                        NativeKind::Ptr(HeapKind::TraitObject),
+                    )
+                }
                 // Construction strict-typing close (2026-06-05) — nested array
                 // iteration (`for row in matrix`). Retain the inner array's
                 // on-header refcount and push with the same carrier kind the
