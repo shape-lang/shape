@@ -344,7 +344,7 @@ fn test_complex_trait_dispatch_polymorphism() {
     ShapeTest::new(
         r#"
         trait Describable {
-            describe(): string
+            method describe() -> string
         }
         type Dog { name: string }
         type Cat { name: string }
@@ -367,16 +367,20 @@ fn test_complex_trait_dispatch_polymorphism() {
 fn test_complex_hashmap_with_loop_aggregation() {
     ShapeTest::new(
         r#"
-        let mut scores = HashMap()
-        let entries = [["Alice", 90], ["Bob", 85], ["Alice", 95], ["Bob", 80]]
+        type ScoreEntry { name: string, score: int }
+        let mut scores: HashMap<string, int> = HashMap()
+        let entries = [
+            ScoreEntry { name: "Alice", score: 90 },
+            ScoreEntry { name: "Bob", score: 85 },
+            ScoreEntry { name: "Alice", score: 95 },
+            ScoreEntry { name: "Bob", score: 80 },
+        ]
         for entry in entries {
-            let name = entry[0]
-            let score = entry[1]
-            let existing = scores.get(name)
-            if existing == None {
-                scores = scores.set(name, score)
-            } else {
-                scores = scores.set(name, existing + score)
+            let name = entry.name
+            let score = entry.score
+            match scores.get(name) {
+                Some(prev) => { let p: int = prev; scores = scores.set(name, p + score) }
+                None => { scores = scores.set(name, score) }
             }
         }
         print(scores.get("Alice"))
