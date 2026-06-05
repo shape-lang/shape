@@ -9,6 +9,29 @@ use shape_ast::error::{Result, ShapeError};
 use crate::compiler::BytecodeCompiler;
 use super::helpers::typed_eq_opcode_for_literal;
 
+/// Tracker type-name for a `ConcreteType` payload binder (F5). Scalars map
+/// to their Shape surface names; arrays/hashmaps to the `Vec<…>` / `HashMap<…>`
+/// tracker-name forms the type tracker and `iter_element_type_name` recognise;
+/// named struct/enum types to their name. Returns `None` for shapes with no
+/// stable tracker name (tuple/function/etc.) — the caller then leaves the
+/// element/map side-table stamp it already recorded in place.
+fn concrete_type_tracker_name(ct: &shape_value::v2::ConcreteType) -> Option<String> {
+    use shape_value::v2::ConcreteType;
+    match ct {
+        ConcreteType::I64 => Some("int".to_string()),
+        ConcreteType::F64 => Some("number".to_string()),
+        ConcreteType::Bool => Some("bool".to_string()),
+        ConcreteType::String => Some("string".to_string()),
+        ConcreteType::Decimal => Some("decimal".to_string()),
+        ConcreteType::Array(elem) => {
+            concrete_type_tracker_name(elem).map(|inner| format!("Vec<{inner}>"))
+        }
+        ConcreteType::Struct(layout) => layout.name.as_ref().map(|n| n.to_string()),
+        ConcreteType::Enum(layout) => layout.name.as_ref().map(|n| n.to_string()),
+        _ => None,
+    }
+}
+
 impl BytecodeCompiler {
     fn resolve_typed_field_operand_binding(
         &self,
@@ -253,7 +276,11 @@ impl BytecodeCompiler {
         }
     }
 
-    pub(in crate::compiler) fn compile_match_binding(&mut self, pattern: &Pattern) -> Result<()> {
+    pub(in crate::compiler) fn compile_match_binding(
+        &mut self,
+        pattern: &Pattern,
+        scrutinee_ct: Option<&shape_value::v2::ConcreteType>,
+    ) -> Result<()> {
         let value_local = self.declare_temp_local("__match_value_")?;
         if let Some(schema_id) = self.last_expr_schema {
             self.type_tracker.set_local_type(
@@ -264,6 +291,13 @@ impl BytecodeCompiler {
         // Propagate numeric type info from the scrutinee expression so that
         // match binding variables inherit the correct storage hint (e.g., Int64).
         self.propagate_initializer_type_to_slot(value_local, true, false);
+        // F5 (v0.3.3 strict-flip): record the scrutinee's proven ConcreteType
+        // on the match-value temp so `Ok(v)` / `Some(v)` / `Err(e)` payload
+        // unwraps can stamp the binder type (`stamp_unwrapped_payload_local`).
+        if let Some(ct) = scrutinee_ct {
+            self.current_function_local_concrete_types
+                .insert(value_local, ct.clone());
+        }
         self.emit(Instruction::new(
             OpCode::StoreLocal,
             Some(Operand::Local(value_local)),
@@ -419,6 +453,7 @@ impl BytecodeCompiler {
                                 OpCode::StoreLocal,
                                 Some(Operand::Local(inner_local)),
                             ));
+                            self.stamp_unwrapped_payload_local(value_local, inner_local, "Some");
                             return self.compile_match_binding_local(&pats[0], inner_local);
                         }
                     }
@@ -443,6 +478,7 @@ impl BytecodeCompiler {
                             OpCode::StoreLocal,
                             Some(Operand::Local(inner_local)),
                         ));
+                        self.stamp_unwrapped_payload_local(value_local, inner_local, variant);
                         return self.compile_match_binding_local(&pats[0], inner_local);
                     }
                     Ok(())
@@ -500,6 +536,69 @@ impl BytecodeCompiler {
                     })
                 }
             },
+        }
+    }
+
+    /// F5 (v0.3.3 strict-flip): after `match r { Ok(v) => … }` /
+    /// `Some(v)` / `Err(e)` unwraps the scrutinee payload into `inner_local`,
+    /// stamp `inner_local`'s tracked ConcreteType / element / type-name from
+    /// the scrutinee's already-proven payload type. Without this the unwrapped
+    /// binder is `unknown` and a downstream `v * 2` rejects as
+    /// `unknown * int`.
+    ///
+    /// The payload type comes verbatim from `value_local`'s recorded
+    /// `ConcreteType` (`Result(T, E)` / `Option(T)`) — no fabrication. When the
+    /// scrutinee has no recorded concrete type (still generic / unannotated),
+    /// nothing is stamped and the pre-existing behavior is preserved.
+    fn stamp_unwrapped_payload_local(
+        &mut self,
+        value_local: u16,
+        inner_local: u16,
+        variant: &str,
+    ) {
+        use shape_value::v2::ConcreteType;
+        let Some(scrutinee_ct) = self
+            .current_function_local_concrete_types
+            .get(&value_local)
+            .cloned()
+        else {
+            return;
+        };
+        let payload_ct = match (&scrutinee_ct, variant) {
+            (ConcreteType::Result(ok, _), "Ok") => (**ok).clone(),
+            (ConcreteType::Result(_, err), "Err") => (**err).clone(),
+            (ConcreteType::Option(inner), "Some") => (**inner).clone(),
+            _ => return,
+        };
+        self.stamp_local_from_concrete_type(inner_local, &payload_ct);
+    }
+
+    /// Stamp a local slot's tracked type info (ConcreteType + element/map
+    /// side-tables + tracker type-name) from a known `ConcreteType`. Mirrors
+    /// the stamps `finalize_empty_array_accumulator_kind` records for a
+    /// promoted accumulator, so a downstream `xs[i]` / `.method()` / operator
+    /// resolves exactly as for an annotated binding (ADR-006 §2.7.5).
+    fn stamp_local_from_concrete_type(
+        &mut self,
+        local_idx: u16,
+        ct: &shape_value::v2::ConcreteType,
+    ) {
+        use shape_value::v2::ConcreteType;
+        self.current_function_local_concrete_types
+            .insert(local_idx, ct.clone());
+        match ct {
+            ConcreteType::Array(elem) => {
+                self.local_array_element_types
+                    .insert(local_idx, (**elem).clone());
+            }
+            ConcreteType::HashMap(k, v) => {
+                self.local_map_key_value_types
+                    .insert(local_idx, ((**k).clone(), (**v).clone()));
+            }
+            _ => {}
+        }
+        if let Some(name) = concrete_type_tracker_name(ct) {
+            self.set_local_type_info(local_idx, &name);
         }
     }
 

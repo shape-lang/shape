@@ -341,6 +341,14 @@ impl BytecodeCompiler {
         self.check_match_exhaustiveness(match_expr)?;
 
         self.push_scope();
+        // F5 (v0.3.3 strict-flip): capture the scrutinee's proven ConcreteType
+        // BEFORE compiling it (compilation may clobber `last_expr_*`). Threaded
+        // into `compile_match_binding` so `Ok(v)`/`Some(v)`/`Err(e)` payload
+        // unwraps stamp the binder type from `Result(T,E)` / `Option(T)`.
+        let scrutinee_ct = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+            self,
+            &match_expr.scrutinee,
+        );
         self.compile_expr(&match_expr.scrutinee)?;
         let scrutinee_local = self.declare_local("__match_scrutinee")?;
         if let Some(schema_id) = self.last_expr_schema {
@@ -398,7 +406,7 @@ impl BytecodeCompiler {
                     OpCode::LoadLocal,
                     Some(Operand::Local(scrutinee_local)),
                 ));
-                self.compile_match_binding(&arm.pattern)?;
+                self.compile_match_binding(&arm.pattern, scrutinee_ct.as_ref())?;
                 self.compile_expr(guard)?;
                 guard_fail_jump = Some(self.emit_jump(OpCode::JumpIfFalse, 0));
                 self.pop_scope();
@@ -413,7 +421,7 @@ impl BytecodeCompiler {
                 OpCode::LoadLocal,
                 Some(Operand::Local(scrutinee_local)),
             ));
-            self.compile_match_binding(&arm.pattern)?;
+            self.compile_match_binding(&arm.pattern, scrutinee_ct.as_ref())?;
             if self.current_expr_result_mode() == crate::compiler::ExprResultMode::PreserveRef {
                 self.compile_expr_preserving_refs(&arm.body)?;
             } else {

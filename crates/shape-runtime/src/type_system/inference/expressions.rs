@@ -877,7 +877,22 @@ impl TypeInferenceEngine {
 
             // Match expression
             Expr::Match(match_expr, span) => {
-                let scrutinee_type = self.infer_expr(&match_expr.scrutinee)?;
+                let raw_scrutinee_type = self.infer_expr(&match_expr.scrutinee)?;
+                // F5 (v0.3.3 strict-flip): zonk the scrutinee through the
+                // unifier's substitution store BEFORE binding pattern vars.
+                // `match Ok(5) { Ok(v) => v * 2 }` infers the scrutinee as
+                // `Result<T, E>` where the payload var `T` is constrained to
+                // `int` (the literal-defers-to-var rule at
+                // `bidirectional.rs:constructor_literal_payload_defers_to_var`
+                // unifies `T = int` rather than pinning the literal). Without
+                // applying substitutions, the builtin Result/Option payload
+                // extractor below reads `args[0]` as the raw `Variable`, so
+                // `v` degrades to a fresh var and `v * 2` rejects as
+                // `unknown * int`. Applying substitutions resolves `T → int`;
+                // no fabrication — the binder type comes verbatim from the
+                // already-registered constraint.
+                let scrutinee_type =
+                    self.unifier.apply_substitutions(&raw_scrutinee_type);
 
                 // Collect all arm return types
                 let mut arm_types: Vec<Type> = Vec::new();
