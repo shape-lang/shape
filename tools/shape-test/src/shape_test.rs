@@ -1286,6 +1286,31 @@ impl ShapeTest {
         self
     }
 
+    /// Assert the code produces a run/compile error containing at least one of
+    /// `msgs`. Used where the strict checker's diagnostic message for a given
+    /// rejection is nondeterministic between equivalent passes (e.g. a
+    /// method-not-found rejection may surface either as
+    /// `Method 'X' not found on type 'Vec'` or as the downstream
+    /// `... cannot have fields` constraint cascade depending on checker pass
+    /// ordering). The error must still occur and match one of the named forms —
+    /// the negative-test intent is preserved.
+    pub fn expect_run_err_contains_any(self, msgs: &[&str]) -> Self {
+        let result = self.eval();
+        assert!(
+            result.is_err(),
+            "Expected run error, but got: {:?}",
+            result.ok()
+        );
+        let err = result.unwrap_err();
+        assert!(
+            msgs.iter().any(|m| err.contains(m)),
+            "Error should contain one of {:?}, got: {}",
+            msgs,
+            err
+        );
+        self
+    }
+
     /// Assert the result is the expected number.
     pub fn expect_number(self, expected: f64) -> Self {
         let result = self.eval();
