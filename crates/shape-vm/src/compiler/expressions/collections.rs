@@ -295,26 +295,27 @@ impl BytecodeCompiler {
         // in `Statement::VarDecl` records the typed kind against the
         // local slot / module binding (Phase 3.1 Agent 3 wiring).
         // R5.4B: detect nested-array literal shape upfront. When any
-        // element is itself an array literal, the outer array CANNOT use
-        // the typed fast path — `NewTypedArrayF64/I64/I32/Bool` store
-        // scalars, and splicing inner typed-array pointers in as f64
-        // bits produces a value that can't be decoded downstream (see
-        // `intrinsic_matmul_mat`'s `as_any_array()` failure). Also, the
-        // inner arrays themselves must be forced off the typed path so
-        // they round-trip as heap-ref pointers through the outer
-        // generic `NewArray`; `nested_array_literal_depth` propagates
-        // that signal into the recursive `compile_expr_array` call.
-        let has_nested_array_elem = elements
-            .iter()
-            .any(|e| matches!(e, Expr::Array(..)));
-        let in_nested_context = self.nested_array_literal_depth > 0;
-        let typed_kind: Option<TypedArrayKind> = if elements
-            .iter()
-            .any(|e| matches!(e, Expr::Spread(..)))
-            || has_nested_array_elem
-            || in_nested_context
-        {
+        // element is itself an array literal, the outer array is a nested
+        // array and lowers to the dedicated `TypedArray<*const
+        // TypedArrayElem>` carrier (the `all_nested_array_elem` branch
+        // below) — NOT the scalar `NewTypedArrayF64/I64/I32/Bool` path
+        // (those store scalars, not inner-array pointers).
+        // Construction strict-typing close (USER RULING 2026-06-05): a
+        // homogeneous nested-array literal (`[[1,2],[3,4]]`) lowers to the
+        // v2-raw `TypedArray<*const TypedArrayElem>` carrier — every element
+        // is itself an `Expr::Array`, structurally an inner typed array. The
+        // outer carrier stores inner-array pointers; per-element release goes
+        // through the kind-erased `release_v2_typed_array`. Per ADR-006
+        // §2.7.5 the element kind (`Ptr(HeapKind::TypedArray)`) is proven at
+        // the producer site without runtime inspection.
+        let all_nested_array_elem = !elements.is_empty()
+            && elements.iter().all(|e| matches!(e, Expr::Array(..)));
+        let has_spread = elements.iter().any(|e| matches!(e, Expr::Spread(..)));
+        let typed_kind: Option<TypedArrayKind> = if has_spread {
             None
+        } else if all_nested_array_elem {
+            self.pending_variable_typed_array_kind = Some(TypedArrayKind::TypedArray);
+            Some(TypedArrayKind::TypedArray)
         } else if let Some(kind) = self.pending_variable_typed_array_kind {
             // The enclosing `let arr: Array<T> = [...]` already proved
             // the element type via annotation; trust it.
@@ -341,6 +342,18 @@ impl BytecodeCompiler {
             // `TypedArray<*const TypedObjectStorage>` carrier fast path.
             self.pending_variable_typed_array_kind = Some(TypedArrayKind::TypedObject);
             Some(TypedArrayKind::TypedObject)
+        } else if let Some(kind) = self.infer_array_element_kind_from_concrete_types(elements) {
+            // Construction strict-typing close (USER RULING 2026-06-05) —
+            // non-literal homogeneous element case. Every element resolves
+            // through `concrete_type_for_expr` (the type tracker) to the SAME
+            // scalar `ConcreteType` that has a typed-array carrier: a
+            // function-call return (`[factorial(0), factorial(1)]` where
+            // `factorial` is inferred to return `int`), a type-tracked
+            // identifier, a range-loop counter, etc. Per ADR-006 §2.7.5 the
+            // element kind is proven at the producer site (the type tracker's
+            // structural proof), never decoded from runtime bits.
+            self.pending_variable_typed_array_kind = Some(kind);
+            Some(kind)
         } else {
             None
         };
@@ -406,40 +419,65 @@ impl BytecodeCompiler {
             for elem in elements {
                 self.plan_flexible_binding_escape_from_expr(elem);
                 self.emit(Instruction::simple(OpCode::Dup));
-                self.compile_typed_array_element_value(kind, elem)?;
+                // Construction strict-typing close (2026-06-05): for a nested
+                // array, each element is itself an `Expr::Array` that must be
+                // lowered to its OWN typed array (picking its own inner
+                // element kind). Clear the outer's pending kind so the inner
+                // `compile_expr_array` resolves independently, then restore it.
+                if kind == TypedArrayKind::TypedArray {
+                    let saved = self.pending_variable_typed_array_kind.take();
+                    self.compile_expr(elem)?;
+                    self.pending_variable_typed_array_kind = saved;
+                } else {
+                    self.compile_typed_array_element_value(kind, elem)?;
+                }
                 self.emit(Instruction::simple(kind.push_opcode()));
             }
         } else if elements.iter().any(|elem| matches!(elem, Expr::Spread(..))) {
             self.compile_array_with_spread(elements)?;
-        } else {
-            // R5.4B: while compiling elements of a generic-array literal,
-            // mark inner array-literal children as nested so they also
-            // refuse the typed fast path (see comment above).
-            self.nested_array_literal_depth += 1;
-            for elem in elements {
-                self.plan_flexible_binding_escape_from_expr(elem);
-                // Phase F: closure literals stored into an array escape
-                // per `docs/v2-closure-specialization.md` §2.1 row 2.
-                // Force heap-ABI emission so the JIT (and Phase H cleanup)
-                // can rely on the signal.
-                if matches!(elem, Expr::FunctionExpr { .. }) {
-                    self.emit_make_closure_heap_next = true;
-                }
-                self.compile_expr_as_value_or_placeholder(elem)?;
-            }
-            self.nested_array_literal_depth -= 1;
-            // Emit NewTypedArray for homogeneous int/number/bool literals
-            let use_typed = !elements.is_empty()
-                && (matches!(
-                    literal_numeric,
-                    Some(NumericType::Int | NumericType::Number)
-                ) || is_bool);
-            if use_typed {
-                self.emit(Instruction::new(
-                    OpCode::NewTypedArray,
-                    Some(Operand::Count(elements.len() as u16)),
-                ));
+        } else if !elements.is_empty() {
+            // Construction strict-typing close (USER RULING 2026-06-05): a
+            // NON-empty array literal whose element type the compiler could
+            // not prove (heterogeneous literals, or non-resolvable element
+            // expressions) has NO typed-array carrier. There is no untyped
+            // runtime array — `op_new_array` is unreachable from well-typed
+            // code — so this surface-and-stops with a clean compile error
+            // rather than emitting a runtime-surfacing `NewArray`.
+            //
+            // Closure-element arrays (`[|x| x+1, ...]`) are called out
+            // specifically: their element carrier is an `Arc<HeapValue>`
+            // closure share (`NativeKind::Ptr(HeapKind::Closure)`), a
+            // different carrier shape than the v2-raw `HeapElement` element
+            // carriers — a genuine divergence surfaced here per the stage
+            // binders (SURFACE, do not fabricate a parallel carrier).
+            let has_closure_elem = elements
+                .iter()
+                .any(|e| matches!(e, Expr::FunctionExpr { .. }));
+            let (kind_hint, detail) = if has_closure_elem {
+                (
+                    "closures",
+                    "Arrays of closures are not yet supported — a closure \
+                     element's runtime carrier differs from the value \
+                     carriers arrays currently store.",
+                )
             } else {
+                (
+                    "a single concrete type",
+                    "Either make every element the same proven type, or \
+                     annotate the binding (`let a: Array<T> = ...`).",
+                )
+            };
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "cannot infer the element type of this array literal. \
+                     Strict typing requires every array to have {kind_hint} \
+                     of element. {detail}"
+                ),
+                location: Some(self.span_to_source_location(span)),
+            });
+        } else {
+            // Empty array literal (`[]`). No elements to compile.
+            {
                 // Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21):
                 // a bare empty array literal (`let mut out = []`, no
                 // `Array<T>` annotation) cannot resolve its element
@@ -459,11 +497,9 @@ impl BytecodeCompiler {
                 let alloc_idx = self.program.instructions.len();
                 self.emit(Instruction::new(
                     OpCode::NewArray,
-                    Some(Operand::Count(elements.len() as u16)),
+                    Some(Operand::Count(0)),
                 ));
-                if elements.is_empty() {
-                    self.pending_empty_array_alloc_idx = Some(alloc_idx);
-                }
+                self.pending_empty_array_alloc_idx = Some(alloc_idx);
             }
         }
         // Arrays don't produce TypedObjects
@@ -1648,7 +1684,9 @@ impl BytecodeCompiler {
                 TypedArrayKind::Bool => Some(Family::Bool),
                 TypedArrayKind::Decimal => Some(Family::Decimal),
                 TypedArrayKind::String => Some(Family::StringF),
-                TypedArrayKind::Char | TypedArrayKind::TypedObject => None,
+                TypedArrayKind::Char
+                | TypedArrayKind::TypedObject
+                | TypedArrayKind::TypedArray => None,
             };
             if let (Some(lf), Some(af)) = (literal_family, array_family) {
                 if lf != af {

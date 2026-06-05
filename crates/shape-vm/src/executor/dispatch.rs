@@ -959,6 +959,12 @@ impl VirtualMachine {
             | TypedArrayGetTypedObject
             | TypedArrayPushTypedObject
             | TypedArraySetTypedObject
+            // Construction strict-typing close (USER RULING 2026-06-05) —
+            // nested-array `TypedArray<*const TypedArrayElem>` carrier.
+            | NewTypedArrayNested
+            | TypedArrayGetNested
+            | TypedArrayPushNested
+            | TypedArraySetNested
             // Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade (2026-05-15) —
             // v2-raw String/Decimal literal constructors (closes the literal-element
             // kind mismatch surfaced at Round 3a' gate-flip: `let xs: Array<string>

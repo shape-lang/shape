@@ -470,6 +470,23 @@ impl VirtualMachine {
                         NativeKind::Ptr(HeapKind::TypedObject),
                     )
                 }
+                // Construction strict-typing close (2026-06-05) — nested array
+                // iteration (`for row in matrix`). Retain the inner array's
+                // on-header refcount and push with the same carrier kind the
+                // outer array uses.
+                V2ElemType::TypedArray => {
+                    use shape_value::v2::refcount::v2_retain;
+                    use shape_value::v2::typed_array::TypedArrayElem;
+                    let arr = view.ptr as *const TypedArray<*const TypedArrayElem>;
+                    let elem_ptr = unsafe {
+                        TypedArray::<*const TypedArrayElem>::get_unchecked(arr, i)
+                    };
+                    unsafe { v2_retain(&(*elem_ptr).header) };
+                    self.push_kinded(
+                        elem_ptr as u64,
+                        NativeKind::Ptr(HeapKind::TypedArray),
+                    )
+                }
             };
             drop_with_kind(idx_bits, idx_kind);
             drop_with_kind(iter_bits, iter_kind);

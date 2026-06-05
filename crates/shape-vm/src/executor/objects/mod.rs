@@ -245,7 +245,8 @@ fn typed_array_method_registry(
         V2ElemType::Char
         | V2ElemType::String
         | V2ElemType::Decimal
-        | V2ElemType::TypedObject => None,
+        | V2ElemType::TypedObject
+        | V2ElemType::TypedArray => None,
     }
 }
 

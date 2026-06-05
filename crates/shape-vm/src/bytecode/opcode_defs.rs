@@ -761,6 +761,30 @@ define_opcodes! {
     /// pushes nothing. Releases prior element, transfers new value's refcount share.
     TypedArraySetTypedObject = 0x1B8, Object, pops: 3, pushes: 0;
 
+    // ===== Construction strict-typing close (USER RULING 2026-06-05) =====
+    // Nested-array element carrier: `TypedArray<*const TypedArrayElem>`. The
+    // stored element is itself a v2-raw `*mut TypedArray<U>` (any inner
+    // monomorphization), viewed through its HeapHeader. Per-element retain
+    // touches only the refcount at offset 0; per-element release dispatches
+    // through the kind-erased `release_v2_typed_array` (reads the inner array's
+    // own `_pad` discriminant). The element carrier kind is
+    // `NativeKind::Ptr(HeapKind::TypedArray)` — the same kind the outer array
+    // itself uses.
+
+    /// Create a new TypedArray<*const TypedArrayElem> with given capacity.
+    /// Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayNested = 0x1B9, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<*const TypedArrayElem>: pops (arr_ptr, index),
+    /// pushes inner-array ptr with NativeKind::Ptr(HeapKind::TypedArray)
+    /// (retains element).
+    TypedArrayGetNested = 0x1BA, Object, pops: 2, pushes: 1;
+    /// Push element to TypedArray<*const TypedArrayElem>: pops (arr_ptr, value),
+    /// pushes nothing. Caller transfers their refcount share to the array.
+    TypedArrayPushNested = 0x1BB, Object, pops: 2, pushes: 0;
+    /// Set element in TypedArray<*const TypedArrayElem>: pops (arr_ptr, index, value),
+    /// pushes nothing. Releases prior element, transfers new value's refcount share.
+    TypedArraySetNested = 0x1BC, Object, pops: 3, pushes: 0;
+
     // ===== v2 Typed Map Operations =====
     /// Allocate a new TypedMap<*const StringObj, f64>. Pushes ptr.
     NewTypedMapStringF64 = 0xCD, Object, pops: 0, pushes: 1;
@@ -2036,6 +2060,11 @@ impl OpCode {
             | OpCode::TypedArrayGetTypedObject
             | OpCode::TypedArrayPushTypedObject
             | OpCode::TypedArraySetTypedObject
+            // Construction strict-typing close (2026-06-05) — nested-array carrier.
+            | OpCode::NewTypedArrayNested
+            | OpCode::TypedArrayGetNested
+            | OpCode::TypedArrayPushNested
+            | OpCode::TypedArraySetNested
             // Local-slot-based typed array element access
             | OpCode::GetElemI64
             | OpCode::GetElemF64

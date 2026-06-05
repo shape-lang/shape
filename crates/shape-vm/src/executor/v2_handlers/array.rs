@@ -82,14 +82,14 @@ use shape_value::v2::decimal_obj::DecimalObj;
 use shape_value::v2::heap_element::HeapElement;
 use shape_value::v2::refcount::v2_retain;
 use shape_value::v2::string_obj::StringObj;
-use shape_value::v2::typed_array::TypedArray;
+use shape_value::v2::typed_array::{TypedArray, TypedArrayElem};
 use shape_value::{HeapKind, NativeKind, VMError};
 
 use super::super::VirtualMachine;
 use super::v2_array_detect::{
     ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I16,
-    ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING, ELEM_TYPE_TYPED_OBJECT,
-    ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8, stamp_elem_type,
+    ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING, ELEM_TYPE_TYPED_ARRAY,
+    ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8, stamp_elem_type,
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -627,6 +627,23 @@ define_exec_v2_typed_array! {
             elem_kind: NativeKind::Ptr(HeapKind::TypedObject),
             elem_tag: ELEM_TYPE_TYPED_OBJECT,
             err_label: "TypedArrayPush/SetTypedObject",
+        }
+        // Construction strict-typing close (USER RULING 2026-06-05) —
+        // nested-array element. `heap_obj = TypedArrayElem` is the
+        // HeapHeader-view newtype over an inner `TypedArray<U>`; its
+        // `HeapElement::release_elem` re-enters the kind-erased
+        // `release_v2_typed_array` (reads the inner `_pad` discriminant).
+        // Get-retain via `v2_retain(&(*elem_ptr).header)` works because the
+        // inner array's HeapHeader is at offset 0. The element carrier kind
+        // is `Ptr(HeapKind::TypedArray)` — the SAME kind the outer array uses
+        // — so push/set's strict-kind check accepts inner-array pointers.
+        {
+            ops: NewTypedArrayNested / TypedArrayGetNested
+                / TypedArrayPushNested / TypedArraySetNested,
+            heap_obj: TypedArrayElem,
+            elem_kind: NativeKind::Ptr(HeapKind::TypedArray),
+            elem_tag: ELEM_TYPE_TYPED_ARRAY,
+            err_label: "TypedArrayPush/SetNested",
         }
     ],
 }

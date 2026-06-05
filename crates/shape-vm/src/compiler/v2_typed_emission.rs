@@ -98,6 +98,15 @@ pub enum TypedArrayKind {
     /// `*mut Self` with `HeapHeader` + `:4058` `unsafe impl HeapElement for
     /// TypedObjectStorage`).
     TypedObject,
+    /// `TypedArray<*const TypedArrayElem>` — backing for a NESTED array
+    /// (`[[1,2],[3,4]]`, Construction strict-typing close, USER RULING
+    /// 2026-06-05). Each element is itself a v2-raw `*mut TypedArray<U>`
+    /// viewed through its HeapHeader. Element carrier kind is
+    /// `NativeKind::Ptr(HeapKind::TypedArray)`; per-element release dispatches
+    /// through the kind-erased `release_v2_typed_array`. Producer-side proof:
+    /// the element is an `Expr::Array` literal (structurally an inner typed
+    /// array) per ADR-006 §2.7.5.
+    TypedArray,
 }
 
 impl TypedArrayKind {
@@ -121,6 +130,8 @@ impl TypedArrayKind {
             TypedArrayKind::Decimal => OpCode::NewTypedArrayDecimal,
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
             TypedArrayKind::TypedObject => OpCode::NewTypedArrayTypedObject,
+            // Construction strict-typing close (2026-06-05) — nested array.
+            TypedArrayKind::TypedArray => OpCode::NewTypedArrayNested,
         }
     }
 
@@ -144,6 +155,8 @@ impl TypedArrayKind {
             TypedArrayKind::Decimal => OpCode::TypedArrayGetDecimal,
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
             TypedArrayKind::TypedObject => OpCode::TypedArrayGetTypedObject,
+            // Construction strict-typing close (2026-06-05) — nested array.
+            TypedArrayKind::TypedArray => OpCode::TypedArrayGetNested,
         }
     }
 
@@ -167,6 +180,8 @@ impl TypedArrayKind {
             TypedArrayKind::Decimal => OpCode::TypedArrayPushDecimal,
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
             TypedArrayKind::TypedObject => OpCode::TypedArrayPushTypedObject,
+            // Construction strict-typing close (2026-06-05) — nested array.
+            TypedArrayKind::TypedArray => OpCode::TypedArrayPushNested,
         }
     }
 
@@ -190,6 +205,8 @@ impl TypedArrayKind {
             TypedArrayKind::Decimal => OpCode::TypedArraySetDecimal,
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18).
             TypedArrayKind::TypedObject => OpCode::TypedArraySetTypedObject,
+            // Construction strict-typing close (2026-06-05) — nested array.
+            TypedArrayKind::TypedArray => OpCode::TypedArraySetNested,
         }
     }
 }
@@ -305,6 +322,19 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
         TypedArrayKind::TypedObject => ConcreteType::placeholder_struct(
             shape_value::v2::concrete_type::StructLayoutId(0),
         ),
+        // Construction strict-typing close (2026-06-05) — nested array. The
+        // kind→ConcreteType round-trip cannot recover the inner element type
+        // (every nested-array monomorphization collapses to this one kind, the
+        // carrier kind being uniformly `Ptr(HeapKind::TypedArray)`). Return a
+        // `Array<Array<?>>` placeholder mirroring the TypedObject placeholder
+        // shape; downstream consumers that need the precise inner element type
+        // read the bytecode compiler's `array_element_types[span]` side-table
+        // populated at the literal site.
+        TypedArrayKind::TypedArray => ConcreteType::Array(Box::new(
+            ConcreteType::Array(Box::new(ConcreteType::placeholder_struct(
+                shape_value::v2::concrete_type::StructLayoutId(0),
+            ))),
+        )),
     }
 }
 
@@ -444,6 +474,7 @@ pub fn vec_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'static str 
         TypedArrayKind::String => "Vec<string>",
         TypedArrayKind::Decimal => "Vec<decimal>",
         TypedArrayKind::TypedObject => "Vec<object>",
+        TypedArrayKind::TypedArray => "Vec<array>",
     }
 }
 
@@ -468,6 +499,7 @@ pub fn vec_element_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'sta
         TypedArrayKind::String => "string",
         TypedArrayKind::Decimal => "decimal",
         TypedArrayKind::TypedObject => "object",
+        TypedArrayKind::TypedArray => "array",
     }
 }
 
@@ -538,6 +570,18 @@ impl super::BytecodeCompiler {
         for elem in elements {
             let returned_type_name: Option<String> = match elem {
                 Expr::FunctionCall { name, .. } => {
+                    // Construction strict-typing close (2026-06-05): a
+                    // function with an INFERRED anonymous-object return
+                    // (`fn aabb(lo, hi) { {min: lo, max: hi} }`) has no named
+                    // return type but DOES have a registered anonymous return
+                    // schema (`function_return_schema_ids`). That return is a
+                    // TypedObject, so the literal is `Array<TypedObject>` and
+                    // routes to the same v2-raw `TypedArray<*const
+                    // TypedObjectStorage>` carrier. Per ADR-006 §2.7.5 the
+                    // schema id IS the producer-side proof.
+                    if self.function_return_schema_ids.contains_key(name) {
+                        continue;
+                    }
                     self.type_tracker.get_function_return_type(name).cloned()
                 }
                 Expr::QualifiedFunctionCall {
@@ -565,6 +609,55 @@ impl super::BytecodeCompiler {
             }
         }
         true
+    }
+
+    /// Construction strict-typing close (USER RULING 2026-06-05): infer a
+    /// homogeneous element [`TypedArrayKind`] for an array literal whose
+    /// elements are NON-literal expressions (function calls, identifiers,
+    /// loop counters, …), via `concrete_type_for_expr`.
+    ///
+    /// Returns `Some(kind)` only when EVERY element resolves through the type
+    /// tracker to the SAME scalar `ConcreteType` that has a typed-array
+    /// carrier (`should_use_typed_array`). Any element that does not resolve,
+    /// or that resolves to a different kind, yields `None` — the caller then
+    /// surface-and-stops with a clean "cannot infer array element type"
+    /// compile error (no untyped runtime array carrier exists).
+    ///
+    /// Nested-array elements (`Expr::Array`) are intentionally NOT handled
+    /// here — they are resolved by the dedicated `all_nested_array_elem`
+    /// branch upstream. Per ADR-006 §2.7.5 the element kind is the type
+    /// tracker's producer-side proof, never a runtime decode.
+    pub(crate) fn infer_array_element_kind_from_concrete_types(
+        &self,
+        elements: &[shape_ast::ast::Expr],
+    ) -> Option<TypedArrayKind> {
+        use shape_ast::ast::Expr;
+        if elements.is_empty() {
+            return None;
+        }
+        // Nested-array elements are handled by the upstream nested branch.
+        if elements.iter().any(|e| matches!(e, Expr::Array(..))) {
+            return None;
+        }
+        let mut acc: Option<TypedArrayKind> = None;
+        for elem in elements {
+            let ct = super::monomorphization::type_resolution::concrete_type_for_expr(self, elem)?;
+            // An array-typed element (`[source]` where `source: Array<int>`)
+            // makes the outer a nested array — the inner array carrier is a
+            // v2-raw `*mut TypedArray<U>` regardless of `U`, so it maps to the
+            // single `TypedArrayKind::TypedArray` nested carrier (same as the
+            // literal `[[..],[..]]` shape, just reached via an identifier /
+            // expression element instead of an inline `Expr::Array`).
+            let kind = match ct {
+                shape_value::v2::ConcreteType::Array(_) => TypedArrayKind::TypedArray,
+                other => should_use_typed_array(&other)?,
+            };
+            match acc {
+                Some(prev) if prev != kind => return None,
+                _ => acc = Some(kind),
+            }
+        }
+        acc
     }
 
     /// Compiler-aware resolution of a `let arr: Array<T> = [...]` binding's

@@ -372,6 +372,17 @@ pub const ELEM_TYPE_STRING: u8 = 13;
 pub const ELEM_TYPE_DECIMAL: u8 = 14;
 /// `_pad`-byte discriminant for `TypedArray<*const TypedObjectStorage>`.
 pub const ELEM_TYPE_TYPED_OBJECT: u8 = 15;
+/// `_pad`-byte discriminant for `TypedArray<*const TypedArrayElem>` — a
+/// nested array whose elements are themselves v2-raw `TypedArray<U>` pointers
+/// (any inner element monomorphization). Construction strict-typing close
+/// (USER RULING 2026-06-05): `[[1,2],[3,4]]` lowers the outer literal to this
+/// carrier. The element pointer is a `*const TypedArrayElem` (HeapHeader at
+/// offset 0), and per-element release dispatches through the kind-erased
+/// [`release_v2_typed_array`], which reads the INNER array's own `_pad`
+/// element-type discriminant to pick the inner monomorphized drop. No
+/// runtime NativeKind probe at the outer layer; the inner discriminant is the
+/// inner array's own producer-side stamp (ADR-006 §2.7.5).
+pub const ELEM_TYPE_TYPED_ARRAY: u8 = 16;
 
 /// Read the element-type discriminant stamped in the `_pad` byte (offset 7).
 ///
@@ -400,6 +411,37 @@ pub unsafe fn read_elem_type(ptr: *const u8) -> u8 {
 #[inline]
 pub unsafe fn stamp_elem_type(ptr: *mut u8, elem_type: u8) {
     unsafe { *ptr.add(7) = elem_type };
+}
+
+/// HeapHeader-view newtype for a NESTED `TypedArray` element.
+///
+/// `[[1,2],[3,4]]` lowers to `TypedArray<*const TypedArrayElem>`. Each stored
+/// element is a `*const TypedArrayElem` — really a `*mut TypedArray<U>` for
+/// some inner element monomorphization `U`, viewed only through its
+/// `HeapHeader` at offset 0. The outer array never needs to know `U`: retain
+/// touches only the refcount at offset 0; release dispatches through the
+/// kind-erased [`release_v2_typed_array`], which reads the inner array's own
+/// `_pad` discriminant. This keeps the per-T monomorphization discipline —
+/// the outer carrier is a single concrete `TypedArray<*const TypedArrayElem>`
+/// instantiation, NOT an `Arc<TypedArrayData>` / `TypedBuffer<T>` parallel
+/// carrier (CLAUDE.md §Forbidden) — while the inner drop stays exact.
+#[repr(C)]
+pub struct TypedArrayElem {
+    /// 8-byte v2 heap header (refcount at offset 0, element-type `_pad` at
+    /// offset 7). This is the only field the outer array ever touches.
+    pub header: HeapHeader,
+}
+
+// HeapElement impl per ADR-006 §2.7.24 Q25.A SUPERSEDED + §4.1.B decision.
+// `release_elem` retires one share of the inner array via the kind-erased
+// `release_v2_typed_array`, which reads the inner `_pad` discriminant and
+// runs the matching inner monomorphized `drop_array` / `drop_array_heap`.
+// No runtime NativeKind probe at this (outer) layer; the inner discriminant
+// is the inner array's own producer-side stamp.
+unsafe impl super::heap_element::HeapElement for TypedArrayElem {
+    unsafe fn release_elem(ptr: *const Self) {
+        unsafe { release_v2_typed_array(ptr as *mut u8) };
+    }
 }
 
 /// Retain (bump the refcount of) a v2-raw `*mut TypedArray<T>` carrier.
@@ -465,6 +507,15 @@ pub unsafe fn release_v2_typed_array(ptr: *mut u8) {
             ELEM_TYPE_TYPED_OBJECT => {
                 TypedArray::<*const crate::heap_value::TypedObjectStorage>::drop_array_heap(
                     ptr as *mut TypedArray<*const crate::heap_value::TypedObjectStorage>,
+                )
+            }
+            ELEM_TYPE_TYPED_ARRAY => {
+                // Nested array. Each element is a `*const TypedArrayElem`
+                // (inner `TypedArray<U>` viewed through its HeapHeader);
+                // `TypedArrayElem::release_elem` re-enters this function for
+                // the inner array, reading the inner `_pad` discriminant.
+                TypedArray::<*const TypedArrayElem>::drop_array_heap(
+                    ptr as *mut TypedArray<*const TypedArrayElem>,
                 )
             }
             // An unstamped (`ELEM_TYPE_UNKNOWN`) or unrecognised discriminant
