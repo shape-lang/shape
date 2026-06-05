@@ -331,7 +331,8 @@ fn generic_identity_with_null() {
         r#"
         fn id<T>(x: T) -> T { return x }
         fn test() {
-            let x = id(None)
+            let n: Option<int> = None
+            let x: Option<int> = id(n)
             return x == None
         }
         test()

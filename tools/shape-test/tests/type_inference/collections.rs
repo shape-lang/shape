@@ -226,7 +226,7 @@ fn test_array_reverse_length_preserved() {
 fn test_array_empty_length() {
     ShapeTest::new(
         r#"
-        let a = []
+        let a: Array<int> = []
         a.length
     "#,
     )
@@ -391,7 +391,7 @@ fn test_hashmap_in_function() {
     ShapeTest::new(
         r#"
         fn make_config() {
-            HashMap().set("host", "localhost").set("port", 8080)
+            HashMap().set("host", "localhost").set("port", "8080")
         }
         let cfg = make_config()
         cfg.get("host")
