@@ -233,7 +233,7 @@ fn for_loop_with_if_else_body() {
 fn for_loop_building_result_array() {
     ShapeTest::new(
         r#"
-        let mut result = []
+        let mut result: Array<int> = []
         for x in [1, 2, 3] {
             result = result.push(x * 2)
         }

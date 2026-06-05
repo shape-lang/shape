@@ -483,7 +483,7 @@ fn runtime_err_modulo_by_zero() {
 fn runtime_err_empty_array_access_returns_null() {
     ShapeTest::new(
         r#"
-        let a = []
+        let a: Array<int> = []
         let v = a[0]
         v == None
     "#,
