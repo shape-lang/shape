@@ -369,6 +369,45 @@ impl TypeInferenceEngine {
     ///
     /// The hint guides inference but doesn't force the type.
     fn synth_with_hint(&mut self, expr: &Expr, hint: &Type) -> TypeResult<Type> {
+        // R3-subcase struct-array HOF (strict-flip, 2026-06-14): a closure
+        // argument whose hint is a function type (`(User) -> bool` resolved
+        // from the method's registered signature against the receiver's
+        // element type) must bind its PARAMETERS from the hint BEFORE the body
+        // is inferred — otherwise the body sees the closure param as a fresh
+        // type var and a field access (`u.score`) resolves to `unknown`, which
+        // the strict-typing emitter rejects ("Cannot infer types for binary
+        // operation"). The plain `infer_expr` below infers the body with bare
+        // fresh params and only unifies the WHOLE function type afterwards, far
+        // too late for an in-body field-access / binary-op to type-check. Route
+        // a function-expression closure with a function-typed hint through the
+        // param-binding `check_function_expr_against` path (the same path the
+        // hard `CheckMode::Check` already uses). This is the bidirectional
+        // closure-param inference CLAUDE.md describes; it carries the receiver
+        // element type (`User`) into the closure scope so `u.score` resolves to
+        // the field's real type. Not broad-suppression: an unproven element
+        // (non-function hint, or a hint whose param shape doesn't match) still
+        // falls back to the soft-unify probe below — no fabrication, no default.
+        if let Expr::FunctionExpr {
+            params,
+            return_type,
+            body,
+            ..
+        } = expr
+        {
+            if matches!(
+                hint,
+                Type::Function { .. }
+                    | Type::Concrete(TypeAnnotation::Function { .. })
+            ) {
+                return self.check_function_expr_against(
+                    params,
+                    return_type.as_ref(),
+                    body,
+                    hint,
+                );
+            }
+        }
+
         let inferred = self.infer_expr(expr)?;
 
         // Try to unify with hint - if it fails, just return inferred

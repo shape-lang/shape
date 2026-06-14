@@ -695,6 +695,57 @@ impl super::BytecodeCompiler {
         acc
     }
 
+    /// R3-subcase struct-array HOF (strict-flip, 2026-06-14): resolve the NAMED
+    /// struct/enum element [`ConcreteType`] of a `TypedObject`-kind array
+    /// literal (`[User { .. }, User { .. }]` / `[aabb(..), aabb(..)]`).
+    ///
+    /// The `TypedArrayKind::TypedObject → ConcreteType` round-trip
+    /// (`concrete_type_for_typed_array_kind`) collapses every struct element to
+    /// `placeholder_struct(name: None)` — the slot-bits kind is uniformly
+    /// `Ptr(HeapKind::TypedObject)`, so the round-trip cannot recover the
+    /// specific struct. Recording that nameless placeholder into the
+    /// `array_element_types[span]` side-table erased the struct identity, and a
+    /// downstream HOF closure (`users.filter(|u| u.score > 85)`) then resolved
+    /// its param to a nameless struct, surfacing "Cannot infer types for binary
+    /// operation" on the in-closure field access.
+    ///
+    /// Recovery is structural and type-proven: every element must resolve via
+    /// `concrete_type_for_expr` to the SAME `ConcreteType::Struct` /
+    /// `ConcreteType::Enum` whose `NamedTypeId` carries a `Some(name)` (a
+    /// `StructLiteral` resolves through `struct_or_enum_concrete_type`; a
+    /// registered-struct-returning call through the return-type tracker). The
+    /// name IS the proof (per ADR-006 §2.7.5). A heterogeneous, unresolvable, or
+    /// unnamed element yields `None` — the caller falls back to the placeholder
+    /// (no fabrication, no Bool-default; the clean-error contract is preserved).
+    pub(crate) fn struct_array_named_element_concrete_type(
+        &self,
+        elements: &[shape_ast::ast::Expr],
+    ) -> Option<shape_value::v2::ConcreteType> {
+        use shape_value::v2::ConcreteType;
+        if elements.is_empty() {
+            return None;
+        }
+        let mut acc: Option<ConcreteType> = None;
+        for elem in elements {
+            let ct =
+                super::monomorphization::type_resolution::concrete_type_for_expr(self, elem)?;
+            // Only a NAMED struct / enum element carries recoverable identity.
+            let named = match &ct {
+                ConcreteType::Struct(n) if n.name_str().is_some() => true,
+                ConcreteType::Enum(n) if n.name_str().is_some() => true,
+                _ => false,
+            };
+            if !named {
+                return None;
+            }
+            match &acc {
+                Some(prev) if prev != &ct => return None,
+                _ => acc = Some(ct),
+            }
+        }
+        acc
+    }
+
     /// Compiler-aware resolution of a `let arr: Array<T> = [...]` binding's
     /// element annotation to a [`TypedArrayKind`]. Wraps the
     /// `v2_array_emission::typed_array_from_annotation` →

@@ -412,10 +412,32 @@ impl BytecodeCompiler {
             // branch only fires when `infer_array_literal_numeric_type` /
             // `infer_array_element_type` / `pending_variable_typed_array_kind`
             // already proved the element type at the producer site.
-            self.record_array_element_type(
-                span,
-                super::super::v2_typed_emission::concrete_type_for_typed_array_kind(kind),
-            );
+            // R3-subcase struct-array HOF (strict-flip, 2026-06-14): the
+            // `kind → ConcreteType` round-trip collapses EVERY struct-element
+            // array to `placeholder_struct(name: None)` (the slot-bits kind is
+            // uniformly `Ptr(HeapKind::TypedObject)` — the round-trip cannot
+            // recover the specific struct). Recording that placeholder into the
+            // span side-table erases the struct identity, so a downstream
+            // `users.filter(|u| u.score > 85)` resolved its closure param `u`
+            // to a nameless struct and `u.score` surfaced "unknown". For a
+            // `TypedObject`-kind literal, recover the NAMED element
+            // `ConcreteType` structurally from the elements (the `StructLiteral`
+            // / registered-struct-returning element resolves to a
+            // `Struct(name: Some(..))` via `concrete_type_for_expr`); that name
+            // IS the proof (per ADR-006 §2.7.5). Only a named struct element is
+            // accepted — a heterogeneous / unresolvable / unnamed element falls
+            // back to the placeholder (no fabrication; the existing
+            // surface-clean-error contract is preserved for genuinely ambiguous
+            // element types).
+            let recorded_elem = if matches!(kind, TypedArrayKind::TypedObject) {
+                self.struct_array_named_element_concrete_type(elements)
+                    .unwrap_or_else(|| {
+                        super::super::v2_typed_emission::concrete_type_for_typed_array_kind(kind)
+                    })
+            } else {
+                super::super::v2_typed_emission::concrete_type_for_typed_array_kind(kind)
+            };
+            self.record_array_element_type(span, recorded_elem);
             // Allocate the typed array with capacity = element count.
             self.emit(Instruction::new(
                 kind.new_opcode(),

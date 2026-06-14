@@ -4612,3 +4612,93 @@ mod r3_elemerasure_tests {
         let _ = eval_typed_i64("([1, 2, 3].sort().map(|x| x + 1))[0]");
     }
 }
+
+#[cfg(test)]
+mod r3_subcase_struct_array_hof_tests {
+    //! R3-subcase struct-array HOF (strict-flip): a closure over an array of
+    //! structs that reads a struct field (`users.filter(|u| u.score > 85)`)
+    //! resolved the field to `unknown` because the struct identity was erased
+    //! at array-of-structs construction — the `TypedArrayKind::TypedObject →
+    //! ConcreteType` round-trip collapsed every struct element to
+    //! `placeholder_struct(name: None)`, and that nameless placeholder was
+    //! recorded into `array_element_types[span]`. The fix recovers the NAMED
+    //! struct element `ConcreteType` structurally from the literal elements and
+    //! records THAT, so the HOF closure param carries the struct type and a
+    //! field access resolves to the field's type. Type-proven, not
+    //! broad-suppression: a non-existent field still rejects.
+
+    use crate::test_utils::compile_with_prelude;
+
+    const USER_TYPE: &str = "type User { name: string, score: int }\n";
+
+    #[test]
+    fn filter_struct_array_reads_field_compiles() {
+        // `u.score` inside the filter closure resolves against `User` — the
+        // exact case the R3 fix SURFACED. Pre-fix: "Cannot infer types for
+        // binary operation `Greater`: operand types are `unknown` and `int`".
+        let src = format!(
+            "{USER_TYPE}fn run() {{ \
+               let users = [User {{ name: \"a\", score: 90 }}, User {{ name: \"b\", score: 50 }}]\n\
+               let high = users.filter(|u| u.score > 85)\n\
+               print(high.len()) }}\nrun()"
+        );
+        assert!(
+            compile_with_prelude(&src).is_ok(),
+            "filter over Array<User> reading u.score should compile"
+        );
+    }
+
+    #[test]
+    fn map_struct_array_reads_field_compiles() {
+        // `.map(|u| u.score * 2)` — closure param `u: User`, `u.score: int`.
+        let src = format!(
+            "{USER_TYPE}fn run() {{ \
+               let users = [User {{ name: \"a\", score: 90 }}, User {{ name: \"b\", score: 50 }}]\n\
+               let scores = users.map(|u| u.score * 2)\n\
+               print(scores.len()) }}\nrun()"
+        );
+        assert!(
+            compile_with_prelude(&src).is_ok(),
+            "map over Array<User> reading u.score should compile"
+        );
+    }
+
+    #[test]
+    fn find_struct_array_reads_field_compiles() {
+        // `.find(|u| u.score > 85)` returns `User?`; the closure body reads the
+        // struct field — `ReceiverParam(0)` element flows the struct type in.
+        let src = format!(
+            "{USER_TYPE}fn run() {{ \
+               let users = [User {{ name: \"a\", score: 90 }}, User {{ name: \"b\", score: 50 }}]\n\
+               let f = users.find(|u| u.score > 85)\n\
+               print(f.name) }}\nrun()"
+        );
+        assert!(
+            compile_with_prelude(&src).is_ok(),
+            "find over Array<User> reading u.score / f.name should compile"
+        );
+    }
+
+    #[test]
+    fn nonexistent_field_in_struct_array_closure_rejects() {
+        // NOT broad-suppression: a field that does not exist on `User` must
+        // still be a compile error (the struct identity is now KNOWN, so the
+        // schema check fires) — never silently accepted.
+        let src = format!(
+            "{USER_TYPE}fn run() {{ \
+               let users = [User {{ name: \"a\", score: 90 }}]\n\
+               let bad = users.filter(|u| u.nonexistent > 5)\n\
+               print(bad.len()) }}\nrun()"
+        );
+        let res = compile_with_prelude(&src);
+        assert!(
+            res.is_err(),
+            "a non-existent struct field inside the HOF closure must reject, got Ok"
+        );
+        let msg = format!("{:?}", res.unwrap_err());
+        assert!(
+            msg.contains("nonexistent"),
+            "rejection should name the missing field; got: {msg}"
+        );
+    }
+}
