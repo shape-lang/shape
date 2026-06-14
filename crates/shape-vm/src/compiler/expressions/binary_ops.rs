@@ -202,6 +202,37 @@ fn strict_typing_binop_error(
     }
 }
 
+/// Strict no-coercion ruling (user 2026-06-14): `string + non-string` is a
+/// compile error. Under strict typing there is no implicit auto-stringify of
+/// the non-string operand — the `op_string_concat_int/number/bool`
+/// auto-stringify handlers are no longer reachable from `+` for well-typed
+/// code. The fix is to use f-string interpolation (`f"{a}{b}"`) or an explicit
+/// string conversion.
+///
+/// Fires when exactly one operand of `+` is a string (or char) and the other
+/// is a non-string concrete type. Both string operands take the
+/// `StringConcatTyped` path before this; both non-string operands never reach
+/// it.
+fn string_plus_nonstring_error(
+    compiler: &mut BytecodeCompiler,
+    left: &Expr,
+    right: &Expr,
+    lhs_type: &str,
+    rhs_type: &str,
+) -> ShapeError {
+    ShapeError::SemanticError {
+        message: format!(
+            "Cannot apply `+` to a `string` and a `{}`. Strict typing does not \
+             implicitly convert `{}` to a string for concatenation. Use f-string \
+             interpolation, e.g. `f\"{{...}}\"`, or convert the value to a string \
+             explicitly before concatenating.",
+            if lhs_type == "string" || lhs_type == "char" { rhs_type } else { lhs_type },
+            if lhs_type == "string" || lhs_type == "char" { rhs_type } else { lhs_type },
+        ),
+        location: Some(compiler.span_to_source_location(combined_span(left, right))),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NumericEmitResult {
     EmittedTyped,
@@ -353,6 +384,12 @@ impl BytecodeCompiler {
         if let (Some(known), None) = (*left_numeric, *right_numeric)
             && matches!(right, Expr::Identifier(..) | Expr::IndexAccess { .. })
             && self.last_expr_schema.is_none()
+            // Strict no-coercion ruling (user 2026-06-14): never seed a numeric
+            // hint onto an operand the compiler has proven to be a `string`.
+            // Doing so misclassifies `s + n` (string + number) as a numeric add
+            // and defers the failure to a runtime `TypeError` instead of the
+            // clean compile-time `string + non-string` rejection below.
+            && !self.expr_is_proven_string(right)
         {
             // Adopt Int only if the identifier has a confirmed Int type.
             // Otherwise promote to Number to avoid misclassifying floats as ints.
@@ -379,7 +416,11 @@ impl BytecodeCompiler {
             } else {
                 false
             };
-            if !has_object_schema {
+            // Strict no-coercion ruling (user 2026-06-14): same guard as the
+            // symmetric branch — a proven-`string` LHS must not adopt the RHS
+            // numeric hint, or `s + n` becomes a numeric add that fails at
+            // runtime instead of rejecting at compile time.
+            if !has_object_schema && !self.expr_is_proven_string(left) {
                 let safe = self.safe_adopt_numeric_hint(left, known);
                 // Only adopt if the type didn't change (confirmed match).
                 if safe == known {
@@ -388,6 +429,27 @@ impl BytecodeCompiler {
                 }
             }
         }
+    }
+
+    /// Strict no-coercion ruling (user 2026-06-14): true when `expr` is proven
+    /// to be a `string` (or `char`) at compile time. Used to keep numeric-hint
+    /// adoption from misclassifying a string operand of `+` as numeric, so the
+    /// `string + non-string` rejection in the `Add` arm fires at compile time
+    /// rather than deferring to a runtime `TypeError`.
+    fn expr_is_proven_string(&mut self, expr: &Expr) -> bool {
+        if matches!(expr, Expr::Literal(Literal::String(_), _)) {
+            return true;
+        }
+        if matches!(
+            self.storage_hint_for_expr(expr),
+            Some(crate::type_tracking::NativeKind::String)
+        ) {
+            return true;
+        }
+        matches!(
+            self.infer_expr_type(expr).ok().map(|t| type_display_name(&t)).as_deref(),
+            Some("string") | Some("char")
+        )
     }
 
     /// When adopting a numeric hint from one operand to another, check if adopting
@@ -1276,77 +1338,45 @@ impl BytecodeCompiler {
                         return Ok(());
                     }
 
-                    // R5.5: typed string + scalar concat. When LHS is proved
-                    // `string` and RHS is a scalar primitive (`int`, `number`,
-                    // or `bool`), emit a dedicated typed opcode instead of
-                    // falling through to the dynamic `AddDynamic` handler's
-                    // string-coercion branch (`try_heap_arithmetic` Case 2 at
-                    // arithmetic/mod.rs:1815).
+                    // Strict no-coercion ruling (user 2026-06-14): `string +
+                    // non-string` is a COMPILE ERROR. The former R5.5 typed
+                    // string + scalar concat path (which emitted
+                    // `StringConcatInt`/`Number`/`Bool` auto-stringify opcodes)
+                    // is deleted. Under strict typing the non-string operand is
+                    // NOT implicitly stringified; the both-strings case already
+                    // returned above via `StringConcatTyped`. Here we detect the
+                    // mixed case (exactly one operand a string/char, the other a
+                    // known non-string concrete type) and reject with a
+                    // diagnostic that names f-string interpolation as the
+                    // alternative.
                     //
-                    // Gate: `SHAPE_V2_STRING_COERCE_CONCAT` (default ON via
-                    // `typed_string_coerce_concat_enabled()`). With the flag
-                    // off, emission is byte-identical to pre-R5.5 (falls
-                    // through to the generic AddDynamic path below).
-                    //
-                    // Asymmetric: only string-LHS fires the typed path. The
-                    // commutative form `int + string` is rare in Shape code
-                    // and continues to work via the dynamic fallback. See
-                    // R5.5 commit body.
-                    //
-                    // Resolve operand types via multiple sources — the
-                    // order matches the surrounding arithmetic branch:
-                    //   1. `infer_expr_type` when it produces a display
-                    //      name (often `None` for locals whose tracker
-                    //      info came from an annotation rather than
-                    //      full inference).
-                    //   2. `storage_hint_for_expr` fallback, which reads
-                    //      the tracker's `NativeKind` hint (set by
-                    //      `let x: string = ...` annotations and by
-                    //      literals). This is the same helper the numeric
-                    //      path uses via `storage_hint_for_expr` below.
-                    let lhs_is_string = matches!(lhs_name.as_deref(), Some("string"))
+                    // Resolve string-ness via the same multi-source order the
+                    // surrounding arithmetic branch uses: `infer_expr_type`
+                    // display name, then the `storage_hint_for_expr`
+                    // `NativeKind::String` hint (set by `let x: string = ...`
+                    // annotations and by literals).
+                    let lhs_is_string = is_strish(&lhs_name)
                         || matches!(
                             self.storage_hint_for_expr(left),
                             Some(crate::type_tracking::NativeKind::String)
                         );
-                    if lhs_is_string
-                        && crate::compiler::helpers::typed_string_coerce_concat_enabled()
-                    {
-                        let rhs_hint = self.storage_hint_for_expr(right);
-                        let typed_opcode = match rhs_name.as_deref() {
-                            Some("int") => Some(OpCode::StringConcatInt),
-                            Some("number") => Some(OpCode::StringConcatNumber),
-                            Some("bool") => Some(OpCode::StringConcatBool),
-                            _ => match rhs_hint {
-                                Some(crate::type_tracking::NativeKind::Int64) => {
-                                    Some(OpCode::StringConcatInt)
-                                }
-                                Some(crate::type_tracking::NativeKind::Float64) => {
-                                    Some(OpCode::StringConcatNumber)
-                                }
-                                Some(crate::type_tracking::NativeKind::Bool) => {
-                                    Some(OpCode::StringConcatBool)
-                                }
-                                _ => None,
-                            },
-                        };
-                        if let Some(op) = typed_opcode {
-                            self.emit(Instruction::simple(op));
-                            self.last_expr_schema = None;
-                            // Phase 3e: result of string + scalar concat is
-                            // a string — propagate the type so chained
-                            // concats track it.
-                            self.last_expr_type_info = Some(
-                                crate::type_tracking::VariableTypeInfo::named(
-                                    "string".to_string(),
-                                ),
-                            );
-                            // Result is a freshly-allocated string; clear
-                            // the numeric hint so downstream Add chains
-                            // don't think the result is a scalar.
-                            self.last_expr_numeric_type = None;
-                            return Ok(());
-                        }
+                    let rhs_is_string = is_strish(&rhs_name)
+                        || matches!(
+                            self.storage_hint_for_expr(right),
+                            Some(crate::type_tracking::NativeKind::String)
+                        );
+                    // Exactly one side is a string. The other operand's type is
+                    // resolved (numeric/bool/heap) — there is no valid `+` here.
+                    if lhs_is_string != rhs_is_string {
+                        let lhs_disp = lhs_name.as_deref().unwrap_or("unknown");
+                        let rhs_disp = rhs_name.as_deref().unwrap_or("unknown");
+                        let (lhs_disp, rhs_disp) = (
+                            if lhs_is_string { "string" } else { lhs_disp },
+                            if rhs_is_string { "string" } else { rhs_disp },
+                        );
+                        return Err(string_plus_nonstring_error(
+                            self, left, right, lhs_disp, rhs_disp,
+                        ));
                     }
 
                     // Array concat: both operands proven to be arrays. We

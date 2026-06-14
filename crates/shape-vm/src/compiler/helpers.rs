@@ -6940,11 +6940,33 @@ mod tests {
         })
     }
 
+    // Strict no-coercion ruling (user 2026-06-14): `string + non-string` is a
+    // COMPILE ERROR. The former R5.5 typed string+scalar concat
+    // (`StringConcatInt`/`Number`/`Bool` auto-stringify) is rejected at type
+    // check. These tests are rebaselined from "emits the typed concat opcode"
+    // /"produces the concatenated string at runtime" to "is a TP-rejection at
+    // compile time". The original programs (the actual user intent we are
+    // ruling on) are preserved verbatim; only the expectation flips. The
+    // diagnostic must name f-string interpolation as the alternative.
+    fn compile_err_with_string_coerce_concat(code: &str) -> String {
+        use shape_ast::parser::parse_program;
+        super::super::helpers::with_typed_string_coerce_concat_flag(true, || {
+            let program = parse_program(code).expect("parse program");
+            let mut compiler = BytecodeCompiler::new();
+            compiler.allow_internal_builtins = true;
+            match compiler.compile(&program) {
+                Ok(_) => panic!(
+                    "expected `string + non-string` to be a compile error under \
+                     strict no-coercion, but compilation succeeded"
+                ),
+                Err(e) => e.to_string(),
+            }
+        })
+    }
+
     #[test]
-    fn r55_string_plus_int_emits_string_concat_int() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_string_coerce_concat(
-            true,
+    fn r55_string_plus_int_is_compile_error() {
+        let msg = compile_err_with_string_coerce_concat(
             r#"
             fn concat_test() {
                 let s: string = "Cash: "
@@ -6955,17 +6977,14 @@ mod tests {
             "#,
         );
         assert!(
-            ops.contains(&OpCode::StringConcatInt),
-            "expected StringConcatInt for string + int, got ops: {:?}",
-            ops
+            msg.contains("f-string") || msg.contains("f\""),
+            "string + int rejection must name f-string interpolation, got: {msg}"
         );
     }
 
     #[test]
-    fn r55_string_plus_number_emits_string_concat_number() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_string_coerce_concat(
-            true,
+    fn r55_string_plus_number_is_compile_error() {
+        let msg = compile_err_with_string_coerce_concat(
             r#"
             fn concat_test() {
                 let n: number = 3.14
@@ -6975,17 +6994,14 @@ mod tests {
             "#,
         );
         assert!(
-            ops.contains(&OpCode::StringConcatNumber),
-            "expected StringConcatNumber for string + number, got ops: {:?}",
-            ops
+            msg.contains("f-string") || msg.contains("f\""),
+            "string + number rejection must name f-string interpolation, got: {msg}"
         );
     }
 
     #[test]
-    fn r55_string_plus_bool_emits_string_concat_bool() {
-        use crate::bytecode::OpCode;
-        let ops = compile_opcodes_with_string_coerce_concat(
-            true,
+    fn r55_string_plus_bool_is_compile_error() {
+        let msg = compile_err_with_string_coerce_concat(
             r#"
             fn concat_test() {
                 let s: string = "flag: "
@@ -6996,15 +7012,16 @@ mod tests {
             "#,
         );
         assert!(
-            ops.contains(&OpCode::StringConcatBool),
-            "expected StringConcatBool for string + bool, got ops: {:?}",
-            ops
+            msg.contains("f-string") || msg.contains("f\""),
+            "string + bool rejection must name f-string interpolation, got: {msg}"
         );
     }
 
     #[test]
-    fn r55_string_plus_string_does_not_emit_r55_scalar_opcodes() {
+    fn r55_string_plus_string_still_compiles_and_concats() {
         use crate::bytecode::OpCode;
+        // string + string remains valid: emits StringConcatTyped, no scalar
+        // auto-stringify opcode.
         let ops = compile_opcodes_with_string_coerce_concat(
             true,
             r#"
@@ -7016,105 +7033,82 @@ mod tests {
             "#,
         );
         assert!(
+            ops.contains(&OpCode::StringConcatTyped),
+            "string + string must emit StringConcatTyped, ops: {:?}",
+            ops
+        );
+        assert!(
             !ops.contains(&OpCode::StringConcatInt)
                 && !ops.contains(&OpCode::StringConcatNumber)
                 && !ops.contains(&OpCode::StringConcatBool),
-            "string+string must not emit any R5.5 typed scalar opcode, ops: {:?}",
+            "string+string must not emit any scalar concat opcode, ops: {:?}",
             ops
         );
     }
 
     #[test]
-    fn r55_string_plus_scalar_runtime_values() {
-        // End-to-end. Migrated from `ValueWordExt::as_str` to
-        // `KindedSlot::as_str` per §2.7.6 / Q8 — the kind-threaded
-        // accessor reads UTF-8 bytes off both `NativeKind::String` (Arc<String>
-        // carrier) and `NativeKind::StringV2` (v2-raw `*const StringObj`)
-        // labels.
+    fn r55_string_plus_scalar_rejected_fstring_is_the_alternative() {
+        // The scalar concat that previously ran at runtime ("Cash: " + c, etc.)
+        // is now a compile error. The intent — producing a formatted string —
+        // is achieved with f-string interpolation, which still compiles and
+        // runs. This pins both halves of the ruling end-to-end.
         use crate::VMConfig;
         use crate::executor::VirtualMachine;
         use shape_ast::parser::parse_program;
 
-        let eval_str = |code: &str| -> String {
-            super::super::helpers::with_typed_string_coerce_concat_flag(true, || {
-                let program = parse_program(code).expect("parse");
-                let mut compiler = BytecodeCompiler::new();
-                compiler.allow_internal_builtins = true;
-                let bc = compiler.compile(&program).expect("compile");
-                let mut vm = VirtualMachine::new(VMConfig::default());
-                vm.load_program(bc);
-                vm.execute(None)
-                    .expect("execute")
-                    .as_str()
-                    .map(|s| s.to_string())
-                    .expect("string result")
-            })
-        };
+        // (a) string + scalar: all four forms reject at compile time.
+        for code in [
+            r#"fn f() { let c: int = 42; "Cash: " + c } f()"#,
+            r#"fn f() { let n: number = 3.14; "X: " + n } f()"#,
+            r#"fn f() { let b: bool = true; "flag: " + b } f()"#,
+            r#"fn f() { let b: bool = false; "flag: " + b } f()"#,
+        ] {
+            let msg = compile_err_with_string_coerce_concat(code);
+            assert!(
+                msg.contains("f-string") || msg.contains("f\""),
+                "expected string+scalar to reject naming f-string, code={code}, got: {msg}"
+            );
+        }
 
+        // (b) f-string interpolation is the working alternative.
+        let eval_str = |code: &str| -> String {
+            let program = parse_program(code).expect("parse");
+            let mut compiler = BytecodeCompiler::new();
+            compiler.allow_internal_builtins = true;
+            let bc = compiler.compile(&program).expect("compile f-string");
+            let mut vm = VirtualMachine::new(VMConfig::default());
+            vm.load_program(bc);
+            vm.execute(None)
+                .expect("execute")
+                .as_str()
+                .map(|s| s.to_string())
+                .expect("string result")
+        };
         assert_eq!(
             eval_str(
                 r#"
                 fn f() {
                     let c: int = 42
-                    "Cash: " + c
+                    f"Cash: {c}"
                 }
                 f()
                 "#,
             ),
             "Cash: 42",
-            "string + int"
-        );
-        assert_eq!(
-            eval_str(
-                r#"
-                fn f() {
-                    let n: number = 3.14
-                    "X: " + n
-                }
-                f()
-                "#,
-            ),
-            "X: 3.14",
-            "string + number"
-        );
-        assert_eq!(
-            eval_str(
-                r#"
-                fn f() {
-                    let n: number = 2.0
-                    "whole: " + n
-                }
-                f()
-                "#,
-            ),
-            "whole: 2",
-            "string + whole number formats without decimal"
+            "f-string int interpolation"
         );
         assert_eq!(
             eval_str(
                 r#"
                 fn f() {
                     let b: bool = true
-                    "flag: " + b
+                    f"flag: {b}"
                 }
                 f()
                 "#,
             ),
             "flag: true",
-            "string + bool true"
-        );
-        assert_eq!(
-            eval_str(
-                r#"
-                fn f() {
-                    let b: bool = false
-                    "flag: " + b
-                }
-                f()
-                "#,
-            ),
-            "flag: false",
-            "string + bool false"
+            "f-string bool interpolation"
         );
     }
 
