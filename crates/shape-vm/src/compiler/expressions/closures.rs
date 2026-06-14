@@ -61,9 +61,7 @@ pub(crate) fn infer_param_type_from_body(
                 scan_expr(name, left).or_else(|| scan_expr(name, right))
             }
             Expr::UnaryOp { operand, .. } => scan_expr(name, operand),
-            Expr::FunctionCall { args, .. } => {
-                args.iter().find_map(|a| scan_expr(name, a))
-            }
+            Expr::FunctionCall { args, .. } => args.iter().find_map(|a| scan_expr(name, a)),
             Expr::MethodCall { receiver, args, .. } => {
                 scan_expr(name, receiver).or_else(|| args.iter().find_map(|a| scan_expr(name, a)))
             }
@@ -81,9 +79,7 @@ pub(crate) fn infer_param_type_from_body(
                         // identifier `x`, scan the guard + body for
                         // `<x> op <literal>` pairings.
                         for arm in &match_expr.arms {
-                            if let shape_ast::ast::Pattern::Identifier(bound_name) =
-                                &arm.pattern
-                            {
+                            if let shape_ast::ast::Pattern::Identifier(bound_name) = &arm.pattern {
                                 if let Some(guard) = arm.guard.as_ref() {
                                     if let Some(t) = scan_expr(bound_name, guard) {
                                         return Some(t);
@@ -98,15 +94,14 @@ pub(crate) fn infer_param_type_from_body(
                 }
                 // Otherwise just recurse into scrutinee + arms looking
                 // for the original name.
-                scan_expr(name, &match_expr.scrutinee)
-                    .or_else(|| {
-                        match_expr.arms.iter().find_map(|arm| {
-                            arm.guard
-                                .as_ref()
-                                .and_then(|g| scan_expr(name, g))
-                                .or_else(|| scan_expr(name, &arm.body))
-                        })
+                scan_expr(name, &match_expr.scrutinee).or_else(|| {
+                    match_expr.arms.iter().find_map(|arm| {
+                        arm.guard
+                            .as_ref()
+                            .and_then(|g| scan_expr(name, g))
+                            .or_else(|| scan_expr(name, &arm.body))
                     })
+                })
             }
             _ => None,
         }
@@ -135,7 +130,11 @@ fn infer_param_type_from_outer_pairing(
     known_outer_types: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
     use shape_ast::ast::Statement;
-    fn scan(name: &str, expr: &Expr, known: &std::collections::HashMap<String, String>) -> Option<String> {
+    fn scan(
+        name: &str,
+        expr: &Expr,
+        known: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
         match expr {
             Expr::BinaryOp { left, right, .. } => {
                 if let (Expr::Identifier(ln, _), Expr::Identifier(rn, _)) =
@@ -156,13 +155,9 @@ fn infer_param_type_from_outer_pairing(
             }
             Expr::UnaryOp { operand, .. } => scan(name, operand, known),
             Expr::Return(Some(e), _) => scan(name, e, known),
-            Expr::FunctionCall { args, .. } => {
-                args.iter().find_map(|a| scan(name, a, known))
-            }
-            Expr::MethodCall { receiver, args, .. } => {
-                scan(name, receiver, known)
-                    .or_else(|| args.iter().find_map(|a| scan(name, a, known)))
-            }
+            Expr::FunctionCall { args, .. } => args.iter().find_map(|a| scan(name, a, known)),
+            Expr::MethodCall { receiver, args, .. } => scan(name, receiver, known)
+                .or_else(|| args.iter().find_map(|a| scan(name, a, known))),
             _ => None,
         }
     }
@@ -177,7 +172,8 @@ fn infer_param_type_from_outer_pairing(
             _ => None,
         }
     }
-    body.iter().find_map(|s| scan_stmt(param_name, s, known_outer_types))
+    body.iter()
+        .find_map(|s| scan_stmt(param_name, s, known_outer_types))
 }
 
 /// Strict-typing-sweep (Cluster 1): convert a `ConcreteType` (the v2 typed
@@ -460,7 +456,9 @@ pub(crate) fn infer_closure_body_return_type_name_with_caller_context(
                 }
                 None
             }
-            Expr::BinaryOp { left, right, op, .. } => {
+            Expr::BinaryOp {
+                left, right, op, ..
+            } => {
                 let lt = expr_type(compiler, param_types, left)?;
                 let rt = expr_type(compiler, param_types, right)?;
                 match op {
@@ -490,12 +488,8 @@ pub(crate) fn infer_closure_body_return_type_name_with_caller_context(
             Expr::Block(block, _) => {
                 let last = block.items.last()?;
                 match last {
-                    shape_ast::ast::BlockItem::Expression(e) => {
-                        expr_type(compiler, param_types, e)
-                    }
-                    shape_ast::ast::BlockItem::Statement(s) => {
-                        stmt_type(compiler, param_types, s)
-                    }
+                    shape_ast::ast::BlockItem::Expression(e) => expr_type(compiler, param_types, e),
+                    shape_ast::ast::BlockItem::Statement(s) => stmt_type(compiler, param_types, s),
                     _ => None,
                 }
             }
@@ -529,7 +523,12 @@ pub(crate) fn infer_closure_body_return_type_name_with_caller_context(
             // method name isn't in either classifier, returns `None` so
             // the outer caller's value-call stamping stays Void per
             // §2.7.5.1 / §2.7.7 #9.
-            Expr::MethodCall { receiver, method, args, .. } => {
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                ..
+            } => {
                 // Invariant-across-receiver methods: classify from name
                 // alone without needing the receiver's type.
                 let invariant_kind: Option<&'static str> = match method.as_str() {
@@ -833,6 +832,19 @@ impl BytecodeCompiler {
         // the layout's `heap_capture_mask`). This records layout metadata in
         // `closure_registry` that Phase C consumes to extend the monomorphization
         // cache key. Emission is unchanged.
+        // C2 Bucket-3 carrier-stamp fix: record which captures are invoked
+        // as callees in this closure body so `resolve_capture_concrete_type`
+        // (used by both `mint_closure_type_id` below and the kinds-aware
+        // re-intern further down) classifies an unannotated callable capture
+        // as `ConcreteType::Function` (→ `Ptr(HeapKind::Closure)`) rather
+        // than the `Pointer(Void)` → `NativeView` "unknown" sentinel. Set
+        // for the duration of this closure's capture-type resolution and
+        // cleared after the re-intern block.
+        let saved_callee_captures = std::mem::replace(
+            &mut self.current_closure_callee_captures,
+            Self::collect_callee_identifier_names(body),
+        );
+
         let closure_type_id = self.mint_closure_type_id(&captured_vars);
 
         // Phase F: mint a FunctionTypeId for the callable signature. This is
@@ -983,9 +995,7 @@ impl BytecodeCompiler {
                     _ if is_local_slot && self.owned_mutable_locals.contains(name) => {
                         CaptureKind::OwnedMutable
                     }
-                    _ if is_module_binding_slot
-                        && self.shared_module_binding_contains(name) =>
-                    {
+                    _ if is_module_binding_slot && self.shared_module_binding_contains(name) => {
                         CaptureKind::Shared
                     }
                     // A.1C.3: module-binding captures with no resolved
@@ -1024,15 +1034,10 @@ impl BytecodeCompiler {
             .iter()
             .any(|k| !matches!(k, CaptureKind::Immutable))
         {
-            use shape_value::v2::concrete_type::ConcreteType;
-            let capture_types: Vec<ConcreteType> = captured_vars
-                .iter()
-                .map(|name| {
-                    let ident = Expr::Identifier(name.clone(), Span::DUMMY);
-                    concrete_type_for_expr(self, &ident)
-                        .unwrap_or_else(|| ConcreteType::Pointer(Box::new(ConcreteType::Void)))
-                })
-                .collect();
+            let mut capture_types: Vec<ConcreteType> = Vec::with_capacity(captured_vars.len());
+            for name in &captured_vars {
+                capture_types.push(self.resolve_capture_concrete_type(name));
+            }
             let kinds_id = self
                 .closure_registry
                 .intern_with_kinds(capture_types, capture_kinds.clone());
@@ -1046,6 +1051,10 @@ impl BytecodeCompiler {
             }
             let _ = closure_type_id; // the kinds-aware id supersedes it.
         }
+
+        // Capture-type resolution for this closure is complete; restore the
+        // enclosing closure's callee-capture set (closures nest).
+        self.current_closure_callee_captures = saved_callee_captures;
 
         // Track A.1C.2b — enforce `let mut` escape rejection (§4.3).
         //
@@ -1109,12 +1118,10 @@ impl BytecodeCompiler {
         //     previously promoted via `AllocSharedLocal`.
         let saved_mutable_captures = std::mem::take(&mut self.mutable_closure_captures);
         let saved_shared_captures = std::mem::take(&mut self.shared_closure_captures);
-        let saved_owned_mutable_captures =
-            std::mem::take(&mut self.owned_mutable_closure_captures);
+        let saved_owned_mutable_captures = std::mem::take(&mut self.owned_mutable_closure_captures);
         let saved_owned_mutable_capture_inner_kinds =
             std::mem::take(&mut self.owned_mutable_capture_inner_kinds);
-        let saved_shared_capture_inner_kinds =
-            std::mem::take(&mut self.shared_capture_inner_kinds);
+        let saved_shared_capture_inner_kinds = std::mem::take(&mut self.shared_capture_inner_kinds);
         let _ = closure_is_escaping;
         for (i, name) in captured_vars.iter().enumerate() {
             if mutable_flags.get(i).copied().unwrap_or(false) {
@@ -1294,19 +1301,19 @@ impl BytecodeCompiler {
                     let is_shared_local_slot = matches!(kind, CaptureKind::Shared)
                         && self.resolve_local(captured).is_some();
                     let is_owned_mutable = matches!(kind, CaptureKind::OwnedMutable);
-                    let shared_module_binding_scoped_name = if matches!(kind, CaptureKind::Shared)
-                        && !is_shared_local_slot
-                    {
-                        self.resolve_scoped_module_binding_name(captured).or_else(|| {
-                            if self.module_bindings.contains_key(captured) {
-                                Some(captured.clone())
-                            } else {
-                                None
-                            }
-                        })
-                    } else {
-                        None
-                    };
+                    let shared_module_binding_scoped_name =
+                        if matches!(kind, CaptureKind::Shared) && !is_shared_local_slot {
+                            self.resolve_scoped_module_binding_name(captured)
+                                .or_else(|| {
+                                    if self.module_bindings.contains_key(captured) {
+                                        Some(captured.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                        } else {
+                            None
+                        };
                     if is_shared_local_slot {
                         let local_idx = self
                             .resolve_local(captured)
@@ -1518,15 +1525,74 @@ impl BytecodeCompiler {
     /// conservative (no missed Drop glue) while Phase B/C/D grow the
     /// resolution coverage.
     pub(crate) fn mint_closure_type_id(&mut self, captured_vars: &[String]) -> ClosureTypeId {
-        let capture_types: Vec<ConcreteType> = captured_vars
-            .iter()
-            .map(|name| {
-                let ident = Expr::Identifier(name.clone(), Span::DUMMY);
-                concrete_type_for_expr(self, &ident)
-                    .unwrap_or_else(|| ConcreteType::Pointer(Box::new(ConcreteType::Void)))
-            })
-            .collect();
+        let mut capture_types: Vec<ConcreteType> = Vec::with_capacity(captured_vars.len());
+        for name in captured_vars {
+            capture_types.push(self.resolve_capture_concrete_type(name));
+        }
         self.closure_registry.intern(capture_types)
+    }
+
+    /// Resolve a captured variable's `ConcreteType` for closure-layout kind
+    /// tracking (ADR-006 §2.7.8 / Q10).
+    ///
+    /// The capture's `NativeKind` (derived from this `ConcreteType` via
+    /// `native_kind_from_concrete_type`) drives the refcount discipline in
+    /// `clone_with_kind` / `drop_with_kind` AND the callee-kind check in
+    /// `call_value_immediate_nb`. Resolution order:
+    ///
+    /// 1. `concrete_type_for_expr` — the side-table / element-type path
+    ///    (covers annotated params, array/map element types, recorded
+    ///    let-binding ConcreteTypes).
+    /// 2. The runtime inference engine via `infer_expr_type`. An
+    ///    **unannotated function/closure param** (e.g. `g` in
+    ///    `fn wrap(g) { |x| g(x) }`) has no side-table entry, but inference
+    ///    resolves it to `Type::Function`. Mapping it to
+    ///    `ConcreteType::Function` here is the carrier-stamp fix: without
+    ///    it the capture falls through to the `Pointer(Void)` "unknown"
+    ///    sentinel below, which `native_kind_from_concrete_type` maps to
+    ///    `Ptr(HeapKind::NativeView)` — a wrong-carrier label that both
+    ///    mis-dispatches the refcount (`Arc<NativeViewData>` vs the
+    ///    closure's `Arc<HeapValue>`) AND makes the returned closure
+    ///    un-callable (the `call_value_immediate_nb` callee match rejects
+    ///    `Ptr(NativeView)`).
+    /// 3. `Pointer(Void)` — the conservative "opaque heap-refcounted slot"
+    ///    fallback for genuinely-unresolved captures. NOTE: this is still
+    ///    mapped to `NativeView` downstream; it is correct only for non-
+    ///    callable opaque captures and is preserved as-is (no scope creep).
+    fn resolve_capture_concrete_type(&mut self, name: &str) -> ConcreteType {
+        let ident = Expr::Identifier(name.to_string(), Span::DUMMY);
+        if let Some(ct) = concrete_type_for_expr(self, &ident) {
+            return ct;
+        }
+        // Carrier-stamp fix (C2 Bucket-3): a capture invoked as a callee
+        // (`g(...)`) inside the closure body is a closure/function value.
+        // Stamp it `ConcreteType::Function` so the capture (and the
+        // returned closure that holds it) carries `Ptr(HeapKind::Closure)`
+        // — `native_kind_from_concrete_type` maps `Function` → Closure.
+        // Without this it falls through to the `Pointer(Void)` "unknown"
+        // sentinel which downstream becomes `Ptr(HeapKind::NativeView)`,
+        // a wrong-carrier label that mis-dispatches the refcount
+        // (`Arc<NativeViewData>` vs the closure's `Arc<HeapValue>`) and is
+        // rejected by the `call_value_immediate_nb` callee match.
+        if self.current_closure_callee_captures.contains(name) {
+            return ConcreteType::Function(
+                shape_value::v2::concrete_type::FunctionTypeId(0),
+            );
+        }
+        ConcreteType::Pointer(Box::new(ConcreteType::Void))
+    }
+
+    /// Collect identifier names invoked in callee position (`name(...)`)
+    /// anywhere inside `body`. Used to classify unannotated callable
+    /// closure captures (see `resolve_capture_concrete_type`).
+    pub(crate) fn collect_callee_identifier_names(
+        body: &[shape_ast::ast::Statement],
+    ) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        for stmt in body {
+            collect_callee_names_in_stmt(stmt, &mut out);
+        }
+        out
     }
 
     /// Phase F — mint a `FunctionTypeId` for a closure literal's callable
@@ -1656,7 +1722,16 @@ impl BytecodeCompiler {
             params.iter().flat_map(|p| p.get_identifiers()).collect();
         captured_vars.retain(|name| !param_names.contains(name));
 
-        self.mint_closure_type_id(&captured_vars)
+        // Mirror `compile_expr_closure`'s callee-capture classification so
+        // the peeked `ClosureTypeId` matches the real one (a callable
+        // capture stamps `ConcreteType::Function`, not `Pointer(Void)`).
+        let saved_callee_captures = std::mem::replace(
+            &mut self.current_closure_callee_captures,
+            Self::collect_callee_identifier_names(body),
+        );
+        let id = self.mint_closure_type_id(&captured_vars);
+        self.current_closure_callee_captures = saved_callee_captures;
+        id
     }
 
     /// Strict-typing-sweep (Cluster 2 extension): same body scan as the
@@ -1700,8 +1775,7 @@ impl BytecodeCompiler {
                     if let Some(ann) = pair_match {
                         return Some(ann);
                     }
-                    scan_expr(compiler, name, left)
-                        .or_else(|| scan_expr(compiler, name, right))
+                    scan_expr(compiler, name, left).or_else(|| scan_expr(compiler, name, right))
                 }
                 Expr::UnaryOp { operand, .. } => scan_expr(compiler, name, operand),
                 Expr::FunctionCall { args, .. } => {
@@ -1724,9 +1798,10 @@ impl BytecodeCompiler {
             match stmt {
                 Statement::Expression(expr, _) => scan_expr(compiler, name, expr),
                 Statement::Return(Some(e), _) => scan_expr(compiler, name, e),
-                Statement::VariableDecl(decl, _) => {
-                    decl.value.as_ref().and_then(|e| scan_expr(compiler, name, e))
-                }
+                Statement::VariableDecl(decl, _) => decl
+                    .value
+                    .as_ref()
+                    .and_then(|e| scan_expr(compiler, name, e)),
                 Statement::Assignment(asgn, _) => scan_expr(compiler, name, &asgn.value),
                 _ => None,
             }
@@ -1747,6 +1822,142 @@ impl BytecodeCompiler {
             concrete_type_to_type_annotation(&ct)
         }
         body.iter().find_map(|s| scan_stmt(self, param_name, s))
+    }
+}
+
+/// Recursively collect callee-position identifier names from a statement.
+/// Best-effort: handles the common closure-body shapes. Any expression form
+/// not explicitly recursed into is conservatively ignored (falls back to the
+/// pre-fix `Pointer(Void)` capture classification — no regression).
+fn collect_callee_names_in_stmt(
+    stmt: &shape_ast::ast::Statement,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    use shape_ast::ast::Statement;
+    match stmt {
+        Statement::Return(Some(e), _) => collect_callee_names_in_expr(e, out),
+        Statement::Return(None, _) => {}
+        Statement::Expression(e, _) => collect_callee_names_in_expr(e, out),
+        Statement::VariableDecl(decl, _) => {
+            if let Some(e) = &decl.value {
+                collect_callee_names_in_expr(e, out);
+            }
+        }
+        Statement::Assignment(assign, _) => collect_callee_names_in_expr(&assign.value, out),
+        Statement::If(if_stmt, _) => {
+            collect_callee_names_in_expr(&if_stmt.condition, out);
+            for s in &if_stmt.then_body {
+                collect_callee_names_in_stmt(s, out);
+            }
+            if let Some(else_body) = &if_stmt.else_body {
+                for s in else_body {
+                    collect_callee_names_in_stmt(s, out);
+                }
+            }
+        }
+        Statement::While(w, _) => {
+            collect_callee_names_in_expr(&w.condition, out);
+            for s in &w.body {
+                collect_callee_names_in_stmt(s, out);
+            }
+        }
+        Statement::For(f, _) => {
+            for s in &f.body {
+                collect_callee_names_in_stmt(s, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Recursively collect callee-position identifier names from an expression.
+/// The load-bearing arm is `Expr::FunctionCall { name, .. }` — a bare
+/// `name(...)` where `name` is a captured variable means that capture holds
+/// a callable (closure / function) value. Compound expressions recurse so
+/// `g(x) + h(y)` etc. are covered; nested `FunctionExpr` bodies recurse too
+/// since an inner closure may invoke a variable captured from the outer one.
+fn collect_callee_names_in_expr(
+    expr: &shape_ast::ast::Expr,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    use shape_ast::ast::Expr;
+    match expr {
+        Expr::FunctionCall { name, args, .. } => {
+            out.insert(name.clone());
+            for a in args {
+                collect_callee_names_in_expr(a, out);
+            }
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            collect_callee_names_in_expr(receiver, out);
+            for a in args {
+                collect_callee_names_in_expr(a, out);
+            }
+        }
+        Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+            collect_callee_names_in_expr(left, out);
+            collect_callee_names_in_expr(right, out);
+        }
+        Expr::UnaryOp { operand, .. } => collect_callee_names_in_expr(operand, out),
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            collect_callee_names_in_expr(condition, out);
+            collect_callee_names_in_expr(then_expr, out);
+            if let Some(e) = else_expr {
+                collect_callee_names_in_expr(e, out);
+            }
+        }
+        Expr::Array(elems, _) => {
+            for e in elems {
+                collect_callee_names_in_expr(e, out);
+            }
+        }
+        Expr::IndexAccess {
+            object,
+            index,
+            end_index,
+            ..
+        } => {
+            collect_callee_names_in_expr(object, out);
+            collect_callee_names_in_expr(index, out);
+            if let Some(e) = end_index {
+                collect_callee_names_in_expr(e, out);
+            }
+        }
+        Expr::PropertyAccess { object, .. } => collect_callee_names_in_expr(object, out),
+        Expr::Return(Some(e), _) | Expr::Break(Some(e), _) => {
+            collect_callee_names_in_expr(e, out)
+        }
+        Expr::TryOperator(e, _) | Expr::Await(e, _) | Expr::Spread(e, _) => {
+            collect_callee_names_in_expr(e, out)
+        }
+        Expr::FunctionExpr { body, .. } => {
+            for s in body {
+                collect_callee_names_in_stmt(s, out);
+            }
+        }
+        Expr::Block(block, _) => {
+            use shape_ast::ast::expr_helpers::BlockItem;
+            for item in &block.items {
+                match item {
+                    BlockItem::VariableDecl(decl) => {
+                        if let Some(e) = &decl.value {
+                            collect_callee_names_in_expr(e, out);
+                        }
+                    }
+                    BlockItem::Assignment(assign) => {
+                        collect_callee_names_in_expr(&assign.value, out)
+                    }
+                    BlockItem::Statement(s) => collect_callee_names_in_stmt(s, out),
+                    BlockItem::Expression(e) => collect_callee_names_in_expr(e, out),
+                }
+            }
+        }
+        _ => {}
     }
 }
 

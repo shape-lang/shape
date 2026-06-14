@@ -761,8 +761,7 @@ pub struct BytecodeCompiler {
     /// for the lifetime of the enclosing function-compile pass to avoid
     /// re-walking the AST at every value-call site. Released when the
     /// enclosing function compile completes.
-    pub(crate) local_callable_closure_bodies:
-        HashMap<u16, ClosureBodyPeek>,
+    pub(crate) local_callable_closure_bodies: HashMap<u16, ClosureBodyPeek>,
 
     /// cluster-2-cw-IB-class-b: module-binding variant of the closure
     /// body peek. Covers top-level / REPL `let f = |..|` bindings whose
@@ -770,8 +769,7 @@ pub struct BytecodeCompiler {
     /// space). Populated/cleared alongside the existing
     /// `module_binding_callable_return_types` map at the
     /// `update_callable_binding_from_expr` `FunctionExpr` arm.
-    pub(crate) module_binding_callable_closure_bodies:
-        HashMap<u16, ClosureBodyPeek>,
+    pub(crate) module_binding_callable_closure_bodies: HashMap<u16, ClosureBodyPeek>,
 
     /// ADR-006 §2.7.24 Q25.C trait-object emission (Wave 2.6 round-2):
     /// per-local-slot trait name for `let a: dyn Animal = ...` bindings.
@@ -1167,8 +1165,7 @@ pub struct BytecodeCompiler {
     /// struct-literal constructions and field accesses inside `comptime { }`
     /// blocks that interact with `comptime_impl_blocks`. Populated in the
     /// first-pass `Item::StructType` arm.
-    pub(crate) comptime_context_struct_defs:
-        HashMap<String, shape_ast::ast::types::StructTypeDef>,
+    pub(crate) comptime_context_struct_defs: HashMap<String, shape_ast::ast::types::StructTypeDef>,
 
     /// Extension registry for comptime execution
     pub(crate) extension_registry: Option<Arc<Vec<shape_runtime::module_exports::ModuleExports>>>,
@@ -1185,8 +1182,7 @@ pub struct BytecodeCompiler {
     /// `comptime_builtins::ComptimeDirective::SetParamValue { value:
     /// KindedSlot }` migration already landed in
     /// `compiler/comptime_builtins.rs`.
-    pub(crate) comptime_fields:
-        HashMap<String, HashMap<String, shape_value::KindedSlot>>,
+    pub(crate) comptime_fields: HashMap<String, HashMap<String, shape_value::KindedSlot>>,
     /// Type diagnostic mode for shared analyzer diagnostics.
     pub(crate) type_diagnostic_mode: TypeDiagnosticMode,
     /// Expression compilation diagnostic mode.
@@ -1274,10 +1270,8 @@ pub struct BytecodeCompiler {
     /// to the proven field type the same way a named-struct field does. The
     /// field types are projected from inference's resolved param `Type` —
     /// proven, never fabricated; an unresolved field yields `None`.
-    pub(crate) inferred_param_object_fields: HashMap<
-        String,
-        Vec<Option<Vec<(String, shape_runtime::type_schema::FieldType)>>>,
-    >,
+    pub(crate) inferred_param_object_fields:
+        HashMap<String, Vec<Option<Vec<(String, shape_runtime::type_schema::FieldType)>>>>,
     /// WS-9c: per-function inferred RETURN type projected to a
     /// `Vec<(field_name, FieldType)>` when that return type is an anonymous
     /// structural object (an unannotated object-literal factory such as
@@ -1538,6 +1532,18 @@ pub struct BytecodeCompiler {
 
     /// Per-local-slot concrete type table for the function currently being compiled.
     pub(crate) current_function_local_concrete_types: HashMap<u16, shape_value::v2::ConcreteType>,
+
+    /// Capture names invoked as a callee (`g(...)`) inside the closure
+    /// literal currently being compiled. Populated by `compile_expr_closure`
+    /// / `mint_closure_type_id_peek` immediately before capture-type
+    /// resolution and consulted by `resolve_capture_concrete_type` so an
+    /// unannotated callable capture stamps `ConcreteType::Function`
+    /// (→ `Ptr(HeapKind::Closure)`) instead of falling through to the
+    /// `Pointer(Void)` → `NativeView` "unknown" sentinel. Without this an
+    /// `fn f(g) { |x| g(x) }`-style returned closure carries a
+    /// wrong-carrier `NativeView` label and is rejected by the
+    /// `call_value_immediate_nb` callee match. Cleared after each closure.
+    pub(crate) current_closure_callee_captures: std::collections::BTreeSet<String>,
 
     /// v0.3 WS-6 — per-module-binding concrete type table, populated at
     /// let-binding time from the binding's explicit `TypeAnnotation`.

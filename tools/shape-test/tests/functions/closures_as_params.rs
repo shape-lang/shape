@@ -80,20 +80,15 @@ fn higher_order_map_style() {
 
 #[test]
 fn closure_composition() {
-    // W14.2-G6 e2e-functions triage SURFACE-AND-STOP: closure-returning-
-    // closure pattern via `compose` hits the Q12 value-call ABI restriction
-    // `call_value_immediate_nb: callee must be NativeKind::Ptr(HeapKind::
-    // Closure), NativeKind::Ptr(HeapKind::ModuleFn), or NativeKind::UInt64,
-    // got Ptr(NativeView)` at crates/shape-vm/src/executor/call_convention.rs:1017
-    // — the inner `f` / `g` params receive `Ptr(NativeView)` carriers
-    // (untyped closure params in compose) and the value-call dispatch
-    // rejects them per ADR-006 §2.7.11/Q12. Routed to W14.2-H1 exception
-    // registry as `v0.4-closure-as-param-nativeview-kind`.
-    // Cannot fix test-side by parameter annotation: `fn compose(f, g)` is
-    // a generic higher-order shape and the parser does not accept
-    // `fn(int)->int` as a parameter type annotation (empirical at HEAD).
-    // Suite-level test reflects the V0.4 gap honestly per surface-and-stop
-    // discipline.
+    // C2 Bucket-3 carrier-stamp fix (was a W14.2-G6 surface-and-stop
+    // placeholder): a `compose(f, g) { |x| f(g(x)) }` whose returned closure
+    // captures the callable params `f`/`g` previously stamped those captures
+    // `Ptr(NativeView)` (the `Pointer(Void)` "unknown" sentinel), so the
+    // returned closure was un-callable — `call_value_immediate_nb` rejected
+    // the `Ptr(NativeView)` callee. The producer now resolves a capture
+    // invoked as a callee (`f(...)` / `g(...)`) to `ConcreteType::Function`
+    // → `Ptr(HeapKind::Closure)`, so the composed closure invokes correctly.
+    // compose(double, add1)(5) = double(add1(5)) = double(6) = 12.
     ShapeTest::new(
         r#"
         fn compose(f, g) {
@@ -105,7 +100,7 @@ fn closure_composition() {
         add1_then_double(5)
     "#,
     )
-    .expect_run_err_contains("call_value_immediate_nb");
+    .expect_number(12.0);
 }
 
 #[test]

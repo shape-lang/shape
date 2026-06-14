@@ -189,6 +189,7 @@ impl BytecodeCompiler {
             graph_namespace_map: HashMap::new(),
             module_graph: None,
             current_function_local_concrete_types: HashMap::new(),
+            current_closure_callee_captures: std::collections::BTreeSet::new(),
             module_binding_concrete_types: HashMap::new(),
             monomorphization_cache:
                 crate::compiler::monomorphization::cache::MonomorphizationCache::new(),
@@ -505,28 +506,19 @@ impl BytecodeCompiler {
                 // table propagated through the content-addressed path so
                 // the linker forwards it to `BytecodeProgram` for the JIT
                 // typed-array / TypedObject fast paths.
-                top_level_local_concrete_types: self
-                    .program
-                    .top_level_local_concrete_types
-                    .clone(),
+                top_level_local_concrete_types: self.program.top_level_local_concrete_types.clone(),
                 // ADR-006 §2.7.5 conduit (W12-jit-aggregate-non-array,
                 // 2026-05-12): per-user-function concrete-types side-table
                 // propagated through the content-addressed path for the
                 // JIT's TypedObject Aggregate short-circuit inside user
                 // function bodies.
-                function_local_concrete_types: self
-                    .program
-                    .function_local_concrete_types
-                    .clone(),
+                function_local_concrete_types: self.program.function_local_concrete_types.clone(),
                 // ADR-006 §2.7.5 conduit (W12-jit-call-return-kind,
                 // 2026-05-12): per-user-function declared return
                 // ConcreteType propagated through the content-addressed
                 // path so the conduit can stamp `TerminatorKind::Call`
                 // destination slots from the callee's return type.
-                function_return_concrete_types: self
-                    .program
-                    .function_return_concrete_types
-                    .clone(),
+                function_return_concrete_types: self.program.function_return_concrete_types.clone(),
                 // ADR-006 §2.7.5 conduit (V3-S6b-jit-method-monomorph-
                 // conduit close, 2026-05-15): per-call-site monomorphized
                 // method-call FunctionId side-table propagated through
@@ -553,10 +545,7 @@ impl BytecodeCompiler {
                 // content-addressed path so the JIT consumer (rvalues.rs
                 // BinaryOp / UnaryOp arms) can lift the bytecode-time
                 // trait-dispatch decision to method-call IR.
-                operator_trait_dispatch_sites: self
-                    .program
-                    .operator_trait_dispatch_sites
-                    .clone(),
+                operator_trait_dispatch_sites: self.program.operator_trait_dispatch_sites.clone(),
                 // Closure spec §14.6 (H6.5): propagate layouts through the
                 // content-addressed path so `load_linked_program` → VM
                 // preserves enough metadata for the raw producer path.
@@ -765,10 +754,7 @@ impl BytecodeCompiler {
     /// `ensure_next_id_above` advances the allocator past every seeded
     /// id so a *new* type declared in this cell cannot collide with a
     /// seeded one.
-    pub fn seed_persistent_schemas(
-        &mut self,
-        schemas: &[shape_runtime::type_schema::TypeSchema],
-    ) {
+    pub fn seed_persistent_schemas(&mut self, schemas: &[shape_runtime::type_schema::TypeSchema]) {
         let registry = self.type_tracker.schema_registry_mut();
         let mut max_id = 0u32;
         for schema in schemas {

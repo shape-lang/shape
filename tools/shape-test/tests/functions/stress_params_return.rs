@@ -268,7 +268,11 @@ fn test_higher_order_compose() {
         double_then_add1(10)
     "#,
     )
-    .expect_run_err_contains("call_value_immediate_nb");
+    // C2 Bucket-3 carrier-stamp fix: the composed closure that captures the
+    // callable params `f`/`g` now stamps `Ptr(HeapKind::Closure)` (was the
+    // un-callable `Ptr(NativeView)` "unknown" sentinel), so the value-call
+    // invokes correctly. compose(|x| x+1, |x| x*2)(10) = (10*2)+1 = 21.
+    .expect_number(21.0);
 }
 
 /// Verifies higher order twice.
