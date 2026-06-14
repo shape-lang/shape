@@ -235,9 +235,30 @@ impl TypeInferenceEngine {
 
             Expr::Array(elements, _) => {
                 if elements.is_empty() {
-                    // Empty array, create a fresh type variable
+                    // Empty array — the element type is an unresolved fresh
+                    // variable. R5a-literal sibling-adoption (USER RULING
+                    // 2026-06-01): an inner `[]` in `[[], [1], []]` must adopt
+                    // the sibling-proven element type (`int`). Construct the
+                    // var-PRESERVING `Type::Generic { base: Array, args:
+                    // [Variable] }` form so the fresh var unifies with a
+                    // sibling `Array<int>` via the `(Generic, Generic)` arm in
+                    // `solve_constraint`. The legacy `BuiltinTypes::array`
+                    // helper routes through `to_annotation()`, which drops the
+                    // `Type::Variable` to `Basic("unknown")` (documented TypeVar
+                    // loss) — a CONCRETE `Array<unknown>` that can never unify
+                    // with `Array<int>` (the `Vec<unknown> not compatible with
+                    // Vec<int>` rejection). Keeping the var preserves strict
+                    // typing: the empty array stays unresolved until a sibling
+                    // or annotation pins it; if nothing does, the var surfaces
+                    // downstream as an unresolved-element error (no `unknown`
+                    // fabrication).
                     let elem_type = self.fresh_type_var();
-                    Ok(BuiltinTypes::array(elem_type))
+                    Ok(Type::Generic {
+                        base: Box::new(Type::Concrete(TypeAnnotation::Reference(
+                            "Array".into(),
+                        ))),
+                        args: vec![elem_type],
+                    })
                 } else {
                     // Compute the contributed *element* type for each entry. A
                     // spread element `...a` contributes the element type of `a`'s

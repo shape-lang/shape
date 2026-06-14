@@ -72,6 +72,38 @@ pub(super) fn int_literal_adopts_field_type(value_expr: &Expr, field_ty: &FieldT
     }
 }
 
+/// The integer value of a bare `Int`/`UInt` literal as `i128`, else `None`.
+/// Used by the R5a-literal array-element lossless adoption: a typed-int
+/// literal (`42u8`) is NOT a bare integer literal and does not context-adopt.
+fn int_literal_value_i128(lit: &Literal) -> Option<i128> {
+    match lit {
+        Literal::Int(v) => Some(*v as i128),
+        Literal::UInt(v) => Some(*v as i128),
+        _ => None,
+    }
+}
+
+/// R5a-literal: whether a bare integer literal losslessly fits the FLOAT
+/// element kind of a typed array, mirroring the scalar lossless-literal
+/// context-adoption (`int_literal_adopts_field_type` F64 arm). `F64`/`number`
+/// uses the exact-integer range `[-2^53, 2^53]`; `F32` uses `[-2^24, 2^24]`.
+/// A non-float array kind or a non-bare-int literal returns `false` (the
+/// caller only consults this for the `(Integer, Float)` family pair).
+fn int_literal_fits_float_array_kind(
+    lit: &Literal,
+    kind: super::super::v2_typed_emission::TypedArrayKind,
+) -> bool {
+    use super::super::v2_typed_emission::TypedArrayKind;
+    let Some(v) = int_literal_value_i128(lit) else {
+        return false;
+    };
+    match kind {
+        TypedArrayKind::F64 => v >= -(1i128 << 53) && v <= (1i128 << 53),
+        TypedArrayKind::F32 => v >= -(1i128 << 24) && v <= (1i128 << 24),
+        _ => false,
+    }
+}
+
 fn infer_array_literal_numeric_type(elements: &[Expr]) -> Option<NumericType> {
     let mut acc: Option<NumericType> = None;
     for elem in elements {
@@ -1716,8 +1748,26 @@ impl BytecodeCompiler {
                 | TypedArrayKind::TraitObject
                 | TypedArrayKind::TypedArray => None,
             };
-            if let (Some(lf), Some(af)) = (literal_family, array_family) {
-                if lf != af {
+            // R5a-literal lossless-context-adoption (numeric-conversion-spec
+            // §4, USER RULING 2026-06-01) — array-element position. A bare
+            // `Int`/`UInt` literal in a FLOAT-family array context (`let x:
+            // Array<number> = [1, 2.5, 3]`) adopts the float element type IFF
+            // the value is losslessly representable in it — exactly the same
+            // mechanism that lets `let n: number = 1` adopt `number`. The int
+            // literal is NOT a cross-family mismatch in that case; the
+            // emission arm below re-lowers it to a `Constant::Number` so the
+            // monomorphic `TypedArrayPushF64`/`F32` handler decodes the
+            // correct f64/f32 bits (the handler does a raw `from_bits`
+            // decode, so the producer must already carry float bits — no
+            // runtime coercion opcode, ADR-006 §2.7.5 stamp-at-compile-time).
+            // Out-of-range int literals (and non-literal int elements) stay a
+            // genuine mismatch and fall through to the reject below.
+            let int_literal_adopts_float = matches!(
+                (literal_family.as_ref(), array_family.as_ref()),
+                (Some(Family::Integer), Some(Family::Float))
+            ) && int_literal_fits_float_array_kind(lit, kind);
+            if let (Some(lf), Some(af)) = (&literal_family, &array_family) {
+                if lf != af && !int_literal_adopts_float {
                     let lk = match lit {
                         Literal::Int(_) => TypedArrayKind::I64,
                         Literal::Number(_) => TypedArrayKind::F64,
@@ -1737,6 +1787,27 @@ impl BytecodeCompiler {
                         ),
                         location: Some(self.span_to_source_location(*lit_span)),
                     });
+                }
+            }
+        }
+        // R5a-literal lossless-context-adoption emission. A bare
+        // `Int`/`UInt` literal pushed into a FLOAT-family array re-lowers to
+        // a `Constant::Number` (f64 bits, `NativeKind::Float64`) so the
+        // monomorphic `TypedArrayPushF64`/`F32` handler — which raw-decodes
+        // the slot via `f64::from_bits` — reads the correct value rather than
+        // reinterpreting i64 bits as an f64 (`1` → `5e-324`). The
+        // lossless-fit gate at the family check above already proved the
+        // value is representable; this is the producer-side carrier stamp
+        // (ADR-006 §2.7.5), not a runtime coercion opcode.
+        if matches!(kind, TypedArrayKind::F64 | TypedArrayKind::F32) {
+            if let Expr::Literal(lit @ (Literal::Int(_) | Literal::UInt(_)), _) = elem {
+                if let Some(v) = int_literal_value_i128(lit) {
+                    let const_idx = self.program.add_constant(Constant::Number(v as f64));
+                    self.emit(Instruction::new(
+                        OpCode::PushConst,
+                        Some(Operand::Const(const_idx)),
+                    ));
+                    return Ok(());
                 }
             }
         }

@@ -115,9 +115,51 @@ fn scalar_annotation_to_slot_kind(annotation: &TypeAnnotation) -> Option<NativeK
     }
 }
 
+/// R5a-literal lossless-context-adoption (numeric-conversion-spec §4, USER
+/// RULING 2026-06-01), bare-literal array inference. When a bare (unannotated)
+/// array literal mixes float literals with bare int literals (`[1, 2.5, 3]`),
+/// the int literals adopt `number` IFF each losslessly fits f64 — so the array
+/// infers `Float64` instead of failing "cannot infer element type". Mirrors
+/// the inference-engine `array_literal_numeric_element_context`. Returns
+/// `Some(Float64)` ONLY when at least one element is a `Number` literal AND
+/// every element is either a `Number` literal or a bare int literal in the f64
+/// exact-integer range `[-2^53, 2^53]`. The producer-side push then re-lowers
+/// each adopting int literal to a `Constant::Number`
+/// (`compile_typed_array_element_value`), so the F64 carrier holds float bits.
+fn infer_float_array_with_lossless_int_literals(elements: &[Expr]) -> Option<NativeKind> {
+    let mut any_float = false;
+    for elem in elements {
+        match elem {
+            Expr::Literal(Literal::Number(_), _) => any_float = true,
+            Expr::Literal(Literal::Int(v), _) => {
+                let v = *v as i128;
+                if !(v >= -(1i128 << 53) && v <= (1i128 << 53)) {
+                    return None;
+                }
+            }
+            Expr::Literal(Literal::UInt(v), _) => {
+                if (*v as i128) > (1i128 << 53) {
+                    return None;
+                }
+            }
+            // Any non-(float|int) literal element breaks the float-adoption
+            // shape — fall back to the strict homogeneity path.
+            _ => return None,
+        }
+    }
+    if any_float { Some(NativeKind::Float64) } else { None }
+}
+
 /// Attempt to infer a homogeneous element type purely from literal nodes.
 fn infer_from_literals(elements: &[Expr]) -> Option<NativeKind> {
     let mut kind: Option<NativeKind> = None;
+
+    // R5a-literal: a mixed int/float bare-literal array (`[1, 2.5, 3]`) infers
+    // `Float64` via lossless int-literal context adoption before the strict
+    // exact-homogeneity scan below (which would reject `(Int64, Float64)`).
+    if let Some(k) = infer_float_array_with_lossless_int_literals(elements) {
+        return Some(k);
+    }
 
     for elem in elements {
         let elem_kind = match elem {
@@ -323,9 +365,34 @@ mod tests {
     }
 
     #[test]
-    fn test_mixed_int_and_number_returns_none() {
+    fn test_mixed_int_and_number_adopts_float() {
+        // R5a-literal lossless-context-adoption (USER RULING 2026-06-01,
+        // numeric-conversion-spec §4): a bare-literal array mixing int and
+        // float literals (`[1, 2.0]`) infers `Float64` — the int literals
+        // losslessly adopt `number`. This REPLACES the pre-rule
+        // `..._returns_none` expectation: the strict-typing rule makes
+        // lossless int-literal context-adoption valid at array-element
+        // positions, identical in spirit to `let n: number = 1`. The
+        // producer-side push (`compile_typed_array_element_value`) re-lowers
+        // each adopting int literal to a `Constant::Number`, so the F64
+        // carrier holds correct float bits.
         let tt = tracker();
         let elems = vec![int_lit(1), num_lit(2.0)];
+        assert_eq!(
+            infer_array_element_type(&elems, &tt),
+            Some(NativeKind::Float64)
+        );
+    }
+
+    #[test]
+    fn test_out_of_range_int_with_number_returns_none() {
+        // The lossless GATE holds: an int literal outside the f64
+        // exact-integer range `[-2^53, 2^53]` does NOT adopt — a mixed array
+        // `[2^53 + 1, 2.0]` is NOT inferrable as `Float64` (the literal would
+        // lose precision). Falls back to the strict-homogeneity reject path
+        // (`None`), preserving the lossless-only invariant.
+        let tt = tracker();
+        let elems = vec![int_lit((1i64 << 53) + 1), num_lit(2.0)];
         assert_eq!(infer_array_element_type(&elems, &tt), None);
     }
 
