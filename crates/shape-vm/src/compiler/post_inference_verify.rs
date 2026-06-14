@@ -38,6 +38,9 @@ use crate::bytecode::BytecodeProgram;
 /// + a transitional flag (closes in R5b W17.2-B+C) or a permanent flag
 /// (carrier-tier exception with parallel-`field_kinds` track per ADR-006
 /// §2.7.26), + a short reason describing why the exception is allowed.
+// `section` / `reason` are audit-trail metadata carried for documentation +
+// grep; the verification logic dispatches only on `rule` + `permanent`.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WhitelistEntry {
     /// Match rule (exact name, prefix, or dynamic enum-payload field).

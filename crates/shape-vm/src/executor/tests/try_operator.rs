@@ -6,8 +6,6 @@ use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
 use shape_ast::parser::parse_program;
 use shape_value::VMError;
-use std::collections::HashMap;
-use std::sync::Arc;
 
 // Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
 

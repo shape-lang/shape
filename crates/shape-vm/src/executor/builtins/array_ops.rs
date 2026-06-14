@@ -126,6 +126,10 @@ fn ckpt3_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
 /// Promoted from file-local `fn` to `pub(in crate::executor)` so
 /// `executor::objects::object_creation::op_new_array` (Round 11A,
 /// ADR-006 §2.7.24 Q25.A) can share the same projection logic.
+// Preserved heap-arc projection helper (ADR-006 §2.7.24 Q25.A); no current
+// caller after the op_new_array path change — kept as the documented
+// TypedArrayData-free reference projection.
+#[allow(dead_code)]
 pub(in crate::executor) fn slot_to_heap_arc(slot: &KindedSlot) -> Result<Arc<HeapValue>, VMError> {
     match slot.kind {
         NativeKind::Int64 => {

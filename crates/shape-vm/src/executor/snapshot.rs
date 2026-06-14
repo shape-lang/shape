@@ -31,6 +31,9 @@ use crate::bytecode::{Function, FunctionHash};
 ///
 /// Priority: `blob_hash` → `function_id` → `function_name`.
 /// Cross-validates when multiple identifiers are present.
+// Pure, value-tier-independent W17-snapshot-resume helper; currently exercised
+// only by its own unit tests pending the production restore-path wiring.
+#[allow(dead_code)]
 pub(crate) fn resolve_function_identity(
     function_id_by_hash: &HashMap<FunctionHash, u16>,
     functions: &[Function],
@@ -99,6 +102,9 @@ pub(crate) fn resolve_function_identity(
 /// `VMError::NotImplemented` rather than panicking — the strict
 /// improvement over the prior `todo!()` macros that aborted the VM
 /// thread on first invocation.
+// In-progress W17-snapshot-resume surface helper; wired in once snapshot()/
+// from_snapshot() route through it (release-blocking W17 territory).
+#[allow(dead_code)]
 fn w17_snapshot_surface(op: &str) -> String {
     format!(
         "VirtualMachine::{op}: W17-snapshot-resume surface — \

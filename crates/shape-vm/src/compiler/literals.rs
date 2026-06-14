@@ -55,6 +55,10 @@ impl BytecodeCompiler {
     }
 
     /// Compile binary operator
+    // Superseded by the strict-typing typed dispatch (`compile_binary_op_inner` /
+    // `helpers::emit_binary_op`); every arith/cmp/bitwise arm is `unreachable!`.
+    // Retained as the documented post-strict-typing reference path.
+    #[allow(dead_code)]
     pub(super) fn compile_binary_op(&mut self, op: &BinaryOp) -> Result<()> {
         let opcode = match op {
             BinaryOp::Add => unreachable!("generic Add should be handled by helpers::emit_binary_op"),
