@@ -1708,7 +1708,7 @@ fn infer_operand_kind(operand: &Operand, kinds: &[Option<NativeKind>]) -> Option
 ///   JIT-side projection alone — the destination slot of
 ///   `Use(Copy(Index(_, _)))` doesn't drive a refcount-dispatch bug
 ///   because v2 typed-array slots route through the
-///   `RefcountDisposition::Skip_TypedCellCarrier` arm (per
+///   `RefcountDisposition::SkipTypedCellCarrier` arm (per
 ///   `ownership.rs:99`) before reaching the `slot_kind` discriminator.
 ///   If a future smoke surfaces a similar refcount-on-element-read bug,
 ///   thread `concrete_types` here.

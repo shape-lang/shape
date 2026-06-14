@@ -1359,8 +1359,9 @@ impl<V: HashMapValueElem> HashMapData<V> {
         };
         for &idx in bucket {
             let i = idx as usize;
-            // SAFETY: key-buffer elements are live `*const StringObj`.
-            let stored = unsafe { keys_slice[i] };
+            // Reading a `*const StringObj` value out of the slice is a plain
+            // copy; the deref happens below in `StringObj::as_str`.
+            let stored = keys_slice[i];
             let stored_str = unsafe { crate::v2::string_obj::StringObj::as_str(stored) };
             if stored_str == key {
                 return Some(i);
@@ -4001,10 +4002,15 @@ impl TypedObjectStorage {
         // is the kind invariant; the caller already debug_asserted kind
         // equality, so the slot's heap-mask bit (if set) still applies
         // to the new bits.
-        let slot_ptr = self.slots.as_ptr().add(idx) as *mut crate::slot::ValueSlot;
-        let prior = (*slot_ptr).raw();
-        *slot_ptr = crate::slot::ValueSlot::from_raw(new_bits);
-        prior
+        // SAFETY (Rust-2024 unsafe_op_in_unsafe_fn): the pointer arithmetic,
+        // deref, and single-word write are all guarded by the method contract
+        // documented above; `idx` is in-bounds per the debug_assert.
+        unsafe {
+            let slot_ptr = self.slots.as_ptr().add(idx) as *mut crate::slot::ValueSlot;
+            let prior = (*slot_ptr).raw();
+            *slot_ptr = crate::slot::ValueSlot::from_raw(new_bits);
+            prior
+        }
     }
 }
 
@@ -4381,6 +4387,8 @@ fn native_scalar_decimal_eq(a: &NativeScalar, b: &rust_decimal::Decimal) -> bool
 /// from `&TypedBuffer<i64>` / `&AlignedTypedBuffer` to `&[i64]` / `&[f64]` per
 /// Migration shape (a). Retained for the eventual v2-raw `*mut TypedArray<T>`
 /// per-T monomorphic rebuild (cluster-2 v2-raw-heap-audit territory).
+// Intentional future-use: retained for the v2-raw per-T monomorphic rebuild.
+#[allow(dead_code)]
 #[inline]
 fn int_float_array_eq(
     ints: &[i64],
@@ -5794,6 +5802,7 @@ mod deque_mutation {
     }
 }
 
+#[cfg(test)]
 mod priority_queue_mutation {
     //! W15-priority-queue (ADR-006 §2.7.18 / Q19, 2026-05-10): pin the
     //! `push` / `pop` / `peek` / heap-invariant API contracts on
@@ -5801,7 +5810,6 @@ mod priority_queue_mutation {
     //! cardinality-amendment shape, with i64-priority-only payload
     //! semantics per the §2.7.18 ruling.
     use super::*;
-    use std::sync::Arc;
 
     #[test]
     fn empty_pq_has_zero_len_and_is_empty() {
@@ -5860,6 +5868,7 @@ mod priority_queue_mutation {
 
 }
 
+#[cfg(test)]
 mod channel_storage {
     //! W15-channel-rebuild (ADR-006 §2.7.20 / Q21, 2026-05-10): pin the
     //! `send` / `try_recv` / `close` / `is_closed` / `len` / `is_empty`

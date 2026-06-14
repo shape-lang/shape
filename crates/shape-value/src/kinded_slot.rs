@@ -49,7 +49,7 @@
 // per supervisor 2026-05-15 partition (ckpt-5 territory: 4-table lockstep
 // deletion + U64 relabel + A1 fold).
 use crate::heap_value::{
-    AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
+    AtomicData, ChannelData, DequeData, HashSetData, HeapKind, HeapValue,
     IoHandleData, LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData, OptionData,
     PriorityQueueData, RangeData, ResultData, TableViewData, TaskGroupData, TemporalData,
     TraitObjectStorage, TypedObjectStorage,

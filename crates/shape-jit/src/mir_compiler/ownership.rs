@@ -53,7 +53,7 @@ enum RefcountDisposition {
     /// These have their own dedicated retain/release path (the matching
     /// per-FieldKind FFI in `ffi/object/closure.rs`, or no retain at all
     /// for stack closures) — emit nothing here.
-    Skip_TypedCellCarrier,
+    SkipTypedCellCarrier,
 }
 
 impl<'a, 'b> MirToIR<'a, 'b> {
@@ -70,7 +70,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // address, not a refcounted handle. (Phase E.)
         if let Place::Local(slot_id) = place {
             if self.stack_closure_slots.contains_key(slot_id) {
-                return Ok(RefcountDisposition::Skip_TypedCellCarrier);
+                return Ok(RefcountDisposition::SkipTypedCellCarrier);
             }
             // Track A.1D.2 / A.1E: OwnedMutable / Shared capture slots
             // hold raw `*mut ValueWord` / `*const SharedCell` pointers
@@ -81,14 +81,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             if self.owned_mutable_capture_slots.contains_key(slot_id)
                 || self.shared_capture_slots.contains_key(slot_id)
             {
-                return Ok(RefcountDisposition::Skip_TypedCellCarrier);
+                return Ok(RefcountDisposition::SkipTypedCellCarrier);
             }
             // Session 1 Commit 3: SharedCow outer-scope local slots
             // hold a `*const SharedCell` Arc pointer; their lifecycle
             // is `jit_arc_shared_release` (not the generic
             // `jit_arc_release`) at `Drop`. Skip here.
             if self.shared_local_slots.contains(slot_id) {
-                return Ok(RefcountDisposition::Skip_TypedCellCarrier);
+                return Ok(RefcountDisposition::SkipTypedCellCarrier);
             }
         }
 
@@ -97,7 +97,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // retain/release surface is the right path (a §2.7.14 follow-up);
         // skip the generic arc_retain/release here.
         if matches!(place, Place::Local(_)) && self.v2_typed_array_elem_kind(place).is_some() {
-            return Ok(RefcountDisposition::Skip_TypedCellCarrier);
+            return Ok(RefcountDisposition::SkipTypedCellCarrier);
         }
 
         // W12-jit-binop-after-heap-read-kind-tracker: for projection
@@ -606,7 +606,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // holding a `*const SharedCell` Arc pointer use the dedicated
         // `jit_arc_shared_release` (not the generic `arc_release`).
         // Handled here BEFORE the generic disposition because the
-        // disposition's `Skip_TypedCellCarrier` arm would otherwise
+        // disposition's `SkipTypedCellCarrier` arm would otherwise
         // suppress this required release.
         if let Place::Local(slot_id) = place {
             if self.shared_local_slots.contains(slot_id) {
@@ -642,7 +642,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // default-init value the runtime expects on re-read.
                 self.null_place(place)?;
             }
-            RefcountDisposition::Skip_TypedCellCarrier => {
+            RefcountDisposition::SkipTypedCellCarrier => {
                 // OwnedMutable / Shared capture slots: lifecycle is
                 // owned by `release_typed_closure`; per the
                 // Track A.1D.2 / A.1E SAFETY notes the slot must NOT
@@ -685,7 +685,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let release_func = self.release_func_for_place(place);
                 self.builder.ins().call(release_func, &[old_val]);
             }
-            RefcountDisposition::Skip | RefcountDisposition::Skip_TypedCellCarrier => {
+            RefcountDisposition::Skip | RefcountDisposition::SkipTypedCellCarrier => {
                 // Scalar / typed-cell-carrier slots: no refcount work.
                 // (TypedCellCarrier: the dedicated reclaim path runs at
                 // Drop / closure-drop, not at reassign.)

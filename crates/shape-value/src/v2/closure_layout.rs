@@ -46,7 +46,7 @@ use crate::heap_value::{
     // 4-table-lockstep territory deferred to V3-S5 ckpt-5 — it stays
     // cascade-broken at this checkpoint per multi-session chain step 2
     // (broken state OK on feature branch).
-    AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapKind, HeapValue,
+    AtomicData, ChannelData, DequeData, HashSetData, HeapKind, HeapValue,
     IoHandleData, LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData,
     PriorityQueueData, RangeData, TableViewData, TaskGroupData, TemporalData,
     TraitObjectStorage, TypedObjectStorage,

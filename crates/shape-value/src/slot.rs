@@ -27,7 +27,7 @@
 // wave (e.g. `from_typed_array_f64(Arc<TypedArray<f64>>)` /
 // `from_typed_array_i64(...)` per the new monomorphic carrier shape).
 use crate::heap_value::{
-    AtomicData, ChannelData, DequeData, HashMapData, HashSetData, HeapValue, IoHandleData,
+    AtomicData, ChannelData, DequeData, HashSetData, HeapValue, IoHandleData,
     LazyData, MutexData, NativeViewData, PriorityQueueData, RangeData, TypedObjectStorage,
 };
 use crate::datatable::DataTable;

@@ -113,6 +113,8 @@ impl<T> GcPtr<T> {
     // ── Platform-specific mark bit encoding ─────────────────────────
 
     /// Bit position for the inline mark bit on ARM64 (TBI — top byte ignore).
+    /// Only referenced by the `#[cfg(target_arch = "aarch64")]` mark-bit methods.
+    #[cfg(target_arch = "aarch64")]
     const MARK_BIT_ARM64: usize = 56;
 
     /// Bit position for the inline mark bit on x86-64 (LAM57).

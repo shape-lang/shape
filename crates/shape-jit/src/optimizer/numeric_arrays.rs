@@ -2,6 +2,13 @@
 //!
 //! This pass classifies array reads/writes at instruction sites where we can
 //! confidently keep numeric values in typed form during lowering.
+//!
+//! Intentional-future: part of the JIT optimization-planning subsystem
+//! (`FunctionOptimizationPlan` / `build_function_plan`) that is built but not
+//! yet consumed by the live lowering path. `stack_effect` /
+//! `producer_index_for_stack_pos` and the numeric-array plan items are dead
+//! until the planner is wired in.
+#![allow(dead_code)]
 
 use std::collections::HashSet;
 

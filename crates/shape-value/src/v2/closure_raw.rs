@@ -1538,15 +1538,13 @@ pub(crate) unsafe fn clone_with_kind(bits: u64, kind: NativeKind) {
     // bumped share) and leak the original via `mem::forget` so the borrowed
     // `bits` continue to represent the original share owned by the caller's
     // cell.
-    unsafe {
-        let original = KindedSlot::new(ValueSlot::from_raw(bits), kind);
-        let cloned = original.clone();
-        std::mem::forget(original);
-        // `cloned` carries the +1 strong-count we added; dropping it would
-        // cancel the retain we just performed, so leak it. The caller's
-        // freshly-cloned slot owns the new share.
-        std::mem::forget(cloned);
-    }
+    let original = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+    let cloned = original.clone();
+    std::mem::forget(original);
+    // `cloned` carries the +1 strong-count we added; dropping it would
+    // cancel the retain we just performed, so leak it. The caller's
+    // freshly-cloned slot owns the new share.
+    std::mem::forget(cloned);
 }
 
 /// WB2.4 release-on-overwrite mirror of `KindedSlot::Drop`. Decrements the
@@ -1571,9 +1569,7 @@ pub(crate) unsafe fn drop_with_kind(bits: u64, kind: NativeKind) {
     // SAFETY: caller upholds that `bits` is one strong-count share for
     // `kind`; reconstructing the `KindedSlot` and letting it drop retires
     // exactly one share via the canonical dispatch table.
-    unsafe {
-        let _retire = KindedSlot::new(ValueSlot::from_raw(bits), kind);
-    }
+    let _retire = KindedSlot::new(ValueSlot::from_raw(bits), kind);
 }
 
 /// Kind-aware closure capture cell store (§2.7.8 / Q10).

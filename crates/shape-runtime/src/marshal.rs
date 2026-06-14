@@ -799,7 +799,7 @@ impl FromSlot for Vec<(Arc<String>, Arc<String>)> {
                             let mut out: Vec<(Arc<String>, Arc<String>)> =
                                 Vec::with_capacity(n);
                             for i in 0..n {
-                                let key = unsafe {
+                                let key = {
                                     let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
                                         arc.keys, i as u32,
                                     );
@@ -808,7 +808,7 @@ impl FromSlot for Vec<(Arc<String>, Arc<String>)> {
                                             .to_owned(),
                                     )
                                 };
-                                let val = unsafe {
+                                let val = {
                                     let v_ptr: *const shape_value::v2::string_obj::StringObj =
                                         *(*arc.values).data.add(i);
                                     Arc::new(
@@ -878,7 +878,7 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
                         HashMapKindedRef::HashMap(arc) => arc.keys,
                     };
                     for i in 0..n {
-                        let key = unsafe {
+                        let key = {
                             let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
                                 keys_ptr, i as u32,
                             );
@@ -889,7 +889,7 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
                         };
                         let value: Arc<HeapValue> = match kref {
                             HashMapKindedRef::I64(arc) => {
-                                let v: i64 = unsafe { *(*arc.values).data.add(i) };
+                                let v: i64 = *(*arc.values).data.add(i);
                                 Arc::new(HeapValue::BigInt(Arc::new(v)))
                             }
                             HashMapKindedRef::F64(_) => {
@@ -909,27 +909,25 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
                                 );
                             }
                             HashMapKindedRef::Char(arc) => {
-                                let v: char = unsafe { *(*arc.values).data.add(i) };
+                                let v: char = *(*arc.values).data.add(i);
                                 Arc::new(HeapValue::Char(v))
                             }
                             HashMapKindedRef::String(arc) => {
                                 let ptr: *const shape_value::v2::string_obj::StringObj =
-                                    unsafe { *(*arc.values).data.add(i) };
-                                let s = unsafe {
-                                    shape_value::v2::string_obj::StringObj::as_str(ptr)
-                                        .to_owned()
-                                };
+                                    *(*arc.values).data.add(i);
+                                let s = shape_value::v2::string_obj::StringObj::as_str(ptr)
+                                    .to_owned();
                                 Arc::new(HeapValue::String(Arc::new(s)))
                             }
                             HashMapKindedRef::Decimal(arc) => {
                                 let ptr: *const shape_value::v2::decimal_obj::DecimalObj =
-                                    unsafe { *(*arc.values).data.add(i) };
-                                let d = unsafe { (*ptr).value };
+                                    *(*arc.values).data.add(i);
+                                let d = (*ptr).value;
                                 Arc::new(HeapValue::Decimal(Arc::new(d)))
                             }
                             HashMapKindedRef::TypedObject(arc) => {
                                 let elem: &shape_value::heap_value::TypedObjectPtr =
-                                    unsafe { &*(*arc.values).data.add(i) };
+                                    &*(*arc.values).data.add(i);
                                 Arc::new(HeapValue::TypedObject(elem.clone()))
                             }
                             HashMapKindedRef::TraitObject(_) => {

@@ -1,4 +1,11 @@
 //! Phase 3: prove array bounds for selected loop accesses.
+//!
+//! Intentional-future: part of the JIT optimization-planning subsystem
+//! (`FunctionOptimizationPlan` / `build_function_plan`) that is built but not
+//! yet consumed by the live lowering path. `stack_effect` /
+//! `producer_index_for_stack_pos` and the bounds-plan items are dead until the
+//! planner is wired in.
+#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 
