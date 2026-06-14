@@ -20,8 +20,61 @@ use crate::bytecode::{Instruction, OpCode, Operand};
 use crate::executor::vm_impl::stack::drop_with_kind;
 use crate::executor::VirtualMachine;
 use shape_value::heap_value::{HeapKind, HeapValue};
+use shape_value::v2::string_obj::StringObj;
 use shape_value::{NativeKind, VMError};
 use std::sync::Arc;
+
+/// True iff `kind` is one of the three string carriers the compiler may
+/// stamp on a slot whose static type is `string`:
+///
+/// - `NativeKind::String` / `NativeKind::Ptr(HeapKind::String)` — the
+///   `Arc<String>` carrier (scalar string locals, string literals).
+/// - `NativeKind::StringV2` — the v2-raw `*const StringObj` carrier
+///   produced when a `string` is read out of an `Array<string>` element
+///   slot (`v2_array_detect::load_elem` → `NativeKind::StringV2`) or any
+///   other v2-raw string producer.
+///
+/// All three are statically `string`. This predicate does NOT widen the
+/// `+` operator: the compiler only reaches `StringConcatTyped` /
+/// `StringConcat*` after proving both operands are `string` (see
+/// `binary_ops.rs:1262`). The fix is purely a runtime carrier-recognition
+/// gap — the `StringV2` carrier was missing from the concat handlers'
+/// accepted set even though the compiler had already proven `string`.
+#[inline]
+fn is_string_carrier(kind: NativeKind) -> bool {
+    matches!(
+        kind,
+        NativeKind::String | NativeKind::Ptr(HeapKind::String) | NativeKind::StringV2
+    )
+}
+
+/// Borrow a string operand from any of the three string carriers and copy
+/// its bytes into an owned `String`. Does NOT consume the strong-count
+/// share — the caller still owns the share that `pop_kinded` transferred
+/// and MUST release it via `drop_with_kind(bits, kind)` (which already
+/// handles all three carriers). Returns `None` for any non-string kind.
+///
+/// SAFETY contract: when `kind` is a string carrier, `bits` is the raw
+/// pointer the matching producer stamped (`Arc::into_raw::<String>` for
+/// the Arc carriers, `*const StringObj` for `StringV2`).
+#[inline]
+fn read_string_operand(bits: u64, kind: NativeKind) -> Option<String> {
+    match kind {
+        NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
+            // Borrow the inner `String` without reconstructing/consuming
+            // the Arc (the caller owns the share and drops it later).
+            let s = unsafe { &*(bits as *const String) };
+            Some(s.clone())
+        }
+        NativeKind::StringV2 => {
+            // Borrow the v2-raw StringObj's UTF-8 bytes; copy into an owned
+            // String. The caller's drop_with_kind releases the share.
+            let s = unsafe { StringObj::as_str(bits as *const StringObj) };
+            Some(s.to_string())
+        }
+        _ => None,
+    }
+}
 
 impl VirtualMachine {
     // =====================================================================
@@ -329,52 +382,28 @@ impl VirtualMachine {
     fn op_string_concat_typed(&mut self) -> Result<(), VMError> {
         let (b_bits, b_kind) = self.pop_kinded()?;
         let (a_bits, a_kind) = self.pop_kinded()?;
-        let result = match (a_kind, b_kind) {
-            (
-                NativeKind::String | NativeKind::Ptr(HeapKind::String),
-                NativeKind::String | NativeKind::Ptr(HeapKind::String),
-            ) => {
-                // SAFETY: kind == String means bits = `Arc::into_raw::<String>` and
-                // pop_kinded transferred ownership of one share each.
-                let a_arc: Arc<String> = unsafe { Arc::from_raw(a_bits as *const String) };
-                let b_arc: Arc<String> = unsafe { Arc::from_raw(b_bits as *const String) };
-                let s = format!("{}{}", a_arc.as_str(), b_arc.as_str());
-                drop(a_arc);
-                drop(b_arc);
-                Ok(s)
-            }
+        // Accept all three string carriers (Arc<String> and v2-raw StringV2).
+        // `read_string_operand` borrows (no consume); the popped shares are
+        // released via drop_with_kind on both success and error paths.
+        let result = match (
+            read_string_operand(a_bits, a_kind),
+            read_string_operand(b_bits, b_kind),
+        ) {
+            (Some(a), Some(b)) => Ok(format!("{}{}", a, b)),
             _ => Err(VMError::TypeError {
                 expected: "string",
-                got: kind_type_name(if !matches!(
-                    a_kind,
-                    NativeKind::String | NativeKind::Ptr(HeapKind::String)
-                ) {
+                got: kind_type_name(if !is_string_carrier(a_kind) {
                     a_kind
                 } else {
                     b_kind
                 }),
             }),
         };
-        // If types didn't match we still own (b_bits, b_kind) and (a_bits,
-        // a_kind); release them via drop_with_kind on the error path.
-        let result = match result {
-            Ok(s) => s,
-            Err(e) => {
-                if matches!(
-                    a_kind,
-                    NativeKind::String | NativeKind::Ptr(HeapKind::String)
-                ) {
-                    drop_with_kind(a_bits, a_kind);
-                }
-                if matches!(
-                    b_kind,
-                    NativeKind::String | NativeKind::Ptr(HeapKind::String)
-                ) {
-                    drop_with_kind(b_bits, b_kind);
-                }
-                return Err(e);
-            }
-        };
+        // pop_kinded transferred a share for each heap-bearing operand; release
+        // both regardless of success/error now that the bytes are copied.
+        drop_with_kind(a_bits, a_kind);
+        drop_with_kind(b_bits, b_kind);
+        let result = result?;
         let bits = Arc::into_raw(Arc::new(result)) as u64;
         self.push_kinded(bits, NativeKind::String)
     }
@@ -418,13 +447,11 @@ impl VirtualMachine {
         // Inline scalar — drop is a no-op but stays symmetric.
         drop_with_kind(i_bits, i_kind);
 
-        // Pop string.
+        // Pop string (any string carrier — Arc<String> or v2-raw StringV2).
         let (s_bits, s_kind) = self.pop_kinded()?;
-        let s_arc: Arc<String> = match s_kind {
-            NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
-                unsafe { Arc::from_raw(s_bits as *const String) }
-            }
-            _ => {
+        let s = match read_string_operand(s_bits, s_kind) {
+            Some(s) => s,
+            None => {
                 drop_with_kind(s_bits, s_kind);
                 return Err(VMError::TypeError {
                     expected: "string",
@@ -432,8 +459,9 @@ impl VirtualMachine {
                 });
             }
         };
-        let result = format!("{}{}", s_arc.as_str(), i);
-        drop(s_arc);
+        // read_string_operand borrowed (did not consume) — release the share.
+        drop_with_kind(s_bits, s_kind);
+        let result = format!("{}{}", s, i);
         let bits = Arc::into_raw(Arc::new(result)) as u64;
         self.push_kinded(bits, NativeKind::String)
     }
@@ -457,11 +485,9 @@ impl VirtualMachine {
         drop_with_kind(n_bits, n_kind);
 
         let (s_bits, s_kind) = self.pop_kinded()?;
-        let s_arc: Arc<String> = match s_kind {
-            NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
-                unsafe { Arc::from_raw(s_bits as *const String) }
-            }
-            _ => {
+        let s = match read_string_operand(s_bits, s_kind) {
+            Some(s) => s,
+            None => {
                 drop_with_kind(s_bits, s_kind);
                 return Err(VMError::TypeError {
                     expected: "string",
@@ -469,13 +495,13 @@ impl VirtualMachine {
                 });
             }
         };
+        drop_with_kind(s_bits, s_kind);
         let n_str = if n.fract() == 0.0 && n.is_finite() {
             format!("{}", n as i64)
         } else {
             format!("{}", n)
         };
-        let result = format!("{}{}", s_arc.as_str(), n_str);
-        drop(s_arc);
+        let result = format!("{}{}", s, n_str);
         let bits = Arc::into_raw(Arc::new(result)) as u64;
         self.push_kinded(bits, NativeKind::String)
     }
@@ -497,11 +523,9 @@ impl VirtualMachine {
         drop_with_kind(b_bits, b_kind);
 
         let (s_bits, s_kind) = self.pop_kinded()?;
-        let s_arc: Arc<String> = match s_kind {
-            NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
-                unsafe { Arc::from_raw(s_bits as *const String) }
-            }
-            _ => {
+        let s = match read_string_operand(s_bits, s_kind) {
+            Some(s) => s,
+            None => {
                 drop_with_kind(s_bits, s_kind);
                 return Err(VMError::TypeError {
                     expected: "string",
@@ -509,8 +533,8 @@ impl VirtualMachine {
                 });
             }
         };
-        let result = format!("{}{}", s_arc.as_str(), b);
-        drop(s_arc);
+        drop_with_kind(s_bits, s_kind);
+        let result = format!("{}{}", s, b);
         let bits = Arc::into_raw(Arc::new(result)) as u64;
         self.push_kinded(bits, NativeKind::String)
     }
@@ -687,5 +711,47 @@ mod tests {
         let slot = eval_with_prelude(r#""λxy".charAt(0)"#);
         assert_eq!(slot.kind, NativeKind::Char);
         assert_eq!(slot.as_char(), Some('λ'));
+    }
+
+    // ── R4-stringiter: StringV2 carrier through StringConcatTyped ────────
+    //
+    // `Array<string>` elements load with `NativeKind::StringV2` (the v2-raw
+    // `*const StringObj` carrier — see `v2_array_detect::load_elem`), NOT the
+    // `Arc<String>` carrier. Pre-fix, `op_string_concat_typed` only accepted
+    // `NativeKind::String` / `Ptr(HeapKind::String)`, so iterating a
+    // string-array and concatenating the bound element produced a runtime
+    // "TypeError: expected string, got string" (both ARE string; the
+    // StringV2 carrier was the unrecognized one). The fix recognizes all
+    // three string carriers in the concat handlers — a runtime
+    // carrier-recognition extension, NOT a widening of `+` (the compiler
+    // still proves both operands `string` before emitting StringConcatTyped).
+
+    /// for-loop over a string-array literal, concatenating the bound element:
+    /// the element slot's StringV2 carrier must be accepted by StringConcatTyped.
+    #[test]
+    fn for_loop_string_array_concat_accepts_stringv2_element() {
+        let slot = eval_with_prelude(
+            r#"
+let mut result = ""
+for s in ["a", "b", "c"] {
+    result = result + s
+}
+result
+"#,
+        );
+        assert_eq!(slot.as_str(), Some("abc"));
+    }
+
+    /// reduce-concat over a string array: accumulator (Arc<String>) + element
+    /// (StringV2) through StringConcatTyped.
+    #[test]
+    fn reduce_concat_string_array_accepts_stringv2_element() {
+        let slot = eval_with_prelude(
+            r#"
+let words = ["foo", "bar", "baz"]
+words.reduce(|acc, w| acc + w, "")
+"#,
+        );
+        assert_eq!(slot.as_str(), Some("foobarbaz"));
     }
 }
