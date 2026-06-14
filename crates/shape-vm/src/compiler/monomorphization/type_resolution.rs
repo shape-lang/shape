@@ -1630,8 +1630,27 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
         // specialized callee's substituted return-type annotation IS the
         // proof — same chain as the let-binding site at statements.rs:4931.
         // No tag-bit decode, no runtime probe, no fabricated default.
-        Expr::MethodCall { .. } => {
-            specialized_call_return_concrete_type(compiler, expr)
+        Expr::MethodCall { receiver, method, .. } => {
+            // First: a monomorphized stdlib method call records its substituted
+            // return annotation at the call site (the `.map`/`.filter` chain
+            // path). When present, that IS the proof — use it verbatim.
+            if let Some(ct) = specialized_call_return_concrete_type(compiler, expr) {
+                return Some(ct);
+            }
+            // R3-elemerasure (strict-flip): the builtin (PHF) array methods that
+            // return `Self` (`sort`/`reverse`/`take`/`drop`/`slice`/`skip`/
+            // `clone`/`unique`/`flatten`/`distinct`/`sortBy`/`concat`) or the
+            // receiver element type (`first`/`last`/`pop`/`find`) are NOT
+            // monomorphized stdlib functions, so the chain above finds nothing
+            // and the result type was lost — a downstream `.map(|x| x*x)` saw
+            // `x: unknown` and surfaced "Cannot infer types for binary
+            // operation". Recover the result `ConcreteType` from the receiver's
+            // proven `ConcreteType`, driven by the method's REGISTERED
+            // `GenericMethodSignature` return shape (no hardcoded method list —
+            // the signature IS the proof, per ADR-006 §2.7.5). Only fires for an
+            // Array receiver whose element type is already known; an unproven
+            // receiver yields `None` (no fabrication).
+            method_call_receiver_derived_concrete_type(compiler, receiver, method)
         }
 
         // v0.3 ε-4 generic-fn-chain: a free-function-call argument like the
@@ -1888,6 +1907,54 @@ pub fn specialized_call_return_concrete_type(
         .get(&specialized_name)
         .and_then(|fd| fd.return_type.as_ref())?;
     crate::compiler::v2_map_emission::concrete_type_from_annotation(return_annotation)
+}
+
+/// R3-elemerasure (strict-flip): derive the result `ConcreteType` of a builtin
+/// (PHF) array method call from the receiver's proven `ConcreteType`, driven by
+/// the method's REGISTERED `GenericMethodSignature` return shape.
+///
+/// The `Self`-returning array methods (`sort`/`reverse`/`take`/`drop`/`slice`/
+/// `skip`/`clone`/`unique`/`flatten`/`distinct`/`sortBy`/`concat`/`groupBy`) and
+/// the element-returning ones (`first`/`last`/`pop`/`find`) are NOT
+/// monomorphized stdlib functions — `specialized_call_return_concrete_type`
+/// finds no call-site record for them, so the concrete element/return type was
+/// lost across the chain (`[1,2,3].sort().map(|x| x*x)` saw `x: unknown`).
+///
+/// Recovery is type-proven, NOT broad-suppression: the receiver's element type
+/// must already be known (an `Array<T>` `ConcreteType`), and the result is
+/// computed strictly from the method's registered return shape —
+/// `TypeParamExpr::SelfType` → the receiver's own `Array<T>`,
+/// `TypeParamExpr::ReceiverParam(0)` → the element `T`. Any other return shape
+/// (`int`/`bool`/`Vec<MethodParam(0)>`/etc.), an unregistered method, or an
+/// unproven receiver yields `None` (the resolver falls back cleanly — no
+/// fabrication, no Bool-default; per ADR-006 §2.7.5 the registered signature IS
+/// the proof).
+pub fn method_call_receiver_derived_concrete_type(
+    compiler: &BytecodeCompiler,
+    receiver: &Expr,
+    method: &str,
+) -> Option<ConcreteType> {
+    use shape_runtime::type_system::checking::TypeParamExpr;
+
+    // The receiver's element type must be proven; only `Array<T>` receivers
+    // carry an element/Self return that we can reconstruct here.
+    let receiver_ct = concrete_type_for_expr(compiler, receiver)?;
+    let elem_ct = match &receiver_ct {
+        ConcreteType::Array(elem) => elem.as_ref().clone(),
+        _ => return None,
+    };
+
+    // Drive off the method's REGISTERED return shape — never a hardcoded list.
+    // Builtin array methods register under the `"Vec"` receiver name (same key
+    // the inference engine resolves against).
+    let sig = compiler.method_table.lookup_generic_signature("Vec", method)?;
+    match &sig.return_type {
+        // `Self` → the receiver array type unchanged (sort/reverse/take/…).
+        TypeParamExpr::SelfType => Some(receiver_ct),
+        // `ReceiverParam(0)` → the element type (first/last/pop/find).
+        TypeParamExpr::ReceiverParam(0) => Some(elem_ct),
+        _ => None,
+    }
 }
 
 fn literal_concrete_type(literal: &shape_ast::ast::Literal) -> Option<ConcreteType> {

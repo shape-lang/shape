@@ -1396,6 +1396,35 @@ impl BytecodeCompiler {
                     return Ok(Type::Concrete(TypeAnnotation::Basic(type_name)));
                 }
             }
+            // R3-elemerasure (strict-flip): a `let x = a.first()` (scalar
+            // element-returning builtin method) records the result
+            // `ConcreteType` into `current_function_local_concrete_types` (via
+            // the let-binding `concrete_type_for_expr` recording, now element-
+            // aware), but its tracker `type_name` stays `Unknown` because the
+            // method-call compile path doesn't stamp `last_expr_numeric_type`
+            // for the receiver-derived element type. Consult the recorded
+            // ConcreteType so a downstream `x + 1` / `x == y` resolves the
+            // operand. Scalar ConcreteTypes only — a composite result keeps the
+            // existing array/schema side-table paths. The recorded ConcreteType
+            // IS the proof (per ADR-006 §2.7.5); absent recording yields the
+            // engine fallthrough below (no fabrication).
+            let recorded_ct = self
+                .resolve_local(name)
+                .and_then(|idx| self.current_function_local_concrete_types.get(&idx))
+                .or_else(|| {
+                    self.module_bindings
+                        .get(name)
+                        .and_then(|idx| self.module_binding_concrete_types.get(idx))
+                });
+            if let Some(ct) = recorded_ct {
+                if let Some(ann) =
+                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(ct)
+                {
+                    if matches!(&ann, TypeAnnotation::Basic(_)) {
+                        return Ok(Type::Concrete(ann));
+                    }
+                }
+            }
         }
 
         // Phase 3e: function call return type from the tracker. The
@@ -1623,6 +1652,32 @@ impl BytecodeCompiler {
             }
         }
 
+        // R3-elemerasure (strict-flip): the builtin (PHF) array methods that
+        // return the receiver element type (`first`/`last`/`pop`/`find`) or the
+        // receiver array itself (`sort`/`reverse`/`take`/`drop`/`slice`/`skip`/
+        // `clone`/`unique`/`flatten`/`distinct`/`sortBy`/`concat`) are not
+        // monomorphized stdlib functions; the shared module-scope inference
+        // engine below has no per-function bindings, so `a.first() + 1` and
+        // `a.first() == a.last()` saw the receiver as `unknown` and the binop
+        // emitter raised a spurious strict-typing reject. Recover the result
+        // `ConcreteType` from the receiver's PROVEN `ConcreteType`, driven by
+        // the method's REGISTERED `GenericMethodSignature` return shape (same
+        // proof source as the closure-param-hint chain). Returns the receiver's
+        // own `Array<T>` for a `SelfType` method, the element `T` for a
+        // `ReceiverParam(0)` method. An unproven receiver / non-array / other
+        // return shape falls through to the engine below — no fabrication.
+        if let Expr::MethodCall { receiver, method, .. } = expr {
+            if let Some(result_ct) =
+                crate::compiler::monomorphization::type_resolution::method_call_receiver_derived_concrete_type(
+                    self, receiver, method,
+                )
+            {
+                if let Some(ann) = crate::compiler::expressions::closures::concrete_type_to_type_annotation(&result_ct) {
+                    return Ok(Type::Concrete(ann));
+                }
+            }
+        }
+
         self.type_inference.infer_expr(expr).map_err(|e| {
             shape_ast::error::ShapeError::SemanticError {
                 message: format!("Type inference failed: {:?}", e),
@@ -1644,7 +1699,7 @@ impl BytecodeCompiler {
     /// hint is exactly as sound as the parameter type itself — the hint is
     /// only `Some` when the program-wide pass observed a concrete array
     /// argument at a call site.
-    fn tracked_array_element_type(
+    pub(super) fn tracked_array_element_type(
         &self,
         object: &Expr,
     ) -> Option<shape_runtime::type_system::Type> {

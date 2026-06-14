@@ -216,6 +216,22 @@ pub(crate) fn concrete_type_to_type_annotation(ct: &ConcreteType) -> Option<Type
                 args: vec![inner_ann],
             })
         }
+        // R3-elemerasure (strict-flip): a struct/enum element type carries its
+        // source-level name (`ConcreteType::Struct`/`Enum` → `NamedTypeId`), so
+        // render it as a `Reference(name)` annotation. This lets an
+        // object-element HOF closure param recover its struct type — e.g.
+        // `users.filter(|u| u.score > 85)` gives `u: User`, so the property
+        // access `u.score` resolves against the schema instead of surfacing
+        // "Cannot infer types for binary operation `Greater`". The name IS the
+        // proof (per ADR-006 §2.7.5); an unnamed layout yields `None` (no
+        // fabrication — the closure param stays unannotated and the body's
+        // property access surfaces a clean error if unresolvable).
+        ConcreteType::Struct(named) => named
+            .name_str()
+            .map(|n| TypeAnnotation::Reference(TypePath::simple(n))),
+        ConcreteType::Enum(named) => named
+            .name_str()
+            .map(|n| TypeAnnotation::Reference(TypePath::simple(n))),
         // Nullable: drop the wrapper — the captured variable is the inner
         // value at the binary-op site if the closure narrows it. No-annotation
         // is safer than a wrong annotation.

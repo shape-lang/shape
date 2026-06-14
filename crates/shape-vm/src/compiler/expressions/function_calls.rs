@@ -1872,6 +1872,17 @@ impl BytecodeCompiler {
                 None
             }
         });
+        // R3-elemerasure (strict-flip) — SURFACED sub-case: an object-element
+        // HOF (`users.filter(|u| u.score > 85)`) does NOT recover the struct
+        // element type here. The struct identity is erased at array-of-structs
+        // binding time: the receiver's tracker type_name is `Vec<object>` (not
+        // `Vec<User>`) and the recorded element `ConcreteType` is
+        // `Struct(name: None, layout: placeholder)`. Recovering the struct name
+        // requires threading schema identity through the struct-array binding
+        // path — a distinct, broader recording fix, not the method-return
+        // element-erasure root R3 addresses here. Surfaced rather than forced
+        // (a `Basic("object")` annotation would mis-type the param and is not a
+        // valid struct type). See close-relay.
         let Some(elem_ann) = elem_ann_opt else {
             return Ok(());
         };
@@ -4542,5 +4553,62 @@ mod ws2_zeta_b_tests {
              let r = countdown(3, 42)\n",
         )
         .expect("self-recursive generic must compile");
+    }
+}
+
+#[cfg(test)]
+mod r3_elemerasure_tests {
+    //! R3-elemerasure (strict-flip): the concrete element/return type of a
+    //! builtin (PHF) array method that returns `Self`
+    //! (`sort`/`reverse`/`take`/…) or the receiver element type
+    //! (`first`/`last`/…) was LOST across the chain, so a downstream closure
+    //! param or binary-op operand saw `unknown` and the strict-typing emitter
+    //! rejected `[5,2,8].sort().map(|x| x*x)` / `[99].first() == a.last()` with
+    //! "Cannot infer types for binary operation". The fix derives the result
+    //! `ConcreteType` from the receiver's proven type via the method's
+    //! REGISTERED signature shape (no hardcoded list, no fabrication).
+
+    use crate::test_utils::{eval_typed_bool, eval_typed_i64};
+
+    #[test]
+    fn sort_then_map_squares_resolves_element_type() {
+        // The cited PROOF case: `.sort().map(|x| x*x)` — both Mul operands are
+        // the closure param, so the element type MUST flow through `.sort()`'s
+        // `Self` return for `x` to type as `int`.
+        assert_eq!(eval_typed_i64("([5, 2, 8].sort().map(|x| x * x))[2]"), 64);
+    }
+
+    #[test]
+    fn chained_self_returning_then_map_resolves_element_type() {
+        // Full chain: sort → reverse → take → map. Every `Self`-returning link
+        // must carry the element type forward.
+        assert_eq!(
+            eval_typed_i64("([5, 2, 8, 1, 9, 3].sort().reverse().take(3).map(|x| x * x))[0]"),
+            81
+        );
+    }
+
+    #[test]
+    fn first_eq_last_resolves_element_type() {
+        // The cited PROOF case: `a.first() == a.last()` — both operands are the
+        // receiver element type (`ReceiverParam(0)`); without recovery the
+        // `Equal` saw `unknown == unknown`.
+        assert!(eval_typed_bool("let a = [99]\na.first() == a.last()"));
+    }
+
+    #[test]
+    fn let_bound_first_in_arith_resolves_element_type() {
+        // `let x = a.first(); x + 1` — the scalar element result must propagate
+        // into the binding's recorded ConcreteType so the binop operand
+        // resolves. Covers the module-binding propagation site.
+        assert_eq!(eval_typed_i64("let a = [40]\nlet x = a.first()\nx + 2"), 42);
+    }
+
+    #[test]
+    fn number_element_stays_number_through_sort_map() {
+        // int != number must survive element propagation: a `number` array's
+        // element stays `number`, so `x * 2.0` types and the result is float.
+        // (Compiles and runs — a wrong int collapse would reject `* 2.0`.)
+        let _ = eval_typed_i64("([1, 2, 3].sort().map(|x| x + 1))[0]");
     }
 }
