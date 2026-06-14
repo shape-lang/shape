@@ -288,6 +288,20 @@ impl MirBuilder {
         self.mut_self_container_locals.get(&slot).copied()
     }
 
+    /// True when the binding occupying `slot` is an immutable (`let` /
+    /// const) binding. Used to gate the mut-self write-back: a chained
+    /// builder call (`.set` / `.add` / etc.) on an immutable receiver is a
+    /// pure value-returning call — the handler returns a NEW container Arc
+    /// and the original binding is unchanged — so no in-place write-back to
+    /// the binding slot may be emitted (R2 chained-builder-on-immutable).
+    /// In-place mutation of the receiver is the opt-in `let mut` feature.
+    pub(super) fn is_slot_immutable_binding(&self, slot: SlotId) -> bool {
+        self.locals
+            .get(slot.0 as usize)
+            .and_then(|record| record.binding_info.as_ref())
+            .is_some_and(|info| info.enforce_immutable_assignment)
+    }
+
     /// Allocate a new local variable slot.
     pub fn alloc_local(&mut self, name: String, type_info: LocalTypeInfo) -> SlotId {
         self.alloc_local_with_binding(name, type_info, None)
@@ -923,6 +937,51 @@ mod tests {
         );
         assert_eq!(errors[0].variable_name, "x");
         assert!(errors[0].is_explicit_let);
+    }
+
+    #[test]
+    fn test_chained_builder_on_immutable_hashmap_no_mutability_error() {
+        // R2 chained-builder-on-immutable: `.set` on an immutable `let`
+        // HashMap returns a NEW map (clone-on-write); the binding is never
+        // reassigned, so no mutation-writeback `Assign(m, ..)` is emitted
+        // and `compute_mutability_errors` must stay clean. In-place
+        // mutation of the receiver is the opt-in `let mut` feature.
+        let lowering = lower_parsed_function(
+            r#"
+                function build() {
+                    let m: HashMap<string, int> = HashMap()
+                    m.set("a", 1).set("b", 2)
+                    m
+                }
+            "#,
+        );
+        let errors = compute_mutability_errors(&lowering);
+        assert!(
+            errors.is_empty(),
+            "chained builder on immutable HashMap must not flag a mutability error: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_builder_on_let_mut_hashmap_still_writes_back() {
+        // The `let mut` counterpart still emits the in-place write-back
+        // (Assign to the receiver slot), but since the binding is mutable
+        // that Assign is NOT a mutability error. Guards against the R2 fix
+        // over-suppressing the writeback for mutable bindings.
+        let lowering = lower_parsed_function(
+            r#"
+                function build() {
+                    let mut m: HashMap<string, int> = HashMap()
+                    m.set("a", 1)
+                    m
+                }
+            "#,
+        );
+        let errors = compute_mutability_errors(&lowering);
+        assert!(
+            errors.is_empty(),
+            "builder on `let mut` HashMap must compile clean: {errors:?}"
+        );
     }
 
     #[test]

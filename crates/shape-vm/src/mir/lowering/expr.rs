@@ -211,6 +211,18 @@ pub(super) fn emit_mut_self_writeback_if_needed(
     if !kind.is_mut_self_method(method) {
         return;
     }
+    // R2 chained-builder-on-immutable: a `&mut self` builder method on an
+    // immutable (`let`) receiver returns a NEW container Arc (clone-on-
+    // write); the original binding is left unchanged. Emitting the
+    // write-back `Assign(slot, ..)` would (a) flag a spurious "assign to
+    // immutable binding" in `compute_mutability_errors` and (b) mutate a
+    // binding the user declared immutable. Skip the write-back: the call
+    // still yields the new value (usable in `m.set(a,1).set(b,2)` chains),
+    // and `m` stays the value it was bound to. In-place mutation is the
+    // opt-in `let mut` feature.
+    if builder.is_slot_immutable_binding(slot) {
+        return;
+    }
     builder.push_stmt(
         StatementKind::Assign(
             Place::Local(slot),

@@ -2056,6 +2056,14 @@ impl BytecodeCompiler {
             return None;
         };
         if let Some(local_idx) = self.resolve_local(name) {
+            // R2 chained-builder-on-immutable: a `&mut self` builder method
+            // on an immutable receiver returns a NEW container Arc; the
+            // binding is left unchanged. No write-back is emitted (which
+            // would otherwise require — and reject on — an immutable
+            // binding). In-place mutation is the opt-in `let mut` feature.
+            if self.is_local_immutable(local_idx) || self.is_local_const(local_idx) {
+                return None;
+            }
             if let Some(&kind) = self.mut_self_container_locals.get(&local_idx) {
                 if kind.is_mut_self_method(method) {
                     return Some(MutSelfWriteBackTarget::Local(local_idx));
@@ -2067,6 +2075,12 @@ impl BytecodeCompiler {
             .resolve_scoped_module_binding_name(name)
             .unwrap_or_else(|| name.to_string());
         if let Some(&binding_idx) = self.module_bindings.get(&scoped) {
+            // R2: immutable module binding — same no-write-back rule.
+            if self.is_module_binding_immutable(binding_idx)
+                || self.is_module_binding_const(binding_idx)
+            {
+                return None;
+            }
             if let Some(&kind) = self.mut_self_container_bindings.get(&binding_idx) {
                 if kind.is_mut_self_method(method) {
                     return Some(MutSelfWriteBackTarget::ModuleBinding(binding_idx));
@@ -2104,6 +2118,13 @@ impl BytecodeCompiler {
             return None;
         };
         if let Some(local_idx) = self.resolve_local(name) {
+            // R2: immutable receiver — no write-back. Returning None routes
+            // a known tuple-return method through the r-value silent-drop
+            // path (`Swap; Pop`), which consumes the side-channel NewSelf
+            // and leaves the binding unchanged (sound).
+            if self.is_local_immutable(local_idx) || self.is_local_const(local_idx) {
+                return None;
+            }
             if let Some(&kind) = self.mut_self_container_locals.get(&local_idx) {
                 if kind.is_mut_self_tuple_return_method(method) {
                     return Some(MutSelfWriteBackTarget::Local(local_idx));
@@ -2115,6 +2136,12 @@ impl BytecodeCompiler {
             .resolve_scoped_module_binding_name(name)
             .unwrap_or_else(|| name.to_string());
         if let Some(&binding_idx) = self.module_bindings.get(&scoped) {
+            // R2: immutable module binding — same no-write-back rule.
+            if self.is_module_binding_immutable(binding_idx)
+                || self.is_module_binding_const(binding_idx)
+            {
+                return None;
+            }
             if let Some(&kind) = self.mut_self_container_bindings.get(&binding_idx) {
                 if kind.is_mut_self_tuple_return_method(method) {
                     return Some(MutSelfWriteBackTarget::ModuleBinding(binding_idx));
