@@ -781,8 +781,35 @@ impl BytecodeCompiler {
             }),
         ));
 
-        // Track result schema for typed merge optimization
+        // Track result schema for typed merge optimization.
+        //
+        // R5c-objfield (v0.3.3 strict-flip): the result-type metadata MUST
+        // reflect the freshly-registered inline TypedObject schema, NOT the
+        // last compiled field value's `last_expr_type_info` (which is left
+        // stale by the per-field `compile_expr_as_value_or_placeholder` loop
+        // above — e.g. `{id: 1, name: "Alice"}` leaves `type_name=Some("string")`
+        // from the trailing `"Alice"`). Without this, a `let mut u = {…}`
+        // binding propagates the stale primitive type through
+        // `propagate_assignment_type_to_slot`'s `last_expr_type_info`-first
+        // branch (helpers.rs:3858) and never reaches the `last_expr_schema`
+        // arm — so the binding records `schema_id=None` and a later
+        // existing-field write `u.name = "Bob"` fails `try_resolve_typed_field_place`
+        // and hits the "requires compile-time field resolution" reject.
+        // Mirrors the named-struct-literal path (collections.rs:1407-1412)
+        // which already stamps the schema-known `VariableTypeInfo`. This is a
+        // compile-time producer-side stamp of the proven schema (ADR-006
+        // §2.7.5) — no runtime decode, no generic property-lookup fallback.
         self.last_expr_schema = Some(schema_id);
+        self.last_expr_numeric_type = None;
+        let schema_name = self
+            .type_tracker
+            .schema_registry()
+            .get_by_id(schema_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| format!("__inline_obj_{}", schema_id));
+        self.last_expr_type_info = Some(
+            crate::type_tracking::VariableTypeInfo::known(schema_id, schema_name),
+        );
 
         Ok(())
     }
