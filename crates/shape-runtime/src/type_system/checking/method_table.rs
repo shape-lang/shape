@@ -338,16 +338,66 @@ impl MethodTable {
             ("except", 0, vec![E::SelfType], E::SelfType),
             ("intersect", 0, vec![E::SelfType], E::SelfType),
             ("zip", 0, vec![E::SelfType], E::SelfType),
-            ("where", 0, vec![func(vec![E::ReceiverParam(0)], boolean())], E::SelfType),
-            ("select", 1, vec![func(vec![E::ReceiverParam(0)], E::MethodParam(0))], vec_of(E::MethodParam(0))),
-            ("orderBy", 0, vec![func(vec![E::ReceiverParam(0)], num())], E::SelfType),
-            ("skipWhile", 0, vec![func(vec![E::ReceiverParam(0)], boolean())], E::SelfType),
-            ("takeWhile", 0, vec![func(vec![E::ReceiverParam(0)], boolean())], E::SelfType),
-            ("any", 0, vec![func(vec![E::ReceiverParam(0)], boolean())], boolean()),
-            ("all", 0, vec![func(vec![E::ReceiverParam(0)], boolean())], boolean()),
-            ("distinctBy", 0, vec![func(vec![E::ReceiverParam(0)], num())], E::SelfType),
-            ("count", 0, vec![func(vec![E::ReceiverParam(0)], boolean())], int()),
-            ("single", 0, vec![func(vec![E::ReceiverParam(0)], boolean())], E::ReceiverParam(0)),
+            (
+                "where",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                E::SelfType,
+            ),
+            (
+                "select",
+                1,
+                vec![func(vec![E::ReceiverParam(0)], E::MethodParam(0))],
+                vec_of(E::MethodParam(0)),
+            ),
+            (
+                "orderBy",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], num())],
+                E::SelfType,
+            ),
+            (
+                "skipWhile",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                E::SelfType,
+            ),
+            (
+                "takeWhile",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                E::SelfType,
+            ),
+            (
+                "any",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                boolean(),
+            ),
+            (
+                "all",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                boolean(),
+            ),
+            (
+                "distinctBy",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], num())],
+                E::SelfType,
+            ),
+            (
+                "count",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                int(),
+            ),
+            (
+                "single",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                E::ReceiverParam(0),
+            ),
         ];
         for (name, mtp, params, ret) in vec_methods {
             self.register_user_generic_method("Vec", name, mtp, params, ret, vec![]);
@@ -390,7 +440,11 @@ impl MethodTable {
                     "string".into(),
                 )))),
             ),
-            ("contains", vec![BuiltinTypes::string()], BuiltinTypes::boolean()),
+            (
+                "contains",
+                vec![BuiltinTypes::string()],
+                BuiltinTypes::boolean(),
+            ),
             (
                 "startsWith",
                 vec![BuiltinTypes::string()],
@@ -417,12 +471,32 @@ impl MethodTable {
                     "string".into(),
                 )))),
             ),
-            ("padStart", vec![BuiltinTypes::integer()], BuiltinTypes::string()),
-            ("padEnd", vec![BuiltinTypes::integer()], BuiltinTypes::string()),
-            ("repeat", vec![BuiltinTypes::integer()], BuiltinTypes::string()),
-            ("charAt", vec![BuiltinTypes::integer()], BuiltinTypes::string()),
+            (
+                "padStart",
+                vec![BuiltinTypes::integer(), BuiltinTypes::string()],
+                BuiltinTypes::string(),
+            ),
+            (
+                "padEnd",
+                vec![BuiltinTypes::integer(), BuiltinTypes::string()],
+                BuiltinTypes::string(),
+            ),
+            (
+                "repeat",
+                vec![BuiltinTypes::integer()],
+                BuiltinTypes::string(),
+            ),
+            (
+                "charAt",
+                vec![BuiltinTypes::integer()],
+                BuiltinTypes::string(),
+            ),
             ("reverse", vec![], BuiltinTypes::string()),
-            ("indexOf", vec![BuiltinTypes::string()], BuiltinTypes::integer()),
+            (
+                "indexOf",
+                vec![BuiltinTypes::string()],
+                BuiltinTypes::integer(),
+            ),
             ("isDigit", vec![], BuiltinTypes::boolean()),
             ("isAlpha", vec![], BuiltinTypes::boolean()),
             (
@@ -430,8 +504,16 @@ impl MethodTable {
                 vec![BuiltinTypes::integer()],
                 BuiltinTypes::integer(),
             ),
-            ("substring", vec![BuiltinTypes::integer()], BuiltinTypes::string()),
-            ("normalize", vec![BuiltinTypes::string()], BuiltinTypes::string()),
+            (
+                "substring",
+                vec![BuiltinTypes::integer(), BuiltinTypes::integer()],
+                BuiltinTypes::string(),
+            ),
+            (
+                "normalize",
+                vec![BuiltinTypes::string()],
+                BuiltinTypes::string(),
+            ),
             (
                 "graphemes",
                 vec![],
@@ -441,7 +523,11 @@ impl MethodTable {
             ),
             ("graphemeLen", vec![], BuiltinTypes::integer()),
             ("isAscii", vec![], BuiltinTypes::boolean()),
-            ("slice", vec![BuiltinTypes::integer(), BuiltinTypes::integer()], BuiltinTypes::string()),
+            (
+                "slice",
+                vec![BuiltinTypes::integer(), BuiltinTypes::integer()],
+                BuiltinTypes::string(),
+            ),
             ("toString", vec![], BuiltinTypes::string()),
             ("join", vec![BuiltinTypes::string()], BuiltinTypes::string()),
         ];
@@ -451,7 +537,12 @@ impl MethodTable {
 
         // ---- HashMap<K,V> (receiver param 0 = K, 1 = V) ----------------
         let map_methods: Vec<(&str, usize, Vec<E>, E)> = vec![
-            ("get", 0, vec![E::ReceiverParam(0)], opt_of(E::ReceiverParam(1))),
+            (
+                "get",
+                0,
+                vec![E::ReceiverParam(0)],
+                opt_of(E::ReceiverParam(1)),
+            ),
             (
                 "set",
                 0,
@@ -492,20 +583,25 @@ impl MethodTable {
             (
                 "forEach",
                 0,
-                vec![func(
-                    vec![E::ReceiverParam(0), E::ReceiverParam(1)],
-                    void(),
-                )],
+                vec![func(vec![E::ReceiverParam(0), E::ReceiverParam(1)], void())],
                 void(),
             ),
             // PHF-defined HashMap methods absent from the seed's stdlib mirror.
-            ("getOrDefault", 0, vec![E::ReceiverParam(0), E::ReceiverParam(1)], E::ReceiverParam(1)),
+            (
+                "getOrDefault",
+                0,
+                vec![E::ReceiverParam(0), E::ReceiverParam(1)],
+                E::ReceiverParam(1),
+            ),
             ("merge", 0, vec![E::SelfType], E::SelfType),
             (
                 "reduce",
                 1,
                 vec![
-                    func(vec![E::MethodParam(0), E::ReceiverParam(0), E::ReceiverParam(1)], E::MethodParam(0)),
+                    func(
+                        vec![E::MethodParam(0), E::ReceiverParam(0), E::ReceiverParam(1)],
+                        E::MethodParam(0),
+                    ),
                     E::MethodParam(0),
                 ],
                 E::MethodParam(0),
@@ -514,7 +610,10 @@ impl MethodTable {
             (
                 "groupBy",
                 1,
-                vec![func(vec![E::ReceiverParam(0), E::ReceiverParam(1)], E::MethodParam(0))],
+                vec![func(
+                    vec![E::ReceiverParam(0), E::ReceiverParam(1)],
+                    E::MethodParam(0),
+                )],
                 E::SelfType,
             ),
         ];
@@ -753,10 +852,9 @@ impl MethodTable {
                 .get(*idx)
                 .cloned()
                 .unwrap_or_else(placeholder),
-            TypeParamExpr::MethodParam(idx) => method_vars
-                .get(*idx)
-                .cloned()
-                .unwrap_or_else(placeholder),
+            TypeParamExpr::MethodParam(idx) => {
+                method_vars.get(*idx).cloned().unwrap_or_else(placeholder)
+            }
             TypeParamExpr::SelfType => receiver_type.clone(),
             TypeParamExpr::Function { params, returns } => Type::Function {
                 params: params
@@ -790,7 +888,9 @@ impl MethodTable {
                     })
                     .collect();
                 Type::Generic {
-                    base: Box::new(Type::Concrete(TypeAnnotation::Reference(name.as_str().into()))),
+                    base: Box::new(Type::Concrete(TypeAnnotation::Reference(
+                        name.as_str().into(),
+                    ))),
                     args: resolved_args,
                 }
             }
@@ -804,9 +904,7 @@ impl MethodTable {
                 if let Type::Concrete(TypeAnnotation::Reference(name)) = base.as_ref() {
                     let mut params = args.clone();
                     if name == "Result" && params.len() == 1 {
-                        params.push(Type::Concrete(TypeAnnotation::Reference(
-                            "AnyError".into(),
-                        )));
+                        params.push(Type::Concrete(TypeAnnotation::Reference("AnyError".into())));
                     }
                     // The var-preserving empty-array form (`expressions.rs`
                     // `Expr::Array` empty arm) is `Type::Generic { base:
@@ -819,7 +917,11 @@ impl MethodTable {
                     // var then binds to the pushed arg via the bare-variable
                     // value-position binding in `expressions.rs::MethodCall`
                     // (R1 empty-array-push let-gen, 2026-06-14).
-                    let canonical = if name == "Array" { "Vec".to_string() } else { name.to_string() };
+                    let canonical = if name == "Array" {
+                        "Vec".to_string()
+                    } else {
+                        name.to_string()
+                    };
                     (Some(canonical), params)
                 } else {
                     (None, vec![])
@@ -834,9 +936,7 @@ impl MethodTable {
                 let mut params: Vec<Type> =
                     args.iter().map(|a| Type::Concrete(a.clone())).collect();
                 if name == "Result" && params.len() == 1 {
-                    params.push(Type::Concrete(TypeAnnotation::Reference(
-                        "AnyError".into(),
-                    )));
+                    params.push(Type::Concrete(TypeAnnotation::Reference("AnyError".into())));
                 }
                 (Some(name.to_string()), params)
             }
@@ -886,10 +986,11 @@ impl MethodTable {
         // through to the universal registry so the receiver-agnostic
         // method's return type still propagates.
         if type_name.is_none() {
-            let universal_key =
-                (UNIVERSAL_RECEIVER.to_string(), method_name.to_string());
-            if let Some(sig) =
-                self.methods.get(&universal_key).and_then(|sigs| sigs.first())
+            let universal_key = (UNIVERSAL_RECEIVER.to_string(), method_name.to_string());
+            if let Some(sig) = self
+                .methods
+                .get(&universal_key)
+                .and_then(|sigs| sigs.first())
             {
                 return Some(sig.return_type.clone());
             }
@@ -1005,7 +1106,12 @@ mod tests {
         let mut table = MethodTable::new();
         // Register first() -> T as a generic method (as Shape stdlib would)
         table.register_user_generic_method(
-            "Vec", "first", 0, vec![], TypeParamExpr::ReceiverParam(0), vec![],
+            "Vec",
+            "first",
+            0,
+            vec![],
+            TypeParamExpr::ReceiverParam(0),
+            vec![],
         );
 
         let array_type = Type::Generic {
@@ -1082,12 +1188,15 @@ mod tests {
     fn test_resolve_generic_filter_with_user_registration() {
         let mut table = MethodTable::new();
         table.register_user_generic_method(
-            "Vec", "filter", 0,
+            "Vec",
+            "filter",
+            0,
             vec![TypeParamExpr::Function {
                 params: vec![TypeParamExpr::ReceiverParam(0)],
                 returns: Box::new(TypeParamExpr::Concrete(BuiltinTypes::boolean())),
             }],
-            TypeParamExpr::SelfType, vec![],
+            TypeParamExpr::SelfType,
+            vec![],
         );
 
         let array_type = Type::Generic {
@@ -1098,14 +1207,20 @@ mod tests {
         let result = table.resolve_method_call(&array_type, "filter", &[], &mut tvgen);
         assert!(result.is_some());
         let rt = result.unwrap();
-        assert!(matches!(rt, Type::Generic { .. }), "filter should return Vec<number>, got {:?}", rt);
+        assert!(
+            matches!(rt, Type::Generic { .. }),
+            "filter should return Vec<number>, got {:?}",
+            rt
+        );
     }
 
     #[test]
     fn test_resolve_generic_map_with_user_registration() {
         let mut table = MethodTable::new();
         table.register_user_generic_method(
-            "Vec", "map", 1,
+            "Vec",
+            "map",
+            1,
             vec![TypeParamExpr::Function {
                 params: vec![TypeParamExpr::ReceiverParam(0)],
                 returns: Box::new(TypeParamExpr::MethodParam(0)),
@@ -1125,15 +1240,23 @@ mod tests {
         let result = table.resolve_method_call(&array_type, "map", &[], &mut tvgen);
         assert!(result.is_some());
         let rt = result.unwrap();
-        assert!(matches!(rt, Type::Generic { .. }), "map should return Vec<U>, got {:?}", rt);
+        assert!(
+            matches!(rt, Type::Generic { .. }),
+            "map should return Vec<U>, got {:?}",
+            rt
+        );
     }
 
     #[test]
     fn test_resolve_generic_option_unwrap_with_user_registration() {
         let mut table = MethodTable::new();
         table.register_user_generic_method(
-            "Option", "unwrap", 0, vec![],
-            TypeParamExpr::ReceiverParam(0), vec![],
+            "Option",
+            "unwrap",
+            0,
+            vec![],
+            TypeParamExpr::ReceiverParam(0),
+            vec![],
         );
 
         let option_type = Type::Generic {
@@ -1143,14 +1266,18 @@ mod tests {
         let mut tvgen = crate::type_system::TypeVarGen::new();
         let result = table.resolve_method_call(&option_type, "unwrap", &[], &mut tvgen);
         assert!(result.is_some());
-        assert!(matches!(result.unwrap(), Type::Concrete(TypeAnnotation::Basic(ref n)) if n == "number"));
+        assert!(
+            matches!(result.unwrap(), Type::Concrete(TypeAnnotation::Basic(ref n)) if n == "number")
+        );
     }
 
     #[test]
     fn test_resolve_generic_hashmap_get_with_user_registration() {
         let mut table = MethodTable::new();
         table.register_user_generic_method(
-            "HashMap", "get", 0,
+            "HashMap",
+            "get",
+            0,
             vec![TypeParamExpr::ReceiverParam(0)],
             TypeParamExpr::GenericContainer {
                 name: "Option".to_string(),
@@ -1171,7 +1298,8 @@ mod tests {
             matches!(&rt, Type::Generic { base, args }
                 if matches!(base.as_ref(), Type::Concrete(TypeAnnotation::Reference(n)) if n == "Option")
                 && args.len() == 1),
-            "get should return Option<number>, got {:?}", rt
+            "get should return Option<number>, got {:?}",
+            rt
         );
     }
 
@@ -1179,11 +1307,22 @@ mod tests {
     fn test_is_self_returning_with_user_registration() {
         let mut table = MethodTable::new();
         table.register_user_generic_method(
-            "Vec", "filter", 0, vec![], TypeParamExpr::SelfType, vec![],
+            "Vec",
+            "filter",
+            0,
+            vec![],
+            TypeParamExpr::SelfType,
+            vec![],
         );
         table.register_user_generic_method(
-            "Vec", "map", 1, vec![],
-            TypeParamExpr::GenericContainer { name: "Vec".to_string(), args: vec![TypeParamExpr::MethodParam(0)] },
+            "Vec",
+            "map",
+            1,
+            vec![],
+            TypeParamExpr::GenericContainer {
+                name: "Vec".to_string(),
+                args: vec![TypeParamExpr::MethodParam(0)],
+            },
             vec![],
         );
 
@@ -1195,12 +1334,15 @@ mod tests {
     fn test_takes_closure_with_receiver_param_with_user_registration() {
         let mut table = MethodTable::new();
         table.register_user_generic_method(
-            "Vec", "filter", 0,
+            "Vec",
+            "filter",
+            0,
             vec![TypeParamExpr::Function {
                 params: vec![TypeParamExpr::ReceiverParam(0)],
                 returns: Box::new(TypeParamExpr::Concrete(BuiltinTypes::boolean())),
             }],
-            TypeParamExpr::SelfType, vec![],
+            TypeParamExpr::SelfType,
+            vec![],
         );
 
         assert!(table.takes_closure_with_receiver_param("Vec", "filter"));

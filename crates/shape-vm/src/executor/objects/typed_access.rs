@@ -17,8 +17,8 @@
 //! reintroducing forbidden patterns.
 
 use crate::bytecode::{Instruction, OpCode, Operand};
-use crate::executor::vm_impl::stack::drop_with_kind;
 use crate::executor::VirtualMachine;
+use crate::executor::vm_impl::stack::drop_with_kind;
 use shape_value::heap_value::{HeapKind, HeapValue};
 use shape_value::v2::string_obj::StringObj;
 use shape_value::{NativeKind, VMError};
@@ -227,7 +227,7 @@ impl VirtualMachine {
                 return Err(VMError::TypeError {
                     expected: "HashMap<string, int>",
                     got: hashmap_v_kind_name(other),
-                })
+                });
             }
         };
         self.push_kinded(value as u64, NativeKind::Int64)
@@ -252,7 +252,7 @@ impl VirtualMachine {
                 return Err(VMError::TypeError {
                     expected: "HashMap<string, number>",
                     got: hashmap_v_kind_name(other),
-                })
+                });
             }
         };
         self.push_kinded(value.to_bits(), NativeKind::Float64)
@@ -371,10 +371,14 @@ impl VirtualMachine {
             // scalar kind (mirror of `v2_string_char_at` / `KindedSlot::from_char`).
             self.push_kinded(ch as u64, NativeKind::Char)
         } else {
-            Err(VMError::IndexOutOfBounds {
-                index: index as i32,
-                length: s.chars().count(),
-            })
+            // Out-of-bounds index pushes the NUL char, mirroring the
+            // `v2_string_char_at` handler contract (string_methods.rs:271):
+            // both negative and past-end indices return '\0'. (A negative
+            // `index: int` wraps to a huge `usize` above via `as usize`, so
+            // it also lands here.) This keeps the typed StringCharAt fast-path
+            // semantically identical to the PHF-dispatched form rather than
+            // raising IndexOutOfBounds for what the language defines as run-ok.
+            self.push_kinded('\0' as u64, NativeKind::Char)
         }
     }
 
