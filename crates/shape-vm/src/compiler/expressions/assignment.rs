@@ -134,6 +134,53 @@ impl BytecodeCompiler {
                         if let Expr::Identifier(recv_name, _) = receiver.as_ref() {
                             if recv_name == name {
                                 let source_loc = self.span_to_source_location(*id_span);
+                                // R1 empty-array-push let-gen (2026-06-14):
+                                // `a = a.push(x)` (assignment EXPRESSION form —
+                                // this is the path a loop-body `a = a.push(x*x)`
+                                // takes) where `a` is a bare empty-array
+                                // accumulator (`let mut a = []`, placeholder
+                                // `NewArray(0)`). The v1 `ArrayPushLocal` path
+                                // below assumes a materialized array carrier in
+                                // the slot; the unpromoted accumulator slot is
+                                // not yet a typed array — at MODULE scope it read
+                                // None and SIGSEGV'd. Route the first such self-
+                                // push through the accumulator finalizer: it
+                                // resolves the element kind from `x`'s producer-
+                                // side proof, PATCHES the placeholder allocator to
+                                // the typed `NewTypedArray*` opcode AFTER the
+                                // element type resolves, emits the typed push, and
+                                // leaves the typed array on the stack. Store it
+                                // back into the slot, then re-load so the
+                                // assignment-expression result (the updated array)
+                                // is on the stack — matching the v1-path contract.
+                                if self.compile_first_push_to_empty_accumulator(
+                                    recv_name,
+                                    &args[0],
+                                    Some(source_loc.clone()),
+                                )? {
+                                    if let Some(local_idx) = self.resolve_local(name) {
+                                        self.emit(Instruction::new(
+                                            OpCode::StoreLocal,
+                                            Some(Operand::Local(local_idx)),
+                                        ));
+                                        self.emit(Instruction::new(
+                                            OpCode::LoadLocal,
+                                            Some(Operand::Local(local_idx)),
+                                        ));
+                                    } else {
+                                        let binding_idx =
+                                            self.get_or_create_module_binding(name);
+                                        self.emit(Instruction::new(
+                                            OpCode::StoreModuleBinding,
+                                            Some(Operand::ModuleBinding(binding_idx)),
+                                        ));
+                                        self.emit(Instruction::new(
+                                            OpCode::LoadModuleBinding,
+                                            Some(Operand::ModuleBinding(binding_idx)),
+                                        ));
+                                    }
+                                    return Ok(());
+                                }
                                 if let Some(local_idx) = self.resolve_local(name) {
                                     if !self.ref_locals.contains(&local_idx) {
                                         self.check_named_binding_write_allowed(

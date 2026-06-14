@@ -5708,6 +5708,53 @@ impl BytecodeCompiler {
                         if method == "push" && args.len() == 1 {
                             if let Expr::Identifier(recv_name, _) = receiver.as_ref() {
                                 if recv_name == name {
+                                    // R1 empty-array-push let-gen (2026-06-14):
+                                    // `a = a.push(x)` where `a` is a bare empty-
+                                    // array accumulator (`let mut a = []`, no
+                                    // annotation, placeholder `NewArray(0)`
+                                    // allocator). The v1 `ArrayPushLocal` path
+                                    // below assumes a materialized array carrier
+                                    // in the slot; the placeholder accumulator is
+                                    // not yet a typed array, so pushing into it
+                                    // (especially at MODULE scope, where the slot
+                                    // read None) SIGSEGV'd. Route the first such
+                                    // self-push through the accumulator finalizer:
+                                    // it resolves the element kind from `x`'s
+                                    // producer-side proof, PATCHES the placeholder
+                                    // allocator to the typed `NewTypedArray*`
+                                    // opcode (so the slot holds a real typed
+                                    // array), emits the typed push, and leaves the
+                                    // array on the stack — which the assignment
+                                    // then stores back into the same slot. The
+                                    // allocator patch fires AFTER the element type
+                                    // resolves, so the module-binding slot is
+                                    // constructed with the right kind (no None
+                                    // read, no heap corruption).
+                                    let source_loc =
+                                        self.span_to_source_location(receiver.as_ref().span());
+                                    if self.compile_first_push_to_empty_accumulator(
+                                        recv_name,
+                                        &args[0],
+                                        Some(source_loc),
+                                    )? {
+                                        // The typed push left the (now-typed)
+                                        // array on the stack; store it back into
+                                        // the binding slot.
+                                        if let Some(local_idx) = self.resolve_local(name) {
+                                            self.emit(Instruction::new(
+                                                OpCode::StoreLocal,
+                                                Some(Operand::Local(local_idx)),
+                                            ));
+                                        } else {
+                                            let binding_idx =
+                                                self.get_or_create_module_binding(name);
+                                            self.emit(Instruction::new(
+                                                OpCode::StoreModuleBinding,
+                                                Some(Operand::ModuleBinding(binding_idx)),
+                                            ));
+                                        }
+                                        break 'assign;
+                                    }
                                     if let Some(local_idx) = self.resolve_local(name) {
                                         self.compile_expr(&args[0])?;
                                         let pushed_numeric = self.last_expr_numeric_type;

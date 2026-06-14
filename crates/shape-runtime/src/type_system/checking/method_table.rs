@@ -808,7 +808,19 @@ impl MethodTable {
                             "AnyError".into(),
                         )));
                     }
-                    (Some(name.to_string()), params)
+                    // The var-preserving empty-array form (`expressions.rs`
+                    // `Expr::Array` empty arm) is `Type::Generic { base:
+                    // Reference("Array"), args: [Variable] }`, but every Vec
+                    // builtin-collection method is registered under the canonical
+                    // "Vec" key (and `Type::Concrete(Array(_))` normalizes to
+                    // "Vec" below). Normalize the Generic-Array spelling to the
+                    // same key so `lookup_generic_signature("Vec", "push")`
+                    // resolves on an unresolved-element empty array. The element
+                    // var then binds to the pushed arg via the bare-variable
+                    // value-position binding in `expressions.rs::MethodCall`
+                    // (R1 empty-array-push let-gen, 2026-06-14).
+                    let canonical = if name == "Array" { "Vec".to_string() } else { name.to_string() };
+                    (Some(canonical), params)
                 } else {
                     (None, vec![])
                 }

@@ -204,6 +204,44 @@ impl BytecodeCompiler {
                             if method == "push" && args.len() == 1 {
                                 if let Expr::Identifier(recv_name, _) = receiver.as_ref() {
                                     if recv_name == name {
+                                        // R1 empty-array-push let-gen (2026-06-14):
+                                        // `a = a.push(x*x)` inside a loop BODY
+                                        // BLOCK takes THIS path (a `BlockItem::
+                                        // Assignment`). When `a` is a bare empty-
+                                        // array accumulator (placeholder
+                                        // `NewArray(0)`), the v1 `ArrayPushLocal`
+                                        // below pushes into a slot that is not yet
+                                        // a typed array — at MODULE scope the slot
+                                        // read None and SIGSEGV'd. Route the first
+                                        // such self-push through the accumulator
+                                        // finalizer: it resolves the element kind
+                                        // from `x`'s producer-side proof, PATCHES
+                                        // the placeholder allocator to the typed
+                                        // `NewTypedArray*` opcode AFTER the element
+                                        // type resolves, emits the typed push, and
+                                        // leaves the typed array on the stack.
+                                        // Store it back into the slot (block-item
+                                        // statement context discards the result).
+                                        if self.compile_first_push_to_empty_accumulator(
+                                            recv_name,
+                                            &args[0],
+                                            None,
+                                        )? {
+                                            if let Some(local_idx) = self.resolve_local(name) {
+                                                self.emit(Instruction::new(
+                                                    OpCode::StoreLocal,
+                                                    Some(Operand::Local(local_idx)),
+                                                ));
+                                            } else {
+                                                let binding_idx =
+                                                    self.get_or_create_module_binding(name);
+                                                self.emit(Instruction::new(
+                                                    OpCode::StoreModuleBinding,
+                                                    Some(Operand::ModuleBinding(binding_idx)),
+                                                ));
+                                            }
+                                            break 'block_assign Ok::<(), ShapeError>(());
+                                        }
                                         if let Some(local_idx) = self.resolve_local(name) {
                                             if !self.ref_locals.contains(&local_idx) {
                                                 self.compile_expr(&args[0])?;
