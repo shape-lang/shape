@@ -857,6 +857,102 @@ impl super::BytecodeCompiler {
         kind
     }
 
+    /// Kind-changing-map carrier reconciliation (2026-06-15).
+    ///
+    /// When a `let r = <init>` binding's initializer is a value whose PROVEN
+    /// element type (via the inference engine) is an `Array<C>`/`Vec<C>`, the
+    /// binding's typed-array carrier stamp MUST match C — NOT a
+    /// `pending_variable_typed_array_kind` value that leaked from compiling a
+    /// SUB-expression of the initializer.
+    ///
+    /// The canonical defect this closes: `let r = [1,2,3].map(|x| x as number)`.
+    /// Compiling the receiver array literal `[1,2,3]` sets
+    /// `pending_variable_typed_array_kind = Some(I64)` (the INPUT element kind),
+    /// which then leaks onto the outer binding `r`. The map RESULT carrier is
+    /// `TypedArray<f64>` (the closure-return kind, correctly built by
+    /// `run_select_builder`), so a `TypedArrayGetI64` index read on `r`
+    /// reinterprets the f64 bits as i64 (a forbidden bit-reinterpret — `int`
+    /// and `number` do not unify, CLAUDE.md §Type-System-Rules).
+    ///
+    /// Returns a reconciliation DIRECTIVE keyed off the binding's proven type:
+    /// - `Some(Some(kind))` — the binding IS an array whose element C maps to a
+    ///   scalar typed-array carrier `kind`; stamp `kind` (authoritative).
+    /// - `Some(None)` — the binding IS an array but C has NO scalar typed-array
+    ///   carrier (heap element, or a kind the carrier set doesn't cover). The
+    ///   stale scalar stamp MUST be suppressed so index access falls to the
+    ///   carrier-reading `GetProp` (`read_element`) path. SOUNDNESS FLOOR — never
+    ///   keep a mismatched scalar stamp that would bit-reinterpret.
+    /// - `None` — the binding is not a provable array; leave the existing
+    ///   capture untouched (no array-index opcode keys off it).
+    ///
+    /// Per ADR-006 §2.7.5 the proof is the inference engine's element type — no
+    /// runtime bit inspection, no fabricated default.
+    pub(crate) fn reconcile_binding_typed_array_kind(
+        &mut self,
+        init_expr: &shape_ast::ast::Expr,
+    ) -> Option<Option<TypedArrayKind>> {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+
+        let inferred = self.infer_expr_type(init_expr).ok()?;
+        // Extract the element annotation when the inferred type is a homogeneous
+        // array carrier (`Array<C>` / `Vec<C>` / `C[]`). Anything else is not a
+        // typed-array binding and yields `None` (leave capture untouched).
+        //
+        // The inference engine carries an instantiated array either as a
+        // `Type::Concrete(TypeAnnotation::Array/Generic)` OR as a
+        // `Type::Generic { base: Vec/Array, args: [elem] }` (the shape the
+        // method-call return inference produces, e.g. `<arr>.map(...)`).
+        let elem_ann: TypeAnnotation = match &inferred {
+            Type::Concrete(TypeAnnotation::Array(inner)) => (**inner).clone(),
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if (name.as_str() == "Array" || name.as_str() == "Vec") && args.len() == 1 =>
+            {
+                args[0].clone()
+            }
+            Type::Generic { base, args } if args.len() == 1 => {
+                let base_name: Option<&str> = match base.as_ref() {
+                    Type::Concrete(TypeAnnotation::Basic(n)) => Some(n.as_str()),
+                    Type::Concrete(TypeAnnotation::Reference(p)) => Some(p.as_str()),
+                    _ => None,
+                };
+                let base_is_array =
+                    matches!(base_name, Some(n) if n == "Array" || n == "Vec");
+                if !base_is_array {
+                    return None;
+                }
+                Self::inferred_type_to_annotation(&args[0])?
+            }
+            _ => return None,
+        };
+        // The binding IS an array. Resolve C's carrier kind through the same
+        // annotation→kind path the annotated `let r: Array<C> = ...` binding
+        // uses. `Some(kind)` => authoritative scalar/heap carrier; `None` =>
+        // no carrier monomorphization (suppress stale stamp, fall to GetProp).
+        let array_ann = TypeAnnotation::Generic {
+            name: shape_ast::ast::TypePath::simple("Array"),
+            args: vec![elem_ann],
+        };
+        Some(self.resolve_typed_array_kind_from_annotation(&array_ann))
+    }
+
+    /// Project an inferred element [`Type`] down to a [`TypeAnnotation`] for the
+    /// array-carrier-kind resolution in [`Self::reconcile_binding_typed_array_kind`].
+    /// Only the shapes that have (or could have) a typed-array carrier are
+    /// projected; an unresolved type variable / function / nested generic yields
+    /// `None` (the caller then leaves the binding's capture untouched — no
+    /// fabricated annotation, no Bool-default).
+    fn inferred_type_to_annotation(
+        elem: &shape_runtime::type_system::Type,
+    ) -> Option<shape_ast::ast::TypeAnnotation> {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+        match elem {
+            Type::Concrete(ann) => Some(ann.clone()),
+            _ => None,
+        }
+    }
+
     /// Resolve an array receiver expression (`Identifier(name)`) to a
     /// [`TypedArrayKind`], if the receiver is a tracked array whose element
     /// type has a typed-array fast path.

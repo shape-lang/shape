@@ -5006,8 +5006,28 @@ impl BytecodeCompiler {
                 // so subsequent typed Get/Set/Push opcode emission can
                 // verify the receiver is actually a v2 typed array.
                 self.pending_variable_name = None;
-                let captured_typed_array_kind = self.pending_variable_typed_array_kind;
+                let mut captured_typed_array_kind = self.pending_variable_typed_array_kind;
                 self.pending_variable_typed_array_kind = None;
+                // Kind-changing-map carrier reconciliation (2026-06-15):
+                // `pending_variable_typed_array_kind` may have leaked from
+                // compiling a SUB-expression of the initializer (the receiver
+                // array literal of `<arr>.map(closure)`), stamping the INPUT
+                // element kind onto a binding whose RESULT carrier is the
+                // closure-return kind. Re-derive the binding's authoritative
+                // carrier kind from its PROVEN element type. `Some(Some(k))`
+                // overrides with the proven scalar carrier; `Some(None)`
+                // suppresses the stale stamp (heap/uncarriered element → the
+                // carrier-reading GetProp path); `None` leaves the capture
+                // untouched (non-array binding). Per ADR-006 §2.7.5 the
+                // inference engine's element type is the proof — never a
+                // bit-reinterpret of the input carrier.
+                if let Some(init_expr) = var_decl.value.as_ref() {
+                    if let Some(reconciled) =
+                        self.reconcile_binding_typed_array_kind(init_expr)
+                    {
+                        captured_typed_array_kind = reconciled;
+                    }
+                }
                 let captured_typed_map_kind = self.pending_variable_typed_map_kind;
                 self.pending_variable_typed_map_kind = None;
                 // Phase 4b Round 6 WS-1b W16.2-C residual: capture the bare
