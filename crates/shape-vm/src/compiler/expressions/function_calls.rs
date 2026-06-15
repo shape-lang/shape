@@ -1910,18 +1910,24 @@ impl BytecodeCompiler {
                     self, &ann,
                 )
                 .map(|_| ann)
+            })
+            // R3-subcase struct-array HOF (strict-flip, 2026-06-15): the
+            // `.iter()` adapter chain over a struct array
+            // (`users.iter().filter(|u| u.score > 85)`,
+            // `users.iter().find(|u| ...)`) — the name-based fallback above
+            // yields the lossy `Vec<object>` head-name which
+            // `declared_annotation_concrete_type` rejects, so the struct
+            // identity was lost and `u` stayed unannotated. `iter_element_concrete_type`
+            // recovers the element `ConcreteType::Struct(named)` (recursing the
+            // type-preserving `iter`/`filter`/`take`/`skip` adapters), and
+            // `concrete_type_to_type_annotation` renders it as `Reference(name)`
+            // so the closure param carries the struct type and `u.score`
+            // resolves. The name IS the proof (per ADR-006 §2.7.5); an unnamed /
+            // non-struct element yields `None` and the param stays unannotated.
+            .or_else(|| {
+                let elem_ct = self.iter_element_concrete_type(receiver)?;
+                crate::compiler::expressions::closures::concrete_type_to_type_annotation(&elem_ct)
             });
-        // R3-elemerasure (strict-flip) — SURFACED sub-case: an object-element
-        // HOF (`users.filter(|u| u.score > 85)`) does NOT recover the struct
-        // element type here. The struct identity is erased at array-of-structs
-        // binding time: the receiver's tracker type_name is `Vec<object>` (not
-        // `Vec<User>`) and the recorded element `ConcreteType` is
-        // `Struct(name: None, layout: placeholder)`. Recovering the struct name
-        // requires threading schema identity through the struct-array binding
-        // path — a distinct, broader recording fix, not the method-return
-        // element-erasure root R3 addresses here. Surfaced rather than forced
-        // (a `Basic("object")` annotation would mis-type the param and is not a
-        // valid struct type). See close-relay.
         let Some(elem_ann) = elem_ann_opt else {
             return Ok(());
         };
@@ -4989,6 +4995,118 @@ mod r3_subcase_struct_array_hof_tests {
         assert!(
             msg.contains("nonexistent"),
             "rejection should name the missing field; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn module_scope_filter_struct_array_resolves_result_element() {
+        // R3-subcase (strict-flip, 2026-06-15): a MODULE-scope struct array
+        // filter — the monomorphized `Vec.filter` body's `let mut result = [];
+        // result.push(item)` accumulator needs `item: User` to resolve the
+        // result element type. Pre-fix: the `for item in self` loop var carried
+        // only the lossy tracker NAME (`User`) which `concrete_type_for_expr`
+        // could not map back to `ConcreteType::Struct`, so the accumulator
+        // surfaced "empty array `result` has an un-resolvable element type".
+        let src = format!(
+            "{USER_TYPE}\
+             let users = [User {{ name: \"a\", score: 90 }}, User {{ name: \"b\", score: 50 }}]\n\
+             let high = users.filter(|u| u.score > 85)\n\
+             print(high.len())"
+        );
+        assert!(
+            compile_with_prelude(&src).is_ok(),
+            "module-scope filter over Array<User> should resolve its result element type"
+        );
+    }
+
+    #[test]
+    fn for_in_struct_array_reads_field_compiles() {
+        // The loop variable of `for u in users` must carry the `User`
+        // ConcreteType (not just the tracker name) so `u.score` resolves.
+        let src = format!(
+            "{USER_TYPE}\
+             let users = [User {{ name: \"a\", score: 90 }}, User {{ name: \"b\", score: 50 }}]\n\
+             for u in users {{ print(u.score) }}"
+        );
+        assert!(
+            compile_with_prelude(&src).is_ok(),
+            "for-in over Array<User> reading u.score should compile"
+        );
+    }
+
+    #[test]
+    fn iter_filter_struct_array_reads_field_compiles() {
+        // `.iter().filter(|u| u.score > 80)` — the type-preserving `iter`/
+        // `filter` adapter chain must thread the `User` element identity to the
+        // closure param. Pre-fix the name-based `.iter()` fallback yielded the
+        // lossy `Vec<object>` head-name which was rejected, so `u` stayed
+        // unannotated and `u.score > 80` surfaced "operand types are `unknown`
+        // and `int`".
+        let src = format!(
+            "{USER_TYPE}\
+             let users = [User {{ name: \"a\", score: 90 }}, User {{ name: \"b\", score: 50 }}]\n\
+             let hi = users.iter().filter(|u| u.score > 80).collect()\n\
+             print(hi.len())"
+        );
+        assert!(
+            compile_with_prelude(&src).is_ok(),
+            ".iter().filter over Array<User> reading u.score should compile"
+        );
+    }
+
+    #[test]
+    fn iter_find_struct_array_reads_field_compiles() {
+        // `.iter().find(|u| u.score > 80)` — same iterator-adapter element
+        // identity threading as the filter case.
+        let src = format!(
+            "{USER_TYPE}\
+             let users = [User {{ name: \"a\", score: 90 }}, User {{ name: \"b\", score: 50 }}]\n\
+             let f = users.iter().find(|u| u.score > 80)\n\
+             print(f)"
+        );
+        assert!(
+            compile_with_prelude(&src).is_ok(),
+            ".iter().find over Array<User> reading u.score should compile"
+        );
+    }
+
+    #[test]
+    fn filter_then_map_struct_field_chain_compiles() {
+        // The full R3 chain: `users.filter(|u| u.score > 85).map(|u| u.score)`
+        // — struct identity must survive the filter's result element type AND
+        // flow into the second closure's `u.score`. (Int-returning map; the
+        // String-returning `.map(|u| u.name)` carrier is the separate, pre-
+        // existing `Array.select: closure-return kind String` J.5d limitation.)
+        let src = format!(
+            "{USER_TYPE}\
+             let users = [User {{ name: \"a\", score: 90 }}, User {{ name: \"b\", score: 50 }}]\n\
+             let top = users.filter(|u| u.score > 85).map(|u| u.score)\n\
+             print(top.len())"
+        );
+        assert!(
+            compile_with_prelude(&src).is_ok(),
+            "filter(...).map(...) chain over Array<User> should compile"
+        );
+    }
+
+    #[test]
+    fn nonexistent_field_in_iter_filter_closure_rejects() {
+        // Soundness guard for the `.iter()` path: the struct identity now flows
+        // through the adapter chain, so a non-existent field still rejects.
+        let src = format!(
+            "{USER_TYPE}\
+             let users = [User {{ name: \"a\", score: 90 }}]\n\
+             let bad = users.iter().filter(|u| u.nonexistent > 5).collect()\n\
+             print(bad.len())"
+        );
+        let res = compile_with_prelude(&src);
+        assert!(
+            res.is_err(),
+            "a non-existent struct field inside the .iter().filter closure must reject"
+        );
+        assert!(
+            format!("{:?}", res.unwrap_err()).contains("nonexistent"),
+            "rejection should name the missing field"
         );
     }
 }

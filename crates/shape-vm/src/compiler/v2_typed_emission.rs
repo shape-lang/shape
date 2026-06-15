@@ -340,9 +340,9 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
         // compiler's `array_element_types[span]` side-table populated at the
         // literal site (which records the resolved struct schema, NOT this
         // round-trip placeholder).
-        TypedArrayKind::TypedObject => ConcreteType::placeholder_struct(
-            shape_value::v2::concrete_type::StructLayoutId(0),
-        ),
+        TypedArrayKind::TypedObject => {
+            ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0))
+        }
         // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
         // ConcreteType has no `dyn Trait` variant; the kind→ConcreteType
         // round-trip cannot recover the trait identity (every `Array<dyn T>`
@@ -350,9 +350,9 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
         // `Ptr(HeapKind::TraitObject)`). Return a placeholder_struct mirroring
         // the TypedObject arm; the bytecode compiler's `array_element_types`
         // side-table records the trait name at the literal site.
-        TypedArrayKind::TraitObject => ConcreteType::placeholder_struct(
-            shape_value::v2::concrete_type::StructLayoutId(0),
-        ),
+        TypedArrayKind::TraitObject => {
+            ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0))
+        }
         // Construction strict-typing close (2026-06-05) — nested array. The
         // kind→ConcreteType round-trip cannot recover the inner element type
         // (every nested-array monomorphization collapses to this one kind, the
@@ -361,11 +361,9 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
         // shape; downstream consumers that need the precise inner element type
         // read the bytecode compiler's `array_element_types[span]` side-table
         // populated at the literal site.
-        TypedArrayKind::TypedArray => ConcreteType::Array(Box::new(
-            ConcreteType::Array(Box::new(ConcreteType::placeholder_struct(
-                shape_value::v2::concrete_type::StructLayoutId(0),
-            ))),
-        )),
+        TypedArrayKind::TypedArray => ConcreteType::Array(Box::new(ConcreteType::Array(Box::new(
+            ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0)),
+        )))),
     }
 }
 
@@ -549,9 +547,7 @@ pub fn vec_element_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'sta
 /// proven at the producer site (the compiled element expression) — never
 /// decoded from runtime bits, never Bool-defaulted.
 #[inline]
-pub fn typed_array_kind_from_numeric_type(
-    nt: crate::type_tracking::NumericType,
-) -> TypedArrayKind {
+pub fn typed_array_kind_from_numeric_type(nt: crate::type_tracking::NumericType) -> TypedArrayKind {
     use crate::type_tracking::NumericType;
     use shape_ast::IntWidth;
     match nt {
@@ -620,7 +616,9 @@ impl super::BytecodeCompiler {
                     self.type_tracker.get_function_return_type(name).cloned()
                 }
                 Expr::QualifiedFunctionCall {
-                    namespace, function, ..
+                    namespace,
+                    function,
+                    ..
                 } => {
                     let qualified = format!("{}::{}", namespace, function);
                     self.type_tracker
@@ -637,9 +635,7 @@ impl super::BytecodeCompiler {
                 .get(&name)
                 .map(|s| s.as_str())
                 .unwrap_or(name.as_str());
-            if !self.struct_types.contains_key(resolved)
-                && !self.struct_types.contains_key(&name)
-            {
+            if !self.struct_types.contains_key(resolved) && !self.struct_types.contains_key(&name) {
                 return false;
             }
         }
@@ -727,8 +723,7 @@ impl super::BytecodeCompiler {
         }
         let mut acc: Option<ConcreteType> = None;
         for elem in elements {
-            let ct =
-                super::monomorphization::type_resolution::concrete_type_for_expr(self, elem)?;
+            let ct = super::monomorphization::type_resolution::concrete_type_for_expr(self, elem)?;
             // Only a NAMED struct / enum element carries recoverable identity.
             let named = match &ct {
                 ConcreteType::Struct(n) if n.name_str().is_some() => true,
@@ -792,9 +787,7 @@ impl super::BytecodeCompiler {
             _ => None,
         };
         if let Some(inner) = dyn_inner {
-            if crate::compiler::trait_object_emission::trait_name_from_annotation(inner)
-                .is_some()
-            {
+            if crate::compiler::trait_object_emission::trait_name_from_annotation(inner).is_some() {
                 return Some(TypedArrayKind::TraitObject);
             }
         }
@@ -821,9 +814,7 @@ impl super::BytecodeCompiler {
             .get(inner_name)
             .map(|s| s.as_str())
             .unwrap_or(inner_name);
-        if self.struct_types.contains_key(resolved)
-            || self.struct_types.contains_key(inner_name)
-        {
+        if self.struct_types.contains_key(resolved) || self.struct_types.contains_key(inner_name) {
             Some(TypedArrayKind::TypedObject)
         } else {
             None
@@ -932,14 +923,20 @@ impl super::BytecodeCompiler {
     ) -> Option<super::EmptyArrayAccumulatorKey> {
         if let Some(local_idx) = self.resolve_local(recv_name) {
             let key = super::EmptyArrayAccumulatorKey::Local(local_idx);
-            return self.empty_array_accumulators.contains_key(&key).then_some(key);
+            return self
+                .empty_array_accumulators
+                .contains_key(&key)
+                .then_some(key);
         }
         let scoped_name = self
             .resolve_scoped_module_binding_name(recv_name)
             .unwrap_or_else(|| recv_name.to_string());
         if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
             let key = super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx);
-            return self.empty_array_accumulators.contains_key(&key).then_some(key);
+            return self
+                .empty_array_accumulators
+                .contains_key(&key)
+                .then_some(key);
         }
         None
     }
@@ -1012,19 +1009,17 @@ impl super::BytecodeCompiler {
             .empty_array_accumulators
             .remove(&key)
             .expect("caller verified key presence");
-        self.program.instructions[acc.alloc_instr_idx] =
-            crate::bytecode::Instruction::new(
-                kind.new_opcode(),
-                Some(crate::bytecode::Operand::Count(0)),
-            );
+        self.program.instructions[acc.alloc_instr_idx] = crate::bytecode::Instruction::new(
+            kind.new_opcode(),
+            Some(crate::bytecode::Operand::Count(0)),
+        );
         // The resolved element type and the `Array<elem>` carrier type — the
         // same stamps the annotated `let mut xs: Array<T> = []` path records,
         // so a downstream `xs[i]` index access / `.method()` dispatch on the
         // promoted accumulator resolves through the type tracker exactly as
         // it would for an annotated binding (ADR-006 §2.7.5).
         let elem_ct = concrete_type_for_typed_array_kind(kind);
-        let array_ct =
-            shape_value::v2::ConcreteType::Array(Box::new(elem_ct.clone()));
+        let array_ct = shape_value::v2::ConcreteType::Array(Box::new(elem_ct.clone()));
         let array_type_name = vec_type_name_for_typed_array_kind(kind);
         match key {
             super::EmptyArrayAccumulatorKey::Local(local_idx) => {
@@ -1035,7 +1030,8 @@ impl super::BytecodeCompiler {
                 self.local_array_element_types.insert(local_idx, elem_ct);
             }
             super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx) => {
-                self.v2_typed_array_module_bindings.insert(binding_idx, kind);
+                self.v2_typed_array_module_bindings
+                    .insert(binding_idx, kind);
                 self.set_module_binding_type_info(binding_idx, array_type_name);
                 self.module_binding_concrete_types
                     .insert(binding_idx, array_ct);
@@ -1123,7 +1119,9 @@ impl super::BytecodeCompiler {
         // Stack: [value]. The typed push needs [arr, value] — load the
         // array and swap it under the already-compiled value.
         self.emit_load_accumulator_binding(key);
-        self.emit(crate::bytecode::Instruction::simple(crate::bytecode::OpCode::Swap));
+        self.emit(crate::bytecode::Instruction::simple(
+            crate::bytecode::OpCode::Swap,
+        ));
         self.emit(crate::bytecode::Instruction::simple(kind.push_opcode()));
         self.emit_load_accumulator_binding(key);
         Ok(true)
@@ -2430,12 +2428,14 @@ mod compile_integration_tests {
     }
 
     #[test]
-    #[ignore]  // diagnostic-only — enable to trace opcode emission for decimal
+    #[ignore] // diagnostic-only — enable to trace opcode emission for decimal
     fn debug_decimal_opcodes() {
-        let prog = compile(r#"
+        let prog = compile(
+            r#"
             let arr: Array<decimal> = [1.5D, 2.5D]
             arr
-            "#);
+            "#,
+        );
         for (i, instr) in prog.instructions.iter().enumerate() {
             eprintln!("[{i}] {:?} {:?}", instr.opcode, instr.operand);
         }

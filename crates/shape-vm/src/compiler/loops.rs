@@ -410,6 +410,17 @@ impl BytecodeCompiler {
                         if let Some(elem_type) = self.iter_element_type_name(iter) {
                             self.set_local_type_info(local_idx, &elem_type);
                         }
+                        // R3-subcase struct-array HOF (strict-flip, 2026-06-15):
+                        // carry the element's full ConcreteType (struct/enum
+                        // identity, not just the tracker name string) so a
+                        // `for u in users { u.score }` field access — and the
+                        // `result.push(item)` accumulator in the monomorphized
+                        // `Vec.filter` body — resolves `u`/`item` to the named
+                        // struct rather than `unknown`.
+                        if let Some(elem_ct) = self.iter_element_concrete_type(iter) {
+                            self.current_function_local_concrete_types
+                                .insert(local_idx, elem_ct);
+                        }
                     }
                 }
 
@@ -769,6 +780,13 @@ impl BytecodeCompiler {
         if let shape_ast::ast::Pattern::Identifier(_) = &for_expr.pattern {
             if let Some(elem_type) = self.iter_element_type_name(&for_expr.iterable) {
                 self.set_local_type_info(elem_local, &elem_type);
+            }
+            // R3-subcase struct-array HOF (strict-flip, 2026-06-15): see the
+            // matching site in `compile_for_loop` — carry the struct/enum
+            // element identity to the loop variable's ConcreteType.
+            if let Some(elem_ct) = self.iter_element_concrete_type(&for_expr.iterable) {
+                self.current_function_local_concrete_types
+                    .insert(elem_local, elem_ct);
             }
         }
 
@@ -1650,6 +1668,57 @@ impl BytecodeCompiler {
             {
                 self.iter_element_type_name(receiver)
             }
+            _ => None,
+        }
+    }
+
+    /// R3-subcase struct-array HOF (strict-flip, 2026-06-15): recover the loop
+    /// variable's element [`ConcreteType`] from the iterable.
+    ///
+    /// Parallels [`iter_element_type_name`] but returns the full `ConcreteType`
+    /// rather than a tracker name string. This is the load-bearing fix for
+    /// `for u in users { ... }` / `users.iter().filter(|u| u.score > 85)` where
+    /// `users: Array<User>`: the string-name path records the loop var's tracker
+    /// type as `"User"`, but `concrete_type_for_expr(u)` →
+    /// `identifier_concrete_type`'s `concrete_type_from_type_name` fallback only
+    /// recognizes `Vec<...>` head-names — a bare struct name yields `None`, so
+    /// `u.score` (and the `result.push(item)` accumulator in the monomorphized
+    /// `Vec.filter` body) saw `u: unknown`. Seeding
+    /// `current_function_local_concrete_types[elem_local]` with the element
+    /// `ConcreteType::Struct(named)` carries the struct identity to the field
+    /// access / accumulator resolution.
+    ///
+    /// Derivation is type-proven (ADR-006 §2.7.5): the element type is the
+    /// inner `T` of the iterable's already-resolved `ConcreteType::Array(T)`
+    /// (recorded at the binding's let-statement / literal span). A non-array or
+    /// unresolvable iterable yields `None` — the loop var stays unstamped and
+    /// the existing string-name path / bidirectional inference is unchanged.
+    pub(super) fn iter_element_concrete_type(
+        &self,
+        iter: &Expr,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        use shape_value::v2::ConcreteType;
+        // Type-preserving iterator adapters yield the receiver's element type;
+        // recurse on the receiver (mirrors the `iter_element_type_name`
+        // MethodCall arm). Type-CHANGING adapters (`map`/`flatMap`/`enumerate`)
+        // are not recursed — their element type is not statically recoverable
+        // from the receiver here.
+        if let Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } = iter
+        {
+            if matches!(method.as_str(), "iter" | "filter" | "take" | "skip")
+                && (method != "iter" || args.is_empty())
+            {
+                return self.iter_element_concrete_type(receiver);
+            }
+        }
+        match crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, iter)
+        {
+            Some(ConcreteType::Array(elem)) => Some(*elem),
             _ => None,
         }
     }
