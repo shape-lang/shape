@@ -153,7 +153,9 @@ impl TypeEnvironment {
         // tracked separately). Registering them here would make the checker
         // accept calls that then crash at runtime, so they are intentionally
         // left unregistered until the prelude-export gap is fixed.
-        for unary in ["sin", "cos", "tan", "asin", "acos", "atan", "log", "exp", "ln"] {
+        for unary in [
+            "sin", "cos", "tan", "asin", "acos", "atan", "log", "exp", "ln",
+        ] {
             self.define_builtin(unary, vec![BuiltinTypes::number()], BuiltinTypes::number());
         }
         // pow(base, exponent) — 2-arg `(number, number) -> number`.
@@ -287,7 +289,7 @@ impl TypeEnvironment {
     /// Built-in types (string, number, int, decimal, bool, array, hashmap, Table, DataTable)
     /// get automatic Content implementations so they can be used in c-strings and content dispatch.
     fn register_content_trait(&mut self) {
-        use shape_ast::ast::{FunctionParam, TraitMemberSignature, TraitMember};
+        use shape_ast::ast::{FunctionParam, TraitMember, TraitMemberSignature};
 
         let content_trait = TraitDef {
             name: "Content".to_string(),
@@ -374,7 +376,7 @@ impl TypeEnvironment {
     /// Types implementing Drop have their `drop(self)` method called automatically
     /// when a binding goes out of scope.
     fn register_drop_trait(&mut self) {
-        use shape_ast::ast::{FunctionParam, TraitMemberSignature, TraitMember};
+        use shape_ast::ast::{FunctionParam, TraitMember, TraitMemberSignature};
 
         let drop_trait = TraitDef {
             name: "Drop".to_string(),
@@ -412,7 +414,7 @@ impl TypeEnvironment {
     /// Concrete conversions are provided by trait implementations (for example
     /// in `std::core::into`) and may be named selectors.
     fn register_into_trait(&mut self) {
-        use shape_ast::ast::{TraitMemberSignature, TraitMember, TypeParam};
+        use shape_ast::ast::{TraitMember, TraitMemberSignature, TypeParam};
 
         let into_trait = TraitDef {
             name: "Into".to_string(),
@@ -445,7 +447,7 @@ impl TypeEnvironment {
     /// Concrete conversions are provided by trait implementations (for example
     /// in `std::core::try_into`) and may be named selectors.
     fn register_try_into_trait(&mut self) {
-        use shape_ast::ast::{TraitMemberSignature, TraitMember, TypeParam};
+        use shape_ast::ast::{TraitMember, TraitMemberSignature, TypeParam};
 
         let try_into_trait = TraitDef {
             name: "TryInto".to_string(),
@@ -484,7 +486,7 @@ impl TypeEnvironment {
     /// Types implementing Iterable have an `iter()` method that returns an `Iterator<T>`.
     /// Built-in impls: Array, String, Range, HashMap, DataTable.
     fn register_iterable_trait(&mut self) {
-        use shape_ast::ast::{FunctionParam, TraitMemberSignature, TraitMember, TypeParam};
+        use shape_ast::ast::{FunctionParam, TraitMember, TraitMemberSignature, TypeParam};
 
         let iterable_trait = TraitDef {
             name: "Iterable".to_string(),
@@ -518,6 +520,47 @@ impl TypeEnvironment {
         };
         self.define_trait(&iterable_trait);
 
+        // Wave-1b SEAM A (user ruling 2026-06-15): Iterator is a REAL
+        // user-implementable trait. Its single REQUIRED member is
+        // `next(self) -> Option<T>`; the adapter/terminal methods (map/filter/
+        // collect/...) are seeded onto the `Iterator` receiver in the
+        // MethodTable and inherited by user impls via
+        // `MethodTable::register_iterator_methods` (items.rs::register_impl).
+        // A user writes `type Counter {...}  impl Iterator for Counter { fn
+        // next(self) -> Option<int> {...} }` and gets `.next()` + the full
+        // adapter/terminal surface. Runtime bodies are SEAM B.
+        let iterator_trait = TraitDef {
+            name: "Iterator".to_string(),
+            doc_comment: None,
+            type_params: Some(vec![TypeParam::Type {
+                name: "T".to_string(),
+                span: Span::DUMMY,
+                doc_comment: None,
+                default_type: None,
+                trait_bounds: vec![],
+            }]),
+            super_traits: vec![],
+            members: vec![TraitMember::Required(TraitMemberSignature::Method {
+                name: "next".to_string(),
+                optional: false,
+                params: vec![FunctionParam {
+                    name: Some("self".to_string()),
+                    type_annotation: TypeAnnotation::Basic("Self".to_string()),
+                    optional: false,
+                }],
+                return_type: TypeAnnotation::Generic {
+                    name: "Option".into(),
+                    args: vec![TypeAnnotation::Reference("T".into())],
+                },
+                is_async: false,
+                span: Span::DUMMY,
+                doc_comment: None,
+            })],
+            annotations: vec![],
+            is_comptime: false,
+        };
+        self.define_trait(&iterator_trait);
+
         // Register built-in Iterable impls for collection types.
         let iterable_types = [
             "Array",
@@ -542,7 +585,7 @@ impl TypeEnvironment {
     /// Unary:  Neg(neg) — `fn neg(self) -> Self`
     /// Comparison: Eq(eq) — `fn eq(self, other) -> bool`, Ord(cmp) — `fn cmp(self, other) -> int`
     fn register_operator_traits(&mut self) {
-        use shape_ast::ast::{FunctionParam, TraitMemberSignature, TraitMember};
+        use shape_ast::ast::{FunctionParam, TraitMember, TraitMemberSignature};
 
         let self_param = FunctionParam {
             name: Some("self".to_string()),
@@ -681,25 +724,21 @@ impl TypeEnvironment {
         // The set is deliberately conservative: only types that have direct
         // typed comparison opcodes are registered. Decimal/BigInt/DateTime
         // can be added later when their stdlib impls land.
-        let comparable_types = ["int", "i8", "i16", "i32", "i64",
-                                "u8", "u16", "u32", "u64",
-                                "number", "f32", "f64",
-                                "bool", "string"];
+        let comparable_types = [
+            "int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "number", "f32", "f64",
+            "bool", "string",
+        ];
         for type_name in &comparable_types {
             // Methods are no-ops at registration time; the typed opcode path
             // services the actual comparison. We pass the trait's required
             // method name so `register_trait_impl`'s arity/name validation
             // succeeds.
-            let _ = self.type_registry.register_trait_impl(
-                "Eq",
-                type_name,
-                vec!["eq".to_string()],
-            );
-            let _ = self.type_registry.register_trait_impl(
-                "Ord",
-                type_name,
-                vec!["cmp".to_string()],
-            );
+            let _ = self
+                .type_registry
+                .register_trait_impl("Eq", type_name, vec!["eq".to_string()]);
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Ord", type_name, vec!["cmp".to_string()]);
         }
 
         // Phase 3b: register arithmetic trait impls (Add/Sub/Mul/Div/Neg) for
@@ -708,40 +747,28 @@ impl TypeEnvironment {
         // …) directly when both operands have the proven primitive type.
         // These impls exist so call-site bound checking on `<T: Add>` etc.
         // succeeds when `T` resolves to a primitive numeric type.
-        let arithmetic_types = ["int", "i8", "i16", "i32", "i64",
-                                "u8", "u16", "u32", "u64",
-                                "number", "f32", "f64"];
+        let arithmetic_types = [
+            "int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "number", "f32", "f64",
+        ];
         for type_name in &arithmetic_types {
-            let _ = self.type_registry.register_trait_impl(
-                "Add",
-                type_name,
-                vec!["add".to_string()],
-            );
-            let _ = self.type_registry.register_trait_impl(
-                "Sub",
-                type_name,
-                vec!["sub".to_string()],
-            );
-            let _ = self.type_registry.register_trait_impl(
-                "Mul",
-                type_name,
-                vec!["mul".to_string()],
-            );
-            let _ = self.type_registry.register_trait_impl(
-                "Div",
-                type_name,
-                vec!["div".to_string()],
-            );
-            let _ = self.type_registry.register_trait_impl(
-                "Mod",
-                type_name,
-                vec!["mod".to_string()],
-            );
-            let _ = self.type_registry.register_trait_impl(
-                "Neg",
-                type_name,
-                vec!["neg".to_string()],
-            );
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Add", type_name, vec!["add".to_string()]);
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Sub", type_name, vec!["sub".to_string()]);
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Mul", type_name, vec!["mul".to_string()]);
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Div", type_name, vec!["div".to_string()]);
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Mod", type_name, vec!["mod".to_string()]);
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Neg", type_name, vec!["neg".to_string()]);
         }
 
         // W1.6: register `Not` impl for `bool` so `<T: Not>` bound
@@ -749,11 +776,9 @@ impl TypeEnvironment {
         // `OpCode::Not` services the actual operation — this is a
         // bookkeeping-only registration, sibling of the Neg arithmetic
         // registrations above.
-        let _ = self.type_registry.register_trait_impl(
-            "Not",
-            "bool",
-            vec!["not".to_string()],
-        );
+        let _ = self
+            .type_registry
+            .register_trait_impl("Not", "bool", vec!["not".to_string()]);
 
         // W1.9: register `BitAnd` / `BitOr` / `BitXor` impls for
         // primitive integer types. Bitwise operators apply to integers
@@ -763,8 +788,7 @@ impl TypeEnvironment {
         // operations — these registrations are bookkeeping-only so
         // call-site bound checking on `<T: BitAnd>` etc. succeeds
         // when `T` resolves to a primitive integer type.
-        let bitwise_types = ["int", "i8", "i16", "i32", "i64",
-                             "u8", "u16", "u32", "u64"];
+        let bitwise_types = ["int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"];
         for type_name in &bitwise_types {
             let _ = self.type_registry.register_trait_impl(
                 "BitAnd",
@@ -886,19 +910,14 @@ impl TypeEnvironment {
         // bookkeeping so `<T: Shl>` / `<T: Shr>` bound checking
         // succeeds when T resolves to an integer type. Sibling of
         // the Add/Sub/Mul/Div/Mod registrations above.
-        let shift_types = ["int", "i8", "i16", "i32", "i64",
-                           "u8", "u16", "u32", "u64"];
+        let shift_types = ["int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"];
         for type_name in &shift_types {
-            let _ = self.type_registry.register_trait_impl(
-                "Shl",
-                type_name,
-                vec!["shl".to_string()],
-            );
-            let _ = self.type_registry.register_trait_impl(
-                "Shr",
-                type_name,
-                vec!["shr".to_string()],
-            );
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Shl", type_name, vec!["shl".to_string()]);
+            let _ =
+                self.type_registry
+                    .register_trait_impl("Shr", type_name, vec!["shr".to_string()]);
         }
 
         // D1 (numeric-conversion GREEN Stage 1): pre-register the prelude
@@ -1184,9 +1203,7 @@ impl TypeEnvironment {
         let option_t = TypeVar::new("T".to_string());
         let option_inner = Type::Variable(option_t.clone());
         let option_result = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Option".into()))),
             args: vec![option_inner.clone()],
         };
         self.define_polymorphic("Some", vec![option_t], vec![option_inner], option_result);
@@ -1195,9 +1212,7 @@ impl TypeEnvironment {
         let ok_e = TypeVar::new("E".to_string());
         let ok_inner = Type::Variable(ok_t.clone());
         let ok_result = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
             args: vec![ok_inner.clone(), Type::Variable(ok_e.clone())],
         };
         let mut ok_defaults = std::collections::HashMap::new();
@@ -1218,9 +1233,7 @@ impl TypeEnvironment {
         let err_ok_t = TypeVar::new("T".to_string());
         let err_payload_t = TypeVar::new("E".to_string());
         let err_result = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
             args: vec![
                 Type::Variable(err_ok_t.clone()),
                 Type::Variable(err_payload_t.clone()),
@@ -1902,7 +1915,7 @@ mod tests {
 
     #[test]
     fn test_trait_define_and_lookup() {
-        use shape_ast::ast::{TraitMemberSignature, TraitMember};
+        use shape_ast::ast::{TraitMember, TraitMemberSignature};
 
         let mut env = TypeEnvironment::new();
 
@@ -1947,7 +1960,7 @@ mod tests {
 
     #[test]
     fn test_trait_impl_registration() {
-        use shape_ast::ast::{TraitMemberSignature, TraitMember};
+        use shape_ast::ast::{TraitMember, TraitMemberSignature};
 
         let mut env = TypeEnvironment::new();
 
@@ -1995,7 +2008,7 @@ mod tests {
 
     #[test]
     fn test_trait_impl_missing_method() {
-        use shape_ast::ast::{TraitMemberSignature, TraitMember};
+        use shape_ast::ast::{TraitMember, TraitMemberSignature};
 
         let mut env = TypeEnvironment::new();
 

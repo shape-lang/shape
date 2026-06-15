@@ -1005,6 +1005,18 @@ impl TypeInferenceEngine {
 
         let has_receiver_params = !receiver_type_params.is_empty();
 
+        // Wave-1b SEAM A (user ruling 2026-06-15): Iterator is a REAL
+        // user-implementable trait. When the user writes `impl Iterator for
+        // MyType`, seed the Iterator adapter/terminal surface (map/filter/
+        // collect/...) onto MyType so `myValue.map(...)` etc. resolve. This
+        // runs BEFORE the per-impl-method loop below so the user's own `next`
+        // (and any adapter override) overwrites the seeded signature rather
+        // than the reverse. Gated on `trait_name == "Iterator"`, so it touches
+        // no other type and cannot regress existing method resolution.
+        if trait_name == "Iterator" {
+            self.method_table.register_iterator_methods(&type_name);
+        }
+
         // Register each impl method in the method table under the target type
         let impl_method_names: Vec<String> =
             impl_block.methods.iter().map(|m| m.name.clone()).collect();

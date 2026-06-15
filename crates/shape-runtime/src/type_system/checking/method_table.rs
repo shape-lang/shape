@@ -215,6 +215,10 @@ impl MethodTable {
             name: "HashMap".to_string(),
             args: vec![k, v],
         };
+        let iter_of = |arg: E| E::GenericContainer {
+            name: "Iterator".to_string(),
+            args: vec![arg],
+        };
         let int = || E::Concrete(BuiltinTypes::integer());
         let num = || E::Concrete(BuiltinTypes::number());
         let boolean = || E::Concrete(BuiltinTypes::boolean());
@@ -226,6 +230,12 @@ impl MethodTable {
         let vec_methods: Vec<(&str, usize, Vec<E>, E)> = vec![
             ("first", 0, vec![], E::ReceiverParam(0)),
             ("last", 0, vec![], E::ReceiverParam(0)),
+            // Wave-1b SEAM A: `iter()` produces a lazy `Iterator<T>`. The
+            // Iterator receiver itself carries the adapter/terminal sigs
+            // (`register_iterator_methods` below). Mirrors the W13 lazy-iterator
+            // factory (`Array.iter`, method_registry.rs:348). Runtime body is
+            // SEAM B.
+            ("iter", 0, vec![], iter_of(E::ReceiverParam(0))),
             ("push", 0, vec![E::ReceiverParam(0)], E::SelfType),
             ("pop", 0, vec![], E::ReceiverParam(0)),
             ("reverse", 0, vec![], E::SelfType),
@@ -530,6 +540,16 @@ impl MethodTable {
             ),
             ("toString", vec![], BuiltinTypes::string()),
             ("join", vec![BuiltinTypes::string()], BuiltinTypes::string()),
+            // Wave-1b SEAM A: `"abc".iter()` -> Iterator<string> (per-char).
+            // Mirrors W13 `String.iter`. Runtime body is SEAM B.
+            (
+                "iter",
+                vec![],
+                Type::Generic {
+                    base: Box::new(Type::Concrete(TypeAnnotation::Reference("Iterator".into()))),
+                    args: vec![BuiltinTypes::string()],
+                },
+            ),
         ];
         for (name, params, ret) in str_methods {
             self.register_method("string", name, params, ret, false);
@@ -560,6 +580,9 @@ impl MethodTable {
             ("keys", 0, vec![], vec_of(E::ReceiverParam(0))),
             ("values", 0, vec![], vec_of(E::ReceiverParam(1))),
             ("entries", 0, vec![], vec_of(vec_of(E::ReceiverParam(0)))),
+            // Wave-1b SEAM A: `m.iter()` -> Iterator<[K]> (entry pairs, mirrors
+            // `entries`). W13 `HashMap.iter` factory. Runtime body is SEAM B.
+            ("iter", 0, vec![], iter_of(vec_of(E::ReceiverParam(0)))),
             ("len", 0, vec![], int()),
             ("isEmpty", 0, vec![], boolean()),
             (
@@ -705,6 +728,32 @@ impl MethodTable {
             self.register_user_generic_method("PriorityQueue", name, mtp, params, ret, vec![]);
         }
 
+        // ---- Range<T> (receiver param 0 = T) ---------------------------
+        // Wave-1b SEAM A: `(0..10).iter()` -> Iterator<int>. A range is
+        // `Range<int>` (expressions.rs:1423); `extract_receiver_info` keys it
+        // under "Range". Only `iter` is seeded here — other Range PHF methods
+        // (RANGE_METHODS, method_registry.rs:1048) are out of this seam's
+        // scope. Runtime body is SEAM B.
+        self.register_user_generic_method(
+            "Range",
+            "iter",
+            0,
+            vec![],
+            iter_of(E::ReceiverParam(0)),
+            vec![],
+        );
+
+        // ---- Iterator<T> (receiver param 0 = T) ------------------------
+        // Wave-1b SEAM A (user ruling 2026-06-15): Iterator is a REAL
+        // user-implementable trait. Seed its adapter/terminal signatures onto
+        // the canonical `Iterator` receiver so a chained pipeline
+        // (`xs.iter().map(f).filter(g).collect()`) type-resolves. Mirrors the
+        // W13 `ITERATOR_METHODS` PHF (method_registry.rs:638). A user
+        // `impl Iterator for MyType` inherits the same set via
+        // `register_iterator_methods("MyType")` (items.rs::register_impl).
+        // Runtime bodies are SEAM B.
+        self.register_iterator_methods("Iterator");
+
         // FOLLOW-UP (concurrency-method seeds): `Mutex`/`Atomic`/`Lazy`/
         // `Channel` ctors ARE registered in `environment/mod.rs` (clears the
         // undefined-function FP class), but their PHF method sets
@@ -716,6 +765,85 @@ impl MethodTable {
         // int). Per the SMOKE-s4-s5 spec ("if a sibling is complex/ambiguous,
         // register its ctor + flag its methods as a follow-up rather than
         // guess"), these are deliberately left for a precise follow-up.
+    }
+
+    /// Wave-1b SEAM A (user ruling 2026-06-15): seed the Iterator-trait
+    /// adapter + terminal method signatures onto `receiver` (receiver param 0 =
+    /// the element type T). Called once for the canonical `Iterator` receiver
+    /// (from `register_builtin_collection_methods`) and again, per user type,
+    /// from `register_impl` when a user writes `impl Iterator for MyType`. This
+    /// is purely additive: it only registers Iterator-trait methods, and only
+    /// onto the named receiver — it cannot change resolution of any existing
+    /// builtin/trait method on any other type.
+    ///
+    /// Mirrors the W13 `ITERATOR_METHODS` PHF (method_registry.rs:638):
+    /// lazy adapters return a new `Iterator<...>`; eager terminals consume.
+    /// Runtime bodies are SEAM B.
+    pub fn register_iterator_methods(&mut self, receiver: &str) {
+        use TypeParamExpr as E;
+
+        let func = |params: Vec<E>, returns: E| E::Function {
+            params,
+            returns: Box::new(returns),
+        };
+        let iter_of = |arg: E| E::GenericContainer {
+            name: "Iterator".to_string(),
+            args: vec![arg],
+        };
+        let vec_of = |arg: E| E::GenericContainer {
+            name: "Vec".to_string(),
+            args: vec![arg],
+        };
+        let opt_of = |arg: E| E::GenericContainer {
+            name: "Option".to_string(),
+            args: vec![arg],
+        };
+        let int = || E::Concrete(BuiltinTypes::integer());
+        let boolean = || E::Concrete(BuiltinTypes::boolean());
+        let void = || E::Concrete(Type::Concrete(TypeAnnotation::Basic("void".into())));
+
+        // T = element type = receiver param 0.
+        let t = || E::ReceiverParam(0);
+
+        // (name, method_type_params, param_types, return_type)
+        let iterator_methods: Vec<(&str, usize, Vec<E>, E)> = vec![
+            // --- the trait's defining method ---
+            // `next(self) -> Option<T>` — the single REQUIRED member of the
+            // Iterator trait. Seeded so it resolves on the canonical Iterator
+            // receiver; a user impl overrides it with the user's own body.
+            ("next", 0, vec![], opt_of(t())),
+            // --- lazy adapters (return a new Iterator) ---
+            ("map", 1, vec![func(vec![t()], E::MethodParam(0))], iter_of(E::MethodParam(0))),
+            ("filter", 0, vec![func(vec![t()], boolean())], iter_of(t())),
+            ("take", 0, vec![int()], iter_of(t())),
+            ("skip", 0, vec![int()], iter_of(t())),
+            (
+                "flatMap",
+                1,
+                vec![func(vec![t()], iter_of(E::MethodParam(0)))],
+                iter_of(E::MethodParam(0)),
+            ),
+            // `enumerate()` -> Iterator<[int, T]> ([index, value] pairs).
+            ("enumerate", 0, vec![], iter_of(vec_of(t()))),
+            ("chain", 0, vec![iter_of(t())], iter_of(t())),
+            // --- eager terminals (consume the iterator) ---
+            ("collect", 0, vec![], vec_of(t())),
+            ("toArray", 0, vec![], vec_of(t())),
+            ("forEach", 0, vec![func(vec![t()], void())], void()),
+            (
+                "reduce",
+                1,
+                vec![func(vec![E::MethodParam(0), t()], E::MethodParam(0)), E::MethodParam(0)],
+                E::MethodParam(0),
+            ),
+            ("count", 0, vec![], int()),
+            ("any", 0, vec![func(vec![t()], boolean())], boolean()),
+            ("all", 0, vec![func(vec![t()], boolean())], boolean()),
+            ("find", 0, vec![func(vec![t()], boolean())], opt_of(t())),
+        ];
+        for (name, mtp, params, ret) in iterator_methods {
+            self.register_user_generic_method(receiver, name, mtp, params, ret, vec![]);
+        }
     }
 
     /// Register generic builtin methods for types with type parameters.
