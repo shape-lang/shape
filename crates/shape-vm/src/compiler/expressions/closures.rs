@@ -11,6 +11,510 @@ use shape_value::v2::concrete_type::{ClosureTypeId, ConcreteType};
 use std::collections::BTreeSet;
 
 use super::super::BytecodeCompiler;
+use crate::compiler::ClosureCallsiteHint;
+
+/// Wave 1a PART A: infer a `TypeAnnotation` for a single call-site argument
+/// expression, conservatively. Returns `None` when the argument's type cannot
+/// be determined structurally (the corresponding param slot then stays
+/// unannotated — no fabrication, no `any`).
+///
+/// Only literal / structurally-obvious forms are inferred. This is the
+/// CALL-SITE side of the bidirectional flow `let f = |a, b| a + b; f(2, 3)`:
+/// `f(2, 3)` yields `[Some(int), Some(int)]`, which seeds the closure params.
+///
+/// `int` and `number` are kept distinct (`2` → int, `2.0` → number) so a
+/// later conflicting site (`f(2.0)`) is detected as a conflict rather than
+/// silently unified.
+fn infer_callsite_arg_type(arg: &Expr) -> Option<TypeAnnotation> {
+    use shape_ast::ast::{Literal, UnaryOp};
+    match arg {
+        Expr::Literal(lit, _) => match lit {
+            Literal::Int(_) => Some(TypeAnnotation::Basic("int".to_string())),
+            Literal::Number(_) => Some(TypeAnnotation::Basic("number".to_string())),
+            Literal::Bool(_) => Some(TypeAnnotation::Basic("bool".to_string())),
+            Literal::String(_) => Some(TypeAnnotation::Basic("string".to_string())),
+            _ => None,
+        },
+        // `-2` / `-2.0`: the unary-minus preserves the operand's numeric kind.
+        Expr::UnaryOp {
+            op: UnaryOp::Neg,
+            operand,
+            ..
+        } => match operand.as_ref() {
+            Expr::Literal(Literal::Int(_), _) => {
+                Some(TypeAnnotation::Basic("int".to_string()))
+            }
+            Expr::Literal(Literal::Number(_), _) => {
+                Some(TypeAnnotation::Basic("number".to_string()))
+            }
+            _ => None,
+        },
+        // `!flag`: a boolean. `not` on a non-bool is itself a strict error
+        // raised elsewhere; here we only claim a type when it is structurally
+        // a bool-producing op.
+        Expr::UnaryOp {
+            op: UnaryOp::Not, ..
+        } => Some(TypeAnnotation::Basic("bool".to_string())),
+        _ => None,
+    }
+}
+
+/// Wave 1a PART A: merge a freshly-observed call site's per-arg inferred types
+/// into the accumulated hint for a binding name.
+///
+/// Soundness rules (strict-typing core):
+/// * Differing concrete annotations at the same slot ⇒ `Conflict` (never pick
+///   one). `int` vs `number` differ, so they conflict.
+/// * `None` at a slot is "no info from this site"; it neither confirms nor
+///   conflicts — a later/earlier `Some` at that slot is kept.
+/// * Differing arities across call sites ⇒ `Conflict` (the binding is being
+///   used inconsistently; surface it rather than guess).
+fn merge_callsite_hint(
+    existing: Option<ClosureCallsiteHint>,
+    observed: Vec<Option<TypeAnnotation>>,
+) -> ClosureCallsiteHint {
+    match existing {
+        None => ClosureCallsiteHint::Types(observed),
+        Some(ClosureCallsiteHint::Conflict) => ClosureCallsiteHint::Conflict,
+        Some(ClosureCallsiteHint::Types(prev)) => {
+            if prev.len() != observed.len() {
+                return ClosureCallsiteHint::Conflict;
+            }
+            let mut merged = Vec::with_capacity(prev.len());
+            for (a, b) in prev.into_iter().zip(observed.into_iter()) {
+                match (a, b) {
+                    (Some(ta), Some(tb)) => {
+                        if ta == tb {
+                            merged.push(Some(ta));
+                        } else {
+                            // int != number, and any two distinct annotations
+                            // at the same slot are a genuine conflict.
+                            return ClosureCallsiteHint::Conflict;
+                        }
+                    }
+                    (Some(t), None) | (None, Some(t)) => merged.push(Some(t)),
+                    (None, None) => merged.push(None),
+                }
+            }
+            ClosureCallsiteHint::Types(merged)
+        }
+    }
+}
+
+/// Wave 1a PART A: whole-program pre-pass that, for every binding whose
+/// initializer is a closure literal, scans the program for DIRECT calls
+/// `name(args)` and records the per-arg call-site argument types so
+/// `compile_expr_closure` can seed the closure's unannotated params.
+///
+/// This is the producer side of the bidirectional flow; the consumer is
+/// `compile_expr_closure` (keyed on `pending_variable_name`).
+///
+/// Soundness: a name bound to a closure literal in MORE THAN ONE place
+/// (shadowing across scopes) is marked `Conflict` up front — a single
+/// name-keyed hint cannot soundly serve two distinct closures. Likewise a
+/// name called with conflicting arg types is `Conflict`. In both cases the
+/// hint is not applied and the closure keeps its existing behavior.
+pub(crate) fn collect_closure_callsite_param_hints(
+    program: &shape_ast::ast::Program,
+) -> std::collections::HashMap<String, ClosureCallsiteHint> {
+    use shape_ast::ast::{BlockItem, Item, Statement};
+    use std::collections::{HashMap, HashSet};
+
+    // ----- Pass 1: collect closure-bound names (and shadowing) -----
+    //
+    // A single recursive expr/stmt walker traverses BOTH statement-level and
+    // expression-level control flow (`Expr::For`/`While`/`If`/`Loop`/`Block`/
+    // `Match` and `BlockItem`), because a top-level `for`/`if`/block is parsed
+    // as an EXPRESSION at the item level, and bindings/calls can live anywhere
+    // inside.
+
+    let mut closure_binding_names: HashSet<String> = HashSet::new();
+    let mut shadowed_names: HashSet<String> = HashSet::new();
+
+    fn note_binding(
+        name: &str,
+        closure_names: &mut HashSet<String>,
+        shadowed: &mut HashSet<String>,
+    ) {
+        if !closure_names.insert(name.to_string()) {
+            shadowed.insert(name.to_string());
+        }
+    }
+
+    fn bind_stmt(
+        stmt: &Statement,
+        closure_names: &mut HashSet<String>,
+        shadowed: &mut HashSet<String>,
+    ) {
+        match stmt {
+            Statement::VariableDecl(decl, _) => {
+                if let (Some(name), Some(value)) =
+                    (decl.pattern.as_identifier(), decl.value.as_ref())
+                {
+                    if matches!(value, Expr::FunctionExpr { .. }) {
+                        note_binding(name, closure_names, shadowed);
+                    }
+                    bind_expr(value, closure_names, shadowed);
+                }
+            }
+            Statement::Assignment(asgn, _) => bind_expr(&asgn.value, closure_names, shadowed),
+            Statement::Expression(e, _) => bind_expr(e, closure_names, shadowed),
+            Statement::Return(Some(e), _) => bind_expr(e, closure_names, shadowed),
+            Statement::For(f, _) => {
+                for s in &f.body {
+                    bind_stmt(s, closure_names, shadowed);
+                }
+            }
+            Statement::While(w, _) => {
+                for s in &w.body {
+                    bind_stmt(s, closure_names, shadowed);
+                }
+            }
+            Statement::If(i, _) => {
+                for s in &i.then_body {
+                    bind_stmt(s, closure_names, shadowed);
+                }
+                if let Some(else_body) = &i.else_body {
+                    for s in else_body {
+                        bind_stmt(s, closure_names, shadowed);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn bind_block_item(
+        item: &BlockItem,
+        closure_names: &mut HashSet<String>,
+        shadowed: &mut HashSet<String>,
+    ) {
+        match item {
+            BlockItem::VariableDecl(decl) => {
+                if let (Some(name), Some(value)) =
+                    (decl.pattern.as_identifier(), decl.value.as_ref())
+                {
+                    if matches!(value, Expr::FunctionExpr { .. }) {
+                        note_binding(name, closure_names, shadowed);
+                    }
+                    bind_expr(value, closure_names, shadowed);
+                }
+            }
+            BlockItem::Assignment(asgn) => bind_expr(&asgn.value, closure_names, shadowed),
+            BlockItem::Statement(stmt) => bind_stmt(stmt, closure_names, shadowed),
+            BlockItem::Expression(e) => bind_expr(e, closure_names, shadowed),
+        }
+    }
+
+    fn bind_expr(
+        expr: &Expr,
+        closure_names: &mut HashSet<String>,
+        shadowed: &mut HashSet<String>,
+    ) {
+        match expr {
+            Expr::FunctionCall { args, .. } | Expr::QualifiedFunctionCall { args, .. } => {
+                for a in args {
+                    bind_expr(a, closure_names, shadowed);
+                }
+            }
+            Expr::MethodCall { receiver, args, .. } => {
+                bind_expr(receiver, closure_names, shadowed);
+                for a in args {
+                    bind_expr(a, closure_names, shadowed);
+                }
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                bind_expr(left, closure_names, shadowed);
+                bind_expr(right, closure_names, shadowed);
+            }
+            Expr::UnaryOp { operand, .. } => bind_expr(operand, closure_names, shadowed),
+            Expr::Reference { expr, .. } => bind_expr(expr, closure_names, shadowed),
+            Expr::Array(elems, _) => {
+                for e in elems {
+                    bind_expr(e, closure_names, shadowed);
+                }
+            }
+            Expr::IndexAccess { object, index, .. } => {
+                bind_expr(object, closure_names, shadowed);
+                bind_expr(index, closure_names, shadowed);
+            }
+            Expr::PropertyAccess { object, .. } => bind_expr(object, closure_names, shadowed),
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                bind_expr(condition, closure_names, shadowed);
+                bind_expr(then_expr, closure_names, shadowed);
+                if let Some(e) = else_expr {
+                    bind_expr(e, closure_names, shadowed);
+                }
+            }
+            Expr::FunctionExpr { body, .. } => {
+                for s in body {
+                    bind_stmt(s, closure_names, shadowed);
+                }
+            }
+            Expr::Block(block, _) => {
+                for it in &block.items {
+                    bind_block_item(it, closure_names, shadowed);
+                }
+            }
+            Expr::If(i, _) => {
+                bind_expr(&i.condition, closure_names, shadowed);
+                bind_expr(&i.then_branch, closure_names, shadowed);
+                if let Some(e) = &i.else_branch {
+                    bind_expr(e, closure_names, shadowed);
+                }
+            }
+            Expr::While(w, _) => {
+                bind_expr(&w.condition, closure_names, shadowed);
+                bind_expr(&w.body, closure_names, shadowed);
+            }
+            Expr::For(f, _) => {
+                bind_expr(&f.iterable, closure_names, shadowed);
+                bind_expr(&f.body, closure_names, shadowed);
+            }
+            Expr::Loop(l, _) => bind_expr(&l.body, closure_names, shadowed),
+            Expr::Match(m, _) => {
+                bind_expr(&m.scrutinee, closure_names, shadowed);
+                for arm in &m.arms {
+                    bind_expr(&arm.body, closure_names, shadowed);
+                }
+            }
+            Expr::Return(Some(e), _) => bind_expr(e, closure_names, shadowed),
+            Expr::Await(e, _) => bind_expr(e, closure_names, shadowed),
+            _ => {}
+        }
+    }
+
+    fn bind_item(
+        item: &Item,
+        closure_names: &mut HashSet<String>,
+        shadowed: &mut HashSet<String>,
+    ) {
+        match item {
+            Item::Statement(stmt, _) => bind_stmt(stmt, closure_names, shadowed),
+            Item::Expression(e, _) => bind_expr(e, closure_names, shadowed),
+            Item::Assignment(asgn, _) => bind_expr(&asgn.value, closure_names, shadowed),
+            Item::VariableDecl(decl, _) => {
+                if let (Some(name), Some(value)) =
+                    (decl.pattern.as_identifier(), decl.value.as_ref())
+                {
+                    if matches!(value, Expr::FunctionExpr { .. }) {
+                        note_binding(name, closure_names, shadowed);
+                    }
+                    bind_expr(value, closure_names, shadowed);
+                }
+            }
+            Item::Function(func, _) => {
+                for s in &func.body {
+                    bind_stmt(s, closure_names, shadowed);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for item in &program.items {
+        bind_item(item, &mut closure_binding_names, &mut shadowed_names);
+    }
+
+    // ----- Pass 2: collect call-site arg types for eligible names -----
+
+    let mut hints: HashMap<String, ClosureCallsiteHint> = HashMap::new();
+
+    fn handle_call(
+        name: &str,
+        args: &[Expr],
+        eligible: &HashSet<String>,
+        hints: &mut HashMap<String, ClosureCallsiteHint>,
+    ) {
+        if !eligible.contains(name) {
+            return;
+        }
+        let observed: Vec<Option<TypeAnnotation>> =
+            args.iter().map(infer_callsite_arg_type).collect();
+        let merged = merge_callsite_hint(hints.remove(name), observed);
+        hints.insert(name.to_string(), merged);
+    }
+
+    fn walk_expr(
+        expr: &Expr,
+        eligible: &HashSet<String>,
+        hints: &mut HashMap<String, ClosureCallsiteHint>,
+    ) {
+        match expr {
+            Expr::FunctionCall { name, args, .. } => {
+                handle_call(name, args, eligible, hints);
+                for a in args {
+                    walk_expr(a, eligible, hints);
+                }
+            }
+            Expr::QualifiedFunctionCall { args, .. } => {
+                for a in args {
+                    walk_expr(a, eligible, hints);
+                }
+            }
+            Expr::MethodCall { receiver, args, .. } => {
+                walk_expr(receiver, eligible, hints);
+                for a in args {
+                    walk_expr(a, eligible, hints);
+                }
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                walk_expr(left, eligible, hints);
+                walk_expr(right, eligible, hints);
+            }
+            Expr::UnaryOp { operand, .. } => walk_expr(operand, eligible, hints),
+            Expr::Reference { expr, .. } => walk_expr(expr, eligible, hints),
+            Expr::Array(elems, _) => {
+                for e in elems {
+                    walk_expr(e, eligible, hints);
+                }
+            }
+            Expr::IndexAccess { object, index, .. } => {
+                walk_expr(object, eligible, hints);
+                walk_expr(index, eligible, hints);
+            }
+            Expr::PropertyAccess { object, .. } => walk_expr(object, eligible, hints),
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                walk_expr(condition, eligible, hints);
+                walk_expr(then_expr, eligible, hints);
+                if let Some(else_e) = else_expr {
+                    walk_expr(else_e, eligible, hints);
+                }
+            }
+            Expr::FunctionExpr { body, .. } => {
+                for s in body {
+                    walk_stmt(s, eligible, hints);
+                }
+            }
+            Expr::Block(block, _) => {
+                for it in &block.items {
+                    walk_block_item(it, eligible, hints);
+                }
+            }
+            Expr::If(i, _) => {
+                walk_expr(&i.condition, eligible, hints);
+                walk_expr(&i.then_branch, eligible, hints);
+                if let Some(e) = &i.else_branch {
+                    walk_expr(e, eligible, hints);
+                }
+            }
+            Expr::While(w, _) => {
+                walk_expr(&w.condition, eligible, hints);
+                walk_expr(&w.body, eligible, hints);
+            }
+            Expr::For(f, _) => {
+                walk_expr(&f.iterable, eligible, hints);
+                walk_expr(&f.body, eligible, hints);
+            }
+            Expr::Loop(l, _) => walk_expr(&l.body, eligible, hints),
+            Expr::Match(m, _) => {
+                walk_expr(&m.scrutinee, eligible, hints);
+                for arm in &m.arms {
+                    walk_expr(&arm.body, eligible, hints);
+                }
+            }
+            Expr::Return(Some(e), _) => walk_expr(e, eligible, hints),
+            Expr::Await(e, _) => walk_expr(e, eligible, hints),
+            _ => {}
+        }
+    }
+
+    fn walk_block_item(
+        item: &BlockItem,
+        eligible: &HashSet<String>,
+        hints: &mut HashMap<String, ClosureCallsiteHint>,
+    ) {
+        match item {
+            BlockItem::VariableDecl(decl) => {
+                if let Some(v) = decl.value.as_ref() {
+                    walk_expr(v, eligible, hints);
+                }
+            }
+            BlockItem::Assignment(asgn) => walk_expr(&asgn.value, eligible, hints),
+            BlockItem::Statement(stmt) => walk_stmt(stmt, eligible, hints),
+            BlockItem::Expression(e) => walk_expr(e, eligible, hints),
+        }
+    }
+
+    fn walk_stmt(
+        stmt: &Statement,
+        eligible: &HashSet<String>,
+        hints: &mut HashMap<String, ClosureCallsiteHint>,
+    ) {
+        match stmt {
+            Statement::Expression(e, _) => walk_expr(e, eligible, hints),
+            Statement::Return(Some(e), _) => walk_expr(e, eligible, hints),
+            Statement::VariableDecl(decl, _) => {
+                if let Some(v) = decl.value.as_ref() {
+                    walk_expr(v, eligible, hints);
+                }
+            }
+            Statement::Assignment(asgn, _) => walk_expr(&asgn.value, eligible, hints),
+            Statement::For(f, _) => {
+                for s in &f.body {
+                    walk_stmt(s, eligible, hints);
+                }
+            }
+            Statement::While(w, _) => {
+                walk_expr(&w.condition, eligible, hints);
+                for s in &w.body {
+                    walk_stmt(s, eligible, hints);
+                }
+            }
+            Statement::If(i, _) => {
+                walk_expr(&i.condition, eligible, hints);
+                for s in &i.then_body {
+                    walk_stmt(s, eligible, hints);
+                }
+                if let Some(else_body) = &i.else_body {
+                    for s in else_body {
+                        walk_stmt(s, eligible, hints);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for item in &program.items {
+        match item {
+            Item::Statement(stmt, _) => walk_stmt(stmt, &closure_binding_names, &mut hints),
+            Item::Expression(e, _) => walk_expr(e, &closure_binding_names, &mut hints),
+            Item::Assignment(asgn, _) => {
+                walk_expr(&asgn.value, &closure_binding_names, &mut hints)
+            }
+            Item::VariableDecl(decl, _) => {
+                if let Some(v) = decl.value.as_ref() {
+                    walk_expr(v, &closure_binding_names, &mut hints);
+                }
+            }
+            Item::Function(func, _) => {
+                for s in &func.body {
+                    walk_stmt(s, &closure_binding_names, &mut hints);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Demote shadowed names to Conflict — a single name-keyed hint cannot
+    // soundly serve two distinct closure definitions.
+    for name in shadowed_names {
+        hints.insert(name, ClosureCallsiteHint::Conflict);
+    }
+
+    hints
+}
 
 /// Strict-typing-sweep (Cluster 2): scan a closure body for binary ops
 /// of the form `<param_name> <op> <literal>` (or the symmetric form), and
@@ -756,6 +1260,24 @@ impl BytecodeCompiler {
         // with their own explicit annotation always win.
         let user_param_hints = self.pending_closure_param_types.take();
 
+        // Wave 1a PART A: bidirectional inference from the let-binding's call
+        // sites. When this closure literal is the initializer of `let f = …`
+        // and `f` is invoked directly elsewhere (`f(2, 3)`), the whole-program
+        // pre-pass recorded the per-arg argument types. We seed each
+        // still-unannotated user param from those types here. `Conflict`
+        // (incompatible call sites, or a shadowed name) yields no hints — the
+        // closure keeps its existing rejection (strict-typing: no silent pick).
+        // `pending_variable_name` holds the binding name during the let-init
+        // compile (set in `Statement::VariableDecl` / `Item::VariableDecl`).
+        let callsite_param_hints: Option<Vec<Option<TypeAnnotation>>> = self
+            .pending_variable_name
+            .as_ref()
+            .and_then(|name| self.closure_callsite_param_hints.get(name))
+            .and_then(|hint| match hint {
+                ClosureCallsiteHint::Types(types) => Some(types.clone()),
+                ClosureCallsiteHint::Conflict => None,
+            });
+
         // Strict-typing-sweep (Cluster 2): closure-body param inference.
         // For closures bound to a `let` and called via the local (or
         // synthesized inside a generic body where const-args have been
@@ -773,6 +1295,17 @@ impl BytecodeCompiler {
                 if let Some(hints) = user_param_hints.as_ref() {
                     if let Some(Some(ann)) = hints.get(idx) {
                         p.type_annotation = Some(ann.clone());
+                    }
+                }
+                // 1b. Wave 1a PART A: let-binding direct-call-site hint.
+                //     `let f = |a, b| a + b; f(2, 3)` flows `a: int, b: int`
+                //     back into the params. Applied only to params still
+                //     unannotated after the HOF hint.
+                if p.type_annotation.is_none() {
+                    if let Some(hints) = callsite_param_hints.as_ref() {
+                        if let Some(Some(ann)) = hints.get(idx) {
+                            p.type_annotation = Some(ann.clone());
+                        }
                     }
                 }
                 // 2. Body-level literal-pairing heuristic. Pulls type

@@ -19,6 +19,23 @@ pub(crate) enum ExprResultMode {
     PreserveRef,
 }
 
+/// Wave 1a PART A: per-binding call-site argument-type hint for a let-bound
+/// closure, produced by the whole-program pre-pass and consumed by
+/// `compile_expr_closure`. See `closure_callsite_param_hints`.
+#[derive(Debug, Clone)]
+pub(crate) enum ClosureCallsiteHint {
+    /// All observed call sites agree (per arg slot). `types[i]` is the inferred
+    /// `TypeAnnotation` for argument slot `i`, or `None` when that slot's type
+    /// could not be inferred at any site. Soundness: only applied to params
+    /// that have no explicit annotation and no HOF hint.
+    Types(Vec<Option<shape_ast::ast::TypeAnnotation>>),
+    /// Two call sites disagreed on an argument's type (e.g. `f(1)` and
+    /// `f(2.0)`), or the binding name was bound to a closure literal in more
+    /// than one place (shadowing). The hint is NOT applied — the closure keeps
+    /// its existing rejection. Strict-typing: do NOT silently pick one type.
+    Conflict,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct ExprReferenceResult {
     pub raw_mode: Option<BorrowMode>,
@@ -659,6 +676,36 @@ pub struct BytecodeCompiler {
     /// no explicit annotation, then clears the field. The vector indexes
     /// USER params only (excludes synthesized capture-params).
     pub(crate) pending_closure_param_types: Option<Vec<Option<shape_ast::ast::TypeAnnotation>>>,
+
+    /// Wave 1a PART A (bidirectional let-bound-closure param inference).
+    ///
+    /// A `let f = |a, b| a + b` binding compiles the closure body EAGERLY at
+    /// the let-site, before any `f(2, 3)` call site is seen. The body's
+    /// unannotated params `a`/`b` then surface "Cannot infer types for binary
+    /// operation Add: operand types are unknown and unknown" because neither
+    /// the HOF receiver-element hint nor the body literal-pairing heuristic
+    /// can resolve them.
+    ///
+    /// This map is populated by a whole-program pre-pass
+    /// (`collect_closure_callsite_param_hints`) that, for every binding whose
+    /// initializer is a closure literal, scans the program for DIRECT calls
+    /// `name(args)` and infers each argument's `TypeAnnotation`. The hint is
+    /// keyed on the binding name; `compile_expr_closure` consults it via
+    /// `pending_variable_name` and seeds the still-unannotated user params.
+    ///
+    /// Soundness (this is the strict-typing core — inference must be CORRECT):
+    /// * A name called with CONFLICTING argument types at different sites, or
+    ///   a name bound to a closure literal in more than one place (shadowing),
+    ///   maps to `ClosureCallsiteHint::Conflict` — the hint is then NOT
+    ///   applied and the closure keeps its existing rejection (do NOT silently
+    ///   pick one type).
+    /// * Only literal / structurally-obvious argument types are inferred; an
+    ///   un-inferable argument contributes `None` for that slot (the param
+    ///   stays unannotated and the body's own heuristics / clean error apply).
+    /// * `int` and `number` do not unify — distinct annotations at the same
+    ///   slot are a conflict.
+    pub(crate) closure_callsite_param_hints:
+        std::collections::HashMap<String, ClosureCallsiteHint>,
 
     /// Unified type metadata for the last compiled expression.
     ///

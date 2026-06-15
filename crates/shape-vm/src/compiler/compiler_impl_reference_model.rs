@@ -1051,8 +1051,7 @@ impl BytecodeCompiler {
                 self.type_tracker
                     .register_object_field_contracts(schema_id, contracts);
             }
-            self.function_return_schema_ids
-                .insert(fn_name, schema_id);
+            self.function_return_schema_ids.insert(fn_name, schema_id);
         }
     }
 
@@ -1352,6 +1351,18 @@ impl BytecodeCompiler {
         // First: desugar the program (converts FromQuery to method chains, etc.)
         let mut program = program.clone();
         shape_ast::transform::desugar_program(&mut program);
+
+        // Wave 1a PART A: bidirectional inference for let-bound closures.
+        // A `let f = |a, b| a + b` compiles the closure body EAGERLY at the
+        // let-site (before any `f(2, 3)` call site is seen), so the call-site
+        // argument types must be gathered up front. This pre-pass records, per
+        // closure-bound name, the per-arg types observed at direct call sites;
+        // `compile_expr_closure` then seeds the still-unannotated params.
+        // Soundness lives in `collect_closure_callsite_param_hints` (conflicts
+        // and shadowing → not applied; the closure keeps its existing
+        // rejection).
+        self.closure_callsite_param_hints =
+            crate::compiler::expressions::closures::collect_closure_callsite_param_hints(&program);
         let analysis_program =
             shape_ast::transform::augment_program_with_generated_extends(&program);
 
@@ -1500,9 +1511,9 @@ impl BytecodeCompiler {
         // be mapped to field names via the schema registry — see the integration
         // note in `compile_typed_object_literal`.
         {
-            use shape_runtime::type_system::inference::PropertyAssignmentCollector;
             use shape_ast::ast::{Expr, Literal};
             use shape_runtime::type_schema::FieldType;
+            use shape_runtime::type_system::inference::PropertyAssignmentCollector;
             let assignments = PropertyAssignmentCollector::collect(&program);
             let grouped = PropertyAssignmentCollector::group_by_variable(&assignments);
             // Phase 3e: infer a primitive FieldType for each hoisted field
@@ -1824,9 +1835,7 @@ impl BytecodeCompiler {
                 .get(&func.name)
                 .and_then(|fd| fd.return_type.as_ref())
                 .and_then(|ann| {
-                    crate::compiler::v2_map_emission::concrete_type_from_annotation(
-                        ann,
-                    )
+                    crate::compiler::v2_map_emission::concrete_type_from_annotation(ann)
                 })
                 .unwrap_or(shape_value::v2::ConcreteType::Void);
             per_fn_ret.push(ct);
@@ -1889,10 +1898,7 @@ impl BytecodeCompiler {
                 // string is `DEFAULT_TRAIT_IMPL_SELECTOR` at
                 // `crates/shape-vm/src/bytecode.rs:15`; inlined here to
                 // avoid the borrow.
-                let default_suffix = format!(
-                    "::{}::__default__::{}",
-                    type_name, method_name
-                );
+                let default_suffix = format!("::{}::__default__::{}", type_name, method_name);
                 for (key, func_name) in &trait_method_symbols {
                     if key.ends_with(&default_suffix) {
                         return Some(func_name.clone());
@@ -1939,19 +1945,17 @@ impl BytecodeCompiler {
         // closes over the `current_function` half of the composite key
         // — top-level uses `None`; per-fn loop below uses
         // `Some(fn_idx)`.
-        let monomorph_call_sites =
-            self.program.monomorphized_method_call_sites.clone();
-        let monomorph_method_returns_top = |span: shape_ast::ast::span::Span|
-            -> Option<shape_value::v2::ConcreteType>
-        {
-            let idx = *monomorph_call_sites.get(&(span, None))?;
-            let ct = returns_vec.get(idx)?;
-            if matches!(ct, shape_value::v2::ConcreteType::Void) {
-                None
-            } else {
-                Some(ct.clone())
-            }
-        };
+        let monomorph_call_sites = self.program.monomorphized_method_call_sites.clone();
+        let monomorph_method_returns_top =
+            |span: shape_ast::ast::span::Span| -> Option<shape_value::v2::ConcreteType> {
+                let idx = *monomorph_call_sites.get(&(span, None))?;
+                let ct = returns_vec.get(idx)?;
+                if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                    None
+                } else {
+                    Some(ct.clone())
+                }
+            };
 
         // cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-
         // ratified): value-call return-ConcreteType resolver. Consumes
@@ -1960,18 +1964,16 @@ impl BytecodeCompiler {
         // result for closure-bound calls. Top-level conduit closes
         // over `None` for the caller half of the composite key — same
         // convention as `monomorph_method_returns_top`.
-        let value_call_sites =
-            self.program.value_call_return_concrete_types.clone();
-        let value_call_returns_top = |span: shape_ast::ast::span::Span|
-            -> Option<shape_value::v2::ConcreteType>
-        {
-            let ct = value_call_sites.get(&(span, None))?.clone();
-            if matches!(ct, shape_value::v2::ConcreteType::Void) {
-                None
-            } else {
-                Some(ct)
-            }
-        };
+        let value_call_sites = self.program.value_call_return_concrete_types.clone();
+        let value_call_returns_top =
+            |span: shape_ast::ast::span::Span| -> Option<shape_value::v2::ConcreteType> {
+                let ct = value_call_sites.get(&(span, None))?.clone();
+                if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                    None
+                } else {
+                    Some(ct)
+                }
+            };
 
         // Re-run top-level conduit with the callee-return resolver so the
         // `let r = divide(10, 2)` slot picks up `Result(I64, String)` from
@@ -2029,32 +2031,30 @@ impl BytecodeCompiler {
                 // (i.e. `Some(fn_idx)` here matches the populator's
                 // post-monomorphization specialized caller FunctionId).
                 let current_fn = Some(fn_idx);
-                let monomorph_method_returns_per_fn = |span: shape_ast::ast::span::Span|
-                    -> Option<shape_value::v2::ConcreteType>
-                {
-                    let idx = *monomorph_call_sites.get(&(span, current_fn))?;
-                    let ct = returns_vec.get(idx)?;
-                    if matches!(ct, shape_value::v2::ConcreteType::Void) {
-                        None
-                    } else {
-                        Some(ct.clone())
-                    }
-                };
+                let monomorph_method_returns_per_fn =
+                    |span: shape_ast::ast::span::Span| -> Option<shape_value::v2::ConcreteType> {
+                        let idx = *monomorph_call_sites.get(&(span, current_fn))?;
+                        let ct = returns_vec.get(idx)?;
+                        if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                            None
+                        } else {
+                            Some(ct.clone())
+                        }
+                    };
                 // cluster-2-cw-IB-class-b: per-fn variant of the value-call
                 // return-ConcreteType resolver. Same composite-key
                 // discipline as monomorph_method_returns_per_fn above —
                 // closes over `Some(fn_idx)` so calls inside user-function
                 // bodies pick up their own caller-context entries.
-                let value_call_returns_per_fn = |span: shape_ast::ast::span::Span|
-                    -> Option<shape_value::v2::ConcreteType>
-                {
-                    let ct = value_call_sites.get(&(span, current_fn))?.clone();
-                    if matches!(ct, shape_value::v2::ConcreteType::Void) {
-                        None
-                    } else {
-                        Some(ct)
-                    }
-                };
+                let value_call_returns_per_fn =
+                    |span: shape_ast::ast::span::Span| -> Option<shape_value::v2::ConcreteType> {
+                        let ct = value_call_sites.get(&(span, current_fn))?.clone();
+                        if matches!(ct, shape_value::v2::ConcreteType::Void) {
+                            None
+                        } else {
+                            Some(ct)
+                        }
+                    };
                 let mut concrete_types =
                     crate::compiler::helpers::infer_top_level_concrete_types_from_mir_with_resolvers(
                         &mir_data.mir,
@@ -2093,17 +2093,13 @@ impl BytecodeCompiler {
                     // for UNANNOTATED params (projected in
                     // `infer_param_concrete_types_from_types`). Used as the
                     // seed source when a param has no annotation to read.
-                    let inferred_param_cts =
-                        self.inferred_param_concrete_types.get(&func.name);
+                    let inferred_param_cts = self.inferred_param_concrete_types.get(&func.name);
                     for (i, &param_slot) in mir_data.mir.param_slots.iter().enumerate() {
                         let idx = param_slot.0 as usize;
                         if idx >= concrete_types.len() {
                             continue;
                         }
-                        if !matches!(
-                            concrete_types[idx],
-                            shape_value::v2::ConcreteType::Void
-                        ) {
+                        if !matches!(concrete_types[idx], shape_value::v2::ConcreteType::Void) {
                             continue;
                         }
                         let Some(param) = def.params.get(i) else {
@@ -2114,7 +2110,9 @@ impl BytecodeCompiler {
                                 // Annotated param: the declared type IS the
                                 // proof source for the slot's ConcreteType.
                                 if let Some(ct) =
-                                    crate::compiler::v2_map_emission::concrete_type_from_annotation(ann)
+                                    crate::compiler::v2_map_emission::concrete_type_from_annotation(
+                                        ann,
+                                    )
                                 {
                                     concrete_types[idx] = ct;
                                 }
@@ -2283,9 +2281,7 @@ impl BytecodeCompiler {
         // `FieldType::Any` outside the named-exception classes. ADR-006
         // §2.7.5 (producer-side stamp) + §2.7.26 (parallel-`field_kinds`
         // carrier for the permanent classes) anchor the discipline.
-        crate::compiler::post_inference_verify::verify_no_post_inference_any(
-            &self.program,
-        )?;
+        crate::compiler::post_inference_verify::verify_no_post_inference_any(&self.program)?;
 
         Ok(self.program)
     }
