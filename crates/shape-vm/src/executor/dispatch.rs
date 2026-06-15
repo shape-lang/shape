@@ -85,8 +85,7 @@ impl VirtualMachine {
         // pattern for TypeSchemaRegistry. The guard restores any outer
         // scope (e.g. a host-installed async scope) on drop, so nested
         // or re-entrant VM execution composes correctly.
-        let _shape_scope =
-            shape_value::SyncShapeTableScope::enter(self.shape_table.clone());
+        let _shape_scope = shape_value::SyncShapeTableScope::enter(self.shape_table.clone());
 
         self.clear_last_uncaught_exception();
 
@@ -784,7 +783,7 @@ impl VirtualMachine {
 
             // Loop control
             LoopStart | LoopEnd | Break | Continue | IterNext | IterDone => {
-                return self.exec_loops(instruction);
+                return self.exec_loops(instruction, ctx);
             }
 
             // Method calls on values

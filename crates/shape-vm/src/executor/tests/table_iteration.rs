@@ -11,9 +11,9 @@
 use super::*;
 use crate::executor::{VMConfig, VirtualMachine};
 use arrow_schema::{DataType, Field, Schema};
+use shape_value::NativeKind;
 use shape_value::datatable::{DataTable, DataTableBuilder};
 use shape_value::heap_value::HeapKind;
-use shape_value::NativeKind;
 use std::sync::Arc;
 
 /// Build a sample DataTable with 3 rows: price=[10.0, 20.0, 30.0], name=["a","b","c"]
@@ -86,7 +86,9 @@ fn make_single_row_table() -> Arc<DataTable> {
 /// downstream cascade pinned for Phase 2c.
 #[allow(dead_code)]
 fn run_table_count_loop(_table_arc: Arc<DataTable>) -> i64 {
-    todo!("phase-2c — see ADR-006 §2.7.4 (Constant::Value(ValueWord) carrier deleted; kinded constant variant pending)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (Constant::Value(ValueWord) carrier deleted; kinded constant variant pending)"
+    )
 }
 
 // =========================================================================
@@ -180,11 +182,8 @@ fn test_iter_done_datatable_false_when_in_bounds() {
     // Push table and idx=0, call IterDone
     push_datatable(&mut vm, table);
     push_int(&mut vm, 0);
-    vm.op_iter_done().unwrap();
-    assert!(
-        !pop_bool(&mut vm),
-        "idx=0 with 3 rows should not be done"
-    );
+    vm.op_iter_done(None).unwrap();
+    assert!(!pop_bool(&mut vm), "idx=0 with 3 rows should not be done");
 }
 
 #[test]
@@ -193,11 +192,8 @@ fn test_iter_done_datatable_true_at_end() {
     let mut vm = VirtualMachine::new(VMConfig::default());
     push_datatable(&mut vm, table);
     push_int(&mut vm, 3);
-    vm.op_iter_done().unwrap();
-    assert!(
-        pop_bool(&mut vm),
-        "idx=3 with 3 rows should be done"
-    );
+    vm.op_iter_done(None).unwrap();
+    assert!(pop_bool(&mut vm), "idx=3 with 3 rows should be done");
 }
 
 #[test]
@@ -214,7 +210,7 @@ fn test_iter_done_negative_index() {
     let mut vm = VirtualMachine::new(VMConfig::default());
     push_datatable(&mut vm, table);
     push_int(&mut vm, -1);
-    vm.op_iter_done().unwrap();
+    vm.op_iter_done(None).unwrap();
     assert!(
         pop_bool(&mut vm),
         "negative index should be treated as done"
@@ -270,7 +266,7 @@ fn test_iter_done_error_message_includes_table() {
     // Use a non-iterable type (bool)
     push_bool(&mut vm, true);
     push_int(&mut vm, 0);
-    let err = vm.op_iter_done().unwrap_err();
+    let err = vm.op_iter_done(None).unwrap_err();
     match err {
         VMError::TypeError { expected, .. } => {
             assert!(

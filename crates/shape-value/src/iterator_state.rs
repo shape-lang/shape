@@ -41,8 +41,9 @@
 // HeapHeader counter (offset 0); the [`TypedArrayArc`] newtype below pairs
 // Clone=retain / Drop=release so the enum stays `Clone` + refcount-safe.
 use crate::heap_value::{HashMapKindedRef, HeapValue};
+use crate::kinded_slot::KindedSlot;
 use crate::v2::typed_array::{release_v2_typed_array, retain_v2_typed_array};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Refcount-managed handle to a v2-raw `*mut TypedArray<T>` source buffer.
 ///
@@ -263,11 +264,37 @@ pub enum IteratorTransform {
 /// walk the (source, transforms, cursor) triple and emit results, leaving
 /// the input state immutable so that `let it = arr.iter().map(f); it.collect()`
 /// is observably the same as `arr.iter().map(f).collect()`.
+///
+/// ## Wave 1b SEAM C (2026-06-15): positional for-loop drive memo
+///
+/// The bytecode for-loop protocol (`IterDone(iter, idx)` / `IterNext(iter,
+/// idx)` over a 0,1,2… positional `idx` local — `compiler/loops.rs:427`)
+/// re-`Dup`s the SAME `Arc<IteratorState>` each iteration and indexes
+/// positionally. A pipeline with transforms (`filter` / `take` / `skip` /
+/// `enumerate`) is NOT positionally indexable on the source, so the for-loop
+/// driver materializes the full post-transform yield vec ONCE (reusing the
+/// SEAM B `materialize_yields` terminal driver) and indexes into it. The
+/// memo lives here so its lifetime tracks the `Arc<IteratorState>` (freed
+/// when the loop's iterator share retires) and side-effecting `map`/`filter`
+/// closures are invoked exactly once per element rather than twice per
+/// `(IterDone, IterNext)` step or O(n²) across the loop.
+///
+/// The memo is interior-mutable (`Mutex<Option<Arc<Vec<KindedSlot>>>>`):
+/// `IterDone`/`IterNext` take `&Arc<IteratorState>` (the slot's borrowed
+/// share), so the drive must fill the cache through a shared reference. The
+/// cached `KindedSlot`s OWN their heap-element shares; `IterNext` hands the
+/// loop body a share-bumped `.clone()`, and the owned shares retire when the
+/// memo drops with the `Arc<IteratorState>`. A cloned iterator gets a FRESH
+/// (empty) memo — a clone re-materializes (the source/transforms clone is a
+/// refcount bump, so re-driving is observably identical).
 #[derive(Debug)]
 pub struct IteratorState {
     pub source: IteratorSource,
     pub transforms: Vec<IteratorTransform>,
     pub cursor: usize,
+    /// SEAM C positional-drive memo (see type doc). NOT part of the logical
+    /// iterator value — excluded from `Clone` (fresh `None`) and `Debug`.
+    materialized: Mutex<Option<Arc<Vec<KindedSlot>>>>,
 }
 
 impl IteratorState {
@@ -278,7 +305,29 @@ impl IteratorState {
             source,
             transforms: Vec::new(),
             cursor: 0,
+            materialized: Mutex::new(None),
         }
+    }
+
+    /// Read the SEAM C positional-drive memo, if already materialized.
+    #[inline]
+    pub fn materialized_yields(&self) -> Option<Arc<Vec<KindedSlot>>> {
+        self.materialized.lock().unwrap().clone()
+    }
+
+    /// Install the SEAM C positional-drive memo. Idempotent: if a concurrent
+    /// (re-entrant) drive already filled it, the existing share is kept and
+    /// the freshly-driven vec is returned to the caller to drop. Returns the
+    /// authoritative memo share.
+    #[inline]
+    pub fn set_materialized(&self, yields: Vec<KindedSlot>) -> Arc<Vec<KindedSlot>> {
+        let mut guard = self.materialized.lock().unwrap();
+        if let Some(existing) = guard.as_ref() {
+            return existing.clone();
+        }
+        let arc = Arc::new(yields);
+        *guard = Some(arc.clone());
+        arc
     }
 
     /// Append a transform stage, returning a new `IteratorState`. The
@@ -292,6 +341,8 @@ impl IteratorState {
             source: self.source.clone(),
             transforms,
             cursor: self.cursor,
+            // A transform-extended iterator is a distinct pipeline — fresh memo.
+            materialized: Mutex::new(None),
         }
     }
 }
@@ -299,12 +350,16 @@ impl IteratorState {
 impl Clone for IteratorState {
     /// Per-field clone — `IteratorSource` and `IteratorTransform` are
     /// already `Clone` (they hold typed `Arc<T>` payloads whose `Clone`
-    /// is a single atomic refcount bump).
+    /// is a single atomic refcount bump). The SEAM C positional-drive memo
+    /// is NOT cloned: a cloned iterator re-materializes (observably identical
+    /// because the source/transforms clone is a refcount bump, not a deep
+    /// copy), avoiding a shared owned-share double-account across clones.
     fn clone(&self) -> Self {
         Self {
             source: self.source.clone(),
             transforms: self.transforms.clone(),
             cursor: self.cursor,
+            materialized: Mutex::new(None),
         }
     }
 }

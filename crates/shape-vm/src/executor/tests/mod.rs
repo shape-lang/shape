@@ -32,8 +32,8 @@ mod jit_abi_tests;
 // Strict-typing defection sentinel — scans the source tree for the
 // Bool-default slot-fabrication pattern (ADR-006 §2.7.7 forbidden),
 // mirroring scripts/check-no-dynamic.sh at the Rust-test layer.
-mod no_dynamic;
 mod matrix_ops;
+mod no_dynamic;
 // ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback, 2026-05-12):
 // source-level smoke tests for `&mut self` method writeback semantics.
 mod mutation_writeback;
@@ -43,6 +43,7 @@ mod mutation_writeback;
 // PriorityQueue.pop / HashMap.remove).
 mod pop_mutation;
 mod priority_queue_ops;
+mod seam_c_for_loop;
 mod set_ops;
 mod soak_tests;
 mod table_iteration;
@@ -133,7 +134,7 @@ fn test_basic_arithmetic() {
     let instructions = vec![
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // Push 2
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // Push 3
-        Instruction::simple(OpCode::AddNumber),                             // Add
+        Instruction::simple(OpCode::AddNumber),                       // Add
     ];
     let constants = vec![Constant::Number(2.0), Constant::Number(3.0)];
 
@@ -884,7 +885,9 @@ fn test_wrap_type_annotation_preserves_operations() {
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_multiple_type_annotations() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }
 
 // ===== Typed Column Access Tests =====
@@ -969,7 +972,12 @@ fn test_load_col_f64() {
     ];
     let constants = vec![Constant::Value(row_view)];
 
-    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Float64).unwrap();
+    let bits = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::NativeKind::Float64,
+    )
+    .unwrap();
     let v = f64::from_bits(bits);
     assert_eq!(v, 42.5, "Expected 42.5, got {}", v);
 }
@@ -1004,7 +1012,12 @@ fn test_load_col_i64() {
     ];
     let constants = vec![Constant::Value(row_view)];
 
-    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Int64).unwrap();
+    let bits = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::NativeKind::Int64,
+    )
+    .unwrap();
     assert_eq!(bits as i64, 2000, "Expected 2000, got {}", bits as i64);
 }
 
@@ -1046,10 +1059,7 @@ fn test_load_col_str() {
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(program);
     let result = vm.execute(None).unwrap();
-    assert_eq!(
-        result.as_str().expect("Expected String"),
-        "AAPL"
-    );
+    assert_eq!(result.as_str().expect("Expected String"), "AAPL");
 }
 
 #[test]
@@ -1099,8 +1109,7 @@ fn test_bind_schema_success() {
     vm.load_program(program);
     let result = vm.execute(None).unwrap();
 
-    let (sid, table) =
-        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    let (sid, table) = typed_table_from_slot(&result).expect("Expected TypedTable result");
     assert_eq!(sid, schema_id as u64);
     assert_eq!(table.row_count(), 2);
 }
@@ -1241,8 +1250,7 @@ fn test_load_pipeline_correct_mapping() {
     vm.load_program(program);
     let result = vm.execute(None).unwrap();
 
-    let (sid, table) =
-        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    let (sid, table) = typed_table_from_slot(&result).expect("Expected TypedTable result");
     assert_eq!(sid, schema_id as u64);
     assert_eq!(table.row_count(), 100);
 }
@@ -1350,8 +1358,7 @@ fn test_load_pipeline_subset_columns() {
     vm.load_program(program);
     let result = vm.execute(None).unwrap();
 
-    let (sid, table) =
-        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    let (sid, table) = typed_table_from_slot(&result).expect("Expected TypedTable result");
     assert_eq!(sid, schema_id as u64);
     assert_eq!(table.row_count(), 100);
 }
@@ -1380,8 +1387,7 @@ fn test_load_pipeline_column_alias() {
     vm.load_program(program);
     let result = vm.execute(None).unwrap();
 
-    let (sid, table) =
-        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    let (sid, table) = typed_table_from_slot(&result).expect("Expected TypedTable result");
     assert_eq!(sid, schema_id as u64);
     assert_eq!(table.row_count(), 100);
 }
@@ -1434,8 +1440,7 @@ fn test_load_pipeline_timestamp_field() {
     vm.load_program(program);
     let result = vm.execute(None).unwrap();
 
-    let (sid, table) =
-        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    let (sid, table) = typed_table_from_slot(&result).expect("Expected TypedTable result");
     assert_eq!(sid, schema_id as u64);
     assert_eq!(table.row_count(), 100);
 }
@@ -1456,8 +1461,7 @@ fn test_load_pipeline_numeric_promotion() {
     vm.load_program(program);
     let result = vm.execute(None).unwrap();
 
-    let (sid, table) =
-        typed_table_from_slot(&result).expect("Expected TypedTable result");
+    let (sid, table) = typed_table_from_slot(&result).expect("Expected TypedTable result");
     assert_eq!(sid, schema_id as u64);
     assert_eq!(table.row_count(), 100);
 }
@@ -1529,7 +1533,12 @@ fn test_load_col_bool() {
         Instruction::simple(OpCode::Halt),
     ];
     let constants = vec![Constant::Value(row_view)];
-    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Bool).unwrap();
+    let bits = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::NativeKind::Bool,
+    )
+    .unwrap();
     assert_eq!(bits != 0, false, "Expected false, got {}", bits != 0);
 
     // Read row 2 (true) — verifies bit-level read at offset > 0
@@ -1543,7 +1552,12 @@ fn test_load_col_bool() {
         Instruction::simple(OpCode::Halt),
     ];
     let constants2 = vec![Constant::Value(row_view2)];
-    let bits2 = execute_bytecode_typed(instructions2, constants2, crate::type_tracking::NativeKind::Bool).unwrap();
+    let bits2 = execute_bytecode_typed(
+        instructions2,
+        constants2,
+        crate::type_tracking::NativeKind::Bool,
+    )
+    .unwrap();
     assert_eq!(bits2 != 0, true, "Expected true, got {}", bits2 != 0);
 }
 
@@ -1578,7 +1592,12 @@ fn test_load_col_f64_from_float32() {
     ];
     let constants = vec![Constant::Value(row_view)];
 
-    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Float64).unwrap();
+    let bits = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::NativeKind::Float64,
+    )
+    .unwrap();
     let n = f64::from_bits(bits);
     assert!((n - 3.14).abs() < 0.001, "Expected ~3.14, got {}", n);
 }
@@ -1612,7 +1631,12 @@ fn test_load_col_f64_from_int64() {
     ];
     let constants = vec![Constant::Value(row_view)];
 
-    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Float64).unwrap();
+    let bits = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::NativeKind::Float64,
+    )
+    .unwrap();
     let v = f64::from_bits(bits);
     assert_eq!(v, 42.0, "Expected 42.0, got {}", v);
 }
@@ -1646,7 +1670,12 @@ fn test_load_col_i64_from_int32() {
     ];
     let constants = vec![Constant::Value(row_view)];
 
-    let bits = execute_bytecode_typed(instructions, constants, crate::type_tracking::NativeKind::Int64).unwrap();
+    let bits = execute_bytecode_typed(
+        instructions,
+        constants,
+        crate::type_tracking::NativeKind::Int64,
+    )
+    .unwrap();
     assert_eq!(bits as i64, 456, "Expected 456, got {}", bits as i64);
 }
 
@@ -1901,19 +1930,25 @@ fn test_dynamic_object_methods_are_rejected() {
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_extension_intrinsic_dispatch() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }
 
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_extension_intrinsic_takes_priority_over_ufcs() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }
 
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_extension_intrinsic_fallback_to_ufcs_when_no_match() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }
 
 // Phase-2c surface: helpers `compile_and_run` and
@@ -2064,11 +2099,7 @@ fn test_window_sum_builtin_executes() {
         "WindowSum should execute: {:?}",
         result.err()
     );
-    assert_eq!(
-        f64::from_bits(result.unwrap()),
-        6.0,
-        "sum([1,2,3]) = 6"
-    );
+    assert_eq!(f64::from_bits(result.unwrap()), 6.0, "sum([1,2,3]) = 6");
 }
 
 #[test]
@@ -2166,11 +2197,7 @@ fn test_window_min_max_builtin_executes() {
         "WindowMin should execute: {:?}",
         result.err()
     );
-    assert_eq!(
-        f64::from_bits(result.unwrap()),
-        3.0,
-        "min([7,3,9]) = 3"
-    );
+    assert_eq!(f64::from_bits(result.unwrap()), 3.0, "min([7,3,9]) = 3");
 
     // Test WindowMax
     let instructions2 = vec![
@@ -2199,11 +2226,7 @@ fn test_window_min_max_builtin_executes() {
         "WindowMax should execute: {:?}",
         result2.err()
     );
-    assert_eq!(
-        f64::from_bits(result2.unwrap()),
-        9.0,
-        "max([7,3,9]) = 9"
-    );
+    assert_eq!(f64::from_bits(result2.unwrap()), 9.0, "max([7,3,9]) = 9");
 }
 
 #[test]
@@ -2277,7 +2300,9 @@ fn test_cte_compiles_and_runs() {
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_module_context_can_invoke_shape_callable() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }
 
 // ============================================================================
@@ -2299,17 +2324,23 @@ fn test_module_context_can_invoke_shape_callable() {
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_r5_4d_intrinsic_vec_add_i64_bytecode_dispatch() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }
 
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_r5_4d_intrinsic_mat_add_bytecode_dispatch() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }
 
 #[test]
 #[ignore = "T1 class-shift surface (ADR-006 §2.7.4) — depends on deleted host-tier helpers / typed-Arc accessors not in T1 scope"]
 fn test_r5_4d_intrinsic_mat_sub_bytecode_dispatch() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted host-tier carriers)"
+    )
 }

@@ -738,6 +738,35 @@ pub(crate) fn handle_chain(
 // Eager terminals
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Wave 1b SEAM C — positional for-loop drive
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Materialize (once, memoized) the full post-transform yield vec for the
+/// bytecode for-loop positional drive, returning a shared `Arc<Vec<KindedSlot>>`.
+///
+/// The for-loop protocol (`compiler/loops.rs:427`) re-`Dup`s the same
+/// `Arc<IteratorState>` each iteration and indexes positionally via a 0,1,2…
+/// `idx` local. Transform pipelines aren't positionally indexable on the
+/// source, so the whole pipeline is driven ONCE through the SEAM B
+/// `materialize_yields` terminal driver (invoking `map`/`filter` closures via
+/// `vm.call_value_immediate_nb`, ADR-006 §2.7.11 / Q12) and cached on the
+/// `IteratorState` memo so subsequent `IterDone`/`IterNext` reads are O(1) and
+/// side-effecting closures fire exactly once per element. The memo OWNS the
+/// yields' heap-element shares; callers read a positional element via a
+/// share-bumped `KindedSlot::clone`.
+pub(crate) fn drive_for_loop_yields(
+    vm: &mut VirtualMachine,
+    state: &Arc<IteratorState>,
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<Arc<Vec<KindedSlot>>, VMError> {
+    if let Some(cached) = state.materialized_yields() {
+        return Ok(cached);
+    }
+    let yields = materialize_yields(vm, &state.source, &state.transforms, ctx)?;
+    Ok(state.set_materialized(yields))
+}
+
 /// `Iterator.collect()` / `Iterator.toArray()` — materialize into a fresh
 /// `TypedArray<T>`. Output element kind = the first yield's kind; a subsequent
 /// kind mismatch surfaces a structured error (no coercion, no `Array<Any>`).

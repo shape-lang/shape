@@ -310,10 +310,9 @@ impl BytecodeCompiler {
 
                 // Try range counter loop specialization (non-async only)
                 if !for_loop.is_async {
-                    if let Some(rcl) = self.try_begin_range_counter_loop(
-                        pattern.as_identifier(),
-                        iter,
-                    )? {
+                    if let Some(rcl) =
+                        self.try_begin_range_counter_loop(pattern.as_identifier(), iter)?
+                    {
                         self.apply_binding_semantics_to_pattern_bindings(
                             pattern,
                             true,
@@ -624,9 +623,9 @@ impl BytecodeCompiler {
         // Try range counter specialization (non-async, simple identifier pattern)
         if !for_expr.is_async {
             let pattern_name = match &for_expr.pattern {
-                    shape_ast::ast::Pattern::Identifier(name) => Some(name.as_str()),
-                    _ => None,
-                };
+                shape_ast::ast::Pattern::Identifier(name) => Some(name.as_str()),
+                _ => None,
+            };
             if let Some(rcl) =
                 self.try_begin_range_counter_loop(pattern_name, &for_expr.iterable)?
             {
@@ -976,8 +975,7 @@ impl BytecodeCompiler {
     ) -> Option<super::v2_typed_emission::TypedArrayKind> {
         use super::monomorphization::type_resolution::concrete_type_for_expr;
         use super::v2_typed_emission::{
-            should_use_typed_array, typed_array_kind_from_numeric_type,
-            TypedArrayKind,
+            TypedArrayKind, should_use_typed_array, typed_array_kind_from_numeric_type,
         };
         if let Some(nt) = self.last_expr_numeric_type {
             return Some(typed_array_kind_from_numeric_type(nt));
@@ -1040,8 +1038,7 @@ impl BytecodeCompiler {
                 // identifies the v2 typed-array carrier for both the VM
                 // and JIT (no generic-carrier slot-kind ambiguity).
                 for &site in &push_sites {
-                    self.program.instructions[site] =
-                        Instruction::simple(kind.push_opcode());
+                    self.program.instructions[site] = Instruction::simple(kind.push_opcode());
                 }
                 self.v2_typed_array_locals.insert(result_local, kind);
                 // Signal the typed-array kind to the enclosing `let c = [...]`
@@ -1081,12 +1078,9 @@ impl BytecodeCompiler {
         // receiver tag. Reset to the array shape — mirrors the tail of
         // `compile_expr_array`.
         if let Some(kind) = element_kind {
-            self.last_expr_type_info = Some(
-                crate::type_tracking::VariableTypeInfo::named(
-                    super::v2_typed_emission::vec_type_name_for_typed_array_kind(kind)
-                        .to_string(),
-                ),
-            );
+            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
+                super::v2_typed_emission::vec_type_name_for_typed_array_kind(kind).to_string(),
+            ));
         } else {
             self.last_expr_type_info = None;
         }
@@ -1148,10 +1142,9 @@ impl BytecodeCompiler {
         let clause = &clauses[0];
 
         // Try range counter specialization for this comprehension clause
-        if let Some(rcl) = self.try_begin_range_counter_loop(
-            clause.pattern.as_identifier(),
-            &clause.iterable,
-        )? {
+        if let Some(rcl) =
+            self.try_begin_range_counter_loop(clause.pattern.as_identifier(), &clause.iterable)?
+        {
             self.apply_binding_semantics_to_pattern_bindings(
                 &clause.pattern,
                 true,
@@ -1326,8 +1319,7 @@ impl BytecodeCompiler {
                         }
                     }
                 }
-                _ => concrete_type_for_expr(self, elem)
-                    .and_then(|ct| should_use_typed_array(&ct)),
+                _ => concrete_type_for_expr(self, elem).and_then(|ct| should_use_typed_array(&ct)),
             };
             let elem_kind = elem_kind?;
             match acc {
@@ -1352,10 +1344,7 @@ impl BytecodeCompiler {
         let result_local = self.declare_local("__array_result")?;
         match accumulator_kind {
             Some(kind) => {
-                self.emit(Instruction::new(
-                    kind.new_opcode(),
-                    Some(Operand::Count(0)),
-                ));
+                self.emit(Instruction::new(kind.new_opcode(), Some(Operand::Count(0))));
                 self.v2_typed_array_locals.insert(result_local, kind);
                 // Signal the kind to the enclosing `let b = [...spread]`
                 // binding path so the destination slot is recorded as a
@@ -1470,8 +1459,7 @@ impl BytecodeCompiler {
                             Some(Operand::Local(counter_local)),
                         ));
 
-                        let offset =
-                            loop_start as i32 - self.program.current_offset() as i32 - 1;
+                        let offset = loop_start as i32 - self.program.current_offset() as i32 - 1;
                         self.emit(Instruction::new(
                             OpCode::Jump,
                             Some(Operand::Offset(offset)),
@@ -1482,15 +1470,13 @@ impl BytecodeCompiler {
                         // Generic iterator path for non-range spreads
                         self.plan_flexible_binding_escape_from_expr(inner);
                         self.compile_expr(inner)?;
-                        let iter_local =
-                            self.declare_local(&format!("__spread_iter_{idx}"))?;
+                        let iter_local = self.declare_local(&format!("__spread_iter_{idx}"))?;
                         self.emit(Instruction::new(
                             OpCode::StoreLocal,
                             Some(Operand::Local(iter_local)),
                         ));
 
-                        let idx_local =
-                            self.declare_local(&format!("__spread_idx_{idx}"))?;
+                        let idx_local = self.declare_local(&format!("__spread_idx_{idx}"))?;
                         let zero_const = self.program.add_constant(Constant::Int(0));
                         self.emit(Instruction::new(
                             OpCode::PushConst,
@@ -1548,8 +1534,7 @@ impl BytecodeCompiler {
                             Some(Operand::Local(idx_local)),
                         ));
 
-                        let offset =
-                            loop_start as i32 - self.program.current_offset() as i32 - 1;
+                        let offset = loop_start as i32 - self.program.current_offset() as i32 - 1;
                         self.emit(Instruction::new(
                             OpCode::Jump,
                             Some(Operand::Offset(offset)),
@@ -1583,12 +1568,9 @@ impl BytecodeCompiler {
         // `let b = [...spread]` binding records `b` as an array, not as
         // the bare element scalar the last spread element left behind.
         if let Some(kind) = accumulator_kind {
-            self.last_expr_type_info = Some(
-                crate::type_tracking::VariableTypeInfo::named(
-                    super::v2_typed_emission::vec_type_name_for_typed_array_kind(kind)
-                        .to_string(),
-                ),
-            );
+            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
+                super::v2_typed_emission::vec_type_name_for_typed_array_kind(kind).to_string(),
+            ));
         } else {
             self.last_expr_type_info = None;
         }
@@ -1632,20 +1614,41 @@ impl BytecodeCompiler {
             Expr::Array(elems, _) => {
                 let first = elems.first()?;
                 match first {
-                    Expr::Literal(shape_ast::ast::Literal::Int(_), _) => {
-                        Some("int".to_string())
-                    }
+                    Expr::Literal(shape_ast::ast::Literal::Int(_), _) => Some("int".to_string()),
                     Expr::Literal(shape_ast::ast::Literal::Number(_), _) => {
                         Some("number".to_string())
                     }
-                    Expr::Literal(shape_ast::ast::Literal::Bool(_), _) => {
-                        Some("bool".to_string())
-                    }
+                    Expr::Literal(shape_ast::ast::Literal::Bool(_), _) => Some("bool".to_string()),
                     Expr::Literal(shape_ast::ast::Literal::String(_), _) => {
                         Some("string".to_string())
                     }
                     _ => None,
                 }
+            }
+            // Wave 1b SEAM C (2026-06-15): `for x in arr.iter()` /
+            // `for x in arr.iter().filter(..)`. Element-type-PRESERVING
+            // iterator adapters yield the same element type as their
+            // receiver, so recurse on the receiver — without this
+            // propagation, `x` is untyped and `sum + x` falls out of
+            // `AddInt` into trait dispatch (the same gap `for x in arr`
+            // solves via the `Identifier` arm).
+            //
+            // Type-preserving adapters recursed here: `iter` (0 args),
+            // `filter`/`take`/`skip` (the source element type is unchanged).
+            // Type-CHANGING adapters (`map`/`flatMap`/`enumerate`) are NOT
+            // recursed — their element type is the closure's return type /
+            // an `[index, e]` pair, neither statically recoverable from the
+            // receiver; the loop var is left untyped (bidirectional
+            // inference recovers it where it can).
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                ..
+            } if matches!(method.as_str(), "iter" | "filter" | "take" | "skip")
+                && (method != "iter" || args.is_empty()) =>
+            {
+                self.iter_element_type_name(receiver)
             }
             _ => None,
         }
@@ -1695,25 +1698,22 @@ mod tests {
 
     #[test]
     fn test_range_loop_exclusive() {
-        let result = compile_and_run_i64(
-            "fn t() { let mut s = 0; for i in 0..5 { s = s + i }; s } t()",
-        );
+        let result =
+            compile_and_run_i64("fn t() { let mut s = 0; for i in 0..5 { s = s + i }; s } t()");
         assert_eq!(result, 10);
     }
 
     #[test]
     fn test_range_loop_inclusive() {
-        let result = compile_and_run_i64(
-            "fn t() { let mut s = 0; for i in 0..=5 { s = s + i }; s } t()",
-        );
+        let result =
+            compile_and_run_i64("fn t() { let mut s = 0; for i in 0..=5 { s = s + i }; s } t()");
         assert_eq!(result, 15);
     }
 
     #[test]
     fn test_range_loop_empty() {
-        let result = compile_and_run_i64(
-            "fn t() { let mut s = 0; for i in 5..0 { s = s + i }; s } t()",
-        );
+        let result =
+            compile_and_run_i64("fn t() { let mut s = 0; for i in 5..0 { s = s + i }; s } t()");
         assert_eq!(result, 0);
     }
 
@@ -1754,25 +1754,19 @@ mod tests {
 
     #[test]
     fn test_range_loop_for_expr() {
-        let result = compile_and_run_i64(
-            "fn t() { let r = for i in 0..5 { i * 2 }; r } t()",
-        );
+        let result = compile_and_run_i64("fn t() { let r = for i in 0..5 { i * 2 }; r } t()");
         assert_eq!(result, 8);
     }
 
     #[test]
     fn test_range_loop_comprehension() {
-        let result = compile_and_run_i64(
-            "fn t() { let a = [i * 2 for i in 0..5]; a.len() } t()",
-        );
+        let result = compile_and_run_i64("fn t() { let a = [i * 2 for i in 0..5]; a.len() } t()");
         assert_eq!(result, 5);
     }
 
     #[test]
     fn test_range_loop_spread() {
-        let result = compile_and_run_i64(
-            "fn t() { let a = [...0..5]; a.len() } t()",
-        );
+        let result = compile_and_run_i64("fn t() { let a = [...0..5]; a.len() } t()");
         assert_eq!(result, 5);
     }
 
