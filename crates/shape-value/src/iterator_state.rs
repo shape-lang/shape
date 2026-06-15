@@ -29,17 +29,119 @@
 //! (the same shape as the §2.7.9 FilterExpr / §2.7.12 SharedCell /
 //! §2.7.13 Reference precedents).
 
-// V3-S5 ckpt-4 (2026-05-15): `TypedArrayData` import deleted — the enum
-// was retired at V3-S5 ckpt-1 per W12-typed-array-data-deletion-audit §3.5
-// + ADR-006 §2.7.24 Q25.A SUPERSEDED. `IteratorSource::Array(Arc<
-// TypedArrayData>)` variant deleted in lockstep; iterator pipelines over
-// typed-array receivers cascade-break for v2-raw `TypedArray<T>` rebuild
-// in a downstream wave (the `IteratorSource::Array` carrier needs a
-// per-element-kind redesign — the typed-Arc payload Q25.A SUPERSEDED
-// pattern produces `Arc<TypedArray<f64>>` / `Arc<TypedArray<i64>>` /
-// etc., not a single `Arc<T>` enum carrier).
+// Wave 1b SEAM B (2026-06-15): `IteratorSource::Array` RESURRECTED over the
+// per-T v2-raw `TypedArray<T>` flat-struct carrier per ADR-006 §2.7.16 / Q17
+// + W12-typed-array-data-deletion-audit §1.2. The carrier is NOT a single
+// `Arc<TypedArrayData>` enum (Refusal #1, CLAUDE.md §Forbidden) and NOT a
+// `TypedBuffer<T>` wrapper — it is a kind-erased `*mut u8` pointer to a
+// genuine `TypedArray<T>` whose element type is read from the stamped `_pad`
+// discriminant at iteration time (the same single-carrier discipline the
+// `v2_array_detect::as_v2_typed_array` consumer uses). Refcount on the
+// carrier rides the v2-raw `retain_v2_typed_array` / `release_v2_typed_array`
+// HeapHeader counter (offset 0); the [`TypedArrayArc`] newtype below pairs
+// Clone=retain / Drop=release so the enum stays `Clone` + refcount-safe.
 use crate::heap_value::{HashMapKindedRef, HeapValue};
+use crate::v2::typed_array::{release_v2_typed_array, retain_v2_typed_array};
 use std::sync::Arc;
+
+/// Refcount-managed handle to a v2-raw `*mut TypedArray<T>` source buffer.
+///
+/// The pointer is kind-erased (`*mut u8`); the element type `T` is recovered
+/// from the stamped `_pad` discriminant by the iterator terminal driver via
+/// `v2_array_detect::as_v2_typed_array`. `Clone` bumps the on-header refcount
+/// (`retain_v2_typed_array`); `Drop` retires one share
+/// (`release_v2_typed_array`), so an `IteratorSource::Array` keeps the source
+/// array alive for the iterator's lifetime without a deep copy — the same
+/// share discipline the `NativeKind::Ptr(HeapKind::TypedArray)` slot
+/// clone/drop arms use. NOT a `TypedArrayData` / `TypedBuffer<T>` carrier
+/// (Refusal #1).
+pub struct TypedArrayArc {
+    ptr: *mut u8,
+}
+
+// The pointee is an atomically-refcounted v2 heap allocation (HeapHeader
+// refcount at offset 0); sharing the handle across threads is sound under the
+// same contract as the `NativeKind::Ptr(HeapKind::TypedArray)` slot carrier.
+unsafe impl Send for TypedArrayArc {}
+unsafe impl Sync for TypedArrayArc {}
+
+impl TypedArrayArc {
+    /// Adopt a v2-raw `*mut TypedArray<T>` pointer that the caller already
+    /// owns one share of (the share is transferred into the handle). Use
+    /// [`TypedArrayArc::retain_from`] when the caller only has a borrow.
+    ///
+    /// # Safety
+    /// `ptr` must be a non-null `*mut TypedArray<T>` produced by the v2
+    /// allocator, and the caller must transfer exactly one owned refcount
+    /// share into the handle.
+    #[inline]
+    pub unsafe fn from_owned(ptr: *mut u8) -> Self {
+        Self { ptr }
+    }
+
+    /// Bump the refcount of a borrowed v2-raw carrier and return an owning
+    /// handle. The caller's share is left untouched.
+    ///
+    /// # Safety
+    /// `ptr` must be a non-null, live `*mut TypedArray<T>` v2 carrier.
+    #[inline]
+    pub unsafe fn retain_from(ptr: *mut u8) -> Self {
+        unsafe { retain_v2_typed_array(ptr) };
+        Self { ptr }
+    }
+
+    /// The kind-erased carrier pointer. Consumers recover the element type via
+    /// `v2_array_detect::as_v2_typed_array(ptr, Ptr(HeapKind::TypedArray))`.
+    #[inline]
+    pub fn ptr(&self) -> *mut u8 {
+        self.ptr
+    }
+
+    /// Element count of the backing v2 array. The `len` field of
+    /// `TypedArray<T>` sits at a fixed offset that is independent of `T`
+    /// (HeapHeader + `*mut T` data pointer precede it), so a `TypedArray<u8>`
+    /// view reads it correctly for any element type — mirror of the
+    /// `as_v2_typed_array` len read.
+    #[inline]
+    pub fn len(&self) -> usize {
+        if self.ptr.is_null() {
+            return 0;
+        }
+        // SAFETY: `ptr` is a live v2 `TypedArray<T>`; the `len` field offset is
+        // identical across monomorphizations (the `u8` view is layout-valid
+        // for the header + data-pointer + len prefix).
+        unsafe {
+            let arr = self.ptr as *const crate::v2::typed_array::TypedArray<u8>;
+            (*arr).len as usize
+        }
+    }
+}
+
+impl Clone for TypedArrayArc {
+    #[inline]
+    fn clone(&self) -> Self {
+        // SAFETY: `ptr` is a live v2-raw carrier (invariant of the handle);
+        // retain bumps the HeapHeader refcount at offset 0.
+        unsafe { retain_v2_typed_array(self.ptr) };
+        Self { ptr: self.ptr }
+    }
+}
+
+impl Drop for TypedArrayArc {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: the handle owns exactly one share; release retires it and,
+        // on the last share, frees the buffer via the stamped `_pad`
+        // monomorphization.
+        unsafe { release_v2_typed_array(self.ptr) };
+    }
+}
+
+impl std::fmt::Debug for TypedArrayArc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TypedArrayArc({:p})", self.ptr)
+    }
+}
 
 /// Source backing a lazy iterator pipeline. Each variant holds a typed
 /// `Arc<T>` over an existing collection so iteration shares the receiver's
@@ -53,16 +155,15 @@ use std::sync::Arc;
 /// future-proof against the §2.3 / Q8 cardinality constraints).
 #[derive(Debug, Clone)]
 pub enum IteratorSource {
-    // V3-S5 ckpt-4 (2026-05-15): `Array(Arc<TypedArrayData>)` variant
-    // DELETED. The `TypedArrayData` enum + wrapper layer
-    // (`TypedBuffer<T>`/`AlignedTypedBuffer`) are retired wholesale at
-    // ckpt-1..ckpt-4 per W12-typed-array-data-deletion-audit §3.5 + §B
-    // + ADR-006 §2.7.24 Q25.A SUPERSEDED. Iterator pipelines over typed-
-    // array receivers cascade-break here; the v2-raw `TypedArray<T>`
-    // rebuild produces per-element-kind `Arc<TypedArray<f64>>` /
-    // `Arc<TypedArray<i64>>` payloads (not a single-Arc enum), so the
-    // replacement is per-element-kind variants whose design is
-    // downstream-wave territory. Refusal #1 binding.
+    /// Iteration over a v2-raw `TypedArray<T>` receiver. Wave 1b SEAM B
+    /// (2026-06-15) RESURRECTION over the per-T v2-raw flat-struct carrier
+    /// per ADR-006 §2.7.16 / Q17 + W12-typed-array-data-deletion-audit
+    /// §1.2. The handle is a kind-erased `*mut TypedArray<T>` (see
+    /// [`TypedArrayArc`]); the element type is recovered from the stamped
+    /// `_pad` discriminant at iteration time via
+    /// `v2_array_detect::as_v2_typed_array`. NOT an `Arc<TypedArrayData>`
+    /// enum carrier (Refusal #1, CLAUDE.md §Forbidden).
+    Array(TypedArrayArc),
 
     /// Iteration over a string receiver (per-codepoint).
     String(Arc<String>),
@@ -91,8 +192,9 @@ impl IteratorSource {
     #[inline]
     pub fn len(&self) -> usize {
         match self {
-            // V3-S5 ckpt-4: `IteratorSource::Array(...)` arm deleted in
-            // lockstep with the variant.
+            // Wave 1b SEAM B: v2-raw `TypedArray<T>` element count read from
+            // the carrier's `len` field (T-independent offset).
+            IteratorSource::Array(a) => a.len(),
             IteratorSource::String(s) => s.chars().count(),
             IteratorSource::Range { start, end, step } => {
                 if *step <= 0 || *end <= *start {
@@ -228,15 +330,27 @@ mod tests {
 
     #[test]
     fn iterator_source_range_len() {
-        let src = IteratorSource::Range { start: 0, end: 10, step: 1 };
+        let src = IteratorSource::Range {
+            start: 0,
+            end: 10,
+            step: 1,
+        };
         assert_eq!(src.len(), 10);
-        let src2 = IteratorSource::Range { start: 0, end: 10, step: 3 };
+        let src2 = IteratorSource::Range {
+            start: 0,
+            end: 10,
+            step: 3,
+        };
         assert_eq!(src2.len(), 4); // 0, 3, 6, 9
     }
 
     #[test]
     fn iterator_source_range_empty_on_zero_step() {
-        let src = IteratorSource::Range { start: 0, end: 10, step: 0 };
+        let src = IteratorSource::Range {
+            start: 0,
+            end: 10,
+            step: 0,
+        };
         assert_eq!(src.len(), 0);
     }
 }
