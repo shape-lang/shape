@@ -5,8 +5,8 @@
 use super::TypeInferenceEngine;
 use crate::type_system::*;
 use shape_ast::ast::{
-    DestructurePattern, Expr, ForeignFunctionDef, FunctionDef, Literal, TraitMemberSignature,
-    Item, Statement, TraitMember, TypeAnnotation, TypeName, VarKind, VariableDecl,
+    DestructurePattern, Expr, ForeignFunctionDef, FunctionDef, Item, Literal, Statement,
+    TraitMember, TraitMemberSignature, TypeAnnotation, TypeName, VarKind, VariableDecl,
 };
 use std::collections::HashMap;
 
@@ -261,43 +261,43 @@ impl TypeInferenceEngine {
                     }
                 }
                 match &export.item {
-                shape_ast::ast::ExportItem::Function(func) => {
-                    let func_type = self.infer_function(func)?;
-                    let scheme = self.make_function_scheme(func, func_type.clone());
-                    self.env.define(&func.name, scheme);
-                    types.insert(func.name.clone(), func_type);
-                }
-                shape_ast::ast::ExportItem::TypeAlias(alias) => {
-                    self.env.define_type_alias(
-                        &alias.name,
-                        &alias.type_annotation,
-                        alias.meta_param_overrides.clone(),
-                    );
-                }
-                shape_ast::ast::ExportItem::Struct(struct_def) => {
-                    self.struct_type_defs
-                        .insert(struct_def.name.clone(), struct_def.clone());
-                    let fields = struct_def
-                        .fields
-                        .iter()
-                        .filter(|f| !f.is_comptime)
-                        .map(|f| shape_ast::ast::ObjectTypeField {
-                            name: f.name.clone(),
-                            optional: f.default_value.is_some(),
-                            type_annotation: f.type_annotation.clone(),
-                            annotations: vec![],
-                        })
-                        .collect();
-                    self.env.define_type_alias(
-                        &struct_def.name,
-                        &TypeAnnotation::Object(fields),
-                        None,
-                    );
-                }
-                shape_ast::ast::ExportItem::Trait(trait_def) => {
-                    self.register_trait(trait_def)?;
-                }
-                _ => {}
+                    shape_ast::ast::ExportItem::Function(func) => {
+                        let func_type = self.infer_function(func)?;
+                        let scheme = self.make_function_scheme(func, func_type.clone());
+                        self.env.define(&func.name, scheme);
+                        types.insert(func.name.clone(), func_type);
+                    }
+                    shape_ast::ast::ExportItem::TypeAlias(alias) => {
+                        self.env.define_type_alias(
+                            &alias.name,
+                            &alias.type_annotation,
+                            alias.meta_param_overrides.clone(),
+                        );
+                    }
+                    shape_ast::ast::ExportItem::Struct(struct_def) => {
+                        self.struct_type_defs
+                            .insert(struct_def.name.clone(), struct_def.clone());
+                        let fields = struct_def
+                            .fields
+                            .iter()
+                            .filter(|f| !f.is_comptime)
+                            .map(|f| shape_ast::ast::ObjectTypeField {
+                                name: f.name.clone(),
+                                optional: f.default_value.is_some(),
+                                type_annotation: f.type_annotation.clone(),
+                                annotations: vec![],
+                            })
+                            .collect();
+                        self.env.define_type_alias(
+                            &struct_def.name,
+                            &TypeAnnotation::Object(fields),
+                            None,
+                        );
+                    }
+                    shape_ast::ast::ExportItem::Trait(trait_def) => {
+                        self.register_trait(trait_def)?;
+                    }
+                    _ => {}
                 }
             }
             Item::Comptime(stmts, _) => {
@@ -543,6 +543,55 @@ impl TypeInferenceEngine {
         }
         self.callable_param_source_vars
             .insert(func.name.clone(), param_source_vars);
+
+        // HOF return-type aliasing (the sg2 root). When an UNANNOTATED function's
+        // RETURN value is precisely the result of invoking one of its own
+        // fn-typed params in tail position (`fn apply2(f, x, y) { f(x, y) }`),
+        // the function's return type IS that param's return type. The inference
+        // engine resolves the fn-typed param's full `Function` signature only
+        // AFTER `solver.solve` (via the post-solve `apply_callsite_unions`
+        // call-site widening), by which point the body constraint that linked
+        // the function's return var to the param's return var has already been
+        // solved against a still-unresolved param. So the function's return is
+        // left as a bare `Variable`. Recording the param index here lets
+        // `apply_callsite_unions` substitute the function's return var with the
+        // param's NOW-concrete return type once the param resolves.
+        //
+        // Pure-AST, conservative: fires ONLY when the function is unannotated,
+        // has no explicit `return` statements (those go through the
+        // return-union machinery untouched), and its single tail value is a
+        // direct `param(...)` call naming an unannotated param. Any other shape
+        // records nothing — the case keeps its existing behavior. The adopted
+        // return type is whatever EXACT type the engine proves for the param's
+        // return (int stays int, number stays number); an unresolved param
+        // return leaves the function's return a variable (SURFACEs, no default).
+        if func.return_type.is_none() {
+            let mut unannotated_param_index: HashMap<String, usize> = HashMap::new();
+            for (i, p) in func.params.iter().enumerate() {
+                if p.type_annotation.is_some() {
+                    continue;
+                }
+                let names = p.get_identifiers();
+                if names.len() == 1 {
+                    unannotated_param_index.insert(names[0].clone(), i);
+                }
+            }
+            let mut explicit_returns: Vec<&Expr> = Vec::new();
+            Self::collect_explicit_returns(&func.body, &mut explicit_returns);
+            if explicit_returns.is_empty() {
+                let mut tail_values: Vec<&Expr> = Vec::new();
+                Self::collect_tail_values(&func.body, &mut tail_values);
+                if tail_values.len() == 1 {
+                    if let Expr::FunctionCall { name, .. } = tail_values[0] {
+                        if let Some(&idx) = unannotated_param_index.get(name.as_str()) {
+                            self.callable_return_from_fn_param
+                                .insert(func.name.clone(), idx);
+                        }
+                    }
+                }
+            }
+        }
+
         self.callable_param_defaults.insert(
             func.name.clone(),
             func.params
@@ -604,12 +653,12 @@ impl TypeInferenceEngine {
         } else {
             None
         };
-        self.expected_return_types.push(expected_return_for_adoption);
+        self.expected_return_types
+            .push(expected_return_for_adoption);
 
         // Infer callable return type from all explicit returns (or final expression)
         let local_constraint_start = self.constraints.len();
-        let inferred_result =
-            self.infer_callable_return_type(&func.body, allow_unresolved_return);
+        let inferred_result = self.infer_callable_return_type(&func.body, allow_unresolved_return);
 
         self.expected_return_types.pop();
         // `include_numeric_refinement: false` — defer the `number` default for
@@ -869,7 +918,9 @@ impl TypeInferenceEngine {
                 // so the arity check is receiver-agnostic and a `fn drop(&mut self)`
                 // trait method matches a `method drop()` impl.
                 let (trait_method_name, trait_arity) = match member {
-                    TraitMember::Required(TraitMemberSignature::Method { name, params, .. }) => {
+                    TraitMember::Required(TraitMemberSignature::Method {
+                        name, params, ..
+                    }) => {
                         let arity = params
                             .iter()
                             .filter(|p| p.name.as_deref() != Some("self"))
@@ -949,10 +1000,8 @@ impl TypeInferenceEngine {
 
         // Extract trait-level type param bounds from the trait name for bound checking
         // e.g., `impl NumericVec for Vec` where NumericVec requires T: Numeric
-        let receiver_param_bounds: Vec<(usize, Vec<String>)> = Self::extract_trait_receiver_bounds(
-            &impl_block.trait_name,
-            &receiver_type_params,
-        );
+        let receiver_param_bounds: Vec<(usize, Vec<String>)> =
+            Self::extract_trait_receiver_bounds(&impl_block.trait_name, &receiver_type_params);
 
         let has_receiver_params = !receiver_type_params.is_empty();
 
@@ -1285,9 +1334,7 @@ impl TypeInferenceEngine {
                 }
                 let arg_exprs: Vec<TypeParamExpr> = args
                     .iter()
-                    .map(|a| {
-                        Self::annotation_to_type_param_expr(a, receiver_params, method_params)
-                    })
+                    .map(|a| Self::annotation_to_type_param_expr(a, receiver_params, method_params))
                     .collect();
                 TypeParamExpr::GenericContainer {
                     name: name_str.to_string(),
@@ -1295,19 +1342,14 @@ impl TypeInferenceEngine {
                 }
             }
             TypeAnnotation::Array(elem) => {
-                let elem_expr = Self::annotation_to_type_param_expr(
-                    elem,
-                    receiver_params,
-                    method_params,
-                );
+                let elem_expr =
+                    Self::annotation_to_type_param_expr(elem, receiver_params, method_params);
                 TypeParamExpr::GenericContainer {
                     name: "Vec".to_string(),
                     args: vec![elem_expr],
                 }
             }
-            TypeAnnotation::Void => {
-                TypeParamExpr::Concrete(Type::Concrete(TypeAnnotation::Void))
-            }
+            TypeAnnotation::Void => TypeParamExpr::Concrete(Type::Concrete(TypeAnnotation::Void)),
             // For other annotation types, fall back to concrete
             _ => TypeParamExpr::Concrete(Type::Concrete(ann.clone())),
         }
@@ -1431,7 +1473,9 @@ impl TypeInferenceEngine {
                     // Transitively include supertrait bounds:
                     // If T: Foo and trait Foo: Bar + Baz, also add Bar and Baz.
                     for trait_name in trait_bounds {
-                        let supers = self.env.get_transitive_supertrait_names(trait_name.as_str());
+                        let supers = self
+                            .env
+                            .get_transitive_supertrait_names(trait_name.as_str());
                         for st in supers {
                             if !expanded.contains(&st) {
                                 expanded.push(st);
@@ -1451,10 +1495,13 @@ impl TypeInferenceEngine {
             // Merge where clause predicates: where T: Display + Serializable
             if let Some(where_preds) = &func.where_clause {
                 for pred in where_preds {
-                    let mut expanded: Vec<String> = pred.bounds.iter().map(|t| t.to_string()).collect();
+                    let mut expanded: Vec<String> =
+                        pred.bounds.iter().map(|t| t.to_string()).collect();
                     // Transitively include supertrait bounds from where clauses too
                     for trait_name in &pred.bounds {
-                        let supers = self.env.get_transitive_supertrait_names(trait_name.as_str());
+                        let supers = self
+                            .env
+                            .get_transitive_supertrait_names(trait_name.as_str());
                         for st in supers {
                             if !expanded.contains(&st) {
                                 expanded.push(st);
@@ -1498,9 +1545,10 @@ impl TypeInferenceEngine {
             decl.value.as_ref(),
             Some(Expr::FunctionCall { .. } | Expr::QualifiedFunctionCall { .. })
         );
-        if let (Some(name), Some(span)) =
-            (decl.pattern.as_identifier(), decl.pattern.as_identifier_span())
-        {
+        if let (Some(name), Some(span)) = (
+            decl.pattern.as_identifier(),
+            decl.pattern.as_identifier_span(),
+        ) {
             self.unannotated_let_binding_origins
                 .insert(name.to_string(), (span, is_application_init));
         }
@@ -1789,9 +1837,7 @@ impl TypeInferenceEngine {
             // call, so its element/payload var is genuinely free, not aliased to a
             // shared mutable cell.
             Expr::Literal(Literal::None, _) => true,
-            Expr::FunctionCall { name, .. }
-                if name == "Some" || name == "Ok" || name == "Err" =>
-            {
+            Expr::FunctionCall { name, .. } if name == "Some" || name == "Ok" || name == "Err" => {
                 true
             }
             Expr::EnumConstructor { .. }
@@ -1863,8 +1909,7 @@ impl TypeInferenceEngine {
             // typed-int initializer keeps its inferred type. `decl.value` is
             // `Some(init_expr)` here.
             let defers_literal = decl.is_mut && decl.kind != VarKind::Const && {
-                let decimal_probe =
-                    Type::Concrete(TypeAnnotation::Basic("decimal".to_string()));
+                let decimal_probe = Type::Concrete(TypeAnnotation::Basic("decimal".to_string()));
                 Self::adopt_int_literal_in_context(init_expr, &decimal_probe).is_some()
             };
             if defers_literal {
@@ -1996,14 +2041,12 @@ impl TypeInferenceEngine {
         struct_name: &str,
         field_name: &str,
     ) -> Option<TypeAnnotation> {
-        self.struct_type_defs
-            .get(struct_name)
-            .and_then(|def| {
-                def.fields
-                    .iter()
-                    .find(|f| f.name == field_name)
-                    .map(|f| f.type_annotation.clone())
-            })
+        self.struct_type_defs.get(struct_name).and_then(|def| {
+            def.fields
+                .iter()
+                .find(|f| f.name == field_name)
+                .map(|f| f.type_annotation.clone())
+        })
     }
 
     /// J-CT.1: reverse lookup from a resolved `Object(...)` shape to its
@@ -2026,8 +2069,7 @@ impl TypeInferenceEngine {
         actual_fields: &[shape_ast::ast::ObjectTypeField],
     ) -> Option<String> {
         use std::collections::HashSet;
-        let actual_names: HashSet<&str> =
-            actual_fields.iter().map(|f| f.name.as_str()).collect();
+        let actual_names: HashSet<&str> = actual_fields.iter().map(|f| f.name.as_str()).collect();
         for (name, def) in self.struct_type_defs.iter() {
             let expected_names: HashSet<&str> = def
                 .fields
@@ -2305,12 +2347,9 @@ mod tests {
 
         let program = parse_program(code).expect("Failed to parse");
         let mut engine = TypeInferenceEngine::new();
-        engine.method_table.register_user_method(
-            "string",
-            "len",
-            vec![],
-            BuiltinTypes::number(),
-        );
+        engine
+            .method_table
+            .register_user_method("string", "len", vec![], BuiltinTypes::number());
         let result = engine.infer_program(&program);
         assert!(
             result.is_ok(),
@@ -2426,7 +2465,10 @@ mod tests {
             assert_eq!(tp.name(), "T");
             assert_eq!(
                 tp.trait_bounds(),
-                &[shape_ast::ast::type_path::TypePath::from("Comparable"), shape_ast::ast::type_path::TypePath::from("Displayable")],
+                &[
+                    shape_ast::ast::type_path::TypePath::from("Comparable"),
+                    shape_ast::ast::type_path::TypePath::from("Displayable")
+                ],
             );
         } else {
             panic!("Expected function item");
@@ -3072,9 +3114,9 @@ mod tests {
         let program = parse_program(code).expect("should parse");
         let mut engine = TypeInferenceEngine::new();
         let (_types, errors) = engine.infer_program_best_effort(&program);
-        let has_jct1_err = errors.iter().any(|e| {
-            matches!(e, TypeError::ComptimeMethodCallOutsideComptime { .. })
-        });
+        let has_jct1_err = errors
+            .iter()
+            .any(|e| matches!(e, TypeError::ComptimeMethodCallOutsideComptime { .. }));
         assert!(
             !has_jct1_err,
             "inside a comptime block, the call should NOT raise \
@@ -3210,8 +3252,7 @@ mod tests {
         // forward reference exactly as from-source does).
         let canvas_ty = Type::Concrete(TypeAnnotation::Reference("Canvas".into()));
         assert!(
-            engine_b.method_table.lookup(&canvas_ty, "draw").is_some()
-                || !errors_b.is_empty(),
+            engine_b.method_table.lookup(&canvas_ty, "draw").is_some() || !errors_b.is_empty(),
             "impl-before-trait either registers the method or surfaces the same \
              error a from-source compile would (no silent divergence)"
         );

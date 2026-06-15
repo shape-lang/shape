@@ -2433,3 +2433,110 @@ fn letgen_empty_array_remedy_unchanged() {
     "#,
     );
 }
+
+/// HOF return-type aliasing (the sg2 root). An unannotated wrapper whose return
+/// value is precisely `f(x, y)` — invoking its own fn-typed param `f` in tail
+/// position — must infer its RETURN type as `f`'s return type. With a NAMED
+/// `fn mul(a:int,b:int)->int`, `apply2(mul, 6, 7)` resolves `apply2`'s return
+/// to `int` (not a bare variable), so downstream arithmetic on the result types
+/// + lowers correctly instead of crashing at runtime ("no method add on
+/// receiver kind Int64"). `int` and `number` stay distinct: the inferred return
+/// is the EXACT proven type, never a numeric defaulted to `number`.
+#[test]
+fn hof_wrapper_return_type_resolves_from_fn_param_return_named() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn apply2(f, x, y) { f(x, y) }
+fn mul(a: int, b: int) -> int { a * b }
+let r = apply2(mul, 6, 7)
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let (types, _errors) = engine.infer_program_best_effort(&program);
+
+    let apply2_type = types.get("apply2").expect("apply2 should be inferred");
+    match apply2_type {
+        Type::Function { returns, .. } => {
+            let ann = returns
+                .to_annotation()
+                .expect("return should convert to annotation");
+            assert!(
+                matches!(&ann, TypeAnnotation::Basic(name) if name == "int"),
+                "apply2's return must resolve to int (f's return), got {:?}",
+                ann
+            );
+        }
+        other => panic!("expected function type for apply2, got {:?}", other),
+    }
+}
+
+/// The closure-literal sibling of the named case: `apply2(|a,b| a*b, 6, 7)`
+/// resolves `apply2`'s return to the closure body's `int` return. int stays int
+/// — the closure params are pinned to `int` by the `6, 7` call-site args, never
+/// defaulted to `number`.
+#[test]
+fn hof_wrapper_return_type_resolves_from_fn_param_return_closure() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn apply2(f, x, y) { f(x, y) }
+let r = apply2(|a, b| a * b, 6, 7)
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let (types, _errors) = engine.infer_program_best_effort(&program);
+
+    let apply2_type = types.get("apply2").expect("apply2 should be inferred");
+    match apply2_type {
+        Type::Function { returns, .. } => {
+            let ann = returns
+                .to_annotation()
+                .expect("return should convert to annotation");
+            assert!(
+                matches!(&ann, TypeAnnotation::Basic(name) if name == "int"),
+                "apply2's return must resolve to int (closure body return), got {:?}",
+                ann
+            );
+        }
+        other => panic!("expected function type for apply2, got {:?}", other),
+    }
+}
+
+/// number-preservation sibling: a `number`-typed closure body keeps the wrapper
+/// return `number`. int and number do NOT unify — the resolution copies the
+/// EXACT proven family.
+#[test]
+fn hof_wrapper_return_type_preserves_number() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn apply2(f, x, y) { f(x, y) }
+fn mulf(a: number, b: number) -> number { a * b }
+let r = apply2(mulf, 2.0, 3.0)
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let (types, _errors) = engine.infer_program_best_effort(&program);
+
+    let apply2_type = types.get("apply2").expect("apply2 should be inferred");
+    match apply2_type {
+        Type::Function { returns, .. } => {
+            let ann = returns
+                .to_annotation()
+                .expect("return should convert to annotation");
+            assert!(
+                matches!(&ann, TypeAnnotation::Basic(name) if name == "number"),
+                "apply2's return must stay number (mulf's return), got {:?}",
+                ann
+            );
+        }
+        other => panic!("expected function type for apply2, got {:?}", other),
+    }
+}

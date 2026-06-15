@@ -90,6 +90,16 @@ pub struct TypeInferenceEngine {
     /// Source type variables for callable parameters, indexed by parameter
     /// position. `None` means parameter was explicitly annotated.
     pub(crate) callable_param_source_vars: HashMap<String, Vec<Option<TypeVar>>>,
+    /// HOF return-type aliasing (the sg2 root). When a function's RETURN value
+    /// is the result of invoking one of its own fn-typed params in tail/return
+    /// position (`fn apply2(f, x, y) { f(x, y) }` — apply2's return IS f's
+    /// return type), records `apply2 -> param-index-of-f`. During
+    /// `apply_callsite_unions`, once that fn-typed param resolves to a concrete
+    /// `Function { returns: R }`, the function's still-unresolved return var is
+    /// substituted with the EXACT proven `R` (int stays int, number stays
+    /// number — no defaulting). An unresolved `R` leaves the return a variable,
+    /// so the case SURFACEs exactly as before (no fabrication).
+    pub(crate) callable_return_from_fn_param: HashMap<String, usize>,
     /// Whether each callable parameter has a default value.
     /// Used for compile-time arity validation at call sites.
     pub(crate) callable_param_defaults: HashMap<String, Vec<bool>>,
@@ -162,8 +172,7 @@ pub struct TypeInferenceEngine {
     /// Populated during `infer_function_call` when all type params of a
     /// polymorphic callee resolve to concrete types. Consumed by the
     /// bytecode compiler to drive monomorphization.
-    pub callsite_type_args:
-        HashMap<(String, usize, usize), Vec<(String, TypeAnnotation)>>,
+    pub callsite_type_args: HashMap<(String, usize, usize), Vec<(String, TypeAnnotation)>>,
     /// J-CT.1: depth of the current `comptime { ... }` nesting.
     ///
     /// Incremented on entering `Expr::Comptime` / `Expr::ComptimeFor` /
@@ -224,6 +233,7 @@ impl TypeInferenceEngine {
             method_table: MethodTable::new(),
             callsite_param_types: HashMap::new(),
             callable_param_source_vars: HashMap::new(),
+            callable_return_from_fn_param: HashMap::new(),
             callable_param_defaults,
             callable_numeric_param_indices: HashMap::new(),
             deferred_closure_numeric_param_vars: std::collections::HashSet::new(),
@@ -502,9 +512,9 @@ impl TypeInferenceEngine {
     /// `Result<int> !~ Result<number>`).
     pub(crate) fn result_error_type(&self, ty: &Type) -> Option<Type> {
         let any_error = || {
-            Type::Concrete(TypeAnnotation::Reference(
-                shape_ast::ast::TypePath::simple("AnyError"),
-            ))
+            Type::Concrete(TypeAnnotation::Reference(shape_ast::ast::TypePath::simple(
+                "AnyError",
+            )))
         };
         match ty {
             Type::Generic { base, args } => match base.as_ref() {
@@ -564,9 +574,7 @@ impl TypeInferenceEngine {
 
     pub(crate) fn wrap_result_type_with_error(&self, inner: Type, err: Type) -> Type {
         Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
             args: vec![inner, err],
         }
     }
@@ -1405,6 +1413,7 @@ impl TypeInferenceEngine {
         // interface across into the consumer check.
         self.pending_return_unions.clear();
         self.callable_param_source_vars.clear();
+        self.callable_return_from_fn_param.clear();
         self.callable_param_defaults.clear();
         self.callable_numeric_param_indices.clear();
         self.deferred_closure_numeric_param_vars.clear();
@@ -1466,6 +1475,7 @@ impl TypeInferenceEngine {
     ) -> (HashMap<String, Type>, Vec<TypeError>) {
         self.pending_return_unions.clear();
         self.callable_param_source_vars.clear();
+        self.callable_return_from_fn_param.clear();
         self.callable_param_defaults.clear();
         self.callable_numeric_param_indices.clear();
         self.deferred_closure_numeric_param_vars.clear();
@@ -1570,6 +1580,55 @@ impl TypeInferenceEngine {
         // CONFLICTING observed pair still produces the genuine union mismatch.
         self.apply_callsite_unions(&mut types);
 
+        // HOF return-type soundness re-check (the sg2 root, int/number guard).
+        //
+        // `apply_callsite_unions` resolved each HOF wrapper's return type to its
+        // fn-typed param's GENUINE return type (`apply2` returns `f`'s return —
+        // `int` for `apply2(|a,b| a*b, …)`). But that resolution is post-solve:
+        // a USE site (`let n: number = 1.0; n + apply2(|a,b| a*b, 6, 7)`)
+        // already unified the wrapper's still-free return var against its
+        // own demanded type (`number`) during `solver.solve`, so the genuine
+        // `int` was never checked against it. Without this guard the bytecode
+        // emitter would then see `number + int` and widen via `IntToNumber` —
+        // exactly the deleted implicit int->number coercion (CLAUDE.md: int and
+        // number do NOT unify).
+        //
+        // Re-pushing the genuine `return_var ~ R` constraints and re-solving
+        // makes such a conflict a real type error: the solver already bound the
+        // return var to `number` at the use site, so `number ~ int` rejects.
+        // When the use site agrees (`acc: int; acc + apply2(…)`) the constraint
+        // is a no-op. When no use site pinned the var, it simply binds to the
+        // genuine `R` (int stays int, number stays number — no defaulting).
+        let mut hof_return_constraints: Vec<(Type, Type)> = Vec::new();
+        for (fn_name, &fn_param_idx) in &self.callable_return_from_fn_param {
+            let Some(Type::Function { params, returns }) = types.get(fn_name) else {
+                continue;
+            };
+            let Type::Variable(_) = returns.as_ref() else {
+                // Already concrete in `types` — the genuine return is what the
+                // emitter will read; nothing to re-assert.
+                continue;
+            };
+            let Some(Type::Function {
+                returns: param_returns,
+                ..
+            }) = params.get(fn_param_idx)
+            else {
+                continue;
+            };
+            let genuine = self.unifier.apply_substitutions(param_returns.as_ref());
+            if matches!(genuine, Type::Variable(_)) {
+                continue;
+            }
+            hof_return_constraints.push(((**returns).clone(), genuine));
+        }
+        if !hof_return_constraints.is_empty() {
+            if let Err(err) = self.solver.solve(&mut hof_return_constraints) {
+                errors.push(err);
+            }
+            self.unifier.merge(self.solver.unifier());
+        }
+
         // Apply substitutions to get final types
         for (_name, ty) in types.iter_mut() {
             *ty = self.unifier.apply_substitutions(ty);
@@ -1661,6 +1720,39 @@ impl TypeInferenceEngine {
                             widened_params[index] = widened_type;
                         }
                         _ => {}
+                    }
+                }
+
+                // HOF return-type aliasing (the sg2 root). When this function's
+                // return value is the result of invoking one of its own fn-typed
+                // params in tail position (recorded in
+                // `callable_return_from_fn_param` during body inference), and
+                // that param has NOW widened to a concrete `Function { returns:
+                // R }`, the function's still-unresolved return var resolves to
+                // the EXACT `R`. This closes the post-solve ordering gap: the
+                // body constraint linking the return var to the param's return
+                // var was solved while the param was unresolved, so the return
+                // var was never substituted. We adopt only a concrete `R` (int
+                // stays int, number stays number); an unresolved `R` leaves the
+                // return a variable, so the case SURFACEs unchanged.
+                if let Type::Variable(return_var) = &returns {
+                    if !substitutions.contains_key(return_var) {
+                        if let Some(&fn_param_idx) =
+                            self.callable_return_from_fn_param.get(function_name)
+                        {
+                            if let Some(Type::Function {
+                                returns: param_returns,
+                                ..
+                            }) = widened_params.get(fn_param_idx)
+                            {
+                                let resolved_param_return =
+                                    self.unifier.apply_substitutions(param_returns.as_ref());
+                                if !matches!(resolved_param_return, Type::Variable(_)) {
+                                    substitutions
+                                        .insert(return_var.clone(), resolved_param_return);
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1766,9 +1858,7 @@ impl TypeInferenceEngine {
             Type::Concrete(ann @ (TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_))) => {
                 name_is_numeric(ann)
             }
-            Type::Concrete(TypeAnnotation::Union(members)) => {
-                members.iter().all(name_is_numeric)
-            }
+            Type::Concrete(TypeAnnotation::Union(members)) => members.iter().all(name_is_numeric),
             _ => false,
         }
     }
@@ -1884,7 +1974,10 @@ impl TypeInferenceEngine {
             .cloned()
             .collect();
         for var in vars {
-            match self.unifier.apply_substitutions(&Type::Variable(var.clone())) {
+            match self
+                .unifier
+                .apply_substitutions(&Type::Variable(var.clone()))
+            {
                 Type::Variable(_) | Type::Constrained { .. } => {
                     self.unifier.bind(var, BuiltinTypes::number());
                 }
@@ -1911,7 +2004,10 @@ impl TypeInferenceEngine {
             .cloned()
             .collect();
         for var in vars {
-            match self.unifier.apply_substitutions(&Type::Variable(var.clone())) {
+            match self
+                .unifier
+                .apply_substitutions(&Type::Variable(var.clone()))
+            {
                 Type::Variable(_) | Type::Constrained { .. } => {
                     self.unifier.bind(var, BuiltinTypes::integer());
                 }
@@ -2139,9 +2235,7 @@ impl TypeInferenceEngine {
                         Type::Variable(v) | Type::Constrained { var: v, .. } => {
                             tyvar_to_annotation(v)
                         }
-                        _ => resolved
-                            .to_annotation()
-                            .unwrap_or_else(|| ann.clone()),
+                        _ => resolved.to_annotation().unwrap_or_else(|| ann.clone()),
                     }
                 }
                 None => ann.clone(),
@@ -2150,7 +2244,10 @@ impl TypeInferenceEngine {
         match ann {
             TypeAnnotation::Borrow { mutable, inner } => TypeAnnotation::Borrow {
                 mutable: *mutable,
-                inner: Box::new(Self::apply_substitutions_to_annotation(inner, substitutions)),
+                inner: Box::new(Self::apply_substitutions_to_annotation(
+                    inner,
+                    substitutions,
+                )),
             },
             TypeAnnotation::Array(elem) => TypeAnnotation::Array(Box::new(
                 Self::apply_substitutions_to_annotation(elem, substitutions),
@@ -2187,7 +2284,10 @@ impl TypeInferenceEngine {
                         ),
                     })
                     .collect(),
-                returns: Box::new(Self::apply_substitutions_to_annotation(returns, substitutions)),
+                returns: Box::new(Self::apply_substitutions_to_annotation(
+                    returns,
+                    substitutions,
+                )),
             },
             TypeAnnotation::Union(members) => TypeAnnotation::Union(
                 members

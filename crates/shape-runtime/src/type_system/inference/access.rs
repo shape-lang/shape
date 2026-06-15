@@ -920,6 +920,67 @@ impl TypeInferenceEngine {
             return Ok(Type::Concrete(*inner));
         }
 
+        // HOF return-type aliasing at the CALL site (the sg2 root, int/number
+        // guard). When `name` is a wrapper whose return value is precisely the
+        // result of invoking one of its own fn-typed params in tail position
+        // (`fn apply2(f, x, y) { f(x, y) }`, recorded in
+        // `callable_return_from_fn_param`), the call's result type IS the
+        // GENUINE return type of the function passed at that param position
+        // (`apply2(|a,b| a*b, 6, 7)` returns `int`, the closure's return). The
+        // HM scheme instantiates apply2's stored return var fresh here, so
+        // without this the result stays an unconstrained var that a USE site
+        // (`n: number; n + apply2(…)`) would unify against its OWN demanded type
+        // — silently accepting a `number + int` the bytecode emitter then widens
+        // (the deleted int->number coercion; int and number do NOT unify). We
+        // pin the result to the genuine `R`, so a conflicting use rejects at
+        // solve time and an agreeing use (`acc: int; acc + apply2(…)`) lowers to
+        // the correct typed opcode. Fires only when the arg's function type is
+        // fully concrete (int stays int, number stays number); an unresolved arg
+        // return leaves the result as-is (no fabrication).
+        if let Some(&fn_param_idx) = self.callable_return_from_fn_param.get(name) {
+            if let Some(arg_ty) = arg_types.get(fn_param_idx) {
+                let resolved_arg = self.unifier.apply_substitutions(arg_ty);
+                let arg_return = match &resolved_arg {
+                    Type::Function { returns, .. } => Some((**returns).clone()),
+                    Type::Concrete(TypeAnnotation::Function { returns, .. }) => {
+                        match annotation_as_tyvar(returns) {
+                            Some(_) => None,
+                            None => Some(Type::Concrete((**returns).clone())),
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(genuine) = arg_return {
+                    let genuine = self.unifier.apply_substitutions(&genuine);
+                    if !matches!(genuine, Type::Variable(_)) {
+                        // Unify (don't blindly replace): an agreeing instantiated
+                        // result var binds to `genuine`; a conflict surfaces.
+                        self.push_constraint_with_origin(
+                            inferred_result_type.clone(),
+                            genuine.clone(),
+                            origin,
+                        );
+                        return Ok(genuine);
+                    }
+                    // The arg's return is still a variable (a closure literal
+                    // whose body return resolves only after the solver pins its
+                    // params from the call-site args). Link the call result to
+                    // that SAME variable so both resolve together to the genuine
+                    // type (`int` for `|a,b| a*b` over int args) — keeping the
+                    // result tied to the closure's actual return rather than a
+                    // disconnected fresh instantiation var. No type is fabricated:
+                    // if the closure return never resolves, the result stays a
+                    // variable exactly as before.
+                    self.push_constraint_with_origin(
+                        inferred_result_type.clone(),
+                        genuine.clone(),
+                        origin,
+                    );
+                    return Ok(genuine);
+                }
+            }
+        }
+
         Ok(inferred_result_type)
     }
 
