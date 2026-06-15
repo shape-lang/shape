@@ -1138,12 +1138,6 @@ impl BytecodeCompiler {
                 if param.type_annotation.is_some() {
                     continue;
                 }
-                let Some(Type::Function {
-                    params: fn_params, ..
-                }) = params.get(idx)
-                else {
-                    continue;
-                };
 
                 // PRIMARY (sound) path: derive the callable's argument
                 // annotations from the OUTER function's own resolved parameter
@@ -1151,22 +1145,34 @@ impl BytecodeCompiler {
                 //
                 // The engine resolves the OUTER params (`x`, `y`) precisely
                 // (call-site `apply2(.., 6, 7)` pins them to `int`), but the
-                // engine's projection of the CALLABLE param `f` can collapse a
-                // `Numeric`-bounded slot to `number` when the only sites that
-                // pin it are closure-eager (e.g. `|a,b| a*b`). Reading the
-                // outer params instead carries the EXACT proven type
-                // (`int`, never widened to `number`) onto the closure.
+                // engine's projection of the CALLABLE param `f` is NOT a
+                // reliable source: it can collapse a `Numeric`-bounded slot to
+                // `number` when the only sites that pin it are closure-eager
+                // (`|a,b| a*b`), AND — when the SAME wrapper is called more than
+                // once with DIFFERENT closure literals — the solver unifies the
+                // distinct closure fn-types into the shared `f` source var as a
+                // `Concrete(Union([fn(unknown,unknown)->unknown, …]))`. Reading
+                // that shared, cross-call-site projection is exactly the
+                // multi-call clobber: it is neither a `Type::Function` nor
+                // concrete. So the PRIMARY path is derived ENTIRELY from the
+                // body-call shape + the OUTER params' own resolved types — each
+                // of which the engine pins per call site (`int`) and which the
+                // closure-arg union never corrupts. This is the
+                // let-generalization instantiation discipline: the wrapper's
+                // closure-param signature is reconstructed per use from the
+                // proven outer-param types, not from a mutated shared `f` slot.
+                //
+                // Arity comes from the body-call shape itself
+                // (`callable_param_body_arg_indices` only returns `Some` for a
+                // consistent `f(<outer-param>, …)` usage), so it does NOT depend
+                // on the corrupted `f` projection.
                 //
                 // `int` and `number` stay distinct: we copy whatever concrete
                 // name the engine proved for the outer param; no defaulting.
                 let body_arg_indices =
                     Self::callable_param_body_arg_indices(&func, param_name, &param_name_to_index);
                 if let Some(outer_indices) = body_arg_indices {
-                    // Arity must agree with the engine's resolved callable
-                    // signature (defensive: a body that calls `f` with a
-                    // different arity than the inferred fn-type is
-                    // inconsistent — leave it to the engine's own error).
-                    if outer_indices.len() == fn_params.len() {
+                    if !outer_indices.is_empty() {
                         let mut arg_anns: Vec<shape_ast::ast::TypeAnnotation> =
                             Vec::with_capacity(outer_indices.len());
                         let mut all_concrete = true;
@@ -1191,9 +1197,18 @@ impl BytecodeCompiler {
                 // FALLBACK: when the body usage is not a simple
                 // `f(<param>, <param>)` call (so no sound outer mapping is
                 // available), fall back to the engine's projection of the
-                // callable param itself. Require EVERY argument position
-                // concrete — a single unresolved (Variable / Constrained /
-                // `unknown`) arg ⇒ bail the entry to `None` (no fabrication).
+                // callable param itself — but ONLY when that projection is a
+                // clean `Type::Function`. A multi-call union / non-function
+                // projection has no usable per-arg type here ⇒ no entry (the
+                // closure keeps its existing rejection; no fabrication).
+                // Require EVERY argument position concrete — a single unresolved
+                // (Variable / Constrained / `unknown`) arg ⇒ bail to `None`.
+                let Some(Type::Function {
+                    params: fn_params, ..
+                }) = params.get(idx)
+                else {
+                    continue;
+                };
                 let mut arg_anns: Vec<shape_ast::ast::TypeAnnotation> =
                     Vec::with_capacity(fn_params.len());
                 let mut all_concrete = true;

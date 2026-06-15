@@ -600,6 +600,45 @@ fn hof_apply_two_args() {
     .expect_number(42.0);
 }
 
+// Strict-flip W1a-B (multi-call): two calls to the SAME inferred fn-typed-param
+// wrapper with DIFFERENT closure literals must BOTH infer their params. The
+// per-call closure signature is reconstructed from the wrapper's OWN resolved
+// params (the let-generalization instantiation discipline), not from a shared
+// `f`-param projection that the second call site collapses into a
+// `Union([fn(unknown,unknown), …])`. int is preserved EXACTLY: `42` and `1`
+// print without a `.0`, proving the closure bodies (`a * b`, `a % b`) typed as
+// int — `%` only exists for int, and `int`/`number` never unified.
+#[test]
+fn hof_apply_two_args_two_calls_same_wrapper_preserves_int() {
+    ShapeTest::new(
+        r#"
+        fn apply2(f, x, y) { f(x, y) }
+        let r: int = apply2(|a, b| a * b, 6, 7)
+        let s: int = apply2(|a, b| a % b, 7, 2)
+        print(r)
+        print(s)
+    "#,
+    )
+    .expect_output("42\n1");
+}
+
+// Sibling: two calls to the same wrapper with number closures keep number
+// (formatted with `.0`), proving the reconstruction copies the EXACT proven
+// outer-param type and never defaults int.
+#[test]
+fn hof_apply_two_args_two_calls_same_wrapper_preserves_number() {
+    ShapeTest::new(
+        r#"
+        fn apply2(f, x, y) { f(x, y) }
+        let r: number = apply2(|a, b| a * b, 6.0, 7.0)
+        let s: number = apply2(|a, b| a + b, 1.5, 2.5)
+        print(r)
+        print(s)
+    "#,
+    )
+    .expect_output("42.0\n4.0");
+}
+
 #[test]
 fn hof_function_as_return_value_with_state() {
     ShapeTest::new(
