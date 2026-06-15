@@ -127,6 +127,26 @@ pub struct TypeInferenceEngine {
     /// `refine_numeric_params_post_callsite` path. No int VALUE is widened: an
     /// unresolved var adopts `number` only when no concrete arg ever pins it.
     pub(crate) deferred_closure_numeric_param_vars: std::collections::HashSet<TypeVar>,
+    /// Numeric-param source vars of a closure LITERAL that was passed as a value
+    /// argument to a USER (non-builtin) function call — i.e. the closure ESCAPES
+    /// into a callee that may invoke it (`id(|a,b| a*b)`, `applyx(|a,b| a*b,…)`).
+    ///
+    /// This is the indirected-callable soundness discriminator. When such a
+    /// closure's param is invoked with concrete arguments through a layer the
+    /// inference engine CAN thread (the direct `applyx(|a,b| a*b,6,7)` case), the
+    /// callsite-union fixpoint resolves the param to the concrete arg type and it
+    /// is NEVER reached by `default_unresolved_closure_numeric_params`. When the
+    /// callable arrives INDIRECTED (returned from `id`, forwarded through a
+    /// 2-level wrapper) the link is severed: the param stays free and reaches the
+    /// default. Defaulting such a var to `number` is the recurring unsoundness —
+    /// an `int` value (6,7) flows into a `number`-typed slot and `MulNumber`
+    /// reads it as an f64 denormal (42.0 instead of 42; arr[r] reads arr[0]).
+    /// CLAUDE.md: `int` and `number` do NOT unify and an un-inferable result must
+    /// SURFACE, so `default_unresolved_closure_numeric_params` REJECTS for vars in
+    /// this set instead of defaulting. A never-called closure (`let f = |x| x*3`)
+    /// is NOT in this set (it escapes into no user call that could invoke it) and
+    /// keeps the harmless `number` default — no value ever flows through it.
+    pub(crate) escaping_closure_numeric_param_vars: std::collections::HashSet<TypeVar>,
     /// ROOT-B: payload type variables of `Ok`/`Err`/`Some` constructors whose
     /// argument was a bare int LITERAL that DEFERRED to the var instead of
     /// pinning it to `int` (see `constructor_literal_payload_defers_to_var` and
@@ -237,6 +257,7 @@ impl TypeInferenceEngine {
             callable_param_defaults,
             callable_numeric_param_indices: HashMap::new(),
             deferred_closure_numeric_param_vars: std::collections::HashSet::new(),
+            escaping_closure_numeric_param_vars: std::collections::HashSet::new(),
             deferred_constructor_literal_payload_vars: std::collections::HashSet::new(),
             pending_return_unions: HashMap::new(),
             return_var_aliases: HashMap::new(),
@@ -1417,6 +1438,7 @@ impl TypeInferenceEngine {
         self.callable_param_defaults.clear();
         self.callable_numeric_param_indices.clear();
         self.deferred_closure_numeric_param_vars.clear();
+        self.escaping_closure_numeric_param_vars.clear();
         self.deferred_constructor_literal_payload_vars.clear();
         Self::seed_builtin_callable_defaults(&mut self.callable_param_defaults);
         self.return_var_aliases.clear();
@@ -1450,8 +1472,10 @@ impl TypeInferenceEngine {
 
         self.apply_callsite_unions(&mut types);
         errors.extend(self.refine_numeric_params_post_callsite(&mut types));
-        // ROOT-2: closure params that no call site resolved fall back to `number`.
-        self.default_unresolved_closure_numeric_params();
+        // ROOT-2: closure params that no call site resolved fall back to `number`
+        // (never-invoked closure) or SURFACE (indirected-callable: escaped into a
+        // user call but never pinned — see `escaping_closure_numeric_param_vars`).
+        errors.extend(self.default_unresolved_closure_numeric_params());
         self.default_unresolved_constructor_literal_payload_vars();
 
         for (_name, ty) in types.iter_mut() {
@@ -1479,6 +1503,7 @@ impl TypeInferenceEngine {
         self.callable_param_defaults.clear();
         self.callable_numeric_param_indices.clear();
         self.deferred_closure_numeric_param_vars.clear();
+        self.escaping_closure_numeric_param_vars.clear();
         self.deferred_constructor_literal_payload_vars.clear();
         Self::seed_builtin_callable_defaults(&mut self.callable_param_defaults);
         self.return_var_aliases.clear();
@@ -1510,6 +1535,26 @@ impl TypeInferenceEngine {
                 errors.push(err);
             }
         }
+
+        // HOF-return aliasing, TRANSITIVELY (the indirected-callable root).
+        //
+        // `infer_item` records `callable_return_from_fn_param[F] = j` only when
+        // F's tail value DIRECTLY invokes its own fn-typed param j
+        // (`fn applyx(f,x,y){ f(x,y) }`). A wrapper that forwards through ANOTHER
+        // named HOF (`fn wrap(f,x,y){ applyx(f,x,y) }`) is NOT caught: its tail
+        // calls `applyx` (a named fn, not a param), so `wrap`'s return var is
+        // left FREE. Closing the indirection here lets the existing post-solve
+        // hof-return re-solve (below) pin `wrap`'s return to the SAME genuine
+        // fn-typed-param return its callee already aliases to — so a forwarded
+        // wrapper whose callable DOES resolve infers correctly instead of being
+        // left an `unknown` the emitter lowers to a generic `CallMethod("add")`.
+        // (The genuinely-un-inferable case — a closure that escaped indirectly
+        // and never pinned — is rejected at its source by
+        // `default_unresolved_closure_numeric_params` via the
+        // `escaping_closure_numeric_param_vars` discriminator, not here.)
+        //
+        // Pure AST + already-recorded map; fixpoint bounded by the chain depth.
+        self.record_transitive_hof_return_aliases(program);
 
         // Attach the method table and trait impl data to the solver,
         // then solve all constraints
@@ -1558,8 +1603,10 @@ impl TypeInferenceEngine {
         // whose body imposes `Numeric` must not be widened to a non-numeric
         // type by callsite propagation — that mismatch is a type error.
         errors.extend(self.refine_numeric_params_post_callsite(&mut types));
-        // ROOT-2: closure params that no call site resolved fall back to `number`.
-        self.default_unresolved_closure_numeric_params();
+        // ROOT-2: closure params that no call site resolved fall back to `number`
+        // (never-invoked closure) or SURFACE (indirected-callable: escaped into a
+        // user call but never pinned — see `escaping_closure_numeric_param_vars`).
+        errors.extend(self.default_unresolved_closure_numeric_params());
         self.default_unresolved_constructor_literal_payload_vars();
 
         // v0.3.3 ref-param caller->param inference (second ACU pass). The
@@ -1640,6 +1687,99 @@ impl TypeInferenceEngine {
         errors.extend(self.reject_unpinnable_let_bindings(&types));
 
         (types, errors)
+    }
+
+    /// Extend `callable_return_from_fn_param` across one-named-function-hop
+    /// forwarding so an indirected HOF wrapper's return is aliased to the SAME
+    /// fn-typed-param return its callee already aliases to (the
+    /// `fn wrap(f,x,y){ applyx(f,x,y) }` → `applyx`'s param-`f` return chain).
+    ///
+    /// `infer_item` records only the DIRECT shape (tail invokes the function's
+    /// own param). This fixpoint adds F→k whenever F's tail is `g(a0,a1,…)`, g
+    /// is already recorded with index j, and `a_j` is F's own unannotated param
+    /// at index k. Pure AST; conservative (same gates as the direct recorder:
+    /// unannotated fn, no explicit `return`, single tail value that is a direct
+    /// `g(...)` call); bounded by the forwarding-chain depth.
+    fn record_transitive_hof_return_aliases(&mut self, program: &Program) {
+        use shape_ast::ast::{Expr, Item};
+
+        // Index every named function declaration for tail-shape inspection.
+        let funcs: Vec<&shape_ast::ast::FunctionDef> = program
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Function(func, _) => Some(func),
+                _ => None,
+            })
+            .collect();
+
+        const MAX_ROUNDS: usize = 16;
+        let max_rounds = funcs.len().saturating_add(1).min(MAX_ROUNDS);
+        for _round in 0..max_rounds {
+            let mut changed = false;
+            for func in &funcs {
+                if self.callable_return_from_fn_param.contains_key(&func.name) {
+                    continue;
+                }
+                if func.return_type.is_some() {
+                    continue;
+                }
+                // Map this function's UNANNOTATED single-identifier params to
+                // their index (the candidate forwarded callable positions).
+                let mut unannotated_param_index: HashMap<String, usize> = HashMap::new();
+                for (k, p) in func.params.iter().enumerate() {
+                    if p.type_annotation.is_some() {
+                        continue;
+                    }
+                    let names = p.get_identifiers();
+                    if names.len() == 1 {
+                        unannotated_param_index.insert(names[0].clone(), k);
+                    }
+                }
+                if unannotated_param_index.is_empty() {
+                    continue;
+                }
+                // Same direct-shape gate as the recorder: no explicit returns,
+                // exactly one tail value, and it is a direct named call.
+                let mut explicit_returns: Vec<&Expr> = Vec::new();
+                Self::collect_explicit_returns(&func.body, &mut explicit_returns);
+                if !explicit_returns.is_empty() {
+                    continue;
+                }
+                let mut tail_values: Vec<&Expr> = Vec::new();
+                Self::collect_tail_values(&func.body, &mut tail_values);
+                if tail_values.len() != 1 {
+                    continue;
+                }
+                let Expr::FunctionCall {
+                    name: callee_name,
+                    args,
+                    ..
+                } = tail_values[0]
+                else {
+                    continue;
+                };
+                // The callee must itself alias its return to its fn-typed param j.
+                let Some(&callee_param_idx) =
+                    self.callable_return_from_fn_param.get(callee_name.as_str())
+                else {
+                    continue;
+                };
+                // The argument forwarded at that position must be one of THIS
+                // function's own unannotated params (a bare identifier).
+                let Some(Expr::Identifier(arg_name, _)) = args.get(callee_param_idx) else {
+                    continue;
+                };
+                if let Some(&k) = unannotated_param_index.get(arg_name.as_str()) {
+                    self.callable_return_from_fn_param
+                        .insert(func.name.clone(), k);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
     }
 
     fn apply_callsite_unions(&mut self, types: &mut HashMap<String, Type>) {
@@ -1967,7 +2107,8 @@ impl TypeInferenceEngine {
     /// var is `Type::Concrete`/`Type::Generic` after `apply_substitutions`, not
     /// `Type::Variable`/`Type::Constrained`, so it is skipped. No int VALUE is
     /// widened.
-    fn default_unresolved_closure_numeric_params(&mut self) {
+    fn default_unresolved_closure_numeric_params(&mut self) -> Vec<TypeError> {
+        let mut errors = Vec::new();
         let vars: Vec<TypeVar> = self
             .deferred_closure_numeric_param_vars
             .iter()
@@ -1979,11 +2120,39 @@ impl TypeInferenceEngine {
                 .apply_substitutions(&Type::Variable(var.clone()))
             {
                 Type::Variable(_) | Type::Constrained { .. } => {
+                    // Indirected-callable surface (the recurring unsoundness). A
+                    // closure that ESCAPED into a user call (recorded in
+                    // `escaping_closure_numeric_param_vars`) but whose numeric
+                    // param the call graph never pinned cannot default to
+                    // `number`: an `int` value may flow into that slot at runtime
+                    // (`applyx(id(|a,b| a*b),6,7)` invokes it with int 6,7), and
+                    // `MulNumber` on int bits is the silent int->number widening
+                    // CLAUDE.md forbids (42.0 not 42; the int-slot index path
+                    // misreads the 4.0 as arr[0]). `int` and `number` do NOT
+                    // unify, so REJECT cleanly instead of defaulting.
+                    if self.escaping_closure_numeric_param_vars.contains(&var) {
+                        errors.push(TypeError::ConstraintViolation(
+                            "cannot infer the element/operand type of a closure passed as a \
+                             function argument: the closure is invoked indirectly (e.g. \
+                             returned from another function or forwarded through a wrapper) so \
+                             the type of its numeric parameter cannot be proven at compile \
+                             time. Annotate the closure's parameter type (e.g. `|a: int, b: \
+                             int| …`) or give the receiving function an explicit function-typed \
+                             parameter to disambiguate (strict typing: `int` and `number` do \
+                             not unify, so an un-inferable numeric operand cannot default)."
+                                .to_string(),
+                        ));
+                        continue;
+                    }
+                    // Genuinely never-invoked closure (`let f = |x| x*3`): no value
+                    // ever flows through the param, so the last-resort `number`
+                    // default is harmless and keeps the binding concrete.
                     self.unifier.bind(var, BuiltinTypes::number());
                 }
                 _ => {}
             }
         }
+        errors
     }
 
     /// ROOT-B post-solve default: an `Ok`/`Err`/`Some` constructor's

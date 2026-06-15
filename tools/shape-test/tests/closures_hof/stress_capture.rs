@@ -538,7 +538,13 @@ fn test_custom_compose() {
         double_then_add1(5)
     "#,
     )
-    .expect_number(11.0);
+    // strict-flip indirected-callable soundness (TP-rebaseline): closures escape
+    // into `compose`, which returns a closure capturing them; their numeric
+    // params are never pinned, so pre-fix they defaulted to `number` and the
+    // all-int computation was unsoundly `11.0` (and crashed on int-flow). `int`
+    // and `number` do not unify, so the un-inferable operand SURFACEs (rejects)
+    // rather than defaulting.
+    .expect_run_err_contains("cannot infer the element/operand type of a closure");
 }
 
 /// Verifies for each side effect.

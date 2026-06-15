@@ -584,7 +584,37 @@ impl TypeInferenceEngine {
                 (Expr::FunctionExpr { .. }, Some(expected_fn_ty)) => {
                     self.check_against(arg, &expected_fn_ty)?
                 }
-                _ => self.infer_expr(arg)?,
+                _ => {
+                    let inferred = self.infer_expr(arg)?;
+                    // Indirected-callable soundness discriminator. A closure
+                    // LITERAL passed as a value argument to a USER (source-located)
+                    // function — with NO concrete expected fn type to drive
+                    // bidirectional param inference — ESCAPES into a callee that
+                    // may invoke it. Record its still-unresolved numeric param
+                    // source vars so `default_unresolved_closure_numeric_params`
+                    // SURFACEs (rejects) rather than silently defaulting them to
+                    // `number` if the call graph never pins them (the `id(|a,b|
+                    // a*b)` / 2-level-wrapper severed-link case). A closure whose
+                    // param the engine CAN thread (direct `applyx(|a,b| a*b,6,7)`)
+                    // resolves before the default and is never affected; a
+                    // never-called closure (`let f = |x| x*3`) is never recorded
+                    // because it escapes into no user call. Builtins (`print`)
+                    // have no source span, so they do not trigger the surface.
+                    if matches!(arg, Expr::FunctionExpr { .. })
+                        && self.lookup_callable_origin_for_name(name).is_some()
+                    {
+                        if let Type::Function { params, .. } = &inferred {
+                            for p in params {
+                                if let Type::Variable(v) = p {
+                                    if self.deferred_closure_numeric_param_vars.contains(v) {
+                                        self.escaping_closure_numeric_param_vars.insert(v.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    inferred
+                }
             };
             // GAP-2 boundary: in pass-by-reference ARGUMENT position, `&x` is the
             // by-reference call mechanism, NOT a `&T` Borrow value. The call-shape

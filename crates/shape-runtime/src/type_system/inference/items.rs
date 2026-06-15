@@ -1710,7 +1710,7 @@ impl TypeInferenceEngine {
 
     /// Collect the value expression of every explicit `return <expr>` reachable
     /// in the body, recursing through control-flow statement bodies.
-    fn collect_explicit_returns<'a>(stmts: &'a [Statement], out: &mut Vec<&'a Expr>) {
+    pub(super) fn collect_explicit_returns<'a>(stmts: &'a [Statement], out: &mut Vec<&'a Expr>) {
         for stmt in stmts {
             match stmt {
                 Statement::Return(Some(expr), _) => out.push(expr),
@@ -1778,7 +1778,7 @@ impl TypeInferenceEngine {
     /// Collect the implicit tail-expression value(s) of a body block — the value
     /// the function yields when control falls off the end without an explicit
     /// `return`. Recurses into the tail position of if/match/block expressions.
-    fn collect_tail_values<'a>(stmts: &'a [Statement], out: &mut Vec<&'a Expr>) {
+    pub(super) fn collect_tail_values<'a>(stmts: &'a [Statement], out: &mut Vec<&'a Expr>) {
         if let Some(Statement::Expression(expr, _)) = stmts.last() {
             Self::collect_tail_value_expr(expr, out);
         }

@@ -554,7 +554,16 @@ fn hof_compose_used_directly() {
         h(20)
     "#,
     )
-    .expect_number(42.0);
+    // strict-flip indirected-callable soundness (TP-rebaseline): the closures
+    // `|x| x*2` / `|x| x+1` ESCAPE into `compose`, which returns a closure
+    // capturing them (`|x| f(g(x))`) — the closure params are never pinned to a
+    // concrete type, so pre-fix they DEFAULTED to `number` and the all-int
+    // computation produced an unsound `42.0` (and CRASHED "no method 'add' on
+    // receiver kind Int64" when the result flowed into an `int` slot). int and
+    // number do NOT unify and an un-inferable numeric operand must SURFACE — the
+    // engine cannot thread the type through the returned-closure capture, so it
+    // now REJECTS cleanly at compile time.
+    .expect_run_err_contains("cannot infer the element/operand type of a closure");
 }
 
 // BUG: Chained closure calls `twice(inc)(40)` fail -- see hof_adder_chained_call

@@ -268,11 +268,16 @@ fn test_higher_order_compose() {
         double_then_add1(10)
     "#,
     )
-    // C2 Bucket-3 carrier-stamp fix: the composed closure that captures the
-    // callable params `f`/`g` now stamps `Ptr(HeapKind::Closure)` (was the
-    // un-callable `Ptr(NativeView)` "unknown" sentinel), so the value-call
-    // invokes correctly. compose(|x| x+1, |x| x*2)(10) = (10*2)+1 = 21.
-    .expect_number(21.0);
+    // strict-flip indirected-callable soundness (TP-rebaseline): the closures
+    // ESCAPE into `compose`, which returns a closure capturing them — their
+    // numeric params are never pinned to a concrete type, so pre-fix they
+    // DEFAULTED to `number` and the all-int `(10*2)+1` was unsoundly produced as
+    // `21.0` (and crashed "no method 'add' on receiver kind Int64" on int-flow).
+    // int and number do NOT unify; an un-inferable numeric operand that the
+    // engine cannot thread through the returned-closure capture must SURFACE, so
+    // it now REJECTS cleanly. (The earlier C2 Bucket-3 carrier-stamp fix made the
+    // value-call invoke; it could not make the un-inferable operand type sound.)
+    .expect_run_err_contains("cannot infer the element/operand type of a closure");
 }
 
 /// Verifies higher order twice.
