@@ -1118,11 +1118,24 @@ impl BytecodeCompiler {
                 continue;
             };
 
+            // Map each param NAME to its positional index, so a body call
+            // `f(x, y)` whose args are bare param identifiers can be mapped
+            // back to the OUTER param positions (`x`→1, `y`→2).
+            let mut param_name_to_index: HashMap<&str, usize> = HashMap::new();
+            for (i, p) in func.params.iter().enumerate() {
+                if let Some(n) = p.simple_name() {
+                    param_name_to_index.insert(n, i);
+                }
+            }
+
             for (idx, param) in func.params.iter().enumerate() {
                 // Only fill UNANNOTATED, single-identifier params. An
                 // explicitly-annotated callable param already drives the
                 // closure seeding through its own annotation.
-                if param.type_annotation.is_some() || param.simple_name().is_none() {
+                let Some(param_name) = param.simple_name() else {
+                    continue;
+                };
+                if param.type_annotation.is_some() {
                     continue;
                 }
                 let Some(Type::Function {
@@ -1131,9 +1144,56 @@ impl BytecodeCompiler {
                 else {
                     continue;
                 };
-                // Require EVERY argument position concrete. A single
-                // unresolved (Variable / Constrained / `unknown`) arg ⇒ bail
-                // the entry to `None` — no fabrication.
+
+                // PRIMARY (sound) path: derive the callable's argument
+                // annotations from the OUTER function's own resolved parameter
+                // types, following the body usage `f(x, y)`.
+                //
+                // The engine resolves the OUTER params (`x`, `y`) precisely
+                // (call-site `apply2(.., 6, 7)` pins them to `int`), but the
+                // engine's projection of the CALLABLE param `f` can collapse a
+                // `Numeric`-bounded slot to `number` when the only sites that
+                // pin it are closure-eager (e.g. `|a,b| a*b`). Reading the
+                // outer params instead carries the EXACT proven type
+                // (`int`, never widened to `number`) onto the closure.
+                //
+                // `int` and `number` stay distinct: we copy whatever concrete
+                // name the engine proved for the outer param; no defaulting.
+                let body_arg_indices =
+                    Self::callable_param_body_arg_indices(&func, param_name, &param_name_to_index);
+                if let Some(outer_indices) = body_arg_indices {
+                    // Arity must agree with the engine's resolved callable
+                    // signature (defensive: a body that calls `f` with a
+                    // different arity than the inferred fn-type is
+                    // inconsistent — leave it to the engine's own error).
+                    if outer_indices.len() == fn_params.len() {
+                        let mut arg_anns: Vec<shape_ast::ast::TypeAnnotation> =
+                            Vec::with_capacity(outer_indices.len());
+                        let mut all_concrete = true;
+                        for &outer_idx in &outer_indices {
+                            match params.get(outer_idx).and_then(|t| t.to_annotation()) {
+                                Some(ann) if !Self::annotation_is_unknown(&ann) => {
+                                    arg_anns.push(ann)
+                                }
+                                _ => {
+                                    all_concrete = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if all_concrete && !arg_anns.is_empty() {
+                            param_fns[idx] = Some(arg_anns);
+                            continue;
+                        }
+                    }
+                }
+
+                // FALLBACK: when the body usage is not a simple
+                // `f(<param>, <param>)` call (so no sound outer mapping is
+                // available), fall back to the engine's projection of the
+                // callable param itself. Require EVERY argument position
+                // concrete — a single unresolved (Variable / Constrained /
+                // `unknown`) arg ⇒ bail the entry to `None` (no fabrication).
                 let mut arg_anns: Vec<shape_ast::ast::TypeAnnotation> =
                     Vec::with_capacity(fn_params.len());
                 let mut all_concrete = true;
@@ -1155,6 +1215,227 @@ impl BytecodeCompiler {
         }
 
         out
+    }
+
+    /// Wave 1a PART B (soundness fix): find the OUTER-parameter index that each
+    /// argument position of an in-body callable invocation receives.
+    ///
+    /// For `fn apply2(f, x, y) { f(x, y) }`, called on `f`, returns
+    /// `Some([1, 2])` — `f`'s arg 0 is the outer param `x` (index 1), arg 1 is
+    /// `y` (index 2). The caller then reads the OUTER params' resolved types
+    /// (which the engine pins precisely from the call site, e.g. `int`) instead
+    /// of the callable param's own projection (which a closure-eager
+    /// `Numeric`-collapse can widen to `number`).
+    ///
+    /// Returns `None` (no sound mapping) when:
+    /// * the body never calls `callable_name`, OR
+    /// * any argument of the call is not a bare identifier naming an outer
+    ///   param (`f(x + 1, y)`, `f(g(x), y)`, `f(2, y)` — the arg type is then
+    ///   not simply an outer param type), OR
+    /// * the body calls `callable_name` more than once with DIFFERENT arg
+    ///   mappings (inconsistent usage — leave it to the engine), OR
+    /// * the callable's name is shadowed by a non-param binding (we only key on
+    ///   the static call name; an inner `let f = ...` is out of scope and
+    ///   conservatively yields `None` via the inconsistency check below).
+    ///
+    /// Pure AST inspection — no fabrication, no defaulting. `int`/`number` are
+    /// whatever the caller reads off the outer param's resolved type.
+    fn callable_param_body_arg_indices(
+        func: &shape_ast::ast::FunctionDef,
+        callable_name: &str,
+        param_name_to_index: &HashMap<&str, usize>,
+    ) -> Option<Vec<usize>> {
+        use shape_ast::ast::{BlockItem, Expr, Statement};
+
+        // Collected mapping; once set, a second call with a different mapping
+        // makes the whole thing ambiguous → `None`.
+        struct Ctx<'a> {
+            callable_name: &'a str,
+            param_name_to_index: &'a HashMap<&'a str, usize>,
+            found: Option<Vec<usize>>,
+            ambiguous: bool,
+        }
+
+        fn record_call(ctx: &mut Ctx, args: &[Expr]) {
+            // Every arg must be a bare identifier naming an outer param.
+            let mut indices = Vec::with_capacity(args.len());
+            for a in args {
+                match a {
+                    Expr::Identifier(id, _) => match ctx.param_name_to_index.get(id.as_str()) {
+                        Some(&j) => indices.push(j),
+                        None => {
+                            // Arg is some other identifier (a local / capture),
+                            // not an outer param — cannot map soundly.
+                            ctx.ambiguous = true;
+                            return;
+                        }
+                    },
+                    _ => {
+                        // A non-trivial call shape (`f(x + 1, y)`, `f(g(x))`,
+                        // `f(2, y)`) — cannot map soundly.
+                        ctx.ambiguous = true;
+                        return;
+                    }
+                }
+            }
+            match &ctx.found {
+                None => ctx.found = Some(indices),
+                Some(prev) if *prev == indices => {}
+                Some(_) => ctx.ambiguous = true,
+            }
+        }
+
+        fn visit_expr(expr: &Expr, ctx: &mut Ctx) {
+            if ctx.ambiguous {
+                return;
+            }
+            match expr {
+                Expr::FunctionCall { name, args, .. } => {
+                    if name == ctx.callable_name {
+                        record_call(ctx, args);
+                    }
+                    for a in args {
+                        visit_expr(a, ctx);
+                    }
+                }
+                Expr::QualifiedFunctionCall { args, .. } => {
+                    for a in args {
+                        visit_expr(a, ctx);
+                    }
+                }
+                Expr::MethodCall { receiver, args, .. } => {
+                    visit_expr(receiver, ctx);
+                    for a in args {
+                        visit_expr(a, ctx);
+                    }
+                }
+                Expr::BinaryOp { left, right, .. } => {
+                    visit_expr(left, ctx);
+                    visit_expr(right, ctx);
+                }
+                Expr::UnaryOp { operand, .. } => visit_expr(operand, ctx),
+                Expr::Reference { expr, .. } => visit_expr(expr, ctx),
+                Expr::Array(elems, _) => {
+                    for e in elems {
+                        visit_expr(e, ctx);
+                    }
+                }
+                Expr::IndexAccess { object, index, .. } => {
+                    visit_expr(object, ctx);
+                    visit_expr(index, ctx);
+                }
+                Expr::PropertyAccess { object, .. } => visit_expr(object, ctx),
+                Expr::Conditional {
+                    condition,
+                    then_expr,
+                    else_expr,
+                    ..
+                } => {
+                    visit_expr(condition, ctx);
+                    visit_expr(then_expr, ctx);
+                    if let Some(e) = else_expr {
+                        visit_expr(e, ctx);
+                    }
+                }
+                Expr::FunctionExpr { body, .. } => {
+                    for s in body {
+                        visit_stmt(s, ctx);
+                    }
+                }
+                Expr::Block(block, _) => {
+                    for it in &block.items {
+                        visit_block_item(it, ctx);
+                    }
+                }
+                Expr::If(i, _) => {
+                    visit_expr(&i.condition, ctx);
+                    visit_expr(&i.then_branch, ctx);
+                    if let Some(e) = &i.else_branch {
+                        visit_expr(e, ctx);
+                    }
+                }
+                Expr::While(w, _) => {
+                    visit_expr(&w.condition, ctx);
+                    visit_expr(&w.body, ctx);
+                }
+                Expr::For(f, _) => {
+                    visit_expr(&f.iterable, ctx);
+                    visit_expr(&f.body, ctx);
+                }
+                Expr::Loop(l, _) => visit_expr(&l.body, ctx),
+                Expr::Match(m, _) => {
+                    visit_expr(&m.scrutinee, ctx);
+                    for arm in &m.arms {
+                        visit_expr(&arm.body, ctx);
+                    }
+                }
+                Expr::Return(Some(e), _) => visit_expr(e, ctx),
+                Expr::Await(e, _) => visit_expr(e, ctx),
+                _ => {}
+            }
+        }
+
+        fn visit_block_item(item: &BlockItem, ctx: &mut Ctx) {
+            match item {
+                BlockItem::VariableDecl(decl) => {
+                    if let Some(v) = decl.value.as_ref() {
+                        visit_expr(v, ctx);
+                    }
+                }
+                BlockItem::Assignment(asgn) => visit_expr(&asgn.value, ctx),
+                BlockItem::Statement(stmt) => visit_stmt(stmt, ctx),
+                BlockItem::Expression(e) => visit_expr(e, ctx),
+            }
+        }
+
+        fn visit_stmt(stmt: &Statement, ctx: &mut Ctx) {
+            match stmt {
+                Statement::VariableDecl(decl, _) => {
+                    if let Some(v) = decl.value.as_ref() {
+                        visit_expr(v, ctx);
+                    }
+                }
+                Statement::Assignment(asgn, _) => visit_expr(&asgn.value, ctx),
+                Statement::Expression(e, _) => visit_expr(e, ctx),
+                Statement::Return(Some(e), _) => visit_expr(e, ctx),
+                Statement::For(f, _) => {
+                    for s in &f.body {
+                        visit_stmt(s, ctx);
+                    }
+                }
+                Statement::While(w, _) => {
+                    for s in &w.body {
+                        visit_stmt(s, ctx);
+                    }
+                }
+                Statement::If(i, _) => {
+                    for s in &i.then_body {
+                        visit_stmt(s, ctx);
+                    }
+                    if let Some(else_body) = &i.else_body {
+                        for s in else_body {
+                            visit_stmt(s, ctx);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut ctx = Ctx {
+            callable_name,
+            param_name_to_index,
+            found: None,
+            ambiguous: false,
+        };
+        for stmt in &func.body {
+            visit_stmt(stmt, &mut ctx);
+        }
+
+        if ctx.ambiguous {
+            return None;
+        }
+        ctx.found
     }
 
     /// Reject the `"unknown"` sentinel that `Type::to_annotation()` substitutes

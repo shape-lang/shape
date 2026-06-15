@@ -4661,25 +4661,27 @@ mod wave1a_partb_fn_typed_param_tests {
     }
 
     #[test]
-    fn underconstrained_plus_body_keeps_existing_rejection() {
-        // `*` is numeric-only, so the callable param resolves to a concrete
-        // `fn(number, number)` and the `*`-bodied closure is seeded (covered
-        // above). `+`, however, is overloaded (numeric OR string concat), so
-        // whole-program inference leaves the callable param's argument types as
-        // unresolved type variables. The PART B producer requires EVERY
-        // argument position concrete, so it bails to `None` here — no seeding —
-        // and the closure `|p, q| p + q` keeps its existing strict rejection
-        // (`unknown + unknown`). Strict typing: an under-constrained usage is
-        // NOT forced to a default.
-        let err = try_compile(
+    fn overloaded_plus_body_seeds_from_callsite_int_args() {
+        // `+` is overloaded (numeric OR string concat), so whole-program
+        // inference on the callable param `f` in ISOLATION leaves its argument
+        // types as unresolved variables — the engine's `f` projection alone is
+        // NOT concrete. But the call `run2(|p, q| p + q, 3, 4)` passes int
+        // LITERALS to `a, b`, and the body `f(a, b)` maps `f`'s params to those
+        // outer params, so `p, q` are PROVABLY `int` from the call site (the
+        // Wave 1a PART B soundness fix carries the exact proven outer-param type
+        // onto the closure via the body-usage mapping). `p + q` then types as
+        // `int + int` and compiles. This is NOT a forced default: `3, 4` are
+        // int literals; `int` is what the call site genuinely proved (the same
+        // mechanism that makes `apply2(|a,b| a*b, 6, 7)` yield `int`, not the
+        // unsound `number`). An under-constrained usage with NO concrete
+        // outer-arg mapping (a dead callable, or args that are not bare outer
+        // params) is still NOT seeded.
+        try_compile(
             "fn run2(f, a, b) { f(a, b) }\n\
              run2(|p, q| p + q, 3, 4)\n",
         )
-        .expect_err("an overloaded-`+` closure body must not be force-seeded");
-        let msg = format!("{err:?}");
-        assert!(
-            msg.contains("unknown") || msg.contains("infer"),
-            "expected an un-inferable closure-body rejection, got: {msg}"
+        .expect(
+            "call-site int args make the +-bodied closure params provably int — must compile",
         );
     }
 
@@ -4694,6 +4696,38 @@ mod wave1a_partb_fn_typed_param_tests {
              let r = apply2(|a, b| a * b, 6, 7)\n",
         )
         .expect("seeded-closure call must compile cleanly");
+    }
+
+    #[test]
+    fn seeded_closure_params_carry_int_not_number() {
+        // SOUNDNESS REGRESSION GUARD (Wave 1a PART B fix). The pre-fix producer
+        // seeded the closure's params as `number` (the engine's collapsed `f`
+        // projection), so `apply2(|a,b| a*b, 6, 7)` computed `42.0` (Float64) —
+        // a static `number` that does not match the proven `int*int`. The fix
+        // carries the EXACT proven type (`int`, from the int literals `6, 7`
+        // flowing through the body usage `f(x, y)`) onto the closure, so the
+        // result is `42` (Int64). `int` and `number` do NOT unify; defaulting a
+        // numeric param to `number` is forbidden (CLAUDE.md).
+        use crate::test_utils::eval_typed_i64;
+        assert_eq!(
+            eval_typed_i64("fn apply2(f, x, y) { f(x, y) }\napply2(|a, b| a * b, 6, 7)"),
+            42,
+            "int*int through an inferred fn-typed param must stay int (42), never number (42.0)"
+        );
+    }
+
+    #[test]
+    fn seeded_closure_result_binds_to_int_context() {
+        // `let r: int = apply2(|a,b| a*b, 6, 7)` must type-check: the closure
+        // result is provably `int`, so binding into an `int` context succeeds
+        // with no error and no coercion.
+        use crate::test_utils::eval_typed_i64;
+        assert_eq!(
+            eval_typed_i64(
+                "fn apply2(f, x, y) { f(x, y) }\nlet r: int = apply2(|a, b| a * b, 6, 7)\nr"
+            ),
+            42,
+        );
     }
 }
 

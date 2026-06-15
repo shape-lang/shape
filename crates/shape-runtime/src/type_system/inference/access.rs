@@ -53,10 +53,9 @@ impl TypeInferenceEngine {
                         // param with no default (or a field that names no
                         // param) is unchanged — genuinely-abstract fields
                         // stay abstract, genuine UnknownProperty still errors.
-                        if let Some(default) = Self::default_for_named_type_param(
-                            &struct_def,
-                            &field.type_annotation,
-                        ) {
+                        if let Some(default) =
+                            Self::default_for_named_type_param(&struct_def, &field.type_annotation)
+                        {
                             return Ok(default);
                         }
                         return Ok(Type::Concrete(field.type_annotation.clone()));
@@ -477,9 +476,7 @@ impl TypeInferenceEngine {
             object_type.clone(),
             Type::Constrained {
                 var,
-                constraint: Box::new(TypeConstraint::Indexable(Box::new(
-                    result_type.clone(),
-                ))),
+                constraint: Box::new(TypeConstraint::Indexable(Box::new(result_type.clone()))),
             },
         ));
         result_type
@@ -601,9 +598,7 @@ impl TypeInferenceEngine {
             // flags, not the arg type.
             let arg_type = if matches!(arg, Expr::Reference { .. }) {
                 match self.unifier.apply_substitutions(&arg_type) {
-                    Type::Concrete(TypeAnnotation::Borrow { inner, .. }) => {
-                        Type::Concrete(*inner)
-                    }
+                    Type::Concrete(TypeAnnotation::Borrow { inner, .. }) => Type::Concrete(*inner),
                     other => other,
                 }
             } else {
@@ -696,6 +691,33 @@ impl TypeInferenceEngine {
         // then resolves the inner callee's parameter from the recorded
         // concrete type. No type kind is fabricated.
         self.propagate_hof_arg_callsites(name, args, &arg_types);
+
+        // Wave 1a PART B (soundness): the CLOSURE-LITERAL analog of
+        // `propagate_hof_arg_callsites`. When a closure literal is passed to an
+        // unannotated callable param whose body invokes it on the outer
+        // function's OWN params (`fn apply2(f, x, y) { f(x, y) }`,
+        // `apply2(|a,b| a*b, 6, 7)`), the named-fn synthetic-callsite path does
+        // not fire (the arg is a closure, not an `Expr::Identifier`), and the
+        // call-shape constraint binds the arg occurrence into the per-call
+        // INSTANCE var, never the closure's own param vars. The closure's
+        // `Numeric`-bounded params then DEFER to the post-solve `number`
+        // default — yielding `(number,number)->number` while the compiler seeds
+        // the closure params from the SAME outer types as `int`. That divergence
+        // is the t4/t5 unsoundness (static `number` result, runtime `int`).
+        //
+        // Fix: push DIRECT constraints `closure_param_var[k] ~
+        // arg_types[outer_idx[k]]` so the solver resolves the closure's params
+        // (and hence its body + return) to the EXACT outer-param types the call
+        // site proved (`int`, never widened). The closure's return then flows
+        // into the call result, so `acc + apply2(...)` types as `int + int`
+        // (t4) and `let r: number = apply2(...)` correctly rejects (t5).
+        //
+        // Soundness: the closure's param vars are read off its inferred
+        // `Type::Function` (no fabrication); the constraint targets are the
+        // already-inferred outer arg types (`int` from the literals `6, 7`).
+        // The solver UNIFIES — a conflicting later site is a genuine mismatch,
+        // never a silent pick. `int`/`number` stay distinct.
+        self.propagate_closure_arg_callsites(name, args, &arg_types);
 
         // v0.3.3 ref-param caller->param inference (sibling of the closure /
         // HOF caller->param propagation above). For a reference argument
@@ -810,10 +832,9 @@ impl TypeInferenceEngine {
             // (T = number) rather than conflicting as `Result<int> !~
             // Result<number>`. LITERALS ONLY — a non-literal int VALUE keeps its
             // normal pinning (no value widening).
-            if args
-                .get(i)
-                .is_some_and(|arg| Self::constructor_literal_payload_defers_to_var(name, arg, param_ty))
-            {
+            if args.get(i).is_some_and(|arg| {
+                Self::constructor_literal_payload_defers_to_var(name, arg, param_ty)
+            }) {
                 // Record the (unresolved) payload var so the post-solve
                 // `default_unresolved_constructor_literal_payload_vars` pass can
                 // bind it to `int` if no carrier ever resolves it.
@@ -981,8 +1002,7 @@ impl TypeInferenceEngine {
             Type::Variable(_) | Type::Constrained { .. } => true,
             Type::Concrete(ann) => Self::annotation_contains_tyvar(ann),
             Type::Generic { base, args } => {
-                Self::type_contains_variable(base)
-                    || args.iter().any(Self::type_contains_variable)
+                Self::type_contains_variable(base) || args.iter().any(Self::type_contains_variable)
             }
             Type::Function { params, returns } => {
                 params.iter().any(Self::type_contains_variable)
@@ -1221,6 +1241,123 @@ impl TypeInferenceEngine {
                 // written directly.
                 self.record_function_callsite(callee_name, &synthetic_arg_types);
             }
+        }
+    }
+
+    /// Wave 1a PART B (soundness): closure-literal analog of
+    /// `propagate_hof_arg_callsites`. When `args[i]` is a CLOSURE LITERAL passed
+    /// to an unannotated callable param of `outer_name` whose body invokes it on
+    /// the outer's OWN params (`fn apply2(f, x, y) { f(x, y) }`), push direct
+    /// constraints binding the closure's k-th param var to the OUTER call's arg
+    /// type at the position the body passes (`f(x, y)` ⇒ closure param 0 ~
+    /// arg_types[x_index], param 1 ~ arg_types[y_index]). This resolves the
+    /// closure's `Numeric`-bounded params to the EXACT call-site types BEFORE
+    /// the post-solve `number` default fires, so the closure body + return type
+    /// (and thus the call result) match the compiler's closure-param seeding.
+    ///
+    /// Three-step mechanism (mirrors `propagate_hof_arg_callsites`):
+    ///  1. `args[i]` is `Expr::FunctionExpr` and `arg_types[i]` is a resolved
+    ///     `Type::Function` exposing the closure's param vars.
+    ///  2. The outer's i-th param source var has a body call-shape constraint
+    ///     `Variable(outer_param_i_src) ~ Function { params: [Variable(outer_param_j_src), …] }`.
+    ///  3. Each body-call slot maps to an outer param index `j`; push
+    ///     `closure_param_var[k] ~ arg_types[j]`.
+    ///
+    /// Soundness: closure param vars come from the inferred arg type (no
+    /// fabrication); targets are already-inferred outer arg types. The solver
+    /// UNIFIES — conflicting sites mismatch, never silently picked. No int VALUE
+    /// is widened; `int`/`number` stay distinct.
+    pub(crate) fn propagate_closure_arg_callsites(
+        &mut self,
+        outer_name: &str,
+        args: &[Expr],
+        arg_types: &[Type],
+    ) {
+        let Some(outer_source_vars) = self.callable_param_source_vars.get(outer_name).cloned()
+        else {
+            return;
+        };
+        let outer_var_to_index: HashMap<TypeVar, usize> = outer_source_vars
+            .iter()
+            .enumerate()
+            .filter_map(|(j, sv)| sv.as_ref().map(|v| (v.clone(), j)))
+            .collect();
+
+        // Collect the constraints to push after the immutable borrows end.
+        let mut to_push: Vec<(Type, Type)> = Vec::new();
+
+        for (i, arg) in args.iter().enumerate() {
+            if !matches!(arg, Expr::FunctionExpr { .. }) {
+                continue;
+            }
+            // The closure's inferred param vars (its `Type::Function`).
+            let Some(Type::Function {
+                params: closure_params,
+                ..
+            }) = arg_types.get(i)
+            else {
+                continue;
+            };
+            // The outer's i-th param must be an unannotated callable whose body
+            // imposed a call-shape constraint.
+            let Some(Some(outer_param_i_src)) = outer_source_vars.get(i) else {
+                continue;
+            };
+            let outer_param_i_src = outer_param_i_src.clone();
+
+            let snapshot: Vec<(Type, Type)> = self.constraints.clone();
+            for (lhs, rhs) in &snapshot {
+                let body_params = match (lhs, rhs) {
+                    (Type::Variable(v), Type::Function { params, .. })
+                    | (Type::Function { params, .. }, Type::Variable(v))
+                        if v == &outer_param_i_src =>
+                    {
+                        params
+                    }
+                    _ => continue,
+                };
+                // Arity must match the closure's param count exactly.
+                if body_params.len() != closure_params.len() {
+                    continue;
+                }
+                // Map each body-call slot to an outer param index, then bind the
+                // closure's k-th param var to that outer arg type.
+                let mut mapped: Vec<(usize, Type)> = Vec::with_capacity(body_params.len());
+                let mut ok = true;
+                for (k, slot) in body_params.iter().enumerate() {
+                    let Type::Variable(slot_var) = slot else {
+                        ok = false;
+                        break;
+                    };
+                    let Some(&j) = outer_var_to_index.get(slot_var) else {
+                        ok = false;
+                        break;
+                    };
+                    let Some(outer_arg_ty) = arg_types.get(j) else {
+                        ok = false;
+                        break;
+                    };
+                    mapped.push((k, outer_arg_ty.clone()));
+                }
+                if !ok {
+                    continue;
+                }
+                for (k, outer_arg_ty) in mapped {
+                    // Only bind closure param SLOTS that are still bare vars
+                    // (the deferred Numeric params). An annotated closure param
+                    // is already a concrete type and must not be overwritten.
+                    if let Some(Type::Variable(_)) = closure_params.get(k) {
+                        to_push.push((closure_params[k].clone(), outer_arg_ty));
+                    }
+                }
+            }
+        }
+
+        let origin = self
+            .lookup_callable_origin_for_name(outer_name)
+            .unwrap_or_else(Span::default);
+        for (lhs, rhs) in to_push {
+            self.push_constraint_with_origin(lhs, rhs, origin);
         }
     }
 
