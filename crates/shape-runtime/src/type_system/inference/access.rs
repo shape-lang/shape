@@ -604,12 +604,32 @@ impl TypeInferenceEngine {
                         && self.lookup_callable_origin_for_name(name).is_some()
                     {
                         if let Type::Function { params, .. } = &inferred {
+                            let mut site_vars: Vec<TypeVar> = Vec::with_capacity(params.len());
+                            let mut all_param_vars = !params.is_empty();
                             for p in params {
                                 if let Type::Variable(v) = p {
                                     if self.deferred_closure_numeric_param_vars.contains(v) {
                                         self.escaping_closure_numeric_param_vars.insert(v.clone());
                                     }
+                                    site_vars.push(v.clone());
+                                } else {
+                                    all_param_vars = false;
                                 }
+                            }
+                            // COMPLETENESS extension: record the full site so the
+                            // post-inference indirected-callable resolver can FOLLOW
+                            // the callable (forwarding wrapper / id-laundered let)
+                            // to a concrete invocation and pin these param vars. We
+                            // only record when EVERY closure param is a bare var
+                            // (an annotated param needs no inference); a partially
+                            // annotated closure is left to its existing path.
+                            if all_param_vars && !site_vars.is_empty() {
+                                self.escaping_closure_arg_sites.push((
+                                    name.to_string(),
+                                    i,
+                                    site_vars,
+                                    args.to_vec(),
+                                ));
                             }
                         }
                     }

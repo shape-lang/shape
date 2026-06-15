@@ -4680,9 +4680,7 @@ mod wave1a_partb_fn_typed_param_tests {
             "fn run2(f, a, b) { f(a, b) }\n\
              run2(|p, q| p + q, 3, 4)\n",
         )
-        .expect(
-            "call-site int args make the +-bodied closure params provably int — must compile",
-        );
+        .expect("call-site int args make the +-bodied closure params provably int — must compile");
     }
 
     #[test]
@@ -4727,6 +4725,101 @@ mod wave1a_partb_fn_typed_param_tests {
                 "fn apply2(f, x, y) { f(x, y) }\nlet r: int = apply2(|a, b| a * b, 6, 7)\nr"
             ),
             42,
+        );
+    }
+
+    // -- Indirected-callable COMPLETENESS (full-inference ruling) -----------
+    //
+    // The SoundRoot floor makes an un-followable indirected closure SURFACE.
+    // The completeness extension FOLLOWS the callable through indirection so the
+    // two tractable shapes INFER instead — without compromising the floor. Each
+    // pair below proves `int` stays `int` (42, never 42.0) and `number` stays
+    // `number` (42.0).
+
+    #[test]
+    fn id_laundered_callable_infers_int_not_number() {
+        // `let h = id(|a,b| a*b)` launders the closure through identity; the
+        // resolver follows `h` to its use as `applyx`'s callable arg, where the
+        // int literals 6,7 prove the closure params `int`. Result is `42`
+        // (Int64), NEVER `42.0` — the recurring number-default unsoundness.
+        use crate::test_utils::eval_typed_i64;
+        assert_eq!(
+            eval_typed_i64(
+                "fn applyx(f, x, y) { f(x, y) }\n\
+                 fn id(g) { g }\n\
+                 let h = id(|a, b| a * b)\n\
+                 let acc: int = 0\n\
+                 acc + applyx(h, 6, 7)"
+            ),
+            42,
+            "id-laundered int*int must stay int (42), never number (42.0)"
+        );
+    }
+
+    #[test]
+    fn id_laundered_callable_number_stays_number() {
+        // The `number` sibling: 6.0,7.0 prove the closure params `number`, so
+        // the result is `42.0` (Float64). `int` and `number` do NOT unify.
+        use crate::test_utils::eval_typed_f64;
+        assert_eq!(
+            eval_typed_f64(
+                "fn applyx(f, x, y) { f(x, y) }\n\
+                 fn id(g) { g }\n\
+                 let h = id(|a, b| a * b)\n\
+                 let acc: number = 0.0\n\
+                 acc + applyx(h, 6.0, 7.0)"
+            ),
+            42.0,
+        );
+    }
+
+    #[test]
+    fn two_level_wrapper_callable_infers_int_not_number() {
+        // `fn wrap(f,x,y){ applyx(f,x,y) }` forwards the callable one hop; the
+        // resolver maps `applyx`'s invocation arg slots back through wrap's
+        // forwarding call to wrap's own params, whose call-site args 6,7 prove
+        // `int`. Result `42` (Int64), no kind-crash.
+        use crate::test_utils::eval_typed_i64;
+        assert_eq!(
+            eval_typed_i64(
+                "fn applyx(f, x, y) { f(x, y) }\n\
+                 fn wrap(f, x, y) { applyx(f, x, y) }\n\
+                 let acc: int = 0\n\
+                 acc + wrap(|a, b| a * b, 6, 7)"
+            ),
+            42,
+            "2-level-wrapper int*int must stay int (42), never number (42.0)"
+        );
+    }
+
+    #[test]
+    fn two_level_wrapper_callable_number_stays_number() {
+        use crate::test_utils::eval_typed_f64;
+        assert_eq!(
+            eval_typed_f64(
+                "fn applyx(f, x, y) { f(x, y) }\n\
+                 fn wrap(f, x, y) { applyx(f, x, y) }\n\
+                 let acc: number = 0.0\n\
+                 acc + wrap(|a, b| a * b, 6.0, 7.0)"
+            ),
+            42.0,
+        );
+    }
+
+    #[test]
+    fn laundered_but_never_invoked_closure_still_surfaces() {
+        // SoundRoot floor preservation. The closure is laundered through `id`
+        // but its result is NEVER used as a callable, so no concrete invocation
+        // proves its params. The resolver cannot follow the hop, so the case
+        // still SURFACEs (rejects) — it must NOT silently default to `number`.
+        let err = try_compile(
+            "fn id(g) { g }\n\
+             let h = id(|a, b| a * b)\n\
+             0",
+        );
+        assert!(
+            err.is_err(),
+            "an un-invoked laundered closure must SURFACE, never number-default"
         );
     }
 }

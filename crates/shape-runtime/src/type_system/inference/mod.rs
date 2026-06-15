@@ -147,6 +147,26 @@ pub struct TypeInferenceEngine {
     /// is NOT in this set (it escapes into no user call that could invoke it) and
     /// keeps the harmless `number` default — no value ever flows through it.
     pub(crate) escaping_closure_numeric_param_vars: std::collections::HashSet<TypeVar>,
+    /// Indirected-callable COMPLETENESS extension (full-inference ruling). Each
+    /// entry records a closure LITERAL passed as a value argument to a USER
+    /// function call (`applyx(|a,b| a*b,6,7)`, `id(|a,b| a*b)`,
+    /// `wrap(|a,b| a*b,6,7)`): the receiving function name, the closure's
+    /// argument position, and the closure's own (still-unresolved) param vars.
+    ///
+    /// A post-inference, pre-default pass (`resolve_indirected_closure_arg_params`)
+    /// walks the program AST to FOLLOW the callable through indirection — a
+    /// forwarding wrapper hop (`fn wrap(f,x,y){ applyx(f,x,y) }`) or an
+    /// identity-laundered `let` binding (`let h = id(|a,b| a*b); applyx(h,6,7)`)
+    /// — to the concrete invocation site whose argument types prove the closure's
+    /// param types. It pushes `closure_param_var[k] ~ <proven outer arg type>`
+    /// so the solver pins the closure (int stays int, number stays number — the
+    /// proven type is copied, never defaulted). Any hop the pass CANNOT follow
+    /// leaves the var unresolved, so `default_unresolved_closure_numeric_params`
+    /// still SURFACEs it (the SoundRoot floor: never number-default an
+    /// un-inferable indirected callable). Recorded as `(callee_name, arg_index,
+    /// closure_param_vars, full_call_args)`.
+    pub(crate) escaping_closure_arg_sites:
+        Vec<(String, usize, Vec<TypeVar>, Vec<shape_ast::ast::Expr>)>,
     /// ROOT-B: payload type variables of `Ok`/`Err`/`Some` constructors whose
     /// argument was a bare int LITERAL that DEFERRED to the var instead of
     /// pinning it to `int` (see `constructor_literal_payload_defers_to_var` and
@@ -258,6 +278,7 @@ impl TypeInferenceEngine {
             callable_numeric_param_indices: HashMap::new(),
             deferred_closure_numeric_param_vars: std::collections::HashSet::new(),
             escaping_closure_numeric_param_vars: std::collections::HashSet::new(),
+            escaping_closure_arg_sites: Vec::new(),
             deferred_constructor_literal_payload_vars: std::collections::HashSet::new(),
             pending_return_unions: HashMap::new(),
             return_var_aliases: HashMap::new(),
@@ -1439,6 +1460,7 @@ impl TypeInferenceEngine {
         self.callable_numeric_param_indices.clear();
         self.deferred_closure_numeric_param_vars.clear();
         self.escaping_closure_numeric_param_vars.clear();
+        self.escaping_closure_arg_sites.clear();
         self.deferred_constructor_literal_payload_vars.clear();
         Self::seed_builtin_callable_defaults(&mut self.callable_param_defaults);
         self.return_var_aliases.clear();
@@ -1462,6 +1484,13 @@ impl TypeInferenceEngine {
                 errors.push(err);
             }
         }
+
+        // Indirected-callable COMPLETENESS parity with `infer_program_best_effort`
+        // (the production path). Follow each escaping closure-arg callable through
+        // indirection so the differential consumer-check resolves the same way the
+        // from-source compile does; an un-followable hop still SURFACEs below.
+        self.record_transitive_hof_return_aliases(consumer);
+        self.resolve_indirected_closure_arg_params(consumer);
 
         self.solver.set_method_table(self.method_table.clone());
         self.solver.set_trait_impls(self.env.trait_impl_keys());
@@ -1504,6 +1533,7 @@ impl TypeInferenceEngine {
         self.callable_numeric_param_indices.clear();
         self.deferred_closure_numeric_param_vars.clear();
         self.escaping_closure_numeric_param_vars.clear();
+        self.escaping_closure_arg_sites.clear();
         self.deferred_constructor_literal_payload_vars.clear();
         Self::seed_builtin_callable_defaults(&mut self.callable_param_defaults);
         self.return_var_aliases.clear();
@@ -1555,6 +1585,15 @@ impl TypeInferenceEngine {
         //
         // Pure AST + already-recorded map; fixpoint bounded by the chain depth.
         self.record_transitive_hof_return_aliases(program);
+
+        // Indirected-callable COMPLETENESS pass (full-inference ruling). FOLLOW
+        // each escaping closure-arg callable through indirection (forwarding
+        // wrapper / id-laundered let) to its concrete invocation and push
+        // `closure_param_var ~ <proven arg type>` constraints, so the closure's
+        // numeric params resolve in the solve below instead of reaching the
+        // `default_unresolved_closure_numeric_params` SURFACE. A hop the pass
+        // cannot follow pushes nothing — the SoundRoot floor still rejects it.
+        self.resolve_indirected_closure_arg_params(program);
 
         // Attach the method table and trait impl data to the solver,
         // then solve all constraints
@@ -1782,6 +1821,391 @@ impl TypeInferenceEngine {
         }
     }
 
+    /// Indirected-callable COMPLETENESS pass (full-inference ruling). For each
+    /// recorded `escaping_closure_arg_sites` entry, FOLLOW the callable through
+    /// indirection to a concrete invocation whose argument types prove the
+    /// closure's param types, and push `closure_param_var[k] ~ <proven type>`.
+    ///
+    /// Two indirection shapes are followed, both purely from the program AST +
+    /// the already-recorded `callable_return_from_fn_param` map:
+    ///
+    ///  (1) FORWARDING WRAPPER. The closure is passed to `outer` at position p;
+    ///      `outer`'s body invokes its own param p as a callable — directly
+    ///      (`fn applyx(f,x,y){ f(x,y) }`) or by forwarding it one hop into
+    ///      another named callee that itself invokes its param p
+    ///      (`fn wrap(f,x,y){ applyx(f,x,y) }`). The invocation's argument slots
+    ///      map back to `outer`'s OWN params, whose types are this very call
+    ///      site's sibling arguments (`wrap(|a,b| a*b, 6, 7)` → 6,7 = int).
+    ///
+    ///  (2) IDENTITY LAUNDER. The closure is passed to an identity-like `id`
+    ///      (`fn id(g){ g }`, recorded `callable_return_from_fn_param[id]=p`)
+    ///      whose result is bound to a `let` and later USED as the callable
+    ///      argument of a wrapper that DOES invoke it
+    ///      (`let h = id(|a,b| a*b); applyx(h, 6, 7)`). The invocation argument
+    ///      types come from that downstream call site (6,7 = int).
+    ///
+    /// In both shapes the proven argument types are COPIED onto the closure's
+    /// param vars (int stays int, number stays number — never a `number`
+    /// default). A site whose callable the pass cannot follow to a concrete
+    /// invocation is left untouched, so `default_unresolved_closure_numeric_params`
+    /// still SURFACEs it — the SoundRoot floor is preserved.
+    fn resolve_indirected_closure_arg_params(&mut self, program: &Program) {
+        use shape_ast::ast::Item;
+
+        let sites = std::mem::take(&mut self.escaping_closure_arg_sites);
+        if sites.is_empty() {
+            return;
+        }
+
+        let funcs: HashMap<String, &shape_ast::ast::FunctionDef> = program
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Function(func, _) => Some((func.name.clone(), func)),
+                _ => None,
+            })
+            .collect();
+
+        let mut to_push: Vec<(Type, Type)> = Vec::new();
+
+        for (callee_name, closure_arg_idx, closure_param_vars, call_args) in &sites {
+            // (1) FORWARDING WRAPPER: the callee invokes its own param
+            // `closure_arg_idx` (directly or via one forwarding hop) with a known
+            // outer-param-index mapping. Map those outer params back to THIS
+            // call's sibling argument types.
+            if let Some(outer_indices) =
+                self.callable_invocation_outer_arg_indices(&funcs, callee_name, *closure_arg_idx)
+            {
+                if outer_indices.len() == closure_param_vars.len() {
+                    if let Some(arg_types) =
+                        self.concrete_arg_types_at_indices(call_args, &outer_indices)
+                    {
+                        for (var, ty) in closure_param_vars.iter().zip(arg_types.into_iter()) {
+                            to_push.push((Type::Variable(var.clone()), ty));
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            // (2) IDENTITY LAUNDER: the callee just returns its param at
+            // `closure_arg_idx` (`fn id(g){ g }` — tail is the bare param). Find
+            // the downstream USE of the laundered binding as a callable argument
+            // of a wrapper that DOES invoke it, and read the invocation argument
+            // types there.
+            if Self::fn_returns_param_directly(&funcs, callee_name, *closure_arg_idx) {
+                if let Some(arg_types) =
+                    self.laundered_closure_invocation_arg_types(program, &funcs, callee_name)
+                {
+                    if arg_types.len() == closure_param_vars.len() {
+                        for (var, ty) in closure_param_vars.iter().zip(arg_types.into_iter()) {
+                            to_push.push((Type::Variable(var.clone()), ty));
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+
+        for (lhs, rhs) in to_push {
+            self.constraints.push((lhs, rhs));
+        }
+    }
+
+    /// Return the OUTER-param indices of `callee_name` that its callable param
+    /// `callable_param_idx` is invoked with — following at most one named
+    /// forwarding hop. `None` when no sound mapping exists (the callable is not
+    /// invoked, or is invoked with non-trivial args).
+    ///
+    /// DIRECT (`fn applyx(f,x,y){ f(x,y) }`, callable param 0): the body call
+    /// `f(x,y)` maps to outer params `[1,2]`.
+    ///
+    /// FORWARDING (`fn wrap(f,x,y){ applyx(f,x,y) }`, callable param 0): the body
+    /// forwards `f` into `applyx` at position 0; `applyx` invokes ITS param 0
+    /// with applyx-outer-indices `[1,2]`. Those map through `wrap`'s forwarding
+    /// call `applyx(f,x,y)` — applyx arg 1 is `wrap`'s `x` (index 1), applyx arg
+    /// 2 is `wrap`'s `y` (index 2) — back to `wrap`'s outer params `[1,2]`.
+    fn callable_invocation_outer_arg_indices(
+        &self,
+        funcs: &HashMap<String, &shape_ast::ast::FunctionDef>,
+        callee_name: &str,
+        callable_param_idx: usize,
+    ) -> Option<Vec<usize>> {
+        let func = funcs.get(callee_name)?;
+        let callable_name = func.params.get(callable_param_idx)?.simple_name()?;
+        if func
+            .params
+            .get(callable_param_idx)?
+            .type_annotation
+            .is_some()
+        {
+            return None;
+        }
+
+        // Map this function's param names to their indices.
+        let mut name_to_index: HashMap<&str, usize> = HashMap::new();
+        for (i, p) in func.params.iter().enumerate() {
+            if let Some(n) = p.simple_name() {
+                name_to_index.insert(n, i);
+            }
+        }
+
+        // Scan the body for the single sound usage of `callable_name`.
+        let mut tail_values: Vec<&shape_ast::ast::Expr> = Vec::new();
+        Self::collect_tail_values(&func.body, &mut tail_values);
+        let mut explicit: Vec<&shape_ast::ast::Expr> = Vec::new();
+        Self::collect_explicit_returns(&func.body, &mut explicit);
+        // Conservative: only a single tail value, no explicit returns.
+        if !explicit.is_empty() || tail_values.len() != 1 {
+            return None;
+        }
+        let shape_ast::ast::Expr::FunctionCall {
+            name: tail_callee,
+            args: tail_args,
+            ..
+        } = tail_values[0]
+        else {
+            return None;
+        };
+
+        // DIRECT: the tail call IS the callable itself (`f(x, y)`).
+        if tail_callee == callable_name {
+            return Self::map_call_args_to_outer_indices(tail_args, &name_to_index);
+        }
+
+        // FORWARDING (one hop): the tail call is some OTHER named function that
+        // receives `callable_name` at one position and invokes ITS param there.
+        let forwarded_pos = tail_args.iter().position(
+            |a| matches!(a, shape_ast::ast::Expr::Identifier(id, _) if id == callable_name),
+        )?;
+        let inner_indices =
+            self.callable_invocation_outer_arg_indices(funcs, tail_callee, forwarded_pos)?;
+        // `inner_indices` are indices into the INNER callee's params. Map each
+        // back through this forwarding call's args to THIS function's params.
+        let mut mapped = Vec::with_capacity(inner_indices.len());
+        for &inner_idx in &inner_indices {
+            let shape_ast::ast::Expr::Identifier(arg_name, _) = tail_args.get(inner_idx)? else {
+                return None;
+            };
+            mapped.push(*name_to_index.get(arg_name.as_str())?);
+        }
+        Some(mapped)
+    }
+
+    /// True when `func_name`'s body is identity-like for its param at
+    /// `param_idx`: an unannotated function with no explicit returns whose single
+    /// tail value is the bare param identifier (`fn id(g){ g }`). This is the
+    /// id-launder shape — the callable passes through unchanged.
+    fn fn_returns_param_directly(
+        funcs: &HashMap<String, &shape_ast::ast::FunctionDef>,
+        func_name: &str,
+        param_idx: usize,
+    ) -> bool {
+        let Some(func) = funcs.get(func_name) else {
+            return false;
+        };
+        if func.return_type.is_some() {
+            return false;
+        }
+        let Some(param_name) = func.params.get(param_idx).and_then(|p| p.simple_name()) else {
+            return false;
+        };
+        if func.params[param_idx].type_annotation.is_some() {
+            return false;
+        }
+        let mut explicit: Vec<&shape_ast::ast::Expr> = Vec::new();
+        Self::collect_explicit_returns(&func.body, &mut explicit);
+        if !explicit.is_empty() {
+            return false;
+        }
+        let mut tail_values: Vec<&shape_ast::ast::Expr> = Vec::new();
+        Self::collect_tail_values(&func.body, &mut tail_values);
+        matches!(
+            tail_values.as_slice(),
+            [shape_ast::ast::Expr::Identifier(id, _)] if id == param_name
+        )
+    }
+
+    /// Map a body-call's arguments to outer-param indices: every arg must be a
+    /// bare identifier naming one of this function's params. `None` otherwise.
+    fn map_call_args_to_outer_indices(
+        call_args: &[shape_ast::ast::Expr],
+        name_to_index: &HashMap<&str, usize>,
+    ) -> Option<Vec<usize>> {
+        let mut out = Vec::with_capacity(call_args.len());
+        for a in call_args {
+            let shape_ast::ast::Expr::Identifier(id, _) = a else {
+                return None;
+            };
+            out.push(*name_to_index.get(id.as_str())?);
+        }
+        Some(out)
+    }
+
+    /// Read the already-inferred types of `call_args` at the given positions,
+    /// requiring every one to resolve to a CONCRETE type (not a variable). This
+    /// is the proven sibling-argument type the closure param adopts. `None` if
+    /// any position is missing or still a variable — that hop is intractable and
+    /// must be left to SURFACE.
+    fn concrete_arg_types_at_indices(
+        &mut self,
+        call_args: &[shape_ast::ast::Expr],
+        indices: &[usize],
+    ) -> Option<Vec<Type>> {
+        let mut out = Vec::with_capacity(indices.len());
+        for &idx in indices {
+            let arg = call_args.get(idx)?;
+            let ty = self.infer_expr(arg).ok()?;
+            let resolved = self.unifier.apply_substitutions(&ty);
+            if matches!(resolved, Type::Variable(_) | Type::Constrained { .. }) {
+                return None;
+            }
+            out.push(resolved);
+        }
+        Some(out)
+    }
+
+    /// Identity-launder strategy. `id_name` is an identity-like function (returns
+    /// its own param). Find a binding `let X = id_name(...)` whose result is later
+    /// USED as the callable argument of a wrapper that invokes it, and return the
+    /// concrete invocation argument types from that downstream call site.
+    fn laundered_closure_invocation_arg_types(
+        &mut self,
+        program: &Program,
+        funcs: &HashMap<String, &shape_ast::ast::FunctionDef>,
+        id_name: &str,
+    ) -> Option<Vec<Type>> {
+        use shape_ast::ast::{Expr, Item, Statement};
+
+        // Collect the candidate laundered binding names and their downstream
+        // uses by walking every function body + the module top level.
+        // A binding `let X = id_name(<closure-or-anything>)` makes `X` a
+        // laundered callable; a later call `wrap(X, a, b)` where `wrap` invokes
+        // its param at X's position pins the closure.
+        let mut result: Option<Vec<Type>> = None;
+
+        // Recursive statement walker collecting (binding_name -> laundered) and
+        // resolving uses in the SAME statement list (lexical, forward-only).
+        // We keep it simple: a single linear scan per body, tracking laundered
+        // names seen so far.
+        fn scan_stmts<'a>(
+            engine: &mut TypeInferenceEngine,
+            funcs: &HashMap<String, &shape_ast::ast::FunctionDef>,
+            id_name: &str,
+            stmts: &'a [Statement],
+            result: &mut Option<Vec<Type>>,
+        ) {
+            let mut laundered: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for stmt in stmts {
+                if result.is_some() {
+                    return;
+                }
+                match stmt {
+                    Statement::VariableDecl(decl, _) => {
+                        if let Some(Expr::FunctionCall { name, .. }) = decl.value.as_ref() {
+                            if name == id_name {
+                                for n in decl.pattern.get_identifiers() {
+                                    laundered.insert(n);
+                                }
+                                continue;
+                            }
+                        }
+                        if let Some(v) = decl.value.as_ref() {
+                            try_use(engine, funcs, &laundered, v, result);
+                        }
+                    }
+                    Statement::Expression(e, _) => try_use(engine, funcs, &laundered, e, result),
+                    Statement::Return(Some(e), _) => try_use(engine, funcs, &laundered, e, result),
+                    _ => {}
+                }
+            }
+        }
+
+        // Inspect one expression for a wrapper call `wrap(<laundered>, …)` whose
+        // param at the laundered position is invoked; read invocation arg types.
+        fn try_use(
+            engine: &mut TypeInferenceEngine,
+            funcs: &HashMap<String, &shape_ast::ast::FunctionDef>,
+            laundered: &std::collections::HashSet<String>,
+            expr: &Expr,
+            result: &mut Option<Vec<Type>>,
+        ) {
+            if result.is_some() {
+                return;
+            }
+            // Collect every FunctionCall in the expr tree (the laundered use may
+            // be nested inside a binary op / let initializer / block, e.g.
+            // `let r = acc + applyx(h, 6, 7)`). Cloning the call shapes keeps the
+            // immutable AST borrow separate from the `&mut engine` resolution.
+            let mut collector = CallCollector { calls: Vec::new() };
+            crate::visitor::walk_expr(&mut collector, expr);
+            for (name, args) in collector.calls {
+                for (pos, a) in args.iter().enumerate() {
+                    if let Expr::Identifier(id, _) = a {
+                        if laundered.contains(id) {
+                            if let Some(outer_indices) =
+                                engine.callable_invocation_outer_arg_indices(funcs, &name, pos)
+                            {
+                                if let Some(types) =
+                                    engine.concrete_arg_types_at_indices(&args, &outer_indices)
+                                {
+                                    *result = Some(types);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pure-AST collector: gathers every `FunctionCall (name, args)` reachable
+        // from an expression, so the laundered-binding use can be found wherever
+        // it is nested. `visit_expr` returns `true` to keep descending.
+        struct CallCollector {
+            calls: Vec<(String, Vec<Expr>)>,
+        }
+        impl crate::visitor::Visitor for CallCollector {
+            fn visit_expr(&mut self, expr: &Expr) -> bool {
+                if let Expr::FunctionCall { name, args, .. } = expr {
+                    self.calls.push((name.clone(), args.clone()));
+                }
+                true
+            }
+        }
+
+        // Module top-level items form one flat statement sequence; lift each
+        // into a `Statement` so the same lexical, forward-only `scan_stmts`
+        // tracks laundered bindings declared at module scope, too.
+        let mut top_level: Vec<Statement> = Vec::new();
+        for item in &program.items {
+            match item {
+                Item::Statement(stmt, _) => top_level.push(stmt.clone()),
+                Item::VariableDecl(decl, span) => {
+                    top_level.push(Statement::VariableDecl(decl.clone(), *span))
+                }
+                Item::Expression(e, span) => {
+                    top_level.push(Statement::Expression(e.clone(), *span))
+                }
+                Item::Assignment(a, span) => {
+                    top_level.push(Statement::Assignment(a.clone(), *span))
+                }
+                _ => {}
+            }
+        }
+        scan_stmts(self, funcs, id_name, &top_level, &mut result);
+
+        for item in &program.items {
+            if result.is_some() {
+                break;
+            }
+            if let Item::Function(func, _) = item {
+                scan_stmts(self, funcs, id_name, &func.body, &mut result);
+            }
+        }
+        result
+    }
+
     fn apply_callsite_unions(&mut self, types: &mut HashMap<String, Type>) {
         // Transitive callsite-union propagation.
         //
@@ -1888,8 +2312,7 @@ impl TypeInferenceEngine {
                                 let resolved_param_return =
                                     self.unifier.apply_substitutions(param_returns.as_ref());
                                 if !matches!(resolved_param_return, Type::Variable(_)) {
-                                    substitutions
-                                        .insert(return_var.clone(), resolved_param_return);
+                                    substitutions.insert(return_var.clone(), resolved_param_return);
                                 }
                             }
                         }
