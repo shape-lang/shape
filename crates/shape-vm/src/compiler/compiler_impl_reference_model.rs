@@ -806,6 +806,7 @@ impl BytecodeCompiler {
         HashMap<String, Vec<Option<shape_value::v2::ConcreteType>>>,
         HashMap<String, Vec<Option<Vec<(String, shape_runtime::type_schema::FieldType)>>>>,
         HashMap<String, Vec<(String, shape_runtime::type_schema::FieldType)>>,
+        HashMap<String, Vec<Option<Vec<shape_ast::ast::TypeAnnotation>>>>,
     ) {
         let funcs = Self::collect_program_functions(program);
         let mut inference = shape_runtime::type_system::inference::TypeInferenceEngine::new();
@@ -819,6 +820,11 @@ impl BytecodeCompiler {
         // array params.
         let inferred_param_concrete_types =
             Self::infer_param_concrete_types_from_types(program, &types);
+        // Wave 1a PART B: project fn-typed unannotated params (used-as-callable
+        // in the body) into their concrete argument annotations, for call-site
+        // closure-argument seeding.
+        let inferred_param_fn_param_types =
+            Self::infer_param_fn_param_types_from_types(program, &types);
         // WS-9b: project anonymous-object param types into per-field
         // `FieldType` lists so `compile_function_body` can register an
         // inline schema and resolve `param.field` for unannotated
@@ -901,6 +907,7 @@ impl BytecodeCompiler {
             inferred_param_concrete_types,
             inferred_param_object_fields,
             inferred_return_object_fields,
+            inferred_param_fn_param_types,
         )
     }
 
@@ -1073,6 +1080,96 @@ impl BytecodeCompiler {
     /// projects to `ConcreteType` (the JIT's proof carrier) instead of a
     /// display string. Annotated params keep `None`; their `ConcreteType`
     /// is stamped from the annotation in the per-fn seeding pass.
+    /// Wave 1a PART B: project the program-wide type-inference engine's
+    /// per-parameter `Type` into, for each UNANNOTATED param the engine
+    /// resolved to a `Type::Function`, the list of CONCRETE param
+    /// `TypeAnnotation`s of that function type.
+    ///
+    /// This is the producer for fn-typed-parameter call-site closure seeding:
+    /// `fn apply2(f, x, y) { f(x, y) }` USES `f` as a callable, so the engine
+    /// (via its callable-param-source-var machinery) infers `f`'s type from
+    /// the body usage + the call-site arg types, yielding e.g.
+    /// `fn(int,int)->_`. We capture only the ARGUMENT annotations (the closure
+    /// seeding consumer maps them onto the closure's user params 1:1).
+    ///
+    /// Soundness (strict-typing core):
+    /// * We require EVERY argument position to resolve to a concrete
+    ///   `TypeAnnotation` via `Type::to_annotation()` AND reject the `"unknown"`
+    ///   sentinel that `to_annotation` substitutes for unresolved inner vars.
+    ///   A single unresolved argument ⇒ the whole param entry is `None` (no
+    ///   fabrication, no `any`, no Bool-default). The closure then keeps its
+    ///   existing compile path / rejection — an un-inferable usage is NOT
+    ///   forced.
+    /// * `int` and `number` stay distinct (each is its own `Basic` name); a
+    ///   later inconsistency surfaces as the engine's own conflict, not a
+    ///   silent pick here.
+    pub(super) fn infer_param_fn_param_types_from_types(
+        program: &Program,
+        inferred_types: &HashMap<String, Type>,
+    ) -> HashMap<String, Vec<Option<Vec<shape_ast::ast::TypeAnnotation>>>> {
+        let funcs = Self::collect_program_functions(program);
+        let mut out = HashMap::new();
+
+        for (name, func) in funcs {
+            let mut param_fns: Vec<Option<Vec<shape_ast::ast::TypeAnnotation>>> =
+                vec![None; func.params.len()];
+            let Some(Type::Function { params, .. }) = inferred_types.get(&name) else {
+                out.insert(name, param_fns);
+                continue;
+            };
+
+            for (idx, param) in func.params.iter().enumerate() {
+                // Only fill UNANNOTATED, single-identifier params. An
+                // explicitly-annotated callable param already drives the
+                // closure seeding through its own annotation.
+                if param.type_annotation.is_some() || param.simple_name().is_none() {
+                    continue;
+                }
+                let Some(Type::Function {
+                    params: fn_params, ..
+                }) = params.get(idx)
+                else {
+                    continue;
+                };
+                // Require EVERY argument position concrete. A single
+                // unresolved (Variable / Constrained / `unknown`) arg ⇒ bail
+                // the entry to `None` — no fabrication.
+                let mut arg_anns: Vec<shape_ast::ast::TypeAnnotation> =
+                    Vec::with_capacity(fn_params.len());
+                let mut all_concrete = true;
+                for fp in fn_params {
+                    match fp.to_annotation() {
+                        Some(ann) if !Self::annotation_is_unknown(&ann) => arg_anns.push(ann),
+                        _ => {
+                            all_concrete = false;
+                            break;
+                        }
+                    }
+                }
+                if all_concrete && !arg_anns.is_empty() {
+                    param_fns[idx] = Some(arg_anns);
+                }
+            }
+
+            out.insert(name, param_fns);
+        }
+
+        out
+    }
+
+    /// Reject the `"unknown"` sentinel that `Type::to_annotation()` substitutes
+    /// for unresolved inner type variables inside a `Type::Function`. A `Basic`
+    /// or `Reference` literally named `unknown` is treated as not-concrete so
+    /// we never seed a closure param from a fabricated type.
+    fn annotation_is_unknown(ann: &shape_ast::ast::TypeAnnotation) -> bool {
+        use shape_ast::ast::TypeAnnotation;
+        match ann {
+            TypeAnnotation::Basic(n) => n == "unknown",
+            TypeAnnotation::Reference(path) => path.to_string() == "unknown",
+            _ => false,
+        }
+    }
+
     pub(super) fn infer_param_concrete_types_from_types(
         program: &Program,
         inferred_types: &HashMap<String, Type>,
@@ -1463,6 +1560,7 @@ impl BytecodeCompiler {
             inferred_param_concrete_types,
             inferred_param_object_fields,
             inferred_return_object_fields,
+            inferred_param_fn_param_types,
         ) = Self::infer_reference_model(&program);
         self.inferred_param_pass_modes =
             Self::build_param_pass_mode_map(&program, &inferred_ref_params, &inferred_ref_mutates);
@@ -1470,6 +1568,7 @@ impl BytecodeCompiler {
         self.inferred_ref_mutates = inferred_ref_mutates;
         self.inferred_param_type_hints = inferred_param_type_hints;
         self.inferred_param_concrete_types = inferred_param_concrete_types;
+        self.inferred_param_fn_param_types = inferred_param_fn_param_types;
         self.inferred_param_object_fields = inferred_param_object_fields;
         self.inferred_return_object_fields = inferred_return_object_fields;
         // WS-9c: eagerly register an inline anonymous schema (+ per-field

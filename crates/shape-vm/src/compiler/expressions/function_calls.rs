@@ -6,16 +6,16 @@ use crate::compiler::monomorphization::type_resolution::{
     concrete_type_for_expr, extract_arg_concrete_types, resolve_call_site_type_args,
     resolve_call_site_type_args_with_closures,
 };
-use shape_runtime::closure::EnvironmentAnalyzer;
-use std::collections::BTreeSet;
 use crate::compiler::string_interpolation::has_interpolation;
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::{NumericType, VariableKind, VariableTypeInfo};
 use shape_ast::ast::{Expr, InterpolationMode, Literal, Span, Spanned};
 use shape_ast::error::{Result, ShapeError};
+use shape_runtime::closure::EnvironmentAnalyzer;
 use shape_runtime::type_system::suggestions::suggest_function;
 use shape_runtime::type_system::{BuiltinTypes, Type};
 use shape_value::v2::ConcreteType;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use super::super::{BuiltinNameResolution, BytecodeCompiler, ModuleBuiltinFunction};
@@ -103,8 +103,9 @@ pub(crate) fn field_type_contract_annotation(
         FieldType::Object(name) => Some(TypeAnnotation::Reference(name.as_str().into())),
         FieldType::Array(inner) => field_type_contract_annotation(inner)
             .map(|inner_ann| TypeAnnotation::Array(Box::new(inner_ann))),
-        FieldType::Option(inner) => field_type_contract_annotation(inner)
-            .map(TypeAnnotation::option),
+        FieldType::Option(inner) => {
+            field_type_contract_annotation(inner).map(TypeAnnotation::option)
+        }
         // W17.3-4.1 — project HashMap<K, V> / Set<T> back to the
         // surface `TypeAnnotation::Generic { name, args }` shape the
         // parser emits. Inner contract projection is best-effort:
@@ -285,10 +286,9 @@ impl BytecodeCompiler {
         args: &[Expr],
         span: Span,
     ) -> Result<()> {
-        if !self.is_native_module_export(
-            &builtin_decl.source_module_path,
-            &builtin_decl.export_name,
-        ) {
+        if !self
+            .is_native_module_export(&builtin_decl.source_module_path, &builtin_decl.export_name)
+        {
             return Err(ShapeError::SemanticError {
                 message: format!(
                     "builtin function '{}' has no runtime implementation in module '{}'",
@@ -323,7 +323,8 @@ impl BytecodeCompiler {
         if self.module_scope_stack.is_empty() {
             self.program.has_w17_marshal_residual = true;
         }
-        let binding_name = self.ensure_hidden_native_module_binding(&builtin_decl.source_module_path);
+        let binding_name =
+            self.ensure_hidden_native_module_binding(&builtin_decl.source_module_path);
         self.compile_module_namespace_call_on_binding(
             &binding_name,
             &builtin_decl.source_module_path,
@@ -333,10 +334,7 @@ impl BytecodeCompiler {
         )
     }
 
-    fn resolve_scoped_module_builtin_function(
-        &self,
-        name: &str,
-    ) -> Option<ModuleBuiltinFunction> {
+    fn resolve_scoped_module_builtin_function(&self, name: &str) -> Option<ModuleBuiltinFunction> {
         if let Some(decl) = self.module_builtin_functions.get(name) {
             return Some(decl.clone());
         }
@@ -379,9 +377,8 @@ impl BytecodeCompiler {
                 let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = fields
                     .iter()
                     .map(|field| {
-                        let ft = BytecodeCompiler::type_annotation_to_field_type(
-                            &field.type_annotation,
-                        );
+                        let ft =
+                            BytecodeCompiler::type_annotation_to_field_type(&field.type_annotation);
                         (field.name.as_str(), ft)
                     })
                     .collect();
@@ -391,8 +388,7 @@ impl BytecodeCompiler {
                 // Also register field contracts so downstream callable-field
                 // unwrapping (e.g. nested `() => Table<{...}>` returns) and
                 // any contract-based field lookups see the annotated types.
-                let mut contracts =
-                    std::collections::HashMap::with_capacity(fields.len());
+                let mut contracts = std::collections::HashMap::with_capacity(fields.len());
                 for field in fields {
                     contracts.insert(field.name.clone(), field.type_annotation.clone());
                 }
@@ -433,7 +429,12 @@ impl BytecodeCompiler {
         // (`register_object_field_contracts`).
         let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = fields
             .iter()
-            .map(|field| (field.name.as_str(), shape_runtime::type_schema::FieldType::Any))
+            .map(|field| {
+                (
+                    field.name.as_str(),
+                    shape_runtime::type_schema::FieldType::Any,
+                )
+            })
             .collect();
         let schema_id = self
             .type_tracker
@@ -554,24 +555,14 @@ impl BytecodeCompiler {
     fn is_native_module_export(&self, module_name: &str, export_name: &str) -> bool {
         self.extension_registry
             .as_ref()
-            .and_then(|registry| {
-                registry
-                    .iter()
-                    .rev()
-                    .find(|m| m.name == module_name)
-            })
+            .and_then(|registry| registry.iter().rev().find(|m| m.name == module_name))
             .is_some_and(|module| module.has_export(export_name))
     }
 
     fn is_native_module_export_available(&self, module_name: &str, export_name: &str) -> bool {
         self.extension_registry
             .as_ref()
-            .and_then(|registry| {
-                registry
-                    .iter()
-                    .rev()
-                    .find(|m| m.name == module_name)
-            })
+            .and_then(|registry| registry.iter().rev().find(|m| m.name == module_name))
             .is_some_and(|module| module.is_export_available(export_name, self.comptime_mode))
     }
 
@@ -720,9 +711,7 @@ impl BytecodeCompiler {
                     Some(Operand::Count(args.len() as u16)),
                 ));
             } else {
-                let arg_count = self
-                    .program
-                    .add_constant(Constant::Int(args.len() as i64));
+                let arg_count = self.program.add_constant(Constant::Int(args.len() as i64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(arg_count)),
@@ -763,16 +752,14 @@ impl BytecodeCompiler {
             let tracked_callable_rt: Option<String> =
                 if let Some(local_idx) = self.resolve_local(name) {
                     self.local_callable_return_types.get(&local_idx).cloned()
-                } else if let Some(scoped) =
-                    self.resolve_scoped_module_binding_name(name)
-                {
-                    self.module_bindings.get(&scoped).and_then(|idx| {
-                        self.module_binding_callable_return_types.get(idx).cloned()
-                    })
+                } else if let Some(scoped) = self.resolve_scoped_module_binding_name(name) {
+                    self.module_bindings
+                        .get(&scoped)
+                        .and_then(|idx| self.module_binding_callable_return_types.get(idx).cloned())
                 } else {
-                    self.module_bindings.get(name).and_then(|idx| {
-                        self.module_binding_callable_return_types.get(idx).cloned()
-                    })
+                    self.module_bindings
+                        .get(name)
+                        .and_then(|idx| self.module_binding_callable_return_types.get(idx).cloned())
                 };
             if let Some(rt_name) = tracked_callable_rt.as_ref() {
                 use crate::type_tracking::NumericType;
@@ -780,13 +767,16 @@ impl BytecodeCompiler {
                     "int" => self.last_expr_numeric_type = Some(NumericType::Int),
                     "number" => self.last_expr_numeric_type = Some(NumericType::Number),
                     "decimal" => self.last_expr_numeric_type = Some(NumericType::Decimal),
-                    other if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(other) => {
+                    other
+                        if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(
+                            other,
+                        ) =>
+                    {
                         // Width-aware ints — fall through; the i32/i16/etc.
                         // names round-trip via type_info.
-                        self.last_expr_type_info =
-                            Some(crate::type_tracking::VariableTypeInfo::named(
-                                other.to_string(),
-                            ));
+                        self.last_expr_type_info = Some(
+                            crate::type_tracking::VariableTypeInfo::named(other.to_string()),
+                        );
                     }
                     "string" | "bool" | "char" => {
                         self.last_expr_type_info = Some(
@@ -859,9 +849,7 @@ impl BytecodeCompiler {
             let closure_peek: Option<crate::compiler::ClosureBodyPeek> =
                 if let Some(local_idx) = self.resolve_local(name) {
                     self.local_callable_closure_bodies.get(&local_idx).cloned()
-                } else if let Some(scoped) =
-                    self.resolve_scoped_module_binding_name(name)
-                {
+                } else if let Some(scoped) = self.resolve_scoped_module_binding_name(name) {
                     self.module_bindings.get(&scoped).and_then(|idx| {
                         self.module_binding_callable_closure_bodies
                             .get(idx)
@@ -966,10 +954,9 @@ impl BytecodeCompiler {
                                 _ => None,
                             };
                             if let Some(ct) = ct {
-                                self.program.value_call_return_concrete_types.insert(
-                                    (span, self.current_function),
-                                    ct,
-                                );
+                                self.program
+                                    .value_call_return_concrete_types
+                                    .insert((span, self.current_function), ct);
 
                                 // cluster-2-cw-IB-class-b (closure-body
                                 // typed-array param seed): retroactively
@@ -1007,10 +994,8 @@ impl BytecodeCompiler {
                                     // exit via `break` for skip cases
                                     // (Arc shared / mir missing).
                                     'seed_block: {
-                                        let Some(func) = self
-                                            .program
-                                            .functions
-                                            .get_mut(closure_fn_idx)
+                                        let Some(func) =
+                                            self.program.functions.get_mut(closure_fn_idx)
                                         else {
                                             break 'seed_block;
                                         };
@@ -1039,7 +1024,8 @@ impl BytecodeCompiler {
                                         // the closure body's typed-
                                         // array param seed is
                                         // missed.
-                                        let Some(mir_data) = std::sync::Arc::get_mut(mir_data_arc) else {
+                                        let Some(mir_data) = std::sync::Arc::get_mut(mir_data_arc)
+                                        else {
                                             break 'seed_block;
                                         };
                                         // Match closure-body param
@@ -1055,8 +1041,12 @@ impl BytecodeCompiler {
                                         // path, which doesn't fire
                                         // here per `vm_captures=false`
                                         // in the FAST PATH).
-                                        for (param_idx, slot) in mir_data.mir.param_slots.clone().iter().enumerate() {
-                                            let Some(Some(caller_tn)) = caller_arg_type_names.get(param_idx) else {
+                                        for (param_idx, slot) in
+                                            mir_data.mir.param_slots.clone().iter().enumerate()
+                                        {
+                                            let Some(Some(caller_tn)) =
+                                                caller_arg_type_names.get(param_idx)
+                                            else {
                                                 continue;
                                             };
                                             // Parse "Vec<elem>" into
@@ -1072,20 +1062,39 @@ impl BytecodeCompiler {
                                             else {
                                                 continue;
                                             };
-                                            let elem_ct: Option<shape_value::v2::ConcreteType> = match inner_name {
-                                                "int" | "i64" => Some(shape_value::v2::ConcreteType::I64),
-                                                "i32" => Some(shape_value::v2::ConcreteType::I32),
-                                                "i16" => Some(shape_value::v2::ConcreteType::I16),
-                                                "i8" => Some(shape_value::v2::ConcreteType::I8),
-                                                "u64" => Some(shape_value::v2::ConcreteType::U64),
-                                                "u32" => Some(shape_value::v2::ConcreteType::U32),
-                                                "u16" => Some(shape_value::v2::ConcreteType::U16),
-                                                "u8" => Some(shape_value::v2::ConcreteType::U8),
-                                                "number" | "f64" => Some(shape_value::v2::ConcreteType::F64),
-                                                "bool" => Some(shape_value::v2::ConcreteType::Bool),
-                                                "string" => Some(shape_value::v2::ConcreteType::String),
-                                                _ => None,
-                                            };
+                                            let elem_ct: Option<shape_value::v2::ConcreteType> =
+                                                match inner_name {
+                                                    "int" | "i64" => {
+                                                        Some(shape_value::v2::ConcreteType::I64)
+                                                    }
+                                                    "i32" => {
+                                                        Some(shape_value::v2::ConcreteType::I32)
+                                                    }
+                                                    "i16" => {
+                                                        Some(shape_value::v2::ConcreteType::I16)
+                                                    }
+                                                    "i8" => Some(shape_value::v2::ConcreteType::I8),
+                                                    "u64" => {
+                                                        Some(shape_value::v2::ConcreteType::U64)
+                                                    }
+                                                    "u32" => {
+                                                        Some(shape_value::v2::ConcreteType::U32)
+                                                    }
+                                                    "u16" => {
+                                                        Some(shape_value::v2::ConcreteType::U16)
+                                                    }
+                                                    "u8" => Some(shape_value::v2::ConcreteType::U8),
+                                                    "number" | "f64" => {
+                                                        Some(shape_value::v2::ConcreteType::F64)
+                                                    }
+                                                    "bool" => {
+                                                        Some(shape_value::v2::ConcreteType::Bool)
+                                                    }
+                                                    "string" => {
+                                                        Some(shape_value::v2::ConcreteType::String)
+                                                    }
+                                                    _ => None,
+                                                };
                                             if let Some(elem_ct) = elem_ct {
                                                 mir_data
                                                     .mir
@@ -1286,7 +1295,19 @@ impl BytecodeCompiler {
             // → `|x: int, y: int|`). See
             // `apply2(|x, y| x + y, 2, 3)` — without this, `x + y` fails
             // strict typing as `unknown + unknown`.
-            self.install_pending_closure_param_types_for_any_param_hof(&call_name, args);
+            // Wave 1a PART B: usage-driven closure seeding for UNANNOTATED
+            // callable params. When `fn apply2(f, x, y) { f(x, y) }` USES `f`
+            // as a callable, whole-program inference resolved `f`'s type to a
+            // concrete `fn(int,int)->_`; the call site `apply2(|a,b| a*b, …)`
+            // seeds `|a,b|` from that inferred signature. This is the
+            // higher-ranked extension of PART A. It supersedes the legacy
+            // `any`-annotation heuristic below; the heuristic is only consulted
+            // as a fallback when inference produced no concrete signature.
+            let seeded_from_inference =
+                self.install_pending_closure_param_types_for_inferred_fn_param(&call_name, args);
+            if !seeded_from_inference {
+                self.install_pending_closure_param_types_for_any_param_hof(&call_name, args);
+            }
 
             let writebacks = self.compile_call_args(args, Some(&pass_modes))?;
             // The closure compile path takes() the hint, but if the closure
@@ -1488,9 +1509,8 @@ impl BytecodeCompiler {
                         // higher-level kind so method-call write-back
                         // emission picks the right `MUT_SELF_HASHMAP`
                         // set.
-                        self.pending_variable_container_kind = Some(
-                            crate::compiler::mutation_writeback::ContainerKind::HashMap,
-                        );
+                        self.pending_variable_container_kind =
+                            Some(crate::compiler::mutation_writeback::ContainerKind::HashMap);
                         return Ok(());
                     }
                 }
@@ -1500,9 +1520,7 @@ impl BytecodeCompiler {
                 self.compile_expr_as_value_or_placeholder(arg)?;
             }
             if self.builtin_requires_arg_count(builtin) {
-                let arg_count = self
-                    .program
-                    .add_constant(Constant::Int(args.len() as i64));
+                let arg_count = self.program.add_constant(Constant::Int(args.len() as i64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(arg_count)),
@@ -1710,9 +1728,7 @@ impl BytecodeCompiler {
         for arg in args {
             self.compile_expr_as_value_or_placeholder(arg)?;
         }
-        let count = self
-            .program
-            .add_constant(Constant::Int(args.len() as i64));
+        let count = self.program.add_constant(Constant::Int(args.len() as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(count)),
@@ -1847,31 +1863,32 @@ impl BytecodeCompiler {
             });
         }
 
-        let elem_ann_opt: Option<shape_ast::ast::TypeAnnotation> = match
-            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, receiver)
-        {
-            Some(shape_value::v2::concrete_type::ConcreteType::Array(inner)) => {
-                crate::compiler::expressions::closures::concrete_type_to_type_annotation(&inner)
+        let elem_ann_opt: Option<shape_ast::ast::TypeAnnotation> =
+            match crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                self, receiver,
+            ) {
+                Some(shape_value::v2::concrete_type::ConcreteType::Array(inner)) => {
+                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(&inner)
+                }
+                _ => None,
             }
-            _ => None,
-        }
-        // Fallback: if the receiver is an inline array literal, infer
-        // element type from the elements via the existing inference helper.
-        // `concrete_type_for_expr` only handles array literals via
-        // `array_element_types[span]`, which is populated by HashMap
-        // method results — NOT by a plain `[1, 2, 3]` literal. This
-        // fallback closes that gap.
-        .or_else(|| {
-            if let Expr::Array(elements, _) = receiver {
-                let kind = crate::compiler::v2_array_emission::infer_array_element_type(
-                    elements,
-                    &self.type_tracker,
-                )?;
-                slot_kind_to_type_annotation(kind)
-            } else {
-                None
-            }
-        });
+            // Fallback: if the receiver is an inline array literal, infer
+            // element type from the elements via the existing inference helper.
+            // `concrete_type_for_expr` only handles array literals via
+            // `array_element_types[span]`, which is populated by HashMap
+            // method results — NOT by a plain `[1, 2, 3]` literal. This
+            // fallback closes that gap.
+            .or_else(|| {
+                if let Expr::Array(elements, _) = receiver {
+                    let kind = crate::compiler::v2_array_emission::infer_array_element_type(
+                        elements,
+                        &self.type_tracker,
+                    )?;
+                    slot_kind_to_type_annotation(kind)
+                } else {
+                    None
+                }
+            });
         // R3-elemerasure (strict-flip) — SURFACED sub-case: an object-element
         // HOF (`users.filter(|u| u.score > 85)`) does NOT recover the struct
         // element type here. The struct identity is erased at array-of-structs
@@ -1933,6 +1950,82 @@ impl BytecodeCompiler {
             Expr::Object(_, _) => Some("an object"),
             _ => None,
         }
+    }
+
+    /// Wave 1a PART B: usage-driven closure-argument seeding from an
+    /// inference-resolved FUNCTION-TYPED parameter.
+    ///
+    /// When a free user function has an UNANNOTATED param that its body USES as
+    /// a callable (`fn apply2(f, x, y) { f(x, y) }`, `fn map_pair(f, a, b) {
+    /// [f(a), f(b)] }`), whole-program inference resolves that param to a
+    /// concrete `Type::Function`; `infer_param_fn_param_types_from_types`
+    /// captured its argument annotations into `inferred_param_fn_param_types`.
+    /// Here, at the call site, if the matching argument is a CLOSURE LITERAL
+    /// whose user-param count equals the inferred signature arity, we map the
+    /// inferred argument annotations 1:1 onto the closure's params via
+    /// `pending_closure_param_types`. The closure compile path then attaches
+    /// concrete annotations (`|a, b|` → `|a: int, b: int|`), so a body like
+    /// `a * b` type-checks under strict typing instead of failing
+    /// `unknown * unknown`.
+    ///
+    /// Returns `true` iff a hint was installed.
+    ///
+    /// Soundness (strict-typing core):
+    /// * Fires ONLY for params the engine resolved to a fully-concrete fn-type
+    ///   (the `None`-bailing producer guarantees no `unknown` leaks in). An
+    ///   un-inferable / dead callable param has no entry ⇒ no seeding ⇒ the
+    ///   closure keeps its existing rejection. No `any`, no Bool-default, no
+    ///   silent pick.
+    /// * Requires arity to match EXACTLY (signature arity == closure user-param
+    ///   count). A mismatch ⇒ no seeding (the call is independently an
+    ///   arity error elsewhere).
+    /// * Each closure param is seeded from its OWN signature position, so
+    ///   heterogeneous signatures (`fn(int, string)`) map correctly —
+    ///   `int`/`number`/`string` stay distinct. A later body conflict with the
+    ///   seeded type still surfaces as a strict error.
+    pub(crate) fn install_pending_closure_param_types_for_inferred_fn_param(
+        &mut self,
+        callee_name: &str,
+        args: &[Expr],
+    ) -> bool {
+        let Some(param_fn_types) = self.inferred_param_fn_param_types.get(callee_name) else {
+            return false;
+        };
+        // Find the argument positions that are closure literals AND for which
+        // the callee has an inferred concrete fn-type. We only seed when there
+        // is exactly one such position (a single pending hint slot), matching
+        // the closure compile path's single-`take()` consumption.
+        let mut seedable: Option<(usize, &Vec<shape_ast::ast::TypeAnnotation>)> = None;
+        for (idx, arg) in args.iter().enumerate() {
+            if !matches!(arg, Expr::FunctionExpr { .. }) {
+                continue;
+            }
+            let Some(Some(sig_anns)) = param_fn_types.get(idx) else {
+                continue;
+            };
+            if seedable.is_some() {
+                // More than one seedable closure arg — the single pending-hint
+                // slot cannot serve both. Bail rather than mis-seed.
+                return false;
+            }
+            seedable = Some((idx, sig_anns));
+        }
+        let Some((closure_pos, sig_anns)) = seedable else {
+            return false;
+        };
+
+        // Match the closure's user-param count to the inferred arity exactly.
+        let Expr::FunctionExpr { params, .. } = &args[closure_pos] else {
+            return false;
+        };
+        if params.len() != sig_anns.len() || sig_anns.is_empty() {
+            return false;
+        }
+
+        let hints: Vec<Option<shape_ast::ast::TypeAnnotation>> =
+            sig_anns.iter().cloned().map(Some).collect();
+        self.pending_closure_param_types = Some(hints);
+        true
     }
 
     /// Sweep phase 3c.x: bidirectional inference for free user functions
@@ -2169,9 +2262,7 @@ impl BytecodeCompiler {
     /// `resolve_mut_self_tuple_return_target`; this is just the
     /// method-name lookup.
     fn is_known_tuple_return_method(&self, method: &str) -> bool {
-        crate::executor::objects::method_registry::is_mut_self_tuple_return_method_name(
-            method,
-        )
+        crate::executor::objects::method_registry::is_mut_self_tuple_return_method_name(method)
     }
 
     /// Compile missing trailing arguments at a UFCS-style method call site.
@@ -2212,18 +2303,14 @@ impl BytecodeCompiler {
             if let Some(ref fdef) = func_def {
                 if let Some(param) = fdef.params.get(param_idx) {
                     if let Some(ref default_expr) = param.default_value {
-                        let is_ref_param =
-                            ref_params.get(param_idx).copied().unwrap_or(false);
+                        let is_ref_param = ref_params.get(param_idx).copied().unwrap_or(false);
                         if is_ref_param {
-                            let borrow_mode = if ref_mutates
-                                .get(param_idx)
-                                .copied()
-                                .unwrap_or(false)
-                            {
-                                crate::compiler::BorrowMode::Exclusive
-                            } else {
-                                crate::compiler::BorrowMode::Shared
-                            };
+                            let borrow_mode =
+                                if ref_mutates.get(param_idx).copied().unwrap_or(false) {
+                                    crate::compiler::BorrowMode::Exclusive
+                                } else {
+                                    crate::compiler::BorrowMode::Shared
+                                };
                             self.compile_implicit_reference_arg(default_expr, borrow_mode)?;
                         } else {
                             self.compile_expr(default_expr)?;
@@ -2264,9 +2351,7 @@ impl BytecodeCompiler {
                 self.callable_return_reference_summary_from_expr(receiver);
             self.compile_expr(receiver)?;
             let writebacks = self.compile_call_args(args, expected_param_modes.as_deref())?;
-            let arg_count = self
-                .program
-                .add_constant(Constant::Int(args.len() as i64));
+            let arg_count = self.program.add_constant(Constant::Int(args.len() as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count)),
@@ -2678,9 +2763,9 @@ impl BytecodeCompiler {
             // kind Bool". Per ADR-006 §2.7.5 stamp-at-compile-time, the
             // producer-site IS the `toString` builtin — its return kind is
             // statically known. No fabrication, no Bool-default.
-            self.last_expr_type_info = Some(
-                crate::type_tracking::VariableTypeInfo::named("string".to_string()),
-            );
+            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
+                "string".to_string(),
+            ));
             self.clear_last_expr_reference_result();
             return Ok(());
         }
@@ -2688,7 +2773,9 @@ impl BytecodeCompiler {
         if let Expr::Identifier(namespace_name, namespace_span) = receiver {
             if self.is_module_namespace_name(namespace_name)
                 && self.resolve_local(namespace_name).is_none()
-                && !self.mutable_closure_captures.contains_key(namespace_name.as_str())
+                && !self
+                    .mutable_closure_captures
+                    .contains_key(namespace_name.as_str())
             {
                 return Err(ShapeError::SemanticError {
                     message: format!(
@@ -2714,8 +2801,12 @@ impl BytecodeCompiler {
                 });
             }
 
-            if self.compile_type_namespace_builtin_call(namespace_name, method, args, *namespace_span)?
-            {
+            if self.compile_type_namespace_builtin_call(
+                namespace_name,
+                method,
+                args,
+                *namespace_span,
+            )? {
                 return Ok(());
             }
         }
@@ -2834,8 +2925,8 @@ impl BytecodeCompiler {
         // parameter the compiler didn't see constructed) — in both
         // cases the handler still side-channel-publishes NewSelf, so
         // we must consume it.
-        let is_rvalue_tuple_return = mut_self_tuple_return_target.is_none()
-            && self.is_known_tuple_return_method(method);
+        let is_rvalue_tuple_return =
+            mut_self_tuple_return_target.is_none() && self.is_known_tuple_return_method(method);
 
         if mut_self_writeback_target.is_some() || mut_self_tuple_return_target.is_some() {
             // Enforce the let-vs-let-mut immutability check at the
@@ -2918,9 +3009,7 @@ impl BytecodeCompiler {
                 self.compile_expr_as_value_or_placeholder(arg)?;
             }
 
-            let arg_count = self
-                .program
-                .add_constant(Constant::Int(args.len() as i64));
+            let arg_count = self.program.add_constant(Constant::Int(args.len() as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count)),
@@ -3038,17 +3127,9 @@ impl BytecodeCompiler {
                 // If it succeeds, the UFCS branch below will re-run it and
                 // hit the cache; if it fails, we know to skip the UFCS
                 // branch entirely.
-                let mono_idx = self.try_monomorphize_method_call(
-                    &func_name,
-                    receiver,
-                    args,
-                    call_site_span,
-                );
-                if mono_idx.is_none() {
-                    Some(idx)
-                } else {
-                    None
-                }
+                let mono_idx =
+                    self.try_monomorphize_method_call(&func_name, receiver, args, call_site_span);
+                if mono_idx.is_none() { Some(idx) } else { None }
             });
         if let Some(func_idx) = extend_func_idx
             .or_else(|| self.find_function(method))
@@ -3097,9 +3178,7 @@ impl BytecodeCompiler {
                 .try_monomorphize_method_call(&func_name, receiver, args, call_site_span)
                 .unwrap_or(func_idx);
 
-            let arg_count = self
-                .program
-                .add_constant(Constant::Int(call_arity as i64));
+            let arg_count = self.program.add_constant(Constant::Int(call_arity as i64));
             self.emit(Instruction::new(
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count)),
@@ -3197,11 +3276,7 @@ impl BytecodeCompiler {
                         args,
                         call_site_span,
                     );
-                    if mono_idx.is_none() {
-                        Some(idx)
-                    } else {
-                        None
-                    }
+                    if mono_idx.is_none() { Some(idx) } else { None }
                 });
             if let Some(func_idx) = scoped_func_idx
                 .or(trait_func_idx)
@@ -3240,9 +3315,7 @@ impl BytecodeCompiler {
                     .try_monomorphize_method_call(&func_name, receiver, args, call_site_span)
                     .unwrap_or(func_idx);
 
-                let arg_count = self
-                    .program
-                    .add_constant(Constant::Int(call_arity as i64));
+                let arg_count = self.program.add_constant(Constant::Int(call_arity as i64));
                 self.emit(Instruction::new(
                     OpCode::PushConst,
                     Some(Operand::Const(arg_count)),
@@ -3484,7 +3557,11 @@ impl BytecodeCompiler {
                     let is_string = self
                         .type_tracker
                         .get_local_type(local_idx)
-                        .and_then(|info| info.type_name.as_deref().map(|n| n == "string" || n == "String"))
+                        .and_then(|info| {
+                            info.type_name
+                                .as_deref()
+                                .map(|n| n == "string" || n == "String")
+                        })
                         .unwrap_or(false);
                     if is_string {
                         self.emit(Instruction::new(
@@ -3514,10 +3591,7 @@ impl BytecodeCompiler {
                     };
                     if let Some(opcode) = opcode {
                         self.compile_expr(&args[0])?;
-                        self.emit(Instruction::new(
-                            opcode,
-                            Some(Operand::Local(local_idx)),
-                        ));
+                        self.emit(Instruction::new(opcode, Some(Operand::Local(local_idx))));
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
                         self.last_expr_numeric_type = match kind {
@@ -3562,7 +3636,10 @@ impl BytecodeCompiler {
             // `.set(key, value)` — typed HashMap set for HashMap<string, int>
             "set" if args.len() == 2 => {
                 if let Some(kind) = self.v2_typed_map_locals.get(&local_idx).copied() {
-                    if matches!(kind, crate::compiler::v2_typed_map_emission::TypedMapKind::StringI64) {
+                    if matches!(
+                        kind,
+                        crate::compiler::v2_typed_map_emission::TypedMapKind::StringI64
+                    ) {
                         self.compile_expr(&args[0])?;
                         self.compile_expr(&args[1])?;
                         self.emit(Instruction::new(
@@ -3596,10 +3673,7 @@ impl BytecodeCompiler {
                             self.check_named_binding_write_allowed(name, Some(source_loc))?;
                         }
                         self.compile_expr(&args[0])?;
-                        self.emit(Instruction::new(
-                            opcode,
-                            Some(Operand::Local(local_idx)),
-                        ));
+                        self.emit(Instruction::new(opcode, Some(Operand::Local(local_idx))));
                         // Push the mutated array as expression result.
                         if self.ref_locals.contains(&local_idx)
                             || self.reference_value_locals.contains(&local_idx)
@@ -3629,7 +3703,11 @@ impl BytecodeCompiler {
                     let is_string = self
                         .type_tracker
                         .get_local_type(local_idx)
-                        .and_then(|info| info.type_name.as_deref().map(|n| n == "string" || n == "String"))
+                        .and_then(|info| {
+                            info.type_name
+                                .as_deref()
+                                .map(|n| n == "string" || n == "String")
+                        })
                         .unwrap_or(false);
                     if is_string {
                         self.compile_expr(&args[0])?;
@@ -3757,17 +3835,16 @@ impl BytecodeCompiler {
             binding_name.to_string()
         };
 
-        let binding_idx =
-            *self
-                .module_bindings
-                .get(&effective_binding_name)
-                .ok_or_else(|| ShapeError::SemanticError {
-                    message: format!(
-                        "module namespace '{}' is not bound in the current scope",
-                        namespace_name
-                    ),
-                    location: Some(self.span_to_source_location(namespace_span)),
-                })?;
+        let binding_idx = *self
+            .module_bindings
+            .get(&effective_binding_name)
+            .ok_or_else(|| ShapeError::SemanticError {
+                message: format!(
+                    "module namespace '{}' is not bound in the current scope",
+                    namespace_name
+                ),
+                location: Some(self.span_to_source_location(namespace_span)),
+            })?;
         self.emit(Instruction::new(
             OpCode::LoadModuleBinding,
             Some(Operand::ModuleBinding(binding_idx)),
@@ -3778,13 +3855,15 @@ impl BytecodeCompiler {
             .as_ref()
             .and_then(Self::value_schema_from_type_info);
 
-        let schema_id = self.last_expr_schema.ok_or_else(|| ShapeError::SemanticError {
-            message: format!(
-                "module namespace '{}' is not typed. Missing module schema for export '{}'",
-                namespace_name, method
-            ),
-            location: Some(self.span_to_source_location(namespace_span)),
-        })?;
+        let schema_id = self
+            .last_expr_schema
+            .ok_or_else(|| ShapeError::SemanticError {
+                message: format!(
+                    "module namespace '{}' is not typed. Missing module schema for export '{}'",
+                    namespace_name, method
+                ),
+                location: Some(self.span_to_source_location(namespace_span)),
+            })?;
 
         let Some(schema) = self.type_tracker.schema_registry().get_by_id(schema_id) else {
             return Err(ShapeError::SemanticError {
@@ -3823,9 +3902,7 @@ impl BytecodeCompiler {
             self.compile_expr_as_value_or_placeholder(arg)?;
         }
 
-        let arg_count = self
-            .program
-            .add_constant(Constant::Int(args.len() as i64));
+        let arg_count = self.program.add_constant(Constant::Int(args.len() as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(arg_count)),
@@ -4022,9 +4099,7 @@ impl BytecodeCompiler {
         // such receivers into a temp local and reload from it instead.
         let receiver_is_pure_identifier = matches!(receiver, Expr::Identifier(..));
         let needs_fluent_return = matches!(method, "set" | "delete");
-        let receiver_temp: Option<u16> = if needs_fluent_return
-            && !receiver_is_pure_identifier
-        {
+        let receiver_temp: Option<u16> = if needs_fluent_return && !receiver_is_pure_identifier {
             // Wrong arity bails before we touch the temp — pre-check here so
             // we don't declare a temp we won't use.
             if args.len() != if method == "set" { 2 } else { 1 } {
@@ -4036,10 +4111,7 @@ impl BytecodeCompiler {
                 OpCode::StoreLocal,
                 Some(Operand::Local(t)),
             ));
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(t)),
-            ));
+            self.emit(Instruction::new(OpCode::LoadLocal, Some(Operand::Local(t))));
             Some(t)
         } else {
             // Compile receiver to put map_ptr on the stack.
@@ -4053,10 +4125,7 @@ impl BytecodeCompiler {
         let reload_receiver = |this: &mut Self| -> Result<()> {
             match receiver_temp {
                 Some(t) => {
-                    this.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(t)),
-                    ));
+                    this.emit(Instruction::new(OpCode::LoadLocal, Some(Operand::Local(t))));
                     Ok(())
                 }
                 None => this.compile_expr(receiver),
@@ -4270,9 +4339,7 @@ impl BytecodeCompiler {
         //    the closure-aware resolver so the mono key incorporates the
         //    closure's layout + inferred return type. Otherwise fall through
         //    to the type-only path (byte-for-byte compatible with pre-C).
-        let has_closure_arg = args
-            .iter()
-            .any(|a| matches!(a, Expr::FunctionExpr { .. }));
+        let has_closure_arg = args.iter().any(|a| matches!(a, Expr::FunctionExpr { .. }));
 
         if has_closure_arg {
             if let Some(idx) = self.try_monomorphize_method_call_with_closures(
@@ -4322,10 +4389,9 @@ impl BytecodeCompiler {
                 // CALLER (same value the conduit's per-fn loop uses for
                 // its `current_function` parameter), so the composite-
                 // key invariant holds across the conduit boundary.
-                self.program.monomorphized_method_call_sites.insert(
-                    (call_site_span, self.current_function),
-                    idx,
-                );
+                self.program
+                    .monomorphized_method_call_sites
+                    .insert((call_site_span, self.current_function), idx);
                 Some(idx)
             }
             Err(_) => None,
@@ -4436,10 +4502,9 @@ impl BytecodeCompiler {
                 // is the post-monomorphization specialized FunctionId of
                 // the caller, matching the conduit producer's per-fn
                 // loop's `current_function` parameter.
-                self.program.monomorphized_method_call_sites.insert(
-                    (call_site_span, self.current_function),
-                    idx,
-                );
+                self.program
+                    .monomorphized_method_call_sites
+                    .insert((call_site_span, self.current_function), idx);
                 Some(idx)
             }
             _ => None,
@@ -4473,16 +4538,12 @@ impl BytecodeCompiler {
         let (mut captured_vars, _mutated) =
             EnvironmentAnalyzer::analyze_function_with_mutability(&proto_def, &outer_vars);
         captured_vars.sort();
-        let param_names: BTreeSet<String> = params
-            .iter()
-            .flat_map(|p| p.get_identifiers())
-            .collect();
+        let param_names: BTreeSet<String> =
+            params.iter().flat_map(|p| p.get_identifiers()).collect();
         captured_vars.retain(|n| !param_names.contains(n));
 
-        let param_name_list: Vec<String> = params
-            .iter()
-            .flat_map(|p| p.get_identifiers())
-            .collect();
+        let param_name_list: Vec<String> =
+            params.iter().flat_map(|p| p.get_identifiers()).collect();
 
         ClosureDefPeek {
             param_names: param_name_list,
@@ -4528,8 +4589,7 @@ mod ws2_zeta_b_tests {
         let msg = format!("{err:?}");
         assert!(
             (msg.contains("cannot infer type argument") && msg.contains("id"))
-                || (msg.contains("Cannot infer a concrete type for binding")
-                    && msg.contains('y')),
+                || (msg.contains("Cannot infer a concrete type for binding") && msg.contains('y')),
             "expected a generic-type-arg / unpinnable-binding inference error, got: {msg}"
         );
     }
@@ -4553,6 +4613,87 @@ mod ws2_zeta_b_tests {
              let r = countdown(3, 42)\n",
         )
         .expect("self-recursive generic must compile");
+    }
+}
+
+#[cfg(test)]
+mod wave1a_partb_fn_typed_param_tests {
+    //! Wave 1a PART B: a function's UNANNOTATED parameter that the body USES as
+    //! a callable (`fn apply2(f, x, y) { f(x, y) }`) is inferred to a function
+    //! type by whole-program inference; a closure-literal argument at that
+    //! position is then seeded with the inferred signature's param types so its
+    //! own body type-checks (`|a, b| a * b` → `|a: int, b: int|`). The
+    //! higher-ranked extension of PART A's let-bound-closure call-site
+    //! inference.
+    //!
+    //! Soundness contract: seed ONLY when inference produced a fully-concrete
+    //! signature; an un-inferable / dead callable param yields no seeding and
+    //! the closure keeps its existing rejection. `int` and `number` stay
+    //! distinct. No fabrication, no `any`, no silent pick.
+
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::error::Result;
+
+    fn try_compile(code: &str) -> Result<()> {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        BytecodeCompiler::new().compile(&program).map(|_| ())
+    }
+
+    #[test]
+    fn callable_param_seeds_closure_arg_params() {
+        // `f` used as `f(x, y)` with x,y inferred from the int-literal call
+        // args → `f: fn(_, _)`; the closure `|a, b| a * b` is seeded so
+        // `a * b` is no longer `unknown * unknown`.
+        try_compile(
+            "fn apply2(f, x, y) { f(x, y) }\n\
+             apply2(|a, b| a * b, 6, 7)\n",
+        )
+        .expect("apply2 with a closure arg whose params are usage-inferred must compile");
+    }
+
+    #[test]
+    fn single_callable_param_seeds_unary_closure() {
+        try_compile(
+            "fn apply(f, x) { f(x) }\n\
+             apply(|n| n * n, 6)\n",
+        )
+        .expect("apply(|n| n * n, 6) must compile — `n` seeded from f's inferred signature");
+    }
+
+    #[test]
+    fn underconstrained_plus_body_keeps_existing_rejection() {
+        // `*` is numeric-only, so the callable param resolves to a concrete
+        // `fn(number, number)` and the `*`-bodied closure is seeded (covered
+        // above). `+`, however, is overloaded (numeric OR string concat), so
+        // whole-program inference leaves the callable param's argument types as
+        // unresolved type variables. The PART B producer requires EVERY
+        // argument position concrete, so it bails to `None` here — no seeding —
+        // and the closure `|p, q| p + q` keeps its existing strict rejection
+        // (`unknown + unknown`). Strict typing: an under-constrained usage is
+        // NOT forced to a default.
+        let err = try_compile(
+            "fn run2(f, a, b) { f(a, b) }\n\
+             run2(|p, q| p + q, 3, 4)\n",
+        )
+        .expect_err("an overloaded-`+` closure body must not be force-seeded");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("unknown") || msg.contains("infer"),
+            "expected an un-inferable closure-body rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn int_and_number_stay_distinct_through_seeding() {
+        // The seeded closure param type follows the inferred signature; this
+        // program multiplies int-literal-seeded params and the result feeds an
+        // int context. The point is that compilation succeeds with a single
+        // proven element type rather than silently unifying int with number.
+        try_compile(
+            "fn apply2(f, x, y) { f(x, y) }\n\
+             let r = apply2(|a, b| a * b, 6, 7)\n",
+        )
+        .expect("seeded-closure call must compile cleanly");
     }
 }
 

@@ -149,6 +149,7 @@ impl BytecodeCompiler {
             inferred_param_pass_modes: HashMap::new(),
             inferred_param_type_hints: HashMap::new(),
             inferred_param_concrete_types: HashMap::new(),
+            inferred_param_fn_param_types: HashMap::new(),
             inferred_param_object_fields: HashMap::new(),
             inferred_return_object_fields: HashMap::new(),
             function_return_schema_ids: HashMap::new(),

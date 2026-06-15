@@ -1302,6 +1302,29 @@ pub struct BytecodeCompiler {
     /// load reads garbage / SIGSEGVs.
     pub(crate) inferred_param_concrete_types:
         HashMap<String, Vec<Option<shape_value::v2::ConcreteType>>>,
+    /// Wave 1a PART B: inference-resolved per-parameter FUNCTION-TYPE param
+    /// annotations for UNANNOTATED params that the whole-program inference
+    /// engine determined are USED AS CALLABLES in the function body
+    /// (`fn apply2(f, x, y) { f(x, y) }` → `f` inferred `fn(int,int)->_`).
+    ///
+    /// Keyed by function name; each entry is a per-param
+    /// `Option<Vec<TypeAnnotation>>`: the inner `Vec` holds one concrete
+    /// `TypeAnnotation` per callable-param argument, present ONLY when EVERY
+    /// argument position resolved to a concrete (non-variable, non-`unknown`)
+    /// type. A param the engine did not infer as a function, or whose
+    /// signature has any unresolved argument type, stays `None` here — the
+    /// closure argument then keeps its existing compile path (no fabrication,
+    /// no `any`, no Bool-default; an un-inferable usage keeps its rejection).
+    ///
+    /// Consumed at the call site by
+    /// `install_pending_closure_param_types_for_inferred_fn_param`: when the
+    /// matching argument is a closure literal whose user-param count equals the
+    /// inferred signature arity, the per-arg annotations seed
+    /// `pending_closure_param_types`, so `|a, b| a * b` compiles as
+    /// `|a: int, b: int|`. This is the higher-ranked extension of PART A's
+    /// let-bound-closure call-site inference to fn-typed function parameters.
+    pub(crate) inferred_param_fn_param_types:
+        HashMap<String, Vec<Option<Vec<shape_ast::ast::TypeAnnotation>>>>,
     /// WS-9b: inference-resolved per-parameter ANONYMOUS-OBJECT field
     /// definitions for UNANNOTATED params. Keyed by function name; each
     /// entry is a per-param optional `Vec<(field_name, FieldType)>`.
@@ -1653,7 +1676,7 @@ mod compiler_impl_reference_model;
 pub fn infer_reference_model(
     program: &Program,
 ) -> (HashMap<String, Vec<bool>>, HashMap<String, Vec<bool>>) {
-    let (inferred_ref_params, inferred_ref_mutates, _, _, _, _, _) =
+    let (inferred_ref_params, inferred_ref_mutates, _, _, _, _, _, _) =
         BytecodeCompiler::infer_reference_model(program);
     (inferred_ref_params, inferred_ref_mutates)
 }
@@ -1661,7 +1684,7 @@ pub fn infer_reference_model(
 /// Infer effective parameter pass modes (`ByValue` / `ByRefShared` / `ByRefExclusive`)
 /// keyed by function name.
 pub fn infer_param_pass_modes(program: &Program) -> HashMap<String, Vec<ParamPassMode>> {
-    let (inferred_ref_params, inferred_ref_mutates, _, _, _, _, _) =
+    let (inferred_ref_params, inferred_ref_mutates, _, _, _, _, _, _) =
         BytecodeCompiler::infer_reference_model(program);
     BytecodeCompiler::build_param_pass_mode_map(
         program,
