@@ -11,15 +11,13 @@ use shape_vm::mir::types::*;
 
 impl<'a, 'b> MirToIR<'a, 'b> {
     /// Compile a MIR terminator.
-    pub(crate) fn compile_terminator(
-        &mut self,
-        terminator: &Terminator,
-    ) -> Result<(), String> {
+    pub(crate) fn compile_terminator(&mut self, terminator: &Terminator) -> Result<(), String> {
         match &terminator.kind {
             TerminatorKind::Goto(target) => {
-                let target_block = self.block_map.get(target).ok_or_else(|| {
-                    format!("MirToIR: unknown block target {}", target)
-                })?;
+                let target_block = self
+                    .block_map
+                    .get(target)
+                    .ok_or_else(|| format!("MirToIR: unknown block target {}", target))?;
                 self.builder.ins().jump(*target_block, &[]);
                 Ok(())
             }
@@ -31,12 +29,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             } => {
                 let cond_val = self.compile_operand(operand)?;
 
-                let true_block = self.block_map.get(true_bb).ok_or_else(|| {
-                    format!("MirToIR: unknown true block {}", true_bb)
-                })?;
-                let false_block = self.block_map.get(false_bb).ok_or_else(|| {
-                    format!("MirToIR: unknown false block {}", false_bb)
-                })?;
+                let true_block = self
+                    .block_map
+                    .get(true_bb)
+                    .ok_or_else(|| format!("MirToIR: unknown true block {}", true_bb))?;
+                let false_block = self
+                    .block_map
+                    .get(false_bb)
+                    .ok_or_else(|| format!("MirToIR: unknown false block {}", false_bb))?;
 
                 // Convert condition to I8 bool based on its Cranelift type.
                 let cond_type = self.builder.func.dfg.value_type(cond_val);
@@ -56,35 +56,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.builder.ins().icmp(IntCC::NotEqual, cond_val, zero)
                 } else {
                     // v2-boundary: I64 (NaN-boxed) truthiness check uses NaN-box tags
-                    let tag_null = self
-                        .builder
-                        .ins()
-                        .iconst(types::I64, 0i64);
-                    let tag_none = self
-                        .builder
-                        .ins()
-                        .iconst(types::I64, 0i64);
-                    let tag_false = self
-                        .builder
-                        .ins()
-                        .iconst(types::I64, 0i64);
+                    let tag_null = self.builder.ins().iconst(types::I64, 0i64);
+                    let tag_none = self.builder.ins().iconst(types::I64, 0i64);
+                    let tag_false = self.builder.ins().iconst(types::I64, 0i64);
                     let zero = self.builder.ins().iconst(types::I64, 0i64);
-                    let not_null = self
-                        .builder
-                        .ins()
-                        .icmp(IntCC::NotEqual, cond_val, tag_null);
-                    let not_none = self
-                        .builder
-                        .ins()
-                        .icmp(IntCC::NotEqual, cond_val, tag_none);
+                    let not_null = self.builder.ins().icmp(IntCC::NotEqual, cond_val, tag_null);
+                    let not_none = self.builder.ins().icmp(IntCC::NotEqual, cond_val, tag_none);
                     let not_false = self
                         .builder
                         .ins()
                         .icmp(IntCC::NotEqual, cond_val, tag_false);
-                    let not_zero = self
-                        .builder
-                        .ins()
-                        .icmp(IntCC::NotEqual, cond_val, zero);
+                    let not_zero = self.builder.ins().icmp(IntCC::NotEqual, cond_val, zero);
                     let t1 = self.builder.ins().band(not_null, not_none);
                     let t2 = self.builder.ins().band(t1, not_false);
                     self.builder.ins().band(t2, not_zero)
@@ -102,6 +84,64 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 destination,
                 next,
             } => {
+                // ── Wave 1b SEAM B: iterator-receiver method COMPILE-BAIL ──
+                //
+                // (2026-06-15) A method call whose receiver slot is kinded
+                // `Ptr(HeapKind::Iterator)` (the lazy `Arc<IteratorState>`
+                // carrier, ADR-006 §2.7.16 / Q17) has NO sound JIT codegen
+                // path: the authoritative iterator handlers are VM-side and
+                // invoke stashed `map`/`filter` closures via
+                // `vm.call_value_immediate_nb`, and a mid-JIT-frame VM
+                // trampoline delegation hits two carrier hazards — a
+                // JIT-format (NaN-boxed / UInt64) closure arg cannot cross
+                // to the VM's v2-raw `Ptr(Closure)` ABI, and the
+                // iterator-state share crossing the boundary races the JIT
+                // frame's own receiver retain/release (empirically: a
+                // garbage `count` result, `Iterator transform argument must
+                // be a closure, got kind UInt64`, and a SIGSEGV on the
+                // let-bound `iter().count()` drive).
+                //
+                // The honest fix is the W12 COMPILE-FAILURE → interpreter
+                // fall-through (NOT a runtime `pending_call_error`, which
+                // surfaces as a hard error per `executor.rs::
+                // SIGNAL_TRAMPOLINE_ERROR`): return `Err` from this
+                // terminator codegen so `JITExecutor` abandons the JIT
+                // compile of the WHOLE function and runs it under the
+                // bytecode interpreter — whose iterator handlers are
+                // carrier-correct and proven (`iter().collect()` already
+                // runs correctly via the existing print-heap-arm fallback).
+                // Net result: VM == JIT, never garbage, never a segfault. A
+                // native JIT-format iterator method path is W10 jit-playbook
+                // §5 / §2.7.4 territory.
+                if let Operand::Constant(MirConstant::Method(method_name)) = func {
+                    if let Some(receiver_arg) = args.first() {
+                        let receiver_place = match receiver_arg {
+                            Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
+                                Some(p.clone())
+                            }
+                            _ => None,
+                        };
+                        if let Some(p) = receiver_place {
+                            if matches!(
+                                self.operand_slot_kind(&Operand::Copy(p)),
+                                Some(shape_vm::type_tracking::NativeKind::Ptr(
+                                    shape_value::heap_value::HeapKind::Iterator
+                                ))
+                            ) {
+                                return Err(format!(
+                                    "Wave 1b SEAM B SURFACE: iterator-receiver \
+                                     method `.{}()` has no sound JIT codegen \
+                                     (carrier-correct iterator handlers are \
+                                     VM-side) — JIT compilation bails so the \
+                                     W12 fall-through runs the whole function \
+                                     under the bytecode interpreter (VM == JIT)",
+                                    method_name,
+                                ));
+                            }
+                        }
+                    }
+                }
+
                 // ── v2 TYPED-ARRAY METHOD FAST PATH ──────────────────────
                 // Intercept `arr.length()` / `arr.len()` / `arr.push(v)`
                 // when the receiver is a v2 typed-array slot. Bypass
@@ -109,13 +149,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if let Operand::Constant(MirConstant::Method(method_name)) = func {
                     if let Some(receiver_arg) = args.first() {
                         if let Some(receiver_place) = match receiver_arg {
-                            Operand::Copy(p)
-                            | Operand::Move(p)
-                            | Operand::MoveExplicit(p) => Some(p.clone()),
+                            Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
+                                Some(p.clone())
+                            }
                             _ => None,
                         } {
-                            if let Some(elem_kind) =
-                                self.v2_typed_array_elem_kind(&receiver_place)
+                            if let Some(elem_kind) = self.v2_typed_array_elem_kind(&receiver_place)
                             {
                                 if let Some(()) = self.try_emit_v2_array_method(
                                     method_name,
@@ -124,9 +163,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                     destination,
                                     elem_kind,
                                 )? {
-                                    let next_block = self.block_map.get(next).ok_or_else(
-                                        || format!("MirToIR: unknown call continuation block {}", next),
-                                    )?;
+                                    let next_block = self.block_map.get(next).ok_or_else(|| {
+                                        format!("MirToIR: unknown call continuation block {}", next)
+                                    })?;
                                     self.builder.ins().jump(*next_block, &[]);
                                     return Ok(());
                                 }
@@ -142,14 +181,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if let Operand::Constant(MirConstant::Method(method_name)) = func {
                     if let Some(receiver_arg) = args.first() {
                         if let Some(receiver_place) = match receiver_arg {
-                            Operand::Copy(p)
-                            | Operand::Move(p)
-                            | Operand::MoveExplicit(p) => Some(p.clone()),
+                            Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
+                                Some(p.clone())
+                            }
                             _ => None,
                         } {
-                            if let Some(kinds) =
-                                self.v2_typed_str_map_kinds(&receiver_place)
-                            {
+                            if let Some(kinds) = self.v2_typed_str_map_kinds(&receiver_place) {
                                 if let Some(()) = self.try_emit_v2_typed_map_method(
                                     method_name,
                                     &receiver_place,
@@ -157,9 +194,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                     destination,
                                     kinds,
                                 )? {
-                                    let next_block = self.block_map.get(next).ok_or_else(
-                                        || format!("MirToIR: unknown call continuation block {}", next),
-                                    )?;
+                                    let next_block = self.block_map.get(next).ok_or_else(|| {
+                                        format!("MirToIR: unknown call continuation block {}", next)
+                                    })?;
                                     self.builder.ins().jump(*next_block, &[]);
                                     return Ok(());
                                 }
@@ -204,13 +241,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // is structural at the Call terminator.
                 if let Operand::Constant(MirConstant::Method(_)) = func {
                     let key = (terminator.span, self.caller_function_id);
-                    if let Some(&specialized_idx) =
-                        self.monomorphized_method_call_sites.get(&key)
-                    {
-                        let func_ref_opt = self
-                            .user_func_refs
-                            .get(&(specialized_idx as u16))
-                            .copied();
+                    if let Some(&specialized_idx) = self.monomorphized_method_call_sites.get(&key) {
+                        let func_ref_opt =
+                            self.user_func_refs.get(&(specialized_idx as u16)).copied();
                         if let Some(func_ref) = func_ref_opt {
                             // Mirror of the direct-Function-call codegen at
                             // terminators.rs:807-867 below. ABI =
@@ -225,11 +258,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                 let boxed = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder.ins().bitcast(
-                                        types::I64,
-                                        MemFlags::new(),
-                                        val,
-                                    )
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else if val_ty == types::I32 {
                                     self.builder.ins().sextend(types::I64, val)
                                 } else if val_ty == types::I8 {
@@ -242,19 +271,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                 arg_vals.push(boxed);
                             }
 
-                            let inst =
-                                self.builder.ins().call(func_ref, &arg_vals);
+                            let inst = self.builder.ins().call(func_ref, &arg_vals);
                             let signal = self.builder.inst_results(inst)[0];
 
                             // Deopt: signal < 0 propagates by immediate
                             // return of the negative signal.
-                            let zero =
-                                self.builder.ins().iconst(types::I32, 0);
-                            let is_error = self.builder.ins().icmp(
-                                IntCC::SignedLessThan,
-                                signal,
-                                zero,
-                            );
+                            let zero = self.builder.ins().iconst(types::I32, 0);
+                            let is_error =
+                                self.builder.ins().icmp(IntCC::SignedLessThan, signal, zero);
                             let deopt_block = self.builder.create_block();
                             let continue_block = self.builder.create_block();
                             self.builder.ins().brif(
@@ -271,8 +295,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                             self.builder.switch_to_block(continue_block);
                             self.builder.seal_block(continue_block);
-                            let stack_offset =
-                                crate::context::STACK_OFFSET as i32;
+                            let stack_offset = crate::context::STACK_OFFSET as i32;
                             let result = self.builder.ins().load(
                                 types::I64,
                                 MemFlags::new(),
@@ -284,14 +307,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                             self.write_place(destination, result)?;
                             self.reload_referenced_locals();
 
-                            let next_block =
-                                self.block_map.get(next).ok_or_else(|| {
-                                    format!(
-                                        "MirToIR: unknown call continuation \
+                            let next_block = self.block_map.get(next).ok_or_else(|| {
+                                format!(
+                                    "MirToIR: unknown call continuation \
                                          block {}",
-                                        next
-                                    )
-                                })?;
+                                    next
+                                )
+                            })?;
                             self.builder.ins().jump(*next_block, &[]);
                             return Ok(());
                         }
@@ -364,58 +386,75 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         };
                         let slot_idx = self.builder.ins().iadd_imm(old_sp, i as i64);
                         let byte_off = self.builder.ins().ishl_imm(slot_idx, 3);
-                        let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base_offset as i64);
+                        let abs_off = self
+                            .builder
+                            .ins()
+                            .iadd_imm(byte_off, stack_base_offset as i64);
                         let store_addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
-                        self.builder.ins().store(MemFlags::new(), boxed, store_addr, 0);
+                        self.builder
+                            .ins()
+                            .store(MemFlags::new(), boxed, store_addr, 0);
                         // §2.7.7 / Q9 lockstep parallel-kind write.
                         self.emit_kind_track_write(slot_idx, arg_kind);
                     }
 
                     // v2-boundary: method name pushed as NaN-boxed string to ctx.stack
                     let method_str_bits = crate::ffi::value_ffi::box_string(method_name.clone());
-                    let method_val = self.builder.ins().iconst(types::I64, method_str_bits as i64);
+                    let method_val = self
+                        .builder
+                        .ins()
+                        .iconst(types::I64, method_str_bits as i64);
                     let method_slot_idx = self.builder.ins().iadd_imm(old_sp, args.len() as i64);
                     let method_byte_off = self.builder.ins().ishl_imm(method_slot_idx, 3);
-                    let method_abs_off = self.builder.ins().iadd_imm(method_byte_off, stack_base_offset as i64);
+                    let method_abs_off = self
+                        .builder
+                        .ins()
+                        .iadd_imm(method_byte_off, stack_base_offset as i64);
                     let method_addr = self.builder.ins().iadd(self.ctx_ptr, method_abs_off);
-                    self.builder.ins().store(MemFlags::new(), method_val, method_addr, 0);
+                    self.builder
+                        .ins()
+                        .store(MemFlags::new(), method_val, method_addr, 0);
                     // Method name is a heap String — kind = `NativeKind::String`.
-                    self.emit_kind_track_write(
-                        method_slot_idx,
-                        shape_value::NativeKind::String,
-                    );
+                    self.emit_kind_track_write(method_slot_idx, shape_value::NativeKind::String);
 
                     // v2-boundary: arg_count pushed as raw i64 to ctx.stack.
                     // jit_call_method decodes this via direct `as usize` — no NaN-box.
                     let actual_arg_count = if args.is_empty() { 0 } else { args.len() - 1 };
                     let argc_bits = actual_arg_count as i64;
                     let argc_val = self.builder.ins().iconst(types::I64, argc_bits as i64);
-                    let argc_slot_idx = self.builder.ins().iadd_imm(old_sp, (args.len() + 1) as i64);
+                    let argc_slot_idx =
+                        self.builder.ins().iadd_imm(old_sp, (args.len() + 1) as i64);
                     let argc_byte_off = self.builder.ins().ishl_imm(argc_slot_idx, 3);
-                    let argc_abs_off = self.builder.ins().iadd_imm(argc_byte_off, stack_base_offset as i64);
+                    let argc_abs_off = self
+                        .builder
+                        .ins()
+                        .iadd_imm(argc_byte_off, stack_base_offset as i64);
                     let argc_addr = self.builder.ins().iadd(self.ctx_ptr, argc_abs_off);
-                    self.builder.ins().store(MemFlags::new(), argc_val, argc_addr, 0);
+                    self.builder
+                        .ins()
+                        .store(MemFlags::new(), argc_val, argc_addr, 0);
                     // arg_count sentinel slot — UInt64 carrier kind per §2.7.5.
-                    self.emit_kind_track_write(
-                        argc_slot_idx,
-                        shape_value::NativeKind::UInt64,
-                    );
+                    self.emit_kind_track_write(argc_slot_idx, shape_value::NativeKind::UInt64);
 
                     // Update stack_ptr: receiver + args + method_name + arg_count
                     let total_items = args.len() + 2; // args (including receiver) + method_name + arg_count
                     let new_sp = self.builder.ins().iadd_imm(old_sp, total_items as i64);
-                    self.builder.ins().store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
+                    self.builder
+                        .ins()
+                        .store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
 
                     // Call jit_call_method(ctx, total_count)
                     let count_val = self.builder.ins().iconst(types::I64, total_items as i64);
-                    let inst = self.builder.ins().call(
-                        self.ffi.call_method,
-                        &[self.ctx_ptr, count_val],
-                    );
+                    let inst = self
+                        .builder
+                        .ins()
+                        .call(self.ffi.call_method, &[self.ctx_ptr, count_val]);
                     let result = self.builder.inst_results(inst)[0];
 
                     // Restore stack_ptr to old value
-                    self.builder.ins().store(MemFlags::new(), old_sp, self.ctx_ptr, sp_offset);
+                    self.builder
+                        .ins()
+                        .store(MemFlags::new(), old_sp, self.ctx_ptr, sp_offset);
 
                     // ── r5c-2-bz-b-jit-err-surface: VM-trampoline error deopt ─
                     // `jit_call_method` returns a `u64` value-shaped result; it
@@ -434,8 +473,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // `JIT_RUNTIME_ERROR` thread-local. This is the W12
                     // architectural fall-through — a genuine JIT failure
                     // abandons the JIT frame; the VM produces the error.
-                    let err_flag_offset =
-                        crate::context::PENDING_CALL_ERROR_OFFSET as i32;
+                    let err_flag_offset = crate::context::PENDING_CALL_ERROR_OFFSET as i32;
                     let err_flag = self.builder.ins().load(
                         types::I8,
                         MemFlags::new(),
@@ -443,20 +481,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         err_flag_offset,
                     );
                     let zero_i8 = self.builder.ins().iconst(types::I8, 0);
-                    let has_err = self.builder.ins().icmp(
-                        IntCC::NotEqual,
-                        err_flag,
-                        zero_i8,
-                    );
+                    let has_err = self.builder.ins().icmp(IntCC::NotEqual, err_flag, zero_i8);
                     let err_deopt_block = self.builder.create_block();
                     let err_continue_block = self.builder.create_block();
-                    self.builder.ins().brif(
-                        has_err,
-                        err_deopt_block,
-                        &[],
-                        err_continue_block,
-                        &[],
-                    );
+                    self.builder
+                        .ins()
+                        .brif(has_err, err_deopt_block, &[], err_continue_block, &[]);
                     self.builder.switch_to_block(err_deopt_block);
                     self.builder.seal_block(err_deopt_block);
                     // Cranelift I32 iconst convention: pass the unsigned
@@ -539,9 +569,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                 let val_ty = self.builder.func.dfg.value_type(val);
                                 let widened = if val_ty == types::I64 {
                                     val
-                                } else if val_ty == types::I32
-                                    || val_ty == types::I8
-                                {
+                                } else if val_ty == types::I32 || val_ty == types::I8 {
                                     self.builder.ins().uextend(types::I64, val)
                                 } else {
                                     val
@@ -553,9 +581,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                 let coerced = if val_ty == types::F64 {
                                     val
                                 } else if val_ty == types::I64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::F64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::F64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
@@ -565,9 +591,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                 let val_ty = self.builder.func.dfg.value_type(val);
                                 let coerced = if val_ty == types::I8 {
                                     val
-                                } else if val_ty == types::I64
-                                    || val_ty == types::I32
-                                {
+                                } else if val_ty == types::I64 || val_ty == types::I32 {
                                     self.builder.ins().ireduce(types::I8, val)
                                 } else {
                                     val
@@ -602,32 +626,26 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                 let widened = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_option,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_option, &[self.ctx_ptr, widened]);
                             }
                             Some(NativeKind::Ptr(HeapKind::Result)) => {
                                 let val_ty = self.builder.func.dfg.value_type(val);
                                 let widened = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_result,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_result, &[self.ctx_ptr, widened]);
                             }
                             // ── §2.7.5 String carrier arm ───────────────
                             // W12-jit-string-carrier-unification (Phase 3
@@ -654,16 +672,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                 let widened = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_str,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_str, &[self.ctx_ptr, widened]);
                             }
                             // ── TypedObject SURFACE-and-stop (residual) ──
                             // The JIT-internal TypedObject path
@@ -749,8 +764,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                             // `jit_print_i64` / `jit_print_f64` /
                             // `jit_print_bool` (scalar-by-value FFI shape,
                             // no ctx_ptr threading needed).
-                            Some(NativeKind::Char)
-                            | Some(NativeKind::Ptr(HeapKind::Char)) => {
+                            Some(NativeKind::Char) | Some(NativeKind::Ptr(HeapKind::Char)) => {
                                 let val_ty = self.builder.func.dfg.value_type(val);
                                 // Narrow to I32: ValueSlot::from_char stores
                                 // `c as u64` (zero-extended); the low 32 bits
@@ -759,9 +773,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                 // directly.
                                 let narrowed = if val_ty == types::I32 {
                                     val
-                                } else if val_ty == types::I64
-                                    || val_ty == types::I8
-                                {
+                                } else if val_ty == types::I64 || val_ty == types::I8 {
                                     // I64: truncate to low 32 bits.
                                     // I8: zero-extend then narrow (covers
                                     // any upstream code that materializes a
@@ -774,10 +786,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_char,
-                                    &[narrowed],
-                                );
+                                self.builder.ins().call(self.ffi.print_char, &[narrowed]);
                             }
                             // ── Phase 3 cluster-2 Round 3 cw-D-fam12
                             //    Concurrency-primitive family (Family 2):
@@ -800,64 +809,52 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                 let widened = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_mutex,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_mutex, &[self.ctx_ptr, widened]);
                             }
                             Some(NativeKind::Ptr(HeapKind::Atomic)) => {
                                 let val_ty = self.builder.func.dfg.value_type(val);
                                 let widened = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_atomic,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_atomic, &[self.ctx_ptr, widened]);
                             }
                             Some(NativeKind::Ptr(HeapKind::Lazy)) => {
                                 let val_ty = self.builder.func.dfg.value_type(val);
                                 let widened = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_lazy,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_lazy, &[self.ctx_ptr, widened]);
                             }
                             Some(NativeKind::Ptr(HeapKind::Channel)) => {
                                 let val_ty = self.builder.func.dfg.value_type(val);
                                 let widened = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_channel,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_channel, &[self.ctx_ptr, widened]);
                             }
                             // ── Phase 3 cluster-2 Round 4 cw-D-fam3
                             //    Collection family (Family 3) arms ────
@@ -897,96 +894,78 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                 let widened = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_hashmap,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_hashmap, &[self.ctx_ptr, widened]);
                             }
                             Some(NativeKind::Ptr(HeapKind::HashSet)) => {
                                 let val_ty = self.builder.func.dfg.value_type(val);
                                 let widened = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_hashset,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_hashset, &[self.ctx_ptr, widened]);
                             }
                             Some(NativeKind::Ptr(HeapKind::Deque)) => {
                                 let val_ty = self.builder.func.dfg.value_type(val);
                                 let widened = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_deque,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_deque, &[self.ctx_ptr, widened]);
                             }
                             Some(NativeKind::Ptr(HeapKind::PriorityQueue)) => {
                                 let val_ty = self.builder.func.dfg.value_type(val);
                                 let widened = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_priority_queue,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_priority_queue, &[self.ctx_ptr, widened]);
                             }
                             Some(NativeKind::Ptr(HeapKind::Range)) => {
                                 let val_ty = self.builder.func.dfg.value_type(val);
                                 let widened = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_range,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_range, &[self.ctx_ptr, widened]);
                             }
                             Some(NativeKind::Ptr(HeapKind::Iterator)) => {
                                 let val_ty = self.builder.func.dfg.value_type(val);
                                 let widened = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_iterator,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_iterator, &[self.ctx_ptr, widened]);
                             }
                             // ── W11-fup-C (Phase 3d, 2026-05-18): v2-raw
                             //    TypedArray<T> arm ────────────────────────
@@ -1020,16 +999,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                 let widened = if val_ty == types::I64 {
                                     val
                                 } else if val_ty == types::F64 {
-                                    self.builder
-                                        .ins()
-                                        .bitcast(types::I64, MemFlags::new(), val)
+                                    self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_typed_array,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_typed_array, &[self.ctx_ptr, widened]);
                             }
                             // ── NotImplemented(SURFACE): unproven kind /
                             //    unwired heap arm ─────────────────────
@@ -1169,9 +1145,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // `write_place` consumer's `ensure_kind` rebuilds the
                 // destination slot's typed carrier.
                 if let Operand::Constant(MirConstant::Function(name)) = func {
-                    if self.function_indices.get(name.as_str()).is_none()
-                        && args.len() == 1
-                    {
+                    if self.function_indices.get(name.as_str()).is_none() && args.len() == 1 {
                         use shape_vm::type_tracking::NativeKind;
                         let math_fn: Option<FuncRef> = match name.as_str() {
                             "sqrt" => Some(self.ffi.sqrt_f64),
@@ -1199,8 +1173,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                             let arg_val = self.compile_operand(&args[0])?;
                             let arg_ty = self.builder.func.dfg.value_type(arg_val);
                             let f64_arg = match arg_kind {
-                                Some(NativeKind::Float64)
-                                | Some(NativeKind::NullableFloat64) => {
+                                Some(NativeKind::Float64) | Some(NativeKind::NullableFloat64) => {
                                     if arg_ty == types::F64 {
                                         arg_val
                                     } else if arg_ty == types::I64 {
@@ -1208,9 +1181,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                         // (§2.7.5 widened in
                                         // `compile_operand`'s carrier
                                         // path).
-                                        self.builder
-                                            .ins()
-                                            .bitcast(types::F64, MemFlags::new(), arg_val)
+                                        self.builder.ins().bitcast(
+                                            types::F64,
+                                            MemFlags::new(),
+                                            arg_val,
+                                        )
                                     } else {
                                         arg_val
                                     }
@@ -1230,8 +1205,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                     };
                                     self.builder.ins().fcvt_from_sint(types::F64, i64_val)
                                 }
-                                Some(NativeKind::Int32)
-                                | Some(NativeKind::UInt32) => {
+                                Some(NativeKind::Int32) | Some(NativeKind::UInt32) => {
                                     let i32_val = if arg_ty == types::I32 {
                                         arg_val
                                     } else if arg_ty == types::I64 {
@@ -1267,10 +1241,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                             self.reload_referenced_locals();
 
                             let next_block = self.block_map.get(next).ok_or_else(|| {
-                                format!(
-                                    "MirToIR: unknown call continuation block {}",
-                                    next
-                                )
+                                format!("MirToIR: unknown call continuation block {}", next)
                             })?;
                             self.builder.ins().jump(*next_block, &[]);
                             return Ok(());
@@ -1295,9 +1266,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // fabricating a kind. Unit variants (empty args) still
                 // route through the normal call dispatch below.
                 if let Operand::Constant(MirConstant::Function(name)) = func {
-                    if name.contains("::")
-                        && self.function_indices.get(name.as_str()).is_none()
-                    {
+                    if name.contains("::") && self.function_indices.get(name.as_str()).is_none() {
                         return Err(format!(
                             "Route A surface-and-stop: SURFACE — enum \
                              constructor `{}` depends on a heterogeneous- \
@@ -1353,32 +1322,21 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 };
 
                 if let Some((info, stack_slot)) = stack_closure_info {
-                    if let Some(func_ref) =
-                        self.user_func_refs.get(&info.function_id).copied()
-                    {
+                    if let Some(func_ref) = self.user_func_refs.get(&info.function_id).copied() {
                         // Prepend captures as args. Each capture is loaded
                         // from the stack slot at its recorded offset with
                         // its recorded native type, then widened to I64 for
                         // the uniform callee ABI.
-                        let mut arg_vals = Vec::with_capacity(
-                            info.capture_offsets.len() + args.len() + 1,
-                        );
+                        let mut arg_vals =
+                            Vec::with_capacity(info.capture_offsets.len() + args.len() + 1);
                         arg_vals.push(self.ctx_ptr);
-                        for (off, ty) in info
-                            .capture_offsets
-                            .iter()
-                            .zip(info.capture_types.iter())
+                        for (off, ty) in info.capture_offsets.iter().zip(info.capture_types.iter())
                         {
-                            let raw = self
-                                .builder
-                                .ins()
-                                .stack_load(*ty, stack_slot, *off);
+                            let raw = self.builder.ins().stack_load(*ty, stack_slot, *off);
                             let widened = if *ty == types::I64 {
                                 raw
                             } else if *ty == types::F64 {
-                                self.builder
-                                    .ins()
-                                    .bitcast(types::I64, MemFlags::new(), raw)
+                                self.builder.ins().bitcast(types::I64, MemFlags::new(), raw)
                             } else if *ty == types::I32 || *ty == types::I16 {
                                 self.builder.ins().sextend(types::I64, raw)
                             } else if *ty == types::I8 {
@@ -1395,9 +1353,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                             let boxed = if val_ty == types::I64 {
                                 val
                             } else if val_ty == types::F64 {
-                                self.builder
-                                    .ins()
-                                    .bitcast(types::I64, MemFlags::new(), val)
+                                self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
                             } else if val_ty == types::I32 || val_ty == types::I16 {
                                 self.builder.ins().sextend(types::I64, val)
                             } else if val_ty == types::I8 {
@@ -1413,20 +1369,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                         // Deopt: if signal < 0, propagate the error.
                         let zero = self.builder.ins().iconst(types::I32, 0);
-                        let is_error = self.builder.ins().icmp(
-                            IntCC::SignedLessThan,
-                            signal,
-                            zero,
-                        );
+                        let is_error = self.builder.ins().icmp(IntCC::SignedLessThan, signal, zero);
                         let deopt_block = self.builder.create_block();
                         let continue_block = self.builder.create_block();
-                        self.builder.ins().brif(
-                            is_error,
-                            deopt_block,
-                            &[],
-                            continue_block,
-                            &[],
-                        );
+                        self.builder
+                            .ins()
+                            .brif(is_error, deopt_block, &[], continue_block, &[]);
                         self.builder.switch_to_block(deopt_block);
                         self.builder.seal_block(deopt_block);
                         self.builder.ins().return_(&[signal]);
@@ -1446,10 +1394,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         self.reload_referenced_locals();
 
                         let next_block = self.block_map.get(next).ok_or_else(|| {
-                            format!(
-                                "MirToIR: unknown call continuation block {}",
-                                next
-                            )
+                            format!("MirToIR: unknown call continuation block {}", next)
                         })?;
                         self.builder.ins().jump(*next_block, &[]);
                         return Ok(());
@@ -1494,10 +1439,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // Deopt: if signal < 0, the callee encountered an error.
                     // Propagate by returning the negative signal immediately.
                     let zero = self.builder.ins().iconst(types::I32, 0);
-                    let is_error =
-                        self.builder
-                            .ins()
-                            .icmp(IntCC::SignedLessThan, signal, zero);
+                    let is_error = self.builder.ins().icmp(IntCC::SignedLessThan, signal, zero);
                     let deopt_block = self.builder.create_block();
                     let continue_block = self.builder.create_block();
                     self.builder
@@ -1513,12 +1455,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.builder.switch_to_block(continue_block);
                     self.builder.seal_block(continue_block);
                     let stack_offset = crate::context::STACK_OFFSET as i32;
-                    self.builder.ins().load(
-                        types::I64,
-                        MemFlags::new(),
-                        self.ctx_ptr,
-                        stack_offset,
-                    )
+                    self.builder
+                        .ins()
+                        .load(types::I64, MemFlags::new(), self.ctx_ptr, stack_offset)
                 } else {
                     // ── INDIRECT CALL (closures/first-class functions) ────
                     //
@@ -1566,7 +1505,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let callee_boxed = if callee_ty == types::I64 {
                         callee_val
                     } else if callee_ty == types::F64 {
-                        self.builder.ins().bitcast(types::I64, MemFlags::new(), callee_val)
+                        self.builder
+                            .ins()
+                            .bitcast(types::I64, MemFlags::new(), callee_val)
                     } else if callee_ty == types::I32 {
                         self.builder.ins().sextend(types::I64, callee_val)
                     } else if callee_ty == types::I8 {
@@ -1578,9 +1519,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     };
                     let callee_slot_idx = old_sp;
                     let callee_byte_off = self.builder.ins().ishl_imm(callee_slot_idx, 3);
-                    let callee_abs_off = self.builder.ins().iadd_imm(callee_byte_off, stack_base_offset as i64);
+                    let callee_abs_off = self
+                        .builder
+                        .ins()
+                        .iadd_imm(callee_byte_off, stack_base_offset as i64);
                     let callee_addr = self.builder.ins().iadd(self.ctx_ptr, callee_abs_off);
-                    self.builder.ins().store(MemFlags::new(), callee_boxed, callee_addr, 0);
+                    self.builder
+                        .ins()
+                        .store(MemFlags::new(), callee_boxed, callee_addr, 0);
                     // Lockstep parallel-kind track write (§2.7.7 / Q9).
                     self.emit_kind_track_write(callee_slot_idx, callee_kind);
 
@@ -1612,9 +1558,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         };
                         let slot_idx = self.builder.ins().iadd_imm(old_sp, (i + 1) as i64);
                         let byte_off = self.builder.ins().ishl_imm(slot_idx, 3);
-                        let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base_offset as i64);
+                        let abs_off = self
+                            .builder
+                            .ins()
+                            .iadd_imm(byte_off, stack_base_offset as i64);
                         let store_addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
-                        self.builder.ins().store(MemFlags::new(), boxed, store_addr, 0);
+                        self.builder
+                            .ins()
+                            .store(MemFlags::new(), boxed, store_addr, 0);
                         // Lockstep parallel-kind track write (§2.7.7 / Q9).
                         self.emit_kind_track_write(slot_idx, arg_kind);
                     }
@@ -1629,30 +1580,34 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // (cf. `dispatch_call_via_trampoline_vm` callee/arg
                     // kind companion). NOT a Bool-default fallback.
                     let total_items = 1 + args.len() + 1; // callee + args + arg_count
-                    let argc_slot_idx = self.builder.ins().iadd_imm(old_sp, (1 + args.len()) as i64);
+                    let argc_slot_idx =
+                        self.builder.ins().iadd_imm(old_sp, (1 + args.len()) as i64);
                     let argc_byte_off = self.builder.ins().ishl_imm(argc_slot_idx, 3);
-                    let argc_abs_off = self.builder.ins().iadd_imm(argc_byte_off, stack_base_offset as i64);
+                    let argc_abs_off = self
+                        .builder
+                        .ins()
+                        .iadd_imm(argc_byte_off, stack_base_offset as i64);
                     let argc_addr = self.builder.ins().iadd(self.ctx_ptr, argc_abs_off);
-                    let argc_val = self.builder.ins().iconst(types::I64,
-                        args.len() as i64);
-                    self.builder.ins().store(MemFlags::new(), argc_val, argc_addr, 0);
+                    let argc_val = self.builder.ins().iconst(types::I64, args.len() as i64);
+                    self.builder
+                        .ins()
+                        .store(MemFlags::new(), argc_val, argc_addr, 0);
                     // Lockstep parallel-kind track write (§2.7.7 / Q9).
-                    self.emit_kind_track_write(
-                        argc_slot_idx,
-                        shape_value::NativeKind::UInt64,
-                    );
+                    self.emit_kind_track_write(argc_slot_idx, shape_value::NativeKind::UInt64);
 
                     // Update stack_ptr
                     let new_sp = self.builder.ins().iadd_imm(old_sp, total_items as i64);
-                    self.builder.ins().store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
+                    self.builder
+                        .ins()
+                        .store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
 
                     // jit_call_value reads callee + args + arg_count from stack
                     // AND the parallel-kind track for the §2.7.11/Q12
                     // callee-classification dispatch.
-                    let inst = self.builder.ins().call(
-                        self.ffi.call_value,
-                        &[self.ctx_ptr],
-                    );
+                    let inst = self
+                        .builder
+                        .ins()
+                        .call(self.ffi.call_value, &[self.ctx_ptr]);
                     self.builder.inst_results(inst)[0]
                 };
 
@@ -1663,8 +1618,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // when `pending_call_error` is set — same shape as the
                 // `MirConstant::Method` path above.
                 {
-                    let err_flag_offset =
-                        crate::context::PENDING_CALL_ERROR_OFFSET as i32;
+                    let err_flag_offset = crate::context::PENDING_CALL_ERROR_OFFSET as i32;
                     let err_flag = self.builder.ins().load(
                         types::I8,
                         MemFlags::new(),
@@ -1672,20 +1626,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         err_flag_offset,
                     );
                     let zero_i8 = self.builder.ins().iconst(types::I8, 0);
-                    let has_err = self.builder.ins().icmp(
-                        IntCC::NotEqual,
-                        err_flag,
-                        zero_i8,
-                    );
+                    let has_err = self.builder.ins().icmp(IntCC::NotEqual, err_flag, zero_i8);
                     let err_deopt_block = self.builder.create_block();
                     let err_continue_block = self.builder.create_block();
-                    self.builder.ins().brif(
-                        has_err,
-                        err_deopt_block,
-                        &[],
-                        err_continue_block,
-                        &[],
-                    );
+                    self.builder
+                        .ins()
+                        .brif(has_err, err_deopt_block, &[], err_continue_block, &[]);
                     self.builder.switch_to_block(err_deopt_block);
                     self.builder.seal_block(err_deopt_block);
                     let trampoline_err_signal = self.builder.ins().iconst(
@@ -1705,9 +1651,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 self.reload_referenced_locals();
 
                 // 5. Jump to continuation block
-                let next_block = self.block_map.get(next).ok_or_else(|| {
-                    format!("MirToIR: unknown call continuation block {}", next)
-                })?;
+                let next_block = self
+                    .block_map
+                    .get(next)
+                    .ok_or_else(|| format!("MirToIR: unknown call continuation block {}", next))?;
                 self.builder.ins().jump(*next_block, &[]);
                 Ok(())
             }
@@ -1723,10 +1670,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // arm left the tag at its zero default (NANBOXED) and the
                 // executor.rs:267 SURFACE fired.
                 if !self.locals.contains_key(&return_slot) {
-                    let tag = self.builder.ins().iconst(
-                        types::I8,
-                        crate::context::RETURN_TAG_UNIT as i64,
-                    );
+                    let tag = self
+                        .builder
+                        .ins()
+                        .iconst(types::I8, crate::context::RETURN_TAG_UNIT as i64);
                     let tag_offset = crate::context::RETURN_TYPE_TAG_OFFSET as i32;
                     self.builder
                         .ins()
@@ -1747,18 +1694,41 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                     if val_type == types::F64 {
                         // Native f64: store raw bits, set tag=1
-                        let as_bits = self.builder.ins().bitcast(types::I64, MemFlags::new(), ret_val);
-                        self.builder.ins().store(MemFlags::new(), as_bits, self.ctx_ptr, stack_offset);
-                        let tag = self.builder.ins().iconst(types::I8, crate::context::RETURN_TAG_F64 as i64);
+                        let as_bits =
+                            self.builder
+                                .ins()
+                                .bitcast(types::I64, MemFlags::new(), ret_val);
+                        self.builder.ins().store(
+                            MemFlags::new(),
+                            as_bits,
+                            self.ctx_ptr,
+                            stack_offset,
+                        );
+                        let tag = self
+                            .builder
+                            .ins()
+                            .iconst(types::I8, crate::context::RETURN_TAG_F64 as i64);
                         let tag_offset = crate::context::RETURN_TYPE_TAG_OFFSET as i32;
-                        self.builder.ins().store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
+                        self.builder
+                            .ins()
+                            .store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
                     } else if val_type == types::I8 {
                         // Native bool: zero-extend to I64, set tag=4
                         let extended = self.builder.ins().uextend(types::I64, ret_val);
-                        self.builder.ins().store(MemFlags::new(), extended, self.ctx_ptr, stack_offset);
-                        let tag = self.builder.ins().iconst(types::I8, crate::context::RETURN_TAG_BOOL as i64);
+                        self.builder.ins().store(
+                            MemFlags::new(),
+                            extended,
+                            self.ctx_ptr,
+                            stack_offset,
+                        );
+                        let tag = self
+                            .builder
+                            .ins()
+                            .iconst(types::I8, crate::context::RETURN_TAG_BOOL as i64);
                         let tag_offset = crate::context::RETURN_TYPE_TAG_OFFSET as i32;
-                        self.builder.ins().store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
+                        self.builder
+                            .ins()
+                            .store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
                     } else if val_type == types::I32 {
                         // Native i32 (NativeKind::Int32 / UInt32): sign-extend
                         // to I64 and stamp RETURN_TAG_I32 so the host marshals
@@ -1768,10 +1738,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         // kind-source gap the executor.rs:267 SURFACE
                         // documented (W11-jit-new-array unblocks).
                         let extended = self.builder.ins().sextend(types::I64, ret_val);
-                        self.builder.ins().store(MemFlags::new(), extended, self.ctx_ptr, stack_offset);
-                        let tag = self.builder.ins().iconst(types::I8, crate::context::RETURN_TAG_I32 as i64);
+                        self.builder.ins().store(
+                            MemFlags::new(),
+                            extended,
+                            self.ctx_ptr,
+                            stack_offset,
+                        );
+                        let tag = self
+                            .builder
+                            .ins()
+                            .iconst(types::I8, crate::context::RETURN_TAG_I32 as i64);
                         let tag_offset = crate::context::RETURN_TYPE_TAG_OFFSET as i32;
-                        self.builder.ins().store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
+                        self.builder
+                            .ins()
+                            .store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
                     } else {
                         // I64. Under strict typing the return-slot kind is
                         // statically known: an `Int64` slot is a raw native
@@ -1794,10 +1774,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         // fall through to RETURN_TAG_NANBOXED — the §2.7.5
                         // kind-source gap surfaced at `executor.rs:267`.
                         use shape_vm::type_tracking::NativeKind;
-                        let return_kind = super::types::slot_kind_for_local(
-                            &self.slot_kinds,
-                            return_slot.0,
-                        );
+                        let return_kind =
+                            super::types::slot_kind_for_local(&self.slot_kinds, return_slot.0);
                         let raw_int = matches!(
                             return_kind,
                             Some(
@@ -1811,7 +1789,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                     | NativeKind::NullableUIntSize
                             )
                         );
-                        self.builder.ins().store(MemFlags::new(), ret_val, self.ctx_ptr, stack_offset);
+                        self.builder.ins().store(
+                            MemFlags::new(),
+                            ret_val,
+                            self.ctx_ptr,
+                            stack_offset,
+                        );
                         let tag_value = if raw_int {
                             crate::context::RETURN_TAG_I64
                         } else if return_kind.is_none() {
@@ -1821,7 +1804,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         };
                         let tag = self.builder.ins().iconst(types::I8, tag_value as i64);
                         let tag_offset = crate::context::RETURN_TYPE_TAG_OFFSET as i32;
-                        self.builder.ins().store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
+                        self.builder
+                            .ins()
+                            .store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
                     }
 
                     // Set stack_ptr to 1
@@ -1874,22 +1859,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let stack_base_offset = crate::context::STACK_OFFSET as i32;
         let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
 
-        let old_sp = self.builder.ins().load(
-            types::I64,
-            MemFlags::new(),
-            self.ctx_ptr,
-            sp_offset,
-        );
+        let old_sp = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::new(), self.ctx_ptr, sp_offset);
 
         // ADR-006 §2.7.7 / Q9 lockstep: every data push stamps the parallel-
         // kind track in the same slot. Mirrors `compile_terminator`'s
         // `MirConstant::Method` arm: args[0] = receiver, args[1..] =
         // explicit method arguments. Each operand is widened to 8-byte I64
         // per the JIT-stack ABI; no NaN-box tagging.
-        let combined: Vec<&shape_vm::mir::types::Operand> = receiver_operands
-            .iter()
-            .chain(extra_args.iter())
-            .collect();
+        let combined: Vec<&shape_vm::mir::types::Operand> =
+            receiver_operands.iter().chain(extra_args.iter()).collect();
         for (i, arg) in combined.iter().enumerate() {
             let arg_kind = self.operand_slot_kind_or_carrier(arg);
             let val = self.compile_operand(arg)?;
@@ -1897,9 +1878,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             let boxed = if val_ty == types::I64 {
                 val
             } else if val_ty == types::F64 {
-                self.builder
-                    .ins()
-                    .bitcast(types::I64, MemFlags::new(), val)
+                self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
             } else if val_ty == types::I32 {
                 self.builder.ins().sextend(types::I64, val)
             } else if val_ty == types::I8 {
@@ -1923,16 +1902,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
 
         // Push method name (heap String) — kind = NativeKind::String.
-        let method_str_bits =
-            crate::ffi::value_ffi::box_string(method_name.to_string());
+        let method_str_bits = crate::ffi::value_ffi::box_string(method_name.to_string());
         let method_val = self
             .builder
             .ins()
             .iconst(types::I64, method_str_bits as i64);
-        let method_slot_idx = self
-            .builder
-            .ins()
-            .iadd_imm(old_sp, combined.len() as i64);
+        let method_slot_idx = self.builder.ins().iadd_imm(old_sp, combined.len() as i64);
         let method_byte_off = self.builder.ins().ishl_imm(method_slot_idx, 3);
         let method_abs_off = self
             .builder
@@ -1942,10 +1917,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder
             .ins()
             .store(MemFlags::new(), method_val, method_addr, 0);
-        self.emit_kind_track_write(
-            method_slot_idx,
-            shape_value::NativeKind::String,
-        );
+        self.emit_kind_track_write(method_slot_idx, shape_value::NativeKind::String);
 
         // Push arg_count = explicit args (excludes receiver) — UInt64 carrier.
         let actual_arg_count = extra_args.len() as i64;
@@ -1963,10 +1935,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder
             .ins()
             .store(MemFlags::new(), argc_val, argc_addr, 0);
-        self.emit_kind_track_write(
-            argc_slot_idx,
-            shape_value::NativeKind::UInt64,
-        );
+        self.emit_kind_track_write(argc_slot_idx, shape_value::NativeKind::UInt64);
 
         // Update stack_ptr: receiver(s) + extra_args + method_name + arg_count.
         let total_items = combined.len() + 2;
@@ -1977,10 +1946,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
         // Call jit_call_method(ctx, total_count).
         let count_val = self.builder.ins().iconst(types::I64, total_items as i64);
-        let inst = self.builder.ins().call(
-            self.ffi.call_method,
-            &[self.ctx_ptr, count_val],
-        );
+        let inst = self
+            .builder
+            .ins()
+            .call(self.ffi.call_method, &[self.ctx_ptr, count_val]);
         let result = self.builder.inst_results(inst)[0];
 
         // Restore stack_ptr to old value.
@@ -1995,29 +1964,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // and the returned bits are a placeholder. Deopt the JIT frame
         // (return `SIGNAL_TRAMPOLINE_ERROR`) BEFORE `write_place` so the
         // placeholder never flows into a heap-kinded refcount-retain site.
-        let err_flag_offset =
-            crate::context::PENDING_CALL_ERROR_OFFSET as i32;
-        let err_flag = self.builder.ins().load(
-            types::I8,
-            MemFlags::new(),
-            self.ctx_ptr,
-            err_flag_offset,
-        );
+        let err_flag_offset = crate::context::PENDING_CALL_ERROR_OFFSET as i32;
+        let err_flag =
+            self.builder
+                .ins()
+                .load(types::I8, MemFlags::new(), self.ctx_ptr, err_flag_offset);
         let zero_i8 = self.builder.ins().iconst(types::I8, 0);
-        let has_err = self.builder.ins().icmp(
-            IntCC::NotEqual,
-            err_flag,
-            zero_i8,
-        );
+        let has_err = self.builder.ins().icmp(IntCC::NotEqual, err_flag, zero_i8);
         let err_deopt_block = self.builder.create_block();
         let err_continue_block = self.builder.create_block();
-        self.builder.ins().brif(
-            has_err,
-            err_deopt_block,
-            &[],
-            err_continue_block,
-            &[],
-        );
+        self.builder
+            .ins()
+            .brif(has_err, err_deopt_block, &[], err_continue_block, &[]);
         self.builder.switch_to_block(err_deopt_block);
         self.builder.seal_block(err_deopt_block);
         let trampoline_err_signal = self.builder.ins().iconst(

@@ -164,9 +164,7 @@ pub(crate) fn native_kind_from_concrete_type(ct: &ConcreteType) -> Option<Native
         ConcreteType::String => NativeKind::String,
         // Closure / Function carry `Arc<HeapValue::ClosureRaw>` per
         // §2.7.11/Q12 — `Ptr(HeapKind::Closure)`.
-        ConcreteType::Closure(_) | ConcreteType::Function(_) => {
-            NativeKind::Ptr(HeapKind::Closure)
-        }
+        ConcreteType::Closure(_) | ConcreteType::Function(_) => NativeKind::Ptr(HeapKind::Closure),
         // Result/Option are typed-Arc heap values with their own
         // HeapKind discriminator per §2.7.17.
         ConcreteType::Result(_, _) => NativeKind::Ptr(HeapKind::Result),
@@ -376,13 +374,28 @@ pub(crate) fn infer_slot_kinds_with_concrete(
                             // BELOW (line ~692, after the forward pass) per
                             // Phase 4b Round 5c-2-α HashMap-has-2-chain
                             // ratify 2026-05-19.
-                            well_known_method_return_kind(name).or_else(|| {
-                                parametric_method_return_kind_from_receiver(
-                                    name,
-                                    args,
-                                    concrete_types,
-                                )
-                            })
+                            well_known_method_return_kind(name)
+                                .or_else(|| {
+                                    parametric_method_return_kind_from_receiver(
+                                        name,
+                                        args,
+                                        concrete_types,
+                                    )
+                                })
+                                // Wave 1b SEAM B (2026-06-15): iterator lazy
+                                // adapters (`map`/`filter`/`take`/...) return a
+                                // new `Ptr(HeapKind::Iterator)` when applied to
+                                // an Iterator receiver. The receiver's kind is
+                                // read from the in-progress `kinds` track (the
+                                // `iter()` result was stamped Iterator just
+                                // above; the forward pass + the fixpoint loop
+                                // below propagate chained adapters). Keeps a
+                                // chained terminal's receiver classified as
+                                // Iterator → VM-trampoline delegation, never
+                                // the legacy `UInt64` garbage path.
+                                .or_else(|| {
+                                    iterator_adapter_return_kind(name, args, &kinds)
+                                })
                         }
                         Operand::Constant(MirConstant::Function(name)) => {
                             well_known_function_return_kind(name)
@@ -570,9 +583,7 @@ pub(crate) fn infer_slot_kinds_with_concrete(
                         "Set" | "HashSet" => Some(NativeKind::Ptr(HeapKind::HashSet)),
                         "HashMap" => Some(NativeKind::Ptr(HeapKind::HashMap)),
                         "Deque" => Some(NativeKind::Ptr(HeapKind::Deque)),
-                        "PriorityQueue" => {
-                            Some(NativeKind::Ptr(HeapKind::PriorityQueue))
-                        }
+                        "PriorityQueue" => Some(NativeKind::Ptr(HeapKind::PriorityQueue)),
                         "Channel" => Some(NativeKind::Ptr(HeapKind::Channel)),
                         "Mutex" => Some(NativeKind::Ptr(HeapKind::Mutex)),
                         "Atomic" => Some(NativeKind::Ptr(HeapKind::Atomic)),
@@ -719,11 +730,7 @@ pub(crate) fn infer_slot_kinds_with_concrete(
             // `let u = t` re-bindings — preserves the existing
             // behavior (was a standalone loop pre-Round-5c-2-α).
             for stmt in &block.statements {
-                if let StatementKind::Assign(
-                    Place::Local(dst),
-                    Rvalue::Use(operand),
-                ) = &stmt.kind
-                {
+                if let StatementKind::Assign(Place::Local(dst), Rvalue::Use(operand)) = &stmt.kind {
                     let src_slot = match operand {
                         Operand::Copy(Place::Local(s))
                         | Operand::Move(Place::Local(s))
@@ -735,8 +742,7 @@ pub(crate) fn infer_slot_kinds_with_concrete(
                         let src_idx = src.0 as usize;
                         if dst_idx < n && src_idx < n {
                             if let Some(src_kind) = kinds[src_idx] {
-                                if is_collection_kind(src_kind)
-                                    && kinds[dst_idx] != Some(src_kind)
+                                if is_collection_kind(src_kind) && kinds[dst_idx] != Some(src_kind)
                                 {
                                     kinds[dst_idx] = Some(src_kind);
                                     changed = true;
@@ -764,9 +770,7 @@ pub(crate) fn infer_slot_kinds_with_concrete(
                     if idx < n && kinds[idx].is_none() {
                         let ret_kind = match func {
                             Operand::Constant(MirConstant::Method(name)) => {
-                                method_return_kind_from_in_pass_kinds(
-                                    name, args, &kinds,
-                                )
+                                method_return_kind_from_in_pass_kinds(name, args, &kinds)
                             }
                             _ => None,
                         };
@@ -906,6 +910,47 @@ pub(crate) fn infer_slot_kinds_with_concrete(
 ///
 /// Names outside this set return `None` — the JIT-compile pass treats
 /// `None` as "kind genuinely not classifiable from the MIR-observable
+/// Wave 1b SEAM B (2026-06-15): classify the return kind of an iterator
+/// LAZY ADAPTER (`map` / `filter` / `take` / `skip` / `flatMap` /
+/// `enumerate` / `chain`) — each returns a new `Ptr(HeapKind::Iterator)`,
+/// but ONLY when the receiver is itself an iterator (the same names are
+/// Array methods with non-Iterator returns). The receiver's kind is read
+/// from the in-progress `kinds` slot-kind track (the `iter()` factory is
+/// stamped `Ptr(HeapKind::Iterator)` by `well_known_method_return_kind`,
+/// and chained adapters propagate forward). Returns `None` for non-adapter
+/// names or non-Iterator receivers, so the caller falls through unchanged.
+///
+/// This is what keeps a chained `iter().filter(..).count()` sound: without
+/// it, the `filter` result slot stays `None` → defaults to the `UInt64`
+/// opaque-JIT carrier → the `.count()` receiver is then mis-classified
+/// `UInt64` and routed into the legacy JIT-format dispatch (no Iterator
+/// registry) which reads a garbage placeholder. Stamping the adapter
+/// result `Ptr(HeapKind::Iterator)` makes the terminal receiver delegate
+/// to the VM trampoline's authoritative iterator handlers (VM == JIT).
+fn iterator_adapter_return_kind(
+    name: &str,
+    args: &[Operand],
+    kinds: &[Option<NativeKind>],
+) -> Option<NativeKind> {
+    use shape_value::heap_value::HeapKind;
+    match name {
+        "map" | "filter" | "take" | "skip" | "flatMap" | "enumerate" | "chain" => {
+            let receiver = args.first()?;
+            let receiver_slot = match receiver {
+                Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => p.root_local(),
+                Operand::Constant(_) => return None,
+            };
+            match kinds.get(receiver_slot.0 as usize).copied().flatten() {
+                Some(NativeKind::Ptr(HeapKind::Iterator)) => {
+                    Some(NativeKind::Ptr(HeapKind::Iterator))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// shape" per §2.7.7 (no Bool-default fallback). Adding a new name
 /// requires verifying the receiver-side method registry returns the
 /// declared kind for every receiver type the dispatch reaches.
@@ -919,6 +964,35 @@ fn well_known_method_return_kind(name: &str) -> Option<NativeKind> {
         // Emptiness / membership predicates — `KindedSlot::from_bool(...)`
         // across every receiver's PHF entry.
         "isEmpty" | "is_empty" | "has" | "contains" => Some(NativeKind::Bool),
+        // Wave 1b SEAM B (2026-06-15): `iter()` produces a lazy iterator on
+        // EVERY receiver (Array / String / Range / HashMap) — the runtime
+        // handlers (`handle_array_iter` / `handle_string_iter` /
+        // `range_iter` / `handle_hashmap_iter`) all return
+        // `KindedSlot::from_iterator(Arc<IteratorState>)`, i.e.
+        // `Ptr(HeapKind::Iterator)`. This is receiver-INVARIANT, so it
+        // belongs here rather than in the parametric cohort. Stamping the
+        // kind is load-bearing: WITHOUT it the `iter()` result slot stays
+        // `None` → defaults to the `UInt64` opaque-JIT carrier, and the
+        // downstream `.count()` / `.collect()` / ... receiver is then
+        // classified `UInt64` in `jit_call_method`, falling into the
+        // legacy JIT-format dispatch (no Iterator registry) which read a
+        // garbage placeholder (`-1407374883553280`) where the bytecode VM
+        // returns the correct value. With the kind stamped as
+        // `Ptr(HeapKind::Iterator)`, the terminal-method receiver is
+        // classified correctly and delegates to the VM trampoline's
+        // authoritative iterator handlers (VM == JIT).
+        "iter" => Some(NativeKind::Ptr(shape_value::heap_value::HeapKind::Iterator)),
+        // Iterator lazy adapters (`map` / `filter` / `take` / `skip` /
+        // `flatMap` / `enumerate` / `chain`) ALSO return a new
+        // `Ptr(HeapKind::Iterator)` — but these names are NOT receiver-
+        // invariant (`Array.map` returns an Array, etc.), so they cannot
+        // be stamped here. They are classified receiver-parametrically in
+        // `iterator_adapter_return_kind` (called from the call-terminator
+        // stamping loop) when the receiver slot's already-inferred kind is
+        // `Ptr(HeapKind::Iterator)` — this keeps a chained
+        // `iter().filter(..).count()` from leaving the `filter` result
+        // slot `UInt64` (which would route the `.count()` receiver into
+        // the legacy garbage path).
         _ => None,
     }
 }
@@ -1166,10 +1240,9 @@ fn parametric_method_return_kind_from_receiver(
         // db3668c5: `Set().add("a").add("b").has("a")` was VM=true /
         // JIT=false (the 1-chain `Set().add("a").has("a")` also
         // diverged — same root cause as the HashMap 1-chain).
-        (
-            "add" | "delete" | "union" | "intersection" | "difference",
-            ConcreteType::HashSet(_),
-        ) => Some(NativeKind::Ptr(HeapKind::HashSet)),
+        ("add" | "delete" | "union" | "intersection" | "difference", ConcreteType::HashSet(_)) => {
+            Some(NativeKind::Ptr(HeapKind::HashSet))
+        }
         // ── Deque.pushBack / .pushFront ────────────────────────────
         // Phase 4b Round 5c-2-β-α collection-mutator-chain fix. The
         // VM-side handlers `deque_methods::v2_push_back` (line 308)
@@ -1195,9 +1268,7 @@ fn parametric_method_return_kind_from_receiver(
         // off this arm.) Empirical reproducer at HEAD db3668c5:
         // `PriorityQueue().push(5).push(3).size()` was VM=2 /
         // JIT=garbage `-1407374883553280`.
-        ("push", ConcreteType::PriorityQueue) => {
-            Some(NativeKind::Ptr(HeapKind::PriorityQueue))
-        }
+        ("push", ConcreteType::PriorityQueue) => Some(NativeKind::Ptr(HeapKind::PriorityQueue)),
         // ── Channel.send / .close ──────────────────────────────────
         // Phase 4b Round 5c-2-β-α collection-mutator-chain fix. The
         // VM-side handlers `channel_methods::v2_channel_send` (line
@@ -1215,9 +1286,7 @@ fn parametric_method_return_kind_from_receiver(
         // `Channel().send(7).send(9).try_recv()` SIGSEGV'd under JIT
         // (use-after-free on the mis-dispatched `Arc<ChannelData>`)
         // vs VM correct.
-        ("send" | "close", ConcreteType::Channel(_)) => {
-            Some(NativeKind::Ptr(HeapKind::Channel))
-        }
+        ("send" | "close", ConcreteType::Channel(_)) => Some(NativeKind::Ptr(HeapKind::Channel)),
         // ── Mutex.get ──────────────────────────────────────────────
         // `Mutex<T>.get() → T` per §2.7.25. The VM-side
         // `executor/objects/mutex_methods::v2_get` clones the inner
@@ -1229,10 +1298,9 @@ fn parametric_method_return_kind_from_receiver(
         // path produces a raw i64 (the `AtomicI64::load` / `fetch_*`
         // result). Pre-typed-payload-amendment all four method names
         // surface Int64.
-        (
-            "load" | "fetch_add" | "fetch_sub" | "compare_exchange",
-            ConcreteType::Atomic,
-        ) => Some(NativeKind::Int64),
+        ("load" | "fetch_add" | "fetch_sub" | "compare_exchange", ConcreteType::Atomic) => {
+            Some(NativeKind::Int64)
+        }
         // ── Lazy.get ───────────────────────────────────────────────
         // `Lazy<T>.get() → T` per §2.7.25. The cached value's
         // `KindedSlot::value` payload is cloned from `LazyInner.value`
@@ -1327,6 +1395,21 @@ fn method_return_kind_from_in_pass_kinds(
         ("send" | "close", NativeKind::Ptr(HeapKind::Channel)) => {
             Some(NativeKind::Ptr(HeapKind::Channel))
         }
+        // Wave 1b SEAM B (2026-06-15): iterator lazy adapters return a new
+        // `Ptr(HeapKind::Iterator)` when applied to an Iterator receiver.
+        // This fixpoint-iterated in-pass classifier propagates the
+        // Iterator kind through a chained adapter pipeline
+        // (`iter().map(..).filter(..).count()`) regardless of block order,
+        // so the terminal's receiver is classified Iterator and delegates
+        // to the VM trampoline (never the legacy `UInt64` garbage path).
+        // The runtime adapter bodies (`handle_map` / `handle_filter` /
+        // `handle_take` / `handle_skip` / `handle_flat_map` /
+        // `handle_enumerate` / `handle_chain` in `iterator_methods.rs`)
+        // each return `wrap_iterator(...)` = `Ptr(HeapKind::Iterator)`.
+        (
+            "map" | "filter" | "take" | "skip" | "flatMap" | "enumerate" | "chain",
+            NativeKind::Ptr(HeapKind::Iterator),
+        ) => Some(NativeKind::Ptr(HeapKind::Iterator)),
         _ => None,
     }
 }
@@ -1550,8 +1633,8 @@ fn infer_rvalue_kind_with_projections(
             field_name_table,
             concrete_types,
         ),
-        Rvalue::Borrow(_, _) => None,     // References are heap pointers
-        Rvalue::Aggregate(_) => None,      // Arrays are heap objects
+        Rvalue::Borrow(_, _) => None, // References are heap pointers
+        Rvalue::Aggregate(_) => None, // Arrays are heap objects
         // EnumTest emits a native Bool — kind is Bool by construction
         // per the JIT consumer's `jit_arc_result_is_ok` / `_is_some`
         // signature (returns I8 / `NativeKind::Bool`).
@@ -1718,13 +1801,7 @@ fn infer_operand_kind_with_fields(
     field_kinds: Option<&std::collections::HashMap<String, NativeKind>>,
     field_name_table: Option<&std::collections::HashMap<FieldIdx, String>>,
 ) -> Option<NativeKind> {
-    infer_operand_kind_with_projections(
-        operand,
-        kinds,
-        field_kinds,
-        field_name_table,
-        None,
-    )
+    infer_operand_kind_with_projections(operand, kinds, field_kinds, field_name_table, None)
 }
 
 /// Project-aware kind classification with both Field (via `field_kinds`)
@@ -2177,9 +2254,7 @@ mod tests {
     #[test]
     fn parametric_array_sum_returns_element_kind() {
         // `Array<int>.sum() → Int64`
-        let cts = vec![
-            ConcreteType::Array(Box::new(ConcreteType::I64)),
-        ];
+        let cts = vec![ConcreteType::Array(Box::new(ConcreteType::I64))];
         let kind = parametric_method_return_kind_from_receiver("sum", &[copy_local(0)], &cts);
         assert_eq!(kind, Some(NativeKind::Int64));
 
@@ -2248,8 +2323,7 @@ mod tests {
             Box::new(ConcreteType::String),
             Box::new(ConcreteType::I64),
         )];
-        let kind =
-            parametric_method_return_kind_from_receiver("get", &[copy_local(0)], &cts);
+        let kind = parametric_method_return_kind_from_receiver("get", &[copy_local(0)], &cts);
         assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::Option)));
     }
 
@@ -2257,14 +2331,12 @@ mod tests {
     fn parametric_mutex_get_returns_inner_kind() {
         // Mutex<int>.get() → Int64 per §2.7.25 receiver-recovery.
         let cts = vec![ConcreteType::Mutex(Box::new(ConcreteType::I64))];
-        let kind =
-            parametric_method_return_kind_from_receiver("get", &[copy_local(0)], &cts);
+        let kind = parametric_method_return_kind_from_receiver("get", &[copy_local(0)], &cts);
         assert_eq!(kind, Some(NativeKind::Int64));
 
         // Mutex<bool>.get() → Bool.
         let cts = vec![ConcreteType::Mutex(Box::new(ConcreteType::Bool))];
-        let kind =
-            parametric_method_return_kind_from_receiver("get", &[copy_local(0)], &cts);
+        let kind = parametric_method_return_kind_from_receiver("get", &[copy_local(0)], &cts);
         assert_eq!(kind, Some(NativeKind::Bool));
     }
 
@@ -2273,8 +2345,7 @@ mod tests {
         // Atomic is i64-only at landing per §2.7.25.
         let cts = vec![ConcreteType::Atomic];
         for name in &["load", "fetch_add", "fetch_sub", "compare_exchange"] {
-            let kind =
-                parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
+            let kind = parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
             assert_eq!(
                 kind,
                 Some(NativeKind::Int64),
@@ -2287,8 +2358,7 @@ mod tests {
     fn parametric_lazy_get_returns_inner_kind() {
         // Lazy<int>.get() → Int64 per §2.7.25 receiver-recovery.
         let cts = vec![ConcreteType::Lazy(Box::new(ConcreteType::I64))];
-        let kind =
-            parametric_method_return_kind_from_receiver("get", &[copy_local(0)], &cts);
+        let kind = parametric_method_return_kind_from_receiver("get", &[copy_local(0)], &cts);
         assert_eq!(kind, Some(NativeKind::Int64));
     }
 
@@ -2297,11 +2367,8 @@ mod tests {
         // Unknown method names produce None — no Bool-default fallback
         // per §2.7.7 #9.
         let cts = vec![ConcreteType::Array(Box::new(ConcreteType::I64))];
-        let kind = parametric_method_return_kind_from_receiver(
-            "unknown_method",
-            &[copy_local(0)],
-            &cts,
-        );
+        let kind =
+            parametric_method_return_kind_from_receiver("unknown_method", &[copy_local(0)], &cts);
         assert_eq!(kind, None);
     }
 
@@ -2323,8 +2390,7 @@ mod tests {
         // conduit couldn't prove a kind), classification falls through
         // to None — no fabricated default.
         let cts = vec![ConcreteType::Void];
-        let kind =
-            parametric_method_return_kind_from_receiver("sum", &[copy_local(0)], &cts);
+        let kind = parametric_method_return_kind_from_receiver("sum", &[copy_local(0)], &cts);
         assert_eq!(kind, None);
     }
 
@@ -2336,8 +2402,7 @@ mod tests {
         // in the well_known path, parametric names in the parametric
         // path. No overlap.
         let cts = vec![ConcreteType::Array(Box::new(ConcreteType::I64))];
-        let kind =
-            parametric_method_return_kind_from_receiver("size", &[copy_local(0)], &cts);
+        let kind = parametric_method_return_kind_from_receiver("size", &[copy_local(0)], &cts);
         assert_eq!(
             kind, None,
             "size belongs to well_known_method_return_kind, not the parametric cohort"
@@ -2436,8 +2501,7 @@ mod tests {
             Box::new(ConcreteType::String),
             Box::new(ConcreteType::I64),
         )];
-        let kind =
-            parametric_method_return_kind_from_receiver("set", &[copy_local(0)], &cts);
+        let kind = parametric_method_return_kind_from_receiver("set", &[copy_local(0)], &cts);
         assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::HashMap)));
     }
 
@@ -2450,8 +2514,7 @@ mod tests {
             Box::new(ConcreteType::String),
             Box::new(ConcreteType::I64),
         )];
-        let kind =
-            parametric_method_return_kind_from_receiver("delete", &[copy_local(0)], &cts);
+        let kind = parametric_method_return_kind_from_receiver("delete", &[copy_local(0)], &cts);
         assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::HashMap)));
     }
 
@@ -2464,8 +2527,7 @@ mod tests {
             Box::new(ConcreteType::String),
             Box::new(ConcreteType::I64),
         )];
-        let kind =
-            parametric_method_return_kind_from_receiver("merge", &[copy_local(0)], &cts);
+        let kind = parametric_method_return_kind_from_receiver("merge", &[copy_local(0)], &cts);
         assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::HashMap)));
     }
 
@@ -2480,25 +2542,13 @@ mod tests {
         // receiver kind directly from `kinds[]` so chain temps following
         // a bare ctor still classify correctly.
         let kinds = vec![Some(NativeKind::Ptr(HeapKind::HashMap)), None, None];
-        let kind = method_return_kind_from_in_pass_kinds(
-            "set",
-            &[copy_local(0)],
-            &kinds,
-        );
+        let kind = method_return_kind_from_in_pass_kinds("set", &[copy_local(0)], &kinds);
         assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::HashMap)));
 
-        let kind = method_return_kind_from_in_pass_kinds(
-            "delete",
-            &[copy_local(0)],
-            &kinds,
-        );
+        let kind = method_return_kind_from_in_pass_kinds("delete", &[copy_local(0)], &kinds);
         assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::HashMap)));
 
-        let kind = method_return_kind_from_in_pass_kinds(
-            "merge",
-            &[copy_local(0)],
-            &kinds,
-        );
+        let kind = method_return_kind_from_in_pass_kinds("merge", &[copy_local(0)], &kinds);
         assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::HashMap)));
     }
 
@@ -2510,22 +2560,17 @@ mod tests {
         // are NOT classified here (their carrier shape differs; broader
         // scope per dispatch supervisor disposition).
         let kinds = vec![Some(NativeKind::Ptr(HeapKind::TypedArray)), None];
-        let kind =
-            method_return_kind_from_in_pass_kinds("set", &[copy_local(0)], &kinds);
+        let kind = method_return_kind_from_in_pass_kinds("set", &[copy_local(0)], &kinds);
         assert_eq!(kind, None, "Non-HashMap receiver must not be classified");
 
         let kinds = vec![Some(NativeKind::Int64), None];
-        let kind =
-            method_return_kind_from_in_pass_kinds("set", &[copy_local(0)], &kinds);
+        let kind = method_return_kind_from_in_pass_kinds("set", &[copy_local(0)], &kinds);
         assert_eq!(kind, None, "Scalar receiver must not be classified");
 
         // Unknown method on HashMap receiver — return None.
         let kinds = vec![Some(NativeKind::Ptr(HeapKind::HashMap)), None];
-        let kind = method_return_kind_from_in_pass_kinds(
-            "unknown_method",
-            &[copy_local(0)],
-            &kinds,
-        );
+        let kind =
+            method_return_kind_from_in_pass_kinds("unknown_method", &[copy_local(0)], &kinds);
         assert_eq!(kind, None, "Unknown method must not be classified");
     }
 
@@ -2570,9 +2615,7 @@ mod tests {
                     ],
                     terminator: Terminator {
                         kind: TerminatorKind::Call {
-                            func: Operand::Constant(MirConstant::Method(
-                                "set".to_string(),
-                            )),
+                            func: Operand::Constant(MirConstant::Method("set".to_string())),
                             args: vec![
                                 copy_local(0),
                                 Operand::Constant(MirConstant::Str("a".to_string())),
@@ -2589,9 +2632,7 @@ mod tests {
                     statements: vec![],
                     terminator: Terminator {
                         kind: TerminatorKind::Call {
-                            func: Operand::Constant(MirConstant::Method(
-                                "set".to_string(),
-                            )),
+                            func: Operand::Constant(MirConstant::Method("set".to_string())),
                             args: vec![
                                 copy_local(1),
                                 Operand::Constant(MirConstant::Str("b".to_string())),
@@ -2608,9 +2649,7 @@ mod tests {
                     statements: vec![],
                     terminator: Terminator {
                         kind: TerminatorKind::Call {
-                            func: Operand::Constant(MirConstant::Method(
-                                "has".to_string(),
-                            )),
+                            func: Operand::Constant(MirConstant::Method("has".to_string())),
                             args: vec![
                                 copy_local(2),
                                 Operand::Constant(MirConstant::Str("a".to_string())),
@@ -2686,8 +2725,7 @@ mod tests {
         // v2_difference 374) return `KindedSlot::from_hashset(...)`.
         let cts = vec![ConcreteType::HashSet(Box::new(ConcreteType::String))];
         for name in ["add", "delete", "union", "intersection", "difference"] {
-            let kind =
-                parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
+            let kind = parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
             assert_eq!(
                 kind,
                 Some(NativeKind::Ptr(HeapKind::HashSet)),
@@ -2704,8 +2742,7 @@ mod tests {
         // `popFront` are tuple-return (pop the element) — NOT on the arm.
         let cts = vec![ConcreteType::Deque(Box::new(ConcreteType::I64))];
         for name in ["pushBack", "pushFront"] {
-            let kind =
-                parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
+            let kind = parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
             assert_eq!(
                 kind,
                 Some(NativeKind::Ptr(HeapKind::Deque)),
@@ -2714,9 +2751,11 @@ mod tests {
         }
         // popBack / popFront stay unclassified by this arm.
         for name in ["popBack", "popFront"] {
-            let kind =
-                parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
-            assert_eq!(kind, None, "Deque.{name} (tuple-return) must not classify here");
+            let kind = parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
+            assert_eq!(
+                kind, None,
+                "Deque.{name} (tuple-return) must not classify here"
+            );
         }
     }
 
@@ -2727,13 +2766,14 @@ mod tests {
         // `KindedSlot::from_priority_queue(...)`. `ConcreteType::
         // PriorityQueue` is nullary (i64-only at landing per §2.7.18).
         let cts = vec![ConcreteType::PriorityQueue];
-        let kind =
-            parametric_method_return_kind_from_receiver("push", &[copy_local(0)], &cts);
+        let kind = parametric_method_return_kind_from_receiver("push", &[copy_local(0)], &cts);
         assert_eq!(kind, Some(NativeKind::Ptr(HeapKind::PriorityQueue)));
         // pop is tuple-return — not classified here.
-        let kind =
-            parametric_method_return_kind_from_receiver("pop", &[copy_local(0)], &cts);
-        assert_eq!(kind, None, "PriorityQueue.pop (tuple-return) must not classify here");
+        let kind = parametric_method_return_kind_from_receiver("pop", &[copy_local(0)], &cts);
+        assert_eq!(
+            kind, None,
+            "PriorityQueue.pop (tuple-return) must not classify here"
+        );
     }
 
     #[test]
@@ -2743,8 +2783,7 @@ mod tests {
         // (193) return `KindedSlot::from_channel(...)`.
         let cts = vec![ConcreteType::Channel(Box::new(ConcreteType::I64))];
         for name in ["send", "close"] {
-            let kind =
-                parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
+            let kind = parametric_method_return_kind_from_receiver(name, &[copy_local(0)], &cts);
             assert_eq!(
                 kind,
                 Some(NativeKind::Ptr(HeapKind::Channel)),
@@ -2888,8 +2927,7 @@ mod tests {
             "size",
             &[],
         );
-        let pq_kinds =
-            infer_slot_kinds_with_concrete(&pq_mir, &[], &vec![ConcreteType::Void; 4]);
+        let pq_kinds = infer_slot_kinds_with_concrete(&pq_mir, &[], &vec![ConcreteType::Void; 4]);
         assert_eq!(pq_kinds[0], Some(NativeKind::Ptr(HeapKind::PriorityQueue)));
         assert_eq!(pq_kinds[1], Some(NativeKind::Ptr(HeapKind::PriorityQueue)));
         assert_eq!(pq_kinds[2], Some(NativeKind::Ptr(HeapKind::PriorityQueue)));
@@ -2903,8 +2941,7 @@ mod tests {
             "is_closed",
             &[],
         );
-        let ch_kinds =
-            infer_slot_kinds_with_concrete(&ch_mir, &[], &vec![ConcreteType::Void; 4]);
+        let ch_kinds = infer_slot_kinds_with_concrete(&ch_mir, &[], &vec![ConcreteType::Void; 4]);
         assert_eq!(ch_kinds[0], Some(NativeKind::Ptr(HeapKind::Channel)));
         assert_eq!(ch_kinds[1], Some(NativeKind::Ptr(HeapKind::Channel)));
         assert_eq!(ch_kinds[2], Some(NativeKind::Ptr(HeapKind::Channel)));
@@ -2955,9 +2992,7 @@ mod tests {
                     ],
                     terminator: Terminator {
                         kind: TerminatorKind::Call {
-                            func: Operand::Constant(MirConstant::Method(
-                                mutator.to_string(),
-                            )),
+                            func: Operand::Constant(MirConstant::Method(mutator.to_string())),
                             args: mut_args_1,
                             destination: Place::Local(SlotId(1)),
                             next: BasicBlockId(1),
@@ -2970,9 +3005,7 @@ mod tests {
                     statements: vec![],
                     terminator: Terminator {
                         kind: TerminatorKind::Call {
-                            func: Operand::Constant(MirConstant::Method(
-                                mutator.to_string(),
-                            )),
+                            func: Operand::Constant(MirConstant::Method(mutator.to_string())),
                             args: mut_args_2,
                             destination: Place::Local(SlotId(2)),
                             next: BasicBlockId(2),
@@ -2985,9 +3018,7 @@ mod tests {
                     statements: vec![],
                     terminator: Terminator {
                         kind: TerminatorKind::Call {
-                            func: Operand::Constant(MirConstant::Method(
-                                query.to_string(),
-                            )),
+                            func: Operand::Constant(MirConstant::Method(query.to_string())),
                             args: query_full,
                             destination: Place::Local(SlotId(3)),
                             next: BasicBlockId(2),
@@ -3074,9 +3105,10 @@ mod tests {
         // NOT a fabricated `NativeKind::String` from hard-coding `"name"`
         // — that would be a CLAUDE.md "Forbidden rationalizations"
         // walk-back ("hard-code the kickoff Smoke 3 case for now").
-        let cts = vec![ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0))];
-        let kind =
-            parametric_method_return_kind_from_receiver("name", &[copy_local(0)], &cts);
+        let cts = vec![ConcreteType::placeholder_struct(
+            shape_value::v2::concrete_type::StructLayoutId(0),
+        )];
+        let kind = parametric_method_return_kind_from_receiver("name", &[copy_local(0)], &cts);
         assert_eq!(
             kind, None,
             "User-defined trait method on Struct receiver must surface \
@@ -3111,9 +3143,7 @@ mod tests {
                 statements: vec![],
                 terminator: Terminator {
                     kind: TerminatorKind::Call {
-                        func: Operand::Constant(MirConstant::Method(
-                            "name".to_string(),
-                        )),
+                        func: Operand::Constant(MirConstant::Method("name".to_string())),
                         args: vec![copy_local(0)],
                         destination: Place::Local(SlotId(1)),
                         next: BasicBlockId(0),
@@ -3139,8 +3169,7 @@ mod tests {
         ];
         let kinds = infer_slot_kinds_with_concrete(&mir, &[], &concrete_types);
         assert_eq!(
-            kinds[1],
-            None,
+            kinds[1], None,
             "Call-terminator destination for `t.name()` on a Struct(_) \
              receiver must remain unstamped — the trait-dispatch return \
              kind cannot be classified without a cross-crate conduit \
@@ -3171,7 +3200,9 @@ mod tests {
         // fall through to any of these arms — that would be a wrong-
         // carrier classification (a user struct with a `.sum()` method
         // is not an `Array<T>`).
-        let cts = vec![ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0))];
+        let cts = vec![ConcreteType::placeholder_struct(
+            shape_value::v2::concrete_type::StructLayoutId(0),
+        )];
         for method_name in [
             "get",
             "sum",
@@ -3195,11 +3226,8 @@ mod tests {
             "try_into",
             "try_from",
         ] {
-            let kind = parametric_method_return_kind_from_receiver(
-                method_name,
-                &[copy_local(0)],
-                &cts,
-            );
+            let kind =
+                parametric_method_return_kind_from_receiver(method_name, &[copy_local(0)], &cts);
             assert_eq!(
                 kind, None,
                 "method `{method_name}` on Struct(_) receiver must \
@@ -3247,9 +3275,7 @@ mod tests {
                 statements: vec![],
                 terminator: Terminator {
                     kind: TerminatorKind::Call {
-                        func: Operand::Constant(MirConstant::Method(
-                            "name".to_string(),
-                        )),
+                        func: Operand::Constant(MirConstant::Method("name".to_string())),
                         args: vec![copy_local(0)],
                         destination: Place::Local(SlotId(1)),
                         next: BasicBlockId(0),
@@ -3277,12 +3303,7 @@ mod tests {
             ConcreteType::Void,
             ConcreteType::Void,
         ];
-        let existing = vec![
-            None,
-            Some(NativeKind::String),
-            None,
-            None,
-        ];
+        let existing = vec![None, Some(NativeKind::String), None, None];
         let kinds = infer_slot_kinds_with_concrete(&mir, &existing, &concrete_types);
         assert_eq!(
             kinds[1],

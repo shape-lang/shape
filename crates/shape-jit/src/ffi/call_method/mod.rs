@@ -372,9 +372,8 @@ unsafe fn try_call_user_method(
     // helper. The signal value is ignored — error-path deopt is not yet
     // routed through this trait-method surface (the bare-function path
     // ignores it identically at `ffi/control/mod.rs:535,:717`).
-    let _result_code = unsafe {
-        crate::ffi::control::call_jit_fn_with_args(raw_fn_ptr, ctx_mut, &native_args)
-    };
+    let _result_code =
+        unsafe { crate::ffi::control::call_jit_fn_with_args(raw_fn_ptr, ctx_mut, &native_args) };
 
     // Pop result from stack. The callee stored the return value at
     // `ctx.stack[0]` and set `stack_ptr = 1` per the §2.7.5 typed-return
@@ -640,6 +639,12 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             // W10 jit-playbook §5 / §2.7.4 territory; until it lands,
             // VM delegation is the correct (non-garbage) behaviour.
             | NativeKind::Ptr(HeapKind::TypedArray)
+            // Wave 1b SEAM B (2026-06-15): `Ptr(HeapKind::Iterator)`
+            // receivers are handled by the surface-and-stop deopt ABOVE
+            // (they never reach this delegation match) — a mid-JIT-frame VM
+            // trampoline delegation is unsound for the iterator carrier
+            // (closure-arg carrier mismatch + share-crossing race). See the
+            // `Ptr(Iterator)` surface block above the `delegated` match.
             | NativeKind::Float64
             | NativeKind::NullableFloat64
             | NativeKind::Int8
@@ -779,12 +784,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             // contract docstring).
             let receiver_pair = (receiver_bits, receiver_kind);
             let result = super::control::with_trampoline_vm_mut(|vm| {
-                vm.jit_trampoline_call_method(
-                    &method_name,
-                    receiver_pair,
-                    &arg_pairs,
-                    None,
-                )
+                vm.jit_trampoline_call_method(&method_name, receiver_pair, &arg_pairs, None)
             });
             match result {
                 Some(Ok(bits)) => return bits,
@@ -893,8 +893,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                 _ => {}
             }
             match method_name.as_str() {
-                "find" | "findIndex" | "some" | "every" | "filter" | "map"
-                | "reduce" => {
+                "find" | "findIndex" | "some" | "every" | "filter" | "map" | "reduce" => {
                     if args.is_empty() {
                         return TAG_NULL;
                     }
@@ -1106,13 +1105,9 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         // `receiver_type_name` so dispatch classifies on the producing
         // call's stamp, not on tag-bit decode.
         if builtin_result == TAG_NULL {
-            if let Some(user_result) = try_call_user_method(
-                ctx,
-                receiver_bits,
-                receiver_kind,
-                &method_name,
-                &arg_pairs,
-            ) {
+            if let Some(user_result) =
+                try_call_user_method(ctx, receiver_bits, receiver_kind, &method_name, &arg_pairs)
+            {
                 return user_result;
             }
         }
