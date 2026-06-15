@@ -82,7 +82,10 @@ impl BytecodeCompiler {
         span: Span,
     ) -> Result<String> {
         serde_json::to_string(value).map_err(|e| ShapeError::RuntimeError {
-            message: format!("Failed to serialize comptime {} directive: {}", directive_label, e),
+            message: format!(
+                "Failed to serialize comptime {} directive: {}",
+                directive_label, e
+            ),
             location: Some(self.span_to_source_location(span)),
         })
     }
@@ -91,11 +94,225 @@ impl BytecodeCompiler {
     fn require_comptime_mode(&self, directive_name: &str, span: Span) -> Result<()> {
         if !self.comptime_mode {
             return Err(ShapeError::SemanticError {
-                message: format!("`{}` is only valid inside `comptime {{}}` context", directive_name),
+                message: format!(
+                    "`{}` is only valid inside `comptime {{}}` context",
+                    directive_name
+                ),
                 location: Some(self.span_to_source_location(span)),
             });
         }
         Ok(())
+    }
+
+    /// strict-flip (map/collect OUTPUT element-type stamp): reject a `let`
+    /// binding whose explicit `Array<T_decl>` annotation does NOT match the
+    /// PROVEN result element type of a computed initializer.
+    ///
+    /// The hole this closes: `let r: Array<number> = [1,2,3].map(|x| x*2)`
+    /// (and the `.iter().map(...).collect()` form). The map's OUTPUT element
+    /// type is the closure RETURN type — `int` here — so the result is
+    /// `Array<int>`. `int` and `number` do NOT unify (CLAUDE.md §Type-System
+    /// Rules): an `Array<int>` result must NOT coerce to `Array<number>`.
+    /// Without this check the binding's slot was stamped `Float64` from the
+    /// annotation while the runtime array carries `Int64` bits — reading them
+    /// as `number` is a bit-reinterpret (the overflow/garbage surface).
+    ///
+    /// Per ADR-006 §2.7.5 stamp-at-compile-time, the proof is the closure's
+    /// RETURN type carried through `specialized_call_return_concrete_type`
+    /// (the substituted callee return annotation). We compare the declared and
+    /// proven `ConcreteType`s structurally; a mismatch is a hard compile error.
+    ///
+    /// Scope is deliberately narrow to avoid regressing lossless literal
+    /// adoption:
+    ///   - An `Expr::Array` literal initializer is SKIPPED — per-element
+    ///     literal adoption (`let a: Array<number> = [1,2,3]`) is handled by
+    ///     the array-emission element path and is lossless/allowed.
+    ///   - We only reject when BOTH the declared annotation AND the
+    ///     initializer resolve to a concrete `Array<T>` whose element types
+    ///     differ. An un-inferable initializer element type yields `None` and
+    ///     the binding falls through to the existing annotation-driven path
+    ///     (a numeric annotation on an unknown-element computed result is the
+    ///     caller's responsibility — this helper never fabricates a match).
+    fn check_let_annotation_element_type_strict(
+        &mut self,
+        type_ann: &TypeAnnotation,
+        init_expr: &Expr,
+    ) -> Result<()> {
+        use shape_value::v2::ConcreteType;
+
+        // Array-literal initializers adopt element types per-element (lossless
+        // literal adoption); never reject them here.
+        if matches!(init_expr, Expr::Array(..)) {
+            return Ok(());
+        }
+
+        // Declared annotation must resolve to a concrete `Array<T_decl>`.
+        let Some(ConcreteType::Array(decl_elem)) =
+            crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                self, type_ann,
+            )
+        else {
+            return Ok(());
+        };
+
+        // Proven result type of the computed initializer must be a concrete
+        // `Array<T_init>`. Two sources of proof:
+        //   1. The eager `recv.map(|x| ...)` form + receiver-derived builtin
+        //      array methods, resolved by `concrete_type_for_expr` (which
+        //      threads the closure RETURN type through
+        //      `specialized_call_return_concrete_type`).
+        //   2. The lazy `recv.iter().map(|x| ...).collect()` form, whose
+        //      iterator-receiver `.map()` / `.collect()` are NOT monomorphized
+        //      stdlib functions, so source (1) finds nothing. The dedicated
+        //      iterator-chain resolver below stamps the result element = the
+        //      iterator's current element type = the LAST map closure's RETURN
+        //      type (or the source array element when no map adapter is
+        //      present).
+        // Unknown → fall through (the annotation-driven path owns it; this
+        // helper never fabricates a match).
+        let init_elem = if let Some(ConcreteType::Array(e)) =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                self, init_expr,
+            ) {
+            e
+        } else if let Some(e) = self.iterator_collect_result_element_concrete_type(init_expr) {
+            Box::new(e)
+        } else {
+            return Ok(());
+        };
+
+        if *decl_elem != *init_elem {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "type mismatch: binding annotated `Array<{}>` but the \
+                     initializer produces `Array<{}>` — `int` and `number` \
+                     do not unify, so the element type must match exactly \
+                     (cast explicitly with `as` if a conversion is intended)",
+                    decl_elem.mono_key(),
+                    init_elem.mono_key(),
+                ),
+                location: Some(self.span_to_source_location(init_expr.span())),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// strict-flip (map/collect OUTPUT element-type stamp): resolve the PROVEN
+    /// result element `ConcreteType` of a lazy iterator-collect chain
+    /// (`recv.iter().map(f1)…collect()` / `.toArray()`).
+    ///
+    /// The iterator-receiver `.map()` / `.collect()` are NOT monomorphized
+    /// stdlib functions, so the normal
+    /// `specialized_call_return_concrete_type` chain finds no call-site record
+    /// and `concrete_type_for_expr` returns `None`. This walks the chain
+    /// structurally and stamps the result element = the iterator's CURRENT
+    /// element type, per the registered iterator signatures
+    /// (`method_table.rs` §iterator_methods):
+    ///   - `collect` / `toArray` → `Vec<T>` where `T` is the receiver
+    ///     iterator's element.
+    ///   - `iter()` over `Array<T>` → element `T`.
+    ///   - `map(closure)` → element = the closure RETURN type (the OUTPUT
+    ///     element-type stamp — `int` stays `int`, `number` stays `number`).
+    ///   - `filter` / `take` / `skip` → element unchanged.
+    ///
+    /// Per ADR-006 §2.7.5 stamp-at-compile-time, the map output element is the
+    /// closure's RETURN type inferred from its body against the proven input
+    /// element type — no runtime probe, no coercion. Any un-inferable link
+    /// yields `None` (the caller then falls through; the strict check never
+    /// fabricates a match).
+    fn iterator_collect_result_element_concrete_type(
+        &mut self,
+        expr: &Expr,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        let Expr::MethodCall {
+            receiver, method, ..
+        } = expr
+        else {
+            return None;
+        };
+        match method.as_str() {
+            // Eager terminal: the result element = the receiver iterator's
+            // current element type.
+            "collect" | "toArray" => self.iterator_element_concrete_type(receiver),
+            _ => None,
+        }
+    }
+
+    /// Resolve the element `ConcreteType` of an iterator-producing expression
+    /// (the lazy-adapter chain rooted at `.iter()`). See
+    /// [`Self::iterator_collect_result_element_concrete_type`] for the stamping
+    /// rules and the ADR-006 §2.7.5 proof discipline.
+    fn iterator_element_concrete_type(
+        &mut self,
+        expr: &Expr,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        use shape_value::v2::ConcreteType;
+
+        let Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+
+        match method.as_str() {
+            // `iter()` over an `Array<T>` receiver → element `T`. The receiver
+            // is a concrete array expr (literal, identifier, or an eager
+            // array-returning chain), resolved by the immutable
+            // `concrete_type_for_expr`.
+            "iter" => {
+                match crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                    self, receiver,
+                ) {
+                    Some(ConcreteType::Array(elem)) => Some(*elem),
+                    _ => None,
+                }
+            }
+            // `map(closure)` → element = the closure RETURN type, inferred from
+            // its body against the receiver iterator's CURRENT element type.
+            "map" => {
+                let recv_elem = self.iterator_element_concrete_type(receiver)?;
+                let Some(Expr::FunctionExpr {
+                    params: cparams,
+                    body: cbody,
+                    return_type,
+                    ..
+                }) = args.first()
+                else {
+                    return None;
+                };
+                // Seed the closure param's type with the proven input element
+                // type (the §2.7.5 proof of the closure param at this site).
+                let elem_ann =
+                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(
+                        &recv_elem,
+                    );
+                let caller_arg_type_names: Vec<Option<String>> = vec![
+                    elem_ann
+                        .as_ref()
+                        .and_then(Self::tracked_type_name_from_annotation),
+                ];
+                let return_type_name =
+                    crate::compiler::expressions::closures::infer_closure_body_return_type_name_with_caller_context(
+                        self,
+                        cparams,
+                        cbody,
+                        return_type.as_ref(),
+                        &[],
+                        &caller_arg_type_names,
+                    )?;
+                let vec_emission =
+                    crate::compiler::v2_map_emission::concrete_type_from_annotation;
+                vec_emission(&shape_ast::ast::TypeAnnotation::Basic(return_type_name))
+            }
+            // Element-preserving lazy adapters.
+            "filter" | "take" | "skip" => self.iterator_element_concrete_type(receiver),
+            _ => None,
+        }
     }
 
     fn emit_comptime_extend_directive(
@@ -486,11 +703,7 @@ impl BytecodeCompiler {
                 // time — see `op_dyn_method_call`. No silent default,
                 // no Bool-default fallback (CLAUDE.md "Renames to refuse
                 // on sight"; phase-2d-hardening item (a)).
-                self.build_and_register_vtable(
-                    &trait_basename,
-                    type_name,
-                    impl_block,
-                )?;
+                self.build_and_register_vtable(&trait_basename, type_name, impl_block)?;
 
                 // BUG-4.6 fix: Register the trait impl in the type inference
                 // environment so that `implements()` can see it at comptime.
@@ -522,7 +735,8 @@ impl BytecodeCompiler {
                             TypeAnnotation::Generic { name, .. } => name.to_string(),
                             _ => continue,
                         };
-                        let (_canonical_super, super_basename) = self.resolve_trait_name(&super_name);
+                        let (_canonical_super, super_basename) =
+                            self.resolve_trait_name(&super_name);
                         if !self
                             .type_inference
                             .env
@@ -779,8 +993,7 @@ impl BytecodeCompiler {
                 // Phase 4b Round 6 WS-1b W16.2-C residual: capture the bare
                 // empty-array-accumulator placeholder index now, before any
                 // downstream emission can reset it.
-                let captured_empty_array_alloc_idx =
-                    self.pending_empty_array_alloc_idx.take();
+                let captured_empty_array_alloc_idx = self.pending_empty_array_alloc_idx.take();
 
                 if let Some(name) = var_decl.pattern.as_identifier() {
                     // v0.3.3 c6 (Wave 1): re-add narrow B0003 guard for
@@ -836,7 +1049,8 @@ impl BytecodeCompiler {
                     // the initializer compiled and is still set if the
                     // typed path was taken.
                     if let Some(kind) = self.pending_variable_typed_array_kind {
-                        self.v2_typed_array_module_bindings.insert(binding_idx, kind);
+                        self.v2_typed_array_module_bindings
+                            .insert(binding_idx, kind);
                     }
                     // Phase 4b Round 6 WS-1b W16.2-C residual: re-key a bare
                     // empty-array-accumulator placeholder against this module
@@ -1211,10 +1425,8 @@ impl BytecodeCompiler {
                 // W7 (2026-05-17): build the TypeReflectionSnapshot for
                 // `type_info(T)` resolution. Top-level comptime block has
                 // no enclosing generic-type-param scope.
-                let type_snapshot = super::comptime_builtins::build_type_reflection_snapshot(
-                    self,
-                    &[],
-                );
+                let type_snapshot =
+                    super::comptime_builtins::build_type_reflection_snapshot(self, &[]);
                 // J-CT.2 — see `expressions/mod.rs::Expr::Comptime` for
                 // rationale on comptime-context items.
                 let comptime_impl_blocks = self.comptime_impl_blocks.clone();
@@ -1566,16 +1778,15 @@ impl BytecodeCompiler {
                         // constant's kind is stamped from the literal at
                         // compile time when the compiler reaches the
                         // identifier reference.
-                        if matches!(
-                            sym.kind,
-                            shape_ast::module_utils::ModuleExportKind::Value
-                        ) {
+                        if matches!(sym.kind, shape_ast::module_utils::ModuleExportKind::Value) {
                             if let Some(ref dep_ast) = dep_node.ast {
                                 for item in &dep_ast.items {
                                     if let shape_ast::ast::Item::Export(export, _) = item {
                                         if let Some(ref decl) = export.source_decl {
                                             if decl.kind == shape_ast::ast::VarKind::Const {
-                                                if let Some(decl_name) = decl.pattern.as_identifier() {
+                                                if let Some(decl_name) =
+                                                    decl.pattern.as_identifier()
+                                                {
                                                     if decl_name == sym.original_name {
                                                         if let Some(ref init) = decl.value {
                                                             self.imported_consts
@@ -1602,11 +1813,7 @@ impl BytecodeCompiler {
         let Some(registry) = self.extension_registry.as_ref() else {
             return;
         };
-        let Some(module) = registry
-            .iter()
-            .rev()
-            .find(|m| m.name == module_path)
-        else {
+        let Some(module) = registry.iter().rev().find(|m| m.name == module_path) else {
             return;
         };
 
@@ -1714,15 +1921,12 @@ impl BytecodeCompiler {
                 // is unchanged (`__payload_N` slots at offset 8/16/...);
                 // the kind here only descriptively shapes the print form.
                 match &member.kind {
-                    EnumMemberKind::Unit { .. } => {
-                        EnumVariantInfo::new(&member.name, id as u16, 0)
-                    }
+                    EnumMemberKind::Unit { .. } => EnumVariantInfo::new(&member.name, id as u16, 0),
                     EnumMemberKind::Tuple(types) => {
                         EnumVariantInfo::new(&member.name, id as u16, types.len() as u16)
                     }
                     EnumMemberKind::Struct(fields) => {
-                        let names: Vec<String> =
-                            fields.iter().map(|f| f.name.clone()).collect();
+                        let names: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
                         EnumVariantInfo::new_struct(&member.name, id as u16, names)
                     }
                 }
@@ -1767,22 +1971,21 @@ impl BytecodeCompiler {
             }
         }
 
-        let schema = shape_runtime::type_schema::TypeSchema::new_enum(&enum_def.name, variants.clone());
+        let schema =
+            shape_runtime::type_schema::TypeSchema::new_enum(&enum_def.name, variants.clone());
         self.type_tracker.schema_registry_mut().register(schema);
 
         // Also register under bare name if the qualified name contains "::"
         // so runtime code that uses bare enum names (e.g., "Snapshot") can find the schema.
         if let Some(basename) = enum_def.name.rsplit("::").next() {
             if basename != enum_def.name
-                && self
-                    .type_tracker
-                    .schema_registry()
-                    .get(basename)
-                    .is_none()
+                && self.type_tracker.schema_registry().get(basename).is_none()
             {
                 let alias_schema =
                     shape_runtime::type_schema::TypeSchema::new_enum(basename, variants);
-                self.type_tracker.schema_registry_mut().register(alias_schema);
+                self.type_tracker
+                    .schema_registry_mut()
+                    .register(alias_schema);
             }
         }
         Ok(())
@@ -1972,8 +2175,7 @@ impl BytecodeCompiler {
         // All methods in `impl Trait for Array` benefit from this because their
         // body operates on `self` (the generic receiver) — even methods with no
         // explicit parameters like `flatten()`.
-        let (impl_type_params, receiver_type) =
-            Self::synthesize_impl_type_params(target_type);
+        let (impl_type_params, receiver_type) = Self::synthesize_impl_type_params(target_type);
 
         let (params, body) = self.desugar_method_signature_and_body(method, receiver_type)?;
 
@@ -2005,36 +2207,32 @@ impl BytecodeCompiler {
         // is preserved per §2.7.7 #9 — no fabricated default.
         let return_type = method.return_type.clone().or_else(|| {
             let (canonical_trait, _) = self.resolve_trait_name(trait_name);
-            self.trait_defs
-                .get(&canonical_trait)
-                .and_then(|trait_def| {
-                    // Match on method name. Both Required and Default trait
-                    // members carry the return type — Required via
-                    // `TraitMemberSignature::Method { return_type, .. }` (always
-                    // present), Default via `MethodDef.return_type:
-                    // Option<TypeAnnotation>` (may itself be None — in which
-                    // case there's nothing to backfill).
-                    for member in &trait_def.members {
-                        match member {
-                            shape_ast::ast::types::TraitMember::Required(
-                                shape_ast::ast::TraitMemberSignature::Method {
-                                    name,
-                                    return_type,
-                                    ..
-                                },
-                            ) if name == &method.name => {
-                                return Some(return_type.clone());
-                            }
-                            shape_ast::ast::types::TraitMember::Default(default_method)
-                                if default_method.name == method.name =>
-                            {
-                                return default_method.return_type.clone();
-                            }
-                            _ => {}
+            self.trait_defs.get(&canonical_trait).and_then(|trait_def| {
+                // Match on method name. Both Required and Default trait
+                // members carry the return type — Required via
+                // `TraitMemberSignature::Method { return_type, .. }` (always
+                // present), Default via `MethodDef.return_type:
+                // Option<TypeAnnotation>` (may itself be None — in which
+                // case there's nothing to backfill).
+                for member in &trait_def.members {
+                    match member {
+                        shape_ast::ast::types::TraitMember::Required(
+                            shape_ast::ast::TraitMemberSignature::Method {
+                                name, return_type, ..
+                            },
+                        ) if name == &method.name => {
+                            return Some(return_type.clone());
                         }
+                        shape_ast::ast::types::TraitMember::Default(default_method)
+                            if default_method.name == method.name =>
+                        {
+                            return default_method.return_type.clone();
+                        }
+                        _ => {}
                     }
-                    None
-                })
+                }
+                None
+            })
         });
 
         // V3-S6a resolver-extension follow-up: merge method-level type
@@ -2077,7 +2275,10 @@ impl BytecodeCompiler {
     /// Returns `(type_params, receiver_annotation)`.
     fn synthesize_impl_type_params(
         target_type: &shape_ast::ast::TypeName,
-    ) -> (Vec<shape_ast::ast::TypeParam>, Option<shape_ast::ast::TypeAnnotation>) {
+    ) -> (
+        Vec<shape_ast::ast::TypeParam>,
+        Option<shape_ast::ast::TypeAnnotation>,
+    ) {
         let type_base = match target_type {
             shape_ast::ast::TypeName::Simple(n) => n.as_str(),
             shape_ast::ast::TypeName::Generic { name, .. } => name.as_str(),
@@ -3103,41 +3304,41 @@ impl BytecodeCompiler {
         };
 
         if let Some(name) = ann.as_type_name_str() {
-                if let Some(existing) = self
-                    .program
-                    .native_struct_layouts
-                    .iter()
-                    .find(|layout| layout.name == name)
-                {
-                    return Ok(NativeFieldLayoutSpec {
-                        c_type: name.to_string(),
-                        size: existing.size as u64,
-                        align: existing.align as u64,
-                    });
-                }
-
-                let spec = match name {
-                    "f64" | "number" | "Number" | "float" => ("f64", 8, 8),
-                    "f32" => ("f32", 4, 4),
-                    "i64" | "int" | "integer" | "Int" | "Integer" => ("i64", 8, 8),
-                    "i32" => ("i32", 4, 4),
-                    "i16" => ("i16", 2, 2),
-                    "i8" | "char" => ("i8", 1, 1),
-                    "u64" => ("u64", 8, 8),
-                    "u32" => ("u32", 4, 4),
-                    "u16" => ("u16", 2, 2),
-                    "u8" | "byte" => ("u8", 1, 1),
-                    "bool" | "boolean" => ("bool", 1, 1),
-                    "isize" => ("isize", pointer, pointer),
-                    "usize" | "ptr" | "pointer" => ("ptr", pointer, pointer),
-                    "string" | "str" | "cstring" => ("cstring", pointer, pointer),
-                    _ => return fail(),
-                };
+            if let Some(existing) = self
+                .program
+                .native_struct_layouts
+                .iter()
+                .find(|layout| layout.name == name)
+            {
                 return Ok(NativeFieldLayoutSpec {
-                    c_type: spec.0.to_string(),
-                    size: spec.1,
-                    align: spec.2,
+                    c_type: name.to_string(),
+                    size: existing.size as u64,
+                    align: existing.align as u64,
                 });
+            }
+
+            let spec = match name {
+                "f64" | "number" | "Number" | "float" => ("f64", 8, 8),
+                "f32" => ("f32", 4, 4),
+                "i64" | "int" | "integer" | "Int" | "Integer" => ("i64", 8, 8),
+                "i32" => ("i32", 4, 4),
+                "i16" => ("i16", 2, 2),
+                "i8" | "char" => ("i8", 1, 1),
+                "u64" => ("u64", 8, 8),
+                "u32" => ("u32", 4, 4),
+                "u16" => ("u16", 2, 2),
+                "u8" | "byte" => ("u8", 1, 1),
+                "bool" | "boolean" => ("bool", 1, 1),
+                "isize" => ("isize", pointer, pointer),
+                "usize" | "ptr" | "pointer" => ("ptr", pointer, pointer),
+                "string" | "str" | "cstring" => ("cstring", pointer, pointer),
+                _ => return fail(),
+            };
+            return Ok(NativeFieldLayoutSpec {
+                c_type: spec.0.to_string(),
+                size: spec.1,
+                align: spec.2,
+            });
         }
         match ann {
             TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
@@ -3577,9 +3778,7 @@ impl BytecodeCompiler {
         use shape_ast::ast::Expr;
         match expr {
             Expr::Literal(_, _) => true,
-            Expr::UnaryOp { operand, .. } => {
-                Self::const_initializer_is_comptime_evaluable(operand)
-            }
+            Expr::UnaryOp { operand, .. } => Self::const_initializer_is_comptime_evaluable(operand),
             _ => false,
         }
     }
@@ -4148,15 +4347,11 @@ impl BytecodeCompiler {
 
             // W7 (2026-05-17): TypeReflectionSnapshot for `type_info(T)`
             // resolution from a module-scoped comptime block.
-            let type_snapshot = super::comptime_builtins::build_type_reflection_snapshot(
-                self,
-                &[],
-            );
+            let type_snapshot = super::comptime_builtins::build_type_reflection_snapshot(self, &[]);
             // J-CT.2 — see `expressions/mod.rs::Expr::Comptime` for
             // rationale on comptime-context items.
             let comptime_impl_blocks = self.comptime_impl_blocks.clone();
-            let comptime_context_trait_defs: Vec<_> =
-                self.trait_defs.values().cloned().collect();
+            let comptime_context_trait_defs: Vec<_> = self.trait_defs.values().cloned().collect();
             let comptime_context_struct_defs: Vec<_> = self
                 .comptime_context_struct_defs
                 .values()
@@ -4245,10 +4440,7 @@ impl BytecodeCompiler {
                     .get(&struct_def.name)
                     .map(|(names, _)| names.is_empty())
                     .unwrap_or(false);
-                let has_real_fields = struct_def
-                    .fields
-                    .iter()
-                    .any(|f| !f.is_comptime);
+                let has_real_fields = struct_def.fields.iter().any(|f| !f.is_comptime);
                 if !self.struct_types.contains_key(&struct_def.name)
                     || (existing_is_empty && has_real_fields)
                 {
@@ -4264,10 +4456,8 @@ impl BytecodeCompiler {
                         .filter(|f| !f.is_comptime)
                         .map(|f| (f.name.clone(), f.type_annotation.clone()))
                         .collect::<std::collections::HashMap<_, _>>();
-                    self.struct_types.insert(
-                        struct_def.name.clone(),
-                        (runtime_field_names, *span),
-                    );
+                    self.struct_types
+                        .insert(struct_def.name.clone(), (runtime_field_names, *span));
                     self.struct_generic_info.insert(
                         struct_def.name.clone(),
                         StructGenericInfo {
@@ -4297,9 +4487,8 @@ impl BytecodeCompiler {
                     };
                     self.type_aliases.insert(
                         type_alias.name.clone(),
-                        base_type_name.unwrap_or_else(|| {
-                            format!("{:?}", type_alias.type_annotation)
-                        }),
+                        base_type_name
+                            .unwrap_or_else(|| format!("{:?}", type_alias.type_annotation)),
                     );
                     self.type_inference.env.define_type_alias(
                         &type_alias.name,
@@ -4309,9 +4498,7 @@ impl BytecodeCompiler {
                 }
                 Ok(())
             }
-            Item::BuiltinFunctionDecl(def, _) => {
-                self.register_builtin_function_decl(def)
-            }
+            Item::BuiltinFunctionDecl(def, _) => self.register_builtin_function_decl(def),
             Item::ForeignFunction(def, _) => {
                 if !self.function_defs.contains_key(&def.name) {
                     // Register arity + foreign def (same as register_item_functions)
@@ -4360,10 +4547,8 @@ impl BytecodeCompiler {
                             .filter(|f| !f.is_comptime)
                             .map(|f| (f.name.clone(), f.type_annotation.clone()))
                             .collect::<std::collections::HashMap<_, _>>();
-                        self.struct_types.insert(
-                            struct_def.name.clone(),
-                            (runtime_field_names, Span::DUMMY),
-                        );
+                        self.struct_types
+                            .insert(struct_def.name.clone(), (runtime_field_names, Span::DUMMY));
                         self.struct_generic_info.insert(
                             struct_def.name.clone(),
                             StructGenericInfo {
@@ -4389,9 +4574,8 @@ impl BytecodeCompiler {
                         };
                         self.type_aliases.insert(
                             type_alias.name.clone(),
-                            base_type_name.unwrap_or_else(|| {
-                                format!("{:?}", type_alias.type_annotation)
-                            }),
+                            base_type_name
+                                .unwrap_or_else(|| format!("{:?}", type_alias.type_annotation)),
                         );
                         self.type_inference.env.define_type_alias(
                             &type_alias.name,
@@ -4401,9 +4585,7 @@ impl BytecodeCompiler {
                     }
                     Ok(())
                 }
-                ExportItem::BuiltinFunction(def) => {
-                    self.register_builtin_function_decl(def)
-                }
+                ExportItem::BuiltinFunction(def) => self.register_builtin_function_decl(def),
                 ExportItem::ForeignFunction(def) => {
                     if !self.function_defs.contains_key(&def.name) {
                         let caller_visible = def.params.iter().filter(|p| !p.is_out).count();
@@ -4421,9 +4603,7 @@ impl BytecodeCompiler {
             // Impl and Extend blocks: delegate to register_item_functions
             // which handles the full registration (desugar methods, trait symbols,
             // type inference impls, drop tracking, etc.)
-            Item::Impl(..) | Item::Extend(..) => {
-                self.register_item_functions(item)
-            }
+            Item::Impl(..) | Item::Extend(..) => self.register_item_functions(item),
             Item::Module(module, _) => {
                 let module_path = self.current_module_path_for(module.name.as_str());
                 self.module_scope_stack.push(module_path.clone());
@@ -4833,8 +5013,7 @@ impl BytecodeCompiler {
                 // Phase 4b Round 6 WS-1b W16.2-C residual: capture the bare
                 // empty-array-accumulator placeholder index alongside the
                 // other initializer-derived signals.
-                let captured_empty_array_alloc_idx =
-                    self.pending_empty_array_alloc_idx.take();
+                let captured_empty_array_alloc_idx = self.pending_empty_array_alloc_idx.take();
 
                 // ADR-006 §2.7.24 Q25.C: coerce-to-dyn emission. When the
                 // binding's annotation is `TypeAnnotation::Dyn(traits)`,
@@ -4862,11 +5041,9 @@ impl BytecodeCompiler {
                         })
                         .unwrap_or(false);
                 if is_dyn_coerce {
-                    if let Some(trait_name) = var_decl
-                        .type_annotation
-                        .as_ref()
-                        .and_then(crate::compiler::trait_object_emission::trait_name_from_annotation)
-                    {
+                    if let Some(trait_name) = var_decl.type_annotation.as_ref().and_then(
+                        crate::compiler::trait_object_emission::trait_name_from_annotation,
+                    ) {
                         let sid = self.program.add_string(trait_name.to_string());
                         self.emit(Instruction::new(
                             OpCode::BoxTraitObject,
@@ -4957,7 +5134,8 @@ impl BytecodeCompiler {
 
                         // v2 Phase 3.1 (Agent 3): record v2 typed array kind for this binding
                         if let Some(kind) = captured_typed_array_kind {
-                            self.v2_typed_array_module_bindings.insert(binding_idx, kind);
+                            self.v2_typed_array_module_bindings
+                                .insert(binding_idx, kind);
                         }
                         // Phase 4b Round 6 WS-1b W16.2-C residual: re-key a
                         // bare empty-array-accumulator placeholder against
@@ -4987,17 +5165,28 @@ impl BytecodeCompiler {
                         // binding so subsequent `a.method()` calls emit
                         // `OpCode::DynMethodCall` instead of the standard
                         // `OpCode::CallMethod` path.
-                        if let Some(trait_name) = var_decl
-                            .type_annotation
-                            .as_ref()
-                            .and_then(crate::compiler::trait_object_emission::trait_name_from_annotation)
-                        {
+                        if let Some(trait_name) = var_decl.type_annotation.as_ref().and_then(
+                            crate::compiler::trait_object_emission::trait_name_from_annotation,
+                        ) {
                             self.dyn_module_bindings
                                 .insert(binding_idx, trait_name.to_string());
                         }
 
                         // Track type annotation if present (for type checker)
                         if let Some(ref type_ann) = var_decl.type_annotation {
+                            // strict-flip (map/collect OUTPUT element-type
+                            // stamp): reject `let r: Array<number> =
+                            // [1,2,3].map(|x| x*2)` — the map output element is
+                            // the closure RETURN type (`int`), so the result is
+                            // `Array<int>`, which must NOT coerce to
+                            // `Array<number>`. Runs BEFORE the annotation drives
+                            // the slot stamp below, so a stale `Float64` stamp
+                            // never reaches an `Int64` carrier.
+                            if let Some(init_expr) = var_decl.value.as_ref() {
+                                self.check_let_annotation_element_type_strict(
+                                    type_ann, init_expr,
+                                )?;
+                            }
                             if let Some(type_name) =
                                 Self::tracked_type_name_from_annotation(type_ann)
                             {
@@ -5220,12 +5409,11 @@ impl BytecodeCompiler {
                     // emitting one extra opcode per binding across an entire pipeline
                     // is measurable, and the hint is free to consult.
                     if let Some(name) = var_decl.pattern.as_identifier() {
-                        let is_owned_binding = var_decl.kind == VarKind::Let
-                            || var_decl.kind == VarKind::Const;
+                        let is_owned_binding =
+                            var_decl.kind == VarKind::Let || var_decl.kind == VarKind::Const;
                         if is_owned_binding {
                             if let Some(local_idx) = self.resolve_local(name) {
-                                let box_by_default =
-                                    super::helpers::box_by_default_enabled();
+                                let box_by_default = super::helpers::box_by_default_enabled();
                                 let should_promote = self
                                     .mir_storage_class_for_slot(local_idx)
                                     .map_or(false, |sc| {
@@ -5353,6 +5541,19 @@ impl BytecodeCompiler {
                     // Track type annotation first (so drop tracking can resolve the type)
                     if let Some(name) = var_decl.pattern.as_identifier() {
                         if let Some(ref type_ann) = var_decl.type_annotation {
+                            // strict-flip (map/collect OUTPUT element-type
+                            // stamp): mirror of the module-binding path — reject
+                            // `let r: Array<number> = [1,2,3].map(|x| x*2)`
+                            // (and the `.iter().map(...).collect()` form). The
+                            // map output element is the closure RETURN type, so
+                            // an `Array<int>` result must NOT coerce to
+                            // `Array<number>`. Runs before the annotation stamps
+                            // the local slot kind.
+                            if let Some(init_expr) = var_decl.value.as_ref() {
+                                self.check_let_annotation_element_type_strict(
+                                    type_ann, init_expr,
+                                )?;
+                            }
                             if let Some(type_name) =
                                 Self::tracked_type_name_from_annotation(type_ann)
                             {
@@ -5378,11 +5579,12 @@ impl BytecodeCompiler {
                             // local so subsequent `a.method()` calls
                             // route through `OpCode::DynMethodCall`.
                             if let Some(trait_name) =
-                                crate::compiler::trait_object_emission::trait_name_from_annotation(type_ann)
+                                crate::compiler::trait_object_emission::trait_name_from_annotation(
+                                    type_ann,
+                                )
                             {
                                 if let Some(local_idx) = self.resolve_local(name) {
-                                    self.dyn_locals
-                                        .insert(local_idx, trait_name.to_string());
+                                    self.dyn_locals.insert(local_idx, trait_name.to_string());
                                 }
                             }
                         } else if let Some(local_idx) = self.resolve_local(name) {
@@ -5891,9 +6093,7 @@ impl BytecodeCompiler {
                             self.module_bindings
                                 .get(&scoped)
                                 .copied()
-                                .and_then(|idx| {
-                                    self.mut_self_container_bindings.get(&idx).copied()
-                                })
+                                .and_then(|idx| self.mut_self_container_bindings.get(&idx).copied())
                         } else {
                             None
                         };
@@ -5937,8 +6137,8 @@ impl BytecodeCompiler {
                             // v2-raw `TypedArray<T>` receiver is a
                             // kind-mismatch (the V3-S5 `op_array_push`
                             // strict-kind check).
-                            let typed_kind = self
-                                .resolve_receiver_typed_array_kind(receiver.as_ref());
+                            let typed_kind =
+                                self.resolve_receiver_typed_array_kind(receiver.as_ref());
                             if let Some(local_idx) = self.resolve_local(recv_name) {
                                 if !self.ref_locals.contains(&local_idx) {
                                     self.check_named_binding_write_allowed(
