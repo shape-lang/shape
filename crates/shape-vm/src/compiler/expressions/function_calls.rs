@@ -1888,6 +1888,28 @@ impl BytecodeCompiler {
                 } else {
                     None
                 }
+            })
+            // Wave 1b iterator-HOF (2026-06-15): when the receiver is an
+            // element-type-PRESERVING iterator adapter chain
+            // (`[1,2,3].iter()`, `arr.iter().filter(..).take(n)`), the
+            // receiver `ConcreteType` is not an `Array<T>` (Iterator has no
+            // `ConcreteType` variant), so the array paths above yield `None`.
+            // `iter_element_type_name` recovers the element-type NAME from the
+            // adapter chain (recursing through `iter`/`filter`/`take`/`skip`,
+            // the type-preserving adapters). Map that name to a
+            // `TypeAnnotation`, but ONLY when it resolves to a known concrete
+            // type — `declared_annotation_concrete_type` is the proof gate, so
+            // an un-resolvable element name SURFACEs (the closure param stays
+            // unannotated, exactly as for an array receiver whose element type
+            // can't be proven). int and number stay distinct: the name carries
+            // the exact proven element type, never a numeric default.
+            .or_else(|| {
+                let elem_name = self.iter_element_type_name(receiver)?;
+                let ann = shape_ast::ast::TypeAnnotation::Basic(elem_name);
+                crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                    self, &ann,
+                )
+                .map(|_| ann)
             });
         // R3-elemerasure (strict-flip) — SURFACED sub-case: an object-element
         // HOF (`users.filter(|u| u.score > 85)`) does NOT recover the struct

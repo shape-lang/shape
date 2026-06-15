@@ -1654,13 +1654,19 @@ impl BytecodeCompiler {
         }
     }
 
-    /// Strip an `Array<T>` / `Vec<T>` wrapper to recover the element type
-    /// name. Returns `None` for non-array tracker names.
+    /// Strip an `Array<T>` / `Vec<T>` / `Iterator<T>` wrapper to recover the
+    /// element type name. Returns `None` for non-iterable tracker names.
+    ///
+    /// `Iterator<T>` is included (Wave 1b iterator-HOF, 2026-06-15) so that a
+    /// `let`-bound iterator (`let it = arr.iter(); it.reduce(..)`) recovers its
+    /// element type `T` for closure-param seeding — the iterator yields `T`,
+    /// exactly like iterating an `Array<T>`.
     fn array_type_name_inner(name: &str) -> Option<String> {
         let trimmed = name.trim();
         let inner = trimmed
             .strip_prefix("Vec<")
-            .or_else(|| trimmed.strip_prefix("Array<"))?
+            .or_else(|| trimmed.strip_prefix("Array<"))
+            .or_else(|| trimmed.strip_prefix("Iterator<"))?
             .strip_suffix('>')?;
         Some(inner.trim().to_string())
     }
