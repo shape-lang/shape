@@ -29,8 +29,7 @@ impl TypeInferenceEngine {
                         p,
                         shape_ast::interpolation::InterpolationPart::Expression {
                             format_spec: Some(
-                                shape_ast::interpolation::InterpolationFormatSpec
-                                    ::ContentStyle(_),
+                                shape_ast::interpolation::InterpolationFormatSpec::ContentStyle(_),
                             ),
                             ..
                         }
@@ -99,7 +98,8 @@ impl TypeInferenceEngine {
                 // still rejects. An out-of-range literal does not adopt.
                 if let Some(adopted) = Self::adopt_int_literal_in_context(left, &right_type) {
                     left_type = adopted;
-                } else if let Some(adopted) = Self::adopt_int_literal_in_context(right, &left_type) {
+                } else if let Some(adopted) = Self::adopt_int_literal_in_context(right, &left_type)
+                {
                     right_type = adopted;
                 }
                 // ROOT-1 (comparison-literal-adoption ordering): when the
@@ -197,7 +197,9 @@ impl TypeInferenceEngine {
                     for arg in args {
                         self.infer_expr(arg)?;
                     }
-                    Ok(Type::Concrete(TypeAnnotation::Reference(namespace.as_str().into())))
+                    Ok(Type::Concrete(TypeAnnotation::Reference(
+                        namespace.as_str().into(),
+                    )))
                 } else if self.env.lookup(namespace).is_some()
                     || self.struct_type_defs.contains_key(namespace.as_str())
                     || self.env.lookup_type_alias(namespace).is_some()
@@ -254,9 +256,7 @@ impl TypeInferenceEngine {
                     // fabrication).
                     let elem_type = self.fresh_type_var();
                     Ok(Type::Generic {
-                        base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                            "Array".into(),
-                        ))),
+                        base: Box::new(Type::Concrete(TypeAnnotation::Reference("Array".into()))),
                         args: vec![elem_type],
                     })
                 } else {
@@ -277,10 +277,9 @@ impl TypeInferenceEngine {
                     // §2 lattice. The unifying element type is the float family
                     // when ANY element contributes it and EVERY non-float element
                     // is a bare int literal that losslessly fits `number`.
-                    let elem_ctx = self.array_literal_numeric_element_context(elements, &elem_types);
-                    let first_type = elem_ctx
-                        .clone()
-                        .unwrap_or_else(|| elem_types[0].clone());
+                    let elem_ctx =
+                        self.array_literal_numeric_element_context(elements, &elem_types);
+                    let first_type = elem_ctx.clone().unwrap_or_else(|| elem_types[0].clone());
 
                     for (i, elem_type) in elem_types.iter().enumerate() {
                         // A bare int literal element that adopts the unified
@@ -293,7 +292,8 @@ impl TypeInferenceEngine {
                         if i == 0 && elem_ctx.is_none() {
                             continue;
                         }
-                        self.constraints.push((first_type.clone(), elem_type.clone()));
+                        self.constraints
+                            .push((first_type.clone(), elem_type.clone()));
                     }
 
                     Ok(BuiltinTypes::array(first_type))
@@ -600,13 +600,28 @@ impl TypeInferenceEngine {
                 // so closures get their param types from the method signature.
                 let (type_name, receiver_params) =
                     MethodTable::extract_receiver_info(&receiver_type);
-                let gsig_opt = type_name
+                let gsig_opt = type_name.as_ref().and_then(|tn| {
+                    self.method_table
+                        .lookup_generic_signature(tn, method)
+                        .cloned()
+                });
+                // Retain the gsig + the per-callsite fresh `method_vars` so the
+                // method's RETURN type can be resolved against the SAME vars the
+                // expected param types reference. This is what lets a closure's
+                // proven return type flow into a `MethodParam`-position result
+                // element (`[1,2,3].map(|x| x*2)` → `MethodParam(0)` bound to
+                // `int` → result `Array<int>`, parity with `filter`'s
+                // `SelfType` element preservation). See the closure-return
+                // binding block after `arg_types` below.
+                let method_vars: Vec<Type> = gsig_opt
                     .as_ref()
-                    .and_then(|tn| self.method_table.lookup_generic_signature(tn, method).cloned());
-                let expected_arg_types: Option<Vec<Type>> = gsig_opt.map(|gsig| {
-                    let method_vars: Vec<Type> = (0..gsig.method_type_params)
-                        .map(|_| self.fresh_type_var())
-                        .collect();
+                    .map(|gsig| {
+                        (0..gsig.method_type_params)
+                            .map(|_| self.fresh_type_var())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let expected_arg_types: Option<Vec<Type>> = gsig_opt.as_ref().map(|gsig| {
                     gsig.param_types
                         .iter()
                         .map(|pt| {
@@ -697,8 +712,7 @@ impl TypeInferenceEngine {
                             continue;
                         }
                         if let Some(arg_ty) = arg_types.get(i) {
-                            self.constraints
-                                .push((arg_ty.clone(), expected_ty.clone()));
+                            self.constraints.push((arg_ty.clone(), expected_ty.clone()));
                             let resolved_arg = self.unifier.apply_substitutions(arg_ty);
                             if !self.type_contains_unresolved_vars(&resolved_arg)
                                 && self.unifier.lookup(var).is_none()
@@ -706,6 +720,103 @@ impl TypeInferenceEngine {
                                 self.unifier.bind(var.clone(), resolved_arg);
                             }
                         }
+                    }
+                }
+
+                // STRICT-FLIP (v0.3.3 map/collect OUTPUT element stamp): bind the
+                // method's RETURN-position `MethodParam` vars from the actual
+                // closure argument's proven type. `map`'s signature is
+                // `(fn(ReceiverParam(0)) -> MethodParam(0)) -> Vec<MethodParam(0)>`;
+                // the result element IS the closure's return type. The bare-
+                // variable block above only binds value-position params (HashMap
+                // K/V); a function-typed param's INNER return var (`MethodParam(0)`
+                // inside the `fn(...) -> MethodParam(0)` expected type) is never
+                // bound there, so the result stayed `Vec<freshvar>` — a FREE
+                // tyvar that later unified with ANY annotation (`let r =
+                // [1,2,3].map(|x| x*2); let n: number = r[0]` wrongly ACCEPTED).
+                //
+                // Parity with `filter` (which returns `SelfType` → the receiver's
+                // concrete `Array<int>` element): we unify the expected function-
+                // param's return position against the actual closure arg's return
+                // position so the closure's proven return type (`int` from
+                // `x * 2` with `x: ReceiverParam(0) = int`) binds `MethodParam(0)`.
+                // Per ADR-006 §2.7.5 stamp-at-compile-time: the closure's inferred
+                // return type IS the proof — no coercion, no fabrication. An
+                // un-inferable closure return leaves `MethodParam(0)` a var, so a
+                // numeric annotation on the result still REJECTS (not coerces).
+                // `int` and `number` do NOT unify (CLAUDE.md §Type-System-Rules).
+                if let Some(ref expected) = expected_arg_types {
+                    for (i, expected_ty) in expected.iter().enumerate() {
+                        // Only the engine-level `Type::Function` form carries a
+                        // `MethodParam`-resolved var in return position (the
+                        // `resolve_type_param_expr` `Function` arm builds a
+                        // `Type::Function`); a `Concrete(Function)` expected type
+                        // is fully concrete already and needs no binding.
+                        let Type::Function {
+                            returns: exp_ret, ..
+                        } = expected_ty
+                        else {
+                            continue;
+                        };
+                        // BOUNDED TIGHTLY to a return position that is a bare
+                        // `MethodParam` var (the `map` / `flatMap` element var).
+                        // A CONCRETE expected return (`sort`'s comparator
+                        // `(T,T) -> number`, `findIndex` `-> int`, `every`/`some`
+                        // `-> bool`) is LEFT ALONE — its prior soft-`Synth`
+                        // unify-probe behavior must be preserved: a named
+                        // comparator `fn asc(a:int,b:int)->int` passed to `sort`
+                        // (whose registered comparator return is `number`) must
+                        // NOT push a hard `int ~ number` constraint here (that
+                        // wrongly rejected `[..].sort(asc)`; the comparator result
+                        // is discarded, so its exact numeric family is not
+                        // load-bearing). Only a `MethodParam`-derived result var
+                        // (whose value flows into the method RESULT element type)
+                        // needs binding.
+                        let Type::Variable(ret_var) = exp_ret.as_ref() else {
+                            continue;
+                        };
+                        let actual_ret = match arg_types.get(i) {
+                            Some(Type::Function { returns, .. }) => returns.as_ref().clone(),
+                            Some(Type::Concrete(TypeAnnotation::Function {
+                                returns: cret,
+                                ..
+                            })) => Type::Concrete(*cret.clone()),
+                            _ => continue,
+                        };
+                        // Deferred constraint (sound default) + eager bind when the
+                        // closure return is concrete, so the method-call result
+                        // element type is concrete immediately (the strict
+                        // annotation check + index-access type both run before the
+                        // deferred solver).
+                        self.constraints
+                            .push((actual_ret.clone(), exp_ret.as_ref().clone()));
+                        let resolved_actual = self.unifier.apply_substitutions(&actual_ret);
+                        if !self.type_contains_unresolved_vars(&resolved_actual)
+                            && self.unifier.lookup(ret_var).is_none()
+                        {
+                            self.unifier.bind(ret_var.clone(), resolved_actual);
+                        }
+                    }
+                }
+
+                // STRICT-FLIP (v0.3.3): resolve the method-call RESULT type using
+                // the SAME `method_vars` whose return-position vars were just
+                // bound from the closure argument — NOT `resolve_method_call`,
+                // which mints its own fresh (and therefore unbound) `method_vars`,
+                // re-introducing the free-tyvar hole. Only fires for a generic
+                // signature that actually carries method type params (`map`,
+                // `flatMap`, `reduce`, …); the `method_vars.is_empty()` /
+                // no-gsig cases fall through to the established
+                // `resolve_method_call` path below unchanged.
+                if let Some(ref gsig) = gsig_opt {
+                    if !method_vars.is_empty() {
+                        let result_type = MethodTable::resolve_type_param_expr(
+                            &gsig.return_type,
+                            &receiver_type,
+                            &receiver_params,
+                            &method_vars,
+                        );
+                        return Ok(self.unifier.apply_substitutions(&result_type));
                     }
                 }
 
@@ -744,11 +855,11 @@ impl TypeInferenceEngine {
                     // (struct fields are a stable identity) without leaking
                     // any new naming convention.
                     if !gated {
-                        if let Type::Concrete(TypeAnnotation::Object(actual_fields)) = &receiver_type
-                            && let Some(struct_name) = self.struct_name_for_object_shape(actual_fields)
-                            && self
-                                .method_table
-                                .is_comptime_method(&struct_name, method)
+                        if let Type::Concrete(TypeAnnotation::Object(actual_fields)) =
+                            &receiver_type
+                            && let Some(struct_name) =
+                                self.struct_name_for_object_shape(actual_fields)
+                            && self.method_table.is_comptime_method(&struct_name, method)
                         {
                             return Err(TypeError::ComptimeMethodCallOutsideComptime {
                                 type_name: struct_name,
@@ -787,8 +898,7 @@ impl TypeInferenceEngine {
                 if let Type::Concrete(TypeAnnotation::Dyn(traits)) = &receiver_type {
                     use shape_ast::ast::{TraitMember, TraitMemberSignature};
                     for trait_path in traits {
-                        let Some(trait_def) = self.env.lookup_trait(trait_path.as_str())
-                        else {
+                        let Some(trait_def) = self.env.lookup_trait(trait_path.as_str()) else {
                             continue;
                         };
                         for member in &trait_def.members {
@@ -838,9 +948,8 @@ impl TypeInferenceEngine {
                                     // `{ greet: |name| ... }`) back to a Variable so the
                                     // call arg substitutes it, instead of failing the
                                     // unsolvable constraint `arg ~ "tyvar:Tn"`.
-                                    let param_ty = match annotation_as_tyvar(
-                                        &param.type_annotation,
-                                    ) {
+                                    let param_ty = match annotation_as_tyvar(&param.type_annotation)
+                                    {
                                         Some(var) => Type::Variable(var),
                                         None => Type::Concrete(param.type_annotation.clone()),
                                     };
@@ -912,8 +1021,7 @@ impl TypeInferenceEngine {
                 // `unknown * int`. Applying substitutions resolves `T → int`;
                 // no fabrication — the binder type comes verbatim from the
                 // already-registered constraint.
-                let scrutinee_type =
-                    self.unifier.apply_substitutions(&raw_scrutinee_type);
+                let scrutinee_type = self.unifier.apply_substitutions(&raw_scrutinee_type);
 
                 // Collect all arm return types
                 let mut arm_types: Vec<Type> = Vec::new();
@@ -1005,12 +1113,9 @@ impl TypeInferenceEngine {
                 //   - all non-var arms structurally equal → that type; or
                 //   - all non-var arms numeric (int/number) → `number` if any
                 //     is `number`, else `int`.
-                let is_int = |t: &Type| {
-                    matches!(t, Type::Concrete(TypeAnnotation::Basic(n)) if n == "int")
-                };
-                let is_number = |t: &Type| {
-                    matches!(t, Type::Concrete(TypeAnnotation::Basic(n)) if n == "number")
-                };
+                let is_int =
+                    |t: &Type| matches!(t, Type::Concrete(TypeAnnotation::Basic(n)) if n == "int");
+                let is_number = |t: &Type| matches!(t, Type::Concrete(TypeAnnotation::Basic(n)) if n == "number");
                 // Same-base generic arms (e.g. every arm a `Result<…>` /
                 // `Option<…>`): a match whose arms all build the same generic
                 // family yields that family, not a nominal union of the
@@ -1027,7 +1132,9 @@ impl TypeInferenceEngine {
                     _ => None,
                 };
                 let all_same_base_generic = non_var_types.len() > 1
-                    && non_var_types.iter().all(|t| matches!(t, Type::Generic { .. }))
+                    && non_var_types
+                        .iter()
+                        .all(|t| matches!(t, Type::Generic { .. }))
                     && {
                         let first_base = generic_base(&non_var_types[0]);
                         first_base.is_some()
@@ -1128,10 +1235,7 @@ impl TypeInferenceEngine {
                 // prior behavior (bind the WHOLE element type to each name);
                 // destructure-precise field typing is not required to keep the
                 // bindings in scope.
-                fn collect_pattern_names(
-                    p: &shape_ast::ast::Pattern,
-                    out: &mut Vec<String>,
-                ) {
+                fn collect_pattern_names(p: &shape_ast::ast::Pattern, out: &mut Vec<String>) {
                     use shape_ast::ast::Pattern::*;
                     match p {
                         Identifier(n) => out.push(n.clone()),
@@ -1282,9 +1386,7 @@ impl TypeInferenceEngine {
                             self.infer_assignment(assign, *block_span)?;
                             BuiltinTypes::void()
                         }
-                        shape_ast::ast::BlockItem::Statement(stmt) => {
-                            self.infer_statement(stmt)?
-                        }
+                        shape_ast::ast::BlockItem::Statement(stmt) => self.infer_statement(stmt)?,
                         shape_ast::ast::BlockItem::Expression(expr) => self.infer_expr(expr)?,
                     };
                 }
@@ -1702,8 +1804,7 @@ impl TypeInferenceEngine {
         // Every element must be either a float-family contribution or a bare int
         // literal that fits `number`.
         let all_adoptable = elements.iter().zip(elem_types.iter()).all(|(expr, ty)| {
-            is_float_concrete(ty)
-                || Self::adopt_int_literal_in_context(expr, &number_ty).is_some()
+            is_float_concrete(ty) || Self::adopt_int_literal_in_context(expr, &number_ty).is_some()
         });
         if all_adoptable { Some(number_ty) } else { None }
     }
@@ -1765,9 +1866,7 @@ impl TypeInferenceEngine {
         }
 
         let Some(struct_def) = self.struct_type_defs.get(type_name).cloned() else {
-            return Ok(Type::Concrete(TypeAnnotation::Reference(
-                type_name.into(),
-            )));
+            return Ok(Type::Concrete(TypeAnnotation::Reference(type_name.into())));
         };
 
         // Numeric-conversion §5 (value-level invariant) + §4 (literal adoption),
@@ -1826,9 +1925,7 @@ impl TypeInferenceEngine {
 
         let type_params = struct_def.type_params.unwrap_or_default();
         if type_params.is_empty() {
-            return Ok(Type::Concrete(TypeAnnotation::Reference(
-                type_name.into(),
-            )));
+            return Ok(Type::Concrete(TypeAnnotation::Reference(type_name.into())));
         }
 
         let mut param_bindings: HashMap<String, Vec<Type>> = HashMap::new();
@@ -1871,14 +1968,10 @@ impl TypeInferenceEngine {
             });
 
         if all_default {
-            Ok(Type::Concrete(TypeAnnotation::Reference(
-                type_name.into(),
-            )))
+            Ok(Type::Concrete(TypeAnnotation::Reference(type_name.into())))
         } else {
             Ok(Type::Generic {
-                base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                    type_name.into(),
-                ))),
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference(type_name.into()))),
                 args: resolved_args,
             })
         }
@@ -2057,8 +2150,7 @@ impl TypeInferenceEngine {
                 }
             }
             Pattern::Object(fields) => {
-                let struct_name = scrutinee
-                    .and_then(|ty| self.struct_name_of_type(ty));
+                let struct_name = scrutinee.and_then(|ty| self.struct_name_of_type(ty));
                 for (key, p) in fields {
                     let field_ty = struct_name.as_deref().and_then(|name| {
                         self.struct_field_annotation(name, key)
@@ -2068,8 +2160,7 @@ impl TypeInferenceEngine {
                     // For a plain identifier field, override the
                     // fresh-var binding with the resolved field type.
                     if let (Pattern::Identifier(bind_name), Some(ft)) = (p, &field_ty) {
-                        self.env
-                            .define(bind_name, TypeScheme::mono(ft.clone()));
+                        self.env.define(bind_name, TypeScheme::mono(ft.clone()));
                     }
                 }
             }
@@ -2126,8 +2217,7 @@ impl TypeInferenceEngine {
                         // No variables to bind
                     }
                     PatternConstructorFields::Tuple(patterns) => {
-                        let payload_tys: Option<Vec<TypeAnnotation>> = match &enum_kind
-                        {
+                        let payload_tys: Option<Vec<TypeAnnotation>> = match &enum_kind {
                             Some(shape_ast::ast::EnumMemberKind::Tuple(types)) => {
                                 Some(types.clone())
                             }
@@ -2144,8 +2234,7 @@ impl TypeInferenceEngine {
                         // `number`. Derive the binder type directly from the
                         // scrutinee's already-resolved generic arg `Type` — no
                         // re-resolution, no fabrication.
-                        let builtin_payload: Option<Type> = if payload_tys.is_none()
-                        {
+                        let builtin_payload: Option<Type> = if payload_tys.is_none() {
                             match scrutinee {
                                 Some(Type::Generic { base, args })
                                     if matches!(
@@ -2173,8 +2262,7 @@ impl TypeInferenceEngine {
                             let field_ty = payload_tys
                                 .as_ref()
                                 .and_then(|tys| {
-                                    tys.get(idx)
-                                        .map(|ann| self.resolve_type_annotation(ann))
+                                    tys.get(idx).map(|ann| self.resolve_type_annotation(ann))
                                 })
                                 .or_else(|| {
                                     if idx == 0 {
@@ -2187,11 +2275,8 @@ impl TypeInferenceEngine {
                             // For a plain identifier binder, override the
                             // fresh-var define with the resolved payload
                             // type — same shape as the Object/Struct arms.
-                            if let (Pattern::Identifier(bind_name), Some(ft)) =
-                                (p, &field_ty)
-                            {
-                                self.env
-                                    .define(bind_name, TypeScheme::mono(ft.clone()));
+                            if let (Pattern::Identifier(bind_name), Some(ft)) = (p, &field_ty) {
+                                self.env.define(bind_name, TypeScheme::mono(ft.clone()));
                             }
                         }
                     }
@@ -2203,19 +2288,16 @@ impl TypeInferenceEngine {
                         // (b) An enum struct-variant (`Shape::Circle { r }`):
                         //     look up via `EnumDef` members and use the
                         //     variant's `EnumMemberKind::Struct(fields)`.
-                        let struct_name = scrutinee
-                            .and_then(|ty| self.struct_name_of_type(ty));
-                        let enum_struct_fields: Option<
-                            Vec<shape_ast::ast::ObjectTypeField>,
-                        > = match &enum_kind {
-                            Some(shape_ast::ast::EnumMemberKind::Struct(fields)) => {
-                                Some(fields.clone())
-                            }
-                            _ => None,
-                        };
+                        let struct_name = scrutinee.and_then(|ty| self.struct_name_of_type(ty));
+                        let enum_struct_fields: Option<Vec<shape_ast::ast::ObjectTypeField>> =
+                            match &enum_kind {
+                                Some(shape_ast::ast::EnumMemberKind::Struct(fields)) => {
+                                    Some(fields.clone())
+                                }
+                                _ => None,
+                            };
                         for (key, p) in field_pats {
-                            let field_ty = if let Some(name) = struct_name.as_deref()
-                            {
+                            let field_ty = if let Some(name) = struct_name.as_deref() {
                                 self.struct_field_annotation(name, key)
                                     .map(|ann| self.resolve_type_annotation(&ann))
                             } else {
@@ -2223,19 +2305,12 @@ impl TypeInferenceEngine {
                                     fields
                                         .iter()
                                         .find(|f| &f.name == key)
-                                        .map(|f| {
-                                            self.resolve_type_annotation(
-                                                &f.type_annotation,
-                                            )
-                                        })
+                                        .map(|f| self.resolve_type_annotation(&f.type_annotation))
                                 })
                             };
                             self.bind_pattern_vars_typed(p, field_ty.as_ref())?;
-                            if let (Pattern::Identifier(bind_name), Some(ft)) =
-                                (p, &field_ty)
-                            {
-                                self.env
-                                    .define(bind_name, TypeScheme::mono(ft.clone()));
+                            if let (Pattern::Identifier(bind_name), Some(ft)) = (p, &field_ty) {
+                                self.env.define(bind_name, TypeScheme::mono(ft.clone()));
                             }
                         }
                     }
@@ -2250,7 +2325,9 @@ impl TypeInferenceEngine {
         match ty {
             Type::Generic { base, args } if !args.is_empty() => match base.as_ref() {
                 Type::Concrete(ann)
-                    if ann.as_type_name_str().is_some_and(|n| n == "Result" || n == "Option") =>
+                    if ann
+                        .as_type_name_str()
+                        .is_some_and(|n| n == "Result" || n == "Option") =>
                 {
                     Some(args[0].clone())
                 }
@@ -2471,9 +2548,7 @@ mod tests {
         engine.push_fallible_scope();
 
         let result_number = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
             args: vec![BuiltinTypes::number()],
         };
         engine.env.define("value", TypeScheme::mono(result_number));
@@ -2613,9 +2688,7 @@ mod tests {
         );
         engine.env.define(
             "value",
-            TypeScheme::mono(Type::Concrete(TypeAnnotation::Reference(
-                "Price".into(),
-            ))),
+            TypeScheme::mono(Type::Concrete(TypeAnnotation::Reference("Price".into()))),
         );
 
         let expr =

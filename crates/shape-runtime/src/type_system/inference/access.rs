@@ -510,6 +510,30 @@ impl TypeInferenceEngine {
                 self.push_numeric_index_constraint(index_type);
                 Ok(Type::Concrete(*elem_type.clone()))
             }
+            // STRICT-FLIP (v0.3.3 map/collect OUTPUT element stamp): the canonical
+            // `Type::Generic { base: Vec/Array, args: [elem] }` form. A `.map()`
+            // result resolves through `resolve_type_param_expr`'s
+            // `GenericContainer` arm to this engine-level `Type::Generic` shape
+            // (NOT `Type::Concrete(Array(_))` — that form is reserved for
+            // `SelfType`-returning methods like `filter` whose receiver is already
+            // concrete). Without this arm `r[0]` on `let r = [1,2,3].map(|x| x*2)`
+            // fell to the `_` wildcard → a fresh `push_indexable_constraint` var →
+            // a FREE element type that wrongly unified with a `number` annotation.
+            // Extract the element type so `r[0]` resolves to the exact element
+            // (`int` stays `int`; `int` and `number` do NOT unify — CLAUDE.md
+            // §Type-System-Rules). Same `Numeric`-bound index constraint as the
+            // concrete-array arm.
+            Type::Generic { base, args }
+                if args.len() == 1
+                    && matches!(
+                        base.as_ref(),
+                        Type::Concrete(TypeAnnotation::Reference(n))
+                            if n.as_str() == "Vec" || n.as_str() == "Array"
+                    ) =>
+            {
+                self.push_numeric_index_constraint(index_type);
+                Ok(args[0].clone())
+            }
             Type::Concrete(TypeAnnotation::Basic(name)) => {
                 // Check if this is a registered record schema (e.g., "rows" returns "row")
                 if self.env.lookup_record_schema(name).is_some() {

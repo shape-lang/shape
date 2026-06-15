@@ -245,9 +245,7 @@ impl TypeInferenceEngine {
             // adopt — it falls through to the default arm, where `(int, u8)`
             // fails the tightened §2 lattice and `let x: u8 = 300` correctly
             // compile-rejects (never a silent wrap).
-            Expr::Literal(..)
-                if Self::adopt_int_literal_in_context(expr, expected).is_some() =>
-            {
+            Expr::Literal(..) if Self::adopt_int_literal_in_context(expr, expected).is_some() => {
                 Ok(expected.clone())
             }
 
@@ -284,12 +282,12 @@ impl TypeInferenceEngine {
             return None;
         }
         match name {
-            "Some" if self.is_option_type(expected) => {
-                self.result_or_option_success_type(expected).map(|t| vec![t])
-            }
-            "Ok" if self.is_result_type(expected) => {
-                self.result_or_option_success_type(expected).map(|t| vec![t])
-            }
+            "Some" if self.is_option_type(expected) => self
+                .result_or_option_success_type(expected)
+                .map(|t| vec![t]),
+            "Ok" if self.is_result_type(expected) => self
+                .result_or_option_success_type(expected)
+                .map(|t| vec![t]),
             "Err" if self.is_result_type(expected) => {
                 self.result_error_type(expected).map(|e| vec![e])
             }
@@ -311,13 +309,14 @@ impl TypeInferenceEngine {
         args: &[Expr],
         expected: &Type,
     ) -> bool {
-        let Some(payloads) = self.constructor_payload_types_from_expected(name, args.len(), expected)
+        let Some(payloads) =
+            self.constructor_payload_types_from_expected(name, args.len(), expected)
         else {
             return false;
         };
-        args.iter().zip(payloads.iter()).any(|(arg, payload)| {
-            Self::adopt_int_literal_in_context(arg, payload).is_some()
-        })
+        args.iter()
+            .zip(payloads.iter())
+            .any(|(arg, payload)| Self::adopt_int_literal_in_context(arg, payload).is_some())
     }
 
     /// ROOT-B: whether a bare int LITERAL payload of an `Ok`/`Err`/`Some`
@@ -396,15 +395,9 @@ impl TypeInferenceEngine {
         {
             if matches!(
                 hint,
-                Type::Function { .. }
-                    | Type::Concrete(TypeAnnotation::Function { .. })
+                Type::Function { .. } | Type::Concrete(TypeAnnotation::Function { .. })
             ) {
-                return self.check_function_expr_against(
-                    params,
-                    return_type.as_ref(),
-                    body,
-                    hint,
-                );
+                return self.check_function_expr_against(params, return_type.as_ref(), body, hint);
             }
         }
 
@@ -484,7 +477,37 @@ impl TypeInferenceEngine {
 
         // Constrain inferred callable return to expected return type
         self.constraints
-            .push((inferred_return_type, constrained_expected_return.clone()));
+            .push((inferred_return_type.clone(), constrained_expected_return.clone()));
+
+        // STRICT-FLIP (v0.3.3 map/collect OUTPUT element stamp): when the
+        // expected return is a bare `MethodParam` var (the
+        // `(ReceiverParam(0)) -> MethodParam(0)` shape registered for `map` /
+        // `flatMap`), eagerly bind it to the closure's PROVEN inferred return
+        // type. The deferred constraint above binds it eventually, but the
+        // method-call RESULT type (`Vec<MethodParam(0)>`) is resolved at the
+        // call site BEFORE the deferred solver runs — without the eager bind it
+        // stays `Vec<freshvar>`, a FREE tyvar that later unifies with ANY
+        // annotation (`let r = [1,2,3].map(|x| x*2); let n: number = r[0]`
+        // wrongly ACCEPTED). Parity with `filter`'s `SelfType` element (concrete
+        // because the receiver is concrete). Per ADR-006 §2.7.5
+        // stamp-at-compile-time: the closure's inferred return type IS the proof
+        // — `int` stays `int`, `number` stays `number`, they do NOT unify
+        // (CLAUDE.md §Type-System-Rules). An un-inferable closure return leaves
+        // the var unbound (still-unresolved → no bind), so a numeric annotation
+        // on the result REJECTS rather than coerces — no fabrication.
+        let returned_type = if let Type::Variable(ret_var) = &constrained_expected_return {
+            let resolved = self.unifier.apply_substitutions(&inferred_return_type);
+            if !self.type_contains_unresolved_vars(&resolved)
+                && self.unifier.lookup(ret_var).is_none()
+            {
+                self.unifier.bind(ret_var.clone(), resolved.clone());
+                resolved
+            } else {
+                constrained_expected_return.clone()
+            }
+        } else {
+            constrained_expected_return.clone()
+        };
 
         // Build the function type using Type::Function to preserve type variables
         let mut actual_param_types: Vec<Type> = Vec::with_capacity(params.len());
@@ -501,7 +524,7 @@ impl TypeInferenceEngine {
 
         Ok(Type::Function {
             params: actual_param_types,
-            returns: Box::new(constrained_expected_return),
+            returns: Box::new(returned_type),
         })
     }
 
