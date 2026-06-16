@@ -363,11 +363,7 @@ pub fn v2_string_code_point_at(
     if i < 0 {
         return Ok(KindedSlot::from_int(-1));
     }
-    let cp = s
-        .chars()
-        .nth(i as usize)
-        .map(|c| c as i64)
-        .unwrap_or(-1);
+    let cp = s.chars().nth(i as usize).map(|c| c as i64).unwrap_or(-1);
     Ok(KindedSlot::from_int(cp))
 }
 
@@ -394,11 +390,10 @@ pub fn v2_string_pad_start(
 ) -> Result<KindedSlot, VMError> {
     let s = receiver_str(args)?;
     let target_len = int_arg(args, 1)?;
-    let pad = args
-        .get(2)
-        .and_then(|a| a.as_str())
-        .unwrap_or(" ");
-    Ok(string_result(pad_to(s, target_len, pad, /*at_start=*/ true)))
+    let pad = args.get(2).and_then(|a| a.as_str()).unwrap_or(" ");
+    Ok(string_result(pad_to(
+        s, target_len, pad, /*at_start=*/ true,
+    )))
 }
 
 /// padEnd / pad_end
@@ -409,26 +404,79 @@ pub fn v2_string_pad_end(
 ) -> Result<KindedSlot, VMError> {
     let s = receiver_str(args)?;
     let target_len = int_arg(args, 1)?;
-    let pad = args
-        .get(2)
-        .and_then(|a| a.as_str())
-        .unwrap_or(" ");
-    Ok(string_result(pad_to(s, target_len, pad, /*at_start=*/ false)))
+    let pad = args.get(2).and_then(|a| a.as_str()).unwrap_or(" ");
+    Ok(string_result(pad_to(
+        s, target_len, pad, /*at_start=*/ false,
+    )))
 }
 
 /// split — `Array<string>` result.
 ///
-/// V3-S5 ckpt-5: TypedArrayData::String result carrier deleted; rebuild
-/// lands at ckpt-6 STRICT close per v2-raw `TypedArray<*const StringObj>`.
+/// V3-S5 ckpt-6 STRICT close (2026-06-16): build an `Array<string>` result by
+/// splitting the receiver on the delimiter and materializing each piece via
+/// the v2-raw `TypedArray<*const StringObj>` carrier — `allocate_empty_typed_array`
+/// + `push_element`'s `V2ElemType::String` arm. Each piece is pushed with
+/// `NativeKind::String` (the `&str` borrowed from `s.split(...)`); the
+/// push-side String arm copies the bytes into a fresh refcount-1 `StringObj`,
+/// so no `Arc<String>` is consumed (we pass a synthesized `Arc<String>` per
+/// piece and let `push_element` retire its share). Result carrier =
+/// `Ptr(HeapKind::TypedArray)`; refcount-balanced (one StringObj share per
+/// element, owned by the array).
 pub fn v2_string_split(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    let _ = receiver_str(args)?;
-    let _ = str_arg(args, 1)?;
-    let _: Option<Arc<String>> = None;
-    Err(ckpt5_string_array_surface("split"))
+    use crate::executor::v2_handlers::v2_array_detect::{
+        V2ElemType, allocate_empty_typed_array, as_v2_typed_array, push_element,
+    };
+    use shape_value::{HeapKind, NativeKind, ValueSlot};
+
+    let s = receiver_str(args)?;
+    let delim = str_arg(args, 1)?;
+
+    let pieces: Vec<&str> = if delim.is_empty() {
+        // Empty delimiter: split into individual characters (one piece per
+        // char), matching the chars()-based semantics used elsewhere. An
+        // empty-delimiter `str::split` would yield empty leading/trailing
+        // pieces; per-char is the well-defined behavior.
+        s.char_indices()
+            .map(|(i, c)| &s[i..i + c.len_utf8()])
+            .collect()
+    } else {
+        s.split(delim).collect()
+    };
+
+    let ptr = allocate_empty_typed_array(V2ElemType::String, pieces.len() as u32);
+    let view = as_v2_typed_array(ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))
+        .ok_or_else(|| {
+            VMError::RuntimeError(
+                "String.split: freshly-allocated typed array failed re-detection".into(),
+            )
+        })?;
+
+    for piece in pieces {
+        // Hand `push_element` an owned `Arc<String>` share via `NativeKind::String`
+        // bits; its String arm copies the bytes into a fresh refcount-1 StringObj
+        // and retires the Arc share (drop_with_kind). One alloc per element.
+        let arc: Arc<String> = Arc::new(piece.to_string());
+        let bits = Arc::into_raw(arc) as usize as u64;
+        if let Err(msg) = push_element(&view, bits, NativeKind::String) {
+            // push_element consumed `bits` only on the success path of its
+            // String arm; on Err the share is still live, so retire it here to
+            // avoid a leak, then release the partial output array.
+            let _retire = unsafe { Arc::from_raw(bits as *const String) };
+            unsafe { shape_value::v2::typed_array::release_v2_typed_array(ptr) };
+            return Err(VMError::RuntimeError(format!(
+                "String.split: push_element failed: {msg}"
+            )));
+        }
+    }
+
+    Ok(KindedSlot::new(
+        ValueSlot::from_u64(ptr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
 }
 
 /// replace — replace all occurrences of `from` with `to`
@@ -465,21 +513,70 @@ pub fn v2_string_substring(
     Ok(string_result(result))
 }
 
-/// join — `Array<T>` receiver, separator (`string`) argument.
+/// join — `Array<string>` receiver, separator (`string`) argument.
 ///
-/// V3-S5 ckpt-5: `Arc<TypedArrayData>` receiver dispatch deleted; rebuild
-/// lands at ckpt-6 STRICT close per per-element-kind v2-raw `TypedArray<T>`
-/// direct access.
+/// V3-S5 ckpt-6 STRICT close (2026-06-16): walk the receiver `Array<string>`
+/// via the v2-raw `read_element` primitive and concatenate the pieces with the
+/// separator into a single `string` result. `read_element` hands a fresh
+/// `StringV2` share per element; we wrap each in a borrowing `KindedSlot` and
+/// read `&str` via `KindedSlot::as_str` (no consume) — the wrapper's `Drop`
+/// retires the fresh share, so the receiver array is left untouched
+/// (refcount-balanced; read-borrow not consume).
 pub fn v2_string_join(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    let _ = str_arg(args, 1)?;
-    // Suppress unused-fn warnings; `format_f64` stays live for forward
-    // compatibility (will be needed when the v2-raw rebuild lands).
+    use crate::executor::v2_handlers::v2_array_detect::{
+        V2ElemType, as_v2_typed_array, read_element,
+    };
+    use shape_value::{NativeKind, ValueSlot};
+
+    let sep = str_arg(args, 1)?;
+
+    let recv = args.first().ok_or(VMError::TypeError {
+        expected: "Array<string> receiver",
+        got: "missing receiver",
+    })?;
+    let view = as_v2_typed_array(recv.slot.raw(), recv.kind).ok_or(VMError::TypeError {
+        expected: "Array<string> receiver",
+        got: "non-array kind",
+    })?;
+    if view.elem_type != V2ElemType::String {
+        return Err(VMError::TypeError {
+            expected: "Array<string> receiver",
+            got: "Array of non-string element kind",
+        });
+    }
+
+    let mut out = String::new();
+    for i in 0..view.len {
+        if i > 0 {
+            out.push_str(sep);
+        }
+        let (bits, kind) = read_element(&view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "String.join: read_element({i}) returned None for Array<string>"
+            ))
+        })?;
+        // `read_element` bumped the StringV2 refcount (fresh share). Wrap so the
+        // share is released on Drop; read the &str by borrow (no consume).
+        let elem = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        match elem.as_str() {
+            Some(piece) => out.push_str(piece),
+            None => {
+                return Err(VMError::RuntimeError(format!(
+                    "String.join: element {i} was not a string (kind {kind:?})"
+                )));
+            }
+        }
+        // `elem` drops here → releases the fresh share read_element handed us.
+    }
+
+    // `format_f64` stays live for non-string numeric-join callers covered
+    // elsewhere; referenced here to suppress unused-fn warnings.
     let _f = format_f64;
-    Err(ckpt5_string_array_surface("join"))
+    Ok(string_result(out))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

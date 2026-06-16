@@ -78,14 +78,14 @@
 //! ckpt-3 sub-cluster (not J.5f scope per supervisor D4). The SURFACE body
 //! is retained but with an updated docstring naming the territory.
 
-use crate::executor::v2_handlers::v2_array_detect::{
-    as_v2_typed_array, cmp_element_natural, permute_array, read_element, V2TypedArrayView,
-};
 use crate::executor::VirtualMachine;
+use crate::executor::v2_handlers::v2_array_detect::{
+    V2TypedArrayView, as_v2_typed_array, cmp_element_natural, permute_array, read_element,
+};
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::HeapKind;
 use shape_value::HeapValue;
-use shape_value::{KindedSlot, NativeKind, ValueSlot, VMError};
+use shape_value::heap_value::HeapKind;
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -202,11 +202,7 @@ fn parse_direction(args: &[KindedSlot], op: &str) -> Result<SortDirection, VMErr
 /// CLAUDE.md §Type System Rules). Float comparison uses `total_cmp`
 /// (NaN-safe). String/Decimal pointers dereference; TypedObject (heap
 /// aggregate) surfaces structured per supervisor D3 (v0.4 territory).
-fn cmp_key_kinded(
-    a: &KindedSlot,
-    b: &KindedSlot,
-    op: &str,
-) -> Result<Ordering, VMError> {
+fn cmp_key_kinded(a: &KindedSlot, b: &KindedSlot, op: &str) -> Result<Ordering, VMError> {
     if a.kind != b.kind {
         return Err(VMError::RuntimeError(format!(
             "{op}: key function produced heterogeneous result kinds {:?} vs {:?} \
@@ -225,10 +221,12 @@ fn cmp_key_kinded(
         | NativeKind::UInt32
         | NativeKind::UInt64
         | NativeKind::UIntSize => a.slot.raw().cmp(&b.slot.raw()),
-        NativeKind::Float64 => f64::from_bits(a.slot.raw())
-            .total_cmp(&f64::from_bits(b.slot.raw())),
-        NativeKind::Float32 => f32::from_bits(a.slot.raw() as u32)
-            .total_cmp(&f32::from_bits(b.slot.raw() as u32)),
+        NativeKind::Float64 => {
+            f64::from_bits(a.slot.raw()).total_cmp(&f64::from_bits(b.slot.raw()))
+        }
+        NativeKind::Float32 => {
+            f32::from_bits(a.slot.raw() as u32).total_cmp(&f32::from_bits(b.slot.raw() as u32))
+        }
         NativeKind::Bool => (a.slot.raw() != 0).cmp(&(b.slot.raw() != 0)),
         NativeKind::Char => (a.slot.raw() as u32).cmp(&(b.slot.raw() as u32)),
         NativeKind::String | NativeKind::StringV2 => {
@@ -350,35 +348,30 @@ fn sort_by_comparator(
     // comparator body runs inline with `&mut vm` access.
     let mut tmp: Vec<u32> = vec![0; len as usize];
     let mut cmp_err: Option<VMError> = None;
-    stable_merge_sort_with_comparator(
-        &mut indices,
-        &mut tmp,
-        &elems,
-        |a_slot, b_slot| {
-            if cmp_err.is_some() {
+    stable_merge_sort_with_comparator(&mut indices, &mut tmp, &elems, |a_slot, b_slot| {
+        if cmp_err.is_some() {
+            return Ordering::Equal;
+        }
+        bump_closure_share(closure);
+        let result = match vm.call_value_immediate_nb(
+            closure,
+            &[a_slot.clone(), b_slot.clone()],
+            ctx.as_deref_mut(),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                cmp_err = Some(e);
                 return Ordering::Equal;
             }
-            bump_closure_share(closure);
-            let result = match vm.call_value_immediate_nb(
-                closure,
-                &[a_slot.clone(), b_slot.clone()],
-                ctx.as_deref_mut(),
-            ) {
-                Ok(r) => r,
-                Err(e) => {
-                    cmp_err = Some(e);
-                    return Ordering::Equal;
-                }
-            };
-            match interpret_comparator_result(&result, op) {
-                Ok(o) => o,
-                Err(e) => {
-                    cmp_err = Some(e);
-                    Ordering::Equal
-                }
+        };
+        match interpret_comparator_result(&result, op) {
+            Ok(o) => o,
+            Err(e) => {
+                cmp_err = Some(e);
+                Ordering::Equal
             }
-        },
-    );
+        }
+    });
     if let Some(e) = cmp_err {
         return Err(e);
     }
@@ -496,8 +489,8 @@ fn sort_by_natural(view: &V2TypedArrayView, op: &'static str) -> Result<Vec<u32>
         for &bits in &bits_vec {
             if bits != 0 {
                 unsafe {
-                    use shape_value::v2::heap_element::HeapElement;
                     use shape_value::heap_value::TypedObjectStorage;
+                    use shape_value::v2::heap_element::HeapElement;
                     <TypedObjectStorage as HeapElement>::release_elem(
                         bits as *const TypedObjectStorage,
                     );
@@ -522,26 +515,22 @@ fn sort_by_natural(view: &V2TypedArrayView, op: &'static str) -> Result<Vec<u32>
     // the sort terminating, with the error captured via a sticky shadow.
     let mut cmp_err: Option<VMError> = None;
     let mut tmp: Vec<u32> = vec![0; len as usize];
-    stable_merge_sort_with_indices(
-        &mut indices,
-        &mut tmp,
-        |ia, ib| {
-            if cmp_err.is_some() {
-                return Ordering::Equal;
-            }
-            match cmp_element_natural(view, bits_vec[ia as usize], bits_vec[ib as usize]) {
-                Some(o) => o,
-                None => {
-                    cmp_err = Some(VMError::RuntimeError(format!(
-                        "Array.{op}: natural-ordering comparison failed for element kind {:?} \
+    stable_merge_sort_with_indices(&mut indices, &mut tmp, |ia, ib| {
+        if cmp_err.is_some() {
+            return Ordering::Equal;
+        }
+        match cmp_element_natural(view, bits_vec[ia as usize], bits_vec[ib as usize]) {
+            Some(o) => o,
+            None => {
+                cmp_err = Some(VMError::RuntimeError(format!(
+                    "Array.{op}: natural-ordering comparison failed for element kind {:?} \
                          (no canonical Ord at v0.3 — supervisor D4 / ADR-006 §2.7.14)",
-                        view.elem_type
-                    )));
-                    Ordering::Equal
-                }
+                    view.elem_type
+                )));
+                Ordering::Equal
             }
-        },
-    );
+        }
+    });
 
     // Drop the read shares for heap-element kinds (String/Decimal) —
     // these were acquired by `read_element`'s heap-arm `v2_retain`.
@@ -599,11 +588,8 @@ fn drop_read_shares(view: &V2TypedArrayView, bits_vec: &[u64]) {
 
 /// In-place stable merge sort on `indices`, comparing via `cmp(ia, ib)`
 /// where `ia` and `ib` are the original element-indices being compared.
-fn stable_merge_sort_with_indices<F>(
-    indices: &mut [u32],
-    tmp: &mut [u32],
-    mut cmp: F,
-) where
+fn stable_merge_sort_with_indices<F>(indices: &mut [u32], tmp: &mut [u32], mut cmp: F)
+where
     F: FnMut(u32, u32) -> Ordering,
 {
     let n = indices.len();
@@ -697,26 +683,22 @@ fn sort_by_key_fn(
     // Pass 2: stable-sort indices by comparing cached keys.
     let mut cmp_err: Option<VMError> = None;
     let mut tmp: Vec<u32> = vec![0; len as usize];
-    stable_merge_sort_with_indices(
-        &mut indices,
-        &mut tmp,
-        |ia, ib| {
-            if cmp_err.is_some() {
+    stable_merge_sort_with_indices(&mut indices, &mut tmp, |ia, ib| {
+        if cmp_err.is_some() {
+            return Ordering::Equal;
+        }
+        let order = match cmp_key_kinded(&keys[ia as usize], &keys[ib as usize], op) {
+            Ok(o) => o,
+            Err(e) => {
+                cmp_err = Some(e);
                 return Ordering::Equal;
             }
-            let order = match cmp_key_kinded(&keys[ia as usize], &keys[ib as usize], op) {
-                Ok(o) => o,
-                Err(e) => {
-                    cmp_err = Some(e);
-                    return Ordering::Equal;
-                }
-            };
-            match direction {
-                SortDirection::Ascending => order,
-                SortDirection::Descending => order.reverse(),
-            }
-        },
-    );
+        };
+        match direction {
+            SortDirection::Ascending => order,
+            SortDirection::Descending => order.reverse(),
+        }
+    });
 
     if let Some(e) = cmp_err {
         return Err(e);
@@ -743,9 +725,7 @@ pub(crate) fn handle_sort_v2(
     ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.is_empty() {
-        return Err(VMError::RuntimeError(
-            "sort: missing receiver".to_string(),
-        ));
+        return Err(VMError::RuntimeError("sort: missing receiver".to_string()));
     }
     let view = extract_view("sort", &args[0])?;
 
@@ -832,6 +812,46 @@ pub(crate) fn handle_join_str_v2(
             args[1].kind
         )));
     }
+
+    // V3-S5 ckpt-6 STRICT close (2026-06-16): `Array<string>.join` — the String
+    // elem_type carrier (the result of `split`, string-array literals) walks via
+    // `read_element` + concatenates with the separator. This is the SplitJoin
+    // round-trip path. Other V2ElemType arms (numeric stringification) remain the
+    // separate ckpt-3 sub-cluster SURFACE below — out of SplitJoin scope.
+    use crate::executor::v2_handlers::v2_array_detect::V2ElemType;
+    let view = extract_view("join", &args[0])?;
+    if view.elem_type == V2ElemType::String {
+        let sep = args[1].as_str().ok_or(VMError::TypeError {
+            expected: "string separator",
+            got: "non-string kind",
+        })?;
+        let mut out = String::new();
+        for i in 0..view.len {
+            if i > 0 {
+                out.push_str(sep);
+            }
+            let (bits, kind) = read_element(&view, i).ok_or_else(|| {
+                VMError::RuntimeError(format!(
+                    "Array.join: read_element({i}) returned None for Array<string>"
+                ))
+            })?;
+            // `read_element` bumped the StringV2 refcount (fresh share). Wrap so
+            // the share is released on Drop; read the &str by borrow (no consume,
+            // the receiver array is left untouched — refcount-balanced).
+            let elem = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+            match elem.as_str() {
+                Some(piece) => out.push_str(piece),
+                None => {
+                    return Err(VMError::RuntimeError(format!(
+                        "Array.join: element {i} was not a string (kind {kind:?})"
+                    )));
+                }
+            }
+            // `elem` drops here → releases the fresh share read_element handed us.
+        }
+        return Ok(KindedSlot::from_string_arc(Arc::new(out)));
+    }
+
     Err(VMError::NotImplemented(
         "joinStr: SURFACE — per-V2ElemType element stringification primitive \
          not yet landed (separate ckpt-3 sub-cluster, not J.5f scope per \
