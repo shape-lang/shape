@@ -20,10 +20,11 @@ fn test_iter_reduce_product() {
     ShapeTest::new(r#"[1, 2, 3, 4].iter().reduce(|acc, x| acc * x, 1)"#).expect_number(24.0);
 }
 
-/// Iter reduce empty.
+/// Iter reduce empty — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_iter_reduce_empty() {
-    ShapeTest::new(r#"[].iter().reduce(|acc, x| acc + x, 99)"#).expect_number(99.0);
+    ShapeTest::new(r#"[].iter().reduce(|acc, x| acc + x, 99)"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Iter find found.
@@ -56,10 +57,11 @@ fn test_iter_any_false() {
     ShapeTest::new(r#"[1, 2, 3].iter().any(|x| x > 10)"#).expect_bool(false);
 }
 
-/// Iter any empty.
+/// Iter any empty — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_iter_any_empty() {
-    ShapeTest::new(r#"[].iter().any(|x| x > 0)"#).expect_bool(false);
+    ShapeTest::new(r#"[].iter().any(|x| x > 0)"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Iter all true.
@@ -74,10 +76,12 @@ fn test_iter_all_false() {
     ShapeTest::new(r#"[2, 4, 6].iter().all(|x| x > 3)"#).expect_bool(false);
 }
 
-/// Iter all empty — vacuous truth.
+/// Iter all empty — bare `[]` receiver is correctly rejected at compile time
+/// (the vacuous-truth behaviour is exercised via annotated/non-empty siblings).
 #[test]
 fn test_iter_all_empty() {
-    ShapeTest::new(r#"[].iter().all(|x| x > 0)"#).expect_bool(true);
+    ShapeTest::new(r#"[].iter().all(|x| x > 0)"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 // =============================================================================
@@ -99,10 +103,11 @@ fn test_iter_enumerate_collect() {
     .expect_number(10.0);
 }
 
-/// Iter enumerate empty.
+/// Iter enumerate empty — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_iter_enumerate_empty() {
-    ShapeTest::new(r#"[].iter().enumerate().collect().length"#).expect_number(0.0);
+    ShapeTest::new(r#"[].iter().enumerate().collect().length"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Iter enumerate count.
@@ -136,16 +141,20 @@ fn test_iter_chain_two_arrays() {
     .expect_number(7.0);
 }
 
-/// Iter chain with empty.
+/// Iter chain with empty — the bare `[]` chain argument is correctly rejected at
+/// compile time (its element type cannot be inferred as the receiver of `.iter()`).
 #[test]
 fn test_iter_chain_with_empty() {
-    ShapeTest::new(r#"[1, 2, 3].iter().chain([].iter()).collect().length"#).expect_number(3.0);
+    ShapeTest::new(r#"[1, 2, 3].iter().chain([].iter()).collect().length"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
-/// Iter chain empty with nonempty.
+/// Iter chain empty with nonempty — the bare `[]` receiver is correctly rejected
+/// at compile time.
 #[test]
 fn test_iter_chain_empty_with_nonempty() {
-    ShapeTest::new(r#"[].iter().chain([4, 5, 6].iter()).collect()[0]"#).expect_number(4.0);
+    ShapeTest::new(r#"[].iter().chain([4, 5, 6].iter()).collect()[0]"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Iter chain then count.
@@ -440,52 +449,60 @@ fn test_single_element_iter_any_check() {
     ShapeTest::new(r#"[42].iter().any(|x| x == 42)"#).expect_bool(true);
 }
 
-/// Iter take from empty.
+/// Iter take from empty — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_iter_take_from_empty() {
-    ShapeTest::new(r#"[].iter().take(5).collect().length"#).expect_number(0.0);
+    ShapeTest::new(r#"[].iter().take(5).collect().length"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
-/// Iter skip from empty.
+/// Iter skip from empty — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_iter_skip_from_empty() {
-    ShapeTest::new(r#"[].iter().skip(5).collect().length"#).expect_number(0.0);
+    ShapeTest::new(r#"[].iter().skip(5).collect().length"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
-/// Iter filter from empty.
+/// Iter filter from empty — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_iter_filter_from_empty() {
-    ShapeTest::new(r#"[].iter().filter(|x| x > 0).collect().length"#).expect_number(0.0);
+    ShapeTest::new(r#"[].iter().filter(|x| x > 0).collect().length"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
-/// Iter reduce from empty.
+/// Iter reduce from empty — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_iter_reduce_from_empty() {
-    ShapeTest::new(r#"[].iter().reduce(|acc, x| acc + x, 0)"#).expect_number(0.0);
+    ShapeTest::new(r#"[].iter().reduce(|acc, x| acc + x, 0)"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
-/// Iter find from empty.
+/// Iter find from empty — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_iter_find_from_empty() {
-    ShapeTest::new(r#"[].iter().find(|x| x > 0)"#).expect_none();
+    ShapeTest::new(r#"[].iter().find(|x| x > 0)"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
-/// Iter any from empty.
+/// Iter any from empty — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_iter_any_from_empty() {
-    ShapeTest::new(r#"[].iter().any(|x| x > 0)"#).expect_bool(false);
+    ShapeTest::new(r#"[].iter().any(|x| x > 0)"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
-/// Iter all from empty.
+/// Iter all from empty — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_iter_all_from_empty() {
-    ShapeTest::new(r#"[].iter().all(|x| x > 0)"#).expect_bool(true);
+    ShapeTest::new(r#"[].iter().all(|x| x > 0)"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
-/// Iter enumerate from empty.
+/// Iter enumerate from empty — bare `[]` receiver is correctly rejected at compile time.
 #[test]
 fn test_iter_enumerate_from_empty() {
-    ShapeTest::new(r#"[].iter().enumerate().collect().length"#).expect_number(0.0);
+    ShapeTest::new(r#"[].iter().enumerate().collect().length"#)
+        .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 // =============================================================================

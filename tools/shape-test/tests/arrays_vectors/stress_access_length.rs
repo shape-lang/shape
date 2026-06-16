@@ -12,14 +12,15 @@ test()"#,
     .expect_number(3.0);
 }
 
-/// Verifies array concat both empty.
+/// Verifies array concat both empty — bare `[]` receiver is correctly rejected at
+/// compile time (strict typing cannot infer the element type).
 #[test]
 fn test_array_concat_both_empty() {
     ShapeTest::new(
         r#"function test() { [].concat([]).length() }
 test()"#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array concat strings.
@@ -109,7 +110,7 @@ fn test_array_take_from_empty() {
         r#"function test() { [].take(5).length() }
 test()"#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array drop basic.
@@ -179,7 +180,7 @@ fn test_array_drop_from_empty() {
         r#"function test() { [].drop(3).length() }
 test()"#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array includes found.
@@ -229,7 +230,7 @@ fn test_array_includes_empty() {
         r#"function test() { [].includes(1) }
 test()"#,
     )
-    .expect_bool(false);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array includes string.
@@ -309,7 +310,7 @@ fn test_array_index_of_empty() {
         r#"function test() { [].indexOf(1) }
 test()"#,
     )
-    .expect_number(-1.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array index of first occurrence.
@@ -399,7 +400,7 @@ fn test_array_flatten_empty_array() {
         r#"function test() { [].flatten().length() }
 test()"#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array flatten three nested.

@@ -232,7 +232,7 @@ fn test_array_length_empty() {
         r#"function test() { [].length() }
 test()"#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array length single.
@@ -323,7 +323,7 @@ fn test_array_first_empty_returns_none() {
         r#"function test() { [].first() }
 test()"#,
     )
-    .expect_none();
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array first string.
@@ -363,7 +363,7 @@ fn test_array_last_empty_returns_none() {
         r#"function test() { [].last() }
 test()"#,
     )
-    .expect_none();
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array last string.
@@ -415,7 +415,7 @@ fn test_array_reverse_empty() {
         r#"function test() { [].reverse().length() }
 test()"#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
 
 /// Verifies array reverse preserves length.
@@ -575,5 +575,5 @@ fn test_array_concat_empty_left() {
         r#"function test() { [].concat([1, 2, 3]).length() }
 test()"#,
     )
-    .expect_number(3.0);
+    .expect_run_err_contains("cannot infer the element type of this empty array");
 }
