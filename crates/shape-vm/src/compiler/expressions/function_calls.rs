@@ -2493,6 +2493,43 @@ impl BytecodeCompiler {
             return Ok(());
         }
 
+        // EmptyArray (strict-flip, 2026-06-16): reject a bare empty-array
+        // LITERAL used directly as a method receiver (`[].iter()`,
+        // `[].map(|x| x)`, `[].count()`) whose element type cannot be proven.
+        //
+        // A bare `[]` literal carries no element-type proof on its own — the
+        // accumulator deferral that rescues `let mut a = []; a.push(x)` only
+        // applies when the literal is BOUND to a binding (re-keyed into
+        // `empty_array_accumulators`, resolved by the first `.push()`). An
+        // inline-receiver `[]` is never bound, so it would otherwise lower to a
+        // placeholder `NewArray(0)` that SURFACEs `op_new_array(0)` at runtime.
+        // Surface a CLEAN compile error here instead (no runtime garbage).
+        //
+        // An ANNOTATED / inferable empty array is unaffected: in
+        // `let a: Array<int> = []; a.map(...)` the receiver is the IDENTIFIER
+        // `a` (which carries the annotation's element type), never the bare
+        // `[]` literal. Only a literal-position empty array reaches this guard.
+        // SURFACE-scope note: resolving the element type of an inline `[]` from
+        // a downstream usage / return-type context (e.g. `_ => []` in a
+        // `-> Array<string>` match arm) is the broader empty-array let-gen
+        // inference the task defers — out of scope here.
+        if let Expr::Array(elements, arr_span) = receiver {
+            if elements.is_empty() {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "cannot infer the element type of this empty array (`[]`). \
+                         It is used directly as the receiver of `.{method}(...)` with \
+                         no `Array<T>` annotation and no element to infer a type from, \
+                         so strict typing cannot prove what element type it holds. \
+                         Bind it with an annotation first \
+                         (`let a: Array<T> = []; a.{method}(...)`) or build a non-empty \
+                         array."
+                    ),
+                    location: Some(self.span_to_source_location(*arr_span)),
+                });
+            }
+        }
+
         // In-place mutation: arr.push(val) → ArrayPushLocal + LoadLocal
         // This is the primary push path for method calls inside function bodies,
         // loops, and blocks (which are compiled as expressions, not statements).
@@ -4906,6 +4943,81 @@ mod r3_elemerasure_tests {
         // element stays `number`, so `x * 2.0` types and the result is float.
         // (Compiles and runs — a wrong int collapse would reject `* 2.0`.)
         let _ = eval_typed_i64("([1, 2, 3].sort().map(|x| x + 1))[0]");
+    }
+}
+
+#[cfg(test)]
+mod empty_array_inline_receiver_tests {
+    //! EmptyArray (strict-flip, 2026-06-16): a bare empty array LITERAL used
+    //! directly as a method receiver (`[].iter()`, `[].map(|x| x)`) has no
+    //! element-type proof and is never bound, so the accumulator deferral that
+    //! rescues `let mut a = []; a.push(x)` cannot apply. Pre-fix it lowered to
+    //! a placeholder `NewArray(0)` that SURFACEd `op_new_array(0)` at RUNTIME;
+    //! now it is a CLEAN compile error. An ANNOTATED empty array is unaffected
+    //! (its receiver is the identifier `a`, which carries the annotation's
+    //! element type) and a non-empty literal receiver is unaffected.
+
+    use crate::test_utils::compile_with_prelude;
+
+    #[test]
+    fn inline_empty_array_map_receiver_is_clean_compile_error() {
+        let res = compile_with_prelude("fn run() { print([].map(|x| x).count()) }\nrun()");
+        assert!(
+            res.is_err(),
+            "inline `[].map(...)` with no element-type proof must reject at compile time"
+        );
+        let msg = format!("{:?}", res.unwrap_err());
+        assert!(
+            msg.contains("empty array") && msg.contains("element type"),
+            "rejection should explain the un-resolvable empty-array element type; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn inline_empty_array_iter_receiver_is_clean_compile_error() {
+        let res = compile_with_prelude("fn run() { print([].iter().count()) }\nrun()");
+        assert!(
+            res.is_err(),
+            "inline `[].iter()` with no element-type proof must reject at compile time"
+        );
+    }
+
+    #[test]
+    fn annotated_empty_array_iter_chain_compiles() {
+        // The receiver here is the IDENTIFIER `a`, not the bare `[]` literal —
+        // the annotation supplies the element type, so the guard does not fire.
+        let res = compile_with_prelude(
+            "fn run() { let a: Array<int> = []; print(a.iter().count()) }\nrun()",
+        );
+        assert!(
+            res.is_ok(),
+            "annotated `let a: Array<int> = []; a.iter()...` should compile: {:?}",
+            res.err()
+        );
+    }
+
+    #[test]
+    fn annotated_empty_array_map_compiles() {
+        let res = compile_with_prelude(
+            "fn run() { let a: Array<int> = []; let b = a.map(|x| x); print(b.len()) }\nrun()",
+        );
+        assert!(
+            res.is_ok(),
+            "annotated empty array `.map(...)` should compile: {:?}",
+            res.err()
+        );
+    }
+
+    #[test]
+    fn non_empty_literal_receiver_still_compiles() {
+        // The guard is scoped to EMPTY literals — a non-empty literal receiver
+        // resolves its element type from its elements and is unaffected.
+        let res = compile_with_prelude("fn run() { print([1, 2, 3].map(|x| x * 2).sum()) }\nrun()");
+        assert!(
+            res.is_ok(),
+            "non-empty literal `.map(...)` receiver must still compile: {:?}",
+            res.err()
+        );
     }
 }
 
