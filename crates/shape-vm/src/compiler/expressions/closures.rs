@@ -869,11 +869,42 @@ pub(crate) fn infer_closure_body_return_type_name_with_caller_context(
                 continue;
             }
         }
+        // Numeric-conversion §4 literal adoption (THE RULE user 2026-06-01),
+        // closure-body parity with the operand-compile widen.
+        //
+        // The caller-context arg type IS the authoritative proof of the
+        // unannotated param's type (it is the receiver element type at the
+        // `.map(|x| …)` call site, resolved via `concrete_type_for_expr`),
+        // whereas the body-literal-pairing heuristic below is only a
+        // SYNTACTIC guess that reads the param's type off a sibling LITERAL.
+        // For `Array<number>.map(|x| x / 2)` the heuristic would mis-read
+        // `x` as `int` from the bare literal `2` — but under §4 it is the
+        // bare literal `2` that ADOPTS the param's `number` (it IS `2.0`),
+        // not the param that adopts the literal's `int`. So when the
+        // call-site supplies a concrete arg type, it takes precedence: the
+        // param resolves `number`, the op is number/number, and this return-
+        // type inference (which names the map's output-element monomorph)
+        // resolves `number` — agreeing with the operand-compile widen so the
+        // result-array element carrier stamps Float64 instead of mis-stamping
+        // Int64 over f64 bits. NOT a return-type constraint and NOT a change
+        // to the element-stamp machinery: only the param-type precedence is
+        // corrected, and only when the call-site actually proved a type
+        // (otherwise the body-literal heuristic still governs, unchanged —
+        // so `|x| x + 1` with no call-site context keeps its `int`, and
+        // comparator/void closures over `Array<int>` keep `int`).
+        let mut resolved_from_caller = false;
+        if let Some(Some(caller_tn)) = caller_arg_type_names.get(param_idx) {
+            param_types.insert(ident.to_string(), caller_tn.clone());
+            resolved_from_caller = true;
+        }
         // Fallback: same body-literal-pairing heuristic the closure
-        // compiler uses for unannotated params (`|x| x + 1`).
-        if let Some(ann) = infer_param_type_from_body(ident, body) {
-            if let Some(tn) = BytecodeCompiler::tracked_type_name_from_annotation(&ann) {
-                param_types.insert(ident.to_string(), tn);
+        // compiler uses for unannotated params (`|x| x + 1`). Only when the
+        // call-site did not already supply a concrete arg type.
+        if !resolved_from_caller {
+            if let Some(ann) = infer_param_type_from_body(ident, body) {
+                if let Some(tn) = BytecodeCompiler::tracked_type_name_from_annotation(&ann) {
+                    param_types.insert(ident.to_string(), tn);
+                }
             }
         }
         // Sweep phase 3c.x: when the param has no annotation and no
@@ -884,18 +915,6 @@ pub(crate) fn infer_closure_body_return_type_name_with_caller_context(
         if !param_types.contains_key(ident) {
             if let Some(tn) = infer_param_type_from_outer_pairing(ident, body, &param_types) {
                 param_types.insert(ident.to_string(), tn);
-            }
-        }
-        // cluster-2-cw-IB-class-b: when no inferred type from local
-        // sources, fall through to the caller-context-supplied arg
-        // type. The arg's type at the call site IS the proof of the
-        // param's type when the closure is invoked there. ADR-006
-        // §2.7.5 stamp-at-compile-time — call-site arg type comes
-        // from `concrete_type_for_expr(arg)` at bytecode-emission, not
-        // from a runtime probe.
-        if !param_types.contains_key(ident) {
-            if let Some(Some(caller_tn)) = caller_arg_type_names.get(param_idx) {
-                param_types.insert(ident.to_string(), caller_tn.clone());
             }
         }
     }
@@ -958,6 +977,46 @@ pub(crate) fn infer_closure_body_return_type_name_with_caller_context(
                     // preserves the type. Comparison/logical ops yield
                     // bool.
                     Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => {
+                        // Numeric-conversion §4 literal adoption (THE RULE
+                        // user 2026-06-01), closure-body parity with the
+                        // operand-compile widen at `binary_ops.rs` (the
+                        // `expr_proves_float` path). When one operand is a
+                        // BARE int literal and the SIBLING resolves to the
+                        // `number`/f64 family (e.g. the closure param `x` of
+                        // `Array<number>.map(|x| x / 2)`, proven `number`
+                        // from the receiver element type), the literal `2`
+                        // IS the number literal `2.0`: the op is
+                        // number/number and the result resolves `number`.
+                        // This MUST agree with the operand-compile widen —
+                        // there the bare-int operand is re-lowered to a
+                        // `Number` constant so the body computes f64; here
+                        // the return-type inference (which names the map's
+                        // output element monomorph) must resolve the SAME
+                        // `number` so the result-array element carrier
+                        // stamps Float64 instead of mis-stamping Int64 over
+                        // f64 bits. A LOCAL LITERAL adoption, NOT a return-
+                        // type constraint and NOT a change to the element-
+                        // stamp machinery: only a bare int literal adopts;
+                        // a genuine `int`-typed operand keeps `int != number`
+                        // (mismatch → `None`, no silent unify).
+                        if lt != rt {
+                            let lit_left = matches!(
+                                left.as_ref(),
+                                Expr::Literal(Literal::Int(_), _)
+                                    | Expr::Literal(Literal::UInt(_), _)
+                            );
+                            let lit_right = matches!(
+                                right.as_ref(),
+                                Expr::Literal(Literal::Int(_), _)
+                                    | Expr::Literal(Literal::UInt(_), _)
+                            );
+                            if lit_right && lt == "number" && rt == "int" {
+                                return Some("number".to_string());
+                            }
+                            if lit_left && rt == "number" && lt == "int" {
+                                return Some("number".to_string());
+                            }
+                        }
                         if lt == rt && BytecodeCompiler::tracker_type_name_is_primitive(&lt) {
                             Some(lt)
                         } else {

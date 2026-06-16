@@ -285,3 +285,32 @@ fn d_param_default_int_literal_is_true_f64() {
 fn d_nonliteral_int_to_number_still_rejected() {
     ShapeTest::new("let m: int = 5\nlet n: number = m\nn").expect_run_err();
 }
+
+/// CLOSURE-BODY literal adoption (the residual fixed here): in
+/// `Array<number>.map(|x| x / 2)` the closure param `x` is proven `number`
+/// from the receiver element type (bidirectional inference), so the bare int
+/// literal `2` IS `2.0` — the op is number/number, the closure returns
+/// `number`, and the result-array element carrier stamps Float64. Pre-fix the
+/// output element was mis-stamped Int64 over the f64 bits: `.sum()` summed
+/// garbage i64 and the result was a huge wrong number. `(0.5 + 1.0 + 1.5) =
+/// 3.0`.
+#[test]
+fn d_closure_map_int_literal_divides_as_float() {
+    ShapeTest::new("let a: Array<number> = [1, 2, 3]\na.map(|x| x / 2).sum()").expect_number(3.0);
+}
+
+/// Closure-body multiply: `Array<number>.map(|x| x * 2).sum()` = (2+4+6) =
+/// 12.0 — the `* 2` literal adopts number, the output stays f64.
+#[test]
+fn d_closure_map_int_literal_mul_stays_float() {
+    ShapeTest::new("let a: Array<number> = [1, 2, 3]\na.map(|x| x * 2).sum()").expect_number(12.0);
+}
+
+/// Closure-body over `Array<int>` is NOT widened — `int` element map keeps the
+/// integer carrier: `[1,2,3].map(|x| x * 2).sum() = 12`. Confirms the
+/// adoption is gated to the float-family receiver only (no over-widen of
+/// int-element maps).
+#[test]
+fn d_closure_map_int_array_stays_integer() {
+    ShapeTest::new("let a: Array<int> = [1, 2, 3]\na.map(|x| x * 2).sum()").expect_number(12.0);
+}
