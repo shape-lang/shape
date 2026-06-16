@@ -2069,6 +2069,20 @@ impl BytecodeCompiler {
         // Store top-level locals count so executor can advance sp past them
         self.program.top_level_locals_count = self.next_local;
 
+        // v0.3.3 comptime JIT-divergence surface-and-stop (ADR-006 §2.7.14).
+        // Detect any `comptime { ... }` / `comptime for` in top-level code so
+        // the JIT top-level strategy can deopt to the bytecode interpreter
+        // (see `top_level_has_comptime` doc on BytecodeProgram). The JIT
+        // consumes the borrow-solver MIR, whose comptime lowering re-lowers
+        // the comptime body's statements (for borrow analysis) rather than the
+        // compile-time-baked literal — re-running the body at runtime leaks
+        // its trailing value into the program-return slot. Deopt preserves
+        // VM == JIT.
+        self.program.top_level_has_comptime = program
+            .items
+            .iter()
+            .any(top_level_item_contains_comptime);
+
         // Persist storage hints for JIT width-aware lowering.
         self.populate_program_storage_hints();
 
@@ -2885,5 +2899,123 @@ impl BytecodeCompiler {
         }
 
         Ok((bytecode, export_map))
+    }
+}
+
+/// v0.3.3 comptime JIT-divergence surface-and-stop (ADR-006 §2.7.14).
+///
+/// True when a TOP-LEVEL item contains a `comptime { ... }` / `comptime for`
+/// expression (including in a `let`/`var`/`const` initializer or a bare
+/// top-level expression). Functions are NOT descended into: a comptime block
+/// inside a `fn` body compiles to that function's own MIR, not the
+/// `top_level_mir` the JIT top-level strategy consumes. See
+/// `BytecodeProgram::top_level_has_comptime`.
+fn top_level_item_contains_comptime(item: &shape_ast::ast::Item) -> bool {
+    use shape_ast::ast::Item;
+    match item {
+        Item::Comptime(_, _) => true,
+        Item::VariableDecl(decl, _) => decl
+            .value
+            .as_ref()
+            .is_some_and(expr_contains_comptime),
+        Item::Assignment(asgn, _) => expr_contains_comptime(&asgn.value),
+        Item::Expression(expr, _) => expr_contains_comptime(expr),
+        Item::Statement(stmt, _) => stmt_contains_comptime(stmt),
+        _ => false,
+    }
+}
+
+fn stmt_contains_comptime(stmt: &shape_ast::ast::Statement) -> bool {
+    use shape_ast::ast::Statement;
+    match stmt {
+        Statement::VariableDecl(decl, _) => {
+            decl.value.as_ref().is_some_and(expr_contains_comptime)
+        }
+        Statement::Assignment(asgn, _) => expr_contains_comptime(&asgn.value),
+        Statement::Expression(expr, _) => expr_contains_comptime(expr),
+        Statement::Return(Some(expr), _) => expr_contains_comptime(expr),
+        Statement::For(f, _) => {
+            let init_has = match &f.init {
+                shape_ast::ast::ForInit::ForIn { iter, .. } => expr_contains_comptime(iter),
+                shape_ast::ast::ForInit::ForC {
+                    condition, update, ..
+                } => expr_contains_comptime(condition) || expr_contains_comptime(update),
+            };
+            init_has || f.body.iter().any(stmt_contains_comptime)
+        }
+        Statement::While(w, _) => w.body.iter().any(stmt_contains_comptime),
+        Statement::If(i, _) => {
+            i.then_body.iter().any(stmt_contains_comptime)
+                || i.else_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(stmt_contains_comptime))
+        }
+        _ => false,
+    }
+}
+
+/// Recursively true when `expr` (or any sub-expression) is a `comptime`
+/// block / `comptime for`. Conservative: covers every value-position
+/// expression form. A miss only suppresses the deopt (leaving the existing
+/// behaviour); it never introduces unsoundness.
+fn expr_contains_comptime(expr: &shape_ast::ast::Expr) -> bool {
+    use shape_ast::ast::{BlockItem, Expr};
+    match expr {
+        Expr::Comptime(_, _) | Expr::ComptimeFor(_, _) => true,
+        Expr::FunctionCall { args, .. } | Expr::QualifiedFunctionCall { args, .. } => {
+            args.iter().any(expr_contains_comptime)
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_contains_comptime(receiver) || args.iter().any(expr_contains_comptime)
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            expr_contains_comptime(left) || expr_contains_comptime(right)
+        }
+        Expr::UnaryOp { operand, .. } => expr_contains_comptime(operand),
+        Expr::Reference { expr, .. } => expr_contains_comptime(expr),
+        Expr::Array(elems, _) => elems.iter().any(expr_contains_comptime),
+        Expr::IndexAccess { object, index, .. } => {
+            expr_contains_comptime(object) || expr_contains_comptime(index)
+        }
+        Expr::PropertyAccess { object, .. } => expr_contains_comptime(object),
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            expr_contains_comptime(condition)
+                || expr_contains_comptime(then_expr)
+                || else_expr.as_ref().is_some_and(|e| expr_contains_comptime(e))
+        }
+        Expr::Block(block, _) => block.items.iter().any(|it| match it {
+            BlockItem::VariableDecl(decl) => {
+                decl.value.as_ref().is_some_and(expr_contains_comptime)
+            }
+            BlockItem::Assignment(asgn) => expr_contains_comptime(&asgn.value),
+            BlockItem::Statement(stmt) => stmt_contains_comptime(stmt),
+            BlockItem::Expression(e) => expr_contains_comptime(e),
+        }),
+        Expr::If(i, _) => {
+            expr_contains_comptime(&i.condition)
+                || expr_contains_comptime(&i.then_branch)
+                || i.else_branch
+                    .as_ref()
+                    .is_some_and(|e| expr_contains_comptime(e))
+        }
+        Expr::While(w, _) => {
+            expr_contains_comptime(&w.condition) || expr_contains_comptime(&w.body)
+        }
+        Expr::For(f, _) => {
+            expr_contains_comptime(&f.iterable) || expr_contains_comptime(&f.body)
+        }
+        Expr::Loop(l, _) => expr_contains_comptime(&l.body),
+        Expr::Match(m, _) => {
+            expr_contains_comptime(&m.scrutinee)
+                || m.arms.iter().any(|arm| expr_contains_comptime(&arm.body))
+        }
+        Expr::Return(Some(e), _) => expr_contains_comptime(e),
+        Expr::Await(e, _) => expr_contains_comptime(e),
+        _ => false,
     }
 }

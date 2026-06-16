@@ -534,6 +534,26 @@ pub struct BytecodeProgram {
     #[serde(skip)]
     pub top_level_mir: Option<Arc<MirFunctionData>>,
 
+    /// True when top-level code contains a `comptime { ... }` expression.
+    ///
+    /// v0.3.3 comptime JIT-divergence surface-and-stop (ADR-006 §2.7.14):
+    /// the borrow-solver MIR lowering of a `comptime` block
+    /// (`mir/lowering/expr.rs::lower_comptime_expr`) re-lowers the comptime
+    /// body's *statements* for borrow analysis — it does NOT carry the
+    /// compile-time-baked literal that the bytecode interpreter executes.
+    /// The JIT consumes that same MIR as its top-level program, so it
+    /// re-runs the comptime body at runtime and the body's trailing
+    /// expression value leaks into the program-return slot (`SlotId(0)`).
+    /// Symptom: `let X = comptime { 2 + 3 }` makes `--mode jit` dump
+    /// `{ "Integer": 5 }` as the program's entire stdout and skip the
+    /// program's prints, while `--mode vm` (running the baked bytecode)
+    /// correctly returns `Null`. Whole-program deopting to the bytecode
+    /// interpreter preserves VM == JIT. Root-cause fix (a JIT-consumable
+    /// top-level MIR that carries the baked comptime literal instead of the
+    /// re-lowered body) is v0.4.
+    #[serde(default)]
+    pub top_level_has_comptime: bool,
+
     /// Content-addressed program built alongside the flat bytecode.
     ///
     /// When present, this contains per-function `FunctionBlob`s with content

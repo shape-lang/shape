@@ -1451,6 +1451,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Called after the caller has optionally stored function params to local variables.
     /// `param_count` indicates how many leading slots are function params (skip init).
     pub fn compile_body(&mut self) -> Result<(), String> {
+        // v0.3.3 move-semantics JIT-divergence surface-and-stop
+        // (ADR-006 §2.7.14, CLAUDE.md surface-and-stop discipline).
+        //
+        // `compile_operand` nulls every `Move`/`MoveExplicit` source slot to
+        // prevent double-drop, but the VM ownership model keeps the source
+        // value live when the "move" is really a Copy/Clone (still-live or
+        // Copy-typed source). A subsequent read of the nulled slot diverges
+        // from the VM: `let b = a; print(a)` (VM 42 / JIT 0) and `a = i`
+        // inside a `while` loop (VM terminates / JIT nulls the counter and
+        // hangs). Whole-function deopt to the bytecode interpreter (which
+        // honours the VM ownership model) preserves VM == JIT. The structured
+        // `Err` routes through the established `[jit-fallback]` path in
+        // `executor.rs`. Root-cause fix (per-point Copy/Clone/Move liveness
+        // in JIT operand lowering) is v0.4.
+        if self.mir_has_move_then_read_divergence() {
+            return Err(
+                "v0.3.3 move-semantics SURFACE (ADR-006 §2.7.14): a slot is \
+                 `Move`/`MoveExplicit`-sourced and read again at a later program \
+                 point. `compile_operand` nulls the moved source slot, but the VM \
+                 ownership model (`compute_ownership_decisions`) keeps the value \
+                 live for Copy/still-live-Clone sources — the JIT would read the \
+                 nulled slot and diverge (silent-wrong-output, or an infinite loop \
+                 when the nulled slot is a live loop counter). Whole-program \
+                 deopting to the bytecode interpreter preserves VM == JIT. \
+                 Root-cause fix (per-point Copy/Clone/Move liveness in JIT operand \
+                 lowering) is v0.4."
+                    .to_string(),
+            );
+        }
+
         // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
         // replaces SHAPE_JIT_MIR_TRACE env-var. CLI selector is
         // `--trace-jit=shape_jit::mir=trace`. The enabled-check gates the

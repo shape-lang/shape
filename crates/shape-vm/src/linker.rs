@@ -709,6 +709,7 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
         // reads this on the post-link BytecodeProgram surface.
         operator_trait_dispatch_sites: linked.operator_trait_dispatch_sites.clone(),
         top_level_mir: None,
+        top_level_has_comptime: false,
         compiled_annotations: HashMap::new(),
         trait_method_symbols: linked.trait_method_symbols.clone(),
         expanded_function_defs: HashMap::new(),

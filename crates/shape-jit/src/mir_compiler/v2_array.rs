@@ -28,6 +28,7 @@
 use cranelift::prelude::*;
 use shape_value::v2::ConcreteType;
 use shape_vm::mir::types::{Operand, Place, SlotId};
+use std::collections::HashMap;
 use shape_vm::type_tracking::NativeKind;
 
 use super::MirToIR;
@@ -219,6 +220,187 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => {}
             }
         }
+        false
+    }
+
+    /// v0.3.3 move-semantics JIT-divergence surface-and-stop detector.
+    ///
+    /// Root cause: `compile_operand` (`ownership.rs:225`) lowers every
+    /// `Operand::Move` / `Operand::MoveExplicit` by reading the value and
+    /// then NULLing the source slot (`null_place`) to prevent double-drop.
+    /// The MIR lowering of `let b = a` / `a = i` emits `Use(Move(src))`
+    /// unconditionally (`lowering/stmt.rs:261-270`), but the VM does NOT
+    /// honour that as a destructive move: `compute_ownership_decisions`
+    /// (`mir/solver.rs:1736`) downgrades the move to `Copy` (Copy types) or
+    /// `Clone` (still-live non-Copy) and keeps the source slot's value.
+    ///
+    /// Consequence — VM != JIT, and JIT is the default mode:
+    ///   * `let a = 42; let b = a; print(a)` — VM prints 42, JIT reads the
+    ///     nulled slot and prints 0 (silent-wrong-output).
+    ///   * `a = i` inside a `while` loop — the JIT nulls the loop counter
+    ///     `i` on every iteration's copy, so the condition re-reads 0 and
+    ///     the loop never terminates (JIT hangs -> timeout).
+    ///
+    /// Per CLAUDE.md "a JIT path that cannot match the VM MUST surface-and-
+    /// stop (deopt to the interpreter)". Replicating the VM's per-point
+    /// Copy/Clone/Move liveness decision inside the JIT operand lowering is
+    /// a v0.4 root-cause workstream; for v0.3.3 the binding-compliant fix is
+    /// a whole-function deopt whenever the divergence SHAPE is present —
+    /// i.e. a slot is `Move`/`MoveExplicit`-sourced and that same slot is
+    /// read again at a DIFFERENT program point with no guaranteed intervening
+    /// reinitialisation. Returns `true` to request the deopt.
+    ///
+    /// **Soundness over throughput.** The analysis is intentionally
+    /// conservative: a read in any other block, or a later read in the same
+    /// block not preceded by a reinitialising `Assign(slot, ..)`, both
+    /// trigger the deopt. Over-deopt costs JIT speed, never correctness; the
+    /// bytecode interpreter (which honours the VM ownership model) runs the
+    /// program and VM == JIT is preserved. Mirrors `mir_has_prior_move_of_slot`.
+    pub(crate) fn mir_has_move_then_read_divergence(&self) -> bool {
+        use shape_vm::mir::types::{Operand, Rvalue, StatementKind, TerminatorKind};
+
+        // (block_idx, stmt_idx) of every Move/MoveExplicit source occurrence,
+        // keyed by the moved slot. stmt_idx == usize::MAX marks a move that
+        // occurs in the block's terminator operands.
+        let mut moves: HashMap<SlotId, Vec<(usize, usize)>> = HashMap::new();
+        // Same keying for every READ of a slot (Copy operand, borrow, or any
+        // operand position the JIT lowers as a value read). Move sources are
+        // ALSO reads (they read the value before nulling), but a move site is
+        // not a "later read" of itself — we exclude the exact move location.
+        let mut reads: HashMap<SlotId, Vec<(usize, usize)>> = HashMap::new();
+        // (block_idx, stmt_idx) of every Assign whose destination is a bare
+        // `Place::Local(slot)` — a reinitialisation point that clears the
+        // moved state for that slot.
+        let mut reinits: HashMap<SlotId, Vec<usize>> = HashMap::new();
+
+        let record_operand = |op: &Operand,
+                              bi: usize,
+                              si: usize,
+                              moves: &mut HashMap<SlotId, Vec<(usize, usize)>>,
+                              reads: &mut HashMap<SlotId, Vec<(usize, usize)>>| {
+            match op {
+                Operand::Move(Place::Local(s)) | Operand::MoveExplicit(Place::Local(s)) => {
+                    moves.entry(*s).or_default().push((bi, si));
+                    reads.entry(*s).or_default().push((bi, si));
+                }
+                Operand::Copy(Place::Local(s)) => {
+                    reads.entry(*s).or_default().push((bi, si));
+                }
+                _ => {}
+            }
+        };
+
+        let record_rvalue_reads = |rv: &Rvalue,
+                                   bi: usize,
+                                   si: usize,
+                                   moves: &mut HashMap<SlotId, Vec<(usize, usize)>>,
+                                   reads: &mut HashMap<SlotId, Vec<(usize, usize)>>| {
+            match rv {
+                Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => {
+                    record_operand(op, bi, si, moves, reads);
+                }
+                Rvalue::BinaryOp(_, lhs, rhs) => {
+                    record_operand(lhs, bi, si, moves, reads);
+                    record_operand(rhs, bi, si, moves, reads);
+                }
+                Rvalue::Aggregate(ops) => {
+                    for op in ops {
+                        record_operand(op, bi, si, moves, reads);
+                    }
+                }
+                // A borrow reads the slot's value (the JIT loads it).
+                Rvalue::Borrow(_, Place::Local(s)) => {
+                    reads.entry(*s).or_default().push((bi, si));
+                }
+                Rvalue::Borrow(_, _) => {}
+                Rvalue::EnumTest { operand, .. }
+                | Rvalue::EnumPayload { operand, .. }
+                | Rvalue::TypePatternTest { operand, .. }
+                | Rvalue::EnumDiscriminantTest { operand, .. } => {
+                    record_operand(operand, bi, si, moves, reads);
+                }
+            }
+        };
+
+        for (bi, block) in self.mir.blocks.iter().enumerate() {
+            for (si, stmt) in block.statements.iter().enumerate() {
+                match &stmt.kind {
+                    StatementKind::Assign(dest, rv) => {
+                        if let Place::Local(d) = dest {
+                            reinits.entry(*d).or_default().push(si);
+                        }
+                        record_rvalue_reads(rv, bi, si, &mut moves, &mut reads);
+                    }
+                    StatementKind::ArrayStore { operands, .. }
+                    | StatementKind::ObjectStore { operands, .. }
+                    | StatementKind::EnumStore { operands, .. }
+                    | StatementKind::ClosureCapture { operands, .. }
+                    | StatementKind::ModuleBindingStore { operands, .. }
+                    | StatementKind::TaskBoundary(operands, _) => {
+                        for op in operands {
+                            record_operand(op, bi, si, &mut moves, &mut reads);
+                        }
+                    }
+                    StatementKind::Drop(_) | StatementKind::Nop => {}
+                }
+            }
+            // Terminator operands — stmt_idx sentinel usize::MAX sorts after
+            // every real statement in the same block.
+            match &block.terminator.kind {
+                TerminatorKind::Call { func, args, .. } => {
+                    record_operand(func, bi, usize::MAX, &mut moves, &mut reads);
+                    for op in args {
+                        record_operand(op, bi, usize::MAX, &mut moves, &mut reads);
+                    }
+                }
+                TerminatorKind::SwitchBool { operand, .. } => {
+                    record_operand(operand, bi, usize::MAX, &mut moves, &mut reads);
+                }
+                TerminatorKind::Goto(_)
+                | TerminatorKind::Return
+                | TerminatorKind::Unreachable => {}
+            }
+        }
+
+        // For each moved slot, deopt if it is read at any program point that
+        // is not exactly one of its move sites, unless that read is in the
+        // SAME block strictly after a reinitialising assign that itself
+        // follows the move (straight-line reinit clears the moved state).
+        for (slot, move_sites) in &moves {
+            let Some(slot_reads) = reads.get(slot) else {
+                continue;
+            };
+            let empty = Vec::new();
+            let slot_reinits = reinits.get(slot).unwrap_or(&empty);
+            for &(rb, rs) in slot_reads {
+                // The move site reads the value before nulling — that's not a
+                // "later read"; skip exact-location matches.
+                if move_sites.contains(&(rb, rs)) {
+                    continue;
+                }
+                // Is there a move that this read can observe the null of?
+                // Conservative: any move in a DIFFERENT block, or an earlier
+                // move in the SAME block, is a divergence unless a same-block
+                // reinit sits strictly between the move and the read.
+                for &(mb, ms) in move_sites {
+                    let observable = if mb != rb {
+                        // Cross-block: the read may execute after the move on
+                        // some CFG path (including loop back-edges). Deopt.
+                        true
+                    } else {
+                        // Same block: only a read strictly after the move.
+                        ms < rs && {
+                            // Cleared if a reinit lies in (ms, rs].
+                            !slot_reinits.iter().any(|&ri| ri > ms && ri <= rs)
+                        }
+                    };
+                    if observable {
+                        return true;
+                    }
+                }
+            }
+        }
+
         false
     }
 

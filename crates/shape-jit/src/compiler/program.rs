@@ -315,6 +315,7 @@ impl JITCompiler {
                 value_call_return_concrete_types: Default::default(),
                 operator_trait_dispatch_sites: Default::default(),
                 top_level_mir: None,
+                top_level_has_comptime: false,
                 compiled_annotations: program.compiled_annotations.clone(),
                 trait_method_symbols: program.trait_method_symbols.clone(),
                 expanded_function_defs: program.expanded_function_defs.clone(),

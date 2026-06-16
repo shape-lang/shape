@@ -29,6 +29,35 @@ impl JITCompiler {
         name: &str,
         program: &BytecodeProgram,
     ) -> Result<JittedStrategyFn, String> {
+        // v0.3.3 comptime JIT-divergence surface-and-stop (ADR-006 §2.7.14):
+        // the borrow-solver `top_level_mir` re-lowers a `comptime { ... }`
+        // body's statements (for borrow analysis) instead of carrying the
+        // compile-time-baked literal the bytecode interpreter executes. The
+        // JIT consumes that MIR as the top-level program, so it re-runs the
+        // comptime body at runtime and the body's trailing value leaks into
+        // the program-return slot — `let X = comptime { 2 + 3 }` makes
+        // `--mode jit` dump `{ "Integer": 5 }` as stdout and skip the
+        // program's prints (VM correctly returns Null). Whole-program deopt
+        // to the bytecode interpreter (this structured `Err` routes through
+        // the `[jit-fallback]` path) preserves VM == JIT. Root-cause fix (a
+        // JIT-consumable top-level MIR carrying the baked literal) is v0.4.
+        if program.top_level_has_comptime {
+            return Err(
+                "v0.3.3 comptime SURFACE (ADR-006 §2.7.14): top-level code \
+                 contains a `comptime { ... }` block. The borrow-solver \
+                 top-level MIR re-lowers the comptime body's statements rather \
+                 than the compile-time-baked literal; the JIT would re-run the \
+                 body at runtime and leak its trailing value into the \
+                 program-return slot (e.g. `let X = comptime { 2 + 3 }` dumps \
+                 `{ \"Integer\": 5 }` and skips the program's prints). \
+                 Whole-program deopting to the bytecode interpreter (which runs \
+                 the baked bytecode) preserves VM == JIT. Root-cause fix (a \
+                 JIT-consumable top-level MIR carrying the baked comptime \
+                 literal) is v0.4."
+                    .to_string(),
+            );
+        }
+
         // MirToIR is the ONLY compilation path.
         let mir_data = program
             .top_level_mir
@@ -188,6 +217,23 @@ impl JITCompiler {
 
         let mut ctx = self.module.make_context();
         ctx.func.signature = sig;
+
+        // v0.3.3 comptime JIT-divergence surface-and-stop (ADR-006 §2.7.14) —
+        // see the matching guard in `compile_strategy`. Deopt the whole
+        // top-level program to the bytecode interpreter when top-level code
+        // contains a `comptime { ... }` block, so VM == JIT.
+        if program.top_level_has_comptime {
+            return Err(
+                "v0.3.3 comptime SURFACE (ADR-006 §2.7.14): top-level code \
+                 contains a `comptime { ... }` block; the borrow-solver \
+                 top-level MIR re-lowers the comptime body rather than the \
+                 baked literal, so the JIT would leak the body's trailing value \
+                 into the program-return slot. Whole-program deopting to the \
+                 bytecode interpreter preserves VM == JIT. Root-cause fix is \
+                 v0.4."
+                    .to_string(),
+            );
+        }
 
         // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).
         let mir_data = program

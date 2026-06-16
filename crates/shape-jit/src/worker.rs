@@ -314,6 +314,7 @@ fn build_sub_program(program: &BytecodeProgram, start: usize, end: usize) -> Byt
         native_struct_layouts: vec![],
         content_addressed: None,
         top_level_mir: None,
+        top_level_has_comptime: false,
         function_blob_hashes: vec![],
         top_level_frame: None,
         top_level_local_concrete_types: vec![],
@@ -401,6 +402,7 @@ mod tests {
             native_struct_layouts: vec![],
             content_addressed: None,
             top_level_mir: None,
+            top_level_has_comptime: false,
             function_blob_hashes: vec![],
             top_level_frame: None,
             ..Default::default()
@@ -452,6 +454,7 @@ mod tests {
             native_struct_layouts: vec![],
             content_addressed: None,
             top_level_mir: None,
+            top_level_has_comptime: false,
             function_blob_hashes: vec![],
             top_level_frame: None,
             ..Default::default()
@@ -536,6 +539,7 @@ mod tests {
             native_struct_layouts: vec![],
             content_addressed: None,
             top_level_mir: None,
+            top_level_has_comptime: false,
             function_blob_hashes: vec![],
             top_level_frame: None,
             ..Default::default()
@@ -623,6 +627,7 @@ mod tests {
             native_struct_layouts: vec![],
             content_addressed: None,
             top_level_mir: None,
+            top_level_has_comptime: false,
             function_blob_hashes: vec![],
             top_level_frame: None,
             ..Default::default()
