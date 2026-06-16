@@ -1668,6 +1668,11 @@ macro_rules! language_runtime_plugin {
             &VTABLE
         }
 
+        // Deliberate C-ABI entry point: dereferences the caller-supplied
+        // `contract` raw pointer after a null check. Marking it `unsafe` would
+        // change the exported C symbol's Rust signature; the contract is
+        // documented at the ABI boundary instead.
+        #[allow(clippy::not_unsafe_ptr_arg_deref)]
         #[unsafe(no_mangle)]
         pub extern "C" fn shape_capability_vtable(
             contract: *const u8,

@@ -2955,6 +2955,11 @@ impl TraitObjectStorage {
     /// let ptr = TraitObjectStorage::_new(value, vtable);
     /// let slot = ValueSlot::from_trait_object_raw(ptr);
     /// ```
+    // Deliberate raw-pointer allocator API: `value` is a borrowed `*const`
+    // copied (not dereferenced) into fresh storage. Keeping this safe matches
+    // the sibling `_new`/`_drop` v2-raw constructors; making it `unsafe` would
+    // change the public allocator signature for no soundness gain.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn _new(value: *const TypedObjectStorage, vtable: Arc<crate::value::VTable>) -> *mut Self {
         let layout = std::alloc::Layout::new::<Self>();
         let ptr = unsafe { std::alloc::alloc(layout) as *mut Self };

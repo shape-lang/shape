@@ -207,6 +207,11 @@ impl BumpAllocator {
     }
 
     /// Get a mutable reference to all regions.
+    ///
+    /// Deliberate interior-mutability accessor over the `UnsafeCell<Vec<Region>>`
+    /// backing store; callers hold the allocator by shared `&self`. Switching to
+    /// `&mut self` would change this public allocator API.
+    #[allow(clippy::mut_from_ref)]
     pub fn regions_mut(&self) -> &mut Vec<Region> {
         unsafe { &mut *self.regions.get() }
     }
