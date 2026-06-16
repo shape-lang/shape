@@ -705,6 +705,26 @@ impl BytecodeCompiler {
         })
     }
 
+    /// True when a cast from `source_name` to `target_name` is a BUILT-IN
+    /// primitive numeric conversion (both endpoints are primitive numeric
+    /// types per the numeric lattice — `int`/`i64`, the width names,
+    /// `number`/`f32`, `decimal`).
+    ///
+    /// Such a cast lowers to the typed `ConvertToInt` / `ConvertToNumber` /
+    /// `ConvertToDecimal` opcode — which BOTH converts the value (`2` → `2.0`,
+    /// NOT a bit reinterpret) AND re-stamps the result slot's `NativeKind` /
+    /// `last_expr_numeric_type` via `record_cast_result_kind`. It must NOT be
+    /// intercepted by the user-`Into`-impl routing below: a stdlib
+    /// `Into<number> for int` (or sibling) would emit a `Call` that leaves the
+    /// compiler's last-expr numeric tracker on the SOURCE type (`int`), so a
+    /// downstream `a / b` selects `DivInt` and divides the f64 BIT PATTERNS as
+    /// i64 — the `(2 as number) / (8 as number) == 0` soundness hole. The
+    /// built-in primitive path is the only correct lowering for these pairs.
+    fn is_builtin_primitive_numeric_cast(source_name: &str, target_name: &str) -> bool {
+        BuiltinTypes::is_numeric_type_name(source_name)
+            && BuiltinTypes::is_numeric_type_name(target_name)
+    }
+
     /// Return the typed ConvertTo* opcode for a primitive target type name,
     /// or None for non-primitive types (which fall through to Convert + trait dispatch).
     fn convert_opcode_for_primitive(target: &str) -> Option<OpCode> {
@@ -811,12 +831,17 @@ impl BytecodeCompiler {
             // Option/Result lift paths preserve current behaviour.
             if matches!(cast_kind, Some(CastLiftKind::Direct)) {
                 if let Some(source_name) = self.cast_source_name(expr) {
-                    if let Some(func_idx) =
-                        self.user_impl_method_for_cast(&source_name, &target_selector, true)
-                    {
-                        self.compile_expr(expr)?;
-                        self.emit_user_impl_cast_call(func_idx);
-                        return Ok(());
+                    // Built-in primitive numeric cast → primitive
+                    // `TryConvertTo*` path below, never a user `Into`-impl
+                    // `Call`. See `is_builtin_primitive_numeric_cast`.
+                    if !Self::is_builtin_primitive_numeric_cast(&source_name, &target_selector) {
+                        if let Some(func_idx) =
+                            self.user_impl_method_for_cast(&source_name, &target_selector, true)
+                        {
+                            self.compile_expr(expr)?;
+                            self.emit_user_impl_cast_call(func_idx);
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -905,12 +930,20 @@ impl BytecodeCompiler {
             // and stdlib-redeclare semantics.
             if matches!(cast_kind, Some(CastLiftKind::Direct)) {
                 if let Some(source_name) = self.cast_source_name(expr) {
-                    if let Some(func_idx) =
-                        self.user_impl_method_for_cast(&source_name, &target_selector, false)
-                    {
-                        self.compile_expr(expr)?;
-                        self.emit_user_impl_cast_call(func_idx);
-                        return Ok(());
+                    // A built-in primitive numeric cast (`int as number`,
+                    // `number as int`, width↔number, …) MUST take the
+                    // primitive `ConvertTo*` path below — never a user
+                    // `Into`-impl `Call` — so the value is converted AND the
+                    // result kind is re-stamped. See
+                    // `is_builtin_primitive_numeric_cast`.
+                    if !Self::is_builtin_primitive_numeric_cast(&source_name, &target_selector) {
+                        if let Some(func_idx) =
+                            self.user_impl_method_for_cast(&source_name, &target_selector, false)
+                        {
+                            self.compile_expr(expr)?;
+                            self.emit_user_impl_cast_call(func_idx);
+                            return Ok(());
+                        }
                     }
                 }
             }
