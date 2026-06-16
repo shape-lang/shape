@@ -10,6 +10,38 @@ use shape_ast::ast::{Expr, Literal, Span, TypeAnnotation};
 use shape_ast::interpolation::{InterpolationPart, parse_interpolation_with_mode};
 
 impl TypeInferenceEngine {
+    /// True for an exact built-in NAMESPACE static-constructor pair
+    /// (`DateTime.now`, `Content.text`, `Table.new`, …) that the bytecode
+    /// compiler lowers to a dedicated `BuiltinFunction` via
+    /// `compile_type_namespace_builtin_call`
+    /// (`crates/shape-vm/src/compiler/expressions/function_calls.rs:1694`).
+    /// Kept in lockstep with that table — these are namespace constructors,
+    /// not instance methods, so inference must NOT emit a `HasField` /
+    /// `HasMethod` constraint on the namespace reference. Callers guard this
+    /// with a user-shadowing check (struct / alias / variable named the same
+    /// take precedence), so the match is sound: a real instance access never
+    /// reaches here.
+    fn is_namespace_constructor(namespace: &str, method: &str) -> bool {
+        matches!(
+            (namespace, method),
+            ("DateTime", "now")
+                | ("DateTime", "utc")
+                | ("DateTime", "parse")
+                | ("DateTime", "from_epoch")
+                | ("DateTime", "from_parts")
+                | ("DateTime", "from_unix_secs")
+                | ("Content", "chart")
+                | ("Content", "text")
+                | ("Content", "table")
+                | ("Content", "code")
+                | ("Content", "kv")
+                | ("Content", "fragment")
+                | ("Table", "new")
+                | ("Code", "new")
+                | ("KeyValue", "new")
+        )
+    }
+
     /// Infer type of an expression
     pub fn infer_expr(&mut self, expr: &Expr) -> TypeResult<Type> {
         match expr {
@@ -531,6 +563,54 @@ impl TypeInferenceEngine {
                 ..
             } => {
                 let receiver_type = self.infer_expr(receiver)?;
+
+                // STRICT-FLIP namespace-constructor regression fix (SC0,
+                // 2026-06-16). A static constructor call on a built-in
+                // NAMESPACE — `DateTime.now()`, `Content.text("x")`,
+                // `Table.new()`, `Code.new()`, `KeyValue.new()` — has its
+                // receiver typed as `Type::Concrete(Reference("DateTime"))`
+                // etc. by the `Expr::Identifier` arm (lines 65-74). These are
+                // NOT instance method calls: the receiver is a namespace, not
+                // a value. The bytecode compiler lowers each known
+                // (namespace, method) pair to a dedicated `BuiltinFunction`
+                // (`compile_type_namespace_builtin_call`,
+                // `function_calls.rs:1694-1721`) — that mapping is the
+                // authoritative resolution.
+                //
+                // Without this guard the call falls through to the
+                // callable-field fallback (-> `infer_property_access` ->
+                // `HasField` -> "Reference(..) cannot have fields") for
+                // `DateTime.now`, OR to the `HasMethod` fallback ->
+                // "Method 'text' not found on type 'Content'" for
+                // `Content.text` (because `Content` is also registered as a
+                // trait with no `text` member). Both worked on main; the
+                // strict-flip lattice tightening surfaced the missing arm.
+                //
+                // SOUNDNESS: bounded TIGHTLY to (a) a bare-identifier receiver
+                // whose name is NOT a user-defined struct / type-alias /
+                // variable (so a user `type DateTime { .. }` shadows and is
+                // NOT intercepted — it resolves through the struct path), and
+                // (b) an EXACT (namespace, method) pair from the compiler's
+                // builtin table. A genuine bad field/method access on a user
+                // value is untouched: it never matches a bare namespace
+                // identifier here, so it still rejects downstream. The result
+                // is a fresh var (the constructor's return type is resolved
+                // authoritatively by the bytecode compiler) — no concrete type
+                // is fabricated.
+                if let Expr::Identifier(recv_name, _) = receiver.as_ref() {
+                    if Self::is_namespace_constructor(recv_name, method)
+                        && !self.struct_type_defs.contains_key(recv_name.as_str())
+                        && self.env.lookup_type_alias(recv_name).is_none()
+                        && self.env.lookup(recv_name).is_none()
+                    {
+                        // Still type-check the arguments so arg-level errors
+                        // (and literal-adoption side effects) surface.
+                        for arg in args {
+                            self.infer_expr(arg)?;
+                        }
+                        return Ok(self.fresh_type_var());
+                    }
+                }
 
                 // IIFE / chained-call (`(|y| body)(args)`, `f(a)(b)`) — the parser
                 // models these as `MethodCall { method: "__call__", receiver: <callable-expr> }`
