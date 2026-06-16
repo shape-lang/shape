@@ -87,9 +87,9 @@ use shape_value::{HeapKind, NativeKind, VMError};
 
 use super::super::VirtualMachine;
 use super::v2_array_detect::{
-    ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I16,
-    ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT,
-    ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8,
+    ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I8,
+    ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT,
+    ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32,
     stamp_elem_type,
 };
 
@@ -414,6 +414,122 @@ macro_rules! define_exec_v2_typed_array {
                     // kind is proven at compile-time emission; no
                     // runtime decode/probe at the FFI boundary.
 
+                    // ── StringElem J.5d hand-written String heap row (2026-06-16) ──
+                    //
+                    // Extracted from the generic `heap_rows:` macro so Push/Set
+                    // can accept BOTH carriers:
+                    //   - `NativeKind::StringV2`: v2-raw `*const StringObj` —
+                    //     transfer the caller's share to the array as-is (the
+                    //     literal NewStringV2 contract).
+                    //   - `NativeKind::String`: Phase-2c `Arc<String>` from
+                    //     non-literal producers (`s + "!"`, split/join, f-string).
+                    //     Materialize a fresh refcount-1 `StringObj` (copies the
+                    //     bytes), store it, then release the consumed `Arc<String>`
+                    //     share exactly once via `drop_with_kind(.., String)`.
+                    //
+                    // String and StringV2 remain DISTINCT NativeKind
+                    // discriminators (CLAUDE.md Parallel-impl) — only the output
+                    // `TypedArray<*const StringObj>` carrier is shared, via a real
+                    // allocation at the storage boundary. New/Get mirror the
+                    // generic heap-row template verbatim. This gating is String-
+                    // only; Decimal/TypedObject/TraitObject/Nested stay strict.
+                    OpCode::NewTypedArrayString => {
+                        let cap = match instruction.operand {
+                            Some(Operand::Count(n)) => n as u32,
+                            _ => 0,
+                        };
+                        let ptr = TypedArray::<*const StringObj>::with_capacity(cap);
+                        unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_STRING) };
+                        self.push_kinded(
+                            ptr as usize as u64,
+                            NativeKind::Ptr(HeapKind::TypedArray),
+                        )?;
+                        Ok(())
+                    }
+                    OpCode::TypedArrayGetString => {
+                        let (idx_bits, _idx_kind) = self.pop_kinded()?;
+                        let index = idx_bits as i64 as u32;
+                        let (arr_bits, arr_kind) = self.pop_kinded()?;
+                        let arr = arr_bits as usize as *const TypedArray<*const StringObj>;
+                        let len = unsafe { TypedArray::len(arr) };
+                        let elem_ptr = unsafe {
+                            TypedArray::<*const StringObj>::get(arr, index).ok_or(
+                                VMError::IndexOutOfBounds {
+                                    index: index as i32,
+                                    length: len as usize,
+                                },
+                            )?
+                        };
+                        // Retain the per-element header: array keeps its share,
+                        // caller gets a fresh share released via the StringV2 arm
+                        // in drop_with_kind.
+                        unsafe { v2_retain(&(*elem_ptr).header) };
+                        drop_with_kind(arr_bits, arr_kind);
+                        self.push_kinded(elem_ptr as u64, NativeKind::StringV2)?;
+                        Ok(())
+                    }
+                    OpCode::TypedArrayPushString => {
+                        let (val_bits, val_kind) = self.pop_kinded()?;
+                        let (arr_bits, arr_kind) = self.pop_kinded()?;
+                        let arr = arr_bits as usize as *mut TypedArray<*const StringObj>;
+                        match val_kind {
+                            NativeKind::StringV2 => {
+                                let val = val_bits as usize as *const StringObj;
+                                // Caller transfers their share to the array.
+                                unsafe { TypedArray::push(arr, val); }
+                            }
+                            NativeKind::String => {
+                                // SAFETY: bits = Arc::into_raw(Arc<String>); borrow &str.
+                                let s: &str = unsafe { &*(val_bits as usize as *const String) };
+                                let val = StringObj::new(s); // fresh refcount-1, copies bytes
+                                unsafe { TypedArray::push(arr, val); }
+                                // Release the consumed Arc share exactly once.
+                                drop_with_kind(val_bits, NativeKind::String);
+                            }
+                            _ => {
+                                drop_with_kind(arr_bits, arr_kind);
+                                return Err(VMError::RuntimeError(format!(
+                                    "TypedArrayPushString: expected StringV2 or String, got {:?}",
+                                    val_kind
+                                )));
+                            }
+                        }
+                        drop_with_kind(arr_bits, arr_kind);
+                        Ok(())
+                    }
+                    OpCode::TypedArraySetString => {
+                        let (val_bits, val_kind) = self.pop_kinded()?;
+                        let (idx_bits, _ik) = self.pop_kinded()?;
+                        let index = idx_bits as i64 as u32;
+                        let (arr_bits, arr_kind) = self.pop_kinded()?;
+                        let arr = arr_bits as usize as *mut TypedArray<*const StringObj>;
+                        let new_ptr: *const StringObj = match val_kind {
+                            NativeKind::StringV2 => val_bits as usize as *const StringObj,
+                            NativeKind::String => {
+                                // SAFETY: bits = Arc::into_raw(Arc<String>); borrow &str.
+                                let s: &str = unsafe { &*(val_bits as usize as *const String) };
+                                let p = StringObj::new(s); // fresh refcount-1, copies bytes
+                                drop_with_kind(val_bits, NativeKind::String);
+                                p
+                            }
+                            _ => {
+                                drop_with_kind(arr_bits, arr_kind);
+                                return Err(VMError::RuntimeError(format!(
+                                    "TypedArraySetString: expected StringV2 or String, got {:?}",
+                                    val_kind
+                                )));
+                            }
+                        };
+                        unsafe {
+                            let old_ptr =
+                                TypedArray::<*const StringObj>::get_unchecked(arr, index);
+                            <StringObj as HeapElement>::release_elem(old_ptr);
+                            TypedArray::set(arr, index, new_ptr);
+                        }
+                        drop_with_kind(arr_bits, arr_kind);
+                        Ok(())
+                    }
+
                     OpCode::NewStringV2 => {
                         let str_id = match instruction.operand {
                             Some(Operand::Property(id)) => id as usize,
@@ -605,14 +721,15 @@ define_exec_v2_typed_array! {
         }
     ],
     heap_rows: [
-        {
-            ops: NewTypedArrayString / TypedArrayGetString
-                / TypedArrayPushString / TypedArraySetString,
-            heap_obj: StringObj,
-            elem_kind: NativeKind::StringV2,
-            elem_tag: ELEM_TYPE_STRING,
-            err_label: "TypedArrayPush/SetString",
-        }
+        // NOTE: the String heap row is NOT macro-generated. Its Push/Set arms
+        // must accept BOTH `NativeKind::StringV2` (v2-raw, transfer) AND
+        // `NativeKind::String` (Phase-2c Arc<String>, materialize-a-fresh-
+        // StringObj + release the consumed Arc) — StringElem J.5d 2026-06-16.
+        // The generic macro arm only accepts the single strict `$h_kind`, so
+        // the four String opcode arms (New/Get/Push/Set) are hand-written in
+        // the macro body trailer below (see `OpCode::NewTypedArrayString` ..).
+        // The remaining heap rows (Decimal/TypedObject/TraitObject/Nested)
+        // stay strict-kind — do NOT loosen them.
         {
             ops: NewTypedArrayDecimal / TypedArrayGetDecimal
                 / TypedArrayPushDecimal / TypedArraySetDecimal,

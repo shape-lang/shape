@@ -31,6 +31,7 @@
 //! `NativeKind` (Float64 / Int64 / Int32 / Bool). Writes accept the same
 //! pair, decode bits per kind, and reject incompatible kinds.
 
+use shape_value::HeapKind;
 use shape_value::NativeKind;
 use shape_value::heap_value::{TraitObjectStorage, TypedObjectStorage};
 use shape_value::v2::decimal_obj::DecimalObj;
@@ -39,7 +40,8 @@ use shape_value::v2::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
 use shape_value::v2::refcount::v2_retain;
 use shape_value::v2::string_obj::StringObj;
 use shape_value::v2::typed_array::{TypedArray, TypedArrayElem};
-use shape_value::HeapKind;
+
+use crate::executor::vm_impl::stack::drop_with_kind;
 
 // ── Element type discriminants ──────────────────────────────────────────────
 //
@@ -57,10 +59,10 @@ use shape_value::HeapKind;
 // reopen — Array<u64> excluded pending the §2.7.7/Q9 native-kind
 // discriminator).
 pub use shape_value::v2::typed_array::{
-    ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64,
-    ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING,
-    ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16,
-    ELEM_TYPE_U32, ELEM_TYPE_U8, ELEM_TYPE_UNKNOWN,
+    ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I8,
+    ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT,
+    ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32,
+    ELEM_TYPE_UNKNOWN,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,19 +160,13 @@ impl V2ElemType {
             V2ElemType::Decimal => NativeKind::DecimalV2,
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
             // element-read result carries the existing TypedObject pointer kind label.
-            V2ElemType::TypedObject => {
-                NativeKind::Ptr(shape_value::HeapKind::TypedObject)
-            }
+            V2ElemType::TypedObject => NativeKind::Ptr(shape_value::HeapKind::TypedObject),
             // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
             // element-read result carries the existing TraitObject pointer kind.
-            V2ElemType::TraitObject => {
-                NativeKind::Ptr(shape_value::HeapKind::TraitObject)
-            }
+            V2ElemType::TraitObject => NativeKind::Ptr(shape_value::HeapKind::TraitObject),
             // Nested array — the element carrier kind is the SAME as the outer
             // array's own carrier kind (a v2-raw `*mut TypedArray<U>`).
-            V2ElemType::TypedArray => {
-                NativeKind::Ptr(shape_value::HeapKind::TypedArray)
-            }
+            V2ElemType::TypedArray => NativeKind::Ptr(shape_value::HeapKind::TypedArray),
         }
     }
 }
@@ -433,8 +429,7 @@ pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<(u64, NativeK
         // `NativeKind::Ptr(HeapKind::TypedObject)` arm.
         V2ElemType::TypedObject => unsafe {
             let arr = view.ptr as *const TypedArray<*const TypedObjectStorage>;
-            let elem_ptr =
-                TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, index);
+            let elem_ptr = TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, index);
             v2_retain(&(*elem_ptr).header);
             (elem_ptr as u64, NativeKind::Ptr(HeapKind::TypedObject))
         },
@@ -444,8 +439,7 @@ pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<(u64, NativeK
         // `Ptr(HeapKind::TraitObject)` (the kind DynMethodCall dispatches on).
         V2ElemType::TraitObject => unsafe {
             let arr = view.ptr as *const TypedArray<*const TraitObjectStorage>;
-            let elem_ptr =
-                TypedArray::<*const TraitObjectStorage>::get_unchecked(arr, index);
+            let elem_ptr = TypedArray::<*const TraitObjectStorage>::get_unchecked(arr, index);
             v2_retain(&(*elem_ptr).header);
             (elem_ptr as u64, NativeKind::Ptr(HeapKind::TraitObject))
         },
@@ -454,8 +448,8 @@ pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<(u64, NativeK
         // HeapHeader; retain its on-header refcount and return with the same
         // carrier kind the outer array uses.
         V2ElemType::TypedArray => unsafe {
-            let arr = view.ptr
-                as *const TypedArray<*const shape_value::v2::typed_array::TypedArrayElem>;
+            let arr =
+                view.ptr as *const TypedArray<*const shape_value::v2::typed_array::TypedArrayElem>;
             let elem_ptr =
                 TypedArray::<*const shape_value::v2::typed_array::TypedArrayElem>::get_unchecked(
                     arr, index,
@@ -566,11 +560,28 @@ pub fn write_element(
         // (v2-raw *const StringObj). No materialize-on-read fallback per
         // §4.1.B.3 forbidden patterns. Per Q25.A SUPERSEDED #3 mixed-migration
         // forbidden pattern, only StringV2 / DecimalV2 are accepted.
+        // StringElem J.5d (2026-06-16): accept BOTH carriers (mirror of the
+        // push arm). `StringV2` transfers the caller's share as-is; `String`
+        // (Phase-2c Arc<String>) materializes a fresh refcount-1 `StringObj`
+        // (copies the bytes), then releases the consumed Arc share exactly
+        // once. Either way the prior element (the array's owned share) is
+        // released before the store. Distinct kinds, shared carrier via a real
+        // allocation — no String/StringV2 merge.
         V2ElemType::String => {
-            if kind != NativeKind::StringV2 {
-                return Err("expected NativeKind::StringV2 for Array<string> write");
-            }
-            let new_ptr = bits as usize as *const StringObj;
+            let new_ptr: *const StringObj = match kind {
+                NativeKind::StringV2 => bits as usize as *const StringObj,
+                NativeKind::String => {
+                    // SAFETY: bits = Arc::into_raw(Arc<String>); borrow &str.
+                    let s: &str = unsafe { &*(bits as usize as *const String) };
+                    let p = StringObj::new(s); // fresh refcount-1, copies bytes
+                    // Release the consumed Arc share after the copy completes.
+                    drop_with_kind(bits, NativeKind::String);
+                    p
+                }
+                _ => {
+                    return Err("expected NativeKind::StringV2 or String for Array<string> write");
+                }
+            };
             unsafe {
                 let arr = view.ptr as *mut TypedArray<*const StringObj>;
                 let old_ptr = TypedArray::<*const StringObj>::get_unchecked(arr, index);
@@ -603,8 +614,7 @@ pub fn write_element(
             let new_ptr = bits as usize as *const TypedObjectStorage;
             unsafe {
                 let arr = view.ptr as *mut TypedArray<*const TypedObjectStorage>;
-                let old_ptr =
-                    TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, index);
+                let old_ptr = TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, index);
                 <TypedObjectStorage as HeapElement>::release_elem(old_ptr);
                 TypedArray::<*const TypedObjectStorage>::set(arr, index, new_ptr);
             }
@@ -621,8 +631,7 @@ pub fn write_element(
             let new_ptr = bits as usize as *const TraitObjectStorage;
             unsafe {
                 let arr = view.ptr as *mut TypedArray<*const TraitObjectStorage>;
-                let old_ptr =
-                    TypedArray::<*const TraitObjectStorage>::get_unchecked(arr, index);
+                let old_ptr = TypedArray::<*const TraitObjectStorage>::get_unchecked(arr, index);
                 <TraitObjectStorage as HeapElement>::release_elem(old_ptr);
                 TypedArray::<*const TraitObjectStorage>::set(arr, index, new_ptr);
             }
@@ -637,8 +646,7 @@ pub fn write_element(
             let new_ptr = bits as usize as *const TypedArrayElem;
             unsafe {
                 let arr = view.ptr as *mut TypedArray<*const TypedArrayElem>;
-                let old_ptr =
-                    TypedArray::<*const TypedArrayElem>::get_unchecked(arr, index);
+                let old_ptr = TypedArray::<*const TypedArrayElem>::get_unchecked(arr, index);
                 <TypedArrayElem as HeapElement>::release_elem(old_ptr);
                 TypedArray::<*const TypedArrayElem>::set(arr, index, new_ptr);
             }
@@ -739,16 +747,40 @@ pub fn push_element(
         // share per element; pop / drop_array_heap releases). Kind discriminator
         // refuses any non-StringV2 / DecimalV2 input per §2.7.5 stamp-at-compile-
         // time + Q25.A SUPERSEDED #3 mixed-migration forbidden pattern.
-        V2ElemType::String => {
-            if kind != NativeKind::StringV2 {
-                return Err("expected NativeKind::StringV2 for Array<string> push");
+        // StringElem J.5d (2026-06-16): accept BOTH carriers.
+        //   - `StringV2` (v2-raw `*const StringObj`): transfer the caller's
+        //     share to the array as-is (the literal NewStringV2 contract).
+        //   - `String` (Phase-2c `Arc<String>`): non-literal string producers
+        //     (`s + "!"`, `split`/`join`, f-string) emit this. Materialize a
+        //     fresh refcount-1 `StringObj` (copies the bytes), push the new
+        //     ptr, then release the consumed `Arc<String>` share exactly once
+        //     via `drop_with_kind(bits, NativeKind::String)`. The array owns a
+        //     fresh StringObj; the incoming Arc share is retired — balanced.
+        // String and StringV2 stay distinct kinds; only the output carrier is
+        // shared, via a real allocation (CLAUDE.md Parallel-impl, no merge).
+        V2ElemType::String => match kind {
+            NativeKind::StringV2 => {
+                let new_ptr = bits as usize as *const StringObj;
+                unsafe {
+                    let arr = view.ptr as *mut TypedArray<*const StringObj>;
+                    TypedArray::<*const StringObj>::push(arr, new_ptr);
+                }
             }
-            let new_ptr = bits as usize as *const StringObj;
-            unsafe {
-                let arr = view.ptr as *mut TypedArray<*const StringObj>;
-                TypedArray::<*const StringObj>::push(arr, new_ptr);
+            NativeKind::String => {
+                // SAFETY: `NativeKind::String` bits = `Arc::into_raw(Arc<String>)`
+                // per the push-site contract. Read `&str` without consuming.
+                let s: &str = unsafe { &*(bits as usize as *const String) };
+                let new_ptr = StringObj::new(s); // fresh refcount-1, copies bytes
+                unsafe {
+                    let arr = view.ptr as *mut TypedArray<*const StringObj>;
+                    TypedArray::<*const StringObj>::push(arr, new_ptr);
+                }
+                // Release the consumed Arc<String> share exactly once AFTER the
+                // byte copy completes (the &str borrow above is dead here).
+                drop_with_kind(bits, NativeKind::String);
             }
-        }
+            _ => return Err("expected NativeKind::StringV2 or String for Array<string> push"),
+        },
         V2ElemType::Decimal => {
             if kind != NativeKind::DecimalV2 {
                 return Err("expected NativeKind::DecimalV2 for Array<decimal> push");
@@ -788,9 +820,7 @@ pub fn push_element(
         // Construction strict-typing close (2026-06-05) — nested array push.
         V2ElemType::TypedArray => {
             if kind != NativeKind::Ptr(HeapKind::TypedArray) {
-                return Err(
-                    "expected NativeKind::Ptr(HeapKind::TypedArray) for nested-array push",
-                );
+                return Err("expected NativeKind::Ptr(HeapKind::TypedArray) for nested-array push");
             }
             let new_ptr = bits as usize as *const TypedArrayElem;
             unsafe {
@@ -1041,14 +1071,7 @@ unsafe fn simd_min_f64(data: *const f64, len: usize, threshold: usize) -> f64 {
         return m;
     }
     let chunks = len / 4;
-    let mut acc = unsafe {
-        f64x4::from([
-            *data,
-            *data.add(1),
-            *data.add(2),
-            *data.add(3),
-        ])
-    };
+    let mut acc = unsafe { f64x4::from([*data, *data.add(1), *data.add(2), *data.add(3)]) };
     for i in 1..chunks {
         let base = i * 4;
         let v = unsafe {
@@ -1099,14 +1122,7 @@ unsafe fn simd_max_f64(data: *const f64, len: usize, threshold: usize) -> f64 {
         return m;
     }
     let chunks = len / 4;
-    let mut acc = unsafe {
-        f64x4::from([
-            *data,
-            *data.add(1),
-            *data.add(2),
-            *data.add(3),
-        ])
-    };
+    let mut acc = unsafe { f64x4::from([*data, *data.add(1), *data.add(2), *data.add(3)]) };
     for i in 1..chunks {
         let base = i * 4;
         let v = unsafe {
@@ -1254,8 +1270,8 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::String
         | V2ElemType::Decimal
         | V2ElemType::TypedObject
-            | V2ElemType::TraitObject
-            | V2ElemType::TypedArray => None,
+        | V2ElemType::TraitObject
+        | V2ElemType::TypedArray => None,
     }
 }
 
@@ -1339,8 +1355,8 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::String
         | V2ElemType::Decimal
         | V2ElemType::TypedObject
-            | V2ElemType::TraitObject
-            | V2ElemType::TypedArray => None,
+        | V2ElemType::TraitObject
+        | V2ElemType::TypedArray => None,
     }
 }
 
@@ -1419,8 +1435,8 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::String
         | V2ElemType::Decimal
         | V2ElemType::TypedObject
-            | V2ElemType::TraitObject
-            | V2ElemType::TypedArray => None,
+        | V2ElemType::TraitObject
+        | V2ElemType::TypedArray => None,
     }
 }
 
@@ -1789,8 +1805,7 @@ pub fn clone_array(view: &V2TypedArrayView) -> *mut u8 {
         // retain per-element so both arrays own valid shares — mirror of the
         // String/Decimal clone arms above.
         V2ElemType::TypedObject => {
-            let new_arr =
-                TypedArray::<*const TypedObjectStorage>::with_capacity(view.len);
+            let new_arr = TypedArray::<*const TypedObjectStorage>::with_capacity(view.len);
             unsafe {
                 let src = view.ptr as *const TypedArray<*const TypedObjectStorage>;
                 let src_data = (*src).data;
@@ -1811,8 +1826,7 @@ pub fn clone_array(view: &V2TypedArrayView) -> *mut u8 {
         // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
         // shallow clone; retain per-element TraitObject share.
         V2ElemType::TraitObject => {
-            let new_arr =
-                TypedArray::<*const TraitObjectStorage>::with_capacity(view.len);
+            let new_arr = TypedArray::<*const TraitObjectStorage>::with_capacity(view.len);
             unsafe {
                 let src = view.ptr as *const TypedArray<*const TraitObjectStorage>;
                 let src_data = (*src).data;
@@ -1832,8 +1846,7 @@ pub fn clone_array(view: &V2TypedArrayView) -> *mut u8 {
         }
         // Construction strict-typing close (2026-06-05) — nested array.
         V2ElemType::TypedArray => {
-            let new_arr =
-                TypedArray::<*const TypedArrayElem>::with_capacity(view.len);
+            let new_arr = TypedArray::<*const TypedArrayElem>::with_capacity(view.len);
             unsafe {
                 let src = view.ptr as *const TypedArray<*const TypedArrayElem>;
                 let src_data = (*src).data;
@@ -2040,11 +2053,7 @@ pub fn diff_f64(view: &V2TypedArrayView) -> Option<*mut u8> {
 pub fn reverse_array(view: &V2TypedArrayView) -> *mut u8 {
     // Helper: copy `Copy` scalar elements in reverse order.
     #[inline]
-    unsafe fn copy_reverse_scalar<T: Copy>(
-        src_data: *const T,
-        dst_data: *mut T,
-        len: usize,
-    ) {
+    unsafe fn copy_reverse_scalar<T: Copy>(src_data: *const T, dst_data: *mut T, len: usize) {
         if len == 0 || src_data.is_null() || dst_data.is_null() {
             return;
         }
@@ -2218,8 +2227,7 @@ pub fn reverse_array(view: &V2TypedArrayView) -> *mut u8 {
             }
         }
         V2ElemType::TypedObject => {
-            let new_arr =
-                TypedArray::<*const TypedObjectStorage>::with_capacity(view.len);
+            let new_arr = TypedArray::<*const TypedObjectStorage>::with_capacity(view.len);
             unsafe {
                 let src = view.ptr as *const TypedArray<*const TypedObjectStorage>;
                 let src_data = (*src).data;
@@ -2241,8 +2249,7 @@ pub fn reverse_array(view: &V2TypedArrayView) -> *mut u8 {
         // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
         // reverse; retain per-element TraitObject share.
         V2ElemType::TraitObject => {
-            let new_arr =
-                TypedArray::<*const TraitObjectStorage>::with_capacity(view.len);
+            let new_arr = TypedArray::<*const TraitObjectStorage>::with_capacity(view.len);
             unsafe {
                 let src = view.ptr as *const TypedArray<*const TraitObjectStorage>;
                 let src_data = (*src).data;
@@ -2263,8 +2270,7 @@ pub fn reverse_array(view: &V2TypedArrayView) -> *mut u8 {
         }
         // Construction strict-typing close (2026-06-05) — nested array.
         V2ElemType::TypedArray => {
-            let new_arr =
-                TypedArray::<*const TypedArrayElem>::with_capacity(view.len);
+            let new_arr = TypedArray::<*const TypedArrayElem>::with_capacity(view.len);
             unsafe {
                 let src = view.ptr as *const TypedArray<*const TypedArrayElem>;
                 let src_data = (*src).data;
@@ -2294,10 +2300,7 @@ pub fn reverse_array(view: &V2TypedArrayView) -> *mut u8 {
 ///
 /// Kind-generic over the 14 `V2ElemType` variants. Same retain discipline
 /// as `clone_array` for heap-element variants.
-pub fn concat_arrays(
-    a: &V2TypedArrayView,
-    b: &V2TypedArrayView,
-) -> Result<*mut u8, &'static str> {
+pub fn concat_arrays(a: &V2TypedArrayView, b: &V2TypedArrayView) -> Result<*mut u8, &'static str> {
     if a.elem_type != b.elem_type {
         return Err("concat_arrays: element type mismatch");
     }
@@ -2562,8 +2565,7 @@ pub fn concat_arrays(
             p
         },
         V2ElemType::TypedObject => unsafe {
-            let new_arr =
-                TypedArray::<*const TypedObjectStorage>::with_capacity(total_len);
+            let new_arr = TypedArray::<*const TypedObjectStorage>::with_capacity(total_len);
             let a_arr = a.ptr as *const TypedArray<*const TypedObjectStorage>;
             let b_arr = b.ptr as *const TypedArray<*const TypedObjectStorage>;
             let dst_data = (*new_arr).data;
@@ -2593,8 +2595,7 @@ pub fn concat_arrays(
         },
         // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
         V2ElemType::TraitObject => unsafe {
-            let new_arr =
-                TypedArray::<*const TraitObjectStorage>::with_capacity(total_len);
+            let new_arr = TypedArray::<*const TraitObjectStorage>::with_capacity(total_len);
             let a_arr = a.ptr as *const TypedArray<*const TraitObjectStorage>;
             let b_arr = b.ptr as *const TypedArray<*const TraitObjectStorage>;
             let dst_data = (*new_arr).data;
@@ -2624,8 +2625,7 @@ pub fn concat_arrays(
         },
         // Construction strict-typing close (2026-06-05) — nested array.
         V2ElemType::TypedArray => unsafe {
-            let new_arr =
-                TypedArray::<*const TypedArrayElem>::with_capacity(total_len);
+            let new_arr = TypedArray::<*const TypedArrayElem>::with_capacity(total_len);
             let a_arr = a.ptr as *const TypedArray<*const TypedArrayElem>;
             let b_arr = b.ptr as *const TypedArray<*const TypedArrayElem>;
             let dst_data = (*new_arr).data;
@@ -2663,11 +2663,7 @@ pub fn concat_arrays(
 /// (mirrors Rust's `slice::get(start..end)` clamping rather than panicking).
 ///
 /// Shared internal worker for `slice_array` / `take_array` / `drop_array_n`.
-fn copy_range_to_new_array(
-    view: &V2TypedArrayView,
-    start: u32,
-    end: u32,
-) -> *mut u8 {
+fn copy_range_to_new_array(view: &V2TypedArrayView, start: u32, end: u32) -> *mut u8 {
     // Clamp the range to `[0, view.len]` and compute out_len.
     let start = start.min(view.len);
     let end = end.min(view.len);
@@ -2827,8 +2823,7 @@ fn copy_range_to_new_array(
             p
         },
         V2ElemType::TypedObject => unsafe {
-            let new_arr =
-                TypedArray::<*const TypedObjectStorage>::with_capacity(out_len);
+            let new_arr = TypedArray::<*const TypedObjectStorage>::with_capacity(out_len);
             let src = view.ptr as *const TypedArray<*const TypedObjectStorage>;
             let src_data = (*src).data;
             let dst_data = (*new_arr).data;
@@ -2846,8 +2841,7 @@ fn copy_range_to_new_array(
         },
         // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
         V2ElemType::TraitObject => unsafe {
-            let new_arr =
-                TypedArray::<*const TraitObjectStorage>::with_capacity(out_len);
+            let new_arr = TypedArray::<*const TraitObjectStorage>::with_capacity(out_len);
             let src = view.ptr as *const TypedArray<*const TraitObjectStorage>;
             let src_data = (*src).data;
             let dst_data = (*new_arr).data;
@@ -2865,8 +2859,7 @@ fn copy_range_to_new_array(
         },
         // Construction strict-typing close (2026-06-05) — nested array.
         V2ElemType::TypedArray => unsafe {
-            let new_arr =
-                TypedArray::<*const TypedArrayElem>::with_capacity(out_len);
+            let new_arr = TypedArray::<*const TypedArrayElem>::with_capacity(out_len);
             let src = view.ptr as *const TypedArray<*const TypedArrayElem>;
             let src_data = (*src).data;
             let dst_data = (*new_arr).data;
@@ -2951,8 +2944,23 @@ pub fn native_kind_to_v2_elem_type(kind: NativeKind) -> Option<V2ElemType> {
         NativeKind::Float32 => Some(V2ElemType::F32),
         NativeKind::Char => Some(V2ElemType::Char),
         NativeKind::StringV2 => Some(V2ElemType::String),
+        // StringElem J.5d (2026-06-16): non-literal string producers emit
+        // `NativeKind::String` (Phase-2c `Arc<String>`). They map to the same
+        // `V2ElemType::String` output carrier as `StringV2`; `push_element`'s
+        // String arm materializes a fresh `StringObj` from the `Arc<String>`
+        // bytes (copy + transfer), so the output array stays a
+        // `TypedArray<*const StringObj>`. String and StringV2 remain distinct
+        // NativeKind discriminators (CLAUDE.md Parallel-impl) — only the
+        // output *carrier* is shared, via a real allocation at the boundary.
+        NativeKind::String => Some(V2ElemType::String),
         NativeKind::DecimalV2 => Some(V2ElemType::Decimal),
         NativeKind::Ptr(HeapKind::TypedObject) => Some(V2ElemType::TypedObject),
+        // StringElem J.5d PART B (2026-06-16): map/collect heap-element output.
+        // `run_select_builder` (array_query.rs) + `collect_into_typed_array`
+        // (iterator_methods.rs) share this chokepoint; the matching push/set
+        // heap rows + drop dispatch already exist.
+        NativeKind::Ptr(HeapKind::TraitObject) => Some(V2ElemType::TraitObject),
+        NativeKind::Ptr(HeapKind::TypedArray) => Some(V2ElemType::TypedArray),
         _ => None,
     }
 }
@@ -2995,11 +3003,9 @@ pub fn allocate_empty_typed_array(elem_type: V2ElemType, capacity: u32) -> *mut 
             V2ElemType::TraitObject => {
                 TypedArray::<*const TraitObjectStorage>::with_capacity(capacity) as *mut u8
             }
-            V2ElemType::TypedArray => {
-                TypedArray::<*const shape_value::v2::typed_array::TypedArrayElem>::with_capacity(
-                    capacity,
-                ) as *mut u8
-            }
+            V2ElemType::TypedArray => TypedArray::<
+                *const shape_value::v2::typed_array::TypedArrayElem,
+            >::with_capacity(capacity) as *mut u8,
         };
         let stamp_byte: u8 = match elem_type {
             V2ElemType::F64 => ELEM_TYPE_F64,
@@ -3195,10 +3201,7 @@ pub fn eq_element(a_bits: u64, b_bits: u64, elem_type: V2ElemType) -> bool {
 /// # Safety
 /// `a` / `b` must be live `&TypedObjectStorage` borrows bounded to the
 /// caller's scope.
-unsafe fn typed_object_deep_eq(
-    a: &TypedObjectStorage,
-    b: &TypedObjectStorage,
-) -> bool {
+unsafe fn typed_object_deep_eq(a: &TypedObjectStorage, b: &TypedObjectStorage) -> bool {
     if a.schema_id != b.schema_id {
         return false;
     }
@@ -3371,7 +3374,7 @@ pub fn position_of(view: &V2TypedArrayView, needle_bits: u64) -> Option<u32> {
                 }
             }
             None
-        }
+        },
         // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
         V2ElemType::TraitObject => unsafe {
             let arr = view.ptr as *const TypedArray<*const TraitObjectStorage>;
@@ -3382,19 +3385,18 @@ pub fn position_of(view: &V2TypedArrayView, needle_bits: u64) -> Option<u32> {
                 }
             }
             None
-        }
+        },
         // Construction strict-typing close (2026-06-05) — nested array.
         V2ElemType::TypedArray => unsafe {
             let arr = view.ptr as *const TypedArray<*const TypedArrayElem>;
             for i in 0..n {
-                let elem_ptr =
-                    TypedArray::<*const TypedArrayElem>::get_unchecked(arr, i);
+                let elem_ptr = TypedArray::<*const TypedArrayElem>::get_unchecked(arr, i);
                 if eq_element(elem_ptr as u64, needle_bits, V2ElemType::TypedArray) {
                     return Some(i);
                 }
             }
             None
-        }
+        },
     }
 }
 
@@ -3451,9 +3453,9 @@ pub fn cmp_element_natural(
     use std::cmp::Ordering;
     match view.elem_type {
         V2ElemType::F64 => Some(f64::from_bits(bits_a).total_cmp(&f64::from_bits(bits_b))),
-        V2ElemType::F32 => Some(
-            f32::from_bits(bits_a as u32).total_cmp(&f32::from_bits(bits_b as u32)),
-        ),
+        V2ElemType::F32 => {
+            Some(f32::from_bits(bits_a as u32).total_cmp(&f32::from_bits(bits_b as u32)))
+        }
         V2ElemType::I64 => Some((bits_a as i64).cmp(&(bits_b as i64))),
         V2ElemType::I32 => Some((bits_a as u32 as i32).cmp(&(bits_b as u32 as i32))),
         V2ElemType::I16 => Some((bits_a as u16 as i16).cmp(&(bits_b as u16 as i16))),
@@ -3708,8 +3710,7 @@ pub fn permute_array(view: &V2TypedArrayView, indices: &[u32]) -> *mut u8 {
             p
         },
         V2ElemType::TypedObject => unsafe {
-            let new_arr =
-                TypedArray::<*const TypedObjectStorage>::with_capacity(out_len);
+            let new_arr = TypedArray::<*const TypedObjectStorage>::with_capacity(out_len);
             let src = view.ptr as *const TypedArray<*const TypedObjectStorage>;
             let src_data = (*src).data;
             let dst_data = (*new_arr).data;
@@ -3732,8 +3733,7 @@ pub fn permute_array(view: &V2TypedArrayView, indices: &[u32]) -> *mut u8 {
         },
         // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
         V2ElemType::TraitObject => unsafe {
-            let new_arr =
-                TypedArray::<*const TraitObjectStorage>::with_capacity(out_len);
+            let new_arr = TypedArray::<*const TraitObjectStorage>::with_capacity(out_len);
             let src = view.ptr as *const TypedArray<*const TraitObjectStorage>;
             let src_data = (*src).data;
             let dst_data = (*new_arr).data;
@@ -3756,8 +3756,7 @@ pub fn permute_array(view: &V2TypedArrayView, indices: &[u32]) -> *mut u8 {
         },
         // Construction strict-typing close (2026-06-05) — nested array.
         V2ElemType::TypedArray => unsafe {
-            let new_arr =
-                TypedArray::<*const TypedArrayElem>::with_capacity(out_len);
+            let new_arr = TypedArray::<*const TypedArrayElem>::with_capacity(out_len);
             let src = view.ptr as *const TypedArray<*const TypedArrayElem>;
             let src_data = (*src).data;
             let dst_data = (*new_arr).data;
@@ -3863,7 +3862,10 @@ mod tests {
         let cloned_view = as_v2_typed_array(cb, ck).expect("clone should be detectable");
         assert_eq!(cloned_view.elem_type, V2ElemType::I64);
         assert_eq!(cloned_view.len, 3);
-        assert_eq!(read_element(&cloned_view, 0), Some((100u64, NativeKind::Int64)));
+        assert_eq!(
+            read_element(&cloned_view, 0),
+            Some((100u64, NativeKind::Int64))
+        );
         unsafe {
             TypedArray::<i64>::drop_array(cloned_ptr as *mut TypedArray<i64>);
             TypedArray::drop_array(arr);
@@ -3900,7 +3902,9 @@ mod tests {
         let view = as_v2_typed_array(bits, kind).expect("should recognize v2 typed array");
         assert_eq!(view.elem_type, V2ElemType::F32);
         assert_eq!(view.len, 2);
-        unsafe { TypedArray::drop_array(arr); }
+        unsafe {
+            TypedArray::drop_array(arr);
+        }
     }
 
     #[test]
@@ -3915,13 +3919,17 @@ mod tests {
         let view = as_v2_typed_array(bits, kind).expect("should recognize v2 typed array");
         assert_eq!(view.elem_type, V2ElemType::Char);
         assert_eq!(view.len, 2);
-        unsafe { TypedArray::drop_array(arr); }
+        unsafe {
+            TypedArray::drop_array(arr);
+        }
     }
 
     #[test]
     fn test_read_element_f32() {
         let arr = TypedArray::<f32>::from_slice(&[1.5_f32, 2.25_f32, 3.0_f32]);
-        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_F32); }
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_F32);
+        }
         let (bits, kind) = ptr_pair(arr as *mut u8);
         let view = as_v2_typed_array(bits, kind).unwrap();
         let r0 = read_element(&view, 0).unwrap();
@@ -3932,13 +3940,17 @@ mod tests {
         assert_eq!(f32::from_bits(r1.0 as u32), 2.25_f32);
         assert_eq!(f32::from_bits(r2.0 as u32), 3.0_f32);
         assert!(read_element(&view, 3).is_none());
-        unsafe { TypedArray::drop_array(arr); }
+        unsafe {
+            TypedArray::drop_array(arr);
+        }
     }
 
     #[test]
     fn test_read_element_char() {
         let arr = TypedArray::<char>::from_slice(&['h', 'i', '!']);
-        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_CHAR); }
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_CHAR);
+        }
         let (bits, kind) = ptr_pair(arr as *mut u8);
         let view = as_v2_typed_array(bits, kind).unwrap();
         for (i, expected) in ['h', 'i', '!'].iter().enumerate() {
@@ -3947,13 +3959,17 @@ mod tests {
             assert_eq!(char::from_u32(b as u32).unwrap(), *expected);
         }
         assert!(read_element(&view, 3).is_none());
-        unsafe { TypedArray::drop_array(arr); }
+        unsafe {
+            TypedArray::drop_array(arr);
+        }
     }
 
     #[test]
     fn test_push_element_f32() {
         let arr = TypedArray::<f32>::with_capacity(4);
-        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_F32); }
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_F32);
+        }
         let (bits, kind) = ptr_pair(arr as *mut u8);
         let view = as_v2_typed_array(bits, kind).unwrap();
         push_element(&view, (1.5_f32).to_bits() as u64, NativeKind::Float32).unwrap();
@@ -3962,26 +3978,34 @@ mod tests {
         let (b, k) = read_element(&view, 0).unwrap();
         assert_eq!(k, NativeKind::Float32);
         assert_eq!(f32::from_bits(b as u32), 1.5_f32);
-        unsafe { TypedArray::drop_array(arr); }
+        unsafe {
+            TypedArray::drop_array(arr);
+        }
     }
 
     #[test]
     fn test_push_element_char() {
         let arr = TypedArray::<char>::with_capacity(4);
-        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_CHAR); }
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_CHAR);
+        }
         let (bits, kind) = ptr_pair(arr as *mut u8);
         let view = as_v2_typed_array(bits, kind).unwrap();
         push_element(&view, 'Z' as u32 as u64, NativeKind::Char).unwrap();
         let view = as_v2_typed_array(bits, kind).unwrap();
         let (b, _) = read_element(&view, 0).unwrap();
         assert_eq!(char::from_u32(b as u32).unwrap(), 'Z');
-        unsafe { TypedArray::drop_array(arr); }
+        unsafe {
+            TypedArray::drop_array(arr);
+        }
     }
 
     #[test]
     fn test_clone_array_f32() {
         let arr = TypedArray::<f32>::from_slice(&[1.0_f32, 2.0_f32, 3.0_f32]);
-        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_F32); }
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_F32);
+        }
         let (bits, kind) = ptr_pair(arr as *mut u8);
         let view = as_v2_typed_array(bits, kind).unwrap();
         let cloned = clone_array(&view);
@@ -3998,7 +4022,9 @@ mod tests {
     #[test]
     fn test_clone_array_char() {
         let arr = TypedArray::<char>::from_slice(&['a', 'b', 'c']);
-        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_CHAR); }
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_CHAR);
+        }
         let (bits, kind) = ptr_pair(arr as *mut u8);
         let view = as_v2_typed_array(bits, kind).unwrap();
         let cloned = clone_array(&view);
@@ -4033,9 +4059,7 @@ mod tests {
         assert!(as_v2_typed_array(0u64, NativeKind::UInt64).is_none());
 
         // Right kind but null pointer.
-        assert!(
-            as_v2_typed_array(0u64, NativeKind::Ptr(HeapKind::TypedArray)).is_none()
-        );
+        assert!(as_v2_typed_array(0u64, NativeKind::Ptr(HeapKind::TypedArray)).is_none());
     }
 
     /// r5c-2-β-CKPT-C: the kind track itself is the carrier discriminator.
@@ -4080,8 +4104,14 @@ mod tests {
         unsafe {
             stamp_elem_type(arr_string as *mut u8, ELEM_TYPE_STRING);
             stamp_elem_type(arr_decimal as *mut u8, ELEM_TYPE_DECIMAL);
-            assert_eq!(read_elem_type_byte(arr_string as *const u8), ELEM_TYPE_STRING);
-            assert_eq!(read_elem_type_byte(arr_decimal as *const u8), ELEM_TYPE_DECIMAL);
+            assert_eq!(
+                read_elem_type_byte(arr_string as *const u8),
+                ELEM_TYPE_STRING
+            );
+            assert_eq!(
+                read_elem_type_byte(arr_decimal as *const u8),
+                ELEM_TYPE_DECIMAL
+            );
             TypedArray::<*const StringObj>::drop_array_heap(arr_string);
             TypedArray::<*const DecimalObj>::drop_array_heap(arr_decimal);
         }
@@ -4099,7 +4129,9 @@ mod tests {
         let view = as_v2_typed_array(bits, kind).expect("should recognize v2 typed array");
         assert_eq!(view.elem_type, V2ElemType::String);
         assert_eq!(view.len, 1);
-        unsafe { TypedArray::<*const StringObj>::drop_array_heap(arr); }
+        unsafe {
+            TypedArray::<*const StringObj>::drop_array_heap(arr);
+        }
     }
 
     #[test]
@@ -4116,7 +4148,9 @@ mod tests {
         let view = as_v2_typed_array(bits, kind).expect("should recognize v2 typed array");
         assert_eq!(view.elem_type, V2ElemType::Decimal);
         assert_eq!(view.len, 1);
-        unsafe { TypedArray::<*const DecimalObj>::drop_array_heap(arr); }
+        unsafe {
+            TypedArray::<*const DecimalObj>::drop_array_heap(arr);
+        }
     }
 
     #[test]
@@ -4169,23 +4203,75 @@ mod tests {
     }
 
     #[test]
-    fn test_push_element_string_kind_mismatch_refused() {
-        // The architectural surface only accepts NativeKind::StringV2 — the
-        // Q25.A SUPERSEDED #3 mixed-migration forbidden pattern. Pushing
-        // legacy `NativeKind::String` (Phase-2c `Arc<String>` carrier) at
-        // this layer would silently corrupt the buffer (the bits are an Arc,
-        // not a *const StringObj). The arm returns Err structurally.
+    fn test_push_element_string_materializes_from_arc() {
+        // StringElem J.5d (2026-06-16) — TP rebaseline of the former
+        // `test_push_element_string_kind_mismatch_refused`. Non-literal string
+        // producers (`s + "!"`, split/join, f-string) emit `NativeKind::String`
+        // (Phase-2c `Arc<String>`). The String push arm now ACCEPTS that
+        // carrier by materializing a fresh refcount-1 `StringObj` (copying the
+        // bytes) into the `TypedArray<*const StringObj>`, then releasing the
+        // consumed `Arc<String>` share exactly once. String and StringV2 stay
+        // distinct kinds; only the output carrier is shared, via a real
+        // allocation. (StringV2 is still accepted via the transfer path.)
+        use std::sync::Arc;
         let arr = TypedArray::<*const StringObj>::with_capacity(4);
-        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_STRING); }
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_STRING);
+        }
         let (bits, kind) = ptr_pair(arr as *mut u8);
         let view = as_v2_typed_array(bits, kind).unwrap();
-        // Pretend we have an Arc<String> bit pattern with the legacy
-        // NativeKind::String — this is the cross-tier mismatch.
-        let result = push_element(&view, 0xDEAD_BEEF, NativeKind::String);
+
+        // Build a genuine `Arc<String>` and hand its raw pointer to the push
+        // arm with `NativeKind::String` (the producer-side contract: bits =
+        // `Arc::into_raw(Arc<String>)`). The arm consumes exactly one share.
+        let arc: Arc<String> = Arc::new("hello".to_string());
+        assert_eq!(Arc::strong_count(&arc), 1);
+        let arc_raw = Arc::into_raw(arc); // share count still 1, now ours-by-raw
+        let result = push_element(&view, arc_raw as u64, NativeKind::String);
+        assert!(result.is_ok(), "String push should materialize, got {result:?}");
+
+        unsafe {
+            // The array now holds a fresh, distinct StringObj with the copied
+            // bytes (NOT the Arc pointer) at refcount 1.
+            let elem = TypedArray::<*const StringObj>::get_unchecked(arr, 0);
+            assert_ne!(elem as usize as u64, arc_raw as u64, "must be a fresh ptr");
+            assert_eq!(StringObj::as_str(elem), "hello");
+            assert_eq!(
+                shape_value::v2::refcount::v2_get_refcount(&(*elem).header),
+                1
+            );
+            // The consumed Arc<String> share was released by the push arm:
+            // reclaiming it must drop the count to 0 (i.e. it is already gone).
+            // We cannot re-observe a released Arc safely; the leak/UAF check
+            // lives in the 100k-iteration end-to-end stress instead.
+            TypedArray::<*const StringObj>::drop_array_heap(arr);
+        }
+    }
+
+    #[test]
+    fn test_push_element_string_kind_mismatch_refused() {
+        // The String push arm accepts StringV2 (transfer) and String
+        // (materialize) only. Any other kind is refused structurally with an
+        // error naming the accepted carriers — guards against a corrupt slot
+        // silently flowing into the `*const StringObj` buffer.
+        let arr = TypedArray::<*const StringObj>::with_capacity(4);
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_STRING);
+        }
+        let (bits, kind) = ptr_pair(arr as *mut u8);
+        let view = as_v2_typed_array(bits, kind).unwrap();
+        // Int64 is neither StringV2 nor String — must be refused.
+        let result = push_element(&view, 0xDEAD_BEEF, NativeKind::Int64);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("StringV2"), "expected error to cite StringV2, got: {}", err);
-        unsafe { TypedArray::<*const StringObj>::drop_array_heap(arr); }
+        assert!(
+            err.contains("StringV2") || err.contains("String"),
+            "expected error to cite the accepted string carriers, got: {}",
+            err
+        );
+        unsafe {
+            TypedArray::<*const StringObj>::drop_array_heap(arr);
+        }
     }
 
     #[test]
@@ -4212,7 +4298,9 @@ mod tests {
             assert_eq!(cv.elem_type, V2ElemType::String);
             assert_eq!(cv.len, 2);
             // Drop the clone — refcounts drop back to 1.
-            TypedArray::<*const StringObj>::drop_array_heap(cloned as *mut TypedArray<*const StringObj>);
+            TypedArray::<*const StringObj>::drop_array_heap(
+                cloned as *mut TypedArray<*const StringObj>,
+            );
             assert_eq!(v2_get_refcount(&(*s1).header), 1);
             assert_eq!(v2_get_refcount(&(*s2).header), 1);
             // Drop the original — frees both StringObj allocations.
@@ -4265,8 +4353,7 @@ mod tests {
             let view = as_v2_typed_array(bits, kind).unwrap();
             let new_ptr = reverse_array(&view);
             let new_view =
-                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                    .unwrap();
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert_eq!(new_view.elem_type, V2ElemType::I64);
             assert_eq!(new_view.len, 5);
             let new_arr = new_ptr as *const TypedArray<i64>;
@@ -4290,8 +4377,7 @@ mod tests {
             let view = as_v2_typed_array(bits, kind).unwrap();
             let new_ptr = reverse_array(&view);
             let new_view =
-                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                    .unwrap();
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert_eq!(new_view.len, 0);
             TypedArray::<i64>::drop_array(arr);
             TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
@@ -4321,8 +4407,7 @@ mod tests {
             assert_eq!(v2_get_refcount(&(*s2).header), 2);
 
             let new_view =
-                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                    .unwrap();
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert_eq!(new_view.elem_type, V2ElemType::String);
             assert_eq!(new_view.len, 2);
             let new_arr = new_ptr as *const TypedArray<*const StringObj>;
@@ -4345,14 +4430,13 @@ mod tests {
             let b = TypedArray::<i64>::from_slice(&[3, 4, 5]);
             stamp_elem_type(a as *mut u8, ELEM_TYPE_I64);
             stamp_elem_type(b as *mut u8, ELEM_TYPE_I64);
-            let view_a = as_v2_typed_array(a as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
-            let view_b = as_v2_typed_array(b as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view_a =
+                as_v2_typed_array(a as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
+            let view_b =
+                as_v2_typed_array(b as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             let new_ptr = concat_arrays(&view_a, &view_b).unwrap();
             let new_view =
-                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                    .unwrap();
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert_eq!(new_view.elem_type, V2ElemType::I64);
             assert_eq!(new_view.len, 5);
             let new_arr = new_ptr as *const TypedArray<i64>;
@@ -4375,10 +4459,10 @@ mod tests {
             let b = TypedArray::<f64>::from_slice(&[3.0, 4.0]);
             stamp_elem_type(a as *mut u8, ELEM_TYPE_I64);
             stamp_elem_type(b as *mut u8, ELEM_TYPE_F64);
-            let view_a = as_v2_typed_array(a as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
-            let view_b = as_v2_typed_array(b as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view_a =
+                as_v2_typed_array(a as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
+            let view_b =
+                as_v2_typed_array(b as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert!(concat_arrays(&view_a, &view_b).is_err());
             TypedArray::<i64>::drop_array(a);
             TypedArray::<f64>::drop_array(b);
@@ -4390,12 +4474,11 @@ mod tests {
         unsafe {
             let arr = TypedArray::<i64>::from_slice(&[10, 20, 30, 40, 50]);
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
-            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view =
+                as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             let new_ptr = slice_array(&view, 1, 4);
             let new_view =
-                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                    .unwrap();
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert_eq!(new_view.elem_type, V2ElemType::I64);
             assert_eq!(new_view.len, 3);
             let new_arr = new_ptr as *const TypedArray<i64>;
@@ -4413,13 +4496,12 @@ mod tests {
         unsafe {
             let arr = TypedArray::<i64>::from_slice(&[10, 20, 30]);
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
-            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view =
+                as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             // end > len → clamp to len; result is `[30]`.
             let new_ptr = slice_array(&view, 2, 100);
             let new_view =
-                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                    .unwrap();
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert_eq!(new_view.len, 1);
             let new_arr = new_ptr as *const TypedArray<i64>;
             assert_eq!(*(*new_arr).data.add(0), 30);
@@ -4433,13 +4515,12 @@ mod tests {
         unsafe {
             let arr = TypedArray::<i64>::from_slice(&[1, 2, 3]);
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
-            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view =
+                as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             // start > end → empty result (no panic).
             let new_ptr = slice_array(&view, 5, 2);
             let new_view =
-                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                    .unwrap();
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert_eq!(new_view.len, 0);
             TypedArray::<i64>::drop_array(arr);
             TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
@@ -4451,12 +4532,11 @@ mod tests {
         unsafe {
             let arr = TypedArray::<i64>::from_slice(&[1, 2, 3, 4, 5]);
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
-            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view =
+                as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             let new_ptr = take_array(&view, 2);
             let new_view =
-                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                    .unwrap();
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert_eq!(new_view.len, 2);
             let new_arr = new_ptr as *const TypedArray<i64>;
             assert_eq!(*(*new_arr).data.add(0), 1);
@@ -4471,13 +4551,12 @@ mod tests {
         unsafe {
             let arr = TypedArray::<i64>::from_slice(&[1, 2]);
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
-            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view =
+                as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             // n > len → clamped to len.
             let new_ptr = take_array(&view, 100);
             let new_view =
-                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                    .unwrap();
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert_eq!(new_view.len, 2);
             TypedArray::<i64>::drop_array(arr);
             TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
@@ -4489,12 +4568,11 @@ mod tests {
         unsafe {
             let arr = TypedArray::<i64>::from_slice(&[1, 2, 3, 4, 5]);
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
-            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view =
+                as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             let new_ptr = drop_array_n(&view, 2);
             let new_view =
-                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                    .unwrap();
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert_eq!(new_view.len, 3);
             let new_arr = new_ptr as *const TypedArray<i64>;
             assert_eq!(*(*new_arr).data.add(0), 3);
@@ -4510,12 +4588,11 @@ mod tests {
         unsafe {
             let arr = TypedArray::<i64>::from_slice(&[1, 2]);
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
-            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view =
+                as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             let new_ptr = drop_array_n(&view, 100);
             let new_view =
-                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                    .unwrap();
+                as_v2_typed_array(new_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert_eq!(new_view.len, 0);
             TypedArray::<i64>::drop_array(arr);
             TypedArray::<i64>::drop_array(new_ptr as *mut TypedArray<i64>);
@@ -4544,8 +4621,16 @@ mod tests {
 
     #[test]
     fn test_eq_element_scalar_f64_bitwise() {
-        assert!(eq_element(1.5f64.to_bits(), 1.5f64.to_bits(), V2ElemType::F64));
-        assert!(!eq_element(1.5f64.to_bits(), 2.5f64.to_bits(), V2ElemType::F64));
+        assert!(eq_element(
+            1.5f64.to_bits(),
+            1.5f64.to_bits(),
+            V2ElemType::F64
+        ));
+        assert!(!eq_element(
+            1.5f64.to_bits(),
+            2.5f64.to_bits(),
+            V2ElemType::F64
+        ));
         // IEEE bitwise: NaN bits == NaN bits is TRUE under eq_element
         // (this matches the includes/indexOf observable that an array
         // containing NaN can find its own NaN element).
@@ -4600,8 +4685,8 @@ mod tests {
         unsafe {
             let arr = TypedArray::<i64>::from_slice(&[10, 20, 30, 20, 40]);
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
-            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view =
+                as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert_eq!(position_of(&view, 10u64), Some(0));
             assert_eq!(position_of(&view, 20u64), Some(1)); // first match
             assert_eq!(position_of(&view, 30u64), Some(2));
@@ -4615,8 +4700,8 @@ mod tests {
         unsafe {
             let arr = TypedArray::<i64>::with_capacity(0);
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
-            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view =
+                as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert_eq!(position_of(&view, 0u64), None);
             TypedArray::<i64>::drop_array(arr);
         }
@@ -4627,8 +4712,8 @@ mod tests {
         unsafe {
             let arr = TypedArray::<i64>::from_slice(&[1, 2, 3, 4, 5]);
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
-            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view =
+                as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             assert!(contains_element(&view, 3u64));
             assert!(!contains_element(&view, 99u64));
             TypedArray::<i64>::drop_array(arr);
@@ -4640,8 +4725,8 @@ mod tests {
         unsafe {
             let arr = TypedArray::<f64>::from_slice(&[1.0, f64::NAN, 2.0]);
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_F64);
-            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view =
+                as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             // NaN findable by its own bit pattern.
             assert_eq!(position_of(&view, f64::NAN.to_bits()), Some(1));
             assert_eq!(position_of(&view, (1.0f64).to_bits()), Some(0));
@@ -4661,8 +4746,8 @@ mod tests {
             TypedArray::push(arr, s2 as *const StringObj);
             TypedArray::push(arr, s3 as *const StringObj);
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_STRING);
-            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view =
+                as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             // Needle is a SEPARATELY-allocated StringObj with the same
             // content as s2 — content-equality must find it (not pointer
             // identity).
@@ -4690,8 +4775,8 @@ mod tests {
             TypedArray::push(arr, d1 as *const DecimalObj);
             TypedArray::push(arr, d2 as *const DecimalObj);
             stamp_elem_type(arr as *mut u8, ELEM_TYPE_DECIMAL);
-            let view = as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray))
-                .unwrap();
+            let view =
+                as_v2_typed_array(arr as u64, NativeKind::Ptr(HeapKind::TypedArray)).unwrap();
             let needle = DecimalObj::new(Decimal::from_f64(2.5).unwrap());
             assert_eq!(position_of(&view, needle as u64), Some(1));
             let other = DecimalObj::new(Decimal::from_f64(9.9).unwrap());
