@@ -71,6 +71,22 @@ pub enum TypeParamExpr {
     },
     /// Returns the same type as the receiver (used for filter, sort, etc.)
     SelfType,
+    /// Resolves the inner expression to a container type, then projects out
+    /// that container's element type (one level of un-nesting). Used by
+    /// `Iterator<Array<T>>.flatten() -> Iterator<T>`, where the flattened
+    /// output element is the INNER element type of the nested-array receiver
+    /// (`ElementOf(ReceiverParam(0))` projects `Vec<int>` → `int`).
+    ///
+    /// The existing `ReceiverParam` / `MethodParam` combinators can only name a
+    /// type-param directly; they have no "element-of-element" form. Rather than
+    /// leave flatten's output element as an unconstrained `MethodParam(0)` var
+    /// (which leaves `a + x` over the flattened element typed `unknown` and the
+    /// strict checker rejects it), `ElementOf` resolves the receiver-param
+    /// container and extracts its single element type. When the inner
+    /// expression does not resolve to a recognized one-arg container, this
+    /// yields a placeholder TypeVar so the un-inferable case SURFACEs (the
+    /// `Add` strict error) rather than being silently mistyped.
+    ElementOf(Box<TypeParamExpr>),
 }
 
 /// A method signature with generic type parameter support.
@@ -833,13 +849,16 @@ impl MethodTable {
             ),
             // `flatten()` on `Iterator<Array<U>>` removes one level →
             // `Iterator<U>`. The receiver element type `T = ReceiverParam(0)`
-            // is itself an array; the flattened element `U` is introduced as a
-            // method type-param (`MethodParam(0)`) since the `TypeParamExpr`
-            // combinators have no "element-of-element" form. `MethodParam(0)`
-            // is left unconstrained at the signature level (the closure-free
-            // flatten carries no param to bind it); downstream terminals
-            // (`collect()` → `Vec<MethodParam(0)>`) thread the fresh var.
-            ("flatten", 1, vec![], iter_of(E::MethodParam(0))),
+            // is itself an array (`Vec<U>`); the flattened output element is
+            // its INNER element type `U`, resolved via `ElementOf(t())` (project
+            // the one element type out of the nested-array receiver param).
+            // Previously this used an unconstrained `MethodParam(0)` var, which
+            // left the flattened element typed `unknown` so a downstream
+            // binop/reduce (`a + x` over flattened ints) was rejected by the
+            // strict checker. With `ElementOf`, a flattened `int` element stays
+            // `int` (not number/unknown); a non-array receiver param yields a
+            // placeholder var → SURFACE.
+            ("flatten", 0, vec![], iter_of(E::ElementOf(Box::new(t())))),
             // `enumerate()` -> Iterator<[int, T]> ([index, value] pairs).
             ("enumerate", 0, vec![], iter_of(vec_of(t()))),
             ("chain", 0, vec![iter_of(t())], iter_of(t())),
@@ -1001,6 +1020,24 @@ impl MethodTable {
                 method_vars.get(*idx).cloned().unwrap_or_else(placeholder)
             }
             TypeParamExpr::SelfType => receiver_type.clone(),
+            TypeParamExpr::ElementOf(inner) => {
+                // Resolve the inner expr to a container type, then project out
+                // its single element type (one level of un-nesting). For
+                // `Iterator<Vec<int>>.flatten()`, inner = ReceiverParam(0)
+                // resolves to `Vec<int>`; `extract_receiver_info` returns the
+                // element params `[int]`. A non-one-arg-container resolution
+                // (e.g. inner is an unresolved var or a scalar) returns the
+                // OOB placeholder var so the un-inferable case SURFACEs rather
+                // than being silently mistyped.
+                let container = Self::resolve_type_param_expr(
+                    inner,
+                    receiver_type,
+                    receiver_params,
+                    method_vars,
+                );
+                let (_name, elem_params) = Self::extract_receiver_info(&container);
+                elem_params.into_iter().next().unwrap_or_else(placeholder)
+            }
             TypeParamExpr::Function { params, returns } => Type::Function {
                 params: params
                     .iter()
@@ -1270,6 +1307,65 @@ mod tests {
         // Should return the element type (number)
         assert!(
             matches!(result.unwrap(), Type::Concrete(TypeAnnotation::Basic(ref n)) if n == "number")
+        );
+    }
+
+    #[test]
+    fn test_iterator_flatten_resolves_inner_element_type() {
+        // Wave 1b FlattenReduce (2026-06-16): `Iterator<Array<int>>.flatten()`
+        // un-nests one level → `Iterator<int>`. The registered signature uses
+        // `iter_of(ElementOf(ReceiverParam(0)))`; resolving it against an
+        // `Iterator<Vec<int>>` receiver must yield `Iterator<int>` (NOT a free
+        // `MethodParam` var, NOT `Iterator<Vec<int>>`). int stays int.
+        let table = MethodTable::new();
+        let int = || Type::Concrete(TypeAnnotation::Basic("int".into()));
+        let vec_int = Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".into()))),
+            args: vec![int()],
+        };
+        let iter_vec_int = Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Iterator".into()))),
+            args: vec![vec_int],
+        };
+
+        let mut tvgen = crate::type_system::TypeVarGen::new();
+        let result = table
+            .resolve_method_call(&iter_vec_int, "flatten", &[], &mut tvgen)
+            .expect("flatten resolves on Iterator<Vec<int>>");
+
+        // Expect Iterator<int> — the inner element type was projected out.
+        match result {
+            Type::Generic { base, args } => {
+                assert!(
+                    matches!(base.as_ref(), Type::Concrete(TypeAnnotation::Reference(n)) if n.as_str() == "Iterator"),
+                    "flatten result base must be Iterator, got {base:?}"
+                );
+                assert_eq!(args.len(), 1, "Iterator carries one element arg");
+                assert!(
+                    matches!(&args[0], Type::Concrete(TypeAnnotation::Basic(n)) if n == "int"),
+                    "flatten element must be int (un-nested), got {:?}",
+                    args[0]
+                );
+            }
+            other => panic!("flatten must resolve to Iterator<int>, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_element_of_non_container_surfaces_placeholder() {
+        // `ElementOf` over a non-container receiver param (here a scalar `int`)
+        // must NOT fabricate a type — it yields the OOB placeholder var so the
+        // un-inferable case SURFACEs downstream rather than being mistyped.
+        let int = Type::Concrete(TypeAnnotation::Basic("int".into()));
+        let resolved = MethodTable::resolve_type_param_expr(
+            &TypeParamExpr::ElementOf(Box::new(TypeParamExpr::ReceiverParam(0))),
+            &int,
+            std::slice::from_ref(&int),
+            &[],
+        );
+        assert!(
+            matches!(resolved, Type::Variable(_)),
+            "ElementOf of a scalar must surface a placeholder var, got {resolved:?}"
         );
     }
 

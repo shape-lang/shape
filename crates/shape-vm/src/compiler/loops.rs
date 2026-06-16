@@ -1640,6 +1640,17 @@ impl BytecodeCompiler {
                     Expr::Literal(shape_ast::ast::Literal::String(_), _) => {
                         Some("string".to_string())
                     }
+                    // Wave 1b FlattenReduce (2026-06-16): a nested-array literal
+                    // element (`[[1,2],[3,4]]` → first = `[1,2]`) — the element
+                    // type NAME is `Array<innerName>`. Recurse to resolve the
+                    // inner element name; this lets `[[1,2],[3,4]].iter().flatten()`
+                    // un-nest one level (the flatten arm strips the `Array<...>`
+                    // wrapper to recover `int`). A nested literal whose inner
+                    // element is itself unresolvable yields `None`.
+                    Expr::Array(..) => {
+                        let inner = self.iter_element_type_name(first)?;
+                        Some(format!("Array<{inner}>"))
+                    }
                     _ => None,
                 }
             }
@@ -1668,6 +1679,22 @@ impl BytecodeCompiler {
             {
                 self.iter_element_type_name(receiver)
             }
+            // Wave 1b FlattenReduce (2026-06-16): `flatten()` un-nests ONE
+            // level, so its element type NAME is the INNER element of the
+            // receiver's (nested-array) element. Recover the receiver's element
+            // name (`Vec<int>` / `Array<int>`), then strip ONE more array
+            // wrapper to yield `int`. Parallels the type-checker's
+            // `ElementOf(ReceiverParam(0))` flatten signature. A receiver whose
+            // element name is not an array (or unresolvable) yields `None` —
+            // the closure param stays unstamped and SURFACEs.
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                ..
+            } if method.as_str() == "flatten" && args.is_empty() => self
+                .iter_element_type_name(receiver)
+                .and_then(|inner_name| Self::array_type_name_inner(&inner_name)),
             _ => None,
         }
     }
@@ -1714,6 +1741,25 @@ impl BytecodeCompiler {
                 && (method != "iter" || args.is_empty())
             {
                 return self.iter_element_concrete_type(receiver);
+            }
+            // Wave 1b FlattenReduce (2026-06-16): `flatten()` removes ONE level
+            // of nesting — its element type is the INNER element type of the
+            // nested-array receiver (`Iterator<Array<T>>.flatten() ->
+            // Iterator<T>`). Recover the receiver's element `ConcreteType`
+            // (itself an `Array<T>` for a well-typed nested receiver), then
+            // strip the inner `Array` to yield `T`. This parallels the
+            // type-checker's `ElementOf(ReceiverParam(0))` flatten signature.
+            // A receiver whose element is not an array (or unresolvable) yields
+            // `None` — the closure param stays unstamped and SURFACEs. (Driven
+            // off the same recursion as the type-preserving adapters; for an
+            // inline nested literal the name-based `iter_element_type_name` path
+            // resolves first, so this serves the let-bound `ConcreteType::Array`
+            // receivers whose element ConcreteType is precisely tracked.)
+            if method.as_str() == "flatten" && args.is_empty() {
+                return match self.iter_element_concrete_type(receiver) {
+                    Some(ConcreteType::Array(inner)) => Some(*inner),
+                    _ => None,
+                };
             }
         }
         match crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, iter)
