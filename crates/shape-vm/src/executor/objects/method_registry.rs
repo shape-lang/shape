@@ -134,6 +134,7 @@ pub static MUT_SELF_PRIORITY_QUEUE_METHODS: phf::Set<&'static str> = phf_set! {
 /// deleted. The shared mut-self set remains for the compiler's
 /// write-back gate, which is liberal across container kinds. `pop` is
 /// excluded per the same return-value rule as `MUT_SELF_ARRAY_METHODS`.
+#[allow(dead_code)]
 pub static MUT_SELF_TYPED_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
     "push",
     "set",
@@ -150,6 +151,7 @@ pub static MUT_SELF_TYPED_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
 /// re-stores the same bits — net effect: no-op modulo refcount churn).
 ///
 /// Used by `compile_expr_method_call`'s writeback emission gate.
+#[allow(dead_code)]
 pub fn is_mut_self_method_name(method: &str) -> bool {
     MUT_SELF_HASHSET_METHODS.contains(method)
         || MUT_SELF_HASHMAP_METHODS.contains(method)
@@ -697,6 +699,7 @@ pub static MATRIX_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
 /// Inherited DataTable methods are dispatched via DATATABLE_METHODS fallback.
 ///
 /// **Query:** between, resample
+#[allow(dead_code)]
 pub static INDEXED_TABLE_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "between" => crate::executor::objects::indexed_table_methods::handle_between,
     "resample" => crate::executor::objects::indexed_table_methods::handle_resample,
@@ -744,6 +747,7 @@ pub static FLOAT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map!
 /// **Aggregations:** sum, avg, mean, min, max
 /// **Numeric:** abs
 /// **Standard:** len, length, map, filter, reduce, fold, forEach, find, some, every, toArray
+#[allow(dead_code)]
 pub static INT_ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     // Aggregations — MethodFnV2 (v2 typed array + v1 fallback)
     "sum" => crate::executor::objects::typed_array_methods::v2_int_sum,

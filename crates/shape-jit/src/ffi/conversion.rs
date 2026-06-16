@@ -12,6 +12,7 @@
 // Branches that walked array elements (`type_spec` of shape "array:...",
 // "tuple:...") now return `false` rather than fabricating an iteration
 // over a deleted heap layout.
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use super::jit_kinds::*;
 use super::value_ffi::*;
 

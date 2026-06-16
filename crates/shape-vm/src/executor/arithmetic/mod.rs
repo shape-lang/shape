@@ -41,6 +41,7 @@ use std::sync::Arc;
 use crate::constants::EXACT_F64_INT_LIMIT;
 
 #[inline(always)]
+#[allow(dead_code)]
 fn arith_i128_to_lossless_f64(value: i128) -> Option<f64> {
     if (-EXACT_F64_INT_LIMIT..=EXACT_F64_INT_LIMIT).contains(&value) {
         Some(value as f64)

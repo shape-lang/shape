@@ -3,6 +3,7 @@
 //! Covers: zero, positive, negative, fractional, scientific notation,
 //! type annotations, inference, truthiness, and edge cases.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =============================================================================

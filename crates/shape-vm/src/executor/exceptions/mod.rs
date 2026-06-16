@@ -367,6 +367,7 @@ impl VirtualMachine {
         Ok(empty_string_kinded_slot())
     }
 
+    #[allow(dead_code)]
     pub(in crate::executor) fn trace_info_single(&mut self) -> Result<KindedSlot, VMError> {
         Ok(empty_string_kinded_slot())
     }
@@ -1149,10 +1150,7 @@ fn type_check_kinded(annotation: &shape_ast::ast::TypeAnnotation, value: &Kinded
                     | NativeKind::UIntSize
             ),
             "number" | "float" => matches!(value.kind, NativeKind::Float64),
-            "bool" => {
-                matches!(value.kind, NativeKind::Bool) && value.slot.raw() != 0
-                    || matches!(value.kind, NativeKind::Bool)
-            }
+            "bool" => matches!(value.kind, NativeKind::Bool),
             "string" => matches!(
                 value.kind,
                 NativeKind::String | NativeKind::Ptr(HeapKind::String)
@@ -1473,7 +1471,6 @@ mod build_any_error_tests {
 #[cfg(test)]
 mod variant_codegen_tests {
     use super::*;
-    use crate::executor::VMConfig;
 
     /// Smoke target: `Ok(42)` → is_ok() → unwrap_ok() yields 42.
     #[test]

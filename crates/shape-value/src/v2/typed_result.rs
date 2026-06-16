@@ -207,6 +207,8 @@ pub const RESULT_OFFSET_TAG: usize = 0;
 pub const RESULT_OFFSET_PAYLOAD: usize = 8;
 
 #[cfg(test)]
+// 3.14 is an arbitrary test float, not a PI approximation.
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

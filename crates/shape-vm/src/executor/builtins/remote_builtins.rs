@@ -49,6 +49,7 @@
 //! `executor/vm_impl/modules.rs` (the VM stamps the active program
 //! before each module dispatch).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_runtime::json_value::JsonValue;
 use shape_runtime::marshal::{register_typed_fn_1, register_typed_fn_2};
 use shape_runtime::module_exports::ModuleExports;
@@ -72,6 +73,7 @@ thread_local! {
 }
 
 /// Set the thread-local program reference. Called by the VM before module dispatch.
+#[allow(dead_code)]
 pub fn set_current_program(program: &crate::bytecode::BytecodeProgram) {
     CURRENT_PROGRAM.with(|p| {
         *p.borrow_mut() = Some(program.clone());
@@ -79,6 +81,7 @@ pub fn set_current_program(program: &crate::bytecode::BytecodeProgram) {
 }
 
 /// Clear the thread-local program reference. Called by the VM after module dispatch.
+#[allow(dead_code)]
 pub fn clear_current_program() {
     CURRENT_PROGRAM.with(|p| {
         *p.borrow_mut() = None;

@@ -21,6 +21,7 @@
 //! Field access uses raw pointer arithmetic with byte offsets known at
 //! compile time, giving O(1) access with no schema lookup.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 
 /// Heap kind tag for v2 typed structs.

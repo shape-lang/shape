@@ -38,8 +38,7 @@
 use arrow_array::Array;
 use shape_runtime::context::ExecutionContext;
 use shape_value::{
-    AlignedVec, DataTable, KindedSlot, NativeKind, TableViewData, TypedObjectStorage, VMError,
-    ValueSlot,
+    AlignedVec, DataTable, KindedSlot, NativeKind, TableViewData, VMError, ValueSlot,
     heap_value::{HeapKind, MatrixData},
 };
 use std::sync::Arc;
@@ -446,6 +445,7 @@ pub(crate) fn handle_columns_ref(
 /// plus the column's `NativeKind` and whether the slot is heap-resident.
 /// Built once per `dt.rows()` call; reused across rows.
 struct ColumnReader {
+    #[allow(dead_code)]
     read: Box<dyn Fn(usize) -> ValueSlot>,
     kind: NativeKind,
     is_heap: bool,

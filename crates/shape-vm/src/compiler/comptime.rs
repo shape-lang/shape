@@ -296,6 +296,7 @@ fn rewrite_type_info_in_expr(expr: &mut Expr) {
 /// `populate_module_objects()` wraps them with `block_in_place` + `block_on`,
 /// which requires a tokio runtime. If no runtime exists (e.g., running from
 /// tests or non-async CLI), a temporary single-threaded runtime is created.
+#[allow(dead_code)]
 pub(crate) fn execute_comptime(
     statements: &[Statement],
     comptime_helpers: &[FunctionDef],
@@ -710,6 +711,7 @@ fn ensure_module_object_schema(
 ///
 /// Returns the `KindedSlot` result of the handler execution (ADR-006 §2.7).
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn execute_comptime_with_target(
     handler_body: &Expr,
     handler_param: &str,

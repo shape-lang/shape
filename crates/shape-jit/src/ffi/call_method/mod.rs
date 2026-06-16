@@ -18,7 +18,6 @@ use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 use shape_runtime::context::ExecutionContext;
 use shape_value::{HeapKind, NativeKind};
-use std::collections::HashMap;
 
 // Module declarations
 pub mod array;

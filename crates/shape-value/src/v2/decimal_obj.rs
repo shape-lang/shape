@@ -100,6 +100,8 @@ unsafe impl super::heap_element::HeapElement for DecimalObj {
 }
 
 #[cfg(test)]
+// 3.14 is an arbitrary test float, not a PI approximation.
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use rust_decimal::prelude::FromPrimitive;

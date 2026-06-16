@@ -15,6 +15,7 @@
 // E-tests reference template `executor/v2_stack_tests.rs` and
 // playbook §3 canonical rewrite).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use super::*;
 use crate::bytecode::*;
 use shape_value::VMError;

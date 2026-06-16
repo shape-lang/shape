@@ -1,6 +1,7 @@
 //! Stress tests for type annotations on let/const/var, function parameters,
 //! return types, closures, default params, mutable variables, any type, and array annotations.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =========================================================================

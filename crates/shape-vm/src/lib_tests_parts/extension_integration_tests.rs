@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod extension_integration_tests {
-    use super::*;
     use crate::BytecodeExecutor;
     use shape_runtime::engine::ShapeEngine;
     use shape_runtime::marshal::{register_typed_fn_0, register_typed_fn_1};

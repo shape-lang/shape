@@ -25,6 +25,9 @@ use cranelift::codegen::ir::FuncRef;
 
 /// Bundle of Cranelift `FuncRef` handles for native-typed FFI calls used by
 /// the v2 JIT codegen pipeline.
+// Several FuncRef fields are staged ahead of their codegen call sites (see the
+// per-field history comments); intentionally unread until those paths land.
+#[allow(dead_code)]
 pub struct FFIFuncRefs {
     // Object / property access
     pub(crate) get_prop: FuncRef,

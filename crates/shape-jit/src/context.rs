@@ -2,7 +2,6 @@
 //!
 //! Contains the runtime context and data structures used by JIT-compiled code.
 
-use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 
 // ============================================================================
@@ -978,6 +977,7 @@ impl Default for JITConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffi::jit_kinds::*;
 
     #[test]
     fn test_closure_dynamic_captures_0() {

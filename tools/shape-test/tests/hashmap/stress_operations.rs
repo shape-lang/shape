@@ -1,6 +1,7 @@
 //! Stress tests for HashMap get/set/delete/has operations, len/length/isEmpty,
 //! integer keys, boolean keys, immutability, nested hashmaps, and edge cases.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =========================================================================

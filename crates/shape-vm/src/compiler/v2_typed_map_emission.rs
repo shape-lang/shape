@@ -329,7 +329,6 @@ mod tests {
 
 #[cfg(test)]
 mod compile_integration_tests {
-    use super::*;
     use crate::bytecode::{BytecodeProgram, OpCode, Operand};
     use crate::compiler::BytecodeCompiler;
 

@@ -670,6 +670,7 @@ pub(crate) fn create_comptime_builtins_module(
 /// variant IDs by name at runtime (the order in `types.shape` is the
 /// source of truth) so the ordinal here is not bit-encoded.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 enum TypeKindLabel {
     Int,
     Float,

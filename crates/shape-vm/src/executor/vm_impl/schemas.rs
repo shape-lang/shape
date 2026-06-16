@@ -20,6 +20,7 @@ impl VirtualMachine {
     /// popped key/value pairs and surfaces `VMError::NotImplemented`. The
     /// signature here is removed entirely so reintroducing a ValueWord-
     /// shaped pairs API requires re-adding the function (review-visible).
+    #[allow(dead_code)]
     pub(crate) fn create_typed_object_from_pairs_stub(&mut self) -> Result<(), VMError> {
         Err(VMError::NotImplemented(
             "create_typed_object_from_pairs: ad-hoc TypedObject construction \

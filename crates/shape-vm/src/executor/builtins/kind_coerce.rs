@@ -15,6 +15,7 @@
 //! Per §2.7.6: "runtime-tier dispatch on a carrier at a builtin
 //! boundary; the deleted hot-path tag_bits dispatch never runs here."
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_value::{KindedSlot, NativeKind, VMError, heap_value::HeapKind};
 
 /// Coerce a `KindedSlot` to `f64` for builtins that accept either an
@@ -94,6 +95,7 @@ pub(crate) fn int_operand(slot: &KindedSlot) -> Result<i64, VMError> {
 /// The variant set is exhaustive for ADR-006's numeric domain — adding a
 /// fifth variant requires supervisor sign-off (playbook §1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum NumericDomain {
     /// Signed/unsigned integer family — Int8..Int64, IntSize, UInt8..UInt64,
     /// UIntSize, plus the nullable variants.
@@ -111,6 +113,7 @@ pub(crate) enum NumericDomain {
 /// arithmetic/comparison opcode bodies that dispatch per-domain. Returns
 /// `Err(VMError::TypeError)` for non-numeric kinds.
 #[inline]
+#[allow(dead_code)]
 pub(crate) fn numeric_domain(slot: &KindedSlot) -> Result<NumericDomain, VMError> {
     match slot.kind {
         k if k.is_integer_family() => Ok(NumericDomain::Int),

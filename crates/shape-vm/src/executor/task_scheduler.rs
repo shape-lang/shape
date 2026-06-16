@@ -318,6 +318,9 @@ impl TaskScheduler {
                 Ok((bits, NativeKind::Ptr(HeapKind::TaskGroup)))
             }
             // Race: return first result (all run, but we return first).
+            // The loop intentionally returns on the first id (or errors if the
+            // task list is empty); the single-iteration shape is deliberate.
+            #[allow(clippy::never_loop)]
             1 => {
                 for &id in task_ids {
                     let res = self.resolve_task(id, &mut executor_fn)?;

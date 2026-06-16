@@ -2,6 +2,7 @@
 //! calls in loops, mutation, array building, algorithms (GCD, collatz, fibonacci,
 //! binary search, integer sqrt), accumulators, sequential loops, and state machines.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =========================================================================

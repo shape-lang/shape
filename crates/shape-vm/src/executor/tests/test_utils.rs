@@ -123,6 +123,7 @@ pub fn eval_typed_i64(source: &str) -> i64 {
 
 /// Evaluate Shape source and return the result as a native `f64`.
 /// Panics if the value cannot be decoded as a float.
+#[allow(dead_code)]
 pub fn eval_typed_f64(source: &str) -> f64 {
     eval_with_kind(source, NativeKind::Float64)
         .as_f64()
@@ -131,6 +132,7 @@ pub fn eval_typed_f64(source: &str) -> f64 {
 
 /// Evaluate Shape source and return the result as a native `bool`.
 /// Panics if the value cannot be decoded as a boolean.
+#[allow(dead_code)]
 pub fn eval_typed_bool(source: &str) -> bool {
     eval_with_kind(source, NativeKind::Bool)
         .as_bool()

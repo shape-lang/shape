@@ -43,7 +43,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::{ChannelData, HeapKind, HeapValue};
+use shape_value::heap_value::{ChannelData, HeapKind};
 use shape_value::{KindedSlot, NativeKind, VMError};
 use std::sync::Arc;
 

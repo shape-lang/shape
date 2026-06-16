@@ -2,6 +2,7 @@
 //! returning structs, Result/Option match patterns, multiple struct types,
 //! type annotation interactions, and edge cases (closures, overflow, precision).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =========================================================================

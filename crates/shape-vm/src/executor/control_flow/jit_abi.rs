@@ -16,6 +16,7 @@
 //! deleted alongside the strict-typing bulldozer (see
 //! `crates/shape-value/src/native_kind.rs` §2.7.7 #6 for the deletion note).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 #[cfg(any(test, feature = "jit"))]
 use crate::type_tracking::NativeKind;
 

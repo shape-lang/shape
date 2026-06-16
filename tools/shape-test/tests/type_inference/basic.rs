@@ -1,6 +1,7 @@
 //! Basic type inference tests — integers, floats, strings, bools,
 //! closures, function calls, and reassignment.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =========================================================================

@@ -530,7 +530,7 @@ pub fn v2_string_join(
     use crate::executor::v2_handlers::v2_array_detect::{
         V2ElemType, as_v2_typed_array, read_element,
     };
-    use shape_value::{NativeKind, ValueSlot};
+    use shape_value::ValueSlot;
 
     let sep = str_arg(args, 1)?;
 

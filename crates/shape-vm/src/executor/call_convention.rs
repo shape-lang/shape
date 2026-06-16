@@ -653,6 +653,7 @@ impl VirtualMachine {
     /// ABI shape — the kinded replacement takes a borrowed
     /// `OwnedClosureBlock` per ADR-006 §2.7.8 / Q10 (the cell-storage
     /// parallel-kind track is the canonical capture-kind source).
+    #[allow(dead_code)]
     pub(crate) fn call_closure_with_nb_args(
         &mut self,
         func_id: u16,

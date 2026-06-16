@@ -118,6 +118,7 @@ use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 /// fires, but the helper remains live for forward consistency with the
 /// Wave 2 Round 3a' Agent β / Agent A2 routing decision.
 #[inline]
+#[allow(dead_code)]
 pub(super) fn detect_v2_raw_string_or_decimal_receiver(
     slot: &KindedSlot,
 ) -> Option<crate::executor::v2_handlers::v2_array_detect::V2TypedArrayView> {

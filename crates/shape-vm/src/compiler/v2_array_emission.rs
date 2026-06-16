@@ -7,6 +7,7 @@
 //! These are pure query functions -- they do NOT modify compilation state.
 //! Integration into the actual opcode emission paths will happen separately.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::type_tracking::{NativeKind, TypeTracker};
 use shape_ast::ast::{Expr, Literal, TypeAnnotation};
 

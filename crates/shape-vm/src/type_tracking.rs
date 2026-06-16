@@ -1234,6 +1234,9 @@ impl std::error::Error for ProofGap {}
 /// declared kind at the source location and compare against
 /// `claimed_kind`. Mismatch or unknown → `ProofGap`.
 #[inline]
+// `site` is reserved for the Phase 3+ proof check (see doc above); the Phase 2
+// stub does not yet inspect it. Keeping the public param name documented.
+#[allow(unused_variables)]
 pub fn prove_native_kind(
     site: &'static str,
     claimed_kind: NativeKind,

@@ -20,6 +20,7 @@
 //!
 //! `point.x` compiles to a single `load f64 [ptr + 8]`.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use cranelift::codegen::ir::FuncRef;
 use cranelift::prelude::*;
 use shape_vm::type_tracking::NativeKind;

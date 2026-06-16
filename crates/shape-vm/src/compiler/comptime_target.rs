@@ -18,7 +18,7 @@ use shape_ast::ast::literals::Literal;
 use shape_ast::ast::{Expr, FunctionDef, TypeAnnotation};
 use shape_ast::error::ShapeError;
 use shape_value::KindedSlot;
-use shape_value::heap_value::{HeapValue, TypedObjectStorage};
+use shape_value::heap_value::TypedObjectStorage;
 // V3-S5 ckpt-5 (2026-05-15): `TypedArrayData` + `typed_buffer::TypedBuffer`
 // imports removed in lockstep with the `nb_string_array` / `nb_object_array`
 // surface-and-stop builders below. Both wrappers were deleted at ckpt-1..

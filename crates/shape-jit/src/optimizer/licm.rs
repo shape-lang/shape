@@ -15,6 +15,7 @@
 //!   `tan`, `asin`, `acos`, `atan`, `exp`, `ln`, `log`, `round`
 //! - Matrix/collection methods: `row`, `col`, `transpose`, `shape`, `len`
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use std::collections::HashMap;
 
 use shape_vm::bytecode::{BuiltinFunction, BytecodeProgram, OpCode, Operand};
@@ -487,7 +488,6 @@ mod tests {
         //   StoreLocal(3)
         //   ...increment...
         //   LoopEnd
-        use shape_value::StringId;
         let instrs = vec![
             make_instr(OpCode::LoopStart, None),                       // 0
             make_instr(OpCode::LoadLocal, Some(Operand::Local(0))),    // 1

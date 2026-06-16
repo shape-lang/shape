@@ -45,6 +45,7 @@
 //!   (iv) ruling. Fail-safe REFUSE LOAD with structured error sits at
 //!   the extension load gate (`shape-runtime/src/plugins/loader.rs`).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use rmpv::Value as Rmp;
 use shape_runtime::type_schema::{FieldType, TypeSchema, TypeSchemaRegistry};
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectPtr};
@@ -702,7 +703,7 @@ fn _unused_imports_keepalive(_hv: &HeapValue, _tp: &TypedObjectPtr) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shape_runtime::type_schema::{FieldType, TypeSchemaRegistry};
+    use shape_runtime::type_schema::TypeSchemaRegistry;
 
     #[test]
     fn marshal_scalar_args_roundtrips_through_msgpack() {

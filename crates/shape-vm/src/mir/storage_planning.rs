@@ -1110,8 +1110,6 @@ fn slot_holds_reference(slot: SlotId, mir: &MirFunction) -> bool {
 mod tests {
     use super::*;
     use crate::mir::analysis::BorrowAnalysis;
-    use crate::mir::liveness::LivenessResult;
-    use crate::mir::types::*;
     use crate::type_tracking::{
         Aliasability, BindingOwnershipClass, BindingSemantics, BindingStorageClass, EscapeStatus,
         MutationCapability,

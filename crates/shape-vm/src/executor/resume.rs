@@ -68,6 +68,7 @@
 //!   (`HeapKind::HashSet` / `HeapKind::Result` / `HeapKind::Option`
 //!   arms).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_value::{HeapKind, NativeKind, VMError};
 
 use super::VirtualMachine;
@@ -756,7 +757,6 @@ fn arm_name_for_diag(sv: &shape_runtime::snapshot::SerializableVMValue) -> &'sta
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::VMConfig;
     use crate::executor::{CallFrame, VirtualMachine};
     use shape_value::{KindedSlot, NativeKind, ValueSlot};

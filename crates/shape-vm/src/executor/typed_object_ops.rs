@@ -32,7 +32,6 @@
 use crate::bytecode::{Instruction, Operand};
 use crate::executor::vm_impl::stack::{clone_with_kind, drop_with_kind};
 use shape_runtime::type_schema::FieldType;
-use shape_value::heap_value::HeapValue;
 use shape_value::{HeapKind, NativeKind, VMError, ValueSlot};
 
 /// Compile-time field type tags for zero-cost field access.
@@ -126,6 +125,7 @@ pub fn field_type_to_tag(ft: &FieldType) -> u16 {
 /// Convert a `field_type_tag` back to a `FieldType` (used by write-path
 /// `clone_slots_with_update`, which is owned by sibling cluster
 /// `D-obj-create`). Pure schema-tag mapping — no runtime dynamic-word shape.
+#[allow(dead_code)]
 pub(in crate::executor) fn tag_to_field_type(tag: u16) -> Option<FieldType> {
     match tag {
         FIELD_TAG_F64 => Some(FieldType::F64),

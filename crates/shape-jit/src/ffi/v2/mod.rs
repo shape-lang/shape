@@ -4,6 +4,7 @@
 //! NaN-boxed u64 values. They are called from JIT-compiled v2 code via direct
 //! extern "C" calls.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 pub mod collection_arc;
 pub mod typed_map;
 

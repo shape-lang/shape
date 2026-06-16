@@ -493,6 +493,7 @@ fn as_string_key(slot: &KindedSlot) -> Result<&str, VMError> {
 /// to a `KindedSlot` via the matching per-FieldType constructor. Mirrors
 /// `executor/builtins/array_ops.rs::heap_value_to_slot` (the canonical
 /// `the-deleted-heterogeneous-element-carrier` element re-wrapping path).
+#[allow(dead_code)]
 fn heap_value_arc_to_slot(hv: &Arc<HeapValue>) -> KindedSlot {
     match hv.as_ref() {
         HeapValue::String(s) => KindedSlot::from_string_arc(Arc::clone(s)),
@@ -1999,6 +2000,7 @@ pub fn v2_group_by(
 /// through `BigInt(Arc<i64>)`; Float64 / Bool reject (no matching heap
 /// arm in the post-§2.3 `HeapValue`); String / heap-pointer kinds clone
 /// through `as_heap_value()` per ADR-005 §1 single-discriminator.
+#[allow(dead_code)]
 fn result_slot_to_heap_value_arc(result: &KindedSlot) -> Result<Arc<HeapValue>, VMError> {
     match result.kind {
         NativeKind::Int64 => {
@@ -2053,6 +2055,7 @@ fn result_slot_to_heap_value_arc(result: &KindedSlot) -> Result<Arc<HeapValue>, 
 /// `Arc::into_raw::<String>` payload (per the `ValueSlot::from_string_arc`
 /// constructor + `KindedSlot::clone`'s string arm at
 /// `kinded_slot.rs:474..480`), so the recovery path is the same for both.
+#[allow(dead_code)]
 fn result_slot_to_string_arc(result: &KindedSlot) -> Option<Arc<String>> {
     match result.kind {
         NativeKind::String | NativeKind::Ptr(HeapKind::String) => {

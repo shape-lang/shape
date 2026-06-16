@@ -249,6 +249,7 @@ impl VirtualMachine {
     ///
     /// After calling this, the VM's `ip` is set to `deopt_info.resume_ip`
     /// and `sp` is adjusted per `deopt_info.stack_depth`.
+    #[allow(dead_code)]
     pub(crate) fn deopt_with_info(
         &mut self,
         deopt_info: &DeoptInfo,
@@ -311,6 +312,7 @@ impl VirtualMachine {
     /// 5. Sets ip = deopt_info.resume_ip (interpreter resumes in innermost)
     ///
     /// The interpreter will naturally return up through the reconstructed stack.
+    #[allow(dead_code)]
     pub(crate) fn deopt_with_inline_frames(
         &mut self,
         deopt_info: &DeoptInfo,
@@ -480,6 +482,7 @@ impl VirtualMachine {
     ///
     /// # Returns
     /// `Ok(true)` if deopt was handled, `Ok(false)` if no deopt info found.
+    #[allow(dead_code)]
     pub(crate) fn handle_tier2_deopt(
         &mut self,
         func_id: u16,
@@ -825,7 +828,6 @@ mod tests {
     #[test]
     fn test_return_ip_dispatch_loop_semantics() {
         use crate::bytecode::InlineFrameInfo;
-        use crate::type_tracking::NativeKind;
 
         let iframe = InlineFrameInfo {
             function_id: 0,

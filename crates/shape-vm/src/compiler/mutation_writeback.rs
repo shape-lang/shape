@@ -201,6 +201,7 @@ pub enum MutSelfWriteBackTarget {
 /// `Swap; Pop` (silent drop for r-value receivers — mirror of the
 /// §2.7.27 self-returning r-value silent-drop rule).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum MutSelfWriteBackMode {
     /// Self-returning `&mut self` (existing §2.7.27 base): handler
     /// returns the (possibly-cloned) container Arc. Codegen emits

@@ -1,5 +1,6 @@
 //! Stress tests for parameter passing and return values.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 /// Verifies function local vars isolated.

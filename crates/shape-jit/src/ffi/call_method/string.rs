@@ -12,7 +12,6 @@
 // `.split()` and `.chars()` returned `JitArray`-of-strings results;
 // they now route to surface-and-stop per ADR-006 §2.7.4 / W10
 // jit-playbook §5.
-use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 
 /// Call a method on a string value

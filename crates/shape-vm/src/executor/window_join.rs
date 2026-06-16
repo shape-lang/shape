@@ -39,7 +39,7 @@ use crate::bytecode::{Instruction, OpCode, Operand};
 use crate::executor::vm_impl::stack::drop_with_kind;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
-use shape_value::{HeapValue, KindedSlot, NativeKind, TableViewData, VMError};
+use shape_value::{KindedSlot, NativeKind, TableViewData, VMError};
 
 use super::VirtualMachine;
 
@@ -299,6 +299,7 @@ impl VirtualMachine {
     /// (TemporalData::DateTime(..))`. The surrounding pure-AST helper
     /// `eval_datetime_expr_recursive` is preserved (no forbidden
     /// patterns, ready for the body re-fill).
+    #[allow(dead_code)]
     pub(crate) fn handle_eval_datetime_expr(
         &mut self,
         _ctx: Option<&mut ExecutionContext>,

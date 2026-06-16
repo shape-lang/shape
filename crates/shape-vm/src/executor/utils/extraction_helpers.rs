@@ -39,6 +39,7 @@ use shape_value::VMError;
 /// collection method handlers. Used by every `*_methods.rs` consumer
 /// in `executor/objects/`.
 #[inline]
+#[allow(dead_code)]
 pub(crate) fn type_mismatch_error(method_name: &str, expected_type: &str) -> VMError {
     VMError::RuntimeError(format!(
         "{} called on non-{} value",

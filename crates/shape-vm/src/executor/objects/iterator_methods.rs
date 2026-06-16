@@ -590,6 +590,7 @@ where
 /// `Range.iter()` — forwarder to `range_methods::range_iter`. Live registry
 /// entry is `range_methods::range_iter`; this binding exists for build
 /// stability and delegates.
+#[allow(dead_code)]
 pub fn v2_range_iter(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -646,6 +647,7 @@ pub(crate) fn handle_string_iter(
 }
 
 /// `Range.iter()` — alternate binding for build stability; delegates.
+#[allow(dead_code)]
 pub(crate) fn handle_range_iter(
     vm: &mut VirtualMachine,
     args: &[KindedSlot],

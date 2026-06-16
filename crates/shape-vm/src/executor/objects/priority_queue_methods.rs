@@ -52,7 +52,7 @@
 // shape).
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::{HeapKind, HeapValue, PriorityQueueData};
+use shape_value::heap_value::{HeapKind, PriorityQueueData};
 use shape_value::{KindedSlot, NativeKind, VMError};
 use std::sync::Arc;
 

@@ -1,5 +1,6 @@
 //! Basic generics tests: generic functions, generic structs, type inference at call sites.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =========================================================================

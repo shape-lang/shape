@@ -4,11 +4,9 @@
 //! through the native module function API.
 
 use shape_runtime::stdlib_io::create_io_module;
-use shape_runtime::stdlib_io::file_ops;
-use shape_runtime::stdlib_io::path_ops;
-use std::sync::Arc;
 
 /// Create a dummy `ModuleContext` for test-only direct function calls.
+#[allow(dead_code)]
 fn test_ctx() -> shape_runtime::module_exports::ModuleContext<'static> {
     static REGISTRY: std::sync::LazyLock<shape_runtime::type_schema::TypeSchemaRegistry> =
         std::sync::LazyLock::new(shape_runtime::type_schema::TypeSchemaRegistry::new);
@@ -26,6 +24,7 @@ fn test_ctx() -> shape_runtime::module_exports::ModuleContext<'static> {
 }
 
 /// Create a unique temp file path for test isolation.
+#[allow(dead_code)]
 fn temp_path(name: &str) -> String {
     let dir = std::env::temp_dir().join("shape_io_tests");
     let _ = std::fs::create_dir_all(&dir);

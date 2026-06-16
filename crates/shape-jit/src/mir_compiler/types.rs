@@ -1975,7 +1975,6 @@ fn is_comparison_op(op: &BinOp) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shape_vm::mir::types::*;
 
     fn make_mir(stmts: Vec<MirStatement>) -> MirFunction {
         MirFunction {

@@ -1,6 +1,7 @@
 //! Stress tests for struct/type declarations, field types, type aliases,
 //! field count variations, and compile-time type errors.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =========================================================================

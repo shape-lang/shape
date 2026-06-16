@@ -8,7 +8,6 @@
 
 use crate::context::JITContext;
 use crate::ffi::control::jit_call_value;
-use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 
 /// JIT FFI for run_simulation

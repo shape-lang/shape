@@ -7,7 +7,7 @@
 //! preserving ADR-005 §1's single-discriminator discipline.
 
 use crate::executor::VirtualMachine;
-use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, TypedObjectStorage, VMError};
+use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, VMError};
 use std::sync::Arc;
 
 #[inline]

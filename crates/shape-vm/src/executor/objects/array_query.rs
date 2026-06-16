@@ -163,6 +163,7 @@ fn require_closure(op: &str, arg: &KindedSlot) -> Result<(), VMError> {
 /// `includes`). Class-shift target: J.5c.
 #[cold]
 #[inline(never)]
+#[allow(dead_code)]
 fn j5_builder_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
     let receiver_kind = if args.is_empty() {
         "<no args>".to_string()

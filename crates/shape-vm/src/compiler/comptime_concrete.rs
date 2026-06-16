@@ -75,7 +75,7 @@
 //! the strict-typing-sweep build clean.
 
 #![allow(dead_code)]
-
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::compiler::v2_map_emission::concrete_type_from_annotation;
 use shape_ast::ast::TypeAnnotation;
 use shape_value::v2::ConcreteType;

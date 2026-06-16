@@ -2,6 +2,7 @@
 //! type-annotated lets, width-typed locals, const bindings, expressions,
 //! function parameters, module-level bindings, and large local counts.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =========================================================================

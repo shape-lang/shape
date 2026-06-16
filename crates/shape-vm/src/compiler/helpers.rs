@@ -89,6 +89,7 @@ thread_local! {
 /// on panic). This is the compile-time-gated test path; production code
 /// reads the env var exclusively via `ownership_moves_enabled()`.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn with_ownership_moves_flag<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
     struct Guard(Option<bool>);
     impl Drop for Guard {
@@ -169,6 +170,7 @@ thread_local! {
 /// panic). Production code reads the env var exclusively via
 /// `promote_to_shared_enabled()`.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn with_promote_to_shared_flag<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
     struct Guard(Option<bool>);
     impl Drop for Guard {
@@ -248,6 +250,7 @@ thread_local! {
 /// Production code reads the env var exclusively via
 /// `box_by_default_enabled()`.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn with_box_by_default_flag<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
     struct Guard(Option<bool>);
     impl Drop for Guard {
@@ -283,6 +286,7 @@ pub(crate) fn with_box_by_default_flag<R>(enabled: bool, f: impl FnOnce() -> R) 
 /// For unit-test determinism, a `#[cfg(test)]` thread-local override
 /// (`with_typed_bitwise_flag`) lets a single test force the flag on/off
 /// without touching the env-var cache.
+#[allow(dead_code)]
 pub(super) fn typed_bitwise_enabled() -> bool {
     #[cfg(test)]
     {
@@ -348,6 +352,7 @@ pub(crate) fn with_typed_bitwise_flag<R>(enabled: bool, f: impl FnOnce() -> R) -
 /// For unit-test determinism, a `#[cfg(test)]` thread-local override
 /// (`with_typed_string_coerce_concat_flag`) lets a single test force the
 /// flag on/off without touching the env-var cache.
+#[allow(dead_code)]
 pub(super) fn typed_string_coerce_concat_enabled() -> bool {
     #[cfg(test)]
     {
@@ -436,6 +441,7 @@ pub(crate) fn with_typed_string_coerce_concat_flag<R>(enabled: bool, f: impl FnO
 /// destinations stay `Void` when this entry point is used; the resolver-
 /// aware variant `infer_top_level_concrete_types_from_mir_with_returns`
 /// stamps them from the callee's declared return type.
+#[allow(dead_code)]
 pub(crate) fn infer_top_level_concrete_types_from_mir(
     mir: &crate::mir::MirFunction,
 ) -> Vec<shape_value::v2::ConcreteType> {
@@ -458,6 +464,7 @@ pub(crate) fn infer_top_level_concrete_types_from_mir(
 ///
 /// Wrapper for the trait-method-aware variant — preserves existing
 /// callers that don't have access to a method-return resolver.
+#[allow(dead_code)]
 pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
     mir: &crate::mir::MirFunction,
     callee_returns: Option<&dyn Fn(&str) -> Option<shape_value::v2::ConcreteType>>,
@@ -1471,6 +1478,7 @@ fn infer_array_elem_from_operands(
 /// reserved for the future when an `EqBool` typed opcode lands (no such
 /// opcode exists in V3, so bool equality falls back to `EqDynamic`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(in crate::compiler) enum BinOperandKind {
     /// Resolved to a specific numeric type (Int, Number, Decimal, IntWidth).
     Numeric(NumericType),
@@ -1487,6 +1495,7 @@ pub(in crate::compiler) enum BinOperandKind {
 impl BinOperandKind {
     /// Build a `BinOperandKind` from an `Option<NumericType>` — the most
     /// common shape used by existing binary-op emission sites.
+    #[allow(dead_code)]
     pub(in crate::compiler) fn from_numeric(nt: Option<NumericType>) -> Self {
         match nt {
             Some(n) => BinOperandKind::Numeric(n),
@@ -1506,6 +1515,7 @@ impl BinOperandKind {
 /// additionally handles `IntWidth` coercions which V3.1 intentionally does
 /// NOT generalize (width handling stays in `emit_numeric_binary_with_coercion`
 /// until V3.2+ tranches migrate those callers).
+#[allow(dead_code)]
 fn typed_numeric_opcode(op: shape_ast::ast::BinaryOp, nt: NumericType) -> Option<OpCode> {
     use shape_ast::ast::BinaryOp;
     // V3.1 shim: handle only scalar Int/Number/Decimal paths. IntWidth is
@@ -1562,6 +1572,7 @@ fn typed_numeric_opcode(op: shape_ast::ast::BinaryOp, nt: NumericType) -> Option
 /// so this helper just selects which BinaryOps the typed-emission shim
 /// handles. Previously this was `dynamic_opcode_for` returning the
 /// `*Dynamic` opcode; the same set of ops is the shim's responsibility.
+#[allow(dead_code)]
 fn is_arith_or_cmp_op(op: shape_ast::ast::BinaryOp) -> bool {
     use shape_ast::ast::BinaryOp;
     matches!(
@@ -1631,6 +1642,7 @@ fn is_arith_or_cmp_op(op: shape_ast::ast::BinaryOp) -> bool {
 /// `last_expr_numeric_type = Some(nt)` for arithmetic so downstream
 /// numeric-propagation logic keeps working. Comparisons always clear the
 /// numeric hint because the result is a `bool`.
+#[allow(dead_code)]
 pub(in crate::compiler) fn emit_binary_op(
     compiler: &mut BytecodeCompiler,
     op: shape_ast::ast::BinaryOp,
@@ -2855,6 +2867,7 @@ impl BytecodeCompiler {
     /// host-boundary synthesizer falls through to passthrough, which
     /// is correct because the executor's matching `op_get_prop` flip
     /// also leaves those tagged.
+    #[allow(dead_code)]
     fn get_prop_native_kind(&self) -> Option<StorageHint> {
         let idx = self.program.instructions.len().checked_sub(1)?;
         self.get_prop_native_kinds.get(&idx).copied()
@@ -5825,6 +5838,7 @@ pub(crate) mod typed_emit_metrics {
 
     /// Snapshot the per-category counters. Sorted by category. Used by
     /// Wave E+4 tests and Wave G's cleanup audit.
+    #[allow(dead_code)]
     pub fn snapshot() -> Vec<(&'static str, u64)> {
         let counters = CATEGORY_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
         let g = counters.lock().expect("typed_emit_metrics lock poisoned");
@@ -5837,6 +5851,7 @@ pub(crate) mod typed_emit_metrics {
     /// (category, hint). Useful for "what hints are driving the residual
     /// fallback" — `Dynamic`/`Unknown` are genuinely-unproven, anything
     /// else suggests a design gap.
+    #[allow(dead_code)]
     pub fn snapshot_joint() -> Vec<((&'static str, &'static str), u64)> {
         let counters = JOINT_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
         let g = counters
@@ -5848,6 +5863,7 @@ pub(crate) mod typed_emit_metrics {
     }
 
     /// Reset both counters for use across test iterations.
+    #[allow(dead_code)]
     pub fn reset() {
         let cat = CATEGORY_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
         if let Ok(mut g) = cat.lock() {
@@ -5952,6 +5968,7 @@ pub(crate) fn typed_store_local_opcode(hint: StorageHint) -> Option<OpCode> {
 /// Map a `StorageHint` to its typed `LoadModuleBinding<Kind>` opcode
 /// (E+3 codes 0x182-0x18C). Returns `None` for unproven hints.
 #[inline]
+#[allow(dead_code)]
 pub(crate) fn typed_load_module_binding_opcode(hint: StorageHint) -> Option<OpCode> {
     use shape_value::v2::struct_layout::FieldKind;
     Some(match storage_hint_to_field_kind(hint)? {
@@ -5972,6 +5989,7 @@ pub(crate) fn typed_load_module_binding_opcode(hint: StorageHint) -> Option<OpCo
 /// Map a `StorageHint` to its typed `StoreModuleBinding<Kind>` opcode
 /// (E+3 codes 0x18D-0x197). Returns `None` for unproven hints.
 #[inline]
+#[allow(dead_code)]
 pub(crate) fn typed_store_module_binding_opcode(hint: StorageHint) -> Option<OpCode> {
     use shape_value::v2::struct_layout::FieldKind;
     Some(match storage_hint_to_field_kind(hint)? {
@@ -6057,6 +6075,7 @@ impl BytecodeCompiler {
     /// proven `StorageHint` maps to a `FieldKind`, otherwise fall back to
     /// the polymorphic legacy `LoadModuleBinding` (0x52). Per-Ptr ownership
     /// rules mirror `emit_load_local_for_hint`.
+    #[allow(dead_code)]
     pub(super) fn emit_load_module_binding_for_hint(
         &mut self,
         binding_idx: u16,
@@ -6076,6 +6095,7 @@ impl BytecodeCompiler {
     /// proven `StorageHint` maps to a `FieldKind`, otherwise fall back to
     /// the polymorphic legacy `StoreModuleBinding` (0x53). Per-Ptr
     /// ownership rules mirror `emit_store_local_for_hint`.
+    #[allow(dead_code)]
     pub(super) fn emit_store_module_binding_for_hint(
         &mut self,
         binding_idx: u16,

@@ -31,6 +31,7 @@
 //! `NativeKind` (Float64 / Int64 / Int32 / Bool). Writes accept the same
 //! pair, decode bits per kind, and reject incompatible kinds.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_value::HeapKind;
 use shape_value::NativeKind;
 use shape_value::heap_value::{TraitObjectStorage, TypedObjectStorage};
@@ -3450,7 +3451,6 @@ pub fn cmp_element_natural(
     bits_a: u64,
     bits_b: u64,
 ) -> Option<std::cmp::Ordering> {
-    use std::cmp::Ordering;
     match view.elem_type {
         V2ElemType::F64 => Some(f64::from_bits(bits_a).total_cmp(&f64::from_bits(bits_b))),
         V2ElemType::F32 => {

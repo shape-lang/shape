@@ -57,6 +57,8 @@ pub fn trace_heap_slot(bits: u64, visitor: &mut dyn FnMut(*mut u8)) {
 }
 
 #[cfg(test)]
+// 3.14 is an arbitrary test float, not a PI approximation.
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

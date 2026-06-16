@@ -6278,7 +6278,6 @@ impl BytecodeCompiler {
 #[cfg(test)]
 mod tests {
     use crate::compiler::BytecodeCompiler;
-    use crate::executor::{VMConfig, VirtualMachine};
     use shape_ast::ast::{Item, Span, Statement};
     use shape_ast::parser::parse_program;
 

@@ -5,6 +5,7 @@
 //! numeric coercion, large stack stress, and function call frames with
 //! typed locals.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::bytecode::*;
 use crate::executor::{VMConfig, VirtualMachine};
 use crate::type_tracking::{FrameDescriptor, NativeKind};

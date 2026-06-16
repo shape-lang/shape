@@ -587,6 +587,9 @@ impl JITCompiler {
     /// Handles series access via compile-time resolved indices:
     /// - `context.spy` → `series_ptrs[0][cursor_idx]` (if spy mapped to index 0)
     /// - `context.vix` → `series_ptrs[1][cursor_idx]` (if vix mapped to index 1)
+    // Stub pending v2 runtime migration; params are the documented future
+    // implementation surface and are intentionally unused until then.
+    #[allow(unused_variables)]
     fn build_correlated_kernel_ir(
         &mut self,
         builder: &mut FunctionBuilder,

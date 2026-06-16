@@ -20,6 +20,9 @@ pub struct JITCompiler {
     /// Used for cross-function speculative direct calls: when function A has
     /// monomorphic feedback for callee B, and B has already been Tier-2
     /// compiled, A can emit a direct `call` to B's direct-call entry.
+    // Speculative cross-function direct-call table; staged ahead of its emit
+    // site (see doc above). Intentionally unread until that path lands.
+    #[allow(dead_code)]
     pub(super) compiled_dc_funcs: HashMap<u16, (cranelift_module::FuncId, u16)>,
 }
 

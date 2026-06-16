@@ -26,10 +26,10 @@
 //! §2.7.4")` placeholders rather than papering over with ValueWord-shape
 //! recovery, per the playbook's surface-and-stop discipline.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_runtime::type_schema::{EnumVariantKind, TypeSchema, TypeSchemaRegistry};
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectStorage};
 use shape_value::{KindedSlot, NativeKind, ValueSlot};
-use std::sync::Arc;
 
 // Re-export the runtime-tier `PrintResult`/`PrintSpan` carriers for
 // formatter consumers — keeps the post-§2.7.4 import path coherent for

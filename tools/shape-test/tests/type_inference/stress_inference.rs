@@ -3,6 +3,7 @@
 //! null/None, type preservation through control flow, int vs number separation,
 //! and complex inference interactions.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =========================================================================

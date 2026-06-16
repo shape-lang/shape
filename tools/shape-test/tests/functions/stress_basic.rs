@@ -1,5 +1,6 @@
 //! Stress tests for basic function definition and calls.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 /// Verifies fn keyword basic.

@@ -21,6 +21,7 @@
 //! (operates only on `FunctionHash` / `Function` / IDs) and is kept
 //! intact. Its tests pass without exercising the snapshot pipeline.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use std::collections::HashMap;
 
 use shape_value::VMError;

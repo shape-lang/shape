@@ -298,6 +298,9 @@ fn variance_avx2(data: &[f64], mean: f64) -> f64 {
 
 /// Core B-spline computation on a contiguous f64 slice (fastest path).
 #[inline]
+// B-spline batch compute helpers; retained for the math-intrinsic path,
+// currently uncalled after the v2 intrinsic re-routing.
+#[allow(dead_code)]
 fn bspline2_3d_batch_slice(
     grid: &[f64],
     nx: usize,
@@ -377,6 +380,7 @@ fn bspline2_3d_batch_slice(
 /// Core B-spline computation using per-element access function (generic arrays).
 /// Only accesses 27 grid elements per query point — no bulk copy.
 #[inline]
+#[allow(dead_code)]
 fn bspline2_3d_batch_fn(
     grid: &dyn Fn(usize) -> f64,
     nx: usize,
@@ -455,6 +459,7 @@ fn bspline2_3d_batch_fn(
 
 /// Quadratic B-spline basis weights for offset t.
 #[inline(always)]
+#[allow(dead_code)]
 fn bspline_weights(t: f64) -> (f64, f64, f64) {
     (
         0.5 * (0.5 - t) * (0.5 - t),

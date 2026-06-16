@@ -835,6 +835,9 @@ pub fn load_chunked_bytes(chunked: &ChunkedBlob, store: &SnapshotStore) -> Resul
 ///
 /// # Safety
 /// The byte slice must have a length that is a multiple of `size_of::<T>()`.
+// Snapshot byte-slice reinterpret helpers; staged for the typed-buffer
+// serialization path, currently uncalled.
+#[allow(dead_code)]
 fn bytes_as_slice<T: Copy>(bytes: &[u8]) -> &[T] {
     let elem_size = std::mem::size_of::<T>();
     assert!(
@@ -848,6 +851,7 @@ fn bytes_as_slice<T: Copy>(bytes: &[u8]) -> &[T] {
 }
 
 /// Reinterpret a slice of `T` as raw bytes.
+#[allow(dead_code)]
 fn slice_as_bytes<T>(data: &[T]) -> &[u8] {
     let byte_len = data.len() * std::mem::size_of::<T>();
     unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, byte_len) }
@@ -2440,6 +2444,9 @@ fn serializable_arm_name(sv: &SerializableVMValue) -> &'static str {
     }
 }
 
+// DataTable snapshot (de)serialization via Arrow IPC; staged ahead of the
+// snapshot wire path that drives it.
+#[allow(dead_code)]
 fn serialize_datatable(dt: &DataTable, store: &SnapshotStore) -> Result<SerializableDataTable> {
     let mut buf = Vec::new();
     let schema = dt.inner().schema();
@@ -2454,6 +2461,7 @@ fn serialize_datatable(dt: &DataTable, store: &SnapshotStore) -> Result<Serializ
     })
 }
 
+#[allow(dead_code)]
 fn deserialize_datatable(
     serialized: SerializableDataTable,
     store: &SnapshotStore,

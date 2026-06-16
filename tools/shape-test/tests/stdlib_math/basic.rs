@@ -2,6 +2,7 @@
 //!
 //! These are direct compiler builtins, not module methods.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // ===== abs =====

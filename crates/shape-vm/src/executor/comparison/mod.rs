@@ -12,6 +12,7 @@
 //! substep-1 and read-as-u64 cannot detect kind without the parallel
 //! kinds track, which is queried via `pop_kinded` here).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::{
     bytecode::{Instruction, OpCode},
     executor::VirtualMachine,

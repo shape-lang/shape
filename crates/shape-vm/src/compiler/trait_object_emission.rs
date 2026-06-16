@@ -44,7 +44,7 @@
 
 use shape_ast::ast::{TypeAnnotation, types::ImplBlock, types::TraitMember};
 use shape_ast::error::Result;
-use shape_value::value::{ThunkSignature, VTable, VTableEntry, VTableEntryFlags, WrapTarget};
+use shape_value::value::{ThunkSignature, VTable, VTableEntry, WrapTarget};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::Arc;

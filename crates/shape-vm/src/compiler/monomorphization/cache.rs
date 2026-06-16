@@ -76,11 +76,13 @@ impl MonomorphizationCache {
     }
 
     /// Number of distinct specializations currently cached.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Whether the cache is empty.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -88,6 +90,7 @@ impl MonomorphizationCache {
     /// Iterate over `(mono_key, function_idx)` pairs.
     ///
     /// Useful for diagnostics and incremental-compilation snapshots.
+    #[allow(dead_code)]
     pub fn iter(&self) -> impl Iterator<Item = (&String, &u16)> {
         self.entries.iter()
     }

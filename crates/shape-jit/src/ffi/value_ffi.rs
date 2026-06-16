@@ -27,6 +27,7 @@
 //! it reads a field from a heap-resident struct). The `HK_*` constants
 //! mirror `HeapKind` ordinals (cast to `u16`) for use as the prefix.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_value::HeapKind;
 use std::sync::Arc;
 

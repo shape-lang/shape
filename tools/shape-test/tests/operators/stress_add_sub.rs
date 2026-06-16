@@ -3,6 +3,7 @@
 //! Migrated from shape-vm stress_02_arithmetic.rs — addition, subtraction,
 //! and negation sections.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =====================================================================

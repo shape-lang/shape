@@ -26,6 +26,7 @@
 //! TypedObject construction (see `executor/exceptions/mod.rs`'s
 //! `build_any_error` Phase-2c surface).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::bytecode::{Constant, Instruction, Operand};
 use crate::executor::VirtualMachine;
 use crate::executor::printing::ValueFormatter;

@@ -1,5 +1,3 @@
-use crate::*;
-
 #[path = "lib_tests_parts/extension_integration_tests.rs"]
 mod extension_integration_tests;
 #[path = "lib_tests_parts/extension_system_tests.rs"]

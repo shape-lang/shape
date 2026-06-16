@@ -245,6 +245,9 @@ fn dispatch_call_via_trampoline_vm(
 }
 
 /// Dispatch a native module function call through the trampoline VM.
+// Pending phase-2c kinded-handler ABI rebuild (body is `todo!`); not yet
+// dispatched. Kept as the named landing point for that work.
+#[allow(dead_code)]
 fn dispatch_module_fn_call(_module_fn_id: u32, _jit_args: &[u64], _ctx: *mut JITContext) -> u64 {
     todo!(
         "phase-2c §2.7.10/Q11: JIT-side kinded handler ABI rebuild — \
@@ -932,6 +935,8 @@ pub extern "C" fn jit_control_find(_ctx: *mut JITContext) -> u64 {
     )
 }
 
+// Closure-invoker trampoline staged ahead of its JIT call site.
+#[allow(dead_code)]
 unsafe fn jit_callable_invoker(
     _ctx: *mut c_void,
     _callable: &u64,

@@ -119,6 +119,7 @@
 //! the generic-template path and keeps existing tests passing while the rest
 //! of the v2 pipeline is being built out.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_ast::ast::{Expr, Spanned, Statement, TypeAnnotation};
 use shape_value::v2::ConcreteType;
 use shape_value::v2::concrete_type::ClosureTypeId;
@@ -664,6 +665,7 @@ impl TypeArgResolution {
     /// bindings. The mono_key is built via [`build_mono_key_with_consts`] so
     /// type-only and const-only and mixed calls all hash distinctly in the
     /// specialization cache.
+    #[allow(dead_code)]
     pub fn with_consts(
         fn_name: impl Into<String>,
         type_args: Vec<ConcreteType>,

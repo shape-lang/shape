@@ -876,6 +876,7 @@ impl VirtualMachine {
     /// Use this at every site that hands a slot to a runtime-tier carrier
     /// (`Vec<KindedSlot>` for builtin args, snapshot serialization, etc.).
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn read_owned_kinded(&self, idx: usize) -> KindedSlot {
         debug_assert!(idx < self.sp, "read_owned_kinded: idx out of live range");
         let bits = self.stack[idx];
@@ -1011,6 +1012,7 @@ impl VirtualMachine {
     /// Post-Wave-6.5, every peek site receives kind alongside bits so
     /// downstream dispatch can match on kind without re-probing.
     #[inline(always)]
+    #[allow(dead_code)]
     pub(crate) fn stack_peek_kinded<F, R>(&self, idx: usize, f: F) -> R
     where
         F: FnOnce(u64, NativeKind) -> R,

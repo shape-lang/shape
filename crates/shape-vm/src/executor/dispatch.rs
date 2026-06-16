@@ -64,6 +64,7 @@ impl VirtualMachine {
     /// state). The deleted `NativeKind::Unknown` sentinel is no longer
     /// observable here per ADR-006 §2.7.5.1 (wire-format is post-proof).
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn program_top_level_return_kind(&self) -> Option<NativeKind> {
         // `FrameDescriptor.return_kind` is `Option<NativeKind>` (single-slot
         // §2.7.8 / Q10 cell-storage shape — `None` ≡ "kind not stamped").

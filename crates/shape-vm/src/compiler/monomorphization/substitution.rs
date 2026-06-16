@@ -61,6 +61,7 @@ use crate::compiler::monomorphization::type_resolution::ComptimeConstValue;
 /// constant avoids invalidating Agent 4's `test_monomorphization_module_exists`
 /// while the real substitution implementation lives behind the same module
 /// path.
+#[allow(dead_code)]
 pub const SUBSTITUTION_NOT_INTEGRATED: &str = "monomorphization::substitution is integrated";
 
 // ---------------------------------------------------------------------------

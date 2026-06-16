@@ -906,6 +906,7 @@ impl BytecodeCompiler {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn is_primitive_value_type_name(name: &str) -> bool {
         matches!(
             name,
@@ -927,6 +928,7 @@ impl BytecodeCompiler {
         )
     }
 
+    #[allow(dead_code)]
     pub(super) fn annotation_is_heap_like(ann: &TypeAnnotation) -> bool {
         match ann {
             TypeAnnotation::Basic(name) => !Self::is_primitive_value_type_name(name),
@@ -949,6 +951,7 @@ impl BytecodeCompiler {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn type_is_heap_like(ty: &Type) -> bool {
         match ty {
             Type::Concrete(ann) => Self::annotation_is_heap_like(ann),

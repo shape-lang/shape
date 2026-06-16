@@ -4,6 +4,7 @@
 //! alongside error handling tests. They cover language fundamentals that
 //! interact with the error handling system.
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_test::shape_test::ShapeTest;
 
 // =========================================================================

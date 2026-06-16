@@ -188,7 +188,7 @@ use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
 };
-use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, TemporalData, VMError, ValueSlot};
+use shape_value::{HeapKind, KindedSlot, NativeKind, TemporalData, VMError, ValueSlot};
 
 /// Select the method-registry PHF lookup for a v2-raw `TypedArray<T>`
 /// receiver, classified by its stamped element-type discriminant.

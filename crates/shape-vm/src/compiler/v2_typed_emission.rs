@@ -944,7 +944,6 @@ impl super::BytecodeCompiler {
     fn inferred_type_to_annotation(
         elem: &shape_runtime::type_system::Type,
     ) -> Option<shape_ast::ast::TypeAnnotation> {
-        use shape_ast::ast::TypeAnnotation;
         use shape_runtime::type_system::Type;
         match elem {
             Type::Concrete(ann) => Some(ann.clone()),
@@ -1711,7 +1710,6 @@ mod tests {
 
 #[cfg(test)]
 mod compile_integration_tests {
-    use super::*;
     use crate::bytecode::{BytecodeProgram, OpCode};
     use crate::compiler::BytecodeCompiler;
 

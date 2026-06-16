@@ -43,6 +43,7 @@
 //! `array_sort.rs::handle_join_str_v2` recipe + `instant_methods.rs`
 //! receiver-borrow precedent. ADR-006 §2.7.6 (Q8) / §2.7.10 (Q11).
 
+#![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::executor::VirtualMachine;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
