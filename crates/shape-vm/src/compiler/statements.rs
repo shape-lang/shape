@@ -4808,11 +4808,30 @@ impl BytecodeCompiler {
                 } else {
                     self.emit(Instruction::simple(OpCode::PushNull));
                 }
+                // ADR-006 §2.7.30 (escape-Drop-deferral): when the returned
+                // expression is a bare identifier naming a Drop-bearing
+                // local, that local's value is MOVED to the caller. Its
+                // `Drop` must defer to the caller's lifetime — emitting a
+                // `DropCall` for it here would run the user `Drop::drop` body
+                // a second time (the caller drops it again at its binding's
+                // scope exit) — the bind-then-return double-drop. The
+                // `LoadLocal` clone (above) + the frame-pop `truncate_stack`
+                // slot-release already balance the refcount; only the
+                // spurious `DropCall` needs suppressing. We scope the skip to
+                // exactly this return's drop-emission.
+                if let Some(Expr::Identifier(name, _)) = expr_opt {
+                    if let Some(local_idx) = self.resolve_local(name) {
+                        if self.local_drop_kind(local_idx).is_some() {
+                            self.return_escape_drop_skip_local = Some(local_idx);
+                        }
+                    }
+                }
                 // Emit drops for all active drop scopes before returning
                 let total_scopes = self.drop_locals.len();
                 if total_scopes > 0 {
                     self.emit_drops_for_early_exit(total_scopes)?;
                 }
+                self.return_escape_drop_skip_local = None;
                 self.emit_return_value_with_ownership();
             }
 

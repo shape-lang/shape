@@ -492,6 +492,19 @@ define_opcodes! {
     /// the legacy `PushNull; Eq` and `emit_unit; Eq` patterns at the 16
     /// null/unit-check sites in the compiler.
     IsNull = 0xF2, Comparison, pops: 1, pushes: 1;
+    /// Null-coalescing probe (`??`). Pops one value and pushes back TWO
+    /// slots: `[present_value, is_absent_bool]`. The `is_absent_bool` is
+    /// `true` when the popped value is absent (the `None` / null sentinel),
+    /// `false` otherwise. The `present_value`:
+    ///   - `Some(v)` Option carrier → the UNWRAPPED inner `v`
+    ///   - `None` Option / null sentinel → a placeholder (the absence
+    ///     value; discarded by the `??` lowering on the absent branch)
+    ///   - bare non-null value → the value itself (null-coding `Some(x) ≡ x`)
+    /// Replaces the `Dup; IsNull` prologue of the `??` lowering so that an
+    /// `Option<T>` carrier (`Arc<OptionData>`) is correctly unwrapped to
+    /// `T` instead of leaking the wrapper — the v0.3.3 book-gate fix for
+    /// `Some(5) ?? 99 -> 5`.
+    CoalesceProbe = 0x17, Comparison, pops: 1, pushes: 2;
 
     // ===== Numeric Coercion Operations =====
     /// Coerce int to number (i64 -> f64)

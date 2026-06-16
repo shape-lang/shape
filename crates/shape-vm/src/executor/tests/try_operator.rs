@@ -473,3 +473,60 @@ let y = x as int
 fn test_uncaught_non_any_error_uses_value_formatting() {
     todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
+
+#[test]
+fn null_coalesce_unwraps_some_option_to_inner() {
+    // v0.3.3 book-gate fix: `Some(5) ?? 99` must UNWRAP the Option carrier
+    // to its inner `5` (was leaking the whole `Some(5)` wrapper). The
+    // `CoalesceProbe` opcode replaces the old `Dup; IsNull` prologue.
+    let some_src = r#"
+let v = Some(5) ?? 99
+v
+"#;
+    let bytecode = compile_source(some_src).expect("compile should succeed");
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    let result = vm.execute(None).expect("execution should succeed").clone();
+    assert_eq!(
+        result.as_i64(),
+        Some(5),
+        "Some(5) ?? 99 must unwrap to 5, not leak the Option wrapper"
+    );
+}
+
+#[test]
+fn null_coalesce_none_option_uses_default() {
+    // `None ?? 99` (typed Option<int> None) must take the default `99`.
+    let none_src = r#"
+let n: Option<int> = None
+let v = n ?? 99
+v
+"#;
+    let bytecode = compile_source(none_src).expect("compile should succeed");
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    let result = vm.execute(None).expect("execution should succeed").clone();
+    assert_eq!(
+        result.as_i64(),
+        Some(99),
+        "None ?? 99 must yield the default 99"
+    );
+}
+
+#[test]
+fn null_coalesce_some_with_mismatched_default_type_is_rejected() {
+    // `Some(5) ?? "x"`: the default must match the unwrapped inner type
+    // `int`; a `string` default is a type error (the `??` result types as
+    // the unwrapped `T`, not `Option<T>`).
+    let bad_src = r#"
+fn f() -> int {
+    return Some(5) ?? "x"
+}
+f()
+"#;
+    let compiled = compile_source(bad_src);
+    assert!(
+        compiled.is_err(),
+        "Some(5) ?? \"x\" must be rejected (default type must match unwrapped T)"
+    );
+}

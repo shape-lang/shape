@@ -206,6 +206,89 @@ impl MethodTable {
         // collection method (e.g. `[1].frobnicate()`) is still absent here and
         // still errors — this is a correct resolution, not a blanket suppress.
         self.register_builtin_collection_methods();
+        self.register_datetime_methods();
+    }
+
+    /// Seed the canonical `DateTime` instance-method signatures for the
+    /// strict type-checker.
+    ///
+    /// STRICT-FLIP (v0.3.3, book-gate DateTime fix): the strict checker
+    /// runs over the user program only and never sees the stdlib `extend`
+    /// blocks, so a `DateTime.now()` value's instance methods
+    /// (`dt.format(...)`, `.year()`, `.add_days(n)`, …) had `lookup`
+    /// return `None`. The downstream effect is worse than a spurious
+    /// rejection: with no return-type signature the call's result kind was
+    /// left unstamped and the runtime read a heap `Arc<TemporalData>`
+    /// pointer back as a raw `i64` (`d.year()` returning garbage like
+    /// `-1407374883553280`). This mirrors the
+    /// `register_builtin_collection_methods` seed (Vec/String/HashMap) and
+    /// the canonical `DATETIME_METHODS` PHF map in shape-vm
+    /// (`executor/objects/method_registry.rs`). Receiver type name is
+    /// `"DateTime"` (a `DateTime.now()` value infers to
+    /// `Type::Concrete(TypeAnnotation::Reference("DateTime"))`).
+    fn register_datetime_methods(&mut self) {
+        let dt = "DateTime";
+        let datetime_ty = || Type::Concrete(TypeAnnotation::Reference("DateTime".into()));
+        let int = BuiltinTypes::integer;
+        let string = BuiltinTypes::string;
+        let boolean = BuiltinTypes::boolean;
+
+        // Component access — `-> int`, no args.
+        for m in [
+            "year",
+            "month",
+            "day",
+            "hour",
+            "minute",
+            "second",
+            "millisecond",
+            "microsecond",
+            "day_of_week",
+            "day_of_year",
+            "week_of_year",
+            "unix_timestamp",
+            "to_unix_millis",
+        ] {
+            self.register_method(dt, m, vec![], int(), false);
+        }
+
+        // Day-info predicates — `-> bool`, no args.
+        for m in ["is_weekday", "is_weekend"] {
+            self.register_method(dt, m, vec![], boolean(), false);
+        }
+
+        // Formatting / timezone-name / offset — `-> string`.
+        self.register_method(dt, "format", vec![string()], string(), false);
+        for m in ["iso8601", "rfc2822", "timezone", "offset"] {
+            self.register_method(dt, m, vec![], string(), false);
+        }
+
+        // Timezone conversions — `-> DateTime`.
+        self.register_method(dt, "to_utc", vec![], datetime_ty(), false);
+        self.register_method(dt, "to_local", vec![], datetime_ty(), false);
+        self.register_method(dt, "to_timezone", vec![string()], datetime_ty(), false);
+
+        // Arithmetic — `(int) -> DateTime`.
+        for m in [
+            "add_days",
+            "add_hours",
+            "add_minutes",
+            "add_seconds",
+            "add_months",
+        ] {
+            self.register_method(dt, m, vec![int()], datetime_ty(), false);
+        }
+
+        // Operator-trait arithmetic — `(DateTime-or-TimeSpan) -> DateTime`.
+        // The VM `v2_add`/`v2_sub` dispatch on the rhs `TemporalData` arm;
+        // the common surface is a `DateTime` rhs, so seed that.
+        self.register_method(dt, "add", vec![datetime_ty()], datetime_ty(), false);
+        self.register_method(dt, "sub", vec![datetime_ty()], datetime_ty(), false);
+
+        // Comparison — `(DateTime) -> bool`.
+        for m in ["is_before", "is_after", "is_same_day"] {
+            self.register_method(dt, m, vec![datetime_ty()], boolean(), false);
+        }
     }
 
     /// Seed the canonical builtin collection-method signatures for the strict
@@ -1266,6 +1349,52 @@ mod tests {
         let array_type = BuiltinTypes::array(BuiltinTypes::number());
         let sig = table.lookup(&array_type, "len");
         assert!(sig.is_some());
+    }
+
+    #[test]
+    fn datetime_instance_methods_seeded_in_strict_table() {
+        // v0.3.3 book-gate fix: DateTime instance methods must resolve in
+        // the strict checker (the same Vec/String seed pattern). A
+        // `DateTime.now()` value infers to Reference("DateTime").
+        let table = MethodTable::new();
+        let dt = Type::Concrete(TypeAnnotation::Reference("DateTime".into()));
+
+        // Component access -> int.
+        let year = table.lookup(&dt, "year").expect("year() must resolve");
+        assert!(matches!(
+            year.return_type,
+            Type::Concrete(TypeAnnotation::Basic(ref n)) if n == "int"
+        ));
+
+        // Formatting -> string, takes one string arg.
+        let format = table.lookup(&dt, "format").expect("format() must resolve");
+        assert_eq!(format.param_types.len(), 1);
+        assert!(matches!(
+            format.return_type,
+            Type::Concrete(TypeAnnotation::Basic(ref n)) if n == "string"
+        ));
+
+        // Arithmetic -> DateTime.
+        let plus = table
+            .lookup(&dt, "add_days")
+            .expect("add_days() must resolve");
+        assert!(matches!(
+            plus.return_type,
+            Type::Concrete(TypeAnnotation::Reference(ref n)) if n.as_ref() == "DateTime"
+        ));
+
+        // Predicate -> bool.
+        let we = table
+            .lookup(&dt, "is_weekend")
+            .expect("is_weekend() must resolve");
+        assert!(matches!(
+            we.return_type,
+            Type::Concrete(TypeAnnotation::Basic(ref n)) if n == "bool"
+        ));
+
+        // A genuinely-absent method still does NOT resolve (not a blanket
+        // suppress).
+        assert!(table.lookup(&dt, "frobnicate").is_none());
     }
 
     #[test]

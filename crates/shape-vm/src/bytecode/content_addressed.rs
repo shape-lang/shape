@@ -360,6 +360,14 @@ pub struct Program {
     /// escape carrier (no JIT lowering; VM is correct). NOT serialised.
     #[serde(skip, default)]
     pub has_reference_escape_promotion: bool,
+
+    /// v0.3.3 book-gate `??` fix: mirror of
+    /// `BytecodeProgram::has_null_coalesce_residual` — forces JIT deopt for
+    /// programs that compile a null-coalescing `??` (the VM unwraps an
+    /// `Option<T>` `Some(v) -> v` via `CoalesceProbe`; the JIT has no
+    /// Option-unwrap lowering). NOT serialised.
+    #[serde(skip, default)]
+    pub has_null_coalesce_residual: bool,
 }
 
 /// A linked function ready for execution in a flat instruction array.
@@ -597,4 +605,12 @@ pub struct LinkedProgram {
     /// escape carrier (no JIT lowering; VM is correct). NOT serialised.
     #[serde(skip, default)]
     pub has_reference_escape_promotion: bool,
+
+    /// v0.3.3 book-gate `??` fix: mirror of
+    /// `BytecodeProgram::has_null_coalesce_residual` — forces JIT deopt for
+    /// programs that compile a null-coalescing `??` (the VM unwraps an
+    /// `Option<T>` `Some(v) -> v` via `CoalesceProbe`; the JIT has no
+    /// Option-unwrap lowering). NOT serialised.
+    #[serde(skip, default)]
+    pub has_null_coalesce_residual: bool,
 }

@@ -847,6 +847,20 @@ pub struct BytecodeCompiler {
     /// `Statement::Return` + implicit-return sites.
     pub(crate) current_function_returns_borrow: bool,
 
+    /// ADR-006 §2.7.30 (escape-Drop-deferral): the local slot index of a
+    /// Drop-bearing value that is being RETURNED by-value from the current
+    /// function (`fn make() -> R { let r = R{..}; return r }`). When set,
+    /// `emit_drops_for_early_exit` SKIPS the `DropCall` for this slot — the
+    /// value's ownership (and its `Drop`) moves to the caller, so dropping
+    /// it at the callee's scope exit would run the user `Drop::drop` body a
+    /// SECOND time (the caller drops it again when its binding leaves
+    /// scope) — the bind-then-return double-drop. The `LoadLocal` clone +
+    /// `truncate_stack` slot-release already balance the refcount; only the
+    /// spurious user-`Drop` invocation needs suppressing. Scoped to a
+    /// single `Statement::Return` lowering (set immediately before
+    /// `emit_drops_for_early_exit`, cleared immediately after).
+    pub(crate) return_escape_drop_skip_local: Option<u16>,
+
     /// Type inference engine for match exhaustiveness and type checking
     pub(crate) type_inference: shape_runtime::type_system::inference::TypeInferenceEngine,
 

@@ -461,6 +461,32 @@ impl JITExecutor {
             });
         }
 
+        // v0.3.3 book-gate `??` SURFACE: the bytecode VM unwraps an
+        // `Option<T>` left operand of `a ?? b` (`Some(v) -> v`) via the
+        // `CoalesceProbe` opcode (`executor/exceptions/mod.rs::
+        // op_coalesce_probe`), but the JIT MIR lowering
+        // (`mir/lowering/expr.rs::lower_null_coalesce`) models `??` as a
+        // `BinOp::Eq` against `MirConstant::None`, which does NOT
+        // recognise/unwrap the `Arc<OptionData>` carrier — it would leak
+        // the whole `Some(v)` wrapper, diverging from the VM. The JIT has
+        // no Option-unwrap lowering (the sibling `?` operator deopts via
+        // `has_try_unwrap_residual` for the same reason). Whole-program
+        // deopt to the (correct) interpreter preserves VM == JIT semantics.
+        if bytecode.has_null_coalesce_residual {
+            return Err(shape_runtime::error::ShapeError::RuntimeError {
+                message: "v0.3.3 `??` null-coalesce SURFACE: the program contains a \
+                          null-coalescing operator (`a ?? b`). The bytecode VM unwraps \
+                          an `Option<T>` left operand `Some(v) -> v` via the \
+                          `CoalesceProbe` opcode; the JIT MIR lowering models `??` as \
+                          `Eq` against `None` with no `Arc<OptionData>` unwrap and \
+                          would leak the `Some(v)` wrapper. Whole-program deopting to \
+                          the bytecode interpreter via this `[jit-fallback]` path \
+                          preserves VM == JIT semantics."
+                    .to_string(),
+                location: None,
+            });
+        }
+
         // R8 W9 B3 Drop-bearing-scope-exit SURFACE (v0.3 divergence-elimination
         // per supervisor 2026-05-25 G.2 Step 2 ruling, ADR-006 §2.7.14):
         // Refuse to JIT-compile programs that register a user `impl Drop for T`

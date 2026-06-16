@@ -566,6 +566,7 @@ pub fn program_from_blobs_by_hash(
         // c4-4B TryUnwrap (`?` operator) surface-and-stop flag propagation.
         has_try_unwrap_residual: source.has_try_unwrap_residual,
         has_reference_escape_promotion: source.has_reference_escape_promotion,
+        has_null_coalesce_residual: source.has_null_coalesce_residual,
     })
 }
 
@@ -947,6 +948,7 @@ fn create_stub_program(program: &BytecodeProgram) -> BytecodeProgram {
             // c4-4B TryUnwrap (`?` operator) surface-and-stop flag propagation.
             has_try_unwrap_residual: ca.has_try_unwrap_residual,
             has_reference_escape_promotion: ca.has_reference_escape_promotion,
+            has_null_coalesce_residual: ca.has_null_coalesce_residual,
         });
     }
     // Copy top-level metadata needed by program_from_blobs
@@ -1861,6 +1863,7 @@ mod tests {
             has_w17_marshal_residual: false,
             has_try_unwrap_residual: false,
             has_reference_escape_promotion: false,
+            has_null_coalesce_residual: false,
         });
 
         assert!(
@@ -2017,6 +2020,7 @@ mod tests {
             has_w17_marshal_residual: false,
             has_try_unwrap_residual: false,
             has_reference_escape_promotion: false,
+            has_null_coalesce_residual: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),
@@ -2379,6 +2383,7 @@ mod tests {
             has_w17_marshal_residual: false,
             has_try_unwrap_residual: false,
             has_reference_escape_promotion: false,
+            has_null_coalesce_residual: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),
@@ -2445,6 +2450,7 @@ mod tests {
             has_w17_marshal_residual: false,
             has_try_unwrap_residual: false,
             has_reference_escape_promotion: false,
+            has_null_coalesce_residual: false,
         });
         program.functions = vec![crate::bytecode::Function {
             name: "entry".to_string(),

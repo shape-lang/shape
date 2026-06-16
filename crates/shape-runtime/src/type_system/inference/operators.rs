@@ -689,9 +689,23 @@ impl TypeInferenceEngine {
             }
 
             BinaryOp::NullCoalesce => {
-                // Null coalescing operator - result type is union of left (non-null) and right
-                // For now, return the right type as a simple approximation
-                Ok(right.clone())
+                // Null coalescing `a ?? b`: yields the UNWRAPPED element type
+                // `T` of the left operand.
+                //   - `Option<T>` / `T?` left → result `T`; the default `b`
+                //     must also be `T` (so `Some(5) ?? "x"` is a type error).
+                //   - bare (non-Option) left → result is that left type; the
+                //     default `b` must unify with it.
+                //
+                // v0.3.3 book-gate fix: previously this returned `right` with
+                // NO constraint between the two operands, so `Some(5) ?? 99`
+                // typed as `int` while the runtime leaked `Some(5)`, and a
+                // mismatched default like `Some(5) ?? "x"` was silently
+                // accepted. The runtime now unwraps `Some(v) -> v` via the
+                // `CoalesceProbe` opcode; the static type must match.
+                let result_ty = Self::unwrap_option_type(left).unwrap_or_else(|| left.clone());
+                // The default `b` must produce the same `T`.
+                self.push_constraint_with_origin(right.clone(), result_ty.clone(), span);
+                Ok(result_ty)
             }
 
             BinaryOp::ErrorContext => {

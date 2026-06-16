@@ -772,8 +772,8 @@ impl VirtualMachine {
             TryConvertToChar => return self.op_try_convert_to_char(),
 
             // Exception handling
-            SetupTry | PopHandler | Throw | TryUnwrap | UnwrapOption | ErrorContext | IsOk
-            | IsErr | UnwrapOk | UnwrapErr => {
+            SetupTry | PopHandler | Throw | TryUnwrap | UnwrapOption | CoalesceProbe
+            | ErrorContext | IsOk | IsErr | UnwrapOk | UnwrapErr => {
                 return self.exec_exceptions(instruction);
             }
 

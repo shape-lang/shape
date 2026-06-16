@@ -5506,6 +5506,15 @@ impl BytecodeCompiler {
         // Now emit DropCall instructions
         for locals in scopes {
             for (local_idx, is_async) in locals.into_iter().rev() {
+                // ADR-006 §2.7.30 (escape-Drop-deferral): skip the local
+                // being returned by-value (`return r`) — its `Drop`
+                // ownership moves to the caller; a `DropCall` here would run
+                // the user `Drop::drop` body a second time (bind-then-return
+                // double-drop). Set/cleared around the return's drop-emission
+                // in the `Statement::Return` arm.
+                if self.return_escape_drop_skip_local == Some(local_idx) {
+                    continue;
+                }
                 self.emit_drop_call_for_local(local_idx, is_async);
             }
         }

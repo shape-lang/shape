@@ -330,6 +330,7 @@ impl JITCompiler {
                 has_w17_marshal_residual: program.has_w17_marshal_residual,
                 has_try_unwrap_residual: program.has_try_unwrap_residual,
                 has_reference_escape_promotion: program.has_reference_escape_promotion,
+                has_null_coalesce_residual: program.has_null_coalesce_residual,
             };
 
             // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).

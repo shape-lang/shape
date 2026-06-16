@@ -233,6 +233,7 @@ impl VirtualMachine {
             Throw => self.op_throw()?,
             TryUnwrap => self.op_try_unwrap()?,
             UnwrapOption => self.op_unwrap_option()?,
+            CoalesceProbe => self.op_coalesce_probe()?,
             ErrorContext => self.op_error_context()?,
             IsOk => self.op_is_ok()?,
             IsErr => self.op_is_err()?,
@@ -918,6 +919,59 @@ impl VirtualMachine {
         };
         drop(value);
         self.push_kinded_slot(inner)
+    }
+
+    /// `CoalesceProbe` (`??`): pop one value and push back TWO slots
+    /// `[present_value, is_absent_bool]`. The `??` lowering replaces its
+    /// `Dup; IsNull` prologue with this opcode so that an `Option<T>`
+    /// carrier (`Arc<OptionData>`) is correctly UNWRAPPED to its inner `T`
+    /// on the present branch instead of leaking the whole `Some(v)` wrapper.
+    ///
+    /// v0.3.3 book-gate fix: `Some(5) ?? 99 -> 5` (was `Some(5)`).
+    ///
+    /// Cases (mirrors `op_try_unwrap` / `op_unwrap_option` discriminator):
+    ///   - `Some(v)` Option → push inner `v` (cloned share), Bool(false)
+    ///   - `None` Option     → push Null placeholder, Bool(true)
+    ///   - null sentinel     → push the sentinel back, Bool(true)
+    ///   - bare non-null     → push the value back (null-coding `Some(x)≡x`),
+    ///                         Bool(false)
+    ///
+    /// The `is_absent_bool` matches `IsNull` polarity (`true` == absent),
+    /// so the existing `JumpIfFalse use_lhs` branch structure is unchanged.
+    pub(in crate::executor) fn op_coalesce_probe(&mut self) -> Result<(), VMError> {
+        let (bits, kind) = self.pop_kinded()?;
+        let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        if let Some(od) = read_option(&value)? {
+            if od.is_some {
+                // Some(v): retain a share of the inner payload, drop the
+                // Option wrapper, push inner + present(false).
+                let inner = od.payload.clone();
+                drop(value);
+                self.push_kinded_slot(inner)?;
+                self.push_kinded_slot(KindedSlot::from_bool(false))
+            } else {
+                // None: drop the wrapper, push a Null placeholder (it is
+                // discarded by the `??` lowering on the absent branch) +
+                // absent(true).
+                drop(value);
+                self.push_kinded(Self::NONE_BITS, NativeKind::Null)?;
+                self.push_kinded_slot(KindedSlot::from_bool(true))
+            }
+        } else if is_null_sentinel(&value) {
+            // null-coded None.
+            drop(value);
+            self.push_kinded(Self::NONE_BITS, NativeKind::Null)?;
+            self.push_kinded_slot(KindedSlot::from_bool(true))
+        } else {
+            // Bare non-null value — null-coding `Some(x) ≡ x`. Pass the
+            // share through verbatim via mem::forget (no clone+drop pair),
+            // then push present(false).
+            let kind = value.kind();
+            let bits = value.slot().raw();
+            std::mem::forget(value);
+            self.push_kinded(bits, kind)?;
+            self.push_kinded_slot(KindedSlot::from_bool(false))
+        }
     }
 
     /// `IsOk`: pop a `Result<_,_>`, push `Bool` indicating Ok variant.

@@ -699,6 +699,21 @@ pub struct BytecodeProgram {
     /// Same surface-and-stop shape as `has_try_unwrap_residual`. NOT serialised.
     #[serde(skip, default)]
     pub has_reference_escape_promotion: bool,
+
+    /// v0.3.3 book-gate `??` fix: set when the program compiles a
+    /// null-coalescing operator (`a ?? b`). The bytecode VM unwraps an
+    /// `Option<T>` left operand `Some(v) -> v` via the `CoalesceProbe`
+    /// opcode (`executor/exceptions/mod.rs::op_coalesce_probe`), but the
+    /// JIT MIR lowering (`mir/lowering/expr.rs::lower_null_coalesce`)
+    /// models `??` as a `BinOp::Eq` against `MirConstant::None`, which does
+    /// NOT recognise/unwrap the `Arc<OptionData>` carrier — it would leak
+    /// the whole `Some(v)` wrapper, diverging from the VM. The JIT has no
+    /// Option-unwrap lowering (the sibling `?` operator deopts via
+    /// `has_try_unwrap_residual` for the same reason). Whole-program deopt
+    /// to the (correct) interpreter preserves VM == JIT semantics. Same
+    /// surface-and-stop shape as `has_try_unwrap_residual`. NOT serialised.
+    #[serde(skip, default)]
+    pub has_null_coalesce_residual: bool,
 }
 
 /// Constants in the constant pool

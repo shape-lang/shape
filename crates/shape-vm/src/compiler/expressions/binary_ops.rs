@@ -1049,6 +1049,37 @@ impl BytecodeCompiler {
         )
     }
 
+    /// True iff `ty` is a concrete `Option<T>` carrier type — i.e. the
+    /// runtime value is an `Arc<OptionData>` (`Some(v)` / `None`), as
+    /// opposed to a plain nullable `T?` (which is null-coded at runtime).
+    /// Used by the `??` lowering to decide whether the JIT must deopt: the
+    /// JIT MIR `lower_null_coalesce` `Eq None` path matches the VM for a
+    /// nullable but leaks the `Some(v)` wrapper for an Option carrier.
+    ///
+    /// Note: `T?` desugars to `Option<T>` in the type lattice, so the two
+    /// are not distinguishable purely from the unwrapped annotation. We
+    /// treat any `Option<T>`-shaped inferred type as a carrier (the
+    /// conservative, sound choice — deopt is always correctness-preserving;
+    /// the common nullable-index `ctx[...] ?? d` infers to the element type
+    /// or a bare nullable scalar, not an `Option<_>` generic, so it is NOT
+    /// flagged and keeps its JIT path).
+    fn type_is_option_carrier(ty: &shape_runtime::type_system::Type) -> bool {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+        match ty {
+            Type::Generic { base, args } if args.len() == 1 => matches!(
+                base.as_ref(),
+                Type::Concrete(ann) if ann.as_type_name_str() == Some("Option")
+            ),
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if name == "Option" && args.len() == 1 =>
+            {
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Compile a binary operation expression.
     ///
     /// `op_span` is the source span of the parent `Expr::BinaryOp` node
@@ -1150,27 +1181,53 @@ impl BytecodeCompiler {
             }
             BinaryOp::NullCoalesce => {
                 // Short-circuit null coalescing: a ?? b
-                // Only evaluate RHS if LHS is None.
+                // Only evaluate RHS if LHS is None/absent.
                 //
-                // Stack discipline (Stage 2.6.5.2: typed IsNull replaces PushNull;Eq):
+                // Stack discipline (v0.3.3 book-gate fix: `CoalesceProbe`
+                // replaces `Dup; IsNull` so that an `Option<T>` carrier
+                // `Some(v)` is UNWRAPPED to `v` instead of leaking the
+                // wrapper — `Some(5) ?? 99 -> 5`):
                 //   1. compile LHS          -> [lhs]
-                //   2. Dup                   -> [lhs, lhs]
-                //   3. IsNull                -> [lhs, is_none]
-                //   4. JumpIfFalse use_lhs   -> [lhs]  (lhs is not None)
-                //   5. Pop                   -> []      (discard None lhs)
-                //   6. compile RHS           -> [rhs]
-                //   7. Jump end
-                //   use_lhs:                 -> [lhs]   (already on stack)
+                //   2. CoalesceProbe         -> [present_lhs, is_absent]
+                //        present_lhs = unwrapped inner of Some(v) / bare lhs;
+                //        a Null placeholder on the absent branch.
+                //   3. JumpIfFalse use_lhs   -> [present_lhs]  (lhs present)
+                //   4. Pop                   -> []   (discard absent placeholder)
+                //   5. compile RHS           -> [rhs]
+                //   6. Jump end
+                //   use_lhs:                 -> [present_lhs] (already on stack)
                 //   end:
+                // The VM↔JIT divergence is specific to an `Option<T>`
+                // carrier LHS (`Some(v)` → `Arc<OptionData>`): the VM
+                // `CoalesceProbe` unwraps it, but the JIT MIR
+                // `lower_null_coalesce` models `??` as `Eq` against
+                // `MirConstant::None` with no `Arc<OptionData>` unwrap, so
+                // it would leak the `Some(v)` wrapper. For a plain nullable
+                // (`T?`) LHS the JIT `Eq None` path already matches the VM
+                // (the null sentinel IS comparable to None), so NO deopt is
+                // needed — gating on the Option-carrier case avoids a
+                // blanket JIT regression for every `??` (e.g. the stdlib's
+                // `ctx[...] ?? default` nullable-index pattern).
+                let lhs_is_option_carrier = self
+                    .infer_expr_type(left)
+                    .ok()
+                    .as_ref()
+                    .is_some_and(Self::type_is_option_carrier);
                 self.compile_expr(left)?;
-                self.emit(Instruction::simple(OpCode::Dup));
-                self.emit(Instruction::simple(OpCode::IsNull));
+                self.emit(Instruction::simple(OpCode::CoalesceProbe));
+                if lhs_is_option_carrier {
+                    // JIT MIR has no Option-unwrap lowering for `??`; deopt
+                    // the whole program to the (correct) interpreter so
+                    // VM == JIT. Same surface-and-stop shape as the `?`
+                    // operator's `has_try_unwrap_residual` flag.
+                    self.program.has_null_coalesce_residual = true;
+                }
                 let use_lhs_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
-                // LHS was None — pop it, compile RHS
+                // LHS was absent — pop the placeholder, compile RHS
                 self.emit(Instruction::simple(OpCode::Pop));
                 self.compile_expr(right)?;
                 let end_jump = self.emit_jump(OpCode::Jump, 0);
-                // LHS was not None — it's already on the stack
+                // LHS was present — the unwrapped value is already on the stack
                 self.patch_jump(use_lhs_jump);
                 self.patch_jump(end_jump);
                 self.last_expr_schema = None;

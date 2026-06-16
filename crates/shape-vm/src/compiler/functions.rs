@@ -1778,11 +1778,26 @@ impl BytecodeCompiler {
                         } else {
                             self.compile_expr(expr)?;
                         }
+                        // ADR-006 §2.7.30 (escape-Drop-deferral): an implicit
+                        // tail-return of a bare Drop-bearing local (`fn f() ->
+                        // R { let r = R{..}; r }`) moves the value to the
+                        // caller — skip its `DropCall` here so the user
+                        // `Drop::drop` body runs exactly once (at the caller's
+                        // binding scope-exit), not twice. Same shape as the
+                        // explicit `Statement::Return` arm.
+                        if let shape_ast::ast::Expr::Identifier(name, _) = expr {
+                            if let Some(local_idx) = self.resolve_local(name) {
+                                if self.local_drop_kind(local_idx).is_some() {
+                                    self.return_escape_drop_skip_local = Some(local_idx);
+                                }
+                            }
+                        }
                         // Emit drops for function-level locals before returning
                         let total_scopes = self.drop_locals.len();
                         if total_scopes > 0 {
                             self.emit_drops_for_early_exit(total_scopes)?;
                         }
+                        self.return_escape_drop_skip_local = None;
                         self.emit_return_value_with_ownership();
                         // Skip the fallback return below since we've already returned
                         // Update function locals count

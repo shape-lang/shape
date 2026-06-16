@@ -80,6 +80,7 @@ impl BytecodeCompiler {
             function_return_reference_summaries: HashMap::new(),
             current_function_return_reference_summary: None,
             current_function_returns_borrow: false,
+            return_escape_drop_skip_local: None,
             type_inference: shape_runtime::type_system::inference::TypeInferenceEngine::new(),
             type_aliases: HashMap::new(),
             current_line: 1,
@@ -597,6 +598,7 @@ impl BytecodeCompiler {
                 has_w17_marshal_residual: self.program.has_w17_marshal_residual,
                 has_try_unwrap_residual: self.program.has_try_unwrap_residual,
                 has_reference_escape_promotion: self.program.has_reference_escape_promotion,
+                has_null_coalesce_residual: self.program.has_null_coalesce_residual,
             });
         }
     }

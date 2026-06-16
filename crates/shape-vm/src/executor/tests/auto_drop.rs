@@ -301,3 +301,108 @@ print("done")
         result.err()
     );
 }
+
+/// ADR-006 §2.7.30 (escape-Drop-deferral): a Drop-bearing value that is
+/// bound then RETURNED by-value must NOT be `DropCall`'d at the producing
+/// function's scope exit — its `Drop` ownership moves to the caller. A
+/// `DropCall` at both producer and consumer would run the user
+/// `Drop::drop` body twice (the bind-then-return double-drop).
+///
+/// We count the REACHABLE type-"R" `DropCall` ops in the producing `make`
+/// function — those preceding its first `ReturnValue`/`ReturnOwned`
+/// terminator (the explicit `return r` path). The compiler also emits an
+/// unreachable fallback epilogue after the explicit return; counting only
+/// the reachable region matches actual runtime drop behavior. The escape
+/// variant must emit ZERO reachable type-"R" DropCalls in `make` (the
+/// returned local's drop is deferred to the caller); the non-escape
+/// sibling must emit ONE (the local is dropped in `make`).
+#[test]
+fn escaping_returned_drop_local_is_not_dropcalled_in_producer() {
+    // Reachable type-"R" DropCalls in function `fn_name`, counted up to its
+    // first ReturnValue/ReturnOwned terminator.
+    fn reachable_dropcalls_for_type_in_fn(src: &str, fn_name: &str, type_name: &str) -> usize {
+        let bc = compile(src);
+        let func = bc
+            .functions
+            .iter()
+            .find(|f| f.name == fn_name)
+            .unwrap_or_else(|| panic!("function {fn_name} not found"));
+        let end = (func.entry_point + func.body_length).min(bc.instructions.len());
+        let mut count = 0;
+        for instr in &bc.instructions[func.entry_point..end] {
+            // Stop at the first reachable return terminator — anything
+            // after it (the fallback epilogue) is dead code.
+            if matches!(instr.opcode, OpCode::ReturnValue | OpCode::ReturnOwned) {
+                break;
+            }
+            if instr.opcode == OpCode::DropCall {
+                if let Some(crate::bytecode::Operand::Property(sid)) = instr.operand {
+                    if bc.strings.get(sid as usize).map(String::as_str) == Some(type_name) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    // ESCAPE: `make` binds `r: R` then returns it by value.
+    let escape_src = r#"
+type R { id: int }
+impl Drop for R {
+  method drop() { print("d") }
+}
+fn make() -> R {
+  let r = R { id: 1 }
+  return r
+}
+fn run() {
+  let x = make()
+  print("use")
+}
+run()
+"#;
+
+    // NON-ESCAPE: `make` binds `r: R`, drops it locally, returns an int.
+    let non_escape_src = r#"
+type R { id: int }
+impl Drop for R {
+  method drop() { print("d") }
+}
+fn make() -> int {
+  let r = R { id: 1 }
+  return r.id
+}
+fn run() {
+  let x = make()
+  print("use")
+}
+run()
+"#;
+
+    assert_eq!(
+        reachable_dropcalls_for_type_in_fn(escape_src, "make", "R"),
+        0,
+        "a returned Drop-bearing local must NOT be DropCall'd in the \
+         producing function (its Drop defers to the caller)"
+    );
+    assert_eq!(
+        reachable_dropcalls_for_type_in_fn(non_escape_src, "make", "R"),
+        1,
+        "a non-escaping Drop local must still be DropCall'd once in the \
+         producing function"
+    );
+
+    // Both programs must execute cleanly (no double-drop fault).
+    use crate::VMConfig;
+    use crate::executor::VirtualMachine;
+    for src in [escape_src, non_escape_src] {
+        let bc = compile(src);
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bc);
+        assert!(
+            vm.execute(None).is_ok(),
+            "escape-Drop program should execute cleanly"
+        );
+    }
+}
