@@ -199,3 +199,89 @@ fn d_out_of_range_reassign_u8_rejected() {
 fn d_out_of_range_reassign_u16_rejected() {
     ShapeTest::new("let mut x: u16 = 0\nx = 70000\nx").expect_run_err();
 }
+
+// =========================================================================
+// D.7 BIT-REINTERPRET regression guards — adopted literal carries the
+//     ACTUAL f64 VALUE, not raw i64 bits reinterpreted as f64.
+//
+// These pin the catastrophic class the prior 104-case suite missed: the
+// type checker ACCEPTED the adoption but emission emitted an i64 constant
+// into a Float64-stamped slot. The acceptance-shaped cases above pass even
+// when the slot carries raw i64 bits; the cases below compute/read the
+// adopted value back so a bit-reinterpret produces a WRONG number (e.g.
+// `takes_num(5)` reading raw i64 `5` as f64 bits → `2.5e-323`), failing the
+// assertion. Spec §4 / THE RULE (user 2026-06-01).
+// =========================================================================
+
+/// `takes_num(5)` — a bare int literal passed to a `number` parameter is the
+/// number literal `5.0`. The pre-fix emission laid raw i64 `5` into the
+/// Float64 param slot; the call site read those bits as f64 → `2.5e-323`.
+/// The `/ 2.0` makes the corruption numerically loud (a true f64 `5.0` → 2.5).
+#[test]
+fn d_call_arg_int_literal_is_true_f64() {
+    ShapeTest::new("fn takes_num(x: number) -> number { x }\ntakes_num(5) / 2.0").expect_number(2.5);
+}
+
+/// The call-arg adopted value read back directly is `5.0`, not a tiny
+/// subnormal from a bit-reinterpret.
+#[test]
+fn d_call_arg_int_literal_value_preserved() {
+    ShapeTest::new("fn takes_num(x: number) -> number { x }\ntakes_num(5)").expect_number(5.0);
+}
+
+/// `let n: number = 5; n / 2` — the bound literal divides as f64 (already a
+/// D.1 case, repeated here as the let-site member of the bit-reinterpret set).
+#[test]
+fn d_let_number_literal_divides_as_float_2_5() {
+    ShapeTest::new("let n: number = 5\nn / 2").expect_number(2.5);
+}
+
+/// `Array<number> = [1, 2, 3]` element read back is a true f64 (`a[0] / 2.0 =
+/// 0.5`). Pre-fix the element stored f64 bits but the binding's element
+/// carrier was reconciled to `I64` from the literal, so `a[0]` emitted
+/// `TypedArrayGetI64` and read the f64 bits as i64 → garbage.
+#[test]
+fn d_array_number_element_is_true_f64() {
+    ShapeTest::new("let a: Array<number> = [1, 2, 3]\na[0] / 2.0").expect_number(0.5);
+}
+
+/// `Array<number>` int-literal elements sum then halve: (1+2+3)/2 = 3.0. A
+/// bit-reinterpret of any element corrupts the sum.
+#[test]
+fn d_array_number_elements_sum_as_f64() {
+    ShapeTest::new("let a: Array<number> = [1, 2, 3]\n(a[0] + a[1] + a[2]) / 2.0")
+        .expect_number(3.0);
+}
+
+/// `Array<int>` is NOT widened — element division stays integer (`6 / 4 = 1`),
+/// confirming the adoption is gated to the float-family carrier only.
+#[test]
+fn d_array_int_element_stays_integer() {
+    ShapeTest::new("let a: Array<int> = [6, 7, 8]\na[0] / 4").expect_number(1.0);
+}
+
+/// Struct `number` field read back and divided as f64: `7 / 2.0 = 3.5`.
+#[test]
+fn d_struct_number_field_is_true_f64() {
+    ShapeTest::new("type P { x: number }\nlet p = P { x: 7 }\np.x / 2.0").expect_number(3.5);
+}
+
+/// Tail-return bare int literal from a `-> number` fn divides as f64.
+#[test]
+fn d_tail_return_int_literal_is_true_f64() {
+    ShapeTest::new("fn g() -> number { 5 }\ng() / 2.0").expect_number(2.5);
+}
+
+/// Parameter default `x: number = 5` adopts number; calling with no arg
+/// yields a true f64 (pre-fix this was a compile error / wrong-kind slot).
+#[test]
+fn d_param_default_int_literal_is_true_f64() {
+    ShapeTest::new("fn h(x: number = 5) -> number { x }\nh() / 2.0").expect_number(2.5);
+}
+
+/// A NON-literal `int` value into a `number` binding stays a COMPILE ERROR —
+/// the bit-reinterpret fix does NOT weaken the p-var family rejection.
+#[test]
+fn d_nonliteral_int_to_number_still_rejected() {
+    ShapeTest::new("let m: int = 5\nlet n: number = m\nn").expect_run_err();
+}

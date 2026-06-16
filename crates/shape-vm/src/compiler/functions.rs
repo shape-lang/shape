@@ -1380,6 +1380,13 @@ impl BytecodeCompiler {
             Some(shape_ast::ast::TypeAnnotation::Borrow { .. })
         );
 
+        // Numeric-conversion §4 literal adoption (return-context widening).
+        // Record the declared return-type annotation so the explicit
+        // `Statement::Return(expr)` site can re-lower a bare int literal to a
+        // `number` literal (`fn g() -> number { return 5 }` ⇒ `5.0`).
+        let saved_current_function_return_type = self.current_function_return_type.take();
+        self.current_function_return_type = func_def.return_type.clone();
+
         // If this is a `comptime fn`, mark the compilation context as comptime
         // so that calls to other `comptime fn` functions within the body are allowed.
         if func_def.is_comptime {
@@ -1772,11 +1779,25 @@ impl BytecodeCompiler {
                                 location: Some(self.span_to_source_location(expr.span())),
                             });
                         }
+                        // Numeric-conversion §4 literal adoption (implicit
+                        // tail-return widening, THE RULE user 2026-06-01): a bare
+                        // int literal tail-returned into a `number` return type IS
+                        // the number literal (`fn g() -> number { 5 }` ⇒ `5.0`).
+                        // Re-lower it to a `Number` literal so the return slot is
+                        // Float64-kinded, not an Int64 constant bit-reinterpreted
+                        // as f64 at the call site. Compile-time literal re-typing.
+                        let return_widened = func_def.return_type.as_ref().and_then(|ann| {
+                            crate::compiler::literal_widen::widen_int_literal_for_annotation(
+                                expr, ann,
+                            )
+                        });
+                        let return_expr: &shape_ast::ast::Expr =
+                            return_widened.as_ref().unwrap_or(expr);
                         // Compile expression and keep value on stack for implicit return.
                         if self.current_function_return_reference_summary.is_some() {
-                            self.compile_expr_preserving_refs(expr)?;
+                            self.compile_expr_preserving_refs(return_expr)?;
                         } else {
-                            self.compile_expr(expr)?;
+                            self.compile_expr(return_expr)?;
                         }
                         // ADR-006 §2.7.30 (escape-Drop-deferral): an implicit
                         // tail-return of a bare Drop-bearing local (`fn f() ->
@@ -1861,6 +1882,8 @@ impl BytecodeCompiler {
                             saved_current_function_return_reference_summary;
                         self.current_function_returns_borrow =
                             saved_current_function_returns_borrow;
+                        self.current_function_return_type =
+                            saved_current_function_return_type;
                         // WS-1b: surface-and-stop any unresolved empty-array
                         // accumulator, then restore the caller's maps.
                         let acc_result = self.finalize_unresolved_empty_array_accumulators();
@@ -1981,6 +2004,7 @@ impl BytecodeCompiler {
         self.current_function_return_reference_summary =
             saved_current_function_return_reference_summary;
         self.current_function_returns_borrow = saved_current_function_returns_borrow;
+        self.current_function_return_type = saved_current_function_return_type;
 
         // WS-1b: surface-and-stop any unresolved empty-array accumulator,
         // then restore the caller's maps.

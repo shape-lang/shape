@@ -518,6 +518,36 @@ impl BytecodeCompiler {
         NumericType::Number
     }
 
+    /// Numeric-conversion §4 literal adoption support: whether `expr` is PROVEN
+    /// to carry the `number`/`f64` floating-point family at compile time. Used to
+    /// gate the binary-operand int-literal → `number` widening: a bare int
+    /// literal whose partner proves float adopts the float family.
+    ///
+    /// A bare `Int`/`UInt` literal is explicitly NOT counted as proving float
+    /// (it has no committed family until a context pins it), so `5 / 2` with no
+    /// surrounding number context stays integer division — only a genuine float
+    /// operand (a `number`-typed binding, a float literal, a `number`-returning
+    /// call, etc.) drives the sibling literal to adopt `number`.
+    pub(crate) fn expr_proves_float(&mut self, expr: &Expr) -> bool {
+        if matches!(
+            expr,
+            Expr::Literal(shape_ast::ast::Literal::Int(_), _)
+                | Expr::Literal(shape_ast::ast::Literal::UInt(_), _)
+        ) {
+            return false;
+        }
+        // A float literal proves float directly.
+        if matches!(expr, Expr::Literal(shape_ast::ast::Literal::Number(_), _)) {
+            return true;
+        }
+        matches!(
+            self.infer_expr_type(expr)
+                .ok()
+                .and_then(|t| super::numeric_ops::inferred_type_to_numeric(&t)),
+            Some(NumericType::Number)
+        )
+    }
+
     /// Returns `true` when the expression is syntactically guaranteed to be numeric.
     /// This does NOT consult the type tracker — it only looks at the AST node itself.
     fn is_expr_confirmed_numeric(expr: &Expr) -> bool {
@@ -2080,6 +2110,50 @@ impl BytecodeCompiler {
                         }
                     }
                 }
+
+                // Numeric-conversion §4 literal adoption (binary-operand
+                // widening, THE RULE user 2026-06-01): in an arithmetic /
+                // ordered-comparison op, a bare int literal whose PARTNER operand
+                // is proven `number`/`f64` IS the number literal (`n / 2` where
+                // `n: number` ⇒ `2` is `2.0`). Re-lower the literal to a `Number`
+                // constant BEFORE compiling it, so the operand carries Float64
+                // bits and the op lowers to the `*Number` opcode with two real
+                // f64 operands. Without this, the literal pushes Int64 bits, the
+                // VM `DivNumber` handler tolerantly coerces (→ 2.5) but the JIT
+                // does not (int-divides → 2) — a VM≠JIT divergence AND, at sites
+                // with no VM coercion, a raw-bits reinterpret. Compile-time
+                // literal re-typing, NOT a runtime coercion opcode.
+                let widen_l;
+                let widen_r;
+                let (left, right): (&Expr, &Expr) =
+                    if is_strict_arithmetic(op) || is_ordered_comparison(op) {
+                        let left = if self.expr_proves_float(right) {
+                            match crate::compiler::literal_widen::widen_int_literal_to_number(left) {
+                                Some(w) => {
+                                    widen_l = w;
+                                    &widen_l
+                                }
+                                None => left,
+                            }
+                        } else {
+                            left
+                        };
+                        let right = if self.expr_proves_float(left) {
+                            match crate::compiler::literal_widen::widen_int_literal_to_number(right)
+                            {
+                                Some(w) => {
+                                    widen_r = w;
+                                    &widen_r
+                                }
+                                None => right,
+                            }
+                        } else {
+                            right
+                        };
+                        (left, right)
+                    } else {
+                        (left, right)
+                    };
 
                 // ── Compile operands, capture numeric types and schemas ──
                 self.compile_expr(left)?;

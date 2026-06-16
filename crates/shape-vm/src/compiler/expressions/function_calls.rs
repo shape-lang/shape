@@ -610,6 +610,43 @@ impl BytecodeCompiler {
         args: &[Expr],
         span: Span,
     ) -> Result<()> {
+        // Numeric-conversion §4 literal adoption (call-argument widening, THE
+        // RULE user 2026-06-01): a bare int literal passed to a `number`(f64)
+        // parameter IS the number literal (`f(5)` where `fn f(x: number)` ⇒
+        // `5.0`). Re-lower each such argument to a `Number` literal BEFORE any
+        // downstream `compile_call_args`, so the argument carries Float64 bits
+        // and the callee's number param slot is not fed an Int64 constant that
+        // the call site bit-reinterprets as f64 (`5` → `2.5e-323`). Compile-time
+        // literal re-typing keyed on the callee's DECLARED param annotations
+        // (`self.function_defs`); a non-literal int arg is NOT rewritten — the
+        // p-var `int`-is-not-`number` rejection stays a compile error. Only the
+        // direct-named-user-function path resolves param annotations here; the
+        // indirect-callable path keeps the raw args.
+        let widened_args: Option<Vec<Expr>> =
+            self.function_defs.get(name).and_then(|def| {
+                let params = &def.params;
+                let mut changed = false;
+                let mut out: Vec<Expr> = Vec::with_capacity(args.len());
+                for (i, arg) in args.iter().enumerate() {
+                    let widened = params.get(i).and_then(|p| {
+                        p.type_annotation.as_ref().and_then(|ann| {
+                            crate::compiler::literal_widen::widen_int_literal_for_annotation(
+                                arg, ann,
+                            )
+                        })
+                    });
+                    match widened {
+                        Some(w) => {
+                            changed = true;
+                            out.push(w);
+                        }
+                        None => out.push(arg.clone()),
+                    }
+                }
+                if changed { Some(out) } else { None }
+            });
+        let args: &[Expr] = widened_args.as_deref().unwrap_or(args);
+
         // W7 (2026-05-17): `type_info(T)` is a comptime-only builtin per
         // `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md`
         // §4 recommendation (b) — TypeInfo struct return — and §8 Q1-Q5

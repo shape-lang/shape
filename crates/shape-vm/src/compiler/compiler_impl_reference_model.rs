@@ -1745,6 +1745,16 @@ impl BytecodeCompiler {
         let mut program = program.clone();
         shape_ast::transform::desugar_program(&mut program);
 
+        // Numeric-conversion §4 literal adoption (THE RULE user 2026-06-01):
+        // re-type every annotation-driven adopting bare int literal to a
+        // `Number` literal BEFORE bytecode compilation and MIR lowering (both
+        // consume this same mutated AST). Without this, a `let n: number = 5`
+        // / `f(5: number)` / `-> number { 5 }` lowers an i64 constant into a
+        // Float64-stamped slot — the catastrophic bit-reinterpret hole
+        // (`takes_num(5)` → `2.5e-323`). Compile-time literal re-typing, NOT a
+        // runtime coercion opcode. See `shape_ast::transform::numeric_literal_adopt`.
+        shape_ast::transform::widen_numeric_literals(&mut program);
+
         // Wave 1a PART A: bidirectional inference for let-bound closures.
         // A `let f = |a, b| a + b` compiles the closure body EAGERLY at the
         // let-site (before any `f(2, 3)` call site is seen), so the call-site

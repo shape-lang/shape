@@ -80,6 +80,7 @@ impl BytecodeCompiler {
             function_return_reference_summaries: HashMap::new(),
             current_function_return_reference_summary: None,
             current_function_returns_borrow: false,
+            current_function_return_type: None,
             return_escape_drop_skip_local: None,
             type_inference: shape_runtime::type_system::inference::TypeInferenceEngine::new(),
             type_aliases: HashMap::new(),

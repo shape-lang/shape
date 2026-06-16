@@ -4800,10 +4800,23 @@ impl BytecodeCompiler {
                     if matches!(expr, Expr::FunctionExpr { .. }) {
                         self.emit_make_closure_heap_next = true;
                     }
+                    // Numeric-conversion §4 literal adoption (explicit-return
+                    // widening, THE RULE user 2026-06-01): a bare int literal
+                    // `return`ed into a `number` return type IS the number
+                    // literal (`fn g() -> number { return 5 }` ⇒ `5.0`). Re-lower
+                    // it so the return slot is Float64-kinded, not an Int64
+                    // constant bit-reinterpreted as f64 at the call site.
+                    let return_widened =
+                        self.current_function_return_type.as_ref().and_then(|ann| {
+                            crate::compiler::literal_widen::widen_int_literal_for_annotation(
+                                expr, ann,
+                            )
+                        });
+                    let return_expr: &Expr = return_widened.as_ref().unwrap_or(expr);
                     if self.current_function_return_reference_summary.is_some() {
-                        self.compile_expr_preserving_refs(expr)?;
+                        self.compile_expr_preserving_refs(return_expr)?;
                     } else {
-                        self.compile_expr(expr)?;
+                        self.compile_expr(return_expr)?;
                     }
                 } else {
                     self.emit(Instruction::simple(OpCode::PushNull));
@@ -4894,6 +4907,36 @@ impl BytecodeCompiler {
             }
 
             Statement::VariableDecl(var_decl, _) => {
+                // Numeric-conversion §4 literal adoption (let-annotation widening,
+                // THE RULE user 2026-06-01): when the binding carries an explicit
+                // `number`/`f64` annotation and the initializer is a bare int
+                // literal, the literal IS the number literal (`let n: number = 5`
+                // ⇒ `5.0`). Rewrite the init node to a `Number` literal BEFORE any
+                // sub-path reads `var_decl.value`, so every downstream emission
+                // pushes a `Constant::Number` (Float64-kinded slot) instead of an
+                // Int64 constant laid into a Float64-stamped slot (the
+                // bit-reinterpret hole: `n / 2` int-dividing → `2`). Compile-time
+                // literal re-typing, NOT a runtime coercion opcode (no W4-δ Convert
+                // defection). A non-literal `int` value is NOT rewritten — the
+                // p-var `int`-is-not-`number` rejection stays a compile error.
+                let widened_decl;
+                let var_decl = match (&var_decl.type_annotation, &var_decl.value) {
+                    (Some(ann), Some(value))
+                        if crate::compiler::literal_widen::widen_int_literal_for_annotation(
+                            value, ann,
+                        )
+                        .is_some() =>
+                    {
+                        let mut clone = var_decl.clone();
+                        clone.value =
+                            crate::compiler::literal_widen::widen_int_literal_for_annotation(
+                                value, ann,
+                            );
+                        widened_decl = clone;
+                        &widened_decl
+                    }
+                    _ => var_decl,
+                };
                 // Set pending variable name for hoisting integration.
                 // compile_typed_object_literal uses self to include hoisted fields in the schema.
                 self.pending_variable_name =
@@ -5039,9 +5082,32 @@ impl BytecodeCompiler {
                 // untouched (non-array binding). Per ADR-006 §2.7.5 the
                 // inference engine's element type is the proof — never a
                 // bit-reinterpret of the input carrier.
-                if let Some(init_expr) = var_decl.value.as_ref() {
-                    if let Some(reconciled) = self.reconcile_binding_typed_array_kind(init_expr) {
-                        captured_typed_array_kind = reconciled;
+                // Numeric-conversion §4 literal adoption (typed-array binding
+                // kind, THE RULE user 2026-06-01): an EXPLICIT `Array<number>`
+                // annotation is AUTHORITATIVE for the element carrier kind. The
+                // `reconcile_binding_typed_array_kind` re-inference walks the
+                // literal `[1, 2, 3]` and the inference engine reports its
+                // natural element type `int` (it does not see the annotation
+                // context), which would override the annotation's `F64` carrier
+                // with `I64` — and then `a[0]` emits `TypedArrayGetI64` against an
+                // array whose elements were stored as f64 (the elements adopted
+                // `number` per the per-element widen at
+                // `collections.rs:1849`), reinterpreting the f64 bits as i64
+                // (`1.0` → `4607182418800017408`). When the annotation already
+                // proved a carrier kind, trust it; only consult the literal
+                // re-inference for the UNANNOTATED binding (`let a = [1, 2, 3]`).
+                let annotation_proved_array_kind = var_decl
+                    .type_annotation
+                    .as_ref()
+                    .and_then(|ann| self.resolve_typed_array_kind_from_annotation(ann))
+                    .is_some();
+                if !annotation_proved_array_kind {
+                    if let Some(init_expr) = var_decl.value.as_ref() {
+                        if let Some(reconciled) =
+                            self.reconcile_binding_typed_array_kind(init_expr)
+                        {
+                            captured_typed_array_kind = reconciled;
+                        }
                     }
                 }
                 let captured_typed_map_kind = self.pending_variable_typed_map_kind;

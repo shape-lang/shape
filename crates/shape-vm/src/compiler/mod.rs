@@ -70,6 +70,7 @@ mod helpers;
 mod helpers_binding;
 mod helpers_reference;
 mod literals;
+pub(crate) mod literal_widen;
 mod loops;
 pub(crate) mod mir_schema_threading;
 pub(crate) mod monomorphization;
@@ -846,6 +847,17 @@ pub struct BytecodeCompiler {
     /// UAF), so it keeps its B0003 reject via the compiler guard at the
     /// `Statement::Return` + implicit-return sites.
     pub(crate) current_function_returns_borrow: bool,
+
+    /// Numeric-conversion §4 literal adoption (return-context widening, THE RULE
+    /// user 2026-06-01): the declared return-type annotation of the function
+    /// currently being compiled, when it is present. Drives the int-literal →
+    /// `number` re-lowering at the explicit `Statement::Return(expr)` site so a
+    /// `fn g() -> number { return 5 }` lowers `5` to the `Number` literal `5.0`
+    /// (Float64-kinded), NOT an Int64 constant laid into a Float64 return slot
+    /// (the bit-reinterpret hole). Saved/restored around each function-body
+    /// compile alongside the other `current_function_*` state. The implicit
+    /// tail-return site reads `func_def.return_type` directly.
+    pub(crate) current_function_return_type: Option<shape_ast::ast::TypeAnnotation>,
 
     /// ADR-006 §2.7.30 (escape-Drop-deferral): the local slot index of a
     /// Drop-bearing value that is being RETURNED by-value from the current
