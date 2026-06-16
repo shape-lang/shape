@@ -1,50 +1,43 @@
 //! Content method dispatch for ContentNode values.
 //!
-//! Phase 1.B-vm Wave-β cluster M-collection-tail: bodies surface
-//! `NotImplemented(SURFACE)` per playbook §7 REVISED + §10 D-objects-mod /
-//! D-obj-tail precedent (ADR-006 §2.7.6 / §2.7.7).
+//! SC2 (R8 — supervisor): the style chain (`bold` / `italic` / `underline`
+//! / `dim` / `fg` / `bg`), `toString`, and the Table `max_rows` builder are
+//! implemented via the kinded MethodHandler ABI — receiver is
+//! `NativeKind::Ptr(HeapKind::Content)`, each method clones the underlying
+//! `ContentNode` and applies one of the `content.rs` `with_*` mutation
+//! helpers, returning a fresh Content slot (or a String slot for
+//! `toString`, which renders via the same `TerminalRenderer` the `print()`
+//! Content arm uses). The chart-builder methods (`series` / `title` /
+//! `x_label` / `y_label`) remain `NotImplemented(SURFACE)` because
+//! `Content.chart` itself is deferred to v0.4 (supervisor D4).
 //!
-//! `Content` *is* a surviving `HeapKind` variant
+//! `Content` is a surviving `HeapKind` variant
 //! (`Content(Arc<ContentNode>)` per ADR-006 §2.3 +
-//! `crates/shape-value/src/heap_variants.rs`), so a kind-correct rewrite
-//! of these handlers is mechanical: receiver is
-//! `NativeKind::Ptr(HeapKind::Content)`, dispatch via
-//! `slot.as_heap_value()` + `HeapValue::Content(arc)` match per Q8, push
-//! the result as `Arc::into_raw(Arc<ContentNode>) as u64` with kind
-//! `NativeKind::Ptr(HeapKind::Content)` (string return arms push
-//! `NativeKind::String`).
-//!
-//! Migration is blocked on the MethodHandler ABI rewrite to
-//! `&mut [KindedSlot] -> Result<KindedSlot>` (cluster
-//! E-builtins-backlog, Wave 5b template, commit `fa2bafc`). The
-//! pre-Wave-6 implementation imported the deleted
-//! `shape_value::{ValueWord, ValueWordExt, ValueWordDisplay}` surface,
-//! the deleted `ValueWord::from_content` / `from_string` /
-//! `from_raw_bits` / `clone_from_bits` constructors, and the
-//! `objects::raw_helpers::{extract_content, extract_number_coerce,
-//! extract_str}` helpers (deleted in cluster D-raw-helpers — only the
-//! FilterExpr extractor remains). The macro-generated runtime delegators
-//! (`v2_content_border`, `v2_content_series`, etc.) call into
-//! `shape_runtime::content_methods::call_content_method` which itself
-//! takes `ValueWord` arguments — that crate-boundary signature is also
-//! awaiting the kinded redesign per playbook §8 cross-cluster cascade.
-//! Per playbook §4 #1 / #9 a Bool-default kinded shim is forbidden; per
-//! §7.4 the correct response is `NotImplemented(SURFACE)`.
+//! `crates/shape-value/src/heap_variants.rs`): the receiver is a
+//! `NativeKind::Ptr(HeapKind::Content)` slot whose bits are
+//! `Arc::into_raw(Arc<ContentNode>)` (set by `KindedSlot::from_content`).
+//! Each method borrows the receiver via `recv_content`, clones the inner
+//! node, mutates one field, and rewraps a fresh Content slot; `toString`
+//! returns a `NativeKind::String` slot. No Bool-default, no dynamic
+//! fallback, no `ValueWord`-era crate-boundary detour — the dead
+//! `content_builders.rs` (deferred()-only) and the runtime
+//! `call_content_method` (always-None) were deleted, superseded by this
+//! opcode/MethodHandler path.
 
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::{HeapKind, KindedSlot, NativeKind, VMError};
 
+/// Chart-builder methods (`series` / `title` / `x_label` / `y_label`)
+/// stay surfaced because `Content.chart` itself is deferred to v0.4
+/// (supervisor D4). They are wired here so the method names resolve, but
+/// building a `ChartSpec` is out of scope until chart rendering lands.
 #[inline]
 fn surface(method: &str) -> VMError {
     VMError::NotImplemented(format!(
-        "phase-2c — Content.{}(): MethodHandler ABI needs kinded migration \
-         (cluster E-builtins-backlog, Wave 5b template); receiver kind \
-         NativeKind::Ptr(HeapKind::Content), dispatch via \
-         slot.as_heap_value() + HeapValue::Content match per ADR-006 \
-         §2.7.6 / Q8. Runtime delegators (border/series/title/etc.) also \
-         depend on the shape-runtime crate-boundary kinded redesign per \
-         playbook §8 cross-cluster cascade.",
+        "Content.{}(): chart builder methods are deferred to v0.4 \
+         (supervisor D4) — Content.chart rendering is not implemented this \
+         round.",
         method
     ))
 }
@@ -141,60 +134,167 @@ fn parse_border_style(s: &str) -> Result<shape_value::content::BorderStyle, VMEr
     }
 }
 
+/// Assert a style method received no extra arguments (receiver only).
+#[inline]
+fn expect_no_args(args: &[KindedSlot], method: &str) -> Result<(), VMError> {
+    if args.len() != 1 {
+        return Err(VMError::RuntimeError(format!(
+            "Content.{}() takes no arguments, got {}",
+            method,
+            args.len().saturating_sub(1)
+        )));
+    }
+    Ok(())
+}
+
+/// Parse the SC1 string Color carrier into a `content::Color`. SC1
+/// `Color.red` lowers to the canonical snake_case string `"red"`;
+/// `Color.rgb(r,g,b)` lowers to `"rgb(r,g,b)"` (no spaces). Unknown
+/// strings produce an error.
+#[inline]
+fn parse_color(s: &str) -> Result<shape_value::content::Color, VMError> {
+    use shape_value::content::{Color, NamedColor};
+    let trimmed = s.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix("rgb(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let parts: Vec<&str> = inner.split(',').collect();
+        if parts.len() != 3 {
+            return Err(VMError::RuntimeError(format!(
+                "Content color: rgb() expects 3 channels, got {}",
+                parts.len()
+            )));
+        }
+        let mut chan = [0u8; 3];
+        for (i, p) in parts.iter().enumerate() {
+            chan[i] = p.trim().parse::<u8>().map_err(|_| {
+                VMError::RuntimeError(format!(
+                    "Content color: rgb() channel '{}' out of range (0-255)",
+                    p.trim()
+                ))
+            })?;
+        }
+        return Ok(Color::Rgb(chan[0], chan[1], chan[2]));
+    }
+    let named = match trimmed.to_ascii_lowercase().as_str() {
+        "red" => NamedColor::Red,
+        "green" => NamedColor::Green,
+        "blue" => NamedColor::Blue,
+        "yellow" => NamedColor::Yellow,
+        "magenta" => NamedColor::Magenta,
+        "cyan" => NamedColor::Cyan,
+        "white" => NamedColor::White,
+        "default" => NamedColor::Default,
+        other => {
+            return Err(VMError::RuntimeError(format!(
+                "Content color: unknown color '{}' — expected red / green / \
+                 blue / yellow / magenta / cyan / white / default or rgb(r,g,b)",
+                other
+            )))
+        }
+    };
+    Ok(Color::Named(named))
+}
+
 pub fn v2_content_bold(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("bold"))
+    let node = recv_content(args, "bold")?;
+    expect_no_args(args, "bold")?;
+    Ok(content_slot(node.clone().with_bold()))
 }
 
 pub fn v2_content_italic(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("italic"))
+    let node = recv_content(args, "italic")?;
+    expect_no_args(args, "italic")?;
+    Ok(content_slot(node.clone().with_italic()))
 }
 
 pub fn v2_content_underline(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("underline"))
+    let node = recv_content(args, "underline")?;
+    expect_no_args(args, "underline")?;
+    Ok(content_slot(node.clone().with_underline()))
 }
 
 pub fn v2_content_dim(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("dim"))
+    let node = recv_content(args, "dim")?;
+    expect_no_args(args, "dim")?;
+    Ok(content_slot(node.clone().with_dim()))
 }
 
 pub fn v2_content_fg(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("fg"))
+    let node = recv_content(args, "fg")?;
+    if args.len() != 2 {
+        return Err(VMError::RuntimeError(format!(
+            "Content.fg(color) requires exactly 1 argument, got {}",
+            args.len().saturating_sub(1)
+        )));
+    }
+    let color_str = args[1].as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Content.fg(): color argument must be a string, got kind {:?}",
+            args[1].kind
+        ))
+    })?;
+    let color = parse_color(color_str)?;
+    Ok(content_slot(node.clone().with_fg(color)))
 }
 
 pub fn v2_content_bg(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("bg"))
+    let node = recv_content(args, "bg")?;
+    if args.len() != 2 {
+        return Err(VMError::RuntimeError(format!(
+            "Content.bg(color) requires exactly 1 argument, got {}",
+            args.len().saturating_sub(1)
+        )));
+    }
+    let color_str = args[1].as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Content.bg(): color argument must be a string, got kind {:?}",
+            args[1].kind
+        ))
+    })?;
+    let color = parse_color(color_str)?;
+    Ok(content_slot(node.clone().with_bg(color)))
 }
 
 pub fn v2_content_to_string(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("toString"))
+    let node = recv_content(args, "toString")?;
+    expect_no_args(args, "toString")?;
+    // Render through the same TerminalRenderer the `print()` Content arm
+    // uses (printing.rs HeapKind::Content). The rendered string is the
+    // user-visible representation; return it as a String-kind slot.
+    use shape_runtime::content_renderer::ContentRenderer;
+    let renderer = shape_runtime::renderers::terminal::TerminalRenderer::new();
+    let rendered = renderer.render(node);
+    Ok(KindedSlot::from_string(&rendered))
 }
 
 /// `table.border(style: string) -> content` — W18.5 builder method
@@ -473,20 +573,55 @@ pub fn v2_content_build(
     Ok(content_slot(node.clone()))
 }
 
+/// `table.max_rows(n: int) -> content` — cap the number of rows the
+/// renderer displays on a Table receiver. `n <= 0` clears the cap
+/// (renders all rows). Returns a fresh Content slot.
+fn content_max_rows_impl(args: &[KindedSlot], method: &str) -> Result<KindedSlot, VMError> {
+    let node = recv_content(args, method)?;
+    if args.len() != 2 {
+        return Err(VMError::RuntimeError(format!(
+            "Content.{}(n) requires exactly 1 argument, got {}",
+            method,
+            args.len().saturating_sub(1)
+        )));
+    }
+    let n = args[1].as_i64().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Content.{}(): argument must be an int, got kind {:?}",
+            method, args[1].kind
+        ))
+    })?;
+    let cap = if n <= 0 { None } else { Some(n as usize) };
+    match node {
+        shape_value::content::ContentNode::Table(t) => {
+            let mut new_table = t.clone();
+            new_table.max_rows = cap;
+            Ok(content_slot(shape_value::content::ContentNode::Table(
+                new_table,
+            )))
+        }
+        other => Err(VMError::RuntimeError(format!(
+            "Content.{}() is only valid on Table receivers (got {})",
+            method,
+            describe_content_variant(other)
+        ))),
+    }
+}
+
 pub fn v2_content_max_rows(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("max_rows"))
+    content_max_rows_impl(args, "max_rows")
 }
 
 pub fn v2_content_max_rows_camel(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("maxRows"))
+    content_max_rows_impl(args, "maxRows")
 }
 
 pub fn v2_content_series(
@@ -593,5 +728,89 @@ mod sc1_style_spec_tests {
     fn unknown_style_spec_member_rejects() {
         let err = eval_result(r#"Color.bogus"#);
         assert!(err.is_err(), "Color.bogus must reject cleanly");
+    }
+}
+
+#[cfg(test)]
+mod sc2_style_chain_tests {
+    //! SC2 (R8 — supervisor): style chain + table/chart builder methods.
+    //! The style methods clone-mutate-rewrap the underlying `ContentNode`
+    //! via the `content.rs` `with_*` helpers; `toString` renders through
+    //! the `TerminalRenderer`. Chart-builder methods stay surfaced (D4
+    //! deferred to v0.4).
+    use crate::executor::tests::test_utils::{eval, eval_result};
+    use shape_value::{HeapKind, NativeKind};
+
+    #[test]
+    fn bold_returns_content_slot() {
+        let v = eval_result(r#"Content.text("hi").bold()"#)
+            .expect(".bold() must succeed on a Text receiver");
+        assert_eq!(v.kind, NativeKind::Ptr(HeapKind::Content));
+    }
+
+    #[test]
+    fn style_chain_composes() {
+        let v = eval_result(r#"Content.text("hi").bold().italic().underline().dim()"#)
+            .expect("style chain must compose");
+        assert_eq!(v.kind, NativeKind::Ptr(HeapKind::Content));
+    }
+
+    #[test]
+    fn fg_consumes_sc1_color_named() {
+        let v = eval_result(r#"Content.text("hi").fg(Color.red)"#)
+            .expect(".fg(Color.red) must succeed");
+        assert_eq!(v.kind, NativeKind::Ptr(HeapKind::Content));
+    }
+
+    #[test]
+    fn bg_consumes_sc1_color_rgb() {
+        let v = eval_result(r#"Content.text("hi").bg(Color.rgb(255, 0, 0))"#)
+            .expect(".bg(Color.rgb(...)) must succeed");
+        assert_eq!(v.kind, NativeKind::Ptr(HeapKind::Content));
+    }
+
+    #[test]
+    fn fg_rejects_unknown_color() {
+        let err = eval_result(r#"Content.text("hi").fg("octarine")"#);
+        assert!(err.is_err(), "unknown fg color must reject");
+    }
+
+    #[test]
+    fn to_string_renders_to_string_kind() {
+        let v = eval(r#"Content.text("plain").toString()"#);
+        assert_eq!(v.as_str(), Some("plain"));
+    }
+
+    #[test]
+    fn to_string_renders_styled_text() {
+        // Bold renders ANSI escape codes around the text via the
+        // TerminalRenderer; assert the body text survives.
+        let v = eval(r#"Content.text("boldtext").bold().toString()"#);
+        let s = v.as_str().expect("toString returns a string");
+        assert!(s.contains("boldtext"), "rendered string must contain the body, got {:?}", s);
+    }
+
+    #[test]
+    fn table_border_then_max_rows_chains() {
+        let v = eval_result(
+            r#"Content.table(["A"], [["1"], ["2"], ["3"]]).border(Border.rounded).max_rows(2)"#,
+        )
+        .expect(".border().max_rows() must chain on a Table receiver");
+        assert_eq!(v.kind, NativeKind::Ptr(HeapKind::Content));
+    }
+
+    #[test]
+    fn max_rows_rejects_on_text_receiver() {
+        let err = eval_result(r#"Content.text("hi").max_rows(2)"#);
+        assert!(err.is_err(), "max_rows on Text receiver must reject");
+    }
+
+    #[test]
+    fn chart_builder_methods_remain_surfaced() {
+        // Content.chart is deferred (D4 v0.4); the chart-builder methods
+        // stay NotImplemented(SURFACE). Calling .title on a non-chart
+        // Content surfaces rather than mutating.
+        let err = eval_result(r#"Content.text("hi").title("x")"#);
+        assert!(err.is_err(), "title() must remain surfaced (chart deferred)");
     }
 }
