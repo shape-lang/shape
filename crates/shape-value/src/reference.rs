@@ -149,10 +149,7 @@ pub enum RefTarget {
     /// `VirtualMachine.module_bindings`; `kind` is sourced from the
     /// module-binding §2.7.8 parallel-kind track at construction
     /// time.
-    ModuleBinding {
-        binding_idx: u32,
-        kind: NativeKind,
-    },
+    ModuleBinding { binding_idx: u32, kind: NativeKind },
 
     /// Projected reference into a typed-object field.
     ///

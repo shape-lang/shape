@@ -48,9 +48,9 @@ use shape_value::v2::typed_array::TypedArray;
 // heap-header at construction time — the same compile-time-proof shape
 // the VM-side `op_new_typed_array_*` handlers use.
 use shape_vm::executor::v2_handlers::v2_array_detect::{
-    stamp_elem_type, ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32,
-    ELEM_TYPE_F64, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_I8,
-    ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8,
+    ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I8,
+    ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT,
+    ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32, stamp_elem_type,
 };
 
 // ============================================================================
@@ -284,10 +284,7 @@ pub extern "C" fn jit_v2_array_new_char(capacity: u32) -> *mut TypedArray<char> 
 #[doc = "Read the codepoint at `index` from a `TypedArray<char>`. Panics on \
 out-of-bounds."]
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_get_char(
-    arr: *const TypedArray<char>,
-    index: i64,
-) -> u32 {
+pub extern "C" fn jit_v2_array_get_char(arr: *const TypedArray<char>, index: i64) -> u32 {
     unsafe {
         if index < 0 || index as u32 >= (*arr).len {
             panic!(
@@ -304,11 +301,7 @@ pub extern "C" fn jit_v2_array_get_char(
 `TypedArray<char>`. The caller must ensure `val` is a valid Unicode scalar \
 value (the JIT codegen site proves this at compile time)."]
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_set_char(
-    arr: *mut TypedArray<char>,
-    index: i64,
-    val: u32,
-) {
+pub extern "C" fn jit_v2_array_set_char(arr: *mut TypedArray<char>, index: i64, val: u32) {
     // SAFETY: the JIT codegen site that emits this call has compile-time-proven
     // the producing slot's NativeKind::Char, so `val` is always a valid
     // Unicode scalar value (matching the VM-side `NewTypedArrayChar` +
@@ -352,11 +345,11 @@ macro_rules! v2_typed_array_heap_get_set {
         kind_label = $kind_label:literal $(,)?
     ) => {
         #[doc = concat!(
-            "Read the per-element heap pointer at `index` from a ",
-            "`TypedArray<*const ", stringify!($elem_obj_ty), ">`. ",
-            "Panics on out-of-bounds. Caller is responsible for per-element ",
-            "retain discipline before transferring the share."
-        )]
+                            "Read the per-element heap pointer at `index` from a ",
+                            "`TypedArray<*const ", stringify!($elem_obj_ty), ">`. ",
+                            "Panics on out-of-bounds. Caller is responsible for per-element ",
+                            "retain discipline before transferring the share."
+                        )]
         #[unsafe(no_mangle)]
         pub extern "C" fn $get_fn(
             arr: *const TypedArray<*const $elem_obj_ty>,
@@ -365,24 +358,21 @@ macro_rules! v2_typed_array_heap_get_set {
             unsafe {
                 if index < 0 || index as u32 >= (*arr).len {
                     panic!(
-                        concat!(
-                            "v2 array ", $kind_label, " index {} out of bounds (len {})"
-                        ),
+                        concat!("v2 array ", $kind_label, " index {} out of bounds (len {})"),
                         index,
                         (*arr).len
                     );
                 }
-                TypedArray::<*const $elem_obj_ty>::get_unchecked(arr, index as u32)
-                    as *const u8
+                TypedArray::<*const $elem_obj_ty>::get_unchecked(arr, index as u32) as *const u8
             }
         }
 
         #[doc = concat!(
-            "Write a per-element heap pointer at `index` in a ",
-            "`TypedArray<*const ", stringify!($elem_obj_ty), ">`. The caller ",
-            "must have an owning refcount share for `val` and is responsible ",
-            "for releasing any previous element at `index` before this call."
-        )]
+                            "Write a per-element heap pointer at `index` in a ",
+                            "`TypedArray<*const ", stringify!($elem_obj_ty), ">`. The caller ",
+                            "must have an owning refcount share for `val` and is responsible ",
+                            "for releasing any previous element at `index` before this call."
+                        )]
         #[unsafe(no_mangle)]
         pub extern "C" fn $set_fn(
             arr: *mut TypedArray<*const $elem_obj_ty>,
@@ -400,9 +390,7 @@ macro_rules! v2_typed_array_heap_get_set {
 Stamps `ELEM_TYPE_STRING` at `HeapHeader._pad` offset 7 per ADR-006 §2.7.5. \
 ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15)."]
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_new_typed_array_string(
-    capacity: u32,
-) -> *mut TypedArray<*const StringObj> {
+pub extern "C" fn jit_new_typed_array_string(capacity: u32) -> *mut TypedArray<*const StringObj> {
     let ptr = TypedArray::<*const StringObj>::with_capacity(capacity);
     unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_STRING) };
     ptr
@@ -412,9 +400,7 @@ pub extern "C" fn jit_new_typed_array_string(
 /// the per-kind symbol matrix (`jit_v2_array_new_<suffix>`) is complete for
 /// all 14 `TypedArrayKind` variants. Consumer-wired alias to the legacy name.
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_new_string(
-    capacity: u32,
-) -> *mut TypedArray<*const StringObj> {
+pub extern "C" fn jit_v2_array_new_string(capacity: u32) -> *mut TypedArray<*const StringObj> {
     jit_new_typed_array_string(capacity)
 }
 
@@ -429,9 +415,7 @@ v2_typed_array_heap_get_set! {
 Stamps `ELEM_TYPE_DECIMAL` at `HeapHeader._pad` offset 7 per ADR-006 §2.7.5. \
 ckpt-6-prime Group X JIT FFI String/Decimal BUILD (2026-05-15)."]
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_new_typed_array_decimal(
-    capacity: u32,
-) -> *mut TypedArray<*const DecimalObj> {
+pub extern "C" fn jit_new_typed_array_decimal(capacity: u32) -> *mut TypedArray<*const DecimalObj> {
     let ptr = TypedArray::<*const DecimalObj>::with_capacity(capacity);
     unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_DECIMAL) };
     ptr
@@ -440,9 +424,7 @@ pub extern "C" fn jit_new_typed_array_decimal(
 /// Macro-uniform alias for `jit_new_typed_array_decimal`. See
 /// `jit_v2_array_new_string` for rationale.
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_array_new_decimal(
-    capacity: u32,
-) -> *mut TypedArray<*const DecimalObj> {
+pub extern "C" fn jit_v2_array_new_decimal(capacity: u32) -> *mut TypedArray<*const DecimalObj> {
     jit_new_typed_array_decimal(capacity)
 }
 
@@ -799,10 +781,7 @@ pub extern "C" fn jit_v2_array_add_f64(
     let (a_data, a_len) = unsafe { ((*a).data as *const f64, (*a).len as usize) };
     let (b_data, b_len) = unsafe { ((*b).data as *const f64, (*b).len as usize) };
     if a_len != b_len {
-        panic!(
-            "v2 array_add_f64: length mismatch ({} vs {})",
-            a_len, b_len
-        );
+        panic!("v2 array_add_f64: length mismatch ({} vs {})", a_len, b_len);
     }
     let out = TypedArray::<f64>::with_capacity(a_len as u32);
     if a_len == 0 {
@@ -832,10 +811,7 @@ pub extern "C" fn jit_v2_array_mul_f64(
     let (a_data, a_len) = unsafe { ((*a).data as *const f64, (*a).len as usize) };
     let (b_data, b_len) = unsafe { ((*b).data as *const f64, (*b).len as usize) };
     if a_len != b_len {
-        panic!(
-            "v2 array_mul_f64: length mismatch ({} vs {})",
-            a_len, b_len
-        );
+        panic!("v2 array_mul_f64: length mismatch ({} vs {})", a_len, b_len);
     }
     let out = TypedArray::<f64>::with_capacity(a_len as u32);
     if a_len == 0 {
@@ -1127,12 +1103,7 @@ unsafe fn simd_add_scalar_f64_inner(src: *const f64, dst: *mut f64, len: usize, 
 }
 
 #[inline]
-unsafe fn simd_binary_add_f64_inner(
-    a: *const f64,
-    b: *const f64,
-    dst: *mut f64,
-    len: usize,
-) {
+unsafe fn simd_binary_add_f64_inner(a: *const f64, b: *const f64, dst: *mut f64, len: usize) {
     if len < SIMD_SUM_THRESHOLD {
         for i in 0..len {
             unsafe { *dst.add(i) = *a.add(i) + *b.add(i) };
@@ -1158,12 +1129,7 @@ unsafe fn simd_binary_add_f64_inner(
 }
 
 #[inline]
-unsafe fn simd_binary_mul_f64_inner(
-    a: *const f64,
-    b: *const f64,
-    dst: *mut f64,
-    len: usize,
-) {
+unsafe fn simd_binary_mul_f64_inner(a: *const f64, b: *const f64, dst: *mut f64, len: usize) {
     if len < SIMD_SUM_THRESHOLD {
         for i in 0..len {
             unsafe { *dst.add(i) = *a.add(i) * *b.add(i) };
@@ -1700,7 +1666,12 @@ mod tests {
         }
         let expected = total / 50.0;
         let m = jit_v2_array_mean_f64(arr);
-        assert!((m - expected).abs() < 1e-9, "mean={} expected={}", m, expected);
+        assert!(
+            (m - expected).abs() < 1e-9,
+            "mean={} expected={}",
+            m,
+            expected
+        );
         unsafe { TypedArray::drop_array(arr) };
     }
 

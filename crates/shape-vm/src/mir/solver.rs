@@ -119,21 +119,21 @@ pub fn extract_facts(
     let mut facts = BorrowFacts::default();
     let mut next_loan = 0u32;
     let mut slot_loans: HashMap<SlotId, Vec<u32>> = HashMap::new();
-    let mut slot_reference_origins: HashMap<SlotId, (BorrowKind, ReferenceOrigin)> =
-        HashMap::new();
+    let mut slot_reference_origins: HashMap<SlotId, (BorrowKind, ReferenceOrigin)> = HashMap::new();
 
     // Track slots that are targets of ClosureCapture with mutable captures
     // (proxy for non-sendable closures).
-    let (all_captures, mutable_captures) =
-        super::storage_planning::collect_closure_captures(mir);
+    let (all_captures, mutable_captures) = super::storage_planning::collect_closure_captures(mir);
     let closure_capture_slots: HashSet<SlotId> = mutable_captures;
-    facts.slot_escape_status.extend((0..mir.num_locals).map(|raw_slot| {
-        let slot = SlotId(raw_slot);
-        (
-            slot,
-            super::storage_planning::detect_escape_status(slot, mir, &all_captures),
-        )
-    }));
+    facts
+        .slot_escape_status
+        .extend((0..mir.num_locals).map(|raw_slot| {
+            let slot = SlotId(raw_slot);
+            (
+                slot,
+                super::storage_planning::detect_escape_status(slot, mir, &all_captures),
+            )
+        }));
     let param_reference_summaries: HashMap<SlotId, ReturnReferenceSummary> = mir
         .param_slots
         .iter()
@@ -485,13 +485,21 @@ pub fn extract_facts(
         }
 
         // Process Call terminators for borrow facts
-        if let TerminatorKind::Call { func, args, destination, .. } = &block.terminator.kind {
+        if let TerminatorKind::Call {
+            func,
+            args,
+            destination,
+            ..
+        } = &block.terminator.kind
+        {
             let call_point = block.statements.last().map(|s| s.point.0).unwrap_or(0);
             // Track reads from func and args operands
             let mut all_operands = vec![func];
             all_operands.extend(args.iter());
             for op in &all_operands {
-                if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) = op {
+                if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) =
+                    op
+                {
                     if let Some(loans) = slot_loans.get(&place.root_local()) {
                         for &loan_id in loans {
                             facts.use_of_loan.push((loan_id, call_point));
@@ -526,10 +534,8 @@ pub fn extract_facts(
                             if let Some(arg_summary) =
                                 slot_reference_summaries.get(&arg_slot).cloned()
                             {
-                                let composed = compose_return_reference_summary(
-                                    &arg_summary,
-                                    callee_summary,
-                                );
+                                let composed =
+                                    compose_return_reference_summary(&arg_summary, callee_summary);
 
                                 // Only compose origin when projection precision is preserved.
                                 // Origin is always-precise (Vec, not Option<Vec>); if projection
@@ -803,10 +809,7 @@ fn reference_origin_from_rvalue(
     rvalue: &Rvalue,
 ) -> Option<(BorrowKind, ReferenceOrigin)> {
     match rvalue {
-        Rvalue::Borrow(kind, place) => Some((
-            *kind,
-            reference_origin_for_place(place, &[]),
-        )),
+        Rvalue::Borrow(kind, place) => Some((*kind, reference_origin_for_place(place, &[]))),
         Rvalue::Use(Operand::Copy(Place::Local(src_slot)))
         | Rvalue::Use(Operand::Move(Place::Local(src_slot)))
         | Rvalue::Use(Operand::MoveExplicit(Place::Local(src_slot)))
@@ -1180,9 +1183,8 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
     // `0` for a borrow whose root is in `mir.param_slots` and `1` for a
     // genuine local (see the `region_depth` assignment at the fact-extraction
     // site). Only `region_depth >= 1` (a local def-site) is promotable.
-    let referent_is_promotable_local = |loan_id: u32| -> bool {
-        facts.loan_info[&loan_id].region_depth >= 1
-    };
+    let referent_is_promotable_local =
+        |loan_id: u32| -> bool { facts.loan_info[&loan_id].region_depth >= 1 };
     let mut floor_only_loans: std::collections::HashMap<u32, bool> =
         std::collections::HashMap::new();
     for sink in &facts.loan_sinks {
@@ -1294,18 +1296,14 @@ pub fn solve(facts: &BorrowFacts) -> SolverResult {
             }
             LoanSinkKind::EnumStore if sink_is_local => continue,
             LoanSinkKind::EnumStore => BorrowErrorKind::ReferenceStoredInEnum,
-            LoanSinkKind::StructuredTaskBoundary => {
-                BorrowErrorKind::ExclusiveRefAcrossTaskBoundary
-            }
+            LoanSinkKind::StructuredTaskBoundary => BorrowErrorKind::ExclusiveRefAcrossTaskBoundary,
             LoanSinkKind::DetachedTaskBoundary if info.kind == BorrowKind::Exclusive => {
                 BorrowErrorKind::ExclusiveRefAcrossTaskBoundary
             }
             LoanSinkKind::DetachedTaskBoundary => BorrowErrorKind::SharedRefAcrossDetachedTask,
             // v0.3.3 c6 (Wave 1): module bindings outlive every frame; no
             // `sink_is_local` exemption applies. Always emit B0003.
-            LoanSinkKind::ModuleBindingStore => {
-                BorrowErrorKind::ReferenceEscapeIntoModuleBinding
-            }
+            LoanSinkKind::ModuleBindingStore => BorrowErrorKind::ReferenceEscapeIntoModuleBinding,
         };
 
         errors.push(BorrowError {
@@ -1431,11 +1429,8 @@ pub fn extract_borrow_summary(
     return_summary: Option<ReturnReferenceSummary>,
 ) -> FunctionBorrowSummary {
     let num_params = mir.param_slots.len();
-    let mut param_borrows: Vec<Option<BorrowKind>> = mir
-        .param_reference_kinds
-        .iter()
-        .cloned()
-        .collect();
+    let mut param_borrows: Vec<Option<BorrowKind>> =
+        mir.param_reference_kinds.iter().cloned().collect();
     // Pad to num_params if param_reference_kinds is shorter
     while param_borrows.len() < num_params {
         param_borrows.push(None);
@@ -1639,9 +1634,7 @@ fn param_slot_escapes(param_slot: SlotId, mir: &MirFunction) -> bool {
 
 fn rvalue_uses_any(rvalue: &Rvalue, slots: &HashSet<SlotId>) -> bool {
     match rvalue {
-        Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => {
-            operand_uses_any(op, slots)
-        }
+        Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => operand_uses_any(op, slots),
         Rvalue::Borrow(_, place) => slots.contains(&place.root_local()),
         Rvalue::BinaryOp(_, lhs, rhs) => {
             operand_uses_any(lhs, slots) || operand_uses_any(rhs, slots)
@@ -1907,11 +1900,20 @@ fn compute_use_after_move_errors(
         }
 
         // Check Call terminator for reads of moved places, then apply its transfer
-        if let TerminatorKind::Call { func, args, destination, .. } = &block.terminator.kind {
+        if let TerminatorKind::Call {
+            func,
+            args,
+            destination,
+            ..
+        } = &block.terminator.kind
+        {
             let term_key_point = block.terminator.span.start as u32;
             // Check func operand
-            if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) = func {
-                if let Some((moved_place, move_span)) = find_moved_place_conflict(&moved_places, place) {
+            if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) = func
+            {
+                if let Some((moved_place, move_span)) =
+                    find_moved_place_conflict(&moved_places, place)
+                {
                     let key = (term_key_point, format!("{}", moved_place));
                     if seen.insert(key) {
                         errors.push(BorrowError {
@@ -1927,8 +1929,12 @@ fn compute_use_after_move_errors(
             }
             // Check each arg
             for arg in args {
-                if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) = arg {
-                    if let Some((moved_place, move_span)) = find_moved_place_conflict(&moved_places, place) {
+                if let Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) =
+                    arg
+                {
+                    if let Some((moved_place, move_span)) =
+                        find_moved_place_conflict(&moved_places, place)
+                    {
                         let key = (term_key_point, format!("{}", moved_place));
                         if seen.insert(key) {
                             errors.push(BorrowError {
@@ -1944,7 +1950,8 @@ fn compute_use_after_move_errors(
                 }
             }
             // Destination write clears moved status
-            moved_places.retain(|moved_place, _| !reinitializes_moved_place(destination, moved_place));
+            moved_places
+                .retain(|moved_place, _| !reinitializes_moved_place(destination, moved_place));
         }
     }
 
@@ -2976,21 +2983,17 @@ mod tests {
             blocks: vec![
                 BasicBlock {
                     id: BasicBlockId(0),
-                    statements: vec![
-                        MirStatement {
-                            kind: StatementKind::Assign(
-                                Place::Local(SlotId(2)),
-                                Rvalue::Use(Operand::Copy(Place::Local(SlotId(1)))),
-                            ),
-                            span: span(),
-                            point: Point(0),
-                        },
-                    ],
+                    statements: vec![MirStatement {
+                        kind: StatementKind::Assign(
+                            Place::Local(SlotId(2)),
+                            Rvalue::Use(Operand::Copy(Place::Local(SlotId(1)))),
+                        ),
+                        span: span(),
+                        point: Point(0),
+                    }],
                     terminator: Terminator {
                         kind: TerminatorKind::Call {
-                            func: Operand::Constant(MirConstant::Function(
-                                "identity".to_string(),
-                            )),
+                            func: Operand::Constant(MirConstant::Function("identity".to_string())),
                             args: vec![Operand::Copy(Place::Local(SlotId(1)))],
                             destination: Place::Local(SlotId(3)),
                             next: BasicBlockId(1),
@@ -3136,9 +3139,7 @@ mod tests {
                     }],
                     terminator: Terminator {
                         kind: TerminatorKind::Call {
-                            func: Operand::Constant(MirConstant::Method(
-                                "identity".to_string(),
-                            )),
+                            func: Operand::Constant(MirConstant::Method("identity".to_string())),
                             args: vec![Operand::Copy(Place::Local(SlotId(1)))],
                             destination: Place::Local(SlotId(3)),
                             next: BasicBlockId(1),
@@ -3217,9 +3218,7 @@ mod tests {
                     }],
                     terminator: Terminator {
                         kind: TerminatorKind::Call {
-                            func: Operand::Constant(MirConstant::Function(
-                                "inner".to_string(),
-                            )),
+                            func: Operand::Constant(MirConstant::Function("inner".to_string())),
                             args: vec![Operand::Copy(Place::Local(SlotId(1)))],
                             destination: Place::Local(SlotId(3)),
                             next: BasicBlockId(1),
@@ -3236,9 +3235,7 @@ mod tests {
                     }],
                     terminator: Terminator {
                         kind: TerminatorKind::Call {
-                            func: Operand::Constant(MirConstant::Function(
-                                "outer".to_string(),
-                            )),
+                            func: Operand::Constant(MirConstant::Function("outer".to_string())),
                             args: vec![Operand::Copy(Place::Local(SlotId(3)))],
                             destination: Place::Local(SlotId(4)),
                             next: BasicBlockId(2),

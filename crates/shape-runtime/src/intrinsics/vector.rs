@@ -224,7 +224,10 @@ pub fn create_vector_intrinsics_module() -> ModuleExports {
 #[inline]
 fn check_lens(a: usize, b: usize, name: &str) -> Result<(), String> {
     if a != b {
-        Err(format!("Vector length mismatch in {}: {} vs {}", name, a, b))
+        Err(format!(
+            "Vector length mismatch in {}: {} vs {}",
+            name, a, b
+        ))
     } else {
         Ok(())
     }

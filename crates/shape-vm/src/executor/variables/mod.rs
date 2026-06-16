@@ -83,9 +83,7 @@ impl VirtualMachine {
     #[inline]
     fn read_capture_raw_pointer_bits(&self, upvalue_idx: u16) -> Result<u64, VMError> {
         let frame = self.call_stack.last().ok_or_else(|| {
-            VMError::RuntimeError(
-                "mutable/shared capture access outside a call frame".to_string(),
-            )
+            VMError::RuntimeError("mutable/shared capture access outside a call frame".to_string())
         })?;
         let upvalues = frame.upvalues.as_ref().ok_or_else(|| {
             VMError::RuntimeError(
@@ -193,7 +191,9 @@ impl VirtualMachine {
             StoreOwnedMutableCaptureU16 => self.op_store_owned_mutable_capture_u16(instruction)?,
             StoreOwnedMutableCaptureI8 => self.op_store_owned_mutable_capture_i8(instruction)?,
             StoreOwnedMutableCaptureU8 => self.op_store_owned_mutable_capture_u8(instruction)?,
-            StoreOwnedMutableCaptureBool => self.op_store_owned_mutable_capture_bool(instruction)?,
+            StoreOwnedMutableCaptureBool => {
+                self.op_store_owned_mutable_capture_bool(instruction)?
+            }
             StoreOwnedMutableCapturePtr => self.op_store_owned_mutable_capture_ptr(instruction)?,
             LoadSharedCapture => self.op_load_shared_capture(instruction)?,
             StoreSharedCapture => self.op_store_shared_capture(instruction)?,
@@ -365,10 +365,7 @@ impl VirtualMachine {
     /// for every capture site. This polymorphic shell stays as a SURFACE
     /// marker until it is removed from the bytecode entirely (out of
     /// B6 territory — bytecode-level cleanup).
-    fn op_load_owned_mutable_capture(
-        &mut self,
-        _instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_owned_mutable_capture(&mut self, _instruction: &Instruction) -> Result<(), VMError> {
         Err(VMError::NotImplemented(
             "LoadOwnedMutableCapture (polymorphic): the deleted ValueWord/vw_clone \
              dispatch path is replaced by per-FieldKind LoadOwnedMutableCapture<Kind> \
@@ -974,10 +971,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_load_shared_capture_i64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -993,10 +987,7 @@ impl VirtualMachine {
         self.push_kinded(value as u64, NativeKind::Int64)
     }
 
-    fn op_load_shared_capture_u64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_u64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1012,10 +1003,7 @@ impl VirtualMachine {
         self.push_kinded(value, NativeKind::UInt64)
     }
 
-    fn op_load_shared_capture_f64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1031,10 +1019,7 @@ impl VirtualMachine {
         self.push_kinded(value.to_bits(), NativeKind::Float64)
     }
 
-    fn op_load_shared_capture_i32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_i32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1050,10 +1035,7 @@ impl VirtualMachine {
         self.push_kinded(value as i64 as u64, NativeKind::Int32)
     }
 
-    fn op_load_shared_capture_u32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_u32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1069,10 +1051,7 @@ impl VirtualMachine {
         self.push_kinded(value as u64, NativeKind::UInt32)
     }
 
-    fn op_load_shared_capture_i16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_i16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1088,10 +1067,7 @@ impl VirtualMachine {
         self.push_kinded(value as i64 as u64, NativeKind::Int16)
     }
 
-    fn op_load_shared_capture_u16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_u16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1107,10 +1083,7 @@ impl VirtualMachine {
         self.push_kinded(value as u64, NativeKind::UInt16)
     }
 
-    fn op_load_shared_capture_i8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_i8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1126,10 +1099,7 @@ impl VirtualMachine {
         self.push_kinded(value as i64 as u64, NativeKind::Int8)
     }
 
-    fn op_load_shared_capture_u8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_u8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1145,10 +1115,7 @@ impl VirtualMachine {
         self.push_kinded(value as u64, NativeKind::UInt8)
     }
 
-    fn op_load_shared_capture_bool(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_bool(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1166,10 +1133,7 @@ impl VirtualMachine {
 
     /// `LoadSharedCapturePtr { idx }` — typed Ptr load via
     /// `SharedCell::kind()` (Wave-β B6 round-1, commit `c785174`).
-    fn op_load_shared_capture_ptr(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_capture_ptr(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1192,10 +1156,7 @@ impl VirtualMachine {
         self.push_kinded(payload_bits, kind)
     }
 
-    fn op_store_shared_capture_i64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1214,10 +1175,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_u64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_u64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1235,10 +1193,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_f64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1257,10 +1212,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_i32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_i32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1279,10 +1231,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_u32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_u32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1301,10 +1250,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_i16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_i16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1323,10 +1269,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_u16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_u16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1345,10 +1288,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_i8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_i8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1367,10 +1307,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_u8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_u8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1389,10 +1326,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_shared_capture_bool(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_bool(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1413,10 +1347,7 @@ impl VirtualMachine {
 
     /// `StoreSharedCapturePtr { idx }` — typed Ptr store via
     /// `SharedCell::kind()` (Wave-β B6 round-1, commit `c785174`).
-    fn op_store_shared_capture_ptr(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_capture_ptr(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
@@ -1527,11 +1458,7 @@ impl VirtualMachine {
         // The frame-init sentinel at `slot` is `(NONE_BITS, Bool)`;
         // `stack_write_kinded` releases that no-op then installs the
         // new (cell_bits, SharedCell) pair in lockstep.
-        self.stack_write_kinded(
-            slot,
-            cell_bits,
-            NativeKind::Ptr(HeapKind::SharedCell),
-        );
+        self.stack_write_kinded(slot, cell_bits, NativeKind::Ptr(HeapKind::SharedCell));
         Ok(())
     }
 
@@ -1658,10 +1585,7 @@ impl VirtualMachine {
     // Shared module-binding opcodes
     // ─────────────────────────────────────────────────────────────────────
 
-    fn op_alloc_shared_module_binding(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_alloc_shared_module_binding(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         // Wave 8 W8-T25 close (ADR-006 §2.7.12 / Q13 amendment,
         // 2026-05-10): paired with `op_alloc_shared_local` above. The
         // Wave-γ G-module-bindings-kind `module_binding_write_kinded`
@@ -1704,11 +1628,7 @@ impl VirtualMachine {
         // releases the previous occupant via `drop_with_kind`, and
         // installs `(cell_bits, NativeKind::Ptr(HeapKind::SharedCell))`
         // in lockstep.
-        self.module_binding_write_kinded(
-            index,
-            cell_bits,
-            NativeKind::Ptr(HeapKind::SharedCell),
-        );
+        self.module_binding_write_kinded(index, cell_bits, NativeKind::Ptr(HeapKind::SharedCell));
         // Register the slot so VM-Drop reclaims the Arc<SharedCell>
         // share via `Arc::from_raw`. The kind-aware second loop in
         // `Drop for VirtualMachine` zeroes both bits and kind first,
@@ -1719,10 +1639,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_load_shared_module_binding(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_shared_module_binding(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
 
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
@@ -1754,10 +1671,7 @@ impl VirtualMachine {
         self.push_kinded(payload_bits, kind)
     }
 
-    fn op_store_shared_module_binding(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_shared_module_binding(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         use shape_value::v2::closure_layout::SharedCell;
 
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
@@ -2559,8 +2473,7 @@ impl VirtualMachine {
             Some(Operand::ModuleBinding(binding_idx)) => {
                 // Kind sourced from the §2.7.8 module-binding parallel-
                 // kind track at construction time.
-                let (bits, kind) =
-                    self.module_binding_read_kinded_raw(binding_idx as usize);
+                let (bits, kind) = self.module_binding_read_kinded_raw(binding_idx as usize);
                 // ADR-006 §2.7.30 (R3): same promotion discrimination as the
                 // local path — a promoted module-binding referent yields an
                 // owning `PromotedCell`, never a `ModuleBinding` coordinate.
@@ -2636,18 +2549,17 @@ impl VirtualMachine {
         // field_type_tag — playbook §2 kind-sourcing rules. Surface (no
         // fabrication, no Bool-default fallback per §2.7.7 #9) when the
         // tag is FIELD_TAG_ANY / FIELD_TAG_UNKNOWN.
-        let projected_kind = crate::executor::typed_object_ops::field_tag_to_native_kind(
-            field_type_tag,
-        )
-        .ok_or_else(|| {
-            VMError::NotImplemented(format!(
-                "MakeFieldRef SURFACE: field_type_tag {} (FIELD_TAG_ANY / \
+        let projected_kind =
+            crate::executor::typed_object_ops::field_tag_to_native_kind(field_type_tag)
+                .ok_or_else(|| {
+                    VMError::NotImplemented(format!(
+                        "MakeFieldRef SURFACE: field_type_tag {} (FIELD_TAG_ANY / \
                  FIELD_TAG_UNKNOWN) has no statically-sourceable NativeKind \
                  — ADR-006 §2.7.13 / Q14 forbids fabrication. Producing emitter \
                  must stamp a concrete tag.",
-                field_type_tag
-            ))
-        })?;
+                        field_type_tag
+                    ))
+                })?;
         // Pop the base-ref carrier. The stack transfers one
         // `Arc<RefTarget>` strong-count share to us via `pop_kinded`.
         let (base_bits, base_kind) = self.pop_kinded()?;
@@ -2864,8 +2776,7 @@ impl VirtualMachine {
         // SAFETY: kind == Ptr(HeapKind::Reference) — `ref_bits` is an
         // `Arc::into_raw::<RefTarget>` pointer and the slot keeps one
         // share live for us.
-        let rt: &shape_value::RefTarget =
-            unsafe { &*(ref_bits as *const shape_value::RefTarget) };
+        let rt: &shape_value::RefTarget = unsafe { &*(ref_bits as *const shape_value::RefTarget) };
         let (out_bits, out_kind) = self.read_ref_target(rt)?;
         // WB2.4 retain-on-read: bump the projected share so the pushed
         // slot's share is independent of the place's share. The place
@@ -2911,8 +2822,7 @@ impl VirtualMachine {
             )));
         }
         // SAFETY: same as DerefLoad.
-        let rt: &shape_value::RefTarget =
-            unsafe { &*(ref_bits as *const shape_value::RefTarget) };
+        let rt: &shape_value::RefTarget = unsafe { &*(ref_bits as *const shape_value::RefTarget) };
         // Cross-check: the popped value's kind matches the projected
         // slot's kind (§2.7.5.1 stack-contents-are-post-proof). On a
         // mismatch, surface — never silently fabricate.
@@ -2992,8 +2902,7 @@ impl VirtualMachine {
         // SAFETY: kind == Ptr(HeapKind::Reference) — `ref_bits` is an
         // `Arc::into_raw::<RefTarget>` pointer; the slot keeps one share
         // live for us (we only borrow).
-        let rt: &shape_value::RefTarget =
-            unsafe { &*(ref_bits as *const shape_value::RefTarget) };
+        let rt: &shape_value::RefTarget = unsafe { &*(ref_bits as *const shape_value::RefTarget) };
 
         // Resolve the array pointer the ref projects to.
         let (arr_bits, arr_kind) = match self.read_ref_target(rt) {
@@ -3010,9 +2919,7 @@ impl VirtualMachine {
                 arr_kind
             )));
         }
-        use crate::executor::v2_handlers::v2_array_detect::{
-            as_v2_typed_array, write_element,
-        };
+        use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, write_element};
         let view = match as_v2_typed_array(arr_bits, arr_kind) {
             Some(v) => v,
             None => {
@@ -3119,8 +3026,7 @@ impl VirtualMachine {
                         kind
                     )));
                 }
-                let (bits, _) =
-                    self.module_binding_read_kinded_raw(*binding_idx as usize);
+                let (bits, _) = self.module_binding_read_kinded_raw(*binding_idx as usize);
                 let ptr = bits as *const TypedObjectStorage;
                 // SAFETY: as above — v2-raw `_new` carrier, HeapHeader at
                 // offset 0. The module binding retains its own share.
@@ -3193,10 +3099,7 @@ impl VirtualMachine {
     /// Read the projected slot of a `RefTarget` as `(bits, kind)` —
     /// borrows the place's share (the place retains ownership). Caller
     /// is responsible for `clone_with_kind` if pushing onto the stack.
-    fn read_ref_target(
-        &self,
-        rt: &shape_value::RefTarget,
-    ) -> Result<(u64, NativeKind), VMError> {
+    fn read_ref_target(&self, rt: &shape_value::RefTarget) -> Result<(u64, NativeKind), VMError> {
         match rt {
             shape_value::RefTarget::Local {
                 frame_index,
@@ -3273,12 +3176,11 @@ impl VirtualMachine {
                             .to_string(),
                     )
                 })?;
-                let (bits, k) = read_element(&view, *index).ok_or_else(|| {
-                    VMError::IndexOutOfBounds {
+                let (bits, k) =
+                    read_element(&view, *index).ok_or_else(|| VMError::IndexOutOfBounds {
                         index: *index as i32,
                         length: view.len as usize,
-                    }
-                })?;
+                    })?;
                 // read_element pre-retains heap-element shares; for those the
                 // op_deref_load caller's clone_with_kind would double-bump.
                 // Guard: heap-element kinds release the extra share so the
@@ -3326,9 +3228,7 @@ impl VirtualMachine {
                     match self.call_stack.get(*frame_index as usize) {
                         Some(f) => f.base_pointer,
                         None => {
-                            crate::executor::vm_impl::stack::drop_with_kind(
-                                val_bits, val_kind,
-                            );
+                            crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
                             return Err(VMError::RuntimeError(format!(
                                 "DerefStore: RefTarget::Local frame_index {} out of bounds",
                                 frame_index
@@ -3360,11 +3260,7 @@ impl VirtualMachine {
                     prior_kind, kind
                 );
                 write_barrier_slot(prior_bits, val_bits);
-                self.module_binding_write_kinded(
-                    *binding_idx as usize,
-                    val_bits,
-                    val_kind,
-                );
+                self.module_binding_write_kinded(*binding_idx as usize, val_bits, val_kind);
                 Ok(())
             }
             shape_value::RefTarget::TypedField {
@@ -3385,9 +3281,7 @@ impl VirtualMachine {
                 // occupant transferred in.
                 let field_idx = *field_offset as usize;
                 if field_idx >= receiver.slots.len() {
-                    crate::executor::vm_impl::stack::drop_with_kind(
-                        val_bits, val_kind,
-                    );
+                    crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
                     return Err(VMError::RuntimeError(format!(
                         "DerefStore: TypedField field_offset {} out of bounds \
                          (slot count {})",
@@ -3419,9 +3313,7 @@ impl VirtualMachine {
                 // invariance debug_asserted above. Per
                 // `TypedObjectStorage::write_slot_in_place` contract,
                 // returns the same `prior_bits` we just read.
-                let _returned_prior = unsafe {
-                    receiver.write_slot_in_place(field_idx, val_bits)
-                };
+                let _returned_prior = unsafe { receiver.write_slot_in_place(field_idx, val_bits) };
                 debug_assert_eq!(
                     _returned_prior, prior_bits,
                     "DerefStore: write_slot_in_place prior_bits mismatch — \
@@ -3429,9 +3321,7 @@ impl VirtualMachine {
                 );
                 // Release the prior occupant's share via the kind-aware
                 // dispatch table (§2.7.7 WB2.4).
-                crate::executor::vm_impl::stack::drop_with_kind(
-                    prior_bits, *kind,
-                );
+                crate::executor::vm_impl::stack::drop_with_kind(prior_bits, *kind);
                 Ok(())
             }
             // ADR-006 §2.7.30 (R3): write the new occupant through the owning
@@ -3440,10 +3330,12 @@ impl VirtualMachine {
             // and equals the ref's captured projected kind by construction.
             shape_value::RefTarget::PromotedCell { cell, kind } => {
                 debug_assert_eq!(
-                    cell.kind(), *kind,
+                    cell.kind(),
+                    *kind,
                     "DerefStore: promoted-cell kind drift (cell {:?}, ref {:?}) \
                      — ADR-006 §2.7.30",
-                    cell.kind(), kind
+                    cell.kind(),
+                    kind
                 );
                 let mut guard = cell.lock();
                 let prior_bits = *guard;
@@ -3452,9 +3344,7 @@ impl VirtualMachine {
                 drop(guard);
                 // Release the prior occupant's share via the kind-aware
                 // dispatch table (§2.7.7 WB2.4).
-                crate::executor::vm_impl::stack::drop_with_kind(
-                    prior_bits, *kind,
-                );
+                crate::executor::vm_impl::stack::drop_with_kind(prior_bits, *kind);
                 Ok(())
             }
             // V3-S5 Seam #2 (2026-06-05): write the new occupant into the
@@ -3484,9 +3374,7 @@ impl VirtualMachine {
                 ) {
                     Some(v) => v,
                     None => {
-                        crate::executor::vm_impl::stack::drop_with_kind(
-                            val_bits, val_kind,
-                        );
+                        crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
                         return Err(VMError::RuntimeError(
                             "DerefStore: IndexedElement array carrier did not \
                              resolve to a v2 typed-array pointer (header \
@@ -3500,9 +3388,7 @@ impl VirtualMachine {
                     Err(msg) => {
                         // write_element did not consume the share on error;
                         // retire it here to preserve refcount balance.
-                        crate::executor::vm_impl::stack::drop_with_kind(
-                            val_bits, val_kind,
-                        );
+                        crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
                         Err(VMError::TypeError {
                             expected: "v2 typed-array element",
                             got: msg,
@@ -3562,10 +3448,7 @@ impl VirtualMachine {
     // typed Store fix at L3301+.
     // ─────────────────────────────────────────────────────────────────────
 
-    fn op_load_module_binding_i64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3574,10 +3457,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_u64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_u64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3586,10 +3466,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_f64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3598,10 +3475,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_i32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_i32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3610,10 +3484,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_u32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_u32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3622,10 +3493,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_i16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_i16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3634,10 +3502,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_u16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_u16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3646,10 +3511,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_i8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_i8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3658,10 +3520,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_u8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_u8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3670,10 +3529,7 @@ impl VirtualMachine {
         self.push_kinded(bits, kind)
     }
 
-    fn op_load_module_binding_bool(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_bool(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3686,10 +3542,7 @@ impl VirtualMachine {
     /// the parallel kind track now classifies the binding's
     /// heap-bearing arm; read kinded bits + bump the share via
     /// `clone_with_kind`.
-    fn op_load_module_binding_ptr(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_load_module_binding_ptr(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3712,10 +3565,7 @@ impl VirtualMachine {
     // binding_ptr` already does this (L3411-3416); these arms now match.
     // ─────────────────────────────────────────────────────────────────────
 
-    fn op_store_module_binding_i64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_i64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3725,10 +3575,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_u64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_u64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3738,10 +3585,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_f64(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_f64(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3751,10 +3595,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_i32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_i32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3764,10 +3605,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_u32(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_u32(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3777,10 +3615,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_i16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_i16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3790,10 +3625,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_u16(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_u16(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3803,10 +3635,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_i8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_i8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3816,10 +3645,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_u8(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_u8(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3829,10 +3655,7 @@ impl VirtualMachine {
         Ok(())
     }
 
-    fn op_store_module_binding_bool(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_bool(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3846,10 +3669,7 @@ impl VirtualMachine {
     /// pop kinded heap source and install via the kinded module-
     /// binding API; the prior occupant's share is released via
     /// `drop_with_kind` using the prior kind track entry.
-    fn op_store_module_binding_ptr(
-        &mut self,
-        instruction: &Instruction,
-    ) -> Result<(), VMError> {
+    fn op_store_module_binding_ptr(&mut self, instruction: &Instruction) -> Result<(), VMError> {
         let Some(Operand::ModuleBinding(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };

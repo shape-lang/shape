@@ -16,7 +16,9 @@
 
 #[test]
 fn test_channel_ctor_returns_array() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/ChannelData carriers)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/ChannelData carriers)"
+    )
 }
 
 // ===== is_sender =====

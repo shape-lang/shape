@@ -315,8 +315,7 @@ fn fallback_diagnostic_prefix_invariant_across_fixtures() {
             .unwrap_or("")
             .to_string();
         assert!(
-            fallback_line
-                .starts_with("[jit-fallback] function main failed JIT compile:"),
+            fallback_line.starts_with("[jit-fallback] function main failed JIT compile:"),
             "fixture {} fallback line should start with the W12 canonical \
              prefix; got: {}",
             fixture,

@@ -149,9 +149,7 @@ pub fn v2_channel_recv(
         return Ok(slot);
     }
     if ch.is_closed() {
-        return Err(type_error(
-            "Channel.recv() on a closed and empty channel",
-        ));
+        return Err(type_error("Channel.recv() on a closed and empty channel"));
     }
     Err(VMError::NotImplemented(
         "Channel.recv() blocking-on-empty path requires the \
@@ -174,9 +172,7 @@ pub fn v2_channel_try_recv(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 1 {
-        return Err(type_error(
-            "Channel.try_recv() takes no arguments",
-        ));
+        return Err(type_error("Channel.try_recv() takes no arguments"));
     }
     let ch: Arc<ChannelData> = as_channel(&args[0])?;
     Ok(ch.try_recv().unwrap_or_else(KindedSlot::none))
@@ -210,9 +206,7 @@ pub fn v2_channel_is_closed(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 1 {
-        return Err(type_error(
-            "Channel.is_closed() takes no arguments",
-        ));
+        return Err(type_error("Channel.is_closed() takes no arguments"));
     }
     let ch: Arc<ChannelData> = as_channel(&args[0])?;
     Ok(KindedSlot::from_bool(ch.is_closed()))
@@ -237,9 +231,7 @@ pub fn v2_channel_is_sender(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 1 {
-        return Err(type_error(
-            "Channel.is_sender() takes no arguments",
-        ));
+        return Err(type_error("Channel.is_sender() takes no arguments"));
     }
     let _ = as_channel(&args[0])?;
     Err(VMError::NotImplemented(

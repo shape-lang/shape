@@ -37,15 +37,15 @@
 //! Refusal #1 binding: `TypedArrayData` resurrection under any rename refused
 //! on sight.
 
-use crate::executor::v2_handlers::v2_array_detect::{
-    as_v2_typed_array, clone_array, pop_element, push_element, read_element, reverse_array,
-    write_element, V2TypedArrayView,
-};
 use crate::executor::VirtualMachine;
+use crate::executor::v2_handlers::v2_array_detect::{
+    V2TypedArrayView, as_v2_typed_array, clone_array, pop_element, push_element, read_element,
+    reverse_array, write_element,
+};
 use shape_runtime::context::ExecutionContext;
 use shape_value::v2::heap_header::HEAP_KIND_V2_TYPED_ARRAY;
-use shape_value::v2::typed_array::{TypedArray, ELEM_TYPE_TYPED_OBJECT};
-use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot, VMError};
+use shape_value::v2::typed_array::{ELEM_TYPE_TYPED_OBJECT, TypedArray};
+use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, VMError, ValueSlot};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WS-8 kind-generic header-view helpers
@@ -234,9 +234,7 @@ pub(crate) fn handle_push_v2(
         .map_err(|e| VMError::RuntimeError(format!("Array.push: {}", e)))?;
     // Re-read the header for the post-push element count.
     let post = extract_typed_array_view(&args[0]).ok_or_else(|| {
-        VMError::RuntimeError(
-            "Array.push: receiver re-detection failed after push".into(),
-        )
+        VMError::RuntimeError("Array.push: receiver re-detection failed after push".into())
     })?;
     Ok(KindedSlot::from_int(post.len as i64))
 }
@@ -302,9 +300,7 @@ pub(crate) fn handle_zip_v2(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Array.zip expects 1 argument".into(),
-        ));
+        return Err(VMError::RuntimeError("Array.zip expects 1 argument".into()));
     }
     let a = extract_typed_array_view(&args[0]).ok_or_else(|| {
         VMError::RuntimeError(format!(
@@ -351,10 +347,8 @@ pub(crate) fn handle_zip_v2(
         // each input slot (bumping any heap refcount), so a_slot/b_slot's
         // shares — owned by us — must be dropped via the explicit
         // `drop_with_kind` lockstep that `KindedSlot::Drop` performs.
-        let pair = shape_runtime::type_schema::typed_object_from_pairs(&[
-            ("_0", a_slot),
-            ("_1", b_slot),
-        ]);
+        let pair =
+            shape_runtime::type_schema::typed_object_from_pairs(&[("_0", a_slot), ("_1", b_slot)]);
         if pair.kind != NativeKind::Ptr(HeapKind::TypedObject) {
             return Err(VMError::RuntimeError(format!(
                 "Array.zip: typed_object_from_pairs returned unexpected kind {:?}",
@@ -378,10 +372,7 @@ pub(crate) fn handle_zip_v2(
     }
     let p = new_arr as *mut u8;
     unsafe {
-        crate::executor::v2_handlers::v2_array_detect::stamp_elem_type(
-            p,
-            ELEM_TYPE_TYPED_OBJECT,
-        );
+        crate::executor::v2_handlers::v2_array_detect::stamp_elem_type(p, ELEM_TYPE_TYPED_OBJECT);
     }
     // The on-header `kind` byte is already `HEAP_KIND_V2_TYPED_ARRAY` from
     // `TypedArray::with_capacity` → `HeapHeader::new(HEAP_KIND_V2_TYPED_ARRAY)`;
@@ -429,9 +420,7 @@ pub(crate) fn handle_get_v2(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() < 2 {
-        return Err(VMError::RuntimeError(
-            "Array.get expects 1 argument".into(),
-        ));
+        return Err(VMError::RuntimeError("Array.get expects 1 argument".into()));
     }
     let view = extract_typed_array_view(&args[0]).ok_or_else(|| {
         VMError::RuntimeError(format!(
@@ -507,9 +496,7 @@ pub(crate) fn handle_set_v2(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executor::v2_handlers::v2_array_detect::{
-        as_v2_typed_array, V2ElemType,
-    };
+    use crate::executor::v2_handlers::v2_array_detect::{V2ElemType, as_v2_typed_array};
 
     // The handlers use the v2-raw allocators from `v2_handlers/array.rs`,
     // which require a fully-set-up `VirtualMachine`. These unit tests build
@@ -529,21 +516,15 @@ mod tests {
         // VM allocator uses.
         let arr_ptr = TypedArray::<i64>::with_capacity(3) as *mut u8;
         unsafe {
-            crate::executor::v2_handlers::v2_array_detect::stamp_elem_type(
-                arr_ptr,
-                ELEM_TYPE_I64,
-            );
+            crate::executor::v2_handlers::v2_array_detect::stamp_elem_type(arr_ptr, ELEM_TYPE_I64);
             let arr = arr_ptr as *mut TypedArray<i64>;
             TypedArray::<i64>::push(arr, 10);
             TypedArray::<i64>::push(arr, 20);
             TypedArray::<i64>::push(arr, 30);
         }
 
-        let view = as_v2_typed_array(
-            arr_ptr as u64,
-            NativeKind::Ptr(HeapKind::TypedArray),
-        )
-        .expect("view");
+        let view =
+            as_v2_typed_array(arr_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray)).expect("view");
         assert_eq!(view.elem_type, V2ElemType::I64);
         assert_eq!(view.len, 3);
 
@@ -565,20 +546,14 @@ mod tests {
 
         let arr_ptr = TypedArray::<u8>::with_capacity(2) as *mut u8;
         unsafe {
-            crate::executor::v2_handlers::v2_array_detect::stamp_elem_type(
-                arr_ptr,
-                ELEM_TYPE_BOOL,
-            );
+            crate::executor::v2_handlers::v2_array_detect::stamp_elem_type(arr_ptr, ELEM_TYPE_BOOL);
             let arr = arr_ptr as *mut TypedArray<u8>;
             TypedArray::<u8>::push(arr, 1);
             TypedArray::<u8>::push(arr, 0);
         }
 
-        let view = as_v2_typed_array(
-            arr_ptr as u64,
-            NativeKind::Ptr(HeapKind::TypedArray),
-        )
-        .expect("view");
+        let view =
+            as_v2_typed_array(arr_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray)).expect("view");
         assert_eq!(view.elem_type, V2ElemType::Bool);
         // isEmpty contract: header.len == 0
         assert_eq!(view.len == 0, false);
@@ -597,21 +572,15 @@ mod tests {
 
         let arr_ptr = TypedArray::<u8>::with_capacity(3) as *mut u8;
         unsafe {
-            crate::executor::v2_handlers::v2_array_detect::stamp_elem_type(
-                arr_ptr,
-                ELEM_TYPE_BOOL,
-            );
+            crate::executor::v2_handlers::v2_array_detect::stamp_elem_type(arr_ptr, ELEM_TYPE_BOOL);
             let arr = arr_ptr as *mut TypedArray<u8>;
             TypedArray::<u8>::push(arr, 1); // true
             TypedArray::<u8>::push(arr, 1); // true
             TypedArray::<u8>::push(arr, 0); // false
         }
 
-        let view = as_v2_typed_array(
-            arr_ptr as u64,
-            NativeKind::Ptr(HeapKind::TypedArray),
-        )
-        .expect("view");
+        let view =
+            as_v2_typed_array(arr_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray)).expect("view");
 
         // What handle_last_v2 reads: read_element(view, len - 1).
         let last = read_element(&view, view.len - 1).expect("read");

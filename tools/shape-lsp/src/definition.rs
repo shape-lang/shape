@@ -105,8 +105,8 @@ pub fn get_references_cross_file(
     workspace_root: Option<&Path>,
 ) -> Option<Vec<Location>> {
     // Local file references via ScopeTree (and text-search fallback).
-    let mut locations = get_references_with_fallback(text, position, uri, cached_program)
-        .unwrap_or_default();
+    let mut locations =
+        get_references_with_fallback(text, position, uri, cached_program).unwrap_or_default();
 
     // Determine the symbol name + whether it's module-scope-visible.
     let Some(word) = get_word_at_position(text, position) else {
@@ -165,12 +165,7 @@ pub fn get_references_cross_file(
                 continue;
             };
             let other_text = other_doc.text();
-            collect_module_scope_refs_in_file(
-                &other_text,
-                &other_uri,
-                &word,
-                &mut locations,
-            );
+            collect_module_scope_refs_in_file(&other_text, &other_uri, &word, &mut locations);
         }
     }
 
@@ -187,12 +182,7 @@ pub fn get_references_cross_file(
             let Ok(other_text) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            collect_module_scope_refs_in_file(
-                &other_text,
-                &other_uri,
-                &word,
-                &mut locations,
-            );
+            collect_module_scope_refs_in_file(&other_text, &other_uri, &word, &mut locations);
         }
     }
 
@@ -243,7 +233,10 @@ fn is_module_scope_symbol(program: &Program, name: &str) -> bool {
                         }
                     }
                 }
-                ImportItems::Namespace { name: ns_name, alias } => {
+                ImportItems::Namespace {
+                    name: ns_name,
+                    alias,
+                } => {
                     let local = alias.as_ref().unwrap_or(ns_name);
                     if local == name {
                         return true;
@@ -260,12 +253,7 @@ fn is_module_scope_symbol(program: &Program, name: &str) -> bool {
 /// `Location`s into `out`. Only the module-scope binding (and its
 /// references) is considered — locally-shadowing inner bindings are
 /// excluded by `ScopeTree::references_of` semantics.
-fn collect_module_scope_refs_in_file(
-    text: &str,
-    uri: &Uri,
-    name: &str,
-    out: &mut Vec<Location>,
-) {
+fn collect_module_scope_refs_in_file(text: &str, uri: &Uri, name: &str, out: &mut Vec<Location>) {
     let program = match parse_program(text) {
         Ok(p) => p,
         Err(_) => {
@@ -772,20 +760,20 @@ fn extract_base_type_name(rendered: &str) -> Option<String> {
     // Unwrap one level of common generic carriers — repeated to handle
     // `Array<Option<Point>>`-style nesting.
     loop {
-        let unwrapped: Option<String> = if let Some(inner) = strip_generic_wrapper(&current, "Array")
-        {
-            Some(inner.to_string())
-        } else if let Some(inner) = strip_generic_wrapper(&current, "Option") {
-            Some(inner.to_string())
-        } else if let Some(inner) = strip_generic_wrapper(&current, "Result") {
-            // Result<T, E> — first generic arg is the success type.
-            Some(first_generic_arg(inner).to_string())
-        } else if let Some(inner) = strip_generic_wrapper(&current, "HashMap") {
-            // HashMap<K, V> — first arg keeps it deterministic.
-            Some(first_generic_arg(inner).to_string())
-        } else {
-            None
-        };
+        let unwrapped: Option<String> =
+            if let Some(inner) = strip_generic_wrapper(&current, "Array") {
+                Some(inner.to_string())
+            } else if let Some(inner) = strip_generic_wrapper(&current, "Option") {
+                Some(inner.to_string())
+            } else if let Some(inner) = strip_generic_wrapper(&current, "Result") {
+                // Result<T, E> — first generic arg is the success type.
+                Some(first_generic_arg(inner).to_string())
+            } else if let Some(inner) = strip_generic_wrapper(&current, "HashMap") {
+                // HashMap<K, V> — first arg keeps it deterministic.
+                Some(first_generic_arg(inner).to_string())
+            } else {
+                None
+            };
         match unwrapped {
             Some(inner) => {
                 let inner_trim = inner.trim().to_string();
@@ -1345,7 +1333,10 @@ impl Greet for Cat {
             .iter()
             .filter(|i| matches!(i, Item::Impl(_, _)))
             .count();
-        assert!(impl_count >= 1, "Expected at least 1 Item::Impl in parsed program");
+        assert!(
+            impl_count >= 1,
+            "Expected at least 1 Item::Impl in parsed program"
+        );
 
         let uri = Uri::from_file_path("/test.shape").unwrap();
         // Cursor on "Greet" trait name in the impl line (line 6, after "impl ").
@@ -1513,16 +1504,9 @@ let y = myVar * 2;
             line: 0,
             character: 3,
         };
-        let refs = get_references_cross_file(
-            &main_text,
-            pos,
-            &main_uri,
-            None,
-            Some(&docs),
-            None,
-            None,
-        )
-        .expect("should find cross-file references");
+        let refs =
+            get_references_cross_file(&main_text, pos, &main_uri, None, Some(&docs), None, None)
+                .expect("should find cross-file references");
         // Local def + local 1 use + other def + other 2 uses = 5
         assert!(
             refs.len() >= 4,
@@ -1541,10 +1525,8 @@ let y = myVar * 2;
         // Local `let` inside a function — should NOT cascade to other files.
         use crate::document::DocumentManager;
         let docs = DocumentManager::new();
-        let main_text =
-            "fn outer() {\n  let local = 1\n  return local + local\n}".to_string();
-        let other_text =
-            "fn other() {\n  let local = 5\n  return local\n}".to_string();
+        let main_text = "fn outer() {\n  let local = 1\n  return local + local\n}".to_string();
+        let other_text = "fn other() {\n  let local = 5\n  return local\n}".to_string();
         let main_uri = Uri::from_file_path("/main.shape").unwrap();
         let other_uri = Uri::from_file_path("/other.shape").unwrap();
         docs.open(main_uri.clone(), 1, main_text.clone());
@@ -1557,15 +1539,8 @@ let y = myVar * 2;
             line,
             character: col,
         };
-        let refs = get_references_cross_file(
-            &main_text,
-            pos,
-            &main_uri,
-            None,
-            Some(&docs),
-            None,
-            None,
-        );
+        let refs =
+            get_references_cross_file(&main_text, pos, &main_uri, None, Some(&docs), None, None);
         // Expect refs only in main.shape (local-scope binding)
         if let Some(refs) = refs {
             assert!(
@@ -1868,7 +1843,10 @@ let y = myVar * 2;
             None, // workspace_root
         );
         // Should still find local references via get_references.
-        assert!(result.is_some(), "expected local references when no cross-file context");
+        assert!(
+            result.is_some(),
+            "expected local references when no cross-file context"
+        );
     }
 
     #[test]

@@ -75,8 +75,26 @@ fn parse_program_cached(source: &str) -> Result<Program> {
 /// When a bare-name import like `"file"` fails to resolve, we check this list
 /// and suggest the canonical `std::core::file` path in the error message.
 const KNOWN_STDLIB_LEAF_NAMES: &[&str] = &[
-    "file", "json", "http", "crypto", "env", "toml", "yaml", "xml", "compress", "archive",
-    "unicode", "csv", "msgpack", "regex", "parallel", "time", "io", "set", "state", "transport",
+    "file",
+    "json",
+    "http",
+    "crypto",
+    "env",
+    "toml",
+    "yaml",
+    "xml",
+    "compress",
+    "archive",
+    "unicode",
+    "csv",
+    "msgpack",
+    "regex",
+    "parallel",
+    "time",
+    "io",
+    "set",
+    "state",
+    "transport",
     "remote",
 ];
 
@@ -565,9 +583,7 @@ impl ModuleLoader {
     /// module's `items` to register the dependency's interface WITHOUT
     /// re-parsing or re-inferring it from source. Empty when no fresh-hit
     /// bundle was loaded.
-    pub fn loaded_interfaces(
-        &self,
-    ) -> &HashMap<String, crate::package_bundle::ResolvedInterface> {
+    pub fn loaded_interfaces(&self) -> &HashMap<String, crate::package_bundle::ResolvedInterface> {
         &self.loaded_interfaces
     }
 
@@ -765,20 +781,18 @@ impl ModuleLoader {
             dependency_paths: &self.dependency_paths,
         };
 
-        filesystem
-            .resolve(module_path, context)?
-            .ok_or_else(|| {
-                // Check if this is a bare-name import that should use a canonical path.
-                let message = if let Some(hint) = bare_name_migration_hint(module_path) {
-                    hint
-                } else {
-                    format!("Module not found: {}", module_path)
-                };
-                ShapeError::ModuleError {
-                    message,
-                    module_path: None,
-                }
-            })
+        filesystem.resolve(module_path, context)?.ok_or_else(|| {
+            // Check if this is a bare-name import that should use a canonical path.
+            let message = if let Some(hint) = bare_name_migration_hint(module_path) {
+                hint
+            } else {
+                format!("Module not found: {}", module_path)
+            };
+            ShapeError::ModuleError {
+                message,
+                module_path: None,
+            }
+        })
     }
 
     /// Load a module with optional context path

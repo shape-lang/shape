@@ -205,11 +205,7 @@ impl BytecodeCompiler {
             // #17.
             if let Some(&owned_idx) = self.owned_mutable_closure_captures.get(name) {
                 debug_assert_eq!(upvalue_idx, owned_idx);
-                let opcode = match self
-                    .owned_mutable_capture_inner_kinds
-                    .get(name)
-                    .copied()
-                {
+                let opcode = match self.owned_mutable_capture_inner_kinds.get(name).copied() {
                     Some(kind) => crate::compiler::helpers::owned_mutable_typed_load_opcode(kind),
                     None => OpCode::LoadOwnedMutableCapture,
                 };

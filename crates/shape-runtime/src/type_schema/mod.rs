@@ -19,8 +19,8 @@
 //! Supports merging multiple schemas for intersection types (`A + B`).
 //! Field collisions are detected at compile time and result in errors.
 
-use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
 use shape_value::heap_value::HeapValue;
+use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -313,9 +313,7 @@ mod tests {
 /// fast path. Phase 2c lands schema → `NativeKind` lowering as a
 /// shared utility; until then this helper returns `None` when the
 /// schema is not registered or the value is not a TypedObject.
-pub fn typed_object_to_hashmap_nb(
-    _value: &KindedSlot,
-) -> Option<HashMap<String, KindedSlot>> {
+pub fn typed_object_to_hashmap_nb(_value: &KindedSlot) -> Option<HashMap<String, KindedSlot>> {
     // Phase 1.B: schema → NativeKind lowering is the deferred Phase 2c
     // utility. This helper's pre-bulldozer body decoded slots via
     // `slots[i].as_heap_nb()` / `ValueWord::clone_from_bits` (now
@@ -324,4 +322,3 @@ pub fn typed_object_to_hashmap_nb(
     // unit test above.
     None
 }
-

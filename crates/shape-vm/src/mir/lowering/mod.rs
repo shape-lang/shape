@@ -22,7 +22,6 @@ use crate::mir::analysis::MutabilityError;
 use shape_ast::ast::{self, Span, Statement};
 use std::collections::{HashMap, HashSet};
 
-
 #[derive(Debug, Clone, Copy)]
 pub(super) struct MirLoopContext {
     pub(super) break_block: BasicBlockId,
@@ -117,8 +116,7 @@ pub struct MirBuilder {
     /// COW-container ctor (`Set()` / `HashMap()` / `Deque()` /
     /// `PriorityQueue()`); consumed at `Expr::MethodCall` lowering to decide
     /// whether to emit the receiver write-back assignment after the call.
-    mut_self_container_locals:
-        HashMap<SlotId, crate::compiler::mutation_writeback::ContainerKind>,
+    mut_self_container_locals: HashMap<SlotId, crate::compiler::mutation_writeback::ContainerKind>,
     /// Per-slot user-struct type name for slots produced by
     /// `Expr::StructLiteral { type_name, .. }` lowering — ADR-006 §2.7.5
     /// producing-site classification, Phase 3 cluster-0 Round 13 T1' gap 1
@@ -600,13 +598,7 @@ impl MirBuilder {
 
     /// Emit a function call as a block terminator. Finishes current block
     /// with TerminatorKind::Call and starts a continuation block.
-    pub fn emit_call(
-        &mut self,
-        func: Operand,
-        args: Vec<Operand>,
-        destination: Place,
-        span: Span,
-    ) {
+    pub fn emit_call(&mut self, func: Operand, args: Vec<Operand>, destination: Place, span: Span) {
         let next_bb = self.new_block();
         self.finish_block(
             TerminatorKind::Call {
@@ -1667,7 +1659,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1687,7 +1684,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1707,7 +1709,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1747,7 +1754,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1787,7 +1799,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1810,7 +1827,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1834,7 +1856,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     /// W15.2-LANG-5 regression. `Pattern::Typed` arms in a `match`
@@ -1968,7 +1995,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -1985,7 +2017,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -2059,7 +2096,12 @@ mod tests {
         let lowering = lower_function_detailed("test", &[pair_param], &body, span());
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -2076,7 +2118,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -2093,7 +2140,12 @@ mod tests {
         );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
@@ -2104,23 +2156,303 @@ mod tests {
             Expr::Literal(ast::Literal::Int(2), span()),
         );
         let body = vec![
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("x".to_string(), span()), type_annotation: None, value: Some(Expr::Literal(ast::Literal::Int(1), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("arr".to_string(), span()), type_annotation: None, value: Some(Expr::Array(vec![Expr::Identifier("x".to_string(), span()), Expr::Literal(ast::Literal::Int(2), span())], span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("obj".to_string(), span()), type_annotation: None, value: Some(Expr::Object(vec![ast::ObjectEntry::Field { key: "left".to_string(), value: Expr::Identifier("x".to_string(), span()), type_annotation: None }, ast::ObjectEntry::Spread(Expr::Identifier("arr".to_string(), span()))], span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("unary".to_string(), span()), type_annotation: None, value: Some(Expr::UnaryOp { op: ast::UnaryOp::Neg, operand: Box::new(Expr::Identifier("x".to_string(), span())), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("fuzzy".to_string(), span()), type_annotation: None, value: Some(Expr::FuzzyComparison { left: Box::new(Expr::Identifier("x".to_string(), span())), op: ast::operators::FuzzyOp::Equal, right: Box::new(Expr::Literal(ast::Literal::Int(1), span())), tolerance: ast::operators::FuzzyTolerance::Percentage(0.02), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("slice".to_string(), span()), type_annotation: None, value: Some(Expr::IndexAccess { object: Box::new(Expr::Identifier("arr".to_string(), span())), index: Box::new(Expr::Literal(ast::Literal::Int(0), span())), end_index: Some(Box::new(Expr::Literal(ast::Literal::Int(1), span()))), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("asserted".to_string(), span()), type_annotation: None, value: Some(Expr::TypeAssertion { expr: Box::new(Expr::Identifier("x".to_string(), span())), type_annotation: ast::TypeAnnotation::Basic("int".to_string()), meta_param_overrides: Some(overrides), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("instance".to_string(), span()), type_annotation: None, value: Some(Expr::InstanceOf { expr: Box::new(Expr::Identifier("x".to_string(), span())), type_annotation: ast::TypeAnnotation::Basic("int".to_string()), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("variant".to_string(), span()), type_annotation: None, value: Some(Expr::EnumConstructor { enum_name: "Option".into(), variant: "Some".to_string(), payload: ast::EnumConstructorPayload::Tuple(vec![Expr::Identifier("x".to_string(), span())]), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("call".to_string(), span()), type_annotation: None, value: Some(Expr::MethodCall { receiver: Box::new(Expr::Identifier("obj".to_string(), span())), method: "touch".to_string(), args: vec![Expr::Identifier("x".to_string(), span())], named_args: vec![("tail".to_string(), Expr::IndexAccess { object: Box::new(Expr::Identifier("arr".to_string(), span())), index: Box::new(Expr::Literal(ast::Literal::Int(0), span())), end_index: Some(Box::new(Expr::Literal(ast::Literal::Int(1), span()))), span: span() })], optional: false, span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("range".to_string(), span()), type_annotation: None, value: Some(Expr::Range { start: Some(Box::new(Expr::Literal(ast::Literal::Int(0), span()))), end: Some(Box::new(Expr::Identifier("x".to_string(), span()))), kind: ast::RangeKind::Exclusive, span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("contextual".to_string(), span()), type_annotation: None, value: Some(Expr::TimeframeContext { timeframe: ast::Timeframe::new(5, ast::TimeframeUnit::Minute), expr: Box::new(Expr::Identifier("x".to_string(), span())), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("using_impl".to_string(), span()), type_annotation: None, value: Some(Expr::UsingImpl { expr: Box::new(Expr::Identifier("x".to_string(), span())), impl_name: "Tracked".to_string(), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("simulation".to_string(), span()), type_annotation: None, value: Some(Expr::SimulationCall { name: "sim".to_string(), params: vec![("value".to_string(), Expr::Identifier("x".to_string(), span()))], span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("struct_lit".to_string(), span()), type_annotation: None, value: Some(Expr::StructLiteral { type_name: "Point".into(), fields: vec![("x".to_string(), Expr::Identifier("x".to_string(), span()))], span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("annotated".to_string(), span()), type_annotation: None, value: Some(Expr::Annotated { annotation: ast::Annotation { name: "trace".to_string(), args: vec![Expr::Identifier("x".to_string(), span())], span: span() }, target: Box::new(Expr::Identifier("x".to_string(), span())), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("rows".to_string(), span()), type_annotation: None, value: Some(Expr::TableRows(vec![vec![Expr::Identifier("x".to_string(), span()), Expr::Literal(ast::Literal::Int(2), span())], vec![Expr::Literal(ast::Literal::Int(3), span()), Expr::Literal(ast::Literal::Int(4), span())]], span())), ownership: OwnershipModifier::Inferred }, span()),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("arr".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Array(
+                        vec![
+                            Expr::Identifier("x".to_string(), span()),
+                            Expr::Literal(ast::Literal::Int(2), span()),
+                        ],
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("obj".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Object(
+                        vec![
+                            ast::ObjectEntry::Field {
+                                key: "left".to_string(),
+                                value: Expr::Identifier("x".to_string(), span()),
+                                type_annotation: None,
+                            },
+                            ast::ObjectEntry::Spread(Expr::Identifier("arr".to_string(), span())),
+                        ],
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("unary".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::UnaryOp {
+                        op: ast::UnaryOp::Neg,
+                        operand: Box::new(Expr::Identifier("x".to_string(), span())),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("fuzzy".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::FuzzyComparison {
+                        left: Box::new(Expr::Identifier("x".to_string(), span())),
+                        op: ast::operators::FuzzyOp::Equal,
+                        right: Box::new(Expr::Literal(ast::Literal::Int(1), span())),
+                        tolerance: ast::operators::FuzzyTolerance::Percentage(0.02),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("slice".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::IndexAccess {
+                        object: Box::new(Expr::Identifier("arr".to_string(), span())),
+                        index: Box::new(Expr::Literal(ast::Literal::Int(0), span())),
+                        end_index: Some(Box::new(Expr::Literal(ast::Literal::Int(1), span()))),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("asserted".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::TypeAssertion {
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        type_annotation: ast::TypeAnnotation::Basic("int".to_string()),
+                        meta_param_overrides: Some(overrides),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("instance".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::InstanceOf {
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        type_annotation: ast::TypeAnnotation::Basic("int".to_string()),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("variant".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::EnumConstructor {
+                        enum_name: "Option".into(),
+                        variant: "Some".to_string(),
+                        payload: ast::EnumConstructorPayload::Tuple(vec![Expr::Identifier(
+                            "x".to_string(),
+                            span(),
+                        )]),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("call".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::MethodCall {
+                        receiver: Box::new(Expr::Identifier("obj".to_string(), span())),
+                        method: "touch".to_string(),
+                        args: vec![Expr::Identifier("x".to_string(), span())],
+                        named_args: vec![(
+                            "tail".to_string(),
+                            Expr::IndexAccess {
+                                object: Box::new(Expr::Identifier("arr".to_string(), span())),
+                                index: Box::new(Expr::Literal(ast::Literal::Int(0), span())),
+                                end_index: Some(Box::new(Expr::Literal(
+                                    ast::Literal::Int(1),
+                                    span(),
+                                ))),
+                                span: span(),
+                            },
+                        )],
+                        optional: false,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("range".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Range {
+                        start: Some(Box::new(Expr::Literal(ast::Literal::Int(0), span()))),
+                        end: Some(Box::new(Expr::Identifier("x".to_string(), span()))),
+                        kind: ast::RangeKind::Exclusive,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("contextual".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::TimeframeContext {
+                        timeframe: ast::Timeframe::new(5, ast::TimeframeUnit::Minute),
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("using_impl".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::UsingImpl {
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        impl_name: "Tracked".to_string(),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("simulation".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::SimulationCall {
+                        name: "sim".to_string(),
+                        params: vec![(
+                            "value".to_string(),
+                            Expr::Identifier("x".to_string(), span()),
+                        )],
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("struct_lit".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::StructLiteral {
+                        type_name: "Point".into(),
+                        fields: vec![("x".to_string(), Expr::Identifier("x".to_string(), span()))],
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("annotated".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Annotated {
+                        annotation: ast::Annotation {
+                            name: "trace".to_string(),
+                            args: vec![Expr::Identifier("x".to_string(), span())],
+                            span: span(),
+                        },
+                        target: Box::new(Expr::Identifier("x".to_string(), span())),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("rows".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::TableRows(
+                        vec![
+                            vec![
+                                Expr::Identifier("x".to_string(), span()),
+                                Expr::Literal(ast::Literal::Int(2), span()),
+                            ],
+                            vec![
+                                Expr::Literal(ast::Literal::Int(3), span()),
+                                Expr::Literal(ast::Literal::Int(4), span()),
+                            ],
+                        ],
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(!lowering.had_fallbacks);
@@ -2129,23 +2461,117 @@ mod tests {
     #[test]
     fn test_lowered_assignment_expr_write_while_borrowed_is_visible_to_solver() {
         let body = vec![
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: true, pattern: DestructurePattern::Identifier("x".to_string(), span()), type_annotation: None, value: Some(Expr::Literal(ast::Literal::Int(1), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("shared".to_string(), span()), type_annotation: None, value: Some(Expr::Reference { expr: Box::new(Expr::Identifier("x".to_string(), span())), is_mutable: false, span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("y".to_string(), span()), type_annotation: None, value: Some(Expr::Assign(Box::new(ast::AssignExpr { target: Box::new(Expr::Identifier("x".to_string(), span())), value: Box::new(Expr::Literal(ast::Literal::Int(2), span())) }), span())), ownership: OwnershipModifier::Inferred }, span()),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Reference {
+                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                        is_mutable: false,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("y".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Assign(
+                        Box::new(ast::AssignExpr {
+                            target: Box::new(Expr::Identifier("x".to_string(), span())),
+                            value: Box::new(Expr::Literal(ast::Literal::Int(2), span())),
+                        }),
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
             Statement::Return(Some(Expr::Identifier("shared".to_string(), span())), span()),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
     fn test_lowered_property_assignment_expr_preserves_disjoint_places() {
         let body = vec![
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: true, pattern: DestructurePattern::Identifier("pair".to_string(), span()), type_annotation: None, value: Some(Expr::Literal(ast::Literal::String("pair".to_string()), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("left".to_string(), span()), type_annotation: None, value: Some(Expr::Reference { expr: Box::new(Expr::PropertyAccess { object: Box::new(Expr::Identifier("pair".to_string(), span())), property: "left".to_string(), optional: false, span: span() }), is_mutable: false, span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::Expression(Expr::Assign(Box::new(ast::AssignExpr { target: Box::new(Expr::PropertyAccess { object: Box::new(Expr::Identifier("pair".to_string(), span())), property: "right".to_string(), optional: false, span: span() }), value: Box::new(Expr::Literal(ast::Literal::String("updated".to_string()), span())) }), span()), span()),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("pair".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(
+                        ast::Literal::String("pair".to_string()),
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("left".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Reference {
+                        expr: Box::new(Expr::PropertyAccess {
+                            object: Box::new(Expr::Identifier("pair".to_string(), span())),
+                            property: "left".to_string(),
+                            optional: false,
+                            span: span(),
+                        }),
+                        is_mutable: false,
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Expression(
+                Expr::Assign(
+                    Box::new(ast::AssignExpr {
+                        target: Box::new(Expr::PropertyAccess {
+                            object: Box::new(Expr::Identifier("pair".to_string(), span())),
+                            property: "right".to_string(),
+                            optional: false,
+                            span: span(),
+                        }),
+                        value: Box::new(Expr::Literal(
+                            ast::Literal::String("updated".to_string()),
+                            span(),
+                        )),
+                    }),
+                    span(),
+                ),
+                span(),
+            ),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(!lowering.had_fallbacks);
@@ -2155,14 +2581,16 @@ mod tests {
 
     #[test]
     fn test_lowered_property_assignment_direct_ref_escape_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 var obj = { value: 0 }
                 let x = 1
                 obj.value = &x
                 0
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(analysis.errors.is_empty());
@@ -2170,7 +2598,8 @@ mod tests {
 
     #[test]
     fn test_lowered_property_assignment_indirect_ref_escape_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 var obj = { value: 0 }
                 let x = 1
@@ -2178,7 +2607,8 @@ mod tests {
                 obj.value = r
                 0
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(analysis.errors.is_empty());
@@ -2186,14 +2616,16 @@ mod tests {
 
     #[test]
     fn test_lowered_index_assignment_direct_ref_escape_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 var arr = [0]
                 let x = 1
                 arr[0] = &x
                 0
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(analysis.errors.is_empty());
@@ -2201,7 +2633,8 @@ mod tests {
 
     #[test]
     fn test_lowered_index_assignment_indirect_ref_escape_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 var arr = [0]
                 let x = 1
@@ -2209,7 +2642,8 @@ mod tests {
                 arr[0] = r
                 0
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(analysis.errors.is_empty());
@@ -2218,41 +2652,190 @@ mod tests {
     #[test]
     fn test_lowered_block_expr_write_while_borrowed_is_visible_to_solver() {
         let body = vec![
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: true, pattern: DestructurePattern::Identifier("x".to_string(), span()), type_annotation: None, value: Some(Expr::Literal(ast::Literal::Int(1), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("shared".to_string(), span()), type_annotation: None, value: Some(Expr::Block(ast::BlockExpr { items: vec![ast::BlockItem::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("inner".to_string(), span()), type_annotation: None, value: Some(Expr::Reference { expr: Box::new(Expr::Identifier("x".to_string(), span())), is_mutable: false, span: span() }), ownership: OwnershipModifier::Inferred }), ast::BlockItem::Expression(Expr::Identifier("inner".to_string(), span()))] }, span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::Assignment(ast::Assignment { pattern: DestructurePattern::Identifier("x".to_string(), span()), value: Expr::Literal(ast::Literal::Int(2), span()) }, span()),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Block(
+                        ast::BlockExpr {
+                            items: vec![
+                                ast::BlockItem::VariableDecl(ast::VariableDecl {
+                                    kind: VarKind::Let,
+                                    is_mut: false,
+                                    pattern: DestructurePattern::Identifier(
+                                        "inner".to_string(),
+                                        span(),
+                                    ),
+                                    type_annotation: None,
+                                    value: Some(Expr::Reference {
+                                        expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                                        is_mutable: false,
+                                        span: span(),
+                                    }),
+                                    ownership: OwnershipModifier::Inferred,
+                                }),
+                                ast::BlockItem::Expression(Expr::Identifier(
+                                    "inner".to_string(),
+                                    span(),
+                                )),
+                            ],
+                        },
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Assignment(
+                ast::Assignment {
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    value: Expr::Literal(ast::Literal::Int(2), span()),
+                },
+                span(),
+            ),
             Statement::Expression(Expr::Identifier("shared".to_string(), span()), span()),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
     fn test_lowered_let_expr_write_while_borrowed_is_visible_to_solver() {
         let body = vec![
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: true, pattern: DestructurePattern::Identifier("x".to_string(), span()), type_annotation: None, value: Some(Expr::Literal(ast::Literal::Int(1), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("shared".to_string(), span()), type_annotation: None, value: Some(Expr::Let(Box::new(ast::LetExpr { pattern: ast::Pattern::Identifier("inner".to_string()), type_annotation: None, value: Some(Box::new(Expr::Reference { expr: Box::new(Expr::Identifier("x".to_string(), span())), is_mutable: false, span: span() })), body: Box::new(Expr::Identifier("inner".to_string(), span())) }), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::Assignment(ast::Assignment { pattern: DestructurePattern::Identifier("x".to_string(), span()), value: Expr::Literal(ast::Literal::Int(2), span()) }, span()),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Let(
+                        Box::new(ast::LetExpr {
+                            pattern: ast::Pattern::Identifier("inner".to_string()),
+                            type_annotation: None,
+                            value: Some(Box::new(Expr::Reference {
+                                expr: Box::new(Expr::Identifier("x".to_string(), span())),
+                                is_mutable: false,
+                                span: span(),
+                            })),
+                            body: Box::new(Expr::Identifier("inner".to_string(), span())),
+                        }),
+                        span(),
+                    )),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Assignment(
+                ast::Assignment {
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    value: Expr::Literal(ast::Literal::Int(2), span()),
+                },
+                span(),
+            ),
             Statement::Expression(Expr::Identifier("shared".to_string(), span()), span()),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
     fn test_lowered_if_expression_with_block_branches_stays_supported() {
         let block_branch = |borrow_name: &str| {
-            Expr::Block(ast::BlockExpr { items: vec![ast::BlockItem::Expression(Expr::Reference { expr: Box::new(Expr::Identifier(borrow_name.to_string(), span())), is_mutable: false, span: span() })] }, span())
+            Expr::Block(
+                ast::BlockExpr {
+                    items: vec![ast::BlockItem::Expression(Expr::Reference {
+                        expr: Box::new(Expr::Identifier(borrow_name.to_string(), span())),
+                        is_mutable: false,
+                        span: span(),
+                    })],
+                },
+                span(),
+            )
         };
         let body = vec![
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: true, pattern: DestructurePattern::Identifier("x".to_string(), span()), type_annotation: None, value: Some(Expr::Literal(ast::Literal::Int(1), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("flag".to_string(), span()), type_annotation: None, value: Some(Expr::Literal(ast::Literal::Bool(true), span())), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::VariableDecl(ast::VariableDecl { kind: VarKind::Let, is_mut: false, pattern: DestructurePattern::Identifier("shared".to_string(), span()), type_annotation: None, value: Some(Expr::Conditional { condition: Box::new(Expr::Identifier("flag".to_string(), span())), then_expr: Box::new(block_branch("x")), else_expr: Some(Box::new(block_branch("x"))), span: span() }), ownership: OwnershipModifier::Inferred }, span()),
-            Statement::Assignment(ast::Assignment { pattern: DestructurePattern::Identifier("x".to_string(), span()), value: Expr::Literal(ast::Literal::Int(2), span()) }, span()),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: true,
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Int(1), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("flag".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Literal(ast::Literal::Bool(true), span())),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::VariableDecl(
+                ast::VariableDecl {
+                    kind: VarKind::Let,
+                    is_mut: false,
+                    pattern: DestructurePattern::Identifier("shared".to_string(), span()),
+                    type_annotation: None,
+                    value: Some(Expr::Conditional {
+                        condition: Box::new(Expr::Identifier("flag".to_string(), span())),
+                        then_expr: Box::new(block_branch("x")),
+                        else_expr: Some(Box::new(block_branch("x"))),
+                        span: span(),
+                    }),
+                    ownership: OwnershipModifier::Inferred,
+                },
+                span(),
+            ),
+            Statement::Assignment(
+                ast::Assignment {
+                    pattern: DestructurePattern::Identifier("x".to_string(), span()),
+                    value: Expr::Literal(ast::Literal::Int(2), span()),
+                },
+                span(),
+            ),
         ];
         let lowering = lower_function_detailed("test", &[], &body, span());
         assert!(!lowering.had_fallbacks);
@@ -2262,20 +2845,28 @@ mod tests {
 
     #[test]
     fn test_lowered_async_let_exclusive_ref_task_boundary_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             async function test() {
                 let mut x = 1
                 async let fut = &mut x
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary)
+        );
     }
 
     #[test]
     fn test_lowered_async_let_nested_ref_binding_task_boundary_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             async function test() {
                 let mut x = 1
                 async let fut = {
@@ -2283,29 +2874,43 @@ mod tests {
                     r
                 }
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary)
+        );
     }
 
     #[test]
     fn test_lowered_async_let_shared_ref_task_boundary_stays_clean() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             async function test() {
                 let x = 1
                 async let fut = &x
                 await fut
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(!analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary));
+        assert!(
+            !analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary)
+        );
     }
 
     #[test]
     fn test_lowered_join_exclusive_ref_task_boundary_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             async function test() {
                 let mut x = 1
                 await join all {
@@ -2313,15 +2918,22 @@ mod tests {
                     2,
                 }
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ExclusiveRefAcrossTaskBoundary)
+        );
     }
 
     #[test]
     fn test_lowered_async_scope_with_async_let_stays_supported() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             async function test() {
                 let x = 1
                 async scope {
@@ -2329,7 +2941,8 @@ mod tests {
                     await fut
                 }
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(analysis.errors.is_empty());
@@ -2337,13 +2950,15 @@ mod tests {
 
     #[test]
     fn test_lowered_closure_capture_of_reference_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let x = 1
                 let r = &x
                 let f = || r
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(analysis.errors.is_empty());
@@ -2351,41 +2966,57 @@ mod tests {
 
     #[test]
     fn test_lowered_returned_array_with_ref_still_errors() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let x = 1
                 let arr = [&x]
                 return arr
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceStoredInArray)
+        );
     }
 
     #[test]
     fn test_lowered_returned_closure_with_ref_still_errors() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let x = 1
                 let r = &x
                 let f = || r
                 return f
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::ReferenceEscapeIntoClosure));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::ReferenceEscapeIntoClosure)
+        );
     }
 
     #[test]
     fn test_lowered_closure_capture_of_owned_value_stays_clean() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let x = 1
                 let f = || x
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
         assert!(analysis.errors.is_empty());
@@ -2393,55 +3024,73 @@ mod tests {
 
     #[test]
     fn test_lowered_list_comprehension_write_conflict_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let mut x = 1
                 let r = &x
                 let xs = [(x = 2) for y in [1]]
                 r
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
     fn test_lowered_from_query_write_conflict_is_visible_to_solver() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let mut x = 1
                 let r = &x
                 let rows = from y in [1] where (x = 2) > 0 select y
                 r
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
         let analysis = solver::analyze(&lowering.mir, &Default::default());
-        assert!(analysis.errors.iter().any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed));
+        assert!(
+            analysis
+                .errors
+                .iter()
+                .any(|error| error.kind == BorrowErrorKind::WriteWhileBorrowed)
+        );
     }
 
     #[test]
     fn test_lowered_comptime_expr_stays_supported() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let generated = comptime {
                     let x = 1
                 }
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
     }
 
     #[test]
     fn test_lowered_comptime_for_expr_stays_supported() {
-        let lowering = lower_parsed_function(r#"
+        let lowering = lower_parsed_function(
+            r#"
             function test() {
                 let generated = comptime for f in [1, 2] {
                     let y = f
                 }
             }
-        "#);
+        "#,
+        );
         assert!(!lowering.had_fallbacks);
     }
 
@@ -2702,19 +3351,17 @@ mod tests {
         // `Assign(outer_acc, ...)` where the RHS Use references a slot
         // populated by `acc + item` — NOT a self-Assign of inner_acc to
         // itself.
-        let body = vec![
-            Statement::VariableDecl(
-                ast::VariableDecl {
-                    kind: VarKind::Let,
-                    is_mut: true,
-                    pattern: DestructurePattern::Identifier("acc".to_string(), span()),
-                    type_annotation: None,
-                    value: Some(Expr::Literal(ast::Literal::Int(0), span())),
-                    ownership: OwnershipModifier::Inferred,
-                },
-                span(),
-            ),
-        ];
+        let body = vec![Statement::VariableDecl(
+            ast::VariableDecl {
+                kind: VarKind::Let,
+                is_mut: true,
+                pattern: DestructurePattern::Identifier("acc".to_string(), span()),
+                type_annotation: None,
+                value: Some(Expr::Literal(ast::Literal::Int(0), span())),
+                ownership: OwnershipModifier::Inferred,
+            },
+            span(),
+        )];
         let mir = lower_function("test_shadow_in_loop", &[], &body, span());
         // Sanity: the function lowered without panic.
         assert!(mir.num_locals >= 1);
@@ -2754,9 +3401,7 @@ mod tests {
         // `Assign(Local(n), Use(Copy|Move(Local(n))))` (self-Use).
         for block in mir.blocks.iter() {
             for stmt in block.statements.iter() {
-                if let StatementKind::Assign(Place::Local(dst), Rvalue::Use(operand)) =
-                    &stmt.kind
-                {
+                if let StatementKind::Assign(Place::Local(dst), Rvalue::Use(operand)) = &stmt.kind {
                     if let Operand::Copy(Place::Local(src))
                     | Operand::Move(Place::Local(src))
                     | Operand::MoveExplicit(Place::Local(src)) = operand
@@ -2810,9 +3455,7 @@ mod tests {
         let mut all_assigns = Vec::new();
         for block in mir.blocks.iter() {
             for stmt in block.statements.iter() {
-                if let StatementKind::Assign(Place::Local(dst), Rvalue::Use(operand)) =
-                    &stmt.kind
-                {
+                if let StatementKind::Assign(Place::Local(dst), Rvalue::Use(operand)) = &stmt.kind {
                     if let Operand::Copy(Place::Local(src))
                     | Operand::Move(Place::Local(src))
                     | Operand::MoveExplicit(Place::Local(src)) = operand

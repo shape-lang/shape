@@ -92,7 +92,6 @@ fn annotate_item_native_abi_package_key(item: &mut Item, package_key: &str) {
     }
 }
 
-
 impl BytecodeExecutor {
     /// Set a module loader for resolving file-based imports.
     ///
@@ -219,7 +218,6 @@ impl BytecodeExecutor {
             ),
         }
     }
-
 }
 
 #[cfg(test)]
@@ -295,9 +293,8 @@ mod tests {
         let program = shape_ast::parser::parse_program("let x = 1\nx").expect("parse");
         let mut loader = shape_runtime::module_loader::ModuleLoader::new();
         let prelude_imports = module_graph::collect_prelude_import_paths(&mut loader);
-        let graph =
-            module_graph::build_module_graph(&program, &mut loader, &[], &prelude_imports)
-                .expect("graph build");
+        let graph = module_graph::build_module_graph(&program, &mut loader, &[], &prelude_imports)
+            .expect("graph build");
 
         // The prelude should load std::core::math
         let math_id = graph.id_for_path("std::core::math");
@@ -314,8 +311,7 @@ mod tests {
     fn test_graph_compiles_with_engine() {
         // Test that compile_program_for_inspection succeeds via graph pipeline.
         let mut executor = crate::configuration::BytecodeExecutor::new();
-        let mut engine =
-            shape_runtime::engine::ShapeEngine::new().expect("engine creation failed");
+        let mut engine = shape_runtime::engine::ShapeEngine::new().expect("engine creation failed");
         engine.load_stdlib().expect("load stdlib");
 
         let program = shape_ast::parser::parse_program("let x = 42\nx").expect("parse");
@@ -404,10 +400,7 @@ mymod::beta()
 
         let source = "use a\na::fa()\n";
         let result = compile_program_with_graph(source, &[tmp.path().to_path_buf()]);
-        assert!(
-            result.is_err(),
-            "circular import should produce an error"
-        );
+        assert!(result.is_err(), "circular import should produce an error");
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
             err_msg.to_lowercase().contains("circular")
@@ -423,9 +416,8 @@ mymod::beta()
         let program = shape_ast::parser::parse_program("1").expect("parse");
         let mut loader = shape_runtime::module_loader::ModuleLoader::new();
         let prelude_imports = module_graph::collect_prelude_import_paths(&mut loader);
-        let graph =
-            module_graph::build_module_graph(&program, &mut loader, &[], &prelude_imports)
-                .expect("graph build");
+        let graph = module_graph::build_module_graph(&program, &mut loader, &[], &prelude_imports)
+            .expect("graph build");
 
         let mut stdlib_names = std::collections::HashSet::new();
         for prelude_path in &prelude_imports {

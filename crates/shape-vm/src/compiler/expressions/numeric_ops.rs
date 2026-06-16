@@ -32,11 +32,7 @@ pub(super) fn is_strict_arithmetic(op: &BinaryOp) -> bool {
 pub(super) fn is_strict_bitwise(op: &BinaryOp) -> bool {
     matches!(
         op,
-        BinaryOp::BitAnd
-            | BinaryOp::BitOr
-            | BinaryOp::BitXor
-            | BinaryOp::BitShl
-            | BinaryOp::BitShr
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::BitShl | BinaryOp::BitShr
     )
 }
 

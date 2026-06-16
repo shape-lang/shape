@@ -714,8 +714,7 @@ pub struct MirFunction {
     /// — primitives, collections, plain object literals, function returns,
     /// etc. The downstream classifier surfaces unstamped per §2.7.7 #9 /
     /// forbidden #9 (no fabricated default).
-    pub local_struct_type_names:
-        std::collections::HashMap<SlotId, String>,
+    pub local_struct_type_names: std::collections::HashMap<SlotId, String>,
     /// Per-slot empty-typed-array element ConcreteType for slots produced by
     /// `let mut <name>: Array<C> = []` lowering (where `C` is a
     /// `concrete_type_from_annotation`-resolvable element type).

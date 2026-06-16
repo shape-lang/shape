@@ -3,10 +3,10 @@
 //! Handles variable declarations, assignments, control flow (if/while/for),
 //! break/continue/return, and pattern destructuring.
 
+use super::BindingMetadata;
+use super::MirBuilder;
 use super::expr::*;
 use super::helpers::*;
-use super::MirBuilder;
-use super::BindingMetadata;
 use crate::mir::types::*;
 use shape_ast::ast::{self, Expr, Span, Spanned, Statement};
 
@@ -98,9 +98,7 @@ pub(super) fn lower_statement(
 /// Lower a variable declaration.
 pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl, span: Span) {
     let binding_metadata = match decl.kind {
-        ast::VarKind::Const => {
-            Some(super::immutable_binding_metadata(span, false, true))
-        }
+        ast::VarKind::Const => Some(super::immutable_binding_metadata(span, false, true)),
         ast::VarKind::Let if !decl.is_mut => {
             Some(super::immutable_binding_metadata(span, true, false))
         }
@@ -245,11 +243,12 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
             // mirrors the bytecode compiler's `mut_self_container_locals`
             // tracking (see `compiler/statements.rs:4707` and
             // `compiler/expressions/function_calls.rs:967`).
-            if let Expr::FunctionCall { name: ctor_name, .. } = init_expr {
+            if let Expr::FunctionCall {
+                name: ctor_name, ..
+            } = init_expr
+            {
                 if let Some(kind) =
-                    crate::compiler::mutation_writeback::ContainerKind::from_ctor_name(
-                        ctor_name,
-                    )
+                    crate::compiler::mutation_writeback::ContainerKind::from_ctor_name(ctor_name)
                 {
                     builder.record_mut_self_container_local(slot, kind);
                 }
@@ -263,9 +262,7 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
                 ast::OwnershipModifier::Move => {
                     lower_expr_to_explicit_move_operand(builder, init_expr)
                 }
-                ast::OwnershipModifier::Clone => {
-                    lower_expr_to_operand(builder, init_expr, false)
-                }
+                ast::OwnershipModifier::Clone => lower_expr_to_operand(builder, init_expr, false),
                 ast::OwnershipModifier::Inferred => {
                     // For `var`: decision deferred to liveness analysis
                     // For `let`: default to Move
@@ -292,7 +289,7 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
             // `lower_expr_to_operand` -> `lower_expr_to_temp` output for
             // non-place expressions.
             if let Some(elem) = empty_array_elem.clone() {
-                use crate::mir::types::{Place as MirPlace, Operand as MirOperand};
+                use crate::mir::types::{Operand as MirOperand, Place as MirPlace};
                 if let MirOperand::Move(MirPlace::Local(temp))
                 | MirOperand::Copy(MirPlace::Local(temp))
                 | MirOperand::MoveExplicit(MirPlace::Local(temp)) = &operand
@@ -304,8 +301,7 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
                 ast::OwnershipModifier::Clone => Rvalue::Clone(operand),
                 _ => Rvalue::Use(operand),
             };
-            let point =
-                builder.push_stmt(StatementKind::Assign(Place::Local(slot), rvalue), span);
+            let point = builder.push_stmt(StatementKind::Assign(Place::Local(slot), rvalue), span);
             if binding_metadata.is_some() {
                 builder.record_binding_initialization(slot, point);
             }
@@ -321,9 +317,7 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
         let type_info = infer_local_type_from_expr(init_expr);
         let source_slot = builder.alloc_temp(type_info);
         let operand = match decl.ownership {
-            ast::OwnershipModifier::Move => {
-                lower_expr_to_explicit_move_operand(builder, init_expr)
-            }
+            ast::OwnershipModifier::Move => lower_expr_to_explicit_move_operand(builder, init_expr),
             ast::OwnershipModifier::Clone => lower_expr_to_operand(builder, init_expr, false),
             ast::OwnershipModifier::Inferred => lower_expr_to_operand(builder, init_expr, true),
         };
@@ -412,11 +406,7 @@ pub(super) fn lower_return_control_flow(
     start_dead_block(builder);
 }
 
-pub(super) fn lower_break_control_flow(
-    builder: &mut MirBuilder,
-    value: Option<&Expr>,
-    span: Span,
-) {
+pub(super) fn lower_break_control_flow(builder: &mut MirBuilder, value: Option<&Expr>, span: Span) {
     let Some(loop_ctx) = builder.current_loop() else {
         builder.mark_fallback();
         builder.push_stmt(StatementKind::Nop, span);
@@ -595,8 +585,7 @@ fn lower_for_loop(
             );
 
             // __len = iter_slot.len()
-            let len_call_func =
-                Operand::Constant(MirConstant::Method("len".to_string()));
+            let len_call_func = Operand::Constant(MirConstant::Method("len".to_string()));
             builder.emit_call(
                 len_call_func,
                 vec![Operand::Copy(Place::Local(iter_slot))],
@@ -986,7 +975,9 @@ pub(super) fn lower_pattern_bindings_from_place_opt(
                 );
             }
         }
-        ast::Pattern::Constructor { variant, fields, .. } => {
+        ast::Pattern::Constructor {
+            variant, fields, ..
+        } => {
             // W12-jit-result-option-trinity (Phase 3 cluster-0 Round 7A,
             // 2026-05-12). For `Ok(v)` / `Err(e)` / `Some(x)` / `None`
             // bindings (per ADR-006 §2.7.17 / Q18 — kinded
@@ -1112,12 +1103,11 @@ fn lower_destructure_assignment_from_place(
                 // slice `source[index..]`, not the single element at
                 // `index` — lower it via the slice-shape `rest_slice_place`
                 // so the JIT cleanly surfaces-and-stops.
-                let projected_place =
-                    if matches!(pattern, ast::DestructurePattern::Rest(_)) {
-                        rest_slice_place(builder, source_place, index, span)
-                    } else {
-                        projected_index_place(source_place, index)
-                    };
+                let projected_place = if matches!(pattern, ast::DestructurePattern::Rest(_)) {
+                    rest_slice_place(builder, source_place, index, span)
+                } else {
+                    projected_index_place(source_place, index)
+                };
                 lower_destructure_assignment_from_place(builder, pattern, &projected_place, span);
             }
         }

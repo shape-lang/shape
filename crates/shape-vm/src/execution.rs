@@ -86,23 +86,21 @@ impl BytecodeExecutor {
         // strict-typing `unknown + unknown` reject path. The kind is read
         // off the persisted `KindedSlot` — no fabrication, the producer
         // stamped it (ADR-006 §2.7.5).
-        let known_binding_types: Vec<(String, String)> =
-            if let Some(ctx) = runtime.persistent_context() {
-                known_bindings
-                    .iter()
-                    .filter_map(|name| {
-                        let value = ctx.get_variable(name).ok().flatten()?;
-                        let type_name = binding_type_name_for_kind(
-                            value.kind(),
-                            value.raw(),
-                            &schema_id_to_name,
-                        )?;
-                        Some((name.clone(), type_name))
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+        let known_binding_types: Vec<(String, String)> = if let Some(ctx) =
+            runtime.persistent_context()
+        {
+            known_bindings
+                .iter()
+                .filter_map(|name| {
+                    let value = ctx.get_variable(name).ok().flatten()?;
+                    let type_name =
+                        binding_type_name_for_kind(value.kind(), value.raw(), &schema_id_to_name)?;
+                    Some((name.clone(), type_name))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let mut root_program = program.clone();
         crate::module_resolution::annotate_program_native_abi_package_key(
@@ -110,9 +108,10 @@ impl BytecodeExecutor {
             self.root_package_key.as_deref(),
         );
 
-        let mut loader = self.module_loader.take().unwrap_or_else(
-            shape_runtime::module_loader::ModuleLoader::new,
-        );
+        let mut loader = self
+            .module_loader
+            .take()
+            .unwrap_or_else(shape_runtime::module_loader::ModuleLoader::new);
         let (graph, stdlib_names, prelude_imports) =
             crate::module_resolution::build_graph_and_stdlib_names(
                 &root_program,
@@ -352,10 +351,7 @@ impl BytecodeExecutor {
     /// occupied the slot before. No tag synthesis: `KindedSlot` already
     /// carries the `NativeKind`, so the slot's bits and kind transfer
     /// directly per ADR-006 §2.7.8 / Q10.
-    fn load_module_bindings_from_context(
-        vm: &mut VirtualMachine,
-        ctx: &ExecutionContext,
-    ) {
+    fn load_module_bindings_from_context(vm: &mut VirtualMachine, ctx: &ExecutionContext) {
         let names = vm.program.module_binding_names.clone();
         for (idx, name) in names.iter().enumerate() {
             if name.is_empty() {

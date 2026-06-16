@@ -16,7 +16,7 @@
 //!  20       4   cap (allocated capacity)
 //! ```
 
-use super::heap_header::{HeapHeader, HEAP_KIND_V2_TYPED_ARRAY};
+use super::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
 use std::alloc::{Layout, alloc, dealloc, realloc};
 use std::ptr;
 
@@ -312,8 +312,8 @@ impl<T: super::heap_element::HeapElement> TypedArray<*const T> {
                     T::release_elem(elem_ptr);
                 }
                 // Free the data buffer.
-                let data_layout = Layout::array::<*const T>(arr.cap as usize)
-                    .expect("invalid array layout");
+                let data_layout =
+                    Layout::array::<*const T>(arr.cap as usize).expect("invalid array layout");
                 dealloc(arr.data as *mut u8, data_layout);
             }
             // Free the TypedArray struct itself.
@@ -504,11 +504,9 @@ pub unsafe fn release_v2_typed_array(ptr: *mut u8) {
             ELEM_TYPE_U32 => TypedArray::<u32>::drop_array(ptr as *mut TypedArray<u32>),
             ELEM_TYPE_F32 => TypedArray::<f32>::drop_array(ptr as *mut TypedArray<f32>),
             ELEM_TYPE_CHAR => TypedArray::<char>::drop_array(ptr as *mut TypedArray<char>),
-            ELEM_TYPE_STRING => {
-                TypedArray::<*const super::string_obj::StringObj>::drop_array_heap(
-                    ptr as *mut TypedArray<*const super::string_obj::StringObj>,
-                )
-            }
+            ELEM_TYPE_STRING => TypedArray::<*const super::string_obj::StringObj>::drop_array_heap(
+                ptr as *mut TypedArray<*const super::string_obj::StringObj>,
+            ),
             ELEM_TYPE_DECIMAL => {
                 TypedArray::<*const super::decimal_obj::DecimalObj>::drop_array_heap(
                     ptr as *mut TypedArray<*const super::decimal_obj::DecimalObj>,
@@ -971,7 +969,7 @@ mod tests {
 
     #[test]
     fn test_refcount_with_typed_array() {
-        use crate::v2::refcount::{v2_get_refcount, v2_retain, v2_release};
+        use crate::v2::refcount::{v2_get_refcount, v2_release, v2_retain};
 
         let arr = TypedArray::<f64>::from_slice(&[1.0, 2.0]);
         unsafe {

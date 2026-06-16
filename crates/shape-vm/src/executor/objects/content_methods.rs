@@ -81,7 +81,10 @@ fn surface(method: &str) -> VMError {
 /// kind is wrong. The returned reference borrows from `args[0]` — the
 /// caller-owned share keeps the inner ContentNode alive.
 #[inline]
-fn recv_content<'a>(args: &'a [KindedSlot], method: &str) -> Result<&'a shape_value::content::ContentNode, VMError> {
+fn recv_content<'a>(
+    args: &'a [KindedSlot],
+    method: &str,
+) -> Result<&'a shape_value::content::ContentNode, VMError> {
     if args.is_empty() {
         return Err(VMError::RuntimeError(format!(
             "Content.{}(): no receiver",
@@ -266,8 +269,8 @@ pub fn v2_content_headers(
             args.len().saturating_sub(1)
         )));
     }
-    let headers = crate::executor::vm_impl::builtins::read_string_array(&args[1])
-        .ok_or_else(|| {
+    let headers =
+        crate::executor::vm_impl::builtins::read_string_array(&args[1]).ok_or_else(|| {
             VMError::RuntimeError(format!(
                 "Content.headers(): argument must be Array<string>, got kind \
                  {:?}",
@@ -304,32 +307,22 @@ pub fn v2_content_row(
             args.len().saturating_sub(1)
         )));
     }
-    use crate::executor::v2_handlers::v2_array_detect::{
-        as_v2_typed_array, read_element,
-    };
+    use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, read_element};
     if args[1].kind != NativeKind::Ptr(HeapKind::TypedArray) {
         return Err(VMError::RuntimeError(format!(
             "Content.row(): cells argument must be an Array, got kind {:?}",
             args[1].kind
         )));
     }
-    let view = as_v2_typed_array(args[1].slot.raw(), args[1].kind)
-        .ok_or_else(|| {
-            VMError::RuntimeError(
-                "Content.row(): cells array has invalid v2 header".to_string(),
-            )
-        })?;
-    let formatter = crate::executor::printing::ValueFormatter::new(
-        &vm.program.type_schema_registry,
-    );
-    let mut cells: Vec<shape_value::content::ContentNode> =
-        Vec::with_capacity(view.len as usize);
+    let view = as_v2_typed_array(args[1].slot.raw(), args[1].kind).ok_or_else(|| {
+        VMError::RuntimeError("Content.row(): cells array has invalid v2 header".to_string())
+    })?;
+    let formatter =
+        crate::executor::printing::ValueFormatter::new(&vm.program.type_schema_registry);
+    let mut cells: Vec<shape_value::content::ContentNode> = Vec::with_capacity(view.len as usize);
     for i in 0..view.len {
         let (bits, kind) = read_element(&view, i).ok_or_else(|| {
-            VMError::RuntimeError(format!(
-                "Content.row(): failed to read cell at index {}",
-                i
-            ))
+            VMError::RuntimeError(format!("Content.row(): failed to read cell at index {}", i))
         })?;
         let cell_slot = KindedSlot::new(shape_value::ValueSlot::from_raw(bits), kind);
         let rendered = formatter.format_kinded(&cell_slot);
@@ -447,18 +440,17 @@ pub fn v2_content_pair(
     // collapsed into a string cell (post-W18.4 swap can preserve nested
     // content; for v0.3 the KeyValue display path projects everything to
     // ContentNode::plain anyway).
-    let formatter = crate::executor::printing::ValueFormatter::new(
-        &vm.program.type_schema_registry,
-    );
+    let formatter =
+        crate::executor::printing::ValueFormatter::new(&vm.program.type_schema_registry);
     let rendered = formatter.format_kinded(&args[2]);
     let value_node = shape_value::content::ContentNode::plain(rendered);
     match node {
         shape_value::content::ContentNode::KeyValue(pairs) => {
             let mut new_pairs = pairs.clone();
             new_pairs.push((key.to_string(), value_node));
-            Ok(content_slot(
-                shape_value::content::ContentNode::KeyValue(new_pairs),
-            ))
+            Ok(content_slot(shape_value::content::ContentNode::KeyValue(
+                new_pairs,
+            )))
         }
         other => Err(VMError::RuntimeError(format!(
             "Content.pair() is only valid on KeyValue receivers (got {})",

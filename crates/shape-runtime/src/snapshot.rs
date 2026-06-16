@@ -2,13 +2,13 @@
 //!
 //! Provides binary, diff-friendly snapshots via a content-addressed store.
 
+use anyhow::{Context, Result};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use anyhow::{Context, Result};
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 // EnumPayload, EnumValue, PrintResult, PrintSpan, Upvalue, ValueWord,
 // ValueWordExt imports removed alongside the deleted value-(de)serialization
 // functions (Phase 2b). The strict-typed slot-serialization API will land
@@ -462,11 +462,12 @@ pub enum SerializableVMValue {
     // in follow-up sub-clusters per CLAUDE.md "Forbidden rationalizations"
     // (no `Arc<HeapValue>` generic serializer, no Bool-default
     // fallback — surface-and-stop is the right shape for the deep arms).
-
     /// `HeapKind::HashSet` — string-keyed insertion-ordered set (Wave 13).
     /// Round-trips the key array verbatim (per ADR-006 §2.7.15 string-
     /// only keyspace).
-    HashSet { keys: Vec<String> },
+    HashSet {
+        keys: Vec<String>,
+    },
 
     /// `HeapKind::Iterator` — lazy iterator carrier (W13 §2.7.16).
     /// Iterator state carries (a) a closure-self share for transform
@@ -504,19 +505,26 @@ pub enum SerializableVMValue {
     /// `Arc<HeapValue>` walks the same generic-serializer shape
     /// §2.7.5.1 forbids; the per-element kinded path lands when the
     /// Deque method-tier wires its KindedSlot return-shape.
-    DequeOpaque { len: usize },
+    DequeOpaque {
+        len: usize,
+    },
 
     /// `HeapKind::Channel` — concurrency-primitive carrier
     /// (Wave 15 §2.7.20). The inner queue holds `KindedSlot` payloads
     /// of arbitrary kinds; same per-element-projection blocker as
     /// `DequeOpaque`. Closed-flag round-trips; queue contents land
     /// in the W17-snapshot-channel-queue follow-up.
-    ChannelOpaque { closed: bool, len: usize },
+    ChannelOpaque {
+        closed: bool,
+        len: usize,
+    },
 
     /// `HeapKind::PriorityQueue` — i64-priority min-heap
     /// (Wave 15 §2.7.18). i64-priority-only storage means full
     /// payload round-trip — the heap-ordered i64 vec encodes losslessly.
-    PriorityQueueHeap { heap: Vec<i64> },
+    PriorityQueueHeap {
+        heap: Vec<i64>,
+    },
 
     /// `HeapKind::Reference` — `&expr` / `&mut expr` reference handle
     /// (Wave 8; STAGE-R5 serialize-through, ADR-006 §2.7.30.5).
@@ -534,7 +542,10 @@ pub enum SerializableVMValue {
     /// `TypedField` reference has no owning cell, so reading its bits as
     /// `*const SharedCell` would be a wild-free — those arms keep the
     /// opaque clean-refuse.
-    Reference { handle: u64, is_mut: bool },
+    Reference {
+        handle: u64,
+        is_mut: bool,
+    },
 
     /// `HeapKind::SharedCell` BODY (STAGE-R5, ADR-006 §2.7.30.5).
     ///
@@ -545,7 +556,10 @@ pub enum SerializableVMValue {
     /// On restore Pass 1 materializes exactly one `Arc<SharedCell>` per
     /// handle into the identity-map; Pass 2 links every back-edge
     /// (`SharedCellRef` / `Reference`) carrying the same handle.
-    SharedCell { handle: u64, inner: Box<SerializableVMValue> },
+    SharedCell {
+        handle: u64,
+        inner: Box<SerializableVMValue>,
+    },
 
     /// `HeapKind::SharedCell` back-edge (STAGE-R5, ADR-006 §2.7.30.5).
     ///
@@ -555,7 +569,9 @@ pub enum SerializableVMValue {
     /// identity-map (Pass 2, `Arc::increment_strong_count`). NOT a new
     /// `HeapKind` ordinal — a WIRE discriminator resolving to
     /// `Ptr(HeapKind::SharedCell)` (§2.7.5.1 4-table lockstep unchanged).
-    SharedCellRef { handle: u64 },
+    SharedCellRef {
+        handle: u64,
+    },
 
     /// `HeapKind::FilterExpr` — query-DSL AST tree (Wave-γ §2.7.9).
     /// Carries `Arc<FilterNode>` whose `And/Or/Not` branches recurse
@@ -570,20 +586,23 @@ pub enum SerializableVMValue {
     // `SharedCellRef { handle }` back-edge arm declared above. Cell
     // identity now survives the snapshot via the shared identity-map
     // (ADR-006 §2.7.30.5).
-
     /// `HeapKind::Mutex` — single-typed-payload exclusion cell
     /// (Wave 2.5 §2.7.25). Inner `Option<KindedSlot>` payload of
     /// arbitrary kind; round-trip requires per-kind projection. The
     /// `MutexEmpty` discriminator distinguishes "no inner payload"
     /// (transient post-`take`) from "payload present, opaque on
     /// landing".
-    MutexOpaque { has_value: bool },
+    MutexOpaque {
+        has_value: bool,
+    },
 
     /// `HeapKind::Atomic` — atomic i64 cell (Wave 2.5 §2.7.25).
     /// Full payload round-trip — `AtomicI64::load(SeqCst)` reads the
     /// value, `AtomicI64::new(value)` restores. Memory ordering is
     /// `SeqCst` per the §2.7.25 ruling.
-    AtomicI64 { value: i64 },
+    AtomicI64 {
+        value: i64,
+    },
 
     /// `HeapKind::Lazy` — initialize-once cell (Wave 2.5 §2.7.25).
     /// Carries an initializer-closure `KindedSlot` (kind
@@ -594,7 +613,9 @@ pub enum SerializableVMValue {
     /// upvalues as `Vec<SerializableVMValue>` — restoration requires
     /// the ClosureLayout side-table on the receiver, which is itself
     /// part of the snapshot's program payload).
-    LazyOpaque { is_initialized: bool },
+    LazyOpaque {
+        is_initialized: bool,
+    },
 
     /// `HeapKind::Char` — single Unicode scalar value (Wave 12 §2.7.13).
     /// Full payload round-trip — `char` already serializes via serde.
@@ -997,9 +1018,7 @@ pub fn slot_to_serializable_ctx(
     ctx: &mut SerializeIdentityCtx,
 ) -> std::result::Result<SerializableVMValue, String> {
     match kind {
-        NativeKind::Ptr(heap_kind) => {
-            slot_heap_to_serializable(bits, heap_kind, store, ctx)
-        }
+        NativeKind::Ptr(heap_kind) => slot_heap_to_serializable(bits, heap_kind, store, ctx),
         // Scalar + string + v2-raw kinds carry no promoted-cell identity;
         // delegate to the ctx-free body (it never touches `ctx`).
         _ => slot_to_serializable(bits, kind, store),
@@ -1164,8 +1183,8 @@ fn slot_heap_to_serializable(
 ) -> std::result::Result<SerializableVMValue, String> {
     use SerializableVMValue as SV;
     use shape_value::heap_value::{
-        AtomicData, ChannelData, DequeData, HashSetData, LazyData, MutexData,
-        OptionData, PriorityQueueData, ResultData,
+        AtomicData, ChannelData, DequeData, HashSetData, LazyData, MutexData, OptionData,
+        PriorityQueueData, ResultData,
     };
     if bits == 0 {
         return Err(format!(
@@ -1239,8 +1258,7 @@ fn slot_heap_to_serializable(
             // inner is a Bool-zero (the canonical no-op None
             // sentinel per §2.7.25).
             let inner = arc.get();
-            let has_value =
-                !(matches!(inner.kind(), NativeKind::Bool) && inner.slot().raw() == 0);
+            let has_value = !(matches!(inner.kind(), NativeKind::Bool) && inner.slot().raw() == 0);
             drop(inner);
             let _ = Arc::into_raw(arc);
             Ok(SV::MutexOpaque { has_value })
@@ -1276,7 +1294,10 @@ fn slot_heap_to_serializable(
             let payload = if is_some {
                 let payload_kind = arc.payload.kind();
                 let payload_bits = arc.payload.slot().raw();
-                Some(Box::new(serializable_inner_kinded(payload_bits, payload_kind)?))
+                Some(Box::new(serializable_inner_kinded(
+                    payload_bits,
+                    payload_kind,
+                )?))
             } else {
                 None
             };
@@ -1366,9 +1387,9 @@ fn slot_heap_to_serializable(
             // through the bespoke decode walk in `executor/resume.rs`, not
             // through this scalar projection).
             use shape_value::v2::typed_array::{
-                read_elem_type, TypedArray, ELEM_TYPE_BOOL, ELEM_TYPE_F32,
-                ELEM_TYPE_F64, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64,
-                ELEM_TYPE_I8, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8,
+                ELEM_TYPE_BOOL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I8, ELEM_TYPE_I16,
+                ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32,
+                TypedArray, read_elem_type,
             };
             let ptr = bits as *const u8;
             // SAFETY: the slot construction contract guarantees a live,
@@ -1376,36 +1397,26 @@ fn slot_heap_to_serializable(
             let elem = unsafe { read_elem_type(ptr) };
             let elems: Vec<SerializableVMValue> = unsafe {
                 match elem {
-                    ELEM_TYPE_F64 => {
-                        TypedArray::<f64>::as_slice(ptr as *const TypedArray<f64>)
-                            .iter()
-                            .map(|v| SV::Number(*v))
-                            .collect()
-                    }
-                    ELEM_TYPE_I64 => {
-                        TypedArray::<i64>::as_slice(ptr as *const TypedArray<i64>)
-                            .iter()
-                            .map(|v| SV::Int(*v))
-                            .collect()
-                    }
-                    ELEM_TYPE_I32 => {
-                        TypedArray::<i32>::as_slice(ptr as *const TypedArray<i32>)
-                            .iter()
-                            .map(|v| SV::Int(*v as i64))
-                            .collect()
-                    }
-                    ELEM_TYPE_I16 => {
-                        TypedArray::<i16>::as_slice(ptr as *const TypedArray<i16>)
-                            .iter()
-                            .map(|v| SV::Int(*v as i64))
-                            .collect()
-                    }
-                    ELEM_TYPE_I8 => {
-                        TypedArray::<i8>::as_slice(ptr as *const TypedArray<i8>)
-                            .iter()
-                            .map(|v| SV::Int(*v as i64))
-                            .collect()
-                    }
+                    ELEM_TYPE_F64 => TypedArray::<f64>::as_slice(ptr as *const TypedArray<f64>)
+                        .iter()
+                        .map(|v| SV::Number(*v))
+                        .collect(),
+                    ELEM_TYPE_I64 => TypedArray::<i64>::as_slice(ptr as *const TypedArray<i64>)
+                        .iter()
+                        .map(|v| SV::Int(*v))
+                        .collect(),
+                    ELEM_TYPE_I32 => TypedArray::<i32>::as_slice(ptr as *const TypedArray<i32>)
+                        .iter()
+                        .map(|v| SV::Int(*v as i64))
+                        .collect(),
+                    ELEM_TYPE_I16 => TypedArray::<i16>::as_slice(ptr as *const TypedArray<i16>)
+                        .iter()
+                        .map(|v| SV::Int(*v as i64))
+                        .collect(),
+                    ELEM_TYPE_I8 => TypedArray::<i8>::as_slice(ptr as *const TypedArray<i8>)
+                        .iter()
+                        .map(|v| SV::Int(*v as i64))
+                        .collect(),
                     ELEM_TYPE_BOOL | ELEM_TYPE_U8 => {
                         TypedArray::<u8>::as_slice(ptr as *const TypedArray<u8>)
                             .iter()
@@ -1418,24 +1429,18 @@ fn slot_heap_to_serializable(
                             })
                             .collect()
                     }
-                    ELEM_TYPE_U16 => {
-                        TypedArray::<u16>::as_slice(ptr as *const TypedArray<u16>)
-                            .iter()
-                            .map(|v| SV::Int(*v as i64))
-                            .collect()
-                    }
-                    ELEM_TYPE_U32 => {
-                        TypedArray::<u32>::as_slice(ptr as *const TypedArray<u32>)
-                            .iter()
-                            .map(|v| SV::Int(*v as i64))
-                            .collect()
-                    }
-                    ELEM_TYPE_F32 => {
-                        TypedArray::<f32>::as_slice(ptr as *const TypedArray<f32>)
-                            .iter()
-                            .map(|v| SV::Number(f64::from(*v)))
-                            .collect()
-                    }
+                    ELEM_TYPE_U16 => TypedArray::<u16>::as_slice(ptr as *const TypedArray<u16>)
+                        .iter()
+                        .map(|v| SV::Int(*v as i64))
+                        .collect(),
+                    ELEM_TYPE_U32 => TypedArray::<u32>::as_slice(ptr as *const TypedArray<u32>)
+                        .iter()
+                        .map(|v| SV::Int(*v as i64))
+                        .collect(),
+                    ELEM_TYPE_F32 => TypedArray::<f32>::as_slice(ptr as *const TypedArray<f32>)
+                        .iter()
+                        .map(|v| SV::Number(f64::from(*v)))
+                        .collect(),
                     other_elem => {
                         return Err(format!(
                             "slot_to_serializable: W17-snapshot-roundtrip surface — \
@@ -1460,9 +1465,7 @@ fn slot_heap_to_serializable(
             // amendment) and surface clean.
             use shape_value::heap_value::HashMapKindedRef;
             // SAFETY: bits = `Arc::into_raw(Arc<HashMapKindedRef>)`.
-            let arc = unsafe {
-                Arc::<HashMapKindedRef>::from_raw(bits as *const HashMapKindedRef)
-            };
+            let arc = unsafe { Arc::<HashMapKindedRef>::from_raw(bits as *const HashMapKindedRef) };
             let kref: HashMapKindedRef = (*arc).clone();
             let _ = Arc::into_raw(arc); // restore the slot's original share
             match &kref {
@@ -1475,20 +1478,17 @@ fn slot_heap_to_serializable(
                         // lifetime of `map_arc`; elements are `*const
                         // StringObj` per the String monomorphization.
                         unsafe {
-                            let kp =
-                                shape_value::v2::typed_array::TypedArray::get_unchecked(
-                                    map_arc.keys,
-                                    i as u32,
-                                );
+                            let kp = shape_value::v2::typed_array::TypedArray::get_unchecked(
+                                map_arc.keys,
+                                i as u32,
+                            );
                             let vp: *const shape_value::v2::string_obj::StringObj =
                                 *(*map_arc.values).data.add(i);
                             keys.push(SV::String(
-                                shape_value::v2::string_obj::StringObj::as_str(kp)
-                                    .to_owned(),
+                                shape_value::v2::string_obj::StringObj::as_str(kp).to_owned(),
                             ));
                             values.push(SV::String(
-                                shape_value::v2::string_obj::StringObj::as_str(vp)
-                                    .to_owned(),
+                                shape_value::v2::string_obj::StringObj::as_str(vp).to_owned(),
                             ));
                         }
                     }
@@ -1744,8 +1744,7 @@ pub fn materialize_cell_bodies(
             // back-edge interior (Reference/SharedCellRef) Pass 1 has
             // already materialized the target body, so the link resolves.
             let expected = expected_kind_for_cell_inner(inner);
-            let (value_bits, value_kind) =
-                serializable_to_slot_ctx(inner, expected, store, ctx)?;
+            let (value_bits, value_kind) = serializable_to_slot_ctx(inner, expected, store, ctx)?;
             // Build the one owning cell. `Arc::into_raw` hands the base
             // share to the identity-map; record it in the ledger.
             let cell = Arc::new(SharedCell::new(value_bits, value_kind));
@@ -1775,9 +1774,7 @@ fn expected_kind_for_cell_inner(sv: &SerializableVMValue) -> NativeKind {
     use SerializableVMValue as SV;
     match sv {
         SV::Reference { .. } => NativeKind::Ptr(HeapKind::Reference),
-        SV::SharedCell { .. } | SV::SharedCellRef { .. } => {
-            NativeKind::Ptr(HeapKind::SharedCell)
-        }
+        SV::SharedCell { .. } | SV::SharedCellRef { .. } => NativeKind::Ptr(HeapKind::SharedCell),
         SV::Int(_) => NativeKind::Int64,
         SV::Number(_) => NativeKind::Float64,
         SV::Bool(_) => NativeKind::Bool,
@@ -2057,12 +2054,14 @@ fn serializable_to_heap_slot(
             let data = if *is_some {
                 match payload {
                     Some(p) => OptionData::some(inner_kinded_from_serializable(p)?),
-                    None => return Err(
-                        "serializable_to_slot: OptionData is_some=true but payload=None — \
+                    None => {
+                        return Err(
+                            "serializable_to_slot: OptionData is_some=true but payload=None — \
                          malformed wire shape; expected Some(SerializableVMValue) for \
                          is_some=true. ADR-006 §2.7.5.1."
-                            .to_string(),
-                    ),
+                                .to_string(),
+                        );
+                    }
                 }
             } else {
                 OptionData::none()
@@ -2074,34 +2073,46 @@ fn serializable_to_heap_slot(
 
         // ── W17-snapshot-roundtrip container restore arms (2026-06-02) ──
         // Inverse of the `slot_heap_to_serializable` container arms.
-        (SV::Range { start, end, inclusive }, HeapKind::Range) => {
+        (
+            SV::Range {
+                start,
+                end,
+                inclusive,
+            },
+            HeapKind::Range,
+        ) => {
             // RangeData carries i64 bounds + step + inclusive. The wire
             // shape only persists start/end/inclusive; step defaults to 1
             // (the surface-syntax `start..end` shape per RangeData docstring).
             let start_i = match start.as_deref() {
                 Some(SV::Int(i)) => *i,
-                _ => return Err(
-                    "serializable_to_slot: Range restore — start bound is not \
+                _ => {
+                    return Err("serializable_to_slot: Range restore — start bound is not \
                      an Int (only i64 ranges are representable). ADR-006 §2.7.23."
-                        .to_string(),
-                ),
+                        .to_string());
+                }
             };
             let end_i = match end.as_deref() {
                 Some(SV::Int(i)) => *i,
-                _ => return Err(
-                    "serializable_to_slot: Range restore — end bound is not \
+                _ => {
+                    return Err("serializable_to_slot: Range restore — end bound is not \
                      an Int (only i64 ranges are representable). ADR-006 §2.7.23."
-                        .to_string(),
-                ),
+                        .to_string());
+                }
             };
-            let data = shape_value::heap_value::RangeData::new(
-                start_i, end_i, 1, *inclusive,
-            );
+            let data = shape_value::heap_value::RangeData::new(start_i, end_i, 1, *inclusive);
             let arc = Arc::new(data);
             let raw = Arc::into_raw(arc) as u64;
             Ok((raw, NativeKind::Ptr(HeapKind::Range)))
         }
-        (SV::TypedObject { schema_id, slot_data, heap_mask }, HeapKind::TypedObject) => {
+        (
+            SV::TypedObject {
+                schema_id,
+                slot_data,
+                heap_mask,
+            },
+            HeapKind::TypedObject,
+        ) => {
             // Rebuild a `TypedObjectStorage` from the per-field restored
             // slots. Each field restores through `serializable_to_slot`
             // (recursion); the returned `(bits, kind)` populate the slot
@@ -2114,13 +2125,12 @@ fn serializable_to_heap_slot(
             let mut field_kinds: Vec<NativeKind> = Vec::with_capacity(n);
             for (i, fsv) in slot_data.iter().enumerate() {
                 let expected = expected_heap_field_kind(fsv);
-                let (fbits, fkind) =
-                    serializable_to_slot(fsv, expected, store).map_err(|msg| {
-                        format!(
-                            "serializable_to_slot: TypedObject restore field[{i}] \
+                let (fbits, fkind) = serializable_to_slot(fsv, expected, store).map_err(|msg| {
+                    format!(
+                        "serializable_to_slot: TypedObject restore field[{i}] \
                              (schema_id={schema_id}): {msg}"
-                        )
-                    })?;
+                    )
+                })?;
                 slots.push(ValueSlot::from_raw(fbits));
                 field_kinds.push(fkind);
             }
@@ -2163,13 +2173,13 @@ fn serializable_to_heap_slot(
             for (k, v) in keys.iter().zip(values.iter()) {
                 let (ks, vs) = match (k, v) {
                     (SV::String(ks), SV::String(vs)) => (ks, vs),
-                    _ => return Err(
-                        "serializable_to_slot: HashMap restore — only \
+                    _ => {
+                        return Err("serializable_to_slot: HashMap restore — only \
                          HashMap<string,string> round-trips at this scope; \
                          a non-String key/value pair is K3 (heap-value track) \
                          or malformed. ADR-006 §2.7.5.1."
-                            .to_string(),
-                    ),
+                            .to_string());
+                    }
                 };
                 let value_ptr = StringObj::new(vs.as_str()) as *const StringObj;
                 // SAFETY: `value_ptr` is a fresh StringObj (refcount = 1);
@@ -2193,8 +2203,7 @@ fn serializable_to_heap_slot(
             // non-scalar elements surface clean — those came from a
             // non-scalar source and don't round-trip through this arm.
             use shape_value::v2::typed_array::{
-                stamp_elem_type, TypedArray, ELEM_TYPE_BOOL, ELEM_TYPE_F64,
-                ELEM_TYPE_I64,
+                ELEM_TYPE_BOOL, ELEM_TYPE_F64, ELEM_TYPE_I64, TypedArray, stamp_elem_type,
             };
             // Classify by the first element (empty → i64).
             let first = elems.first();
@@ -2204,12 +2213,12 @@ fn serializable_to_heap_slot(
                     for e in elems {
                         match e {
                             SV::Int(i) => v.push(*i),
-                            _ => return Err(
-                                "serializable_to_slot: TypedArray restore — \
+                            _ => {
+                                return Err("serializable_to_slot: TypedArray restore — \
                                  heterogeneous element (expected all Int). \
                                  ADR-006 §2.7.5.1."
-                                    .to_string(),
-                            ),
+                                    .to_string());
+                            }
                         }
                     }
                     let arr = TypedArray::<i64>::from_slice(&v);
@@ -2221,12 +2230,12 @@ fn serializable_to_heap_slot(
                     for e in elems {
                         match e {
                             SV::Number(f) => v.push(*f),
-                            _ => return Err(
-                                "serializable_to_slot: TypedArray restore — \
+                            _ => {
+                                return Err("serializable_to_slot: TypedArray restore — \
                                  heterogeneous element (expected all Number). \
                                  ADR-006 §2.7.5.1."
-                                    .to_string(),
-                            ),
+                                    .to_string());
+                            }
                         }
                     }
                     let arr = TypedArray::<f64>::from_slice(&v);
@@ -2238,12 +2247,12 @@ fn serializable_to_heap_slot(
                     for e in elems {
                         match e {
                             SV::Bool(b) => v.push(if *b { 1 } else { 0 }),
-                            _ => return Err(
-                                "serializable_to_slot: TypedArray restore — \
+                            _ => {
+                                return Err("serializable_to_slot: TypedArray restore — \
                                  heterogeneous element (expected all Bool). \
                                  ADR-006 §2.7.5.1."
-                                    .to_string(),
-                            ),
+                                    .to_string());
+                            }
                         }
                     }
                     let arr = TypedArray::<u8>::from_slice(&v);
@@ -2297,14 +2306,15 @@ fn serializable_to_heap_slot(
 
         // Opaque arms — surface-and-stop on restore. These produced
         // discriminator-only wire shapes; the inner payload is lost.
-        (SV::MutexOpaque { .. }, HeapKind::Mutex)
-        | (SV::LazyOpaque { .. }, HeapKind::Lazy) => Err(format!(
-            "serializable_to_slot: W17-snapshot-roundtrip surface — \
+        (SV::MutexOpaque { .. }, HeapKind::Mutex) | (SV::LazyOpaque { .. }, HeapKind::Lazy) => {
+            Err(format!(
+                "serializable_to_slot: W17-snapshot-roundtrip surface — \
              {heap_kind:?} arm restored from opaque wire shape; \
              deep payload reconstruction is the W17-snapshot-{:?} \
              follow-up. ADR-006 §2.7.5.1.",
-            heap_kind,
-        )),
+                heap_kind,
+            ))
+        }
 
         // Anything else: the discriminator doesn't pair with the
         // expected heap_kind. Surface-and-stop, no fabrication.
@@ -2340,10 +2350,7 @@ fn inner_kinded_from_serializable(
             NativeKind::Bool,
         )),
         SV::String(s) => Ok(KindedSlot::from_string_arc(Arc::new(s.clone()))),
-        SV::Unit | SV::None => Ok(KindedSlot::new(
-            ValueSlot::from_raw(0),
-            NativeKind::Bool,
-        )),
+        SV::Unit | SV::None => Ok(KindedSlot::new(ValueSlot::from_raw(0), NativeKind::Bool)),
         other => Err(format!(
             "inner_kinded_from_serializable: W17-snapshot-roundtrip surface — \
              SerializableVMValue arm {} has no in-session inner-payload \
@@ -2355,9 +2362,7 @@ fn inner_kinded_from_serializable(
 
 /// One-line discriminator name for `HashMapKindedRef` value
 /// monomorphizations (K3 surface diagnostics).
-fn hashmap_kinded_ref_arm_name(
-    kref: &shape_value::heap_value::HashMapKindedRef,
-) -> &'static str {
+fn hashmap_kinded_ref_arm_name(kref: &shape_value::heap_value::HashMapKindedRef) -> &'static str {
     use shape_value::heap_value::HashMapKindedRef as K;
     match kref {
         K::I64(_) => "I64",
@@ -2496,14 +2501,8 @@ mod opaque_disposition_tests {
     fn clean_refuse_by_design_arms_carry_design_wording() {
         let (_tmp, st) = store();
         let cases = [
-            (
-                SerializableVMValue::IteratorOpaque,
-                HeapKind::Iterator,
-            ),
-            (
-                SerializableVMValue::DequeOpaque { len: 0 },
-                HeapKind::Deque,
-            ),
+            (SerializableVMValue::IteratorOpaque, HeapKind::Iterator),
+            (SerializableVMValue::DequeOpaque { len: 0 }, HeapKind::Deque),
             (
                 SerializableVMValue::ChannelOpaque {
                     closed: false,
@@ -2511,10 +2510,7 @@ mod opaque_disposition_tests {
                 },
                 HeapKind::Channel,
             ),
-            (
-                SerializableVMValue::FilterExprOpaque,
-                HeapKind::FilterExpr,
-            ),
+            (SerializableVMValue::FilterExprOpaque, HeapKind::FilterExpr),
         ];
         for (sv, hk) in cases {
             let err = serializable_to_slot(&sv, NativeKind::Ptr(hk), &st)
@@ -2684,7 +2680,10 @@ mod opaque_disposition_tests {
             let rt = Arc::<RefTarget>::from_raw(r_ref_bits as *const RefTarget);
             let restored_cell = Arc::<SharedCell>::from_raw(r_cell_bits as *const SharedCell);
             match &*rt {
-                RefTarget::PromotedCell { cell: ref_cell, kind } => {
+                RefTarget::PromotedCell {
+                    cell: ref_cell,
+                    kind,
+                } => {
                     assert_eq!(*kind, NativeKind::Int64);
                     assert_eq!(
                         Arc::as_ptr(ref_cell),
@@ -2822,12 +2821,8 @@ mod opaque_disposition_tests {
         // ...then a SUBSEQUENT slot fails (inject a back-edge with an
         // unknown handle).
         let bad = SerializableVMValue::SharedCellRef { handle: 9999 };
-        let res = serializable_to_slot_ctx(
-            &bad,
-            NativeKind::Ptr(HeapKind::SharedCell),
-            &st,
-            &mut link,
-        );
+        let res =
+            serializable_to_slot_ctx(&bad, NativeKind::Ptr(HeapKind::SharedCell), &st, &mut link);
         assert!(res.is_err(), "unknown-handle back-edge must surface");
 
         // ABORT: release the slot we already built + the base shares.
@@ -2879,4 +2874,3 @@ mod opaque_disposition_tests {
         );
     }
 }
-

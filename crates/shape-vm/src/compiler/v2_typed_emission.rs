@@ -916,8 +916,7 @@ impl super::BytecodeCompiler {
                     Type::Concrete(TypeAnnotation::Reference(p)) => Some(p.as_str()),
                     _ => None,
                 };
-                let base_is_array =
-                    matches!(base_name, Some(n) if n == "Array" || n == "Vec");
+                let base_is_array = matches!(base_name, Some(n) if n == "Array" || n == "Vec");
                 if !base_is_array {
                     return None;
                 }

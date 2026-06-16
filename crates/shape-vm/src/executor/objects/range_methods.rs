@@ -125,10 +125,7 @@ pub fn range_to_array(
     // `marshal.rs` Migration shape (a) landed at ckpt-5-prime²c).
     let arr_ptr: *mut TypedArray<i64> = TypedArray::<i64>::from_slice(&vec);
     let slot = ValueSlot::from_u64(arr_ptr as u64);
-    Ok(KindedSlot::new(
-        slot,
-        NativeKind::Ptr(HeapKind::TypedArray),
-    ))
+    Ok(KindedSlot::new(slot, NativeKind::Ptr(HeapKind::TypedArray)))
 }
 
 /// `range.iter()` — convert the `RangeData` to a fresh
@@ -160,9 +157,10 @@ pub fn range_start(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    let range = clone_range_arc(args.first().ok_or_else(|| {
-        type_error("Range.start: missing receiver")
-    })?)?;
+    let range = clone_range_arc(
+        args.first()
+            .ok_or_else(|| type_error("Range.start: missing receiver"))?,
+    )?;
     Ok(KindedSlot::from_int(range.start))
 }
 
@@ -174,9 +172,10 @@ pub fn range_end(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    let range = clone_range_arc(args.first().ok_or_else(|| {
-        type_error("Range.end: missing receiver")
-    })?)?;
+    let range = clone_range_arc(
+        args.first()
+            .ok_or_else(|| type_error("Range.end: missing receiver"))?,
+    )?;
     Ok(KindedSlot::from_int(range.end))
 }
 
@@ -186,9 +185,10 @@ pub fn range_step(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    let range = clone_range_arc(args.first().ok_or_else(|| {
-        type_error("Range.step: missing receiver")
-    })?)?;
+    let range = clone_range_arc(
+        args.first()
+            .ok_or_else(|| type_error("Range.step: missing receiver"))?,
+    )?;
     Ok(KindedSlot::from_int(range.step))
 }
 
@@ -198,9 +198,10 @@ pub fn range_length(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    let range = clone_range_arc(args.first().ok_or_else(|| {
-        type_error("Range.length: missing receiver")
-    })?)?;
+    let range = clone_range_arc(
+        args.first()
+            .ok_or_else(|| type_error("Range.length: missing receiver"))?,
+    )?;
     Ok(KindedSlot::from_int(range.len() as i64))
 }
 
@@ -210,9 +211,10 @@ pub fn range_is_empty(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    let range = clone_range_arc(args.first().ok_or_else(|| {
-        type_error("Range.isEmpty: missing receiver")
-    })?)?;
+    let range = clone_range_arc(
+        args.first()
+            .ok_or_else(|| type_error("Range.isEmpty: missing receiver"))?,
+    )?;
     Ok(KindedSlot::from_bool(range.is_empty()))
 }
 

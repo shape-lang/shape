@@ -42,8 +42,7 @@ fn check_arity(args: &[KindedSlot], n: usize, name: &str) -> Result<(), VMError>
 
 pub(in crate::executor) fn builtin_abs(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "abs")?;
-    let x = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("abs() argument must be a number"))?;
+    let x = coerce_to_f64(&args[0]).ok_or_else(|| type_error("abs() argument must be a number"))?;
     match args[0].kind {
         NativeKind::Int64 => Ok(KindedSlot::from_int(x.abs() as i64)),
         NativeKind::Float64 => Ok(KindedSlot::from_number(x.abs())),
@@ -53,43 +52,41 @@ pub(in crate::executor) fn builtin_abs(args: &[KindedSlot]) -> Result<KindedSlot
 
 pub(in crate::executor) fn builtin_sqrt(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "sqrt")?;
-    let x = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("sqrt() argument must be a number"))?;
+    let x =
+        coerce_to_f64(&args[0]).ok_or_else(|| type_error("sqrt() argument must be a number"))?;
     Ok(KindedSlot::from_number(x.sqrt()))
 }
 
 pub(in crate::executor) fn builtin_floor(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "floor")?;
-    let x = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("floor() argument must be a number"))?;
+    let x =
+        coerce_to_f64(&args[0]).ok_or_else(|| type_error("floor() argument must be a number"))?;
     Ok(KindedSlot::from_number(x.floor()))
 }
 
 pub(in crate::executor) fn builtin_ceil(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "ceil")?;
-    let x = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("ceil() argument must be a number"))?;
+    let x =
+        coerce_to_f64(&args[0]).ok_or_else(|| type_error("ceil() argument must be a number"))?;
     Ok(KindedSlot::from_number(x.ceil()))
 }
 
 pub(in crate::executor) fn builtin_round(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "round")?;
-    let x = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("round() argument must be a number"))?;
+    let x =
+        coerce_to_f64(&args[0]).ok_or_else(|| type_error("round() argument must be a number"))?;
     Ok(KindedSlot::from_number(x.round()))
 }
 
 pub(in crate::executor) fn builtin_ln(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "ln")?;
-    let x = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("ln() argument must be a number"))?;
+    let x = coerce_to_f64(&args[0]).ok_or_else(|| type_error("ln() argument must be a number"))?;
     Ok(KindedSlot::from_number(x.ln()))
 }
 
 pub(in crate::executor) fn builtin_exp(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "exp")?;
-    let x = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("exp() argument must be a number"))?;
+    let x = coerce_to_f64(&args[0]).ok_or_else(|| type_error("exp() argument must be a number"))?;
     Ok(KindedSlot::from_number(x.exp()))
 }
 
@@ -103,8 +100,8 @@ pub(in crate::executor) fn builtin_log(args: &[KindedSlot]) -> Result<KindedSlot
         2 => {
             let val = coerce_to_f64(&args[0])
                 .ok_or_else(|| type_error("log() argument must be a number"))?;
-            let base = coerce_to_f64(&args[1])
-                .ok_or_else(|| type_error("log() base must be a number"))?;
+            let base =
+                coerce_to_f64(&args[1]).ok_or_else(|| type_error("log() base must be a number"))?;
             Ok(KindedSlot::from_number(val.log(base)))
         }
         _ => Err(type_error("log() requires 1 or 2 arguments")),
@@ -113,52 +110,48 @@ pub(in crate::executor) fn builtin_log(args: &[KindedSlot]) -> Result<KindedSlot
 
 pub(in crate::executor) fn builtin_pow(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 2, "pow")?;
-    let base = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("pow() base must be a number"))?;
-    let exp = coerce_to_f64(&args[1])
-        .ok_or_else(|| type_error("pow() exponent must be a number"))?;
+    let base = coerce_to_f64(&args[0]).ok_or_else(|| type_error("pow() base must be a number"))?;
+    let exp =
+        coerce_to_f64(&args[1]).ok_or_else(|| type_error("pow() exponent must be a number"))?;
     Ok(KindedSlot::from_number(base.powf(exp)))
 }
 
 pub(in crate::executor) fn builtin_sin(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "sin")?;
-    let x = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("sin() argument must be a number"))?;
+    let x = coerce_to_f64(&args[0]).ok_or_else(|| type_error("sin() argument must be a number"))?;
     Ok(KindedSlot::from_number(x.sin()))
 }
 
 pub(in crate::executor) fn builtin_cos(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "cos")?;
-    let x = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("cos() argument must be a number"))?;
+    let x = coerce_to_f64(&args[0]).ok_or_else(|| type_error("cos() argument must be a number"))?;
     Ok(KindedSlot::from_number(x.cos()))
 }
 
 pub(in crate::executor) fn builtin_tan(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "tan")?;
-    let x = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("tan() argument must be a number"))?;
+    let x = coerce_to_f64(&args[0]).ok_or_else(|| type_error("tan() argument must be a number"))?;
     Ok(KindedSlot::from_number(x.tan()))
 }
 
 pub(in crate::executor) fn builtin_asin(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "asin")?;
-    let x = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("asin() argument must be a number"))?;
+    let x =
+        coerce_to_f64(&args[0]).ok_or_else(|| type_error("asin() argument must be a number"))?;
     Ok(KindedSlot::from_number(x.asin()))
 }
 
 pub(in crate::executor) fn builtin_acos(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "acos")?;
-    let x = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("acos() argument must be a number"))?;
+    let x =
+        coerce_to_f64(&args[0]).ok_or_else(|| type_error("acos() argument must be a number"))?;
     Ok(KindedSlot::from_number(x.acos()))
 }
 
 pub(in crate::executor) fn builtin_atan(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "atan")?;
-    let x = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("atan() argument must be a number"))?;
+    let x =
+        coerce_to_f64(&args[0]).ok_or_else(|| type_error("atan() argument must be a number"))?;
     Ok(KindedSlot::from_number(x.atan()))
 }
 
@@ -170,10 +163,8 @@ pub(in crate::executor) fn builtin_min(args: &[KindedSlot]) -> Result<KindedSlot
     if args.len() != 2 {
         return Err(type_error("min() requires 2 arguments"));
     }
-    let a = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("min() argument must be a number"))?;
-    let b = coerce_to_f64(&args[1])
-        .ok_or_else(|| type_error("min() argument must be a number"))?;
+    let a = coerce_to_f64(&args[0]).ok_or_else(|| type_error("min() argument must be a number"))?;
+    let b = coerce_to_f64(&args[1]).ok_or_else(|| type_error("min() argument must be a number"))?;
     // Preserve Int kind when both inputs are Int.
     match (args[0].kind, args[1].kind) {
         (NativeKind::Int64, NativeKind::Int64) => {
@@ -189,10 +180,8 @@ pub(in crate::executor) fn builtin_max(args: &[KindedSlot]) -> Result<KindedSlot
     if args.len() != 2 {
         return Err(type_error("max() requires 2 arguments"));
     }
-    let a = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("max() argument must be a number"))?;
-    let b = coerce_to_f64(&args[1])
-        .ok_or_else(|| type_error("max() argument must be a number"))?;
+    let a = coerce_to_f64(&args[0]).ok_or_else(|| type_error("max() argument must be a number"))?;
+    let b = coerce_to_f64(&args[1]).ok_or_else(|| type_error("max() argument must be a number"))?;
     match (args[0].kind, args[1].kind) {
         (NativeKind::Int64, NativeKind::Int64) => {
             let ai = args[0].as_i64().expect("kind=Int64");
@@ -243,10 +232,10 @@ pub(in crate::executor) fn builtin_gcd(args: &[KindedSlot]) -> Result<KindedSlot
 
 pub(in crate::executor) fn builtin_lcm(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 2, "lcm")?;
-    let a = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("lcm() argument must be a number"))? as i64;
-    let b = coerce_to_f64(&args[1])
-        .ok_or_else(|| type_error("lcm() argument must be a number"))? as i64;
+    let a = coerce_to_f64(&args[0]).ok_or_else(|| type_error("lcm() argument must be a number"))?
+        as i64;
+    let b = coerce_to_f64(&args[1]).ok_or_else(|| type_error("lcm() argument must be a number"))?
+        as i64;
     if a == 0 && b == 0 {
         return Ok(KindedSlot::from_int(0));
     }
@@ -265,21 +254,21 @@ pub(in crate::executor) fn builtin_lcm(args: &[KindedSlot]) -> Result<KindedSlot
 
 pub(in crate::executor) fn builtin_hypot(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 2, "hypot")?;
-    let a = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("hypot() argument must be a number"))?;
-    let b = coerce_to_f64(&args[1])
-        .ok_or_else(|| type_error("hypot() argument must be a number"))?;
+    let a =
+        coerce_to_f64(&args[0]).ok_or_else(|| type_error("hypot() argument must be a number"))?;
+    let b =
+        coerce_to_f64(&args[1]).ok_or_else(|| type_error("hypot() argument must be a number"))?;
     Ok(KindedSlot::from_number(a.hypot(b)))
 }
 
 pub(in crate::executor) fn builtin_clamp(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 3, "clamp")?;
-    let x = coerce_to_f64(&args[0])
-        .ok_or_else(|| type_error("clamp() argument must be a number"))?;
-    let min_val = coerce_to_f64(&args[1])
-        .ok_or_else(|| type_error("clamp() min must be a number"))?;
-    let max_val = coerce_to_f64(&args[2])
-        .ok_or_else(|| type_error("clamp() max must be a number"))?;
+    let x =
+        coerce_to_f64(&args[0]).ok_or_else(|| type_error("clamp() argument must be a number"))?;
+    let min_val =
+        coerce_to_f64(&args[1]).ok_or_else(|| type_error("clamp() min must be a number"))?;
+    let max_val =
+        coerce_to_f64(&args[2]).ok_or_else(|| type_error("clamp() max must be a number"))?;
     Ok(KindedSlot::from_number(x.max(min_val).min(max_val)))
 }
 
@@ -362,16 +351,14 @@ mod tests {
 
     #[test]
     fn min_two_ints_stays_int() {
-        let r =
-            builtin_min(&[KindedSlot::from_int(3), KindedSlot::from_int(7)]).unwrap();
+        let r = builtin_min(&[KindedSlot::from_int(3), KindedSlot::from_int(7)]).unwrap();
         assert_eq!(r.kind, NativeKind::Int64);
         assert_eq!(r.as_i64(), Some(3));
     }
 
     #[test]
     fn min_int_float_widens() {
-        let r =
-            builtin_min(&[KindedSlot::from_int(3), KindedSlot::from_number(1.5)]).unwrap();
+        let r = builtin_min(&[KindedSlot::from_int(3), KindedSlot::from_number(1.5)]).unwrap();
         assert_eq!(r.kind, NativeKind::Float64);
         assert_eq!(r.as_f64(), Some(1.5));
     }
@@ -385,22 +372,20 @@ mod tests {
 
     #[test]
     fn gcd_basic() {
-        let r =
-            builtin_gcd(&[KindedSlot::from_int(12), KindedSlot::from_int(18)]).unwrap();
+        let r = builtin_gcd(&[KindedSlot::from_int(12), KindedSlot::from_int(18)]).unwrap();
         assert_eq!(r.as_i64(), Some(6));
     }
 
     #[test]
     fn lcm_basic() {
-        let r =
-            builtin_lcm(&[KindedSlot::from_int(4), KindedSlot::from_int(6)]).unwrap();
+        let r = builtin_lcm(&[KindedSlot::from_int(4), KindedSlot::from_int(6)]).unwrap();
         assert_eq!(r.as_i64(), Some(12));
     }
 
     #[test]
     fn hypot_basic() {
-        let r = builtin_hypot(&[KindedSlot::from_number(3.0), KindedSlot::from_number(4.0)])
-            .unwrap();
+        let r =
+            builtin_hypot(&[KindedSlot::from_number(3.0), KindedSlot::from_number(4.0)]).unwrap();
         assert_eq!(r.as_f64(), Some(5.0));
     }
 

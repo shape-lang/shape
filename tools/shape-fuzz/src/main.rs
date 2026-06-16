@@ -18,7 +18,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use shape_fuzz::divergence::Signal;
-use shape_fuzz::{CompareConfig, DEFAULT_TIMEOUT, classify_divergence, compare_outputs, record_finding};
+use shape_fuzz::{
+    CompareConfig, DEFAULT_TIMEOUT, classify_divergence, compare_outputs, record_finding,
+};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -98,7 +100,11 @@ fn run_corpus(
     let seeds = match collect_seeds(corpus) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("shape-fuzz: failed to enumerate corpus {}: {}", corpus.display(), e);
+            eprintln!(
+                "shape-fuzz: failed to enumerate corpus {}: {}",
+                corpus.display(),
+                e
+            );
             return ExitCode::from(2);
         }
     };

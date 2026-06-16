@@ -6,8 +6,8 @@ use crate::type_tracking::VariableTypeInfo;
 use shape_ast::ast::{Literal, Pattern, PatternConstructorFields, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
 
-use crate::compiler::BytecodeCompiler;
 use super::helpers::typed_eq_opcode_for_literal;
+use crate::compiler::BytecodeCompiler;
 
 /// Tracker type-name for a `ConcreteType` payload binder (F5). Scalars map
 /// to their Shape surface names; arrays/hashmaps to the `Vec<…>` / `HashMap<…>`
@@ -149,15 +149,14 @@ impl BytecodeCompiler {
                 }
 
                 self.compile_literal(lit)?;
-                let eq_op = typed_eq_opcode_for_literal(lit).ok_or_else(|| {
-                    ShapeError::SemanticError {
+                let eq_op =
+                    typed_eq_opcode_for_literal(lit).ok_or_else(|| ShapeError::SemanticError {
                         message: format!(
                             "Pattern matching on {} literals is not yet supported",
                             lit
                         ),
                         location: None,
-                    }
-                })?;
+                    })?;
                 self.emit(Instruction::simple(eq_op));
                 let ok_jump = self.emit_jump(OpCode::JumpIfTrue, 0);
 
@@ -386,19 +385,16 @@ impl BytecodeCompiler {
                         OpCode::LoadLocal,
                         Some(Operand::Local(value_local)),
                     ));
-                    let operand = self.resolve_typed_field_operand_binding(schema_id, key).ok_or_else(|| {
-                        ShapeError::SemanticError {
+                    let operand = self
+                        .resolve_typed_field_operand_binding(schema_id, key)
+                        .ok_or_else(|| ShapeError::SemanticError {
                             message: format!(
                                 "Field '{}' is not declared in object schema for match binding.",
                                 key
                             ),
                             location: None,
-                        }
-                    })?;
-                    self.emit(Instruction::new(
-                        OpCode::GetFieldTyped,
-                        Some(operand),
-                    ));
+                        })?;
+                    self.emit(Instruction::new(OpCode::GetFieldTyped, Some(operand)));
                     let field_local = self.declare_temp_local("__match_field_")?;
                     // Phase 3e: propagate the schema field's type onto the
                     // temp local so the downstream binding (Pattern::Identifier
@@ -486,7 +482,11 @@ impl BytecodeCompiler {
                 (Some(enum_name), _) => {
                     // Look up enum schema - must be registered (no generic fallback)
                     let resolved_name = self.resolve_type_name(enum_name);
-                    if let Some(schema) = self.type_tracker.schema_registry().get(resolved_name.as_str()) {
+                    if let Some(schema) = self
+                        .type_tracker
+                        .schema_registry()
+                        .get(resolved_name.as_str())
+                    {
                         if schema.get_enum_info().is_some() {
                             let schema_id = schema.id;
                             return self.compile_typed_enum_binding(
@@ -550,12 +550,7 @@ impl BytecodeCompiler {
     /// `ConcreteType` (`Result(T, E)` / `Option(T)`) — no fabrication. When the
     /// scrutinee has no recorded concrete type (still generic / unannotated),
     /// nothing is stamped and the pre-existing behavior is preserved.
-    fn stamp_unwrapped_payload_local(
-        &mut self,
-        value_local: u16,
-        inner_local: u16,
-        variant: &str,
-    ) {
+    fn stamp_unwrapped_payload_local(&mut self, value_local: u16, inner_local: u16, variant: &str) {
         use shape_value::v2::ConcreteType;
         let Some(scrutinee_ct) = self
             .current_function_local_concrete_types
@@ -684,26 +679,25 @@ impl BytecodeCompiler {
                 // field types live on the side in
                 // `enum_struct_variant_fields`, populated by
                 // `register_enum`.
-                let variant_fields: Option<
-                    Vec<(String, shape_ast::ast::TypeAnnotation)>,
-                > = match (enum_name, variant_name) {
-                    (Some(en), Some(vn)) => self
-                        .enum_struct_variant_fields
-                        .get(&(en.to_string(), vn.to_string()))
-                        .cloned()
-                        .or_else(|| {
-                            // Fall back to bare-name lookup (e.g. inside
-                            // a `mod m` block, an `E::V` pattern may
-                            // resolve `enum_name` differently than the
-                            // qualified key).
-                            en.rsplit("::").next().and_then(|bare| {
-                                self.enum_struct_variant_fields
-                                    .get(&(bare.to_string(), vn.to_string()))
-                                    .cloned()
-                            })
-                        }),
-                    _ => None,
-                };
+                let variant_fields: Option<Vec<(String, shape_ast::ast::TypeAnnotation)>> =
+                    match (enum_name, variant_name) {
+                        (Some(en), Some(vn)) => self
+                            .enum_struct_variant_fields
+                            .get(&(en.to_string(), vn.to_string()))
+                            .cloned()
+                            .or_else(|| {
+                                // Fall back to bare-name lookup (e.g. inside
+                                // a `mod m` block, an `E::V` pattern may
+                                // resolve `enum_name` differently than the
+                                // qualified key).
+                                en.rsplit("::").next().and_then(|bare| {
+                                    self.enum_struct_variant_fields
+                                        .get(&(bare.to_string(), vn.to_string()))
+                                        .cloned()
+                                })
+                            }),
+                        _ => None,
+                    };
 
                 // For struct payloads, we access fields by index
                 for (idx, (_key, pat)) in patterns.iter().enumerate() {

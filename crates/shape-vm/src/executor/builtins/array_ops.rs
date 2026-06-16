@@ -212,7 +212,9 @@ pub(in crate::executor) fn builtin_zip(args: &[KindedSlot]) -> Result<KindedSlot
 /// `Array.filled(size, value)` — produce an array of `size` repeats of `value`.
 pub(in crate::executor) fn builtin_filled(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     if args.len() != 2 {
-        return Err(type_error("Array.filled() requires 2 arguments (size, value)"));
+        return Err(type_error(
+            "Array.filled() requires 2 arguments (size, value)",
+        ));
     }
     Err(ckpt3_surface("filled", args))
 }

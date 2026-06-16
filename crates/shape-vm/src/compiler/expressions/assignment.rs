@@ -168,8 +168,7 @@ impl BytecodeCompiler {
                                             Some(Operand::Local(local_idx)),
                                         ));
                                     } else {
-                                        let binding_idx =
-                                            self.get_or_create_module_binding(name);
+                                        let binding_idx = self.get_or_create_module_binding(name);
                                         self.emit(Instruction::new(
                                             OpCode::StoreModuleBinding,
                                             Some(Operand::ModuleBinding(binding_idx)),
@@ -333,16 +332,13 @@ impl BytecodeCompiler {
                         // `FieldKind` from `shared_capture_inner_kinds`.
                         // Falls back to legacy `StoreSharedCapture` (0x135)
                         // for unresolved capture types.
-                        let opcode = match self
-                            .shared_capture_inner_kinds
-                            .get(name.as_str())
-                            .copied()
-                        {
-                            Some(kind) => {
-                                crate::compiler::helpers::shared_typed_store_opcode(kind)
-                            }
-                            None => OpCode::StoreSharedCapture,
-                        };
+                        let opcode =
+                            match self.shared_capture_inner_kinds.get(name.as_str()).copied() {
+                                Some(kind) => {
+                                    crate::compiler::helpers::shared_typed_store_opcode(kind)
+                                }
+                                None => OpCode::StoreSharedCapture,
+                            };
                         self.emit(Instruction::new(opcode, Some(Operand::Local(shared_idx))));
                         return Ok(());
                     }
@@ -361,8 +357,7 @@ impl BytecodeCompiler {
                     // The Shared (`var`) write path above stays on the
                     // legacy `StoreSharedCapture` (0x135) — atomic flip
                     // is follow-up #17.
-                    if let Some(&owned_idx) =
-                        self.owned_mutable_closure_captures.get(name.as_str())
+                    if let Some(&owned_idx) = self.owned_mutable_closure_captures.get(name.as_str())
                     {
                         debug_assert_eq!(upvalue_idx, owned_idx);
                         let opcode = match self
@@ -605,14 +600,12 @@ impl BytecodeCompiler {
                         // (`p.x = 300` into u8) does NOT adopt and still rejects;
                         // a non-literal int VAR keeps the §2 value-level reject in
                         // the `else` arm below.
-                        let literal_adopts =
-                            super::collections::int_literal_adopts_field_type(
-                                &assign_expr.value,
-                                &place.field_type_info,
-                            );
+                        let literal_adopts = super::collections::int_literal_adopts_field_type(
+                            &assign_expr.value,
+                            &place.field_type_info,
+                        );
                         if inferred != place.field_type_info && !literal_adopts {
-                            let value_loc =
-                                self.span_to_source_location(assign_expr.value.span());
+                            let value_loc = self.span_to_source_location(assign_expr.value.span());
                             let mut loc = value_loc;
                             loc.hints.push(format!(
                                 "expected `{}`, found `{}`",
@@ -625,10 +618,7 @@ impl BytecodeCompiler {
                             return Err(ShapeError::SemanticError {
                                 message: format!(
                                     "type mismatch: cannot assign `{}` to field `{}.{}` of type `{}`",
-                                    inferred,
-                                    place.root_name,
-                                    property,
-                                    place.field_type_info
+                                    inferred, place.root_name, property, place.field_type_info
                                 ),
                                 location: Some(loc),
                             });
@@ -677,8 +667,7 @@ impl BytecodeCompiler {
                         // CLAUDE.md §Forbidden Patterns); no producer-side fabrication
                         // of NativeKind at emit time; no defection-attractor descriptor
                         // (per §Renames-to-refuse-on-sight family).
-                        let rhs_field_type =
-                            Self::primitive_type_to_field_type(&rhs_ty);
+                        let rhs_field_type = Self::primitive_type_to_field_type(&rhs_ty);
                         if let Some(rhs_ft) = rhs_field_type {
                             // Only fire when BOTH sides resolve to a primitive — the
                             // generic / object / unresolved cases are conservatively
@@ -714,10 +703,7 @@ impl BytecodeCompiler {
                                 return Err(ShapeError::SemanticError {
                                     message: format!(
                                         "type mismatch: cannot assign `{}` to field `{}.{}` of type `{}`",
-                                        rhs_ft,
-                                        place.root_name,
-                                        property,
-                                        place.field_type_info
+                                        rhs_ft, place.root_name, property, place.field_type_info
                                     ),
                                     location: Some(loc),
                                 });
@@ -746,18 +732,14 @@ impl BytecodeCompiler {
                     // double-free SIGABRT). For a non-nested write the
                     // chain has a single entry and the emission shape is
                     // identical to the pre-fix code path.
-                    let field_chain =
-                        self.collect_property_access_chain(object, property);
+                    let field_chain = self.collect_property_access_chain(object, property);
                     debug_assert!(
                         !field_chain.is_empty(),
                         "JOINT-FIX #2: collect_property_access_chain produced \
                          an empty chain for a resolved typed_field_place",
                     );
                     for field_operand in field_chain {
-                        self.emit(Instruction::new(
-                            OpCode::MakeFieldRef,
-                            Some(field_operand),
-                        ));
+                        self.emit(Instruction::new(OpCode::MakeFieldRef, Some(field_operand)));
                     }
                     self.emit(Instruction::new(
                         OpCode::StoreLocal,
@@ -783,18 +765,14 @@ impl BytecodeCompiler {
                     let widened_literal = if place.field_type_info == FieldType::F64 {
                         if let Expr::Literal(lit, lit_span) = assign_expr.value.as_ref() {
                             match lit {
-                                shape_ast::ast::Literal::Int(v) => {
-                                    Some(Expr::Literal(
-                                        shape_ast::ast::Literal::Number(*v as f64),
-                                        *lit_span,
-                                    ))
-                                }
-                                shape_ast::ast::Literal::UInt(v) => {
-                                    Some(Expr::Literal(
-                                        shape_ast::ast::Literal::Number(*v as f64),
-                                        *lit_span,
-                                    ))
-                                }
+                                shape_ast::ast::Literal::Int(v) => Some(Expr::Literal(
+                                    shape_ast::ast::Literal::Number(*v as f64),
+                                    *lit_span,
+                                )),
+                                shape_ast::ast::Literal::UInt(v) => Some(Expr::Literal(
+                                    shape_ast::ast::Literal::Number(*v as f64),
+                                    *lit_span,
+                                )),
                                 _ => None,
                             }
                         } else {
@@ -927,9 +905,7 @@ impl BytecodeCompiler {
                 // (receiver, key, value) onto the stack, then preserves
                 // the value as the assignment-expression result. Sibling
                 // of the `Index` dispatch in `property_access.rs:compile_expr_index_access`.
-                if typed_kind.is_none()
-                    && self.receiver_type_implements_trait(object, "IndexMut")
-                {
+                if typed_kind.is_none() && self.receiver_type_implements_trait(object, "IndexMut") {
                     self.reject_direct_reference_storage(
                         &assign_expr.value,
                         ARRAY_REF_STORAGE_ERROR,
@@ -1359,9 +1335,7 @@ impl BytecodeCompiler {
     /// but diverge on generic shapes and tuple syntax. Sub-fix (ii) only
     /// needs the primitive cohort — keeping the helper scoped here documents
     /// the scope and avoids drift across the boundary.
-    fn primitive_type_to_field_type(
-        ty: &shape_runtime::type_system::Type,
-    ) -> Option<FieldType> {
+    fn primitive_type_to_field_type(ty: &shape_runtime::type_system::Type) -> Option<FieldType> {
         use shape_ast::ast::TypeAnnotation;
         use shape_runtime::type_system::Type;
         let name = match ty {
@@ -1377,9 +1351,7 @@ impl BytecodeCompiler {
             "i32" => FieldType::I32,
             "u32" => FieldType::U32,
             "u64" => FieldType::U64,
-            "int" | "i64" | "integer" | "isize" | "usize" | "byte" | "char" => {
-                FieldType::I64
-            }
+            "int" | "i64" | "integer" | "isize" | "usize" | "byte" | "char" => FieldType::I64,
             "string" | "str" => FieldType::String,
             "decimal" => FieldType::Decimal,
             "bool" | "boolean" => FieldType::Bool,

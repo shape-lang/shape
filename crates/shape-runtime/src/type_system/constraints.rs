@@ -497,7 +497,6 @@ impl ConstraintSolver {
         }
     }
 
-
     /// Extract the bare name from a `Basic` / `Reference` annotation (the only
     /// shapes a primitive numeric alias can take). Returns `None` for compound
     /// annotations.
@@ -580,8 +579,7 @@ impl ConstraintSolver {
                     mutable: m2,
                     inner: i2,
                 },
-            ) => Ok(m1 == m2
-                && crate::type_system::unification::annotations_equal(i1, i2)),
+            ) => Ok(m1 == m2 && crate::type_system::unification::annotations_equal(i1, i2)),
 
             // Array types
             (TypeAnnotation::Array(e1), TypeAnnotation::Array(e2)) => {
@@ -730,16 +728,12 @@ impl ConstraintSolver {
             // as either (`format_annotation` renders them identically).
             (TypeAnnotation::Basic(name), TypeAnnotation::Dyn(traits))
             | (TypeAnnotation::Dyn(traits), TypeAnnotation::Basic(name)) => {
-                Ok(traits
-                    .iter()
-                    .all(|t| self.has_trait_impl(t.as_str(), name)))
+                Ok(traits.iter().all(|t| self.has_trait_impl(t.as_str(), name)))
             }
             (TypeAnnotation::Reference(path), TypeAnnotation::Dyn(traits))
-            | (TypeAnnotation::Dyn(traits), TypeAnnotation::Reference(path)) => {
-                Ok(traits
-                    .iter()
-                    .all(|t| self.has_trait_impl(t.as_str(), path.as_str())))
-            }
+            | (TypeAnnotation::Dyn(traits), TypeAnnotation::Reference(path)) => Ok(traits
+                .iter()
+                .all(|t| self.has_trait_impl(t.as_str(), path.as_str()))),
 
             // Different types don't unify
             _ => Ok(false),
@@ -866,9 +860,7 @@ impl ConstraintSolver {
                                 Some(args[0].clone())
                             }
                             // String indexing yields a single-character string.
-                            Type::Concrete(TypeAnnotation::Basic(name))
-                                if name == "string" =>
-                            {
+                            Type::Concrete(TypeAnnotation::Basic(name)) if name == "string" => {
                                 Some(BuiltinTypes::string())
                             }
                             _ => None,
@@ -941,9 +933,7 @@ impl ConstraintSolver {
             // we only validate that the resolved type supports indexing.
             TypeConstraint::Indexable(_) => match ty {
                 Type::Concrete(TypeAnnotation::Array(_)) => Ok(()),
-                Type::Generic { base, args }
-                    if args.len() == 1 && is_array_or_vec_base(base) =>
-                {
+                Type::Generic { base, args } if args.len() == 1 && is_array_or_vec_base(base) => {
                     Ok(())
                 }
                 Type::Concrete(TypeAnnotation::Basic(name))
@@ -1528,11 +1518,23 @@ mod tests {
         let mut solver = ConstraintSolver::new();
         // Inject Numeric trait impls (same as TypeEnvironment registers)
         let trait_impls: std::collections::HashSet<String> = [
-            "Numeric::int", "Numeric::number", "Numeric::decimal",
-            "Numeric::i8", "Numeric::i16", "Numeric::i32", "Numeric::i64",
-            "Numeric::u8", "Numeric::u16", "Numeric::u32", "Numeric::u64",
-            "Numeric::f32", "Numeric::f64",
-        ].iter().map(|s| s.to_string()).collect();
+            "Numeric::int",
+            "Numeric::number",
+            "Numeric::decimal",
+            "Numeric::i8",
+            "Numeric::i16",
+            "Numeric::i32",
+            "Numeric::i64",
+            "Numeric::u8",
+            "Numeric::u16",
+            "Numeric::u32",
+            "Numeric::u64",
+            "Numeric::f32",
+            "Numeric::f64",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         solver.set_trait_impls(trait_impls);
         let mut tvgen = TypeVarGen::new();
         let bound_var = fresh_var(&mut tvgen);
@@ -1598,7 +1600,12 @@ mod tests {
         // `"int"`) that let `int -> i8` and `int -> u64` silently pass.
         //
         // Widening INTO int (subset of i64) — IMPL (accept):
-        for (src, dst) in [("i8", "int"), ("u16", "int"), ("i32", "int"), ("u32", "int")] {
+        for (src, dst) in [
+            ("i8", "int"),
+            ("u16", "int"),
+            ("i32", "int"),
+            ("u32", "int"),
+        ] {
             let mut solver = ConstraintSolver::new();
             let mut constraints = vec![(
                 Type::Concrete(TypeAnnotation::Basic(src.to_string())),
@@ -1610,7 +1617,12 @@ mod tests {
             );
         }
         // `int` narrowing / sign-reinterpreting back — CAST-REQUIRED (reject):
-        for (src, dst) in [("int", "i8"), ("int", "u64"), ("int", "i32"), ("int", "u16")] {
+        for (src, dst) in [
+            ("int", "i8"),
+            ("int", "u64"),
+            ("int", "i32"),
+            ("int", "u16"),
+        ] {
             let mut solver = ConstraintSolver::new();
             let mut constraints = vec![(
                 Type::Concrete(TypeAnnotation::Basic(src.to_string())),
@@ -1640,7 +1652,12 @@ mod tests {
         // The R5 fix must NOT collapse `int` and `number` (they stay distinct
         // script types), and must never make an integer unify with `bool`.
         // `number → int` (lossy) must still fail; `bool` vs `i8` must fail.
-        for (a, b) in [("number", "i8"), ("f64", "i32"), ("bool", "i8"), ("i8", "bool")] {
+        for (a, b) in [
+            ("number", "i8"),
+            ("f64", "i32"),
+            ("bool", "i8"),
+            ("i8", "bool"),
+        ] {
             let mut solver = ConstraintSolver::new();
             let mut constraints = vec![(
                 Type::Concrete(TypeAnnotation::Basic(a.to_string())),
@@ -1657,11 +1674,23 @@ mod tests {
     fn test_decimal_constrained_numeric_succeeds() {
         let mut solver = ConstraintSolver::new();
         let trait_impls: std::collections::HashSet<String> = [
-            "Numeric::int", "Numeric::number", "Numeric::decimal",
-            "Numeric::i8", "Numeric::i16", "Numeric::i32", "Numeric::i64",
-            "Numeric::u8", "Numeric::u16", "Numeric::u32", "Numeric::u64",
-            "Numeric::f32", "Numeric::f64",
-        ].iter().map(|s| s.to_string()).collect();
+            "Numeric::int",
+            "Numeric::number",
+            "Numeric::decimal",
+            "Numeric::i8",
+            "Numeric::i16",
+            "Numeric::i32",
+            "Numeric::i64",
+            "Numeric::u8",
+            "Numeric::u16",
+            "Numeric::u32",
+            "Numeric::u64",
+            "Numeric::f32",
+            "Numeric::f64",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         solver.set_trait_impls(trait_impls);
         let mut tvgen = TypeVarGen::new();
         let bound_var = fresh_var(&mut tvgen);

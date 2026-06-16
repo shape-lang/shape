@@ -30,8 +30,7 @@ use shape_ast::ast::Span;
 use shape_jit::mir_compiler::bounds_elision;
 use shape_vm::mir::types::{
     BasicBlock, BasicBlockId, BinOp, FieldIdx, LocalTypeInfo, MirConstant, MirFunction,
-    MirStatement, Operand, Place, Point, Rvalue, SlotId, StatementKind, Terminator,
-    TerminatorKind,
+    MirStatement, Operand, Place, Point, Rvalue, SlotId, StatementKind, Terminator, TerminatorKind,
 };
 
 fn s(kind: StatementKind) -> MirStatement {
@@ -219,7 +218,11 @@ fn bound_from_different_array_rejects_pair() {
     mir.param_slots.push(other_arr); // other_arr is also a param
     mir.param_reference_kinds.push(None);
     let length_idx = FieldIdx(7);
-    let bb0 = mir.blocks.iter_mut().find(|b| b.id == BasicBlockId(0)).unwrap();
+    let bb0 = mir
+        .blocks
+        .iter_mut()
+        .find(|b| b.id == BasicBlockId(0))
+        .unwrap();
     bb0.statements[0] = s(StatementKind::Assign(
         Place::Local(bnd),
         Rvalue::Use(Operand::Copy(Place::Field(

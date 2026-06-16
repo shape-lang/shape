@@ -578,7 +578,6 @@ mod tests {
         }
     }
 
-
     // ── 1. Basic allocation and collection ──────────────────────────
 
     #[test]

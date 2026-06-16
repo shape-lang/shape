@@ -297,7 +297,8 @@ fn test_bitwise_shift_with_variables() {
 /// Verifies <<= compound assignment.
 #[test]
 fn test_shl_assign() {
-    ShapeTest::new("fn test() {\n    let mut x = 1\n    x <<= 4\n    x\n}\ntest()").expect_number(16.0);
+    ShapeTest::new("fn test() {\n    let mut x = 1\n    x <<= 4\n    x\n}\ntest()")
+        .expect_number(16.0);
 }
 
 /// Verifies >>= compound assignment.

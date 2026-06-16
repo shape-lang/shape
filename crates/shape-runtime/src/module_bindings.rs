@@ -211,7 +211,9 @@ impl ModuleBindingRegistry {
     /// For JIT, call this after all module bindings are registered.
     #[inline]
     pub fn get_ptr(&self, idx: u32) -> Option<*const KindedSlot> {
-        self.values.get(idx as usize).map(|v| v as *const KindedSlot)
+        self.values
+            .get(idx as usize)
+            .map(|v| v as *const KindedSlot)
     }
 
     /// Snapshot constant module bindings for JIT constant folding.
@@ -282,8 +284,14 @@ mod tests {
             .register_const("b", KindedSlot::from_number(2.0))
             .unwrap();
 
-        assert_eq!(registry.get_by_index(0).map(|ks| ks.slot().as_f64()), Some(1.0));
-        assert_eq!(registry.get_by_index(1).map(|ks| ks.slot().as_f64()), Some(2.0));
+        assert_eq!(
+            registry.get_by_index(0).map(|ks| ks.slot().as_f64()),
+            Some(1.0)
+        );
+        assert_eq!(
+            registry.get_by_index(1).map(|ks| ks.slot().as_f64()),
+            Some(2.0)
+        );
         assert!(registry.get_by_index(99).is_none());
     }
 
@@ -299,7 +307,10 @@ mod tests {
         assert!(result.is_err());
 
         // Value should be unchanged
-        assert_eq!(registry.get_by_index(0).map(|ks| ks.slot().as_f64()), Some(42.0));
+        assert_eq!(
+            registry.get_by_index(0).map(|ks| ks.slot().as_f64()),
+            Some(42.0)
+        );
     }
 
     #[test]
@@ -310,8 +321,13 @@ mod tests {
             .unwrap();
 
         // Should succeed to set mutable by index
-        registry.set_by_index(0, KindedSlot::from_number(1.0)).unwrap();
-        assert_eq!(registry.get_by_index(0).map(|ks| ks.slot().as_f64()), Some(1.0));
+        registry
+            .set_by_index(0, KindedSlot::from_number(1.0))
+            .unwrap();
+        assert_eq!(
+            registry.get_by_index(0).map(|ks| ks.slot().as_f64()),
+            Some(1.0)
+        );
     }
 
     #[test]

@@ -49,10 +49,10 @@
 // per supervisor 2026-05-15 partition (ckpt-5 territory: 4-table lockstep
 // deletion + U64 relabel + A1 fold).
 use crate::heap_value::{
-    AtomicData, ChannelData, DequeData, HashSetData, HeapKind, HeapValue,
-    IoHandleData, LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData, OptionData,
-    PriorityQueueData, RangeData, ResultData, TableViewData, TaskGroupData, TemporalData,
-    TraitObjectStorage, TypedObjectStorage,
+    AtomicData, ChannelData, DequeData, HashSetData, HeapKind, HeapValue, IoHandleData, LazyData,
+    MatrixData, MatrixSliceData, MutexData, NativeViewData, OptionData, PriorityQueueData,
+    RangeData, ResultData, TableViewData, TaskGroupData, TemporalData, TraitObjectStorage,
+    TypedObjectStorage,
 };
 use crate::iterator_state::IteratorState;
 use crate::native_kind::NativeKind;
@@ -101,10 +101,7 @@ impl KindedSlot {
     /// Drop is a no-op (inline scalar, no `Arc<T>` payload).
     #[inline]
     pub fn from_f32(f: f32) -> Self {
-        Self::new(
-            ValueSlot::from_raw(f.to_bits() as u64),
-            NativeKind::Float32,
-        )
+        Self::new(ValueSlot::from_raw(f.to_bits() as u64), NativeKind::Float32)
     }
 
     /// Convenience: a `Bool`-kind slot.
@@ -189,10 +186,7 @@ impl KindedSlot {
     /// `HeapValue::Deque(Arc<DequeData>)` arm, not pure-discriminator.
     #[inline]
     pub fn from_deque(d: Arc<DequeData>) -> Self {
-        Self::new(
-            ValueSlot::from_deque(d),
-            NativeKind::Ptr(HeapKind::Deque),
-        )
+        Self::new(ValueSlot::from_deque(d), NativeKind::Ptr(HeapKind::Deque))
     }
 
     /// Convenience: a `Ptr(HeapKind::Channel)`-kind slot. Mirror of
@@ -251,10 +245,7 @@ impl KindedSlot {
     /// `HeapValue::Mutex(Arc<MutexData>)` arm.
     #[inline]
     pub fn from_mutex(m: Arc<MutexData>) -> Self {
-        Self::new(
-            ValueSlot::from_mutex(m),
-            NativeKind::Ptr(HeapKind::Mutex),
-        )
+        Self::new(ValueSlot::from_mutex(m), NativeKind::Ptr(HeapKind::Mutex))
     }
 
     /// Convenience: a `Ptr(HeapKind::Atomic)`-kind slot. Mirror of
@@ -263,10 +254,7 @@ impl KindedSlot {
     /// `HeapValue::Atomic(Arc<AtomicData>)` arm. i64-only at landing.
     #[inline]
     pub fn from_atomic(a: Arc<AtomicData>) -> Self {
-        Self::new(
-            ValueSlot::from_atomic(a),
-            NativeKind::Ptr(HeapKind::Atomic),
-        )
+        Self::new(ValueSlot::from_atomic(a), NativeKind::Ptr(HeapKind::Atomic))
     }
 
     /// Convenience: a `Ptr(HeapKind::Lazy)`-kind slot. Mirror of
@@ -275,10 +263,7 @@ impl KindedSlot {
     /// `HeapValue::Lazy(Arc<LazyData>)` arm.
     #[inline]
     pub fn from_lazy(l: Arc<LazyData>) -> Self {
-        Self::new(
-            ValueSlot::from_lazy(l),
-            NativeKind::Ptr(HeapKind::Lazy),
-        )
+        Self::new(ValueSlot::from_lazy(l), NativeKind::Ptr(HeapKind::Lazy))
     }
 
     /// Convenience: a `Ptr(HeapKind::Temporal)`-kind slot. ADR-006
@@ -355,10 +340,7 @@ impl KindedSlot {
     /// per ADR-005 §1 single-discriminator.
     #[inline]
     pub fn from_range(r: Arc<RangeData>) -> Self {
-        Self::new(
-            ValueSlot::from_range(r),
-            NativeKind::Ptr(HeapKind::Range),
-        )
+        Self::new(ValueSlot::from_range(r), NativeKind::Ptr(HeapKind::Range))
     }
 
     /// Convenience: a `Ptr(HeapKind::Content)`-kind slot. Stores the
@@ -385,20 +367,14 @@ impl KindedSlot {
     /// `from_iterator` typed-Arc dispatch shape.
     #[inline]
     pub fn from_result(r: Arc<ResultData>) -> Self {
-        Self::new(
-            ValueSlot::from_result(r),
-            NativeKind::Ptr(HeapKind::Result),
-        )
+        Self::new(ValueSlot::from_result(r), NativeKind::Ptr(HeapKind::Result))
     }
 
     /// Convenience: a `Ptr(HeapKind::Option)`-kind slot. ADR-006 §2.7.17 /
     /// Q18 amendment (Wave 14 W14-variant-codegen).
     #[inline]
     pub fn from_option(o: Arc<OptionData>) -> Self {
-        Self::new(
-            ValueSlot::from_option(o),
-            NativeKind::Ptr(HeapKind::Option),
-        )
+        Self::new(ValueSlot::from_option(o), NativeKind::Ptr(HeapKind::Option))
     }
 
     /// Convenience: a `Ptr(HeapKind::Decimal)`-kind slot.
@@ -562,10 +538,7 @@ impl KindedSlot {
     /// `invoke_module_fn_id_stub` at `CallValue` time.
     #[inline]
     pub fn from_module_fn_id(id: u64) -> Self {
-        Self::new(
-            ValueSlot::from_raw(id),
-            NativeKind::Ptr(HeapKind::ModuleFn),
-        )
+        Self::new(ValueSlot::from_raw(id), NativeKind::Ptr(HeapKind::ModuleFn))
     }
 
     /// Convenience: a `String`-kind slot from a `&str`. Allocates a fresh
@@ -731,9 +704,7 @@ impl KindedSlot {
                 // `&self`; `StringObj::as_str(ptr)` borrows the inner UTF-8
                 // bytes — lifetime is bounded by the slot's ownership.
                 let ptr = bits as *const crate::v2::string_obj::StringObj;
-                Some(unsafe {
-                    crate::v2::string_obj::StringObj::as_str(ptr)
-                })
+                Some(unsafe { crate::v2::string_obj::StringObj::as_str(ptr) })
             }
             _ => None,
         }
@@ -1517,7 +1488,11 @@ mod tests {
 
             assert_eq!(header_refcount(ptr), 1, "_new starts at refcount 1");
             let slot1 = KindedSlot::from_typed_object_raw(ptr);
-            assert_eq!(header_refcount(ptr), 1, "from_typed_object_raw transfers existing share");
+            assert_eq!(
+                header_refcount(ptr),
+                1,
+                "from_typed_object_raw transfers existing share"
+            );
             let slot2 = slot1.clone();
             assert_eq!(header_refcount(ptr), 2, "Clone bumped refcount");
             drop(slot1);

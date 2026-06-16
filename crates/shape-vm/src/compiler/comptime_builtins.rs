@@ -19,8 +19,8 @@ use shape_runtime::type_system::BuiltinTypes;
 use shape_runtime::typed_module_exports::{
     ConcreteReturn, ConcreteType, TypedReturn, register_typed_function,
 };
-use shape_value::heap_value::HeapValue;
 use shape_value::KindedSlot;
+use shape_value::heap_value::HeapValue;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -62,10 +62,9 @@ pub(crate) fn build_type_reflection_snapshot(
         // target type-name string, not a TypeAnnotation, so we surface
         // the alias as `Basic(target)` for downstream `type_info`
         // resolution.
-        snapshot.alias_defs.insert(
-            alias_name.clone(),
-            TypeAnnotation::Basic(_target.clone()),
-        );
+        snapshot
+            .alias_defs
+            .insert(alias_name.clone(), TypeAnnotation::Basic(_target.clone()));
     }
     // Enums: pull from the schema registry via the type-inference
     // environment so we don't need a parallel compiler-side enum table.
@@ -80,11 +79,8 @@ pub(crate) fn build_type_reflection_snapshot(
     {
         if let Some(schema) = compiler.type_tracker.schema_registry().get(&type_name) {
             if let Some(enum_info) = schema.get_enum_info() {
-                let variants: Vec<String> = enum_info
-                    .variants
-                    .iter()
-                    .map(|v| v.name.clone())
-                    .collect();
+                let variants: Vec<String> =
+                    enum_info.variants.iter().map(|v| v.name.clone()).collect();
                 snapshot.enum_defs.insert(type_name.clone(), variants);
             }
         }
@@ -412,7 +408,9 @@ pub(crate) fn create_comptime_builtins_module(
             // SAFETY: per `typed_object_from_pairs`'s construction-side
             // contract, `ptr` points to a live TypedObjectStorage with
             // refcount ≥ 1.
-            unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header); }
+            unsafe {
+                shape_value::v2::refcount::v2_retain(&(*ptr).header);
+            }
             drop(kinded);
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
                 Arc::new(HeapValue::TypedObject(
@@ -719,17 +717,12 @@ impl TypeKindLabel {
 /// Classify a bare type name (without generic parameters) into a
 /// `TypeKindLabel`. Generic-parameter names declared in the enclosing
 /// scope project to `TypeVar` per Q2 disposition.
-fn classify_bare_type_name(
-    name: &str,
-    snapshot: &TypeReflectionSnapshot,
-) -> TypeKindLabel {
+fn classify_bare_type_name(name: &str, snapshot: &TypeReflectionSnapshot) -> TypeKindLabel {
     if snapshot.known_type_params.contains(name) {
         return TypeKindLabel::TypeVar;
     }
     match name {
-        "int" | "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" => {
-            TypeKindLabel::Int
-        }
+        "int" | "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" => TypeKindLabel::Int,
         "number" | "f64" | "f32" | "float" => TypeKindLabel::Float,
         "bool" => TypeKindLabel::Bool,
         "string" | "str" => TypeKindLabel::String,
@@ -881,11 +874,7 @@ mod tests {
 
         // Another exact match
         let result = module
-            .invoke_export(
-                "implements",
-                &[nb_str("Currency"), nb_str("Display")],
-                &ctx,
-            )
+            .invoke_export("implements", &[nb_str("Currency"), nb_str("Display")], &ctx)
             .expect("implements function should exist");
         assert_eq!(result.unwrap().as_bool(), Some(true));
 
@@ -909,21 +898,13 @@ mod tests {
 
         // int should widen to number
         let result = module
-            .invoke_export(
-                "implements",
-                &[nb_str("int"), nb_str("Serializable")],
-                &ctx,
-            )
+            .invoke_export("implements", &[nb_str("int"), nb_str("Serializable")], &ctx)
             .expect("implements function should exist");
         assert_eq!(result.unwrap().as_bool(), Some(true));
 
         // i64 should also widen to number
         let result = module
-            .invoke_export(
-                "implements",
-                &[nb_str("i64"), nb_str("Serializable")],
-                &ctx,
-            )
+            .invoke_export("implements", &[nb_str("i64"), nb_str("Serializable")], &ctx)
             .expect("implements function should exist");
         assert_eq!(result.unwrap().as_bool(), Some(true));
     }

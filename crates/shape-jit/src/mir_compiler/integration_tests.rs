@@ -94,10 +94,7 @@ fn jit_expect_bool(source: &str, expected: bool) {
 /// regression tests where a method call surfaces a VM `Err`.
 fn jit_run_result(
     source: &str,
-) -> Result<
-    shape_runtime::engine::ProgramExecutorResult,
-    shape_runtime::error::ShapeError,
-> {
+) -> Result<shape_runtime::engine::ProgramExecutorResult, shape_runtime::error::ShapeError> {
     let _ = initialize_shared_runtime();
     let mut engine = ShapeEngine::new().expect("engine creation failed");
     let program = shape_ast::parse_program(source).expect("parse failed");
@@ -1471,10 +1468,12 @@ y
 
 #[test]
 fn parity_string_interpolation() {
-    match jit_eval(r#"
+    match jit_eval(
+        r#"
 let name = "world"
 f"hello {name}"
-"#) {
+"#,
+    ) {
         WireValue::String(s) => assert_eq!(s, "hello world"),
         other => panic!("Expected String(\"hello world\"), got {:?}", other),
     }

@@ -17,11 +17,7 @@ impl TypeInferenceEngine {
     /// `last = dbl(11)` inside a loop would otherwise never be walked, so the
     /// callsite of `dbl` is never recorded and an unannotated parameter
     /// collapses to the `number` default — producing a kind-confused result.
-    pub(crate) fn infer_assignment(
-        &mut self,
-        assign: &Assignment,
-        span: Span,
-    ) -> TypeResult<()> {
+    pub(crate) fn infer_assignment(&mut self, assign: &Assignment, span: Span) -> TypeResult<()> {
         let value_type = self.infer_expr(&assign.value)?;
         if let Some(name) = assign.pattern.as_identifier() {
             let scheme = self.env.lookup(name).cloned();
@@ -152,16 +148,12 @@ impl TypeInferenceEngine {
     /// (`{ 42 }`) is LEFT to plain inference so Shape's implicit `Ok`/`Some`-wrap
     /// (`push_return_constraint`) still applies; constraining a bare `int` tail
     /// against `Result<number>` would wrongly reject the implicit wrap.
-    fn infer_statements_with_return_adoption(
-        &mut self,
-        stmts: &[Statement],
-    ) -> TypeResult<Type> {
+    fn infer_statements_with_return_adoption(&mut self, stmts: &[Statement]) -> TypeResult<Type> {
         let expected = match self.expected_return_types.last().cloned() {
             Some(Some(ty)) => ty,
             _ => return self.infer_statements(stmts),
         };
-        let expected_is_carrier =
-            self.is_result_type(&expected) || self.is_option_type(&expected);
+        let expected_is_carrier = self.is_result_type(&expected) || self.is_option_type(&expected);
         let mut last_type = BuiltinTypes::void();
         let n = stmts.len();
         for (idx, stmt) in stmts.iter().enumerate() {
@@ -390,8 +382,7 @@ impl TypeInferenceEngine {
         let Some(else_body) = &if_stmt.else_body else {
             return false;
         };
-        let both_constructors = self
-            .body_tail_is_carrier_constructor(&if_stmt.then_body, expected)
+        let both_constructors = self.body_tail_is_carrier_constructor(&if_stmt.then_body, expected)
             && self.body_tail_is_carrier_constructor(else_body, expected);
         let any_adopts = self.body_tail_adopts_literal(&if_stmt.then_body, expected)
             || self.body_tail_adopts_literal(else_body, expected);

@@ -39,12 +39,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // wrapping `i32::MIN` (mod → 0). `compile_int_divmod_guarded`
             // (in `rvalues.rs`) operates at the `I32` width; the result is
             // sign-extended back to the I64 ABI slot below.
-            BinOp::Div => {
-                self.compile_int_divmod_guarded(l, r, types::I32, true, false)?
-            }
-            BinOp::Mod => {
-                self.compile_int_divmod_guarded(l, r, types::I32, true, true)?
-            }
+            BinOp::Div => self.compile_int_divmod_guarded(l, r, types::I32, true, false)?,
+            BinOp::Mod => self.compile_int_divmod_guarded(l, r, types::I32, true, true)?,
             _ => return Err(format!("unsupported i32 binop: {:?}", op)),
         };
 
@@ -79,14 +75,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
         let cmp_result = self.builder.ins().icmp(cc, l, r);
 
-        let true_val = self
-            .builder
-            .ins()
-            .iconst(types::I64, 1i64);
-        let false_val = self
-            .builder
-            .ins()
-            .iconst(types::I64, 0i64);
+        let true_val = self.builder.ins().iconst(types::I64, 1i64);
+        let false_val = self.builder.ins().iconst(types::I64, 0i64);
         Ok(self.builder.ins().select(cmp_result, true_val, false_val))
     }
 }
@@ -207,12 +197,8 @@ mod tests {
         };
 
         let cmp_result = builder.ins().icmp(cc, l, r);
-        let true_val = builder
-            .ins()
-            .iconst(types::I64, 1i64);
-        let false_val = builder
-            .ins()
-            .iconst(types::I64, 0i64);
+        let true_val = builder.ins().iconst(types::I64, 1i64);
+        let false_val = builder.ins().iconst(types::I64, 0i64);
         let result = builder.ins().select(cmp_result, true_val, false_val);
         builder.ins().return_(&[result]);
         builder.finalize();
@@ -267,42 +253,24 @@ mod tests {
 
     #[test]
     fn test_i32_cmp_eq_true() {
-        assert_eq!(
-            jit_i32_cmp("eq", 42, 42),
-            1u64
-        );
+        assert_eq!(jit_i32_cmp("eq", 42, 42), 1u64);
     }
 
     #[test]
     fn test_i32_cmp_eq_false() {
-        assert_eq!(
-            jit_i32_cmp("eq", 42, 43),
-            0u64
-        );
+        assert_eq!(jit_i32_cmp("eq", 42, 43), 0u64);
     }
 
     #[test]
     fn test_i32_cmp_lt() {
-        assert_eq!(
-            jit_i32_cmp("lt", 10, 20),
-            1u64
-        );
-        assert_eq!(
-            jit_i32_cmp("lt", 20, 10),
-            0u64
-        );
+        assert_eq!(jit_i32_cmp("lt", 10, 20), 1u64);
+        assert_eq!(jit_i32_cmp("lt", 20, 10), 0u64);
     }
 
     #[test]
     fn test_i32_cmp_gt() {
-        assert_eq!(
-            jit_i32_cmp("gt", 20, 10),
-            1u64
-        );
-        assert_eq!(
-            jit_i32_cmp("gt", 10, 20),
-            0u64
-        );
+        assert_eq!(jit_i32_cmp("gt", 20, 10), 1u64);
+        assert_eq!(jit_i32_cmp("gt", 10, 20), 0u64);
     }
 
     #[test]
@@ -310,10 +278,7 @@ mod tests {
         // -5 + 3 = -2, sign-extended back to i64
         assert_eq!(jit_i32_binop("add", -5, 3), -2);
         // -10 < 5 should be true
-        assert_eq!(
-            jit_i32_cmp("lt", -10, 5),
-            1u64
-        );
+        assert_eq!(jit_i32_cmp("lt", -10, 5), 1u64);
     }
 
     // ── R5c-2-β-γ (c) jit-narrow-wrap regression tests ──────────────
@@ -335,21 +300,14 @@ mod tests {
     /// `sextend`/`uextend` the narrow result back to i64 (the same shape
     /// `compile_binop_narrow_int` produces feeding `store_to_place`'s
     /// `ensure_kind` widen). `unsigned` selects the result extension.
-    fn jit_narrow_binop(
-        op: &str,
-        narrow: types::Type,
-        unsigned: bool,
-        a: i64,
-        b: i64,
-    ) -> i64 {
+    fn jit_narrow_binop(op: &str, narrow: types::Type, unsigned: bool, a: i64, b: i64) -> i64 {
         let mut flag_builder = settings::builder();
         flag_builder.set("opt_level", "speed_and_size").unwrap();
         let isa = cranelift_native::builder()
             .unwrap()
             .finish(settings::Flags::new(flag_builder))
             .unwrap();
-        let builder =
-            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         let mut module = JITModule::new(builder);
         let mut ctx = module.make_context();
 
@@ -359,11 +317,7 @@ mod tests {
         sig.returns.push(AbiParam::new(types::I64));
 
         let func_id = module
-            .declare_function(
-                "narrow_fn",
-                cranelift_module::Linkage::Local,
-                &sig,
-            )
+            .declare_function("narrow_fn", cranelift_module::Linkage::Local, &sig)
             .unwrap();
         ctx.func.signature = sig;
 
@@ -437,7 +391,10 @@ mod tests {
             jit_narrow_binop("add", types::I16, false, 30000, 30000),
             (30000i16).wrapping_add(30000) as i64,
         );
-        assert_eq!(jit_narrow_binop("add", types::I16, false, 30000, 30000), -5536);
+        assert_eq!(
+            jit_narrow_binop("add", types::I16, false, 30000, 30000),
+            -5536
+        );
     }
 
     #[test]
@@ -446,7 +403,10 @@ mod tests {
             jit_narrow_binop("sub", types::I16, false, -30000, 30000),
             (-30000i16).wrapping_sub(30000) as i64,
         );
-        assert_eq!(jit_narrow_binop("sub", types::I16, false, -30000, 30000), 5536);
+        assert_eq!(
+            jit_narrow_binop("sub", types::I16, false, -30000, 30000),
+            5536
+        );
     }
 
     #[test]
@@ -455,7 +415,10 @@ mod tests {
             jit_narrow_binop("mul", types::I16, false, 1000, 1000),
             (1000i16).wrapping_mul(1000) as i64,
         );
-        assert_eq!(jit_narrow_binop("mul", types::I16, false, 1000, 1000), 16960);
+        assert_eq!(
+            jit_narrow_binop("mul", types::I16, false, 1000, 1000),
+            16960
+        );
     }
 
     #[test]
@@ -530,7 +493,10 @@ mod tests {
             jit_narrow_binop("add", types::I16, true, 60000, 60000),
             (60000u16).wrapping_add(60000) as i64,
         );
-        assert_eq!(jit_narrow_binop("add", types::I16, true, 60000, 60000), 54464);
+        assert_eq!(
+            jit_narrow_binop("add", types::I16, true, 60000, 60000),
+            54464
+        );
     }
 
     #[test]
@@ -539,7 +505,10 @@ mod tests {
             jit_narrow_binop("sub", types::I16, true, 10000, 60000),
             (10000u16).wrapping_sub(60000) as i64,
         );
-        assert_eq!(jit_narrow_binop("sub", types::I16, true, 10000, 60000), 15536);
+        assert_eq!(
+            jit_narrow_binop("sub", types::I16, true, 10000, 60000),
+            15536
+        );
     }
 
     #[test]
@@ -621,8 +590,7 @@ mod tests {
             .unwrap()
             .finish(settings::Flags::new(flag_builder))
             .unwrap();
-        let builder =
-            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         let mut module = JITModule::new(builder);
         let mut ctx = module.make_context();
 
@@ -674,8 +642,7 @@ mod tests {
             .unwrap()
             .finish(settings::Flags::new(flag_builder))
             .unwrap();
-        let builder =
-            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         let mut module = JITModule::new(builder);
         let mut ctx = module.make_context();
 
@@ -744,7 +711,11 @@ mod tests {
     #[test]
     fn u64_jit_mul_wraps_at_2_pow_64() {
         assert_eq!(
-            jit_u64_binop("mul", 10_000_000_000_000_000_000, 10_000_000_000_000_000_000),
+            jit_u64_binop(
+                "mul",
+                10_000_000_000_000_000_000,
+                10_000_000_000_000_000_000
+            ),
             10_000_000_000_000_000_000u64.wrapping_mul(10_000_000_000_000_000_000),
         );
     }
@@ -831,8 +802,7 @@ mod tests {
             .unwrap()
             .finish(settings::Flags::new(flag_builder))
             .unwrap();
-        let builder =
-            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         let mut module = JITModule::new(builder);
         let mut ctx = module.make_context();
 
@@ -943,13 +913,22 @@ mod tests {
     fn i64_div_by_zero_is_guarded_no_sigill() {
         // Prior codegen: `trapnz` → `ud2` → SIGILL aborting the process.
         // Now: the guard branch returns the sentinel; the process survives.
-        assert_eq!(jit_guarded_divmod(types::I64, true, false, 1, 0), SENTINEL_DIVZERO);
-        assert_eq!(jit_guarded_divmod(types::I64, true, false, -42, 0), SENTINEL_DIVZERO);
+        assert_eq!(
+            jit_guarded_divmod(types::I64, true, false, 1, 0),
+            SENTINEL_DIVZERO
+        );
+        assert_eq!(
+            jit_guarded_divmod(types::I64, true, false, -42, 0),
+            SENTINEL_DIVZERO
+        );
     }
 
     #[test]
     fn i64_mod_by_zero_is_guarded_no_sigill() {
-        assert_eq!(jit_guarded_divmod(types::I64, true, true, 10, 0), SENTINEL_DIVZERO);
+        assert_eq!(
+            jit_guarded_divmod(types::I64, true, true, 10, 0),
+            SENTINEL_DIVZERO
+        );
     }
 
     #[test]
@@ -991,8 +970,14 @@ mod tests {
 
     #[test]
     fn i32_div_by_zero_is_guarded_no_sigill() {
-        assert_eq!(jit_guarded_divmod(types::I32, true, false, 7, 0), SENTINEL_DIVZERO);
-        assert_eq!(jit_guarded_divmod(types::I32, true, true, 7, 0), SENTINEL_DIVZERO);
+        assert_eq!(
+            jit_guarded_divmod(types::I32, true, false, 7, 0),
+            SENTINEL_DIVZERO
+        );
+        assert_eq!(
+            jit_guarded_divmod(types::I32, true, true, 7, 0),
+            SENTINEL_DIVZERO
+        );
     }
 
     #[test]
@@ -1018,8 +1003,14 @@ mod tests {
 
     #[test]
     fn narrow_i8_div_by_zero_is_guarded_no_sigill() {
-        assert_eq!(jit_guarded_divmod(types::I8, true, false, 9, 0), SENTINEL_DIVZERO);
-        assert_eq!(jit_guarded_divmod(types::I16, true, true, 9, 0), SENTINEL_DIVZERO);
+        assert_eq!(
+            jit_guarded_divmod(types::I8, true, false, 9, 0),
+            SENTINEL_DIVZERO
+        );
+        assert_eq!(
+            jit_guarded_divmod(types::I16, true, true, 9, 0),
+            SENTINEL_DIVZERO
+        );
     }
 
     #[test]
@@ -1060,8 +1051,14 @@ mod tests {
 
     #[test]
     fn u64_div_by_zero_is_guarded_no_sigill() {
-        assert_eq!(jit_guarded_divmod(types::I64, false, false, 100, 0), SENTINEL_DIVZERO);
-        assert_eq!(jit_guarded_divmod(types::I64, false, true, 100, 0), SENTINEL_DIVZERO);
+        assert_eq!(
+            jit_guarded_divmod(types::I64, false, false, 100, 0),
+            SENTINEL_DIVZERO
+        );
+        assert_eq!(
+            jit_guarded_divmod(types::I64, false, true, 100, 0),
+            SENTINEL_DIVZERO
+        );
     }
 
     #[test]
@@ -1076,8 +1073,14 @@ mod tests {
 
     #[test]
     fn narrow_unsigned_div_by_zero_is_guarded_no_sigill() {
-        assert_eq!(jit_guarded_divmod(types::I8, false, false, 200, 0), SENTINEL_DIVZERO);
-        assert_eq!(jit_guarded_divmod(types::I32, false, true, 4_000_000_000, 0), SENTINEL_DIVZERO);
+        assert_eq!(
+            jit_guarded_divmod(types::I8, false, false, 200, 0),
+            SENTINEL_DIVZERO
+        );
+        assert_eq!(
+            jit_guarded_divmod(types::I32, false, true, 4_000_000_000, 0),
+            SENTINEL_DIVZERO
+        );
     }
 
     #[test]
@@ -1119,21 +1122,14 @@ mod tests {
     /// (`b`) models the width-polymorphic literal / `int` partner: it stays
     /// at the full I64 width. `icmp` then runs at I64 with the signed /
     /// unsigned condition code selected by `unsigned`. Returns 1 / 0.
-    fn jit_narrow_cmp(
-        op: &str,
-        narrow: types::Type,
-        unsigned: bool,
-        a: i64,
-        b: i64,
-    ) -> u64 {
+    fn jit_narrow_cmp(op: &str, narrow: types::Type, unsigned: bool, a: i64, b: i64) -> u64 {
         let mut flag_builder = settings::builder();
         flag_builder.set("opt_level", "speed_and_size").unwrap();
         let isa = cranelift_native::builder()
             .unwrap()
             .finish(settings::Flags::new(flag_builder))
             .unwrap();
-        let builder =
-            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         let mut module = JITModule::new(builder);
         let mut ctx = module.make_context();
 
@@ -1253,7 +1249,10 @@ mod tests {
         assert_eq!(jit_narrow_cmp("ne", types::I32, false, v, 0), 1);
         assert_eq!(jit_narrow_cmp("lt", types::I32, false, v, -1), 1);
         assert_eq!(jit_narrow_cmp("le", types::I32, false, v, v), 1);
-        assert_eq!(jit_narrow_cmp("gt", types::I32, false, v, -1_000_000_000), 1);
+        assert_eq!(
+            jit_narrow_cmp("gt", types::I32, false, v, -1_000_000_000),
+            1
+        );
         assert_eq!(jit_narrow_cmp("ge", types::I32, false, v, v), 1);
         // Positive literal.
         assert_eq!(jit_narrow_cmp("eq", types::I32, false, 123_456, 123_456), 1);
@@ -1273,7 +1272,10 @@ mod tests {
         // u16 / u32 above their signed boundaries.
         assert_eq!(jit_narrow_cmp("eq", types::I16, true, 60_000, 60_000), 1);
         assert_eq!(jit_narrow_cmp("gt", types::I16, true, 60_000, 1_000), 1);
-        assert_eq!(jit_narrow_cmp("eq", types::I32, true, 4_000_000_000, 4_000_000_000), 1);
+        assert_eq!(
+            jit_narrow_cmp("eq", types::I32, true, 4_000_000_000, 4_000_000_000),
+            1
+        );
         assert_eq!(jit_narrow_cmp("gt", types::I32, true, 4_000_000_000, 1), 1);
     }
 
@@ -1301,6 +1303,9 @@ mod tests {
         assert_eq!(jit_narrow_cmp("eq", types::I8, false, -1, 5), 0);
         assert_eq!(jit_narrow_cmp("gt", types::I8, false, -1, -100), 1);
         // i32 narrow vs a large positive `int`.
-        assert_eq!(jit_narrow_cmp("lt", types::I32, false, -1, 9_000_000_000), 1);
+        assert_eq!(
+            jit_narrow_cmp("lt", types::I32, false, -1, 9_000_000_000),
+            1
+        );
     }
 }

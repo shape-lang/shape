@@ -205,9 +205,7 @@ fn corpus_all_seeds_converge_or_are_known_negative() {
 
 #[test]
 fn mutation_engine_produces_derived_seeds_for_a_base_corpus_seed() {
-    let base = corpus_root()
-        .join("arithmetic")
-        .join("a09_for_sum.shape");
+    let base = corpus_root().join("arithmetic").join("a09_for_sum.shape");
     assert!(base.is_file(), "base seed missing: {}", base.display());
     let source = std::fs::read_to_string(&base).unwrap();
     let cfg = MutationConfig {
@@ -225,7 +223,10 @@ fn mutation_engine_produces_derived_seeds_for_a_base_corpus_seed() {
     }
     // Determinism check.
     let derived_again = mutate_seed(&source, &cfg);
-    assert_eq!(derived, derived_again, "mutation engine must be deterministic");
+    assert_eq!(
+        derived, derived_again,
+        "mutation engine must be deterministic"
+    );
 }
 
 #[test]
@@ -250,7 +251,11 @@ fn minimizer_handles_a_base_not_high_signal_seed_correctly() {
     ));
     std::fs::create_dir_all(&tmp_dir).unwrap();
     let seed = tmp_dir.join("convergent.shape");
-    std::fs::write(&seed, "let mut sum = 0\nfor i in 0..10 { sum += i }\nprint(sum)\n").unwrap();
+    std::fs::write(
+        &seed,
+        "let mut sum = 0\nfor i in 0..10 { sum += i }\nprint(sum)\n",
+    )
+    .unwrap();
 
     let cfg = MinimizeConfig::new(
         tmp_dir.clone(),
@@ -278,8 +283,16 @@ fn minimizer_split_handles_multi_block_source_correctly() {
                print(f(2))\n\
                let trailing = 99\n";
     let blocks = shape_fuzz::minimizer::split_into_blocks(src);
-    assert!(blocks.len() >= 4, "expected >=4 blocks, got {}: {:?}", blocks.len(), blocks);
+    assert!(
+        blocks.len() >= 4,
+        "expected >=4 blocks, got {}: {:?}",
+        blocks.len(),
+        blocks
+    );
     // The fn block must remain intact (brace-balanced).
-    let fn_block = blocks.iter().find(|b| b.starts_with("fn f")).expect("fn block");
+    let fn_block = blocks
+        .iter()
+        .find(|b| b.starts_with("fn f"))
+        .expect("fn block");
     assert!(fn_block.ends_with("}"));
 }

@@ -3,8 +3,8 @@
 //! Tests boundary conditions: integer overflow, division by zero, large
 //! numbers, and type transitions that the trusted fast path must handle.
 
-use super::*;
 use super::test_utils::eval_result as eval;
+use super::*;
 use shape_value::{VMError, ValueWord, ValueWordExt};
 
 // ── Integer overflow → f64 promotion ────────────────────────────────

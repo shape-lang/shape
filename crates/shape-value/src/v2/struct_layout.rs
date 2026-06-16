@@ -51,8 +51,8 @@ pub struct FieldInfo {
 #[derive(Debug)]
 pub struct StructLayout {
     pub fields: Vec<FieldInfo>,
-    pub total_size: usize,        // including HeapHeader (8 bytes)
-    pub heap_field_mask: u64,     // bitmap: bit N = field N is Ptr type
+    pub total_size: usize,    // including HeapHeader (8 bytes)
+    pub heap_field_mask: u64, // bitmap: bit N = field N is Ptr type
 }
 
 impl StructLayout {
@@ -113,12 +113,9 @@ mod tests {
     #[test]
     fn test_point_f64_f64() {
         // Point { x: F64, y: F64 }
-        let layout = StructLayout::new(&[
-            ("x", FieldKind::F64),
-            ("y", FieldKind::F64),
-        ]);
+        let layout = StructLayout::new(&[("x", FieldKind::F64), ("y", FieldKind::F64)]);
         assert_eq!(layout.field_count(), 2);
-        assert_eq!(layout.field_offset(0), 8);  // x at offset 8
+        assert_eq!(layout.field_offset(0), 8); // x at offset 8
         assert_eq!(layout.field_offset(1), 16); // y at offset 16
         assert_eq!(layout.total_size(), 24);
         assert_eq!(layout.heap_field_mask, 0);
@@ -137,35 +134,35 @@ mod tests {
             ("c", FieldKind::I8),
         ]);
         assert_eq!(layout.field_count(), 3);
-        assert_eq!(layout.field_offset(0), 8);   // a: I32 at 8
+        assert_eq!(layout.field_offset(0), 8); // a: I32 at 8
         assert_eq!(layout.field_kind(0), FieldKind::I32);
         assert_eq!(layout.fields[0].size, 4);
 
-        assert_eq!(layout.field_offset(1), 16);  // b: F64 at 16 (padded from 12)
+        assert_eq!(layout.field_offset(1), 16); // b: F64 at 16 (padded from 12)
         assert_eq!(layout.field_kind(1), FieldKind::F64);
         assert_eq!(layout.fields[1].size, 8);
 
-        assert_eq!(layout.field_offset(2), 24);  // c: I8 at 24
+        assert_eq!(layout.field_offset(2), 24); // c: I8 at 24
         assert_eq!(layout.field_kind(2), FieldKind::I8);
         assert_eq!(layout.fields[2].size, 1);
 
-        assert_eq!(layout.total_size(), 32);     // 25 rounded up to 32
+        assert_eq!(layout.total_size(), 32); // 25 rounded up to 32
     }
 
     #[test]
     fn test_all_field_kinds() {
         let layout = StructLayout::new(&[
-            ("f0", FieldKind::F64),   // 8, size 8
-            ("f1", FieldKind::I64),   // 16, size 8
-            ("f2", FieldKind::I32),   // 24, size 4
-            ("f3", FieldKind::I16),   // 28, size 2
-            ("f4", FieldKind::I8),    // 30, size 1
-            ("f5", FieldKind::U64),   // 32, size 8 (pad from 31 to 32)
-            ("f6", FieldKind::U32),   // 40, size 4
-            ("f7", FieldKind::U16),   // 44, size 2
-            ("f8", FieldKind::U8),    // 46, size 1
-            ("f9", FieldKind::Bool),  // 47, size 1
-            ("f10", FieldKind::Ptr),  // 48, size 8
+            ("f0", FieldKind::F64),  // 8, size 8
+            ("f1", FieldKind::I64),  // 16, size 8
+            ("f2", FieldKind::I32),  // 24, size 4
+            ("f3", FieldKind::I16),  // 28, size 2
+            ("f4", FieldKind::I8),   // 30, size 1
+            ("f5", FieldKind::U64),  // 32, size 8 (pad from 31 to 32)
+            ("f6", FieldKind::U32),  // 40, size 4
+            ("f7", FieldKind::U16),  // 44, size 2
+            ("f8", FieldKind::U8),   // 46, size 1
+            ("f9", FieldKind::Bool), // 47, size 1
+            ("f10", FieldKind::Ptr), // 48, size 8
         ]);
         assert_eq!(layout.field_count(), 11);
 
@@ -201,10 +198,10 @@ mod tests {
     fn test_heap_field_mask_positions_1_and_3() {
         // Struct with Ptr fields at positions 1 and 3
         let layout = StructLayout::new(&[
-            ("a", FieldKind::I32),   // pos 0: not Ptr
-            ("b", FieldKind::Ptr),   // pos 1: Ptr
-            ("c", FieldKind::F64),   // pos 2: not Ptr
-            ("d", FieldKind::Ptr),   // pos 3: Ptr
+            ("a", FieldKind::I32), // pos 0: not Ptr
+            ("b", FieldKind::Ptr), // pos 1: Ptr
+            ("c", FieldKind::F64), // pos 2: not Ptr
+            ("d", FieldKind::Ptr), // pos 3: Ptr
         ]);
         assert_eq!(layout.heap_field_mask, 0b1010);
     }
@@ -246,10 +243,10 @@ mod tests {
     fn test_small_fields_packing() {
         // Multiple small fields pack tightly
         let layout = StructLayout::new(&[
-            ("a", FieldKind::I8),   // 8
-            ("b", FieldKind::I8),   // 9
-            ("c", FieldKind::I8),   // 10
-            ("d", FieldKind::I8),   // 11
+            ("a", FieldKind::I8), // 8
+            ("b", FieldKind::I8), // 9
+            ("c", FieldKind::I8), // 10
+            ("d", FieldKind::I8), // 11
         ]);
         assert_eq!(layout.field_offset(0), 8);
         assert_eq!(layout.field_offset(1), 9);
@@ -260,10 +257,7 @@ mod tests {
 
     #[test]
     fn test_field_names_preserved() {
-        let layout = StructLayout::new(&[
-            ("x_coord", FieldKind::F64),
-            ("y_coord", FieldKind::F64),
-        ]);
+        let layout = StructLayout::new(&[("x_coord", FieldKind::F64), ("y_coord", FieldKind::F64)]);
         assert_eq!(layout.fields[0].name, "x_coord");
         assert_eq!(layout.fields[1].name, "y_coord");
     }

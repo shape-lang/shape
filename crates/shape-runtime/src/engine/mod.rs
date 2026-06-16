@@ -116,8 +116,7 @@ pub struct ShapeEngine {
     /// `GetFieldTyped` lookup misses. Seeding each cell's compiler with
     /// these schemas (ids preserved) keeps a user type's id stable for
     /// the whole REPL session, so persisted instances stay resolvable.
-    pub(crate) repl_user_schemas:
-        std::collections::HashMap<String, crate::type_schema::TypeSchema>,
+    pub(crate) repl_user_schemas: std::collections::HashMap<String, crate::type_schema::TypeSchema>,
 }
 
 impl ShapeEngine {
@@ -423,10 +422,7 @@ impl ShapeEngine {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    tracing::warn!(
-                        "Failed to get shape source from language runtime: {}",
-                        e
-                    );
+                    tracing::warn!("Failed to get shape source from language runtime: {}", e);
                 }
             }
         }

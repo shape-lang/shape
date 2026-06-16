@@ -46,8 +46,8 @@
 //! the csv_module migration (commit `9f6b1d3`). New typed-marshal test
 //! harness arrives with the shape-vm cleanup workstream.
 
-use crate::marshal::register_typed_async_fn_3_full;
 use crate::marshal::register_typed_async_fn_2_full;
+use crate::marshal::register_typed_async_fn_3_full;
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_value::heap_value::HeapValue;
@@ -126,9 +126,7 @@ fn extract_headers(options: &[(Arc<String>, Arc<HeapValue>)]) -> Vec<(String, St
 /// would require either Shape user code passing an int (`5000` not
 /// `5000.0`) OR a future `HeapValue::NativeScalar`-aware branch here.
 /// Documented for follow-on if a consumer surfaces.
-fn extract_timeout(
-    options: &[(Arc<String>, Arc<HeapValue>)],
-) -> Option<std::time::Duration> {
+fn extract_timeout(options: &[(Arc<String>, Arc<HeapValue>)]) -> Option<std::time::Duration> {
     for (k, v) in options.iter() {
         if k.as_str() == "timeout" {
             if let HeapValue::BigInt(ms) = &**v {
@@ -159,8 +157,7 @@ pub fn create_http_module() -> ModuleExports {
         name: "options".to_string(),
         type_name: "HashMap<string, any>".to_string(),
         required: false,
-        description: "Request options: { headers?: HashMap, timeout?: int }"
-            .to_string(),
+        description: "Request options: { headers?: HashMap, timeout?: int }".to_string(),
         default_snippet: Some("{}".to_string()),
         ..Default::default()
     };
@@ -263,8 +260,7 @@ pub fn create_http_module() -> ModuleExports {
         name: "options".to_string(),
         type_name: "HashMap<string, any>".to_string(),
         required: false,
-        description: "Request options: { headers?: HashMap, timeout?: int }"
-            .to_string(),
+        description: "Request options: { headers?: HashMap, timeout?: int }".to_string(),
         default_snippet: Some("{}".to_string()),
         ..Default::default()
     };
@@ -302,15 +298,10 @@ pub fn create_http_module() -> ModuleExports {
             options_param_3.clone(),
         ],
         response_ty_3.clone(),
-        |url: Arc<String>,
-         body: Arc<String>,
-         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+        |url: Arc<String>, body: Arc<String>, options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
             let mut builder = reqwest::Client::new()
                 .post(url.as_str())
-                .header(
-                    reqwest::header::CONTENT_TYPE,
-                    "text/plain; charset=utf-8",
-                )
+                .header(reqwest::header::CONTENT_TYPE, "text/plain; charset=utf-8")
                 .body(body.as_str().to_string());
 
             for (k, v) in extract_headers(&options) {
@@ -343,13 +334,7 @@ pub fn create_http_module() -> ModuleExports {
     );
 
     // http.post_bytes(url: string, body: Array<int>, options?: HashMap) -> Result<HttpResponse>
-    register_typed_async_fn_3_full::<
-        _,
-        _,
-        Arc<String>,
-        Vec<u8>,
-        Vec<(Arc<String>, Arc<HeapValue>)>,
-    >(
+    register_typed_async_fn_3_full::<_, _, Arc<String>, Vec<u8>, Vec<(Arc<String>, Arc<HeapValue>)>>(
         &mut module,
         "post_bytes",
         "Perform an HTTP POST request with a binary body",
@@ -359,15 +344,10 @@ pub fn create_http_module() -> ModuleExports {
             options_param_3.clone(),
         ],
         response_ty_3.clone(),
-        |url: Arc<String>,
-         body: Vec<u8>,
-         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+        |url: Arc<String>, body: Vec<u8>, options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
             let mut builder = reqwest::Client::new()
                 .post(url.as_str())
-                .header(
-                    reqwest::header::CONTENT_TYPE,
-                    "application/octet-stream",
-                )
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
                 .body(body);
 
             for (k, v) in extract_headers(&options) {
@@ -416,15 +396,10 @@ pub fn create_http_module() -> ModuleExports {
             options_param_3.clone(),
         ],
         response_ty_3.clone(),
-        |url: Arc<String>,
-         body: Arc<String>,
-         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+        |url: Arc<String>, body: Arc<String>, options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
             let mut builder = reqwest::Client::new()
                 .put(url.as_str())
-                .header(
-                    reqwest::header::CONTENT_TYPE,
-                    "text/plain; charset=utf-8",
-                )
+                .header(reqwest::header::CONTENT_TYPE, "text/plain; charset=utf-8")
                 .body(body.as_str().to_string());
 
             for (k, v) in extract_headers(&options) {
@@ -457,27 +432,16 @@ pub fn create_http_module() -> ModuleExports {
     );
 
     // http.put_bytes(url: string, body: Array<int>, options?: HashMap) -> Result<HttpResponse>
-    register_typed_async_fn_3_full::<
-        _,
-        _,
-        Arc<String>,
-        Vec<u8>,
-        Vec<(Arc<String>, Arc<HeapValue>)>,
-    >(
+    register_typed_async_fn_3_full::<_, _, Arc<String>, Vec<u8>, Vec<(Arc<String>, Arc<HeapValue>)>>(
         &mut module,
         "put_bytes",
         "Perform an HTTP PUT request with a binary body",
         [url_param_3, body_bytes_param, options_param_3],
         response_ty_3,
-        |url: Arc<String>,
-         body: Vec<u8>,
-         options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
+        |url: Arc<String>, body: Vec<u8>, options: Vec<(Arc<String>, Arc<HeapValue>)>| async move {
             let mut builder = reqwest::Client::new()
                 .put(url.as_str())
-                .header(
-                    reqwest::header::CONTENT_TYPE,
-                    "application/octet-stream",
-                )
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
                 .body(body);
 
             for (k, v) in extract_headers(&options) {
@@ -543,8 +507,7 @@ pub fn create_http_module() -> ModuleExports {
         name: "options".to_string(),
         type_name: "HashMap<string, any>".to_string(),
         required: false,
-        description: "Request options: { headers?: HashMap, timeout?: int }"
-            .to_string(),
+        description: "Request options: { headers?: HashMap, timeout?: int }".to_string(),
         default_snippet: Some("{}".to_string()),
         ..Default::default()
     };
@@ -633,7 +596,11 @@ pub fn create_http_module() -> ModuleExports {
         &mut module,
         "put_json",
         "Perform an HTTP PUT request with a JSON body",
-        [url_param_post_json, body_object_param_put, options_param_post_json],
+        [
+            url_param_post_json,
+            body_object_param_put,
+            options_param_post_json,
+        ],
         response_ty_post_json,
         |url: Arc<String>,
          body: Vec<(Arc<String>, Arc<HeapValue>)>,

@@ -60,7 +60,6 @@ pub enum NumericType {
     Decimal,
 }
 
-
 // `NativeKind` (formerly `SlotKind`) is the single discriminator used at
 // every typed-ABI boundary. Moved to `shape-value::native_kind` so that
 // shape-runtime's marshal layer and shape-vm's compile-time proof share one
@@ -1494,10 +1493,7 @@ mod tests {
 
         // Unknown types — analysis-tier "not yet proven" is `None`
         // per ADR-006 §2.7.5.1 (no `NativeKind::Unknown` sentinel).
-        assert_eq!(
-            VariableTypeInfo::infer_storage_hint("SomeCustomType"),
-            None
-        );
+        assert_eq!(VariableTypeInfo::infer_storage_hint("SomeCustomType"), None);
     }
 
     #[test]
@@ -1571,10 +1567,7 @@ mod tests {
             Some(NativeKind::NullableFloat64)
         );
         // Bulldozer deleted the Unknown sink — complex types now return None.
-        assert_eq!(
-            native_kind_from_storage_type(&StorageType::Dynamic),
-            None
-        );
+        assert_eq!(native_kind_from_storage_type(&StorageType::Dynamic), None);
     }
 
     #[test]

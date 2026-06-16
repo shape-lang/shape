@@ -230,4 +230,3 @@ unsafe fn shared_cell_ptr(
     // SAFETY: see `owned_mutable_cell_ptr` above.
     unsafe { std::ptr::read((ptr as *const u8).add(off) as *const *const SharedCell) }
 }
-

@@ -188,25 +188,29 @@ fn find_doc_target(items: &[Item], text: &str, line: u32) -> Option<DocTemplateT
                                     .as_ref()
                                     .is_some_and(|ty| !matches!(ty, TypeAnnotation::Void)),
                             ),
-                            TraitMember::Required(shape_ast::ast::TraitMemberSignature::Method {
-                                params,
-                                return_type,
-                                doc_comment,
-                                ..
-                            }) => callable_target(
+                            TraitMember::Required(
+                                shape_ast::ast::TraitMemberSignature::Method {
+                                    params,
+                                    return_type,
+                                    doc_comment,
+                                    ..
+                                },
+                            ) => callable_target(
                                 span,
                                 doc_comment.is_some(),
                                 None,
                                 params.iter().filter_map(|param| param.name.clone()),
                                 !matches!(return_type, TypeAnnotation::Void),
                             ),
-                            TraitMember::Required(shape_ast::ast::TraitMemberSignature::Property {
-                                doc_comment,
-                                ..
-                            })
+                            TraitMember::Required(
+                                shape_ast::ast::TraitMemberSignature::Property {
+                                    doc_comment, ..
+                                },
+                            )
                             | TraitMember::Required(
                                 shape_ast::ast::TraitMemberSignature::IndexSignature {
-                                    doc_comment, ..
+                                    doc_comment,
+                                    ..
                                 },
                             )
                             | TraitMember::AssociatedType { doc_comment, .. } => {

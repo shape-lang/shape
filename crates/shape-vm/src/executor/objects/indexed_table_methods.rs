@@ -26,8 +26,8 @@
 //! `NotImplemented(SURFACE)`.
 
 use crate::executor::VirtualMachine;
-use shape_value::{KindedSlot, VMError};
 use shape_runtime::context::ExecutionContext;
+use shape_value::{KindedSlot, VMError};
 
 // In-progress phase-2c IndexedTable surface (cluster E-builtins-backlog): the
 // handlers + their `surface` helper are wired through the (currently un-consumed)

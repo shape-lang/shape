@@ -284,10 +284,9 @@ fn build_field_slot_from_json(
         (Value::Number(n), FieldType::I64) => {
             Ok((ValueSlot::from_int(n.as_i64().unwrap_or(0)), false))
         }
-        (Value::Number(n), FieldType::F64) | (Value::Number(n), FieldType::Decimal) => Ok((
-            ValueSlot::from_number(n.as_f64().unwrap_or(0.0)),
-            false,
-        )),
+        (Value::Number(n), FieldType::F64) | (Value::Number(n), FieldType::Decimal) => {
+            Ok((ValueSlot::from_number(n.as_f64().unwrap_or(0.0)), false))
+        }
         (Value::String(s), FieldType::String) => {
             Ok((ValueSlot::from_string_arc(Arc::new(s.clone())), true))
         }
@@ -376,11 +375,7 @@ fn build_typed_object_from_json(
         }
     }
 
-    Ok(build_typed_object(
-        schema.id as u64,
-        slots,
-        heap_mask,
-    ))
+    Ok(build_typed_object(schema.id as u64, slots, heap_mask))
 }
 
 /// Create the `json` module with JSON parsing and serialization functions.
@@ -440,9 +435,7 @@ pub fn create_json_module() -> ModuleExports {
         "__parse_typed",
         "Parse a JSON string into a typed struct",
         [("text", "string"), ("schema_id", "number")],
-        ConcreteType::Result(Box::new(ConcreteType::OpaqueTypedObject(
-            "any".to_string(),
-        ))),
+        ConcreteType::Result(Box::new(ConcreteType::OpaqueTypedObject("any".to_string()))),
         |text: Arc<String>, schema_id_f: f64, ctx| {
             let schema_id = schema_id_f as u32;
 
@@ -467,11 +460,12 @@ pub fn create_json_module() -> ModuleExports {
             })?;
             let json_schema_id = json_schema.id as u64;
 
-            let result_hv = build_typed_object_from_json(schema, &map, ctx.schemas, json_schema_id)?;
+            let result_hv =
+                build_typed_object_from_json(schema, &map, ctx.schemas, json_schema_id)?;
 
-            Ok(TypedReturn::Ok(ConcreteReturn::OpaqueTypedObject(Arc::new(
-                result_hv,
-            ))))
+            Ok(TypedReturn::Ok(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(result_hv),
+            )))
         },
     );
 
@@ -572,7 +566,6 @@ fn slot_as_string(slot: &KindedSlot) -> Option<Arc<String>> {
         Some(cloned)
     }
 }
-
 
 // Tests deleted along with the legacy ValueWord-based fixtures, mirroring
 // the csv/http/xml migrations. The test infrastructure (`invoke_export`,

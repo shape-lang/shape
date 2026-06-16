@@ -9,8 +9,8 @@
 //! `NativeKind::UInt64` (NativeScalar shape — non-Arc, no refcount).
 
 use crate::bytecode::{Instruction, OpCode};
-use crate::executor::vm_impl::stack::drop_with_kind;
 use crate::executor::VirtualMachine;
+use crate::executor::vm_impl::stack::drop_with_kind;
 use shape_value::{NativeKind, VMError};
 
 impl VirtualMachine {

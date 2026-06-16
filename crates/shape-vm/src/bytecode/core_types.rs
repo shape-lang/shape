@@ -433,11 +433,10 @@ pub struct BytecodeProgram {
     /// `function_return_concrete_types` — `ConcreteType` carries opaque
     /// per-program registry IDs that aren't a stable wire shape.
     #[serde(skip, default)]
-    pub value_call_return_concrete_types:
-        std::collections::HashMap<
-            (shape_ast::ast::span::Span, Option<usize>),
-            shape_value::v2::ConcreteType,
-        >,
+    pub value_call_return_concrete_types: std::collections::HashMap<
+        (shape_ast::ast::span::Span, Option<usize>),
+        shape_value::v2::ConcreteType,
+    >,
 
     /// ADR-006 §2.7.5 conduit — per-binop-or-unop-site operator trait
     /// dispatch side-table (W10 jit-call-method-user-trait-fix close,
@@ -566,8 +565,7 @@ pub struct BytecodeProgram {
     /// end of compilation from the compiler's `ClosureRegistry`. Not
     /// serialized — programs loaded from disk fall back to the FFI path.
     #[serde(skip, default)]
-    pub closure_function_layouts:
-        Vec<Option<Arc<shape_value::v2::closure_layout::ClosureLayout>>>,
+    pub closure_function_layouts: Vec<Option<Arc<shape_value::v2::closure_layout::ClosureLayout>>>,
 
     /// ADR-006 §2.7.24 Q25.C trait-object vtable registry.
     ///
@@ -579,10 +577,7 @@ pub struct BytecodeProgram {
     /// vtables are rebuilt on cached-program reload from
     /// `trait_method_symbols`.
     #[serde(skip, default)]
-    pub trait_vtables: std::collections::HashMap<
-        String,
-        Arc<shape_value::value::VTable>,
-    >,
+    pub trait_vtables: std::collections::HashMap<String, Arc<shape_value::value::VTable>>,
 
     /// R8 W8 Cluster A surface-and-stop flag (2026-05-25).
     ///

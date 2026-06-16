@@ -71,7 +71,11 @@ pub extern "C" fn jit_make_err(inner_bits: u64) -> u64 {
 
 /// Check if a value is Ok (returns TAG_BOOL_TRUE or TAG_BOOL_FALSE)
 pub extern "C" fn jit_is_ok(bits: u64) -> u64 {
-    if is_ok_tag(bits) { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE }
+    if is_ok_tag(bits) {
+        TAG_BOOL_TRUE
+    } else {
+        TAG_BOOL_FALSE
+    }
 }
 
 /// Check if a value is Err (returns TAG_BOOL_TRUE or TAG_BOOL_FALSE)
@@ -238,10 +242,7 @@ pub extern "C" fn jit_unwrap_some(bits: u64) -> u64 {
 /// `SHAPE_JIT_DEBUG=1` in the caller's own diagnostic, NOT a Bool-default
 /// rationalization per §2.7.7 #9).
 #[inline]
-fn decode_payload_kind_or_surface(
-    code: u8,
-    func_name: &str,
-) -> shape_value::NativeKind {
+fn decode_payload_kind_or_surface(code: u8, func_name: &str) -> shape_value::NativeKind {
     match super::stack_kind_code::decode(code) {
         Some(k) => k,
         None => {
@@ -561,8 +562,8 @@ mod tests {
     // (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A, 2026-05-12)
 
     use super::super::stack_kind_code;
-    use shape_value::heap_value::HeapKind;
     use shape_value::ValueSlot;
+    use shape_value::heap_value::HeapKind;
 
     /// Recover and free the Arc carriers without leaking, matching the
     /// §2.7.17 stack-tier drop dispatch.
@@ -652,12 +653,8 @@ mod tests {
         // with the HeapKind ordinal table per CLAUDE.md "Renames to refuse
         // on sight" — the kind-blind producer that doesn't stamp kind is
         // the W-series defection-attractor shape.
-        let result_code = stack_kind_code::encode(
-            shape_value::NativeKind::Ptr(HeapKind::Result),
-        );
-        let option_code = stack_kind_code::encode(
-            shape_value::NativeKind::Ptr(HeapKind::Option),
-        );
+        let result_code = stack_kind_code::encode(shape_value::NativeKind::Ptr(HeapKind::Result));
+        let option_code = stack_kind_code::encode(shape_value::NativeKind::Ptr(HeapKind::Option));
         assert_eq!(
             stack_kind_code::decode(result_code),
             Some(shape_value::NativeKind::Ptr(HeapKind::Result))

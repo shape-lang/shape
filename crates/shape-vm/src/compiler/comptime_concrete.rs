@@ -319,8 +319,7 @@ mod tests {
     #[test]
     fn annotation_int_resolves_to_typed_string() {
         let ann = TypeAnnotation::Basic("int".into());
-        let v = type_annotation_to_constant_value(&ann)
-            .expect("int annotation should resolve");
+        let v = type_annotation_to_constant_value(&ann).expect("int annotation should resolve");
         assert_eq!(v.concrete_type(), ConcreteType::String);
         assert_eq!(v.as_str(), Some("int"));
     }

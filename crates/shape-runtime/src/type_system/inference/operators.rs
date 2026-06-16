@@ -73,11 +73,7 @@ impl TypeInferenceEngine {
             // do not context-adopt (a `42u8` is a u8; `3.5` is a number).
             _ => return None,
         };
-        if fits {
-            Some(context.clone())
-        } else {
-            None
-        }
+        if fits { Some(context.clone()) } else { None }
     }
 
     /// A bare integer literal whose comparison/arithmetic partner is still an
@@ -210,9 +206,7 @@ impl TypeInferenceEngine {
     /// Wrap a type in Option<T>
     fn wrap_in_option(ty: Type) -> Type {
         Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Option".into()))),
             args: vec![ty],
         }
     }
@@ -222,7 +216,9 @@ impl TypeInferenceEngine {
         match ty {
             Type::Generic { base, args } if !args.is_empty() => match base.as_ref() {
                 Type::Concrete(ann)
-                    if ann.as_type_name_str().is_some_and(|n| n == "Result" || n == "Option") =>
+                    if ann
+                        .as_type_name_str()
+                        .is_some_and(|n| n == "Result" || n == "Option") =>
                 {
                     Some(args[0].clone())
                 }
@@ -275,10 +271,11 @@ impl TypeInferenceEngine {
             ) if BuiltinTypes::is_numeric_type_name(l)
                 && BuiltinTypes::is_numeric_type_name(r)
                 && BuiltinTypes::canonical_script_alias(l).is_some()
-                && BuiltinTypes::canonical_script_alias(l) == BuiltinTypes::canonical_script_alias(r) =>
+                && BuiltinTypes::canonical_script_alias(l)
+                    == BuiltinTypes::canonical_script_alias(r) =>
             {
-                let alias = BuiltinTypes::canonical_script_alias(l)
-                    .expect("guarded by is_some() above");
+                let alias =
+                    BuiltinTypes::canonical_script_alias(l).expect("guarded by is_some() above");
                 Type::Concrete(TypeAnnotation::Basic(alias.to_string()))
             }
             // Mixed concrete numeric across families → widen to number
@@ -333,9 +330,9 @@ impl TypeInferenceEngine {
     fn is_string_like(ty: &Type) -> bool {
         match ty {
             Type::Concrete(ann) if ann.as_type_name_str() == Some("string") => true,
-            Type::Concrete(TypeAnnotation::Union(types)) => types.iter().any(|ann| {
-                ann.as_type_name_str() == Some("string")
-            }),
+            Type::Concrete(TypeAnnotation::Union(types)) => types
+                .iter()
+                .any(|ann| ann.as_type_name_str() == Some("string")),
             Type::Generic { base, args } if args.len() == 1 => {
                 matches!(
                     base.as_ref(),
@@ -351,12 +348,13 @@ impl TypeInferenceEngine {
 
     fn is_vec_number(ty: &Type) -> bool {
         match ty {
-            Type::Concrete(TypeAnnotation::Array(inner)) => {
-                inner.as_type_name_str().is_some_and(|n| BuiltinTypes::is_numeric_type_name(n))
-            }
+            Type::Concrete(TypeAnnotation::Array(inner)) => inner
+                .as_type_name_str()
+                .is_some_and(|n| BuiltinTypes::is_numeric_type_name(n)),
             Type::Concrete(TypeAnnotation::Generic { name, args }) if name == "Vec" => {
                 args.first().is_some_and(|arg| {
-                    arg.as_type_name_str().is_some_and(|n| BuiltinTypes::is_numeric_type_name(n))
+                    arg.as_type_name_str()
+                        .is_some_and(|n| BuiltinTypes::is_numeric_type_name(n))
                 })
             }
             Type::Generic { base, args } if args.len() == 1 => {
@@ -376,7 +374,8 @@ impl TypeInferenceEngine {
         match ty {
             Type::Concrete(TypeAnnotation::Generic { name, args }) if name == "Mat" => {
                 args.first().is_some_and(|arg| {
-                    arg.as_type_name_str().is_some_and(|n| BuiltinTypes::is_numeric_type_name(n))
+                    arg.as_type_name_str()
+                        .is_some_and(|n| BuiltinTypes::is_numeric_type_name(n))
                 })
             }
             Type::Generic { base, args } if args.len() == 1 => {
@@ -907,9 +906,7 @@ mod tests {
     #[test]
     fn test_unwrap_option_generic() {
         let option_num = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Option".into()))),
             args: vec![BuiltinTypes::number()],
         };
         let inner = TypeInferenceEngine::unwrap_option_type(&option_num);
@@ -994,7 +991,12 @@ mod tests {
             let mut engine = TypeInferenceEngine::new();
             let before = engine.constraints.len();
             engine
-                .infer_binary_op(&basic("int"), &BinaryOp::Equal, &basic("string"), Span::DUMMY)
+                .infer_binary_op(
+                    &basic("int"),
+                    &BinaryOp::Equal,
+                    &basic("string"),
+                    Span::DUMMY,
+                )
                 .expect("equality should infer");
             assert_eq!(
                 engine.constraints.len(),
@@ -1020,7 +1022,12 @@ mod tests {
         // And the genuine mismatch `int ~ string` is actually rejected by the solver.
         let mut engine = TypeInferenceEngine::new();
         engine
-            .infer_binary_op(&basic("int"), &BinaryOp::Equal, &basic("string"), Span::DUMMY)
+            .infer_binary_op(
+                &basic("int"),
+                &BinaryOp::Equal,
+                &basic("string"),
+                Span::DUMMY,
+            )
             .expect("inference itself succeeds; the constraint is what fails");
         assert!(
             engine.solver.solve(&mut engine.constraints).is_err(),
@@ -1045,9 +1052,7 @@ mod tests {
             .expect("option !! context should infer");
 
         let expected = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
             args: vec![
                 BuiltinTypes::number(),
                 Type::Concrete(TypeAnnotation::Reference("AnyError".into())),
@@ -1060,9 +1065,7 @@ mod tests {
     fn test_error_context_keeps_result_inner_type() {
         let mut engine = TypeInferenceEngine::new();
         let result_num = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
             args: vec![
                 BuiltinTypes::number(),
                 Type::Concrete(TypeAnnotation::Reference("AnyError".into())),

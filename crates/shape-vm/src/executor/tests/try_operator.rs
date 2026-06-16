@@ -12,8 +12,7 @@ use shape_value::VMError;
 // Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
 
 fn compile_source(source: &str) -> Result<BytecodeProgram, VMError> {
-    let program =
-        parse_program(source).map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
+    let program = parse_program(source).map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
     let mut loader = shape_runtime::module_loader::ModuleLoader::new();
     let (graph, stdlib_names, prelude_imports) =
         crate::module_resolution::build_graph_and_stdlib_names(&program, &mut loader, &[])
@@ -78,7 +77,9 @@ fn test_try_unwrap_err_raises_uncaught_exception_at_top_level() {
 
 #[test]
 fn test_try_unwrap_none_raises_uncaught_exception_at_top_level() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted execute_bytecode_with_vm helper)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted execute_bytecode_with_vm helper)"
+    )
 }
 
 #[test]
@@ -168,7 +169,9 @@ fn test_error_context_then_try_short_circuits_with_err() {
 
 #[test]
 fn test_error_context_inline_try_syntax_without_parentheses() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted execute_source_with_vm helper)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted execute_source_with_vm helper)"
+    )
 }
 
 /// Create a TraceFrame object matching the builtin schema field order:
@@ -206,7 +209,11 @@ val
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
     let result = vm.execute(None).expect("execution should succeed").clone();
-    assert_eq!(result.as_f64(), Some(42.0), "Some(42) as number should be 42.0");
+    assert_eq!(
+        result.as_f64(),
+        Some(42.0),
+        "Some(42) as number should be 42.0"
+    );
 }
 
 #[test]
@@ -303,7 +310,11 @@ fn pb5_direct_string_as_int_fallible_success_yields_some() {
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
     let result = vm.execute(None).expect("execution should succeed").clone();
-    assert_eq!(result.as_i64(), Some(42), "\"42\" as int? should be Some(42)");
+    assert_eq!(
+        result.as_i64(),
+        Some(42),
+        "\"42\" as int? should be Some(42)"
+    );
 }
 
 #[test]

@@ -231,11 +231,16 @@ impl VirtualMachine {
                 string_id,
                 ..
             }) => {
-                let name = self.program.strings.get(string_id as usize).cloned().ok_or_else(
-                    || VMError::RuntimeError(
-                        "DynMethodCall: method-name StringId out of range".to_string(),
-                    ),
-                )?;
+                let name = self
+                    .program
+                    .strings
+                    .get(string_id as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        VMError::RuntimeError(
+                            "DynMethodCall: method-name StringId out of range".to_string(),
+                        )
+                    })?;
                 (arg_count as usize, name)
             }
             _ => {
@@ -389,7 +394,9 @@ impl VirtualMachine {
                 /*wrap_targets=*/ &[],
                 /*self_arg_positions=*/ &[],
             ),
-            VTableEntry::BoxedReturn { ref wrap_targets, .. } => self.invoke_dyn_unified(
+            VTableEntry::BoxedReturn {
+                ref wrap_targets, ..
+            } => self.invoke_dyn_unified(
                 runtime_function_id,
                 trait_object,
                 arg_count,
@@ -444,13 +451,7 @@ impl VirtualMachine {
             VTableEntry::Closure {
                 function_id,
                 type_id: _,
-            } => self.invoke_dyn_closure(
-                function_id,
-                trait_object,
-                arg_count,
-                receiver_idx,
-                ctx,
-            ),
+            } => self.invoke_dyn_closure(function_id, trait_object, arg_count, receiver_idx, ctx),
         }
     }
 
@@ -497,8 +498,7 @@ impl VirtualMachine {
                 .and_then(|x| x.checked_add(pos as usize))
                 .ok_or_else(|| {
                     VMError::RuntimeError(
-                        "DynMethodCall SelfArg: arg_idx arithmetic overflow"
-                            .to_string(),
+                        "DynMethodCall SelfArg: arg_idx arithmetic overflow".to_string(),
                     )
                 })?;
             if arg_idx >= self.sp {
@@ -543,8 +543,7 @@ impl VirtualMachine {
                      `Self` in argument position requires the argument's \
                      concrete type to match the receiver's. Receiver \
                      trait(s): {:?}; argument trait(s): {:?}.",
-                    pos, trait_object.vtable.trait_names,
-                    arg_trait_object.vtable.trait_names
+                    pos, trait_object.vtable.trait_names, arg_trait_object.vtable.trait_names
                 )));
             }
         }
@@ -562,7 +561,9 @@ impl VirtualMachine {
         // `Arc<TraitObjectStorage>` carrier still holds the original.
         // SAFETY: `trait_object.value` is non-null per universal-dyn
         // construction; the borrowed Arc keeps it live for this scope.
-        unsafe { shape_value::v2::refcount::v2_retain(&(*trait_object.value).header); }
+        unsafe {
+            shape_value::v2::refcount::v2_retain(&(*trait_object.value).header);
+        }
         let new_bits = trait_object.value as u64;
         let new_kind = NativeKind::Ptr(HeapKind::TypedObject);
         self.stack_write_kinded(receiver_idx, new_bits, new_kind);
@@ -574,13 +575,13 @@ impl VirtualMachine {
             debug_assert_eq!(arg_kind, NativeKind::Ptr(HeapKind::TraitObject));
             // SAFETY: validated above; transient borrow to read the
             // inner typed object ptr, then v2_retain-bump and install.
-            let arg_to: &TraitObjectStorage = unsafe {
-                &*(arg_bits as *const TraitObjectStorage)
-            };
+            let arg_to: &TraitObjectStorage = unsafe { &*(arg_bits as *const TraitObjectStorage) };
             let arg_inner_ptr = arg_to.value;
             // SAFETY: same as above — inner ptr is non-null and live
             // for the duration of the borrowed Arc carrier.
-            unsafe { shape_value::v2::refcount::v2_retain(&(*arg_inner_ptr).header); }
+            unsafe {
+                shape_value::v2::refcount::v2_retain(&(*arg_inner_ptr).header);
+            }
             let new_arg_bits = arg_inner_ptr as u64;
             self.stack_write_kinded(arg_idx, new_arg_bits, new_kind);
         }
@@ -613,12 +614,8 @@ impl VirtualMachine {
             self.push_kinded(ret_bits, ret_kind)?;
             return Ok(());
         }
-        let (wrapped_bits, wrapped_kind) = rewrap_return_value(
-            ret_bits,
-            ret_kind,
-            wrap_targets,
-            &trait_object.vtable,
-        )?;
+        let (wrapped_bits, wrapped_kind) =
+            rewrap_return_value(ret_bits, ret_kind, wrap_targets, &trait_object.vtable)?;
         self.push_kinded(wrapped_bits, wrapped_kind)?;
         Ok(())
     }
@@ -670,7 +667,8 @@ impl VirtualMachine {
              `call_value_immediate_nb`. The thunks tier (Wave 3 \
              W17-trait-object-thunks) reserves dispatch wire-through for \
              a future sub-cluster pending W7 emission. Storage shapes \
-             ready; emission gates the dispatch.".to_string(),
+             ready; emission gates the dispatch."
+                .to_string(),
         ))
     }
 
@@ -714,9 +712,7 @@ impl VirtualMachine {
         // operand — in that case the type is unknown at compile time;
         // we still pop+drop the slot (the kind dispatch handles refcount).
         let type_name_opt: Option<String> = match instruction.operand {
-            Some(Operand::Property(sid)) => {
-                self.program.strings.get(sid as usize).cloned()
-            }
+            Some(Operand::Property(sid)) => self.program.strings.get(sid as usize).cloned(),
             _ => None,
         };
 
@@ -879,7 +875,10 @@ fn rewrap_return_value(
                  (tuples & records) / HashMap / TypedArray. Wrap-targets: \
                  {:?}.",
                 other,
-                wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
+                wrap_targets
+                    .iter()
+                    .map(|w| w.path.as_slice())
+                    .collect::<Vec<_>>()
             )))
         }
     }
@@ -898,8 +897,7 @@ fn rebox_self_value(
         NativeKind::Ptr(HeapKind::TypedObject) => {
             if bits == 0 {
                 return Err(VMError::RuntimeError(
-                    "DynMethodCall BoxedReturn: null TypedObject return"
-                        .to_string(),
+                    "DynMethodCall BoxedReturn: null TypedObject return".to_string(),
                 ));
             }
             // Wave 2 Round 4 D4 ckpt-3 (2026-05-14): post-cascade slot
@@ -950,8 +948,7 @@ fn rewrap_result_payload(
     }
     // SAFETY: kind=Ptr(Result); bits are
     // `Arc::into_raw::<ResultData>(arc)`. Consume the share.
-    let result: Arc<ResultData> =
-        unsafe { Arc::from_raw(ret_bits as *const ResultData) };
+    let result: Arc<ResultData> = unsafe { Arc::from_raw(ret_bits as *const ResultData) };
     // Determine whether to re-box the payload. Path=[0] applies to
     // the Ok arm, path=[1] to the Err arm; matching against the
     // result's `is_ok` selects which we descend into.
@@ -986,10 +983,7 @@ fn rewrap_result_payload(
     ));
     let (new_payload_bits, new_payload_kind) =
         rewrap_return_value(payload_bits, payload_kind, &descendants, receiver_vtable)?;
-    new_result.payload = KindedSlot::new(
-        ValueSlot::from_raw(new_payload_bits),
-        new_payload_kind,
-    );
+    new_result.payload = KindedSlot::new(ValueSlot::from_raw(new_payload_bits), new_payload_kind);
     // Drop the borrowed `result` (releases the original share).
     drop(result);
     let new_arc = Arc::new(new_result);
@@ -1011,8 +1005,7 @@ fn rewrap_option_payload(
     }
     // SAFETY: kind=Ptr(Option); bits are
     // `Arc::into_raw::<OptionData>(arc)`. Consume the share.
-    let option: Arc<OptionData> =
-        unsafe { Arc::from_raw(ret_bits as *const OptionData) };
+    let option: Arc<OptionData> = unsafe { Arc::from_raw(ret_bits as *const OptionData) };
     if !option.is_some {
         // None: nothing to re-box.
         let raw = Arc::into_raw(option) as u64;
@@ -1039,10 +1032,7 @@ fn rewrap_option_payload(
     ));
     let (new_payload_bits, new_payload_kind) =
         rewrap_return_value(payload_bits, payload_kind, &descendants, receiver_vtable)?;
-    new_option.payload = KindedSlot::new(
-        ValueSlot::from_raw(new_payload_bits),
-        new_payload_kind,
-    );
+    new_option.payload = KindedSlot::new(ValueSlot::from_raw(new_payload_bits), new_payload_kind);
     drop(option);
     let new_arc = Arc::new(new_option);
     let raw = Arc::into_raw(new_arc) as u64;
@@ -1077,7 +1067,10 @@ fn rewrap_typed_object_fields(
          a trait-declared field-index lookup. The dispatch shell \
          surfaces; lifting this is a follow-up sub-cluster pending \
          the typed-record-rewrap recipe.",
-        wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
+        wrap_targets
+            .iter()
+            .map(|w| w.path.as_slice())
+            .collect::<Vec<_>>()
     )))
 }
 
@@ -1111,7 +1104,10 @@ fn rewrap_hashmap_values(
          C2a (runtime tier) + C2b (JIT FFI tier) close. The dispatch \
          shell surfaces; lifting this pairs with the \
          `rewrap_typed_object_fields` follow-up.",
-        wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
+        wrap_targets
+            .iter()
+            .map(|w| w.path.as_slice())
+            .collect::<Vec<_>>()
     )))
 }
 
@@ -1144,8 +1140,9 @@ fn rewrap_typed_array_elements(
          which is deleted (Wave 2 Round 1 Agent F, 2026-05-14, dead-arm \
          wholesale deletion). A user-facing Array<dyn T> carrier lands \
          per audit §A.3 row when reachability is required.",
-        wrap_targets.iter().map(|w| w.path.as_slice()).collect::<Vec<_>>()
+        wrap_targets
+            .iter()
+            .map(|w| w.path.as_slice())
+            .collect::<Vec<_>>()
     )))
 }
-
-

@@ -187,9 +187,7 @@ pub fn decode(code: u8) -> Option<NativeKind> {
         // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
         // 2026-05-19): canonical absence-of-value discriminator code.
         C_NULL => Some(NativeKind::Null),
-        c if c >= PTR_BASE && c < SENTINEL => {
-            decode_heap_kind(c - PTR_BASE).map(NativeKind::Ptr)
-        }
+        c if c >= PTR_BASE && c < SENTINEL => decode_heap_kind(c - PTR_BASE).map(NativeKind::Ptr),
         _ => None,
     }
 }

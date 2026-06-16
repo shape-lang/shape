@@ -25,8 +25,8 @@ use std::sync::Arc;
 /// Create the statistical intrinsics module with 4 typed-marshal entry points.
 pub fn create_statistical_intrinsics_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::intrinsics::statistical");
-    module.description = "Statistical intrinsics (correlation, covariance, percentile, median)"
-        .to_string();
+    module.description =
+        "Statistical intrinsics (correlation, covariance, percentile, median)".to_string();
 
     register_typed_fn_2::<_, Arc<Vec<f64>>, Arc<Vec<f64>>>(
         &mut module,

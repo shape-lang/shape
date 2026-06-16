@@ -529,8 +529,7 @@ fn lookup_method_def<'a>(
         match item {
             Item::Impl(impl_block, _) => {
                 if typename_base(&impl_block.target_type) == target_type {
-                    if let Some(method) =
-                        impl_block.methods.iter().find(|m| m.name == method_name)
+                    if let Some(method) = impl_block.methods.iter().find(|m| m.name == method_name)
                     {
                         return Some(method);
                     }
@@ -538,8 +537,7 @@ fn lookup_method_def<'a>(
             }
             Item::Extend(extend_stmt, _) => {
                 if typename_base(&extend_stmt.type_name) == target_type {
-                    if let Some(method) =
-                        extend_stmt.methods.iter().find(|m| m.name == method_name)
+                    if let Some(method) = extend_stmt.methods.iter().find(|m| m.name == method_name)
                     {
                         return Some(method);
                     }
@@ -1057,8 +1055,7 @@ let s = foo("hi")
     #[test]
     fn test_format_reference_aware_type_union_splits_primitives() {
         // Primitives stay unprefixed; non-primitives get the ref prefix.
-        let result =
-            format_reference_aware_type("int | string", Some(&ParamReferenceMode::Shared));
+        let result = format_reference_aware_type("int | string", Some(&ParamReferenceMode::Shared));
         // Should contain both `int` (no prefix) and `&string` (prefixed)
         assert!(
             result.contains("int") && result.contains("&string"),
@@ -1120,10 +1117,7 @@ let s = foo("hi")
             character: 13,
         };
         let result = get_signature_help(text, position);
-        assert!(
-            result.is_none(),
-            "expected None for unknown function call"
-        );
+        assert!(result.is_none(), "expected None for unknown function call");
     }
 
     #[test]

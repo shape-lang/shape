@@ -59,8 +59,8 @@ pub fn create_compress_module() -> ModuleExports {
             use flate2::read::GzDecoder;
             use std::io::Read;
 
-            let bytes = bytes_from_i64_slice(&data)
-                .map_err(|e| format!("compress.gunzip(): {}", e))?;
+            let bytes =
+                bytes_from_i64_slice(&data).map_err(|e| format!("compress.gunzip(): {}", e))?;
 
             let mut decoder = GzDecoder::new(&bytes[..]);
             let mut output = String::new();
@@ -96,8 +96,8 @@ pub fn create_compress_module() -> ModuleExports {
         "Array<int>",
         ConcreteType::String,
         |data, _ctx| {
-            let bytes = bytes_from_i64_slice(&data)
-                .map_err(|e| format!("compress.unzstd(): {}", e))?;
+            let bytes =
+                bytes_from_i64_slice(&data).map_err(|e| format!("compress.unzstd(): {}", e))?;
 
             let decompressed = zstd::decode_all(&bytes[..])
                 .map_err(|e| format!("compress.unzstd() failed: {}", e))?;
@@ -146,8 +146,8 @@ pub fn create_compress_module() -> ModuleExports {
             use flate2::read::DeflateDecoder;
             use std::io::Read;
 
-            let bytes = bytes_from_i64_slice(&data)
-                .map_err(|e| format!("compress.inflate(): {}", e))?;
+            let bytes =
+                bytes_from_i64_slice(&data).map_err(|e| format!("compress.inflate(): {}", e))?;
 
             let mut decoder = DeflateDecoder::new(&bytes[..]);
             let mut output = String::new();

@@ -21,7 +21,7 @@ use arrow_array::{BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use shape_value::datatable::DataTable;
 use shape_value::heap_value::{HeapKind, HeapValue, TableViewData};
-use shape_value::{KindedSlot, NativeKind, ValueSlot, VMError};
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 use std::sync::Arc;
 
 /// Read a `KindedSlot` as `i64` for an integer-typed table column.
@@ -204,13 +204,12 @@ impl VirtualMachine {
         }
 
         let arrow_schema = Arc::new(Schema::new(arrow_fields));
-        let batch =
-            arrow_array::RecordBatch::try_new(arrow_schema, columns).map_err(|e| {
-                VMError::RuntimeError(format!(
-                    "MakeTableFromRows: failed to create RecordBatch: {}",
-                    e
-                ))
-            })?;
+        let batch = arrow_array::RecordBatch::try_new(arrow_schema, columns).map_err(|e| {
+            VMError::RuntimeError(format!(
+                "MakeTableFromRows: failed to create RecordBatch: {}",
+                e
+            ))
+        })?;
 
         let dt = DataTable::with_type_name(batch, type_name).with_schema_id(schema_id);
         let table = Arc::new(dt);

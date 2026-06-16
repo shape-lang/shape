@@ -25,8 +25,7 @@
 use arrow_array::{Array, BooleanArray, Float64Array, Int64Array};
 use shape_runtime::context::ExecutionContext;
 use shape_value::{
-    DataTable, KindedSlot, NativeKind, TableViewData, ValueSlot, VMError,
-    heap_value::HeapKind,
+    DataTable, KindedSlot, NativeKind, TableViewData, VMError, ValueSlot, heap_value::HeapKind,
 };
 use std::sync::Arc;
 
@@ -99,7 +98,10 @@ fn col_numeric_agg(
     op: AggOp,
 ) -> Result<KindedSlot, VMError> {
     let col = dt.column_by_name(col_name).ok_or_else(|| {
-        VMError::RuntimeError(format!("datatable.{}: unknown column: {}", method, col_name))
+        VMError::RuntimeError(format!(
+            "datatable.{}: unknown column: {}",
+            method, col_name
+        ))
     })?;
     if let Some(f64a) = col.as_any().downcast_ref::<Float64Array>() {
         let n = f64a.len();
@@ -214,7 +216,9 @@ fn col_numeric_agg(
         }
         match op {
             AggOp::Sum => Ok(KindedSlot::from_int(count_true as i64)),
-            AggOp::Mean => Ok(KindedSlot::from_number((count_true as f64) / (count as f64))),
+            AggOp::Mean => Ok(KindedSlot::from_number(
+                (count_true as f64) / (count as f64),
+            )),
             AggOp::Min => Ok(KindedSlot::from_bool(count_true == count)),
             AggOp::Max => Ok(KindedSlot::from_bool(count_true > 0)),
         }
@@ -403,9 +407,7 @@ pub(crate) fn handle_sort(
         indices.sort_by(|&a, &b| {
             let va = f64a.value(a);
             let vb = f64a.value(b);
-            let ord = va
-                .partial_cmp(&vb)
-                .unwrap_or(std::cmp::Ordering::Equal);
+            let ord = va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal);
             if ascending { ord } else { ord.reverse() }
         });
     } else if let Some(i64a) = col.as_any().downcast_ref::<Int64Array>() {
@@ -500,11 +502,17 @@ pub(crate) fn handle_describe(
                 }
                 let v = f.value(i);
                 s += v;
-                if v < mn { mn = v; }
-                if v > mx { mx = v; }
+                if v < mn {
+                    mn = v;
+                }
+                if v > mx {
+                    mx = v;
+                }
                 c += 1;
             }
-            if c == 0 { continue; }
+            if c == 0 {
+                continue;
+            }
             (c as i64, s / (c as f64), mn, mx)
         } else if let Some(i) = col.as_any().downcast_ref::<Int64Array>() {
             let n = i.len();
@@ -518,11 +526,17 @@ pub(crate) fn handle_describe(
                 }
                 let v = i.value(k);
                 s += v as i128;
-                if v < mn { mn = v; }
-                if v > mx { mx = v; }
+                if v < mn {
+                    mn = v;
+                }
+                if v > mx {
+                    mx = v;
+                }
                 c += 1;
             }
-            if c == 0 { continue; }
+            if c == 0 {
+                continue;
+            }
             (c as i64, (s as f64) / (c as f64), mn as f64, mx as f64)
         } else {
             // Skip non-numeric columns silently — `describe` output is

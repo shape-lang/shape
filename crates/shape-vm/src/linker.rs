@@ -153,27 +153,26 @@ fn remap_operand(
         Operand::Const(i) => Operand::Const((const_base + i as usize) as u16),
         Operand::Property(i) => Operand::Property((string_base + i as usize) as u16),
         Operand::Name(StringId(i)) => Operand::Name(StringId((string_base + i as usize) as u32)),
-        Operand::Function(FunctionId(dep_idx)) => {
-            Operand::Function(FunctionId(remap_fid(
+        Operand::Function(FunctionId(dep_idx)) => Operand::Function(FunctionId(remap_fid(
+            dep_idx,
+            blob,
+            current_function_id,
+            hash_to_id,
+            name_to_id,
+        ))),
+        Operand::ClosureAlloc {
+            fid: FunctionId(dep_idx),
+            escapes,
+        } => Operand::ClosureAlloc {
+            fid: FunctionId(remap_fid(
                 dep_idx,
                 blob,
                 current_function_id,
                 hash_to_id,
                 name_to_id,
-            )))
-        }
-        Operand::ClosureAlloc { fid: FunctionId(dep_idx), escapes } => {
-            Operand::ClosureAlloc {
-                fid: FunctionId(remap_fid(
-                    dep_idx,
-                    blob,
-                    current_function_id,
-                    hash_to_id,
-                    name_to_id,
-                )),
-                escapes,
-            }
-        }
+            )),
+            escapes,
+        },
         Operand::TypedMethodCall {
             method_id,
             arg_count,
@@ -475,28 +474,22 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
             top_level_local_concrete_types: program.top_level_local_concrete_types.clone(),
             function_local_concrete_types: program.function_local_concrete_types.clone(),
             function_return_concrete_types: program.function_return_concrete_types.clone(),
-            monomorphized_method_call_sites:
-                program.monomorphized_method_call_sites.clone(),
+            monomorphized_method_call_sites: program.monomorphized_method_call_sites.clone(),
             // cluster-2-cw-IB-class-b: propagate the value-call return-
             // ConcreteType side-table through the parallel-link path so
             // the conduit producer can stamp value-call destinations
             // identically to the sequential path below.
-            value_call_return_concrete_types:
-                program.value_call_return_concrete_types.clone(),
+            value_call_return_concrete_types: program.value_call_return_concrete_types.clone(),
             // W10 jit-call-method-user-trait-fix (2026-05-17): propagate
             // the operator-trait-dispatch side-table through the
             // parallel-link path so the JIT consumer can re-emit
             // user-type binary/unary operators as method-call IR.
-            operator_trait_dispatch_sites:
-                program.operator_trait_dispatch_sites.clone(),
+            operator_trait_dispatch_sites: program.operator_trait_dispatch_sites.clone(),
             trait_method_symbols: program.trait_method_symbols.clone(),
             foreign_functions: program.foreign_functions.clone(),
             native_struct_layouts: program.native_struct_layouts.clone(),
             total_required_permissions: total_required_permissions.clone(),
-            closure_function_layouts: remap_closure_function_layouts(
-                program,
-                &blobs,
-            ),
+            closure_function_layouts: remap_closure_function_layouts(program, &blobs),
             trait_vtables: program.trait_vtables.clone(),
             has_imported_const_inline: program.has_imported_const_inline,
             has_w17_marshal_residual: program.has_w17_marshal_residual,
@@ -604,20 +597,17 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
         top_level_local_concrete_types: program.top_level_local_concrete_types.clone(),
         function_local_concrete_types: program.function_local_concrete_types.clone(),
         function_return_concrete_types: program.function_return_concrete_types.clone(),
-        monomorphized_method_call_sites:
-            program.monomorphized_method_call_sites.clone(),
+        monomorphized_method_call_sites: program.monomorphized_method_call_sites.clone(),
         // cluster-2-cw-IB-class-b: propagate the value-call return-
         // ConcreteType side-table through the sequential-link path so
         // the conduit producer's value-call destination stamping fires
         // on linked programs.
-        value_call_return_concrete_types:
-            program.value_call_return_concrete_types.clone(),
+        value_call_return_concrete_types: program.value_call_return_concrete_types.clone(),
         // W10 jit-call-method-user-trait-fix (2026-05-17): propagate
         // the operator-trait-dispatch side-table through the
         // sequential-link path so the JIT consumer's user-type operator
         // dispatch fires on linked programs.
-        operator_trait_dispatch_sites:
-            program.operator_trait_dispatch_sites.clone(),
+        operator_trait_dispatch_sites: program.operator_trait_dispatch_sites.clone(),
         trait_method_symbols: program.trait_method_symbols.clone(),
         foreign_functions: program.foreign_functions.clone(),
         native_struct_layouts: program.native_struct_layouts.clone(),
@@ -704,20 +694,17 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
         top_level_local_concrete_types: linked.top_level_local_concrete_types.clone(),
         function_local_concrete_types: linked.function_local_concrete_types.clone(),
         function_return_concrete_types: linked.function_return_concrete_types.clone(),
-        monomorphized_method_call_sites:
-            linked.monomorphized_method_call_sites.clone(),
+        monomorphized_method_call_sites: linked.monomorphized_method_call_sites.clone(),
         // cluster-2-cw-IB-class-b: propagate the value-call return-
         // ConcreteType side-table through the LinkedProgram →
         // BytecodeProgram round-trip; the conduit producer consumes
         // this on the post-link BytecodeProgram surface.
-        value_call_return_concrete_types:
-            linked.value_call_return_concrete_types.clone(),
+        value_call_return_concrete_types: linked.value_call_return_concrete_types.clone(),
         // W10 jit-call-method-user-trait-fix (2026-05-17): propagate
         // the operator-trait-dispatch side-table through the
         // LinkedProgram → BytecodeProgram round-trip; the JIT consumer
         // reads this on the post-link BytecodeProgram surface.
-        operator_trait_dispatch_sites:
-            linked.operator_trait_dispatch_sites.clone(),
+        operator_trait_dispatch_sites: linked.operator_trait_dispatch_sites.clone(),
         top_level_mir: None,
         compiled_annotations: HashMap::new(),
         trait_method_symbols: linked.trait_method_symbols.clone(),

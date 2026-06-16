@@ -478,9 +478,7 @@ impl EnvironmentAnalyzer {
                 }
             }
             Expr::QualifiedFunctionCall {
-                namespace,
-                args,
-                ..
+                namespace, args, ..
             } => {
                 self.check_variable_reference(namespace);
                 for arg in args {

@@ -167,14 +167,10 @@ impl BytecodeCompiler {
                 // Nested struct field — propagate the inner schema so a
                 // nested object destructure (`let { p: { x } } = …`)
                 // resolves the inner field operands.
-                if let Some(nested) =
-                    self.type_tracker.schema_registry().get(type_name.as_str())
-                {
+                if let Some(nested) = self.type_tracker.schema_registry().get(type_name.as_str()) {
                     self.last_expr_schema = Some(nested.id);
-                    self.last_expr_type_info = Some(VariableTypeInfo::known(
-                        nested.id,
-                        type_name.clone(),
-                    ));
+                    self.last_expr_type_info =
+                        Some(VariableTypeInfo::known(nested.id, type_name.clone()));
                 }
             }
             // W17.3-4.2 — per-container destructure narrowing. When the
@@ -197,16 +193,13 @@ impl BytecodeCompiler {
             // §1 single-discriminator preserved; the container variants
             // carry the inner FieldTypes inline).
             FieldType::Array(_) => {
-                self.last_expr_type_info =
-                    Some(VariableTypeInfo::named("array".to_string()));
+                self.last_expr_type_info = Some(VariableTypeInfo::named("array".to_string()));
             }
             FieldType::HashMap { .. } => {
-                self.last_expr_type_info =
-                    Some(VariableTypeInfo::named("hashmap".to_string()));
+                self.last_expr_type_info = Some(VariableTypeInfo::named("hashmap".to_string()));
             }
             FieldType::Set(_) => {
-                self.last_expr_type_info =
-                    Some(VariableTypeInfo::named("set".to_string()));
+                self.last_expr_type_info = Some(VariableTypeInfo::named("set".to_string()));
             }
             _ => {
                 if let Some(tn) = Self::destructure_field_scalar_type_name(&field_type) {
@@ -225,53 +218,46 @@ impl BytecodeCompiler {
                                 Some(crate::type_tracking::NumericType::Decimal);
                         }
                         FieldType::I8 => {
-                            self.last_expr_numeric_type = Some(
-                                crate::type_tracking::NumericType::IntWidth(
+                            self.last_expr_numeric_type =
+                                Some(crate::type_tracking::NumericType::IntWidth(
                                     shape_ast::IntWidth::I8,
-                                ),
-                            );
+                                ));
                         }
                         FieldType::U8 => {
-                            self.last_expr_numeric_type = Some(
-                                crate::type_tracking::NumericType::IntWidth(
+                            self.last_expr_numeric_type =
+                                Some(crate::type_tracking::NumericType::IntWidth(
                                     shape_ast::IntWidth::U8,
-                                ),
-                            );
+                                ));
                         }
                         FieldType::I16 => {
-                            self.last_expr_numeric_type = Some(
-                                crate::type_tracking::NumericType::IntWidth(
+                            self.last_expr_numeric_type =
+                                Some(crate::type_tracking::NumericType::IntWidth(
                                     shape_ast::IntWidth::I16,
-                                ),
-                            );
+                                ));
                         }
                         FieldType::U16 => {
-                            self.last_expr_numeric_type = Some(
-                                crate::type_tracking::NumericType::IntWidth(
+                            self.last_expr_numeric_type =
+                                Some(crate::type_tracking::NumericType::IntWidth(
                                     shape_ast::IntWidth::U16,
-                                ),
-                            );
+                                ));
                         }
                         FieldType::I32 => {
-                            self.last_expr_numeric_type = Some(
-                                crate::type_tracking::NumericType::IntWidth(
+                            self.last_expr_numeric_type =
+                                Some(crate::type_tracking::NumericType::IntWidth(
                                     shape_ast::IntWidth::I32,
-                                ),
-                            );
+                                ));
                         }
                         FieldType::U32 => {
-                            self.last_expr_numeric_type = Some(
-                                crate::type_tracking::NumericType::IntWidth(
+                            self.last_expr_numeric_type =
+                                Some(crate::type_tracking::NumericType::IntWidth(
                                     shape_ast::IntWidth::U32,
-                                ),
-                            );
+                                ));
                         }
                         FieldType::U64 => {
-                            self.last_expr_numeric_type = Some(
-                                crate::type_tracking::NumericType::IntWidth(
+                            self.last_expr_numeric_type =
+                                Some(crate::type_tracking::NumericType::IntWidth(
                                     shape_ast::IntWidth::U64,
-                                ),
-                            );
+                                ));
                         }
                         _ => {}
                     }
@@ -315,9 +301,7 @@ impl BytecodeCompiler {
         };
         let type_name: Option<String> = match &field_type {
             shape_runtime::type_schema::FieldType::Object(tn) => Some(tn.clone()),
-            other => {
-                Self::destructure_field_scalar_type_name(other).map(|s| s.to_string())
-            }
+            other => Self::destructure_field_scalar_type_name(other).map(|s| s.to_string()),
         };
         let Some(tn) = type_name else {
             return;
@@ -385,8 +369,7 @@ impl BytecodeCompiler {
                     .any(|p| matches!(p, DestructurePattern::Rest(_)))
                 {
                     return Err(ShapeError::SemanticError {
-                        message: "array rest-pattern (`[a, ...rest]`) is not supported"
-                            .to_string(),
+                        message: "array rest-pattern (`[a, ...rest]`) is not supported".to_string(),
                         location: None,
                     });
                 }
@@ -621,8 +604,7 @@ impl BytecodeCompiler {
                     .any(|p| matches!(p, DestructurePattern::Rest(_)))
                 {
                     return Err(ShapeError::SemanticError {
-                        message: "array rest-pattern (`[a, ...rest]`) is not supported"
-                            .to_string(),
+                        message: "array rest-pattern (`[a, ...rest]`) is not supported".to_string(),
                         location: None,
                     });
                 }
@@ -839,8 +821,7 @@ impl BytecodeCompiler {
                     .any(|p| matches!(p, DestructurePattern::Rest(_)))
                 {
                     return Err(ShapeError::SemanticError {
-                        message: "array rest-pattern (`[a, ...rest]`) is not supported"
-                            .to_string(),
+                        message: "array rest-pattern (`[a, ...rest]`) is not supported".to_string(),
                         location: None,
                     });
                 }
@@ -1054,12 +1035,7 @@ impl BytecodeCompiler {
                         let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> =
                             fields
                                 .iter()
-                                .map(|n| {
-                                    (
-                                        n.as_str(),
-                                        shape_runtime::type_schema::FieldType::Any,
-                                    )
-                                })
+                                .map(|n| (n.as_str(), shape_runtime::type_schema::FieldType::Any))
                                 .collect();
                         self.type_tracker
                             .register_inline_object_schema_typed(&typed_fields)
@@ -1259,6 +1235,9 @@ mod ws4_destructure_tests {
             first
             "#,
         );
-        assert!(result.is_ok(), "string-field destructure failed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "string-field destructure failed: {result:?}"
+        );
     }
 }

@@ -572,7 +572,10 @@ mod tests {
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         // At entry of bb0, nothing is initialized (correct: writes happen inside).
         let init_at_entry = result
@@ -652,7 +655,10 @@ mod tests {
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         // At bb3 entry, _0.0 should NOT be definitely initialized (missing from bb2 path).
         let init_at_bb3 = result
@@ -742,7 +748,10 @@ mod tests {
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         // At bb3 entry, _0.0 SHOULD be definitely initialized.
         let init_at_bb3 = result
@@ -816,7 +825,10 @@ mod tests {
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         // _0.0 is read → not dead.
         assert!(!result.dead_fields.contains(&(SlotId(0), FieldIdx(0))));
@@ -870,7 +882,10 @@ mod tests {
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         // _0.0 should be live at entry of bb1 (read there).
         let live_bb1 = result
@@ -964,7 +979,10 @@ mod tests {
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         // At bb3 entry (after loop exit), _0.0 is NOT definitely initialized
         // because the path bb0 → bb1 → bb3 never writes _0.0.
@@ -1009,7 +1027,10 @@ mod tests {
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         assert!(result.dead_fields.is_empty());
         assert!(result.conditionally_initialized.is_empty());
@@ -1070,7 +1091,10 @@ mod tests {
         };
 
         let cfg = ControlFlowGraph::build(&mir);
-        let result = analyze_fields(&FieldAnalysisInput { mir: &mir, cfg: &cfg });
+        let result = analyze_fields(&FieldAnalysisInput {
+            mir: &mir,
+            cfg: &cfg,
+        });
 
         // Both fields are read → not dead.
         assert!(!result.dead_fields.contains(&(SlotId(0), FieldIdx(0))));

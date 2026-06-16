@@ -132,9 +132,10 @@ pub fn concrete_to_annotation(ct: &ConcreteType) -> TypeAnnotation {
         // collides with a user identifier.
         ConcreteType::Struct(id) => match id.name_str() {
             Some(name) => TypeAnnotation::Reference(TypePath::simple(name.to_string())),
-            None => {
-                TypeAnnotation::Reference(TypePath::simple(format!("__mono_struct_{}", id.layout.0)))
-            }
+            None => TypeAnnotation::Reference(TypePath::simple(format!(
+                "__mono_struct_{}",
+                id.layout.0
+            ))),
         },
         ConcreteType::Enum(id) => match id.name_str() {
             Some(name) => TypeAnnotation::Reference(TypePath::simple(name.to_string())),
@@ -165,9 +166,7 @@ pub fn concrete_to_annotation(ct: &ConcreteType) -> TypeAnnotation {
             name: TypePath::simple("Deque"),
             args: vec![concrete_to_annotation(elem)],
         },
-        ConcreteType::PriorityQueue => {
-            TypeAnnotation::Reference(TypePath::simple("PriorityQueue"))
-        }
+        ConcreteType::PriorityQueue => TypeAnnotation::Reference(TypePath::simple("PriorityQueue")),
         ConcreteType::Channel(elem) => TypeAnnotation::Generic {
             name: TypePath::simple("Channel"),
             args: vec![concrete_to_annotation(elem)],
@@ -390,10 +389,14 @@ fn synthesize_empty_array_result_annotation(def: &mut FunctionDef) {
     // Step 1: read the concrete element type out of the return annotation,
     // if it is `Array<C>`. Bail otherwise.
     let elem_annotation: TypeAnnotation = match def.return_type.as_ref() {
-        Some(TypeAnnotation::Generic { name, args }) if name.as_str() == "Array" && args.len() == 1 => {
+        Some(TypeAnnotation::Generic { name, args })
+            if name.as_str() == "Array" && args.len() == 1 =>
+        {
             args[0].clone()
         }
-        Some(TypeAnnotation::Generic { name, args }) if name.as_str() == "Vec" && args.len() == 1 => {
+        Some(TypeAnnotation::Generic { name, args })
+            if name.as_str() == "Vec" && args.len() == 1 =>
+        {
             args[0].clone()
         }
         Some(TypeAnnotation::Array(inner)) => (**inner).clone(),
@@ -521,7 +524,11 @@ pub fn substitute_function_def_with_consts(
 
     // Use the caller-supplied mono_key directly so this stays in lock-step
     // with `build_mono_key_with_consts`.
-    cloned.name = format!("{}::{}", def.name, strip_fn_name_prefix(&def.name, mono_key));
+    cloned.name = format!(
+        "{}::{}",
+        def.name,
+        strip_fn_name_prefix(&def.name, mono_key)
+    );
 
     // The cloned function is now fully concrete; drop generics so the rest
     // of the pipeline doesn't try to re-instantiate it.
@@ -727,10 +734,7 @@ fn substitute_const_in_statement(
 /// The exhaustive match mirrors [`substitute_expr`] — adding a new `Expr`
 /// variant to the AST forces a compile error here, driving the CLAUDE.md
 /// "Exhaustive Match Rule" guarantee.
-fn substitute_const_in_expr(
-    expr: &Expr,
-    const_subs: &HashMap<String, ComptimeConstValue>,
-) -> Expr {
+fn substitute_const_in_expr(expr: &Expr, const_subs: &HashMap<String, ComptimeConstValue>) -> Expr {
     if const_subs.is_empty() {
         return expr.clone();
     }
@@ -1296,10 +1300,9 @@ fn substitute_const_in_expr(
             *span,
         ),
 
-        Expr::AsyncScope(inner, span) => Expr::AsyncScope(
-            Box::new(substitute_const_in_expr(inner, const_subs)),
-            *span,
-        ),
+        Expr::AsyncScope(inner, span) => {
+            Expr::AsyncScope(Box::new(substitute_const_in_expr(inner, const_subs)), *span)
+        }
 
         Expr::Comptime(stmts, span) => Expr::Comptime(
             stmts
@@ -1529,11 +1532,10 @@ fn substitute_statement(stmt: &Statement, subs: &HashMap<String, ConcreteType>) 
                     .iter()
                     .map(|s| substitute_statement(s, subs))
                     .collect(),
-                else_body: if_stmt.else_body.as_ref().map(|body| {
-                    body.iter()
-                        .map(|s| substitute_statement(s, subs))
-                        .collect()
-                }),
+                else_body: if_stmt
+                    .else_body
+                    .as_ref()
+                    .map(|body| body.iter().map(|s| substitute_statement(s, subs)).collect()),
             },
             *span,
         ),
@@ -1576,10 +1578,7 @@ fn substitute_statement(stmt: &Statement, subs: &HashMap<String, ConcreteType>) 
         },
 
         Statement::ReplaceBody { body, span } => Statement::ReplaceBody {
-            body: body
-                .iter()
-                .map(|s| substitute_statement(s, subs))
-                .collect(),
+            body: body.iter().map(|s| substitute_statement(s, subs)).collect(),
             span: *span,
         },
 
@@ -1846,8 +1845,7 @@ fn substitute_expr(expr: &Expr, subs: &HashMap<String, ConcreteType>) -> Expr {
                     }
                     BlockItem::Assignment(assign) => {
                         let mut new_assign = assign.clone();
-                        new_assign.pattern =
-                            substitute_destructure_pattern(&assign.pattern, subs);
+                        new_assign.pattern = substitute_destructure_pattern(&assign.pattern, subs);
                         new_assign.value = substitute_expr(&assign.value, subs);
                         BlockItem::Assignment(new_assign)
                     }
@@ -1897,9 +1895,7 @@ fn substitute_expr(expr: &Expr, subs: &HashMap<String, ConcreteType>) -> Expr {
             span: *span,
         },
 
-        Expr::Spread(inner, span) => {
-            Expr::Spread(Box::new(substitute_expr(inner, subs)), *span)
-        }
+        Expr::Spread(inner, span) => Expr::Spread(Box::new(substitute_expr(inner, subs)), *span),
 
         Expr::If(if_expr, span) => Expr::If(
             Box::new(IfExpr {
@@ -1999,7 +1995,10 @@ fn substitute_expr(expr: &Expr, subs: &HashMap<String, ConcreteType>) -> Expr {
                     .iter()
                     .map(|arm| MatchArm {
                         pattern: substitute_pattern(&arm.pattern, subs),
-                        guard: arm.guard.as_ref().map(|g| Box::new(substitute_expr(g, subs))),
+                        guard: arm
+                            .guard
+                            .as_ref()
+                            .map(|g| Box::new(substitute_expr(g, subs))),
                         body: Box::new(substitute_expr(&arm.body, subs)),
                         pattern_span: arm.pattern_span,
                     })
@@ -2416,21 +2415,43 @@ fn inline_closure_calls_in_statement(
     closure_body: &[shape_ast::ast::Statement],
     closure_param_annotations: &[Option<shape_ast::ast::TypeAnnotation>],
 ) -> shape_ast::ast::Statement {
-    use shape_ast::ast::{Statement, statements::{ForInit, ForLoop, IfStatement, WhileLoop}};
+    use shape_ast::ast::{
+        Statement,
+        statements::{ForInit, ForLoop, IfStatement, WhileLoop},
+    };
     match stmt {
         Statement::Return(expr, span) => Statement::Return(
-            expr.as_ref()
-                .map(|e| inline_closure_calls_in_expr(e, closure_param_name, closure_params, closure_body, closure_param_annotations)),
+            expr.as_ref().map(|e| {
+                inline_closure_calls_in_expr(
+                    e,
+                    closure_param_name,
+                    closure_params,
+                    closure_body,
+                    closure_param_annotations,
+                )
+            }),
             *span,
         ),
         Statement::Expression(expr, span) => Statement::Expression(
-            inline_closure_calls_in_expr(expr, closure_param_name, closure_params, closure_body, closure_param_annotations),
+            inline_closure_calls_in_expr(
+                expr,
+                closure_param_name,
+                closure_params,
+                closure_body,
+                closure_param_annotations,
+            ),
             *span,
         ),
         Statement::VariableDecl(decl, span) => {
             let mut new_decl = decl.clone();
             new_decl.value = decl.value.as_ref().map(|e| {
-                inline_closure_calls_in_expr(e, closure_param_name, closure_params, closure_body, closure_param_annotations)
+                inline_closure_calls_in_expr(
+                    e,
+                    closure_param_name,
+                    closure_params,
+                    closure_body,
+                    closure_param_annotations,
+                )
             });
             Statement::VariableDecl(new_decl, *span)
         }
@@ -2465,7 +2486,11 @@ fn inline_closure_calls_in_statement(
                         closure_param_annotations,
                     ),
                 },
-                ForInit::ForC { init, condition, update } => ForInit::ForC {
+                ForInit::ForC {
+                    init,
+                    condition,
+                    update,
+                } => ForInit::ForC {
                     init: Box::new(inline_closure_calls_in_statement(
                         init,
                         closure_param_name,
@@ -2623,7 +2648,12 @@ fn inline_closure_calls_in_expr(
                     )
                 })
                 .collect();
-            return build_inlined_closure_block(closure_params, &rewritten_args, closure_body, closure_param_annotations);
+            return build_inlined_closure_block(
+                closure_params,
+                &rewritten_args,
+                closure_body,
+                closure_param_annotations,
+            );
         }
     }
 
@@ -2631,13 +2661,24 @@ fn inline_closure_calls_in_expr(
     // Expr variant that can hold sub-expressions. This is verbose but
     // correct: any variant not matched here falls through unchanged.
     let rec = |e: &Expr| {
-        inline_closure_calls_in_expr(e, closure_param_name, closure_params, closure_body, closure_param_annotations)
+        inline_closure_calls_in_expr(
+            e,
+            closure_param_name,
+            closure_params,
+            closure_body,
+            closure_param_annotations,
+        )
     };
     let rec_box = |e: &Box<Expr>| Box::new(rec(e));
     let rec_vec = |v: &Vec<Expr>| v.iter().map(rec).collect();
 
     match expr {
-        Expr::BinaryOp { left, op, right, span } => Expr::BinaryOp {
+        Expr::BinaryOp {
+            left,
+            op,
+            right,
+            span,
+        } => Expr::BinaryOp {
             left: rec_box(left),
             op: op.clone(),
             right: rec_box(right),
@@ -2648,7 +2689,12 @@ fn inline_closure_calls_in_expr(
             operand: rec_box(operand),
             span: *span,
         },
-        Expr::FunctionCall { name, args, named_args, span } => Expr::FunctionCall {
+        Expr::FunctionCall {
+            name,
+            args,
+            named_args,
+            span,
+        } => Expr::FunctionCall {
             name: name.clone(),
             args: args.iter().map(rec).collect(),
             named_args: named_args
@@ -2657,13 +2703,21 @@ fn inline_closure_calls_in_expr(
                 .collect(),
             span: *span,
         },
-        Expr::MethodCall { receiver, method, args, named_args, optional, span } => {
+        Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            named_args,
+            optional,
+            span,
+        } => {
             // cluster-2-cw-2-phaseC-inlining empirical trace (2026-05-16).
             if std::env::var_os("SHAPE_JIT_DEBUG").is_some() {
                 PHASEC_TRACE_METHOD_CALL.with(|c| c.set(c.get() + 1));
                 eprintln!(
                     "[phaseC-empirical]   MethodCall method={:?} args_count={}",
-                    method, args.len(),
+                    method,
+                    args.len(),
                 );
             }
             Expr::MethodCall {
@@ -2678,13 +2732,23 @@ fn inline_closure_calls_in_expr(
                 span: *span,
             }
         }
-        Expr::PropertyAccess { object, property, optional, span } => Expr::PropertyAccess {
+        Expr::PropertyAccess {
+            object,
+            property,
+            optional,
+            span,
+        } => Expr::PropertyAccess {
             object: rec_box(object),
             property: property.clone(),
             optional: *optional,
             span: *span,
         },
-        Expr::IndexAccess { object, index, end_index, span } => Expr::IndexAccess {
+        Expr::IndexAccess {
+            object,
+            index,
+            end_index,
+            span,
+        } => Expr::IndexAccess {
             object: rec_box(object),
             index: rec_box(index),
             end_index: end_index.as_ref().map(|e| rec_box(e)),
@@ -2720,15 +2784,15 @@ fn inline_closure_calls_in_expr(
                 .iter()
                 .map(|item| match item {
                     BlockItem::Expression(e) => BlockItem::Expression(rec(e)),
-                    BlockItem::Statement(s) => BlockItem::Statement(
-                        inline_closure_calls_in_statement(
+                    BlockItem::Statement(s) => {
+                        BlockItem::Statement(inline_closure_calls_in_statement(
                             s,
                             closure_param_name,
                             closure_params,
                             closure_body,
                             closure_param_annotations,
-                        ),
-                    ),
+                        ))
+                    }
                     BlockItem::VariableDecl(decl) => {
                         let mut new_decl = decl.clone();
                         new_decl.value = decl.value.as_ref().map(rec);
@@ -3021,10 +3085,8 @@ mod tests {
             other => panic!("expected Generic, got {:?}", other),
         }
 
-        let map = ConcreteType::HashMap(
-            Box::new(ConcreteType::String),
-            Box::new(ConcreteType::I64),
-        );
+        let map =
+            ConcreteType::HashMap(Box::new(ConcreteType::String), Box::new(ConcreteType::I64));
         match concrete_to_annotation(&map) {
             TypeAnnotation::Generic { name, args } => {
                 assert_eq!(name.as_str(), "HashMap");
@@ -3108,10 +3170,7 @@ mod tests {
         );
 
         // Return type is `int`.
-        assert_eq!(
-            mono.return_type,
-            Some(TypeAnnotation::Basic("int".into()))
-        );
+        assert_eq!(mono.return_type, Some(TypeAnnotation::Basic("int".into())));
 
         // Generics dropped.
         assert!(mono.type_params.is_none());
@@ -3328,12 +3387,8 @@ mod tests {
         let mut const_subs: HashMap<String, ComptimeConstValue> = HashMap::new();
         const_subs.insert("__const_0".into(), ComptimeConstValue::Int(3));
 
-        let mono = substitute_function_def_with_consts(
-            &func,
-            &type_subs,
-            &const_subs,
-            "repeat::int_3",
-        );
+        let mono =
+            substitute_function_def_with_consts(&func, &type_subs, &const_subs, "repeat::int_3");
 
         // Name follows the `<base>::<suffix>` convention.
         assert_eq!(mono.name, "repeat::int_3");
@@ -3347,12 +3402,8 @@ mod tests {
         let mut const_subs: HashMap<String, ComptimeConstValue> = HashMap::new();
         const_subs.insert("__const_0".into(), ComptimeConstValue::Int(3));
 
-        let mono = substitute_function_def_with_consts(
-            &func,
-            &type_subs,
-            &const_subs,
-            "repeat::int_3",
-        );
+        let mono =
+            substitute_function_def_with_consts(&func, &type_subs, &const_subs, "repeat::int_3");
 
         // Body should now be `return 3` instead of `return __const_0`.
         match &mono.body[0] {
@@ -3402,12 +3453,7 @@ mod tests {
         let type_subs: HashMap<String, ConcreteType> = HashMap::new();
         let const_subs: HashMap<String, ComptimeConstValue> = HashMap::new();
 
-        let mono = substitute_function_def_with_consts(
-            &func,
-            &type_subs,
-            &const_subs,
-            "repeat",
-        );
+        let mono = substitute_function_def_with_consts(&func, &type_subs, &const_subs, "repeat");
 
         // Body identifier is preserved as-is.
         match &mono.body[0] {
@@ -3559,15 +3605,7 @@ mod tests {
             is_async: false,
             is_comptime: false,
         };
-        super::inline_closure_body_into_specialization(
-            &mut spec,
-            "f",
-            &[],
-            &[],
-            &[],
-            &[],
-        )
-        .unwrap();
+        super::inline_closure_body_into_specialization(&mut spec, "f", &[], &[], &[], &[]).unwrap();
         assert_eq!(spec.name, "original_name");
     }
 
@@ -3649,15 +3687,7 @@ mod tests {
             is_async: false,
             is_comptime: false,
         };
-        super::inline_closure_body_into_specialization(
-            &mut spec,
-            "f",
-            &[],
-            &[],
-            &[],
-            &[],
-        )
-        .unwrap();
+        super::inline_closure_body_into_specialization(&mut spec, "f", &[], &[], &[], &[]).unwrap();
         // The `println(...)` call should be intact — its name was not `f`.
         match &spec.body[0] {
             Statement::Return(Some(Expr::FunctionCall { name, .. }), _) => {
@@ -3783,8 +3813,7 @@ mod tests {
         // mirrors substitute_const_in_expr's recursion surface. Any variant
         // we don't explicitly walk here is a leaf for identifier purposes.
         match expr {
-            Expr::BinaryOp { left, right, .. }
-            | Expr::FuzzyComparison { left, right, .. } => {
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
                 assert_no_const_id_in_expr(left);
                 assert_no_const_id_in_expr(right);
             }

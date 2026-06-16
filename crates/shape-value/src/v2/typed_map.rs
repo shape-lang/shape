@@ -9,7 +9,7 @@
 //! - `TypedMapStringI64` — `HashMap<string, i64>`
 //! - `TypedMapStringPtr` — `HashMap<string, *const u8>`
 
-use super::heap_header::{HeapHeader, HEAP_KIND_V2_TYPED_MAP};
+use super::heap_header::{HEAP_KIND_V2_TYPED_MAP, HeapHeader};
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 
 /// Sentinel hash values for bucket state.
@@ -137,8 +137,7 @@ impl<K: Copy, V: Copy> TypedMap<K, V> {
 
     /// Allocate a zeroed bucket array. All buckets have hash = 0 (empty).
     fn alloc_buckets(count: u32) -> *mut Bucket<K, V> {
-        let layout =
-            Layout::array::<Bucket<K, V>>(count as usize).expect("invalid bucket layout");
+        let layout = Layout::array::<Bucket<K, V>>(count as usize).expect("invalid bucket layout");
         let ptr = unsafe { alloc_zeroed(layout) as *mut Bucket<K, V> };
         assert!(!ptr.is_null(), "allocation failed for TypedMap buckets");
         ptr
@@ -202,8 +201,8 @@ impl<K: Copy, V: Copy> TypedMap<K, V> {
             }
 
             // Free old buckets
-            let old_layout = Layout::array::<Bucket<K, V>>(old_count as usize)
-                .expect("invalid bucket layout");
+            let old_layout =
+                Layout::array::<Bucket<K, V>>(old_count as usize).expect("invalid bucket layout");
             dealloc(old_buckets as *mut u8, old_layout);
 
             (*this).buckets = new_buckets;

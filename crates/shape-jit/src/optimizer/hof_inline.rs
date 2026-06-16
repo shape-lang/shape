@@ -72,12 +72,7 @@ pub fn analyze_hof_inline(program: &BytecodeProgram) -> HofInlinePlan {
         // We look backwards for a PushConst with a Function operand.
         let callback_fn_id = resolve_callback_fn_id(program, idx, arg_count);
 
-        plan.sites.insert(
-            idx,
-            HofInlineSite {
-                callback_fn_id,
-            },
-        );
+        plan.sites.insert(idx, HofInlineSite { callback_fn_id });
     }
 
     plan

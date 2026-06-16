@@ -69,19 +69,19 @@ fn recv_number_as_f64(args: &[KindedSlot], method: &str) -> Result<f64, VMError>
         )));
     }
     match args[0].kind {
-        NativeKind::Int64 => args[0]
-            .as_i64()
-            .map(|i| i as f64)
-            .ok_or_else(|| VMError::RuntimeError(format!("number.{}: int receiver decode", method))),
-        NativeKind::Float64 => args[0]
-            .as_f64()
-            .ok_or_else(|| VMError::RuntimeError(format!("number.{}: float receiver decode", method))),
+        NativeKind::Int64 => args[0].as_i64().map(|i| i as f64).ok_or_else(|| {
+            VMError::RuntimeError(format!("number.{}: int receiver decode", method))
+        }),
+        NativeKind::Float64 => args[0].as_f64().ok_or_else(|| {
+            VMError::RuntimeError(format!("number.{}: float receiver decode", method))
+        }),
         NativeKind::Ptr(HeapKind::Decimal) => {
             let bits = args[0].slot.raw();
             // SAFETY: see function-level note above.
             let d: &Decimal = unsafe { &*(bits as *const Decimal) };
-            d.to_f64()
-                .ok_or_else(|| VMError::RuntimeError(format!("number.{}: decimal overflow", method)))
+            d.to_f64().ok_or_else(|| {
+                VMError::RuntimeError(format!("number.{}: decimal overflow", method))
+            })
         }
         other => Err(VMError::RuntimeError(format!(
             "number.{}: receiver kind must be int/number/decimal, got {:?}",
@@ -101,19 +101,19 @@ fn recv_number_as_i64(args: &[KindedSlot], method: &str) -> Result<i64, VMError>
         )));
     }
     match args[0].kind {
-        NativeKind::Int64 => args[0]
-            .as_i64()
-            .ok_or_else(|| VMError::RuntimeError(format!("number.{}: int receiver decode", method))),
-        NativeKind::Float64 => args[0]
-            .as_f64()
-            .map(|f| f as i64)
-            .ok_or_else(|| VMError::RuntimeError(format!("number.{}: float receiver decode", method))),
+        NativeKind::Int64 => args[0].as_i64().ok_or_else(|| {
+            VMError::RuntimeError(format!("number.{}: int receiver decode", method))
+        }),
+        NativeKind::Float64 => args[0].as_f64().map(|f| f as i64).ok_or_else(|| {
+            VMError::RuntimeError(format!("number.{}: float receiver decode", method))
+        }),
         NativeKind::Ptr(HeapKind::Decimal) => {
             let bits = args[0].slot.raw();
             // SAFETY: see `recv_number_as_f64`.
             let d: &Decimal = unsafe { &*(bits as *const Decimal) };
-            d.to_i64()
-                .ok_or_else(|| VMError::RuntimeError(format!("number.{}: decimal->int overflow", method)))
+            d.to_i64().ok_or_else(|| {
+                VMError::RuntimeError(format!("number.{}: decimal->int overflow", method))
+            })
         }
         other => Err(VMError::RuntimeError(format!(
             "number.{}: receiver kind must be int/number/decimal, got {:?}",
@@ -148,14 +148,9 @@ fn floor_like<F: Fn(f64) -> f64>(
 
 #[inline]
 fn arg_int(args: &[KindedSlot], idx: usize, method: &str) -> Result<i64, VMError> {
-    args.get(idx)
-        .and_then(|a| a.as_i64())
-        .ok_or_else(|| {
-            VMError::RuntimeError(format!(
-                "number.{}: argument {} must be int",
-                method, idx
-            ))
-        })
+    args.get(idx).and_then(|a| a.as_i64()).ok_or_else(|| {
+        VMError::RuntimeError(format!("number.{}: argument {} must be int", method, idx))
+    })
 }
 
 #[inline]
@@ -179,7 +174,10 @@ fn arg_number_as_f64(args: &[KindedSlot], idx: usize, method: &str) -> Result<f6
             // SAFETY: same Arc-share invariant as receiver borrow.
             let d: &Decimal = unsafe { &*(bits as *const Decimal) };
             d.to_f64().ok_or_else(|| {
-                VMError::RuntimeError(format!("number.{}: decimal overflow at arg {}", method, idx))
+                VMError::RuntimeError(format!(
+                    "number.{}: decimal overflow at arg {}",
+                    method, idx
+                ))
             })
         }
         other => Err(VMError::RuntimeError(format!(
@@ -223,7 +221,9 @@ pub fn number_abs_v2(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.is_empty() {
-        return Err(VMError::RuntimeError("number.abs: missing receiver".to_string()));
+        return Err(VMError::RuntimeError(
+            "number.abs: missing receiver".to_string(),
+        ));
     }
     match args[0].kind {
         NativeKind::Int64 => {
@@ -257,7 +257,9 @@ pub fn number_sign_v2(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.is_empty() {
-        return Err(VMError::RuntimeError("number.sign: missing receiver".to_string()));
+        return Err(VMError::RuntimeError(
+            "number.sign: missing receiver".to_string(),
+        ));
     }
     match args[0].kind {
         NativeKind::Int64 => {
@@ -304,7 +306,9 @@ pub fn number_is_nan_v2(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.is_empty() {
-        return Err(VMError::RuntimeError("number.isNaN: missing receiver".to_string()));
+        return Err(VMError::RuntimeError(
+            "number.isNaN: missing receiver".to_string(),
+        ));
     }
     let result = match args[0].kind {
         NativeKind::Float64 => args[0].as_f64().is_some_and(f64::is_nan),
@@ -379,9 +383,9 @@ pub fn number_to_string_v2(
             i.to_string()
         }
         NativeKind::Float64 => {
-            let x = args[0]
-                .as_f64()
-                .ok_or_else(|| VMError::RuntimeError("number.toString: float decode".to_string()))?;
+            let x = args[0].as_f64().ok_or_else(|| {
+                VMError::RuntimeError("number.toString: float decode".to_string())
+            })?;
             // Match the i48-or-f64 display: integral floats render as "n"
             // (no decimal), non-integral as "n.m".
             if x.fract() == 0.0 && x.is_finite() && x.abs() < 1e16 {
@@ -412,7 +416,9 @@ pub fn number_clamp_v2(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.is_empty() {
-        return Err(VMError::RuntimeError("number.clamp: missing receiver".to_string()));
+        return Err(VMError::RuntimeError(
+            "number.clamp: missing receiver".to_string(),
+        ));
     }
     // Receiver-kind-preserving: int receiver → int result, float / decimal
     // receiver → float result. Bounds coerce to f64 across kinds.
@@ -424,9 +430,7 @@ pub fn number_clamp_v2(
             let lo = arg_number_as_f64(args, 1, "clamp")?;
             let hi = arg_number_as_f64(args, 2, "clamp")?;
             if lo > hi {
-                return Err(VMError::RuntimeError(
-                    "number.clamp: lo > hi".to_string(),
-                ));
+                return Err(VMError::RuntimeError("number.clamp: lo > hi".to_string()));
             }
             let clamped = (v as f64).clamp(lo, hi);
             Ok(KindedSlot::from_int(clamped as i64))
@@ -436,9 +440,7 @@ pub fn number_clamp_v2(
             let lo = arg_number_as_f64(args, 1, "clamp")?;
             let hi = arg_number_as_f64(args, 2, "clamp")?;
             if lo > hi {
-                return Err(VMError::RuntimeError(
-                    "number.clamp: lo > hi".to_string(),
-                ));
+                return Err(VMError::RuntimeError("number.clamp: lo > hi".to_string()));
             }
             Ok(KindedSlot::from_number(x.clamp(lo, hi)))
         }
@@ -470,9 +472,7 @@ pub fn bool_to_string_v2(
 fn recv_char(args: &[KindedSlot], method: &str) -> Result<char, VMError> {
     args.first()
         .and_then(|a| a.as_char())
-        .ok_or_else(|| {
-            VMError::RuntimeError(format!("char.{}: receiver must be char", method))
-        })
+        .ok_or_else(|| VMError::RuntimeError(format!("char.{}: receiver must be char", method)))
 }
 
 pub fn char_is_alphabetic_v2(

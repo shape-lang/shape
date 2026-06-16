@@ -28,7 +28,10 @@ use shape_ast::ast::{Expr, Literal, TypeAnnotation};
 ///   outer literal must fall back to the generic `NewArray` path so the
 ///   inner arrays round-trip as heap-ref ValueWords, not as raw
 ///   `NativeScalar::Ptr` words that can't be decoded downstream.)
-pub fn infer_array_element_type(elements: &[Expr], type_tracker: &TypeTracker) -> Option<NativeKind> {
+pub fn infer_array_element_type(
+    elements: &[Expr],
+    type_tracker: &TypeTracker,
+) -> Option<NativeKind> {
     if elements.is_empty() {
         return None;
     }
@@ -147,7 +150,11 @@ fn infer_float_array_with_lossless_int_literals(elements: &[Expr]) -> Option<Nat
             _ => return None,
         }
     }
-    if any_float { Some(NativeKind::Float64) } else { None }
+    if any_float {
+        Some(NativeKind::Float64)
+    } else {
+        None
+    }
 }
 
 /// Attempt to infer a homogeneous element type purely from literal nodes.
@@ -190,8 +197,7 @@ fn infer_from_literals(elements: &[Expr]) -> Option<NativeKind> {
             // Object literal (`{k: v}` shape, no type tag) also lowers to
             // `NewTypedObject` per `compile_typed_object_literal`. Treat the
             // same way for homogeneous-object-literal arrays.
-            Expr::StructLiteral { .. }
-            | Expr::Object(..) => {
+            Expr::StructLiteral { .. } | Expr::Object(..) => {
                 NativeKind::Ptr(shape_value::HeapKind::TypedObject)
             }
             // Non-literal or unsupported literal -- can't infer from literals alone.
@@ -200,7 +206,7 @@ fn infer_from_literals(elements: &[Expr]) -> Option<NativeKind> {
 
         match kind {
             Some(prev) if prev != elem_kind => return None, // heterogeneous
-            Some(_) => {}                                    // same, continue
+            Some(_) => {}                                   // same, continue
             None => kind = Some(elem_kind),
         }
     }

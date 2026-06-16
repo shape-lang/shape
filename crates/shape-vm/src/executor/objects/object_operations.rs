@@ -42,11 +42,11 @@
 
 use crate::{
     bytecode::{Instruction, Operand},
-    executor::vm_impl::stack::{clone_with_kind, drop_with_kind},
     executor::VirtualMachine,
+    executor::vm_impl::stack::{clone_with_kind, drop_with_kind},
 };
 use shape_value::heap_value::{HeapKind, TypedObjectStorage};
-use shape_value::{NativeKind, ValueSlot, VMError};
+use shape_value::{NativeKind, VMError, ValueSlot};
 use std::sync::Arc;
 
 impl VirtualMachine {
@@ -75,10 +75,7 @@ impl VirtualMachine {
 
         // Validate kinds — both must be Ptr(HeapKind::TypedObject).
         match (left_kind, right_kind) {
-            (
-                NativeKind::Ptr(HeapKind::TypedObject),
-                NativeKind::Ptr(HeapKind::TypedObject),
-            ) => {}
+            (NativeKind::Ptr(HeapKind::TypedObject), NativeKind::Ptr(HeapKind::TypedObject)) => {}
             _ => {
                 drop_with_kind(right_bits, right_kind);
                 drop_with_kind(left_bits, left_kind);
@@ -141,10 +138,7 @@ impl VirtualMachine {
         let (target_bits, target_kind) = self.pop_kinded()?;
 
         match (target_kind, source_kind) {
-            (
-                NativeKind::Ptr(HeapKind::TypedObject),
-                NativeKind::Ptr(HeapKind::TypedObject),
-            ) => {}
+            (NativeKind::Ptr(HeapKind::TypedObject), NativeKind::Ptr(HeapKind::TypedObject)) => {}
             _ => {
                 drop_with_kind(source_bits, source_kind);
                 drop_with_kind(target_bits, target_kind);
@@ -174,12 +168,12 @@ impl VirtualMachine {
         // the right schema. Read schemas without holding any borrow into
         // `self` past the merged-schema derivation call.
         let (keep_left_indices, right_count) = {
-            let left_schema = self.lookup_schema(target_id).ok_or_else(|| {
-                VMError::RuntimeError(format!("Schema {} not found", target_id))
-            })?;
-            let right_schema = self.lookup_schema(source_id).ok_or_else(|| {
-                VMError::RuntimeError(format!("Schema {} not found", source_id))
-            })?;
+            let left_schema = self
+                .lookup_schema(target_id)
+                .ok_or_else(|| VMError::RuntimeError(format!("Schema {} not found", target_id)))?;
+            let right_schema = self
+                .lookup_schema(source_id)
+                .ok_or_else(|| VMError::RuntimeError(format!("Schema {} not found", source_id)))?;
 
             let right_names: std::collections::HashSet<&str> = right_schema
                 .fields

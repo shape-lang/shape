@@ -8,9 +8,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use shape_ast::Program;
 use shape_ast::ast::FunctionDef;
 use shape_ast::module_utils::ModuleExportKind;
-use shape_ast::Program;
 
 // ---------------------------------------------------------------------------
 // Core identifiers
@@ -235,29 +235,21 @@ pub enum GraphBuildError {
         cycle: Vec<String>,
     },
     /// A module is only available as pre-compiled bytecode.
-    CompiledBytecodeNotSupported {
-        module_path: String,
-    },
+    CompiledBytecodeNotSupported { module_path: String },
     /// Module not found.
     ModuleNotFound {
         module_path: String,
         requested_by: String,
     },
     /// Other error during graph construction.
-    Other {
-        message: String,
-    },
+    Other { message: String },
 }
 
 impl std::fmt::Display for GraphBuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GraphBuildError::CyclicDependency { cycle } => {
-                write!(
-                    f,
-                    "Circular dependency detected: {}",
-                    cycle.join(" → ")
-                )
+                write!(f, "Circular dependency detected: {}", cycle.join(" → "))
             }
             GraphBuildError::CompiledBytecodeNotSupported { module_path } => {
                 write!(
@@ -313,7 +305,10 @@ pub fn resolve_module_source_kind(
         return ModuleSourceKindHint::NativeExtension;
     }
     // Check if it's an embedded stdlib module
-    if loader.embedded_stdlib_module_paths().contains(&module_path.to_string()) {
+    if loader
+        .embedded_stdlib_module_paths()
+        .contains(&module_path.to_string())
+    {
         return ModuleSourceKindHint::EmbeddedStdlib;
     }
     // Check if we can resolve a file path for it
@@ -511,10 +506,7 @@ fn build_native_interface(
 }
 
 /// Resolve imports for a module node against the graph's dependency interfaces.
-fn resolve_imports_for_node(
-    ast: &Program,
-    builder: &GraphBuilder,
-) -> Vec<ResolvedImport> {
+fn resolve_imports_for_node(ast: &Program, builder: &GraphBuilder) -> Vec<ResolvedImport> {
     let mut resolved = Vec::new();
 
     for item in &ast.items {
@@ -529,17 +521,13 @@ fn resolve_imports_for_node(
 
         match &import_stmt.items {
             shape_ast::ast::ImportItems::Namespace { name, alias } => {
-                let local_name = alias
-                    .as_ref()
-                    .or(Some(name))
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        module_path
-                            .split("::")
-                            .last()
-                            .unwrap_or(module_path)
-                            .to_string()
-                    });
+                let local_name = alias.as_ref().or(Some(name)).cloned().unwrap_or_else(|| {
+                    module_path
+                        .split("::")
+                        .last()
+                        .unwrap_or(module_path)
+                        .to_string()
+                });
                 resolved.push(ResolvedImport::Namespace {
                     local_name,
                     canonical_path: module_path.clone(),
@@ -701,9 +689,7 @@ fn build_module_graph_with_prelude_structure(
     for i in 0..node_count {
         let node_path = builder.nodes[i].canonical_path.clone();
         // Skip prelude modules themselves to avoid circular dependencies
-        if node_path.starts_with("std::core::prelude")
-            || prelude_imports.contains(&node_path)
-        {
+        if node_path.starts_with("std::core::prelude") || prelude_imports.contains(&node_path) {
             continue;
         }
         for pi in structured_prelude {
@@ -786,13 +772,13 @@ fn build_module_graph_with_prelude_structure(
 
                 if !symbols.is_empty() {
                     // Check if we already have a Named import for this path to merge into
-                    let existing_named_idx = builder.nodes[i]
-                        .resolved_imports
-                        .iter()
-                        .position(|ri| matches!(ri,
-                            ResolvedImport::Named { canonical_path, .. }
-                            if canonical_path == &pi.canonical_path
-                        ));
+                    let existing_named_idx =
+                        builder.nodes[i].resolved_imports.iter().position(|ri| {
+                            matches!(ri,
+                                ResolvedImport::Named { canonical_path, .. }
+                                if canonical_path == &pi.canonical_path
+                            )
+                        });
 
                     if let Some(idx) = existing_named_idx {
                         // Merge symbols into existing Named import
@@ -875,16 +861,12 @@ fn visit_module(
                     builder.visited.insert(dep_path.clone());
                 }
             }
-            ModuleSourceKindHint::ShapeSource
-            | ModuleSourceKindHint::EmbeddedStdlib => {
+            ModuleSourceKindHint::ShapeSource | ModuleSourceKindHint::EmbeddedStdlib => {
                 // Load Shape source
                 let module = loader
                     .load_module(dep_path)
                     .map_err(|e| GraphBuildError::Other {
-                        message: format!(
-                            "Failed to load module '{}': {}",
-                            dep_path, e
-                        ),
+                        message: format!("Failed to load module '{}': {}", dep_path, e),
                     })?;
 
                 let dep_id = builder.get_or_create_node(dep_path);

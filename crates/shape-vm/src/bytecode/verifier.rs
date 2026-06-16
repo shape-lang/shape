@@ -626,10 +626,7 @@ mod tests {
         let prog = make_program(vec![func], instructions);
         let errs = verify_v2_typed_opcodes(&prog).unwrap_err();
         assert_eq!(errs.len(), 1);
-        assert!(matches!(
-            &errs[0],
-            VerifyError::V2MissingFieldOffset { .. }
-        ));
+        assert!(matches!(&errs[0], VerifyError::V2MissingFieldOffset { .. }));
     }
 
     #[test]

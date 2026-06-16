@@ -186,12 +186,14 @@ fn substitute_type_param_field_type(
             // nested-struct reference. Leave it unchanged.
             None => ft.clone(),
         },
-        FieldType::Array(inner) => FieldType::Array(Box::new(
-            substitute_type_param_field_type(inner, substitution),
-        )),
-        FieldType::Option(inner) => FieldType::Option(Box::new(
-            substitute_type_param_field_type(inner, substitution),
-        )),
+        FieldType::Array(inner) => FieldType::Array(Box::new(substitute_type_param_field_type(
+            inner,
+            substitution,
+        ))),
+        FieldType::Option(inner) => FieldType::Option(Box::new(substitute_type_param_field_type(
+            inner,
+            substitution,
+        ))),
         // W17.3-4.2 — per-container substitution. `type Bag<T> { items:
         // HashMap<string, T>, tags: Set<T> }` monomorphized to
         // `Bag<int>` must thread `T` through the inner key/value/element
@@ -207,9 +209,10 @@ fn substitute_type_param_field_type(
             key: Box::new(substitute_type_param_field_type(key, substitution)),
             value: Box::new(substitute_type_param_field_type(value, substitution)),
         },
-        FieldType::Set(inner) => FieldType::Set(Box::new(
-            substitute_type_param_field_type(inner, substitution),
-        )),
+        FieldType::Set(inner) => FieldType::Set(Box::new(substitute_type_param_field_type(
+            inner,
+            substitution,
+        ))),
         // Primitive / non-parametric field types carry no type-parameter
         // reference; return unchanged. Per audit §4.D.2 + CLAUDE.md
         // exhaustive-match guidance — explicit per-variant arms keep the
@@ -287,7 +290,7 @@ impl BytecodeCompiler {
     pub(super) fn compile_expr_array(&mut self, elements: &[Expr], span: Span) -> Result<()> {
         use super::super::v2_array_emission::infer_array_element_type;
         use super::super::v2_typed_emission::{
-            should_use_typed_array_from_slot_kind, TypedArrayKind,
+            TypedArrayKind, should_use_typed_array_from_slot_kind,
         };
 
         // Inside function bodies the MIR solver handles ref-in-collection;
@@ -340,8 +343,8 @@ impl BytecodeCompiler {
         // through the kind-erased `release_v2_typed_array`. Per ADR-006
         // §2.7.5 the element kind (`Ptr(HeapKind::TypedArray)`) is proven at
         // the producer site without runtime inspection.
-        let all_nested_array_elem = !elements.is_empty()
-            && elements.iter().all(|e| matches!(e, Expr::Array(..)));
+        let all_nested_array_elem =
+            !elements.is_empty() && elements.iter().all(|e| matches!(e, Expr::Array(..)));
         let has_spread = elements.iter().any(|e| matches!(e, Expr::Spread(..)));
         let typed_kind: Option<TypedArrayKind> = if has_spread {
             None
@@ -352,9 +355,7 @@ impl BytecodeCompiler {
             // The enclosing `let arr: Array<T> = [...]` already proved
             // the element type via annotation; trust it.
             Some(kind)
-        } else if let Some(slot_kind) =
-            infer_array_element_type(elements, &self.type_tracker)
-        {
+        } else if let Some(slot_kind) = infer_array_element_type(elements, &self.type_tracker) {
             // Bare literal with a homogeneous, statically-resolvable
             // element type. Pick a typed kind if we have one and signal
             // it back to the binding code path.
@@ -480,14 +481,13 @@ impl BytecodeCompiler {
             // `TypedArrayPushTraitObject` requires. The trait-name operand
             // drives the runtime `(concrete_type, trait_name) → vtable` lookup
             // per ADR-006 §2.7.24 Q25.C (all-traits-dyn-able).
-            let trait_object_box_sid: Option<u32> =
-                if kind == TypedArrayKind::TraitObject {
-                    self.pending_trait_object_array_trait
-                        .clone()
-                        .map(|t| self.program.add_string(t) as u32)
-                } else {
-                    None
-                };
+            let trait_object_box_sid: Option<u32> = if kind == TypedArrayKind::TraitObject {
+                self.pending_trait_object_array_trait
+                    .clone()
+                    .map(|t| self.program.add_string(t) as u32)
+            } else {
+                None
+            };
             for elem in elements {
                 self.plan_flexible_binding_escape_from_expr(elem);
                 self.emit(Instruction::simple(OpCode::Dup));
@@ -575,10 +575,7 @@ impl BytecodeCompiler {
                 // surface-and-stopped cleanly by
                 // `finalize_unresolved_empty_array_accumulators`.
                 let alloc_idx = self.program.instructions.len();
-                self.emit(Instruction::new(
-                    OpCode::NewArray,
-                    Some(Operand::Count(0)),
-                ));
+                self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
                 self.pending_empty_array_alloc_idx = Some(alloc_idx);
             }
         }
@@ -829,9 +826,10 @@ impl BytecodeCompiler {
             .get_by_id(schema_id)
             .map(|s| s.name.clone())
             .unwrap_or_else(|| format!("__inline_obj_{}", schema_id));
-        self.last_expr_type_info = Some(
-            crate::type_tracking::VariableTypeInfo::known(schema_id, schema_name),
-        );
+        self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::known(
+            schema_id,
+            schema_name,
+        ));
 
         Ok(())
     }
@@ -1125,11 +1123,15 @@ impl BytecodeCompiler {
         // Resolve through module scope for qualified type lookups
         let type_name = &self.resolve_type_name(type_name);
         // Look up struct type definition, resolving through type aliases if needed
-        let struct_info = self.struct_types.get(type_name.as_str()).cloned().or_else(|| {
-            self.type_aliases
-                .get(type_name.as_str())
-                .and_then(|resolved| self.struct_types.get(resolved).cloned())
-        });
+        let struct_info = self
+            .struct_types
+            .get(type_name.as_str())
+            .cloned()
+            .or_else(|| {
+                self.type_aliases
+                    .get(type_name.as_str())
+                    .and_then(|resolved| self.struct_types.get(resolved).cloned())
+            });
 
         match struct_info {
             Some((expected_fields, type_def_span)) => {
@@ -1332,10 +1334,9 @@ impl BytecodeCompiler {
                             .iter()
                             .map(|f| {
                                 let ft = match &type_param_substitution {
-                                    Some(subst) => substitute_type_param_field_type(
-                                        &f.field_type,
-                                        subst,
-                                    ),
+                                    Some(subst) => {
+                                        substitute_type_param_field_type(&f.field_type, subst)
+                                    }
                                     None => f.field_type.clone(),
                                 };
                                 (f.name.clone(), ft)
@@ -1395,8 +1396,7 @@ impl BytecodeCompiler {
                 } else if let Some(schema) = self.type_tracker.schema_registry().get(type_name) {
                     schema.id
                 } else if let Some(alias_base) = alias_target.as_deref()
-                    && let Some(base_schema) =
-                        self.type_tracker.schema_registry().get(alias_base)
+                    && let Some(base_schema) = self.type_tracker.schema_registry().get(alias_base)
                 {
                     // Type-alias indirection at the `runtime_type_name == type_name` branch:
                     // `let origin = P { ... }` where `type P = Point` — `runtime_type_name`
@@ -1702,9 +1702,7 @@ impl BytecodeCompiler {
         // migration); a `Number` constant produces a `Float64` slot kind
         // that `int_operand` rejects.
         let total_args = 3 + row_count * field_count;
-        let ac_const = self
-            .program
-            .add_constant(Constant::Int(total_args as i64));
+        let ac_const = self.program.add_constant(Constant::Int(total_args as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(ac_const)),
@@ -2273,14 +2271,11 @@ mod tests {
         // The all-defaults monomorphization must register a `Box<int>`
         // schema (the pre-fix `all_defaults` early-`None` skipped this and
         // left the bare `Box` schema's `Object("T")` field in play).
-        let schema = bytecode
-            .type_schema_registry
-            .get("Box<int>")
-            .expect(
-                "default-type-param generic literal must monomorphize to a \
+        let schema = bytecode.type_schema_registry.get("Box<int>").expect(
+            "default-type-param generic literal must monomorphize to a \
                  `Box<int>` schema (pre-fix the `all_defaults` early-return \
                  left the bare `Box` schema's `Object(\"T\")` field in play)",
-            );
+        );
         let value_field = schema
             .fields
             .iter()

@@ -67,7 +67,11 @@ fn test_extension_registration() {
         "hello",
         "Test export returning a fixed string",
         ConcreteType::String,
-        |_ctx| Ok(TypedReturn::Concrete(ConcreteReturn::String("hi".to_string()))),
+        |_ctx| {
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(
+                "hi".to_string(),
+            )))
+        },
     );
 
     let mut executor = BytecodeExecutor::new();
@@ -102,8 +106,8 @@ pub fn helper() { 1 }
     )
     .expect("write util module");
 
-    let program = shape_ast::parser::parse_program("from util use { helper }")
-        .expect("program should parse");
+    let program =
+        shape_ast::parser::parse_program("from util use { helper }").expect("program should parse");
 
     let mut executor = BytecodeExecutor::new();
     let mut loader = ModuleLoader::new();

@@ -505,7 +505,6 @@ pub struct FFIFuncRefs {
     // `_release` and Round 7A's `arc_result_retain` / `_release` pairs.
     pub(crate) arc_closure_retain: FuncRef,
     pub(crate) arc_closure_release: FuncRef,
-
     // v2 typed HashMap<string, ...> access.
     //
     // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion sub-cluster):

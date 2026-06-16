@@ -108,9 +108,7 @@ impl BytecodeCompiler {
                 if let Some(type_name) = self.tracker_type_name_for_identifier(name) {
                     let trimmed = type_name.trim();
                     if trimmed.starts_with("Result<") || trimmed.starts_with("Option<") {
-                        return Some(Type::Concrete(TypeAnnotation::Basic(
-                            type_name,
-                        )));
+                        return Some(Type::Concrete(TypeAnnotation::Basic(type_name)));
                     }
                 }
             }
@@ -150,10 +148,7 @@ impl BytecodeCompiler {
     /// substitute the enclosing return type when the inner expression
     /// genuinely failed to resolve its success arm; resolved-but-mismatched
     /// success types must surface as type errors, not get silently rewritten.
-    fn success_arm_is_unresolved_typevar(
-        &self,
-        ty: &shape_runtime::type_system::Type,
-    ) -> bool {
+    fn success_arm_is_unresolved_typevar(&self, ty: &shape_runtime::type_system::Type) -> bool {
         use shape_ast::ast::TypeAnnotation;
         use shape_runtime::type_system::Type;
 
@@ -182,8 +177,7 @@ impl BytecodeCompiler {
             }
             Type::Concrete(TypeAnnotation::Basic(s)) => {
                 // Baked form: `Result<unknown, string>` etc.
-                Self::first_generic_arg_of_baked_name(s, is_fallible_name)
-                    .as_deref()
+                Self::first_generic_arg_of_baked_name(s, is_fallible_name).as_deref()
                     == Some("unknown")
             }
             _ => false,
@@ -199,17 +193,21 @@ impl BytecodeCompiler {
         use shape_ast::ast::TypeAnnotation;
 
         let func_idx = self.current_function?;
-        let func_name = self.program.functions.get(func_idx).map(|f| f.name.clone())?;
+        let func_name = self
+            .program
+            .functions
+            .get(func_idx)
+            .map(|f| f.name.clone())?;
         let func_def = self.function_defs.get(&func_name)?;
         let ann = func_def.return_type.as_ref()?;
         let is_fallible_name = |n: &str| n == "Result" || n == "Option";
         match ann {
-            TypeAnnotation::Generic { name, args } if is_fallible_name(name) && !args.is_empty() => {
+            TypeAnnotation::Generic { name, args }
+                if is_fallible_name(name) && !args.is_empty() =>
+            {
                 Some(args[0].to_type_string())
             }
-            TypeAnnotation::Basic(s) => {
-                Self::first_generic_arg_of_baked_name(s, is_fallible_name)
-            }
+            TypeAnnotation::Basic(s) => Self::first_generic_arg_of_baked_name(s, is_fallible_name),
             _ => None,
         }
     }
@@ -221,9 +219,7 @@ impl BytecodeCompiler {
     /// `Type::Concrete(Basic("Result<int, string>"))` string-baked form the
     /// function-return-type hint table produces. Returns `None` when the
     /// operand is not a recognised fallible wrapper.
-    fn try_operator_success_type_name(
-        ty: &shape_runtime::type_system::Type,
-    ) -> Option<String> {
+    fn try_operator_success_type_name(ty: &shape_runtime::type_system::Type) -> Option<String> {
         use shape_ast::ast::TypeAnnotation;
         use shape_runtime::type_system::Type;
 
@@ -309,23 +305,19 @@ impl BytecodeCompiler {
             "number" => self.last_expr_numeric_type = Some(NumericType::Number),
             "decimal" => self.last_expr_numeric_type = Some(NumericType::Decimal),
             "string" | "bool" | "char" | "bigint" => {
-                self.last_expr_type_info =
-                    Some(VariableTypeInfo::named(name.to_string()));
+                self.last_expr_type_info = Some(VariableTypeInfo::named(name.to_string()));
             }
             other if BuiltinTypes::is_integer_type_name(other) => {
                 // Width-aware ints (i8/u8/i16/...): the name round-trips via
                 // `type_info`; `propagate_assignment_type_to_slot` re-derives
                 // the storage hint from the recorded name.
-                self.last_expr_type_info =
-                    Some(VariableTypeInfo::named(other.to_string()));
+                self.last_expr_type_info = Some(VariableTypeInfo::named(other.to_string()));
             }
             other => {
                 // A user struct / enum success type — stamp the schema so the
                 // binding inherits it. Strip any generic args before lookup.
                 let base = other.split('<').next().unwrap_or(other).trim();
-                if let Some(schema) =
-                    self.type_tracker.schema_registry().get(base)
-                {
+                if let Some(schema) = self.type_tracker.schema_registry().get(base) {
                     self.last_expr_schema = Some(schema.id);
                 }
             }
@@ -345,10 +337,11 @@ impl BytecodeCompiler {
         // BEFORE compiling it (compilation may clobber `last_expr_*`). Threaded
         // into `compile_match_binding` so `Ok(v)`/`Some(v)`/`Err(e)` payload
         // unwraps stamp the binder type from `Result(T,E)` / `Option(T)`.
-        let scrutinee_ct = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
-            self,
-            &match_expr.scrutinee,
-        );
+        let scrutinee_ct =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                self,
+                &match_expr.scrutinee,
+            );
         self.compile_expr(&match_expr.scrutinee)?;
         let scrutinee_local = self.declare_local("__match_scrutinee")?;
         if let Some(schema_id) = self.last_expr_schema {

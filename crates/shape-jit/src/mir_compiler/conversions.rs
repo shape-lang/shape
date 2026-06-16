@@ -27,8 +27,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// should call `slot_kind_for_local` directly and surface-and-stop
     /// on `None` per ADR-006 §2.7.7.
     pub(crate) fn slot_kind_of(&self, slot: shape_vm::mir::types::SlotId) -> NativeKind {
-        super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
-            .unwrap_or(NativeKind::Int64)
+        super::types::slot_kind_for_local(&self.slot_kinds, slot.0).unwrap_or(NativeKind::Int64)
     }
 
     /// Widen a Cranelift value to an I64 bit pattern (ValueWord-shaped) for
@@ -77,11 +76,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// dispatch). The `_hint` is retained on the signature for the bool
     /// zero-extend split; downstream callers should flow `NativeKind`
     /// through the JitFfiCarrier instead of relying on bit-level tags.
-    pub(crate) fn nan_box_for_value_word(
-        &mut self,
-        val: Value,
-        hint: Option<NativeKind>,
-    ) -> Value {
+    pub(crate) fn nan_box_for_value_word(&mut self, val: Value, hint: Option<NativeKind>) -> Value {
         let val_type = self.builder.func.dfg.value_type(val);
         if val_type == types::I64 {
             return val;
@@ -124,11 +119,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // I64 → native (unbox-equivalent width reduction).
         if val_type == types::I64 {
             return match target_kind {
-                NativeKind::Float64 => {
-                    self.builder
-                        .ins()
-                        .bitcast(types::F64, MemFlags::new(), val)
-                }
+                NativeKind::Float64 => self.builder.ins().bitcast(types::F64, MemFlags::new(), val),
                 NativeKind::Int32 | NativeKind::UInt32 => {
                     self.builder.ins().ireduce(types::I32, val)
                 }
@@ -171,11 +162,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         };
 
         match target_kind {
-            NativeKind::Float64 => {
-                self.builder
-                    .ins()
-                    .bitcast(types::F64, MemFlags::new(), widened)
-            }
+            NativeKind::Float64 => self
+                .builder
+                .ins()
+                .bitcast(types::F64, MemFlags::new(), widened),
             NativeKind::Int32 | NativeKind::UInt32 => {
                 self.builder.ins().ireduce(types::I32, widened)
             }
@@ -208,11 +198,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ///   slot" — the lockstep invariant requires a write at every push.
     /// - Decoding the kind from the data slot's bit pattern (§2.7.7 #4 / #7)
     ///   — kind comes from the call signature, not the bits.
-    pub(crate) fn emit_kind_track_write(
-        &mut self,
-        slot_idx: Value,
-        kind: shape_value::NativeKind,
-    ) {
+    pub(crate) fn emit_kind_track_write(&mut self, slot_idx: Value, kind: shape_value::NativeKind) {
         let kinds_base = crate::context::STACK_KINDS_OFFSET as i64;
         // `stack_kinds: [u8; 512]` — slot index doubles as byte offset
         // within the kind track (no `<< 3` shift like the data side).

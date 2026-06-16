@@ -571,8 +571,8 @@ pub unsafe fn unbox_string(bits: u64) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::jit_kinds::UnifiedValue;
+    use super::*;
 
     #[test]
     fn test_inline_types_in_negative_nan_space() {

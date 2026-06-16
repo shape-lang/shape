@@ -281,9 +281,7 @@ fn trace_local_defining_mode(
         }
 
         if let TerminatorKind::Call {
-            destination,
-            func,
-            ..
+            destination, func, ..
         } = &block.terminator.kind
         {
             if destination.root_local() == slot {
@@ -495,7 +493,11 @@ mod tests {
         mir.num_locals = 3;
         mir.param_slots = vec![SlotId(1), SlotId(2)];
         mir.param_reference_kinds = vec![None, None];
-        mir.local_types = vec![LocalTypeInfo::Copy, LocalTypeInfo::Copy, LocalTypeInfo::Copy];
+        mir.local_types = vec![
+            LocalTypeInfo::Copy,
+            LocalTypeInfo::Copy,
+            LocalTypeInfo::Copy,
+        ];
         let mut bb0 = BasicBlock {
             id: BasicBlockId(0),
             statements: Vec::new(),
@@ -614,7 +616,11 @@ mod tests {
         // One branch returns param 1, the other returns param 2 — meet is Unknown.
         let mut mir = empty_mir("route");
         mir.num_locals = 3;
-        mir.param_slots = vec![SlotId(0) /* unused placeholder */, SlotId(1), SlotId(2)];
+        mir.param_slots = vec![
+            SlotId(0), /* unused placeholder */
+            SlotId(1),
+            SlotId(2),
+        ];
         // Actually, let's not mess with SlotId(0) — use distinct param slots.
         mir.param_slots = vec![SlotId(1), SlotId(2)];
         mir.param_reference_kinds = vec![None, None];
@@ -781,7 +787,8 @@ mod tests {
             ReturnOwnershipMode::NewlyOwned
         );
         assert_eq!(
-            ReturnOwnershipMode::BorrowedFromParam(1).meet(ReturnOwnershipMode::BorrowedFromParam(1)),
+            ReturnOwnershipMode::BorrowedFromParam(1)
+                .meet(ReturnOwnershipMode::BorrowedFromParam(1)),
             ReturnOwnershipMode::BorrowedFromParam(1)
         );
     }
@@ -793,7 +800,8 @@ mod tests {
             ReturnOwnershipMode::Unknown
         );
         assert_eq!(
-            ReturnOwnershipMode::BorrowedFromParam(0).meet(ReturnOwnershipMode::BorrowedFromParam(1)),
+            ReturnOwnershipMode::BorrowedFromParam(0)
+                .meet(ReturnOwnershipMode::BorrowedFromParam(1)),
             ReturnOwnershipMode::Unknown
         );
     }
@@ -1008,10 +1016,7 @@ mod tests {
         mir.blocks = vec![bb0, bb1];
 
         let mut callee_modes = HashMap::new();
-        callee_modes.insert(
-            "get_singleton".to_string(),
-            ReturnOwnershipMode::Static,
-        );
+        callee_modes.insert("get_singleton".to_string(), ReturnOwnershipMode::Static);
 
         assert_eq!(
             infer_return_ownership_mode(&mir, &callee_modes),
@@ -1271,9 +1276,7 @@ mod tests {
     // etc.) rather than hand-built MIR.
     // ---------------------------------------------------------------------
 
-    fn infer_from_source(
-        code: &str,
-    ) -> std::collections::HashMap<String, ReturnOwnershipMode> {
+    fn infer_from_source(code: &str) -> std::collections::HashMap<String, ReturnOwnershipMode> {
         use shape_ast::ast::Item;
         let program = shape_ast::parser::parse_program(code).expect("parse failed");
         let mut modes = std::collections::HashMap::new();
@@ -1296,7 +1299,10 @@ mod tests {
         modes: &std::collections::HashMap<String, ReturnOwnershipMode>,
         name: &str,
     ) -> ReturnOwnershipMode {
-        modes.get(name).copied().unwrap_or(ReturnOwnershipMode::Unknown)
+        modes
+            .get(name)
+            .copied()
+            .unwrap_or(ReturnOwnershipMode::Unknown)
     }
 
     #[test]

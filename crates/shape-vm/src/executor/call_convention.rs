@@ -817,7 +817,10 @@ impl VirtualMachine {
         // the callee carrier.
         use shape_value::v2::closure_layout::CaptureKind;
         for capture_idx in 0..capture_count {
-            if !matches!(layout.capture_storage_kind(capture_idx), CaptureKind::Immutable) {
+            if !matches!(
+                layout.capture_storage_kind(capture_idx),
+                CaptureKind::Immutable
+            ) {
                 continue;
             }
             // SAFETY: see the upvalue-table loop above — same construction

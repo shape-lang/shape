@@ -444,12 +444,8 @@ impl ShapeTest {
         start_line_max: u32,
     ) -> Self {
         let uri = self.uri();
-        let impls = shape_lsp::definition::get_implementations(
-            &self.text,
-            self.position,
-            &uri,
-            None,
-        );
+        let impls =
+            shape_lsp::definition::get_implementations(&self.text, self.position, &uri, None);
         assert!(
             impls.is_some(),
             "Expected implementations at ({}, {})",
@@ -724,7 +720,8 @@ impl ShapeTest {
             let CodeActionOrCommand::CodeAction(action) = a else {
                 return false;
             };
-            let is_extract = matches!(action.kind.as_ref(), Some(k) if k == &CodeActionKind::REFACTOR_EXTRACT);
+            let is_extract =
+                matches!(action.kind.as_ref(), Some(k) if k == &CodeActionKind::REFACTOR_EXTRACT);
             let has_edit = action.edit.is_some();
             let title_matches = action.title.contains(title);
             is_extract && has_edit && title_matches
@@ -1019,7 +1016,8 @@ impl ShapeTest {
         let symbols = self.collect_flat_document_symbols();
         let count = symbols.iter().filter(|s| s.kind == kind).count();
         assert_eq!(
-            count, expected,
+            count,
+            expected,
             "Expected {} document symbols of kind {:?}, got {} (all: {:?})",
             expected,
             kind,
@@ -1075,8 +1073,7 @@ impl ShapeTest {
         assert!(
             is_empty,
             "Expected prepare_call_hierarchy empty/None at ({}, {})",
-            self.position.line,
-            self.position.character
+            self.position.line, self.position.character
         );
         self
     }

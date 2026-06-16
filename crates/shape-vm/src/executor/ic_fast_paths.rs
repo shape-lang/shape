@@ -313,10 +313,7 @@ pub struct ClosureCallIcHit {
 /// Closure spec Phase G §5.4: shared between `CallClosure` and
 /// `CallFunctionIndirect`; the underlying feedback representation is
 /// the existing `FeedbackSlot::Call(CallFeedback)`.
-pub fn closure_call_ic_check(
-    vm: &VirtualMachine,
-    ip: usize,
-) -> Option<ClosureCallIcHit> {
+pub fn closure_call_ic_check(vm: &VirtualMachine, ip: usize) -> Option<ClosureCallIcHit> {
     let func_id = vm.call_stack.last()?.function_id? as usize;
     let fv = vm.feedback_vectors.get(func_id)?.as_ref()?;
     let slot = fv.get_slot(ip)?;

@@ -139,9 +139,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::ffi_refs::FFIFuncRefs;
+use shape_value::v2::ConcreteType;
 use shape_value::v2::closure_layout::ClosureLayout;
 use shape_value::v2::struct_layout::FieldKind;
-use shape_value::v2::ConcreteType;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::NativeKind;
@@ -307,8 +307,7 @@ pub struct MirToIR<'a, 'b> {
     /// stack pointer (no NaN-box tag, no `HK_CLOSURE` header) that the
     /// FFI dispatcher can't recognise — the fix is to not dispatch through
     /// the FFI at all when the JIT itself built the closure.
-    pub(crate) stack_closure_call_info:
-        HashMap<SlotId, StackClosureCallInfo>,
+    pub(crate) stack_closure_call_info: HashMap<SlotId, StackClosureCallInfo>,
 
     // ── Phase 4b Round 5c-2-α jit-ref-param-chain-stamp ────────────
     /// Param slots whose source-declaration carries a reference borrow kind
@@ -553,8 +552,7 @@ pub struct MirToIR<'a, 'b> {
     /// `expr.span()`). Empty when the program has no user-type operator
     /// overloading — JIT falls through to the existing typed-arith /
     /// typed-cmp / unop lowering paths.
-    pub(crate) operator_trait_dispatch_sites:
-        HashMap<shape_ast::ast::span::Span, (String, u16)>,
+    pub(crate) operator_trait_dispatch_sites: HashMap<shape_ast::ast::span::Span, (String, u16)>,
 }
 
 /// Result of MIR preflight check.
@@ -577,10 +575,7 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
             match &stmt.kind {
                 StatementKind::Assign(place, rvalue) => {
                     if !is_simple_place(place) {
-                        blockers.push(format!(
-                            "complex place in assignment at {:?}",
-                            stmt.span
-                        ));
+                        blockers.push(format!("complex place in assignment at {:?}", stmt.span));
                     }
                     match rvalue {
                         // W15.2-LANG-5 (Phase 4b, 2026-05-18). MIR-level
@@ -594,7 +589,9 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
                         // `compiler/patterns/checking.rs`. ADR-006 §2.7.5
                         // producer-side classification: the annotation is
                         // carried verbatim from `ast::Pattern::Typed`.
-                        Rvalue::TypePatternTest { type_annotation, .. } => {
+                        Rvalue::TypePatternTest {
+                            type_annotation, ..
+                        } => {
                             blockers.push(format!(
                                 "TypePatternTest (W15.2-LANG-5): \
                                  `Pattern::Typed` codegen pending, \
@@ -872,17 +869,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // `v2_typed_array_elem_kind` projection uses. Without this seed
         // `print(xs[0])` on `xs: Array<int>` falls into the kind-blind
         // print decoder.
-        let slot_kinds = types::infer_slot_kinds_with_concrete(
-            &mir_data.mir,
-            &concrete_seed,
-            &concrete_types,
-        );
+        let slot_kinds =
+            types::infer_slot_kinds_with_concrete(&mir_data.mir, &concrete_seed, &concrete_types);
         // Phase E: pull the set of non-escaping closure slots out of the MIR
         // storage plan so `ClosureCapture` lowering can pick the stack-slot
         // fast path. Slots absent from this set fall back to the legacy
         // `jit_make_closure` FFI path (Phase H will delete that).
-        let non_escaping_closure_slots =
-            mir_data.storage_plan.non_escaping_closure_slots.clone();
+        let non_escaping_closure_slots = mir_data.storage_plan.non_escaping_closure_slots.clone();
 
         // Session 1 Commit 3: scan `storage_plan` for outer-scope
         // local slots that actually get promoted to
@@ -918,8 +911,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // that is an operand of a `ClosureCapture` whose layout
         // declares a `CaptureKind::Shared` capture at that position.
         use shape_vm::type_tracking::{BindingStorageClass, EscapeStatus};
-        let param_slot_set: HashSet<SlotId> =
-            mir_data.mir.param_slots.iter().copied().collect();
+        let param_slot_set: HashSet<SlotId> = mir_data.mir.param_slots.iter().copied().collect();
         let mut shared_local_slots: HashSet<SlotId> = HashSet::new();
         for (slot, class) in &mir_data.storage_plan.slot_classes {
             if !matches!(class, BindingStorageClass::SharedCow) {
@@ -991,12 +983,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         continue;
                     }
                     let root = match op {
-                        MirOperand::Copy(p)
-                        | MirOperand::Move(p)
-                        | MirOperand::MoveExplicit(p) => match p {
-                            MirPlace::Local(s) => Some(*s),
-                            _ => None,
-                        },
+                        MirOperand::Copy(p) | MirOperand::Move(p) | MirOperand::MoveExplicit(p) => {
+                            match p {
+                                MirPlace::Local(s) => Some(*s),
+                                _ => None,
+                            }
+                        }
                         MirOperand::Constant(_) => None,
                     };
                     if let Some(slot) = root {
@@ -1033,8 +1025,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // available for cross-block field reads, mirroring how
         // `infer_slot_kinds` and the §2.7.5 conduit's
         // `infer_top_level_concrete_types_from_mir` already work.
-        let field_native_kinds =
-            types::infer_field_native_kinds(&mir_data.mir, &slot_kinds);
+        let field_native_kinds = types::infer_field_native_kinds(&mir_data.mir, &slot_kinds);
 
         // Phase 4b Round 5c-2-α jit-ref-param-chain-stamp (ADR-006 §2.7.13
         // ref-chain stamp + §2.7.5 producer-side stamp; supervisor ratify
@@ -1397,13 +1388,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // clamp to the smaller of the two so no out-of-bounds panics
         // slip into release builds.
         let len = captures_count.min(layout.capture_kinds.len());
-        for (i, &param_slot) in self
-            .mir
-            .param_slots
-            .iter()
-            .take(len)
-            .enumerate()
-        {
+        for (i, &param_slot) in self.mir.param_slots.iter().take(len).enumerate() {
             let capture_kind = layout.capture_storage_kind(i);
             let is_cell_capture = matches!(
                 capture_kind,

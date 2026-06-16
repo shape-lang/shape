@@ -56,46 +56,48 @@ macro_rules! define_heap_types {
         // Layers above HeapValue take Arc<HeapValue> and dispatch on
         // HeapValue::kind() rather than introducing parallel discriminators.
         // See docs/adr/005-typed-slot-construction.md.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ::serde::Serialize, ::serde::Deserialize)]
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, Hash, ::serde::Serialize, ::serde::Deserialize,
+        )]
         #[repr(u8)]
         pub enum HeapKind {
-            String,        // 0
-            TypedObject,   // 1
-            Closure,       // 2  (matches HeapValue::ClosureRaw via the Closure ordinal)
-            Decimal,       // 3
-            BigInt,        // 4
-            DataTable,     // 5
-            Future,        // 6
-            TaskGroup,     // 7
-            TypedArray,    // 8  (VACATED: V3-S5 ckpt-1..ckpt-4 (2026-05-15)
-                           //      retired the `TypedArrayData` enum + outer
-                           //      `HeapValue::TypedArray(Arc<TypedArrayData>)`
-                           //      arm + `TypedBuffer<T>` / `AlignedTypedBuffer`
-                           //      wrapper layer per W12-typed-array-data-
-                           //      deletion-audit §3.5/§3.6/§B + ADR-006
-                           //      §2.7.24 Q25.A SUPERSEDED. Ordinal 8 is
-                           //      vacated; per audit §3.6 deprecation cadence
-                           //      + handover §0 ordinal-collision rule, the
-                           //      ordinal MUST NOT be reassigned to a new
-                           //      HeapKind variant — avoids grep-history
-                           //      confusion across future agent dispatch.
-                           //      The variant identifier itself stays in the
-                           //      enum until V3-S5 ckpt-5 deletes the
-                           //      4-table-lockstep dispatch arms (clone_with_kind
-                           //      / drop_with_kind / SharedCell::drop /
-                           //      TypedObjectStorage::drop_fields) and the
-                           //      identifier finally retires. Refusal #1
-                           //      binding: do not reintroduce under any
-                           //      rename/shim/bridge.
-            Temporal,      // 9
-            TableView,     // 10
-            Content,       // 11
-            Instant,       // 12
-            IoHandle,      // 13
-            NativeScalar,  // 14
-            NativeView,    // 15
-            Char,          // 16
-            HashMap,       // 17  (Stage C P1(b), 2026-05-07)
+            String,      // 0
+            TypedObject, // 1
+            Closure,     // 2  (matches HeapValue::ClosureRaw via the Closure ordinal)
+            Decimal,     // 3
+            BigInt,      // 4
+            DataTable,   // 5
+            Future,      // 6
+            TaskGroup,   // 7
+            TypedArray,  // 8  (VACATED: V3-S5 ckpt-1..ckpt-4 (2026-05-15)
+            //      retired the `TypedArrayData` enum + outer
+            //      `HeapValue::TypedArray(Arc<TypedArrayData>)`
+            //      arm + `TypedBuffer<T>` / `AlignedTypedBuffer`
+            //      wrapper layer per W12-typed-array-data-
+            //      deletion-audit §3.5/§3.6/§B + ADR-006
+            //      §2.7.24 Q25.A SUPERSEDED. Ordinal 8 is
+            //      vacated; per audit §3.6 deprecation cadence
+            //      + handover §0 ordinal-collision rule, the
+            //      ordinal MUST NOT be reassigned to a new
+            //      HeapKind variant — avoids grep-history
+            //      confusion across future agent dispatch.
+            //      The variant identifier itself stays in the
+            //      enum until V3-S5 ckpt-5 deletes the
+            //      4-table-lockstep dispatch arms (clone_with_kind
+            //      / drop_with_kind / SharedCell::drop /
+            //      TypedObjectStorage::drop_fields) and the
+            //      identifier finally retires. Refusal #1
+            //      binding: do not reintroduce under any
+            //      rename/shim/bridge.
+            Temporal,     // 9
+            TableView,    // 10
+            Content,      // 11
+            Instant,      // 12
+            IoHandle,     // 13
+            NativeScalar, // 14
+            NativeView,   // 15
+            Char,         // 16
+            HashMap,      // 17  (Stage C P1(b), 2026-05-07)
             // Pure-discriminator variant — no corresponding `HeapValue` arm
             // (FilterExpr payloads live as `Arc<FilterNode>` directly in slot
             // bits, never wrapped in `HeapValue`). Added to fix the
@@ -107,7 +109,7 @@ macro_rules! define_heap_types {
             // dispatched the same label as `Arc<NativeViewData>` —
             // wrong-type retain/release. ADR-006 §2.3 / §2.7.6 / Q8
             // amendment (Wave-γ G-heap-filter-expr).
-            FilterExpr,    // 18  (Wave-γ G-heap-filter-expr, 2026-05-09)
+            FilterExpr, // 18  (Wave-γ G-heap-filter-expr, 2026-05-09)
             // ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26, 2026-05-10):
             // Reference-value carrier — replaces the deleted
             // `nanboxed::RefTarget` / `RefProjection` `ValueWord`-shaped
@@ -122,7 +124,7 @@ macro_rules! define_heap_types {
             // the ADR-005 §1 / ADR-006 §2.3 `HeapKind`↔`HeapValue`
             // symmetry property; no caller materializes a `Reference`
             // through `HeapValue` pattern matching.
-            Reference,     // 19  (Wave 8 W8-T26, 2026-05-10)
+            Reference, // 19  (Wave 8 W8-T26, 2026-05-10)
             // Pure-discriminator variant — no corresponding `HeapValue` arm
             // (`Arc<SharedCell>` cell-pointer slots live as
             // `Arc::into_raw(Arc<SharedCell>) as u64` directly in the
@@ -138,7 +140,7 @@ macro_rules! define_heap_types {
             // (Wave 8 W8-T25, mirror of §2.7.9 FilterExpr precedent).
             // NOTE: ordinal 20 (not the originally drafted 19) — T26 took
             // 19 first at merge time.
-            SharedCell,    // 20  (Wave 8 W8-T25, 2026-05-10)
+            SharedCell, // 20  (Wave 8 W8-T25, 2026-05-10)
             // ADR-006 §2.7.15 / Q16 amendment (Wave 13 W13-hashset-rebuild,
             // 2026-05-10): one-keyspace Set carrier, structurally a mirror
             // of the Stage C P1(b) `HeapKind::HashMap(Arc<HashMapData>)`
@@ -150,7 +152,7 @@ macro_rules! define_heap_types {
             // TypedObject slots and `the-deleted-heterogeneous-element-carrier` buffers.
             // See §2.7.15 for the full justification + the rejected Path
             // B (`TypedSet<T>` per element kind) alternative.
-            HashSet,       // 21  (Wave 13 W13-hashset-rebuild, 2026-05-10)
+            HashSet, // 21  (Wave 13 W13-hashset-rebuild, 2026-05-10)
             // ADR-006 §2.7.16 / Q17 (W13-iterator-state, 2026-05-10):
             // Lazy-iterator carrier — replaces the deleted
             // `heap_value::IteratorState` / `IteratorTransform`
@@ -166,7 +168,7 @@ macro_rules! define_heap_types {
             // `HeapValue` arm (mirror of other typed-Arc
             // refcount-dispatch arms — refcount discipline goes
             // through the kind label).
-            Iterator,      // 22  (W13-iterator-state, 2026-05-10)
+            Iterator, // 22  (W13-iterator-state, 2026-05-10)
             // ADR-006 §2.7.19 / Q20 amendment (Wave 15 W15-deque,
             // 2026-05-10): heterogeneous-element double-ended queue
             // carrier, structurally a mirror of the §2.7.15 HashSet
@@ -182,7 +184,7 @@ macro_rules! define_heap_types {
             // after Iterator=22 is taken. Merge ordering at
             // integration time per playbook §4 (W14 → PriorityQueue
             // → Deque) restores the documented 26 spec layout.
-            Deque,         // 23  (Wave 15 W15-deque, 2026-05-10)
+            Deque, // 23  (Wave 15 W15-deque, 2026-05-10)
             // ADR-006 §2.7.20 / Q21 amendment (Wave 15 W15-channel-rebuild,
             // 2026-05-10): MPSC-style synchronous channel concurrency
             // primitive. Unlike HashMap/HashSet/Iterator (which are
@@ -200,7 +202,7 @@ macro_rules! define_heap_types {
             // classification at method dispatch (`c.send(...)` / `c.recv()`),
             // can be stored in TypedObject slots and `the-deleted-heterogeneous-element-carrier`
             // buffers.
-            Channel,       // 24  (Wave 15 W15-channel-rebuild, 2026-05-10; bumped from drafted 23 at merge — Deque already took 23)
+            Channel, // 24  (Wave 15 W15-channel-rebuild, 2026-05-10; bumped from drafted 23 at merge — Deque already took 23)
             // ADR-006 §2.7.18 / Q19 amendment (Wave 15 W15-priority-queue,
             // 2026-05-10): i64-priority min-heap carrier, structurally
             // a mirror of the §2.7.15 HashSet shape with the keys
@@ -233,7 +235,7 @@ macro_rules! define_heap_types {
             // §0 "Pre-assigned HeapKind ordinals" table. Slots 23 (Result),
             // 24 (Option), 25 (PriorityQueue), 26 (Deque), 27 (Channel),
             // 28 (Column), 29 (Matrix) reserved for W14/W15 sibling agents.
-            Range,         // 26  (W15-range, 2026-05-10; renumbered from drafted 30 at merge — Result/Option/Column/Matrix slots dissolved or audit-pivoted)
+            Range, // 26  (W15-range, 2026-05-10; renumbered from drafted 30 at merge — Result/Option/Column/Matrix slots dissolved or audit-pivoted)
             // ADR-006 §2.7.17 / Q18 amendment (Wave 14 W14-variant-codegen,
             // 2026-05-10): Result<T,E> carrier — replaces the deleted
             // pre-bulldozer `Some/Ok/Err` `ValueWord`-shaped HeapValue
@@ -246,7 +248,7 @@ macro_rules! define_heap_types {
             // Mirror of §2.7.16 Iterator typed-Arc shape (full
             // HeapValue arm, NOT pure-discriminator like §2.7.9
             // FilterExpr / §2.7.12 SharedCell).
-            Result,        // 27  (Wave 14 W14-variant-codegen, 2026-05-10; renumbered from drafted 23 at merge — Deque already took 23)
+            Result, // 27  (Wave 14 W14-variant-codegen, 2026-05-10; renumbered from drafted 23 at merge — Deque already took 23)
             // ADR-006 §2.7.17 / Q18 amendment (Wave 14 W14-variant-codegen,
             // 2026-05-10): Option<T> carrier — sibling of Result with
             // `is_some` discriminator instead of `is_ok`. The dual-shape
@@ -255,7 +257,7 @@ macro_rules! define_heap_types {
             // null-bearing `T?` payload, which cannot be distinguished
             // from None under null-coding. Slot bits are
             // `Arc::into_raw(Arc<OptionData>)`; full HeapValue arm.
-            Option,        // 28  (Wave 14 W14-variant-codegen, 2026-05-10; renumbered from drafted 24 at merge — Channel already took 24)
+            Option, // 28  (Wave 14 W14-variant-codegen, 2026-05-10; renumbered from drafted 24 at merge — Channel already took 24)
             // ADR-006 §2.7.24 / Q25.C amendment (Wave 17
             // W17-trait-object-storage, 2026-05-11): re-introduces the
             // strict-typing-bulldozer-deleted `HeapKind::TraitObject` /
@@ -284,7 +286,7 @@ macro_rules! define_heap_types {
             // playbook reserved 29 for TraitObject; rescope kept that
             // assignment). Ordinal 29 was free between Option=28 and
             // the W17-concurrency block Mutex=30 / Atomic=31 / Lazy=32.
-            TraitObject,   // 29  (Wave 17 W17-trait-object-storage, 2026-05-11)
+            TraitObject, // 29  (Wave 17 W17-trait-object-storage, 2026-05-11)
             // ADR-006 §2.7.25 amendment (Wave 17 W17-concurrency,
             // 2026-05-11): Mutex<T> concurrency primitive — a single
             // typed payload protected by a `Mutex<MutexInner>` for
@@ -300,7 +302,7 @@ macro_rules! define_heap_types {
             // classification at method dispatch (`m.lock()` / `m.set(...)`),
             // can be stored in TypedObject slots. Pre-assigned ordinal
             // 30 per the wave-2.5 W17-concurrency dispatch contract.
-            Mutex,         // 30  (Wave 17 W17-concurrency, 2026-05-11)
+            Mutex, // 30  (Wave 17 W17-concurrency, 2026-05-11)
             // ADR-006 §2.7.25 amendment (Wave 17 W17-concurrency,
             // 2026-05-11): Atomic<i64> concurrency primitive — wraps
             // `std::sync::atomic::AtomicI64` for atomic load / store /
@@ -313,7 +315,7 @@ macro_rules! define_heap_types {
             // for receiver classification at method dispatch.
             // Pre-assigned ordinal 31 per the wave-2.5 W17-concurrency
             // dispatch contract.
-            Atomic,        // 31  (Wave 17 W17-concurrency, 2026-05-11)
+            Atomic, // 31  (Wave 17 W17-concurrency, 2026-05-11)
             // ADR-006 §2.7.25 amendment (Wave 17 W17-concurrency,
             // 2026-05-11): Lazy<T> initialize-once carrier — wraps an
             // initializer closure (`KindedSlot` of kind
@@ -327,7 +329,7 @@ macro_rules! define_heap_types {
             // classification at method dispatch (`l.get()` /
             // `l.is_initialized()`). Pre-assigned ordinal 32 per the
             // wave-2.5 W17-concurrency dispatch contract.
-            Lazy,          // 32  (Wave 17 W17-concurrency, 2026-05-11)
+            Lazy, // 32  (Wave 17 W17-concurrency, 2026-05-11)
             // ADR-006 §2.7.26 amendment (Wave 17 W17-comptime-vm-dispatch,
             // 2026-05-12): module-function reference carrier — labels a
             // slot whose `bits` are a `module_fn_id: usize` cast to `u64`.
@@ -348,7 +350,7 @@ macro_rules! define_heap_types {
             // `ModuleFn`-labeled bits (mirror of FilterExpr /
             // SharedCell / Reference's pure-discriminator-style
             // dispatch).
-            ModuleFn,      // 33  (Wave 17 W17-comptime-vm-dispatch, 2026-05-12)
+            ModuleFn, // 33  (Wave 17 W17-comptime-vm-dispatch, 2026-05-12)
             // ADR-006 §2.7.22 amendment (Round 18 S3
             // W12-matrix-floatslice-heapkind-exit, 2026-05-13): Matrix exits
             // the `TypedArrayData` carrier hierarchy. The pre-amendment
@@ -377,7 +379,7 @@ macro_rules! define_heap_types {
             // array-buffer carrier with element-typed payload); Matrix is
             // a separate value category (a structured numeric matrix
             // value, not an array of anything).
-            Matrix,        // 34  (Round 18 S3 W12-matrix-floatslice-heapkind-exit, 2026-05-13)
+            Matrix, // 34  (Round 18 S3 W12-matrix-floatslice-heapkind-exit, 2026-05-13)
             // ADR-006 §2.7.22 amendment (Round 18 S3
             // W12-matrix-floatslice-heapkind-exit, 2026-05-13): the
             // `FloatSlice { parent, offset, len }` projection (returned by
@@ -396,7 +398,7 @@ macro_rules! define_heap_types {
             // the kind label, `as_heap_value()` unsound, full
             // `HeapValue::MatrixSlice(Arc<MatrixSliceData>)` arm for the
             // ADR-005 §1 / ADR-006 §2.3 symmetry property).
-            MatrixSlice,   // 35  (Round 18 S3 W12-matrix-floatslice-heapkind-exit, 2026-05-13)
+            MatrixSlice, // 35  (Round 18 S3 W12-matrix-floatslice-heapkind-exit, 2026-05-13)
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every

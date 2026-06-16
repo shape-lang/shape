@@ -24,7 +24,10 @@ fn match_to_pairs(m: &regex::Match, captures: &regex::Captures) -> Vec<(String, 
         })
         .collect();
     vec![
-        ("text".to_string(), ConcreteReturn::String(m.as_str().to_string())),
+        (
+            "text".to_string(),
+            ConcreteReturn::String(m.as_str().to_string()),
+        ),
         ("start".to_string(), ConcreteReturn::I64(m.start() as i64)),
         ("end".to_string(), ConcreteReturn::I64(m.end() as i64)),
         ("groups".to_string(), ConcreteReturn::ArrayString(groups)),
@@ -89,7 +92,9 @@ pub fn create_regex_module() -> ModuleExports {
         |text, pattern, _ctx| {
             let re = regex::Regex::new(pattern.as_str())
                 .map_err(|e| format!("regex.is_match() invalid pattern: {}", e))?;
-            Ok(TypedReturn::Concrete(ConcreteReturn::Bool(re.is_match(text.as_str()))))
+            Ok(TypedReturn::Concrete(ConcreteReturn::Bool(
+                re.is_match(text.as_str()),
+            )))
         },
     );
 
@@ -119,13 +124,19 @@ pub fn create_regex_module() -> ModuleExports {
         &mut module,
         "replace",
         "Replace the first match of the pattern with the replacement",
-        [("text", "string"), ("pattern", "string"), ("replacement", "string")],
+        [
+            ("text", "string"),
+            ("pattern", "string"),
+            ("replacement", "string"),
+        ],
         ConcreteType::String,
         |text, pattern, replacement, _ctx| {
             let re = regex::Regex::new(pattern.as_str())
                 .map_err(|e| format!("regex.replace() invalid pattern: {}", e))?;
             let result = re.replace(text.as_str(), replacement.as_str());
-            Ok(TypedReturn::Concrete(ConcreteReturn::String(result.into_owned())))
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(
+                result.into_owned(),
+            )))
         },
     );
 
@@ -134,13 +145,19 @@ pub fn create_regex_module() -> ModuleExports {
         &mut module,
         "replace_all",
         "Replace all matches of the pattern with the replacement",
-        [("text", "string"), ("pattern", "string"), ("replacement", "string")],
+        [
+            ("text", "string"),
+            ("pattern", "string"),
+            ("replacement", "string"),
+        ],
         ConcreteType::String,
         |text, pattern, replacement, _ctx| {
             let re = regex::Regex::new(pattern.as_str())
                 .map_err(|e| format!("regex.replace_all() invalid pattern: {}", e))?;
             let result = re.replace_all(text.as_str(), replacement.as_str());
-            Ok(TypedReturn::Concrete(ConcreteReturn::String(result.into_owned())))
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(
+                result.into_owned(),
+            )))
         },
     );
 

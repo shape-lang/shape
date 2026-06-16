@@ -58,8 +58,7 @@ impl TypedFunctionSignature {
     /// more information than the v1 ABI and can be compiled with the legacy
     /// uniform-I64 path.
     pub fn is_fully_untyped(&self) -> bool {
-        self.param_types.iter().all(|k| is_untyped_slot(*k))
-            && is_untyped_slot(self.return_type)
+        self.param_types.iter().all(|k| is_untyped_slot(*k)) && is_untyped_slot(self.return_type)
     }
 }
 
@@ -104,19 +103,22 @@ pub fn slot_kind_to_clif_type(kind: NativeKind) -> types::Type {
         | NativeKind::NullableUIntSize => types::I64,
 
         // --- 32-bit integers ---
-        NativeKind::Int32 | NativeKind::NullableInt32 | NativeKind::UInt32 | NativeKind::NullableUInt32 => {
-            types::I32
-        }
+        NativeKind::Int32
+        | NativeKind::NullableInt32
+        | NativeKind::UInt32
+        | NativeKind::NullableUInt32 => types::I32,
 
         // --- 16-bit integers ---
-        NativeKind::Int16 | NativeKind::NullableInt16 | NativeKind::UInt16 | NativeKind::NullableUInt16 => {
-            types::I16
-        }
+        NativeKind::Int16
+        | NativeKind::NullableInt16
+        | NativeKind::UInt16
+        | NativeKind::NullableUInt16 => types::I16,
 
         // --- 8-bit integers ---
-        NativeKind::Int8 | NativeKind::NullableInt8 | NativeKind::UInt8 | NativeKind::NullableUInt8 => {
-            types::I8
-        }
+        NativeKind::Int8
+        | NativeKind::NullableInt8
+        | NativeKind::UInt8
+        | NativeKind::NullableUInt8 => types::I8,
 
         // --- boolean ---
         NativeKind::Bool => types::I8,
@@ -171,7 +173,9 @@ pub fn build_cranelift_signature(sig: &TypedFunctionSignature) -> Signature {
 
     // User arguments in their native representation.
     for kind in &sig.param_types {
-        clif_sig.params.push(AbiParam::new(slot_kind_to_clif_type(*kind)));
+        clif_sig
+            .params
+            .push(AbiParam::new(slot_kind_to_clif_type(*kind)));
     }
 
     // Signal return (same as v1 direct-call convention).

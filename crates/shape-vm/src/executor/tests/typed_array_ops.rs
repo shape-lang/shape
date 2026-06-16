@@ -23,22 +23,30 @@ use super::test_utils::{eval, eval_typed_i64};
 
 #[test]
 fn test_new_typed_array_ints() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_new_typed_array_floats() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_new_typed_array_bools() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_new_typed_array_mixed_falls_back() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
@@ -83,32 +91,44 @@ fn test_float_array_len() {
 
 #[test]
 fn test_float_array_dot_product() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_float_array_norm() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_float_array_cumsum() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_float_array_diff() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_float_array_abs() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_float_array_to_array() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
@@ -158,57 +178,79 @@ fn test_int_array_len() {
 
 #[test]
 fn test_int_array_abs() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_int_array_to_array() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_bool_array_count() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_bool_array_any() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_bool_array_any_all_false() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_bool_array_all() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_bool_array_all_with_false() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_bool_array_len() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_bool_array_to_array() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_float_array_unknown_method_errors() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 #[test]
 fn test_int_array_unknown_method_errors() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
+    )
 }
 
 // =========================================================================
@@ -367,9 +409,7 @@ fn test_lang9_spin_2c_reduce_chained_map_wrong_order_is_clean_error() {
     // compile-time error surfaced by the arg-kind guard in
     // `install_pending_closure_param_types_for_hof`.
     use super::test_utils::compile_with_prelude;
-    let result = compile_with_prelude(
-        "let _ = [1,2,3,4,5].map(|x| x * 2).reduce(0, |a, b| a + b)",
-    );
+    let result = compile_with_prelude("let _ = [1,2,3,4,5].map(|x| x * 2).reduce(0, |a, b| a + b)");
     let err = result.expect_err(
         "wrong-order reduce(init, closure) must be a clean compile error, not a miscompile",
     );
@@ -388,9 +428,7 @@ fn test_lang9_spin_2c_reduce_callback_first_compiles() {
     // so hint indexing is identical regardless of the closure's index in
     // the call's arg list.
     use super::test_utils::compile_with_prelude;
-    let result = compile_with_prelude(
-        "let _ = [1,2,3,4,5].map(|x| x * 2).reduce(|a, b| a + b, 0)",
-    );
+    let result = compile_with_prelude("let _ = [1,2,3,4,5].map(|x| x * 2).reduce(|a, b| a + b, 0)");
     assert!(
         result.is_ok(),
         "callback-first reduce must compile; got: {:?}",
@@ -423,9 +461,7 @@ fn test_lang9_spin_2c_reduce_direct_array_compiles() {
     // `compile_expr_array`), then `install_pending_closure_param_types_
     // for_hof`'s is_reduce branch seeds both `acc` and `x` as `int`.
     use super::test_utils::compile_with_prelude;
-    let result = compile_with_prelude(
-        "let _ = [1, 2, 3].reduce(|acc, x| acc + x, 0)",
-    );
+    let result = compile_with_prelude("let _ = [1, 2, 3].reduce(|acc, x| acc + x, 0)");
     assert!(
         result.is_ok(),
         "direct array.reduce must compile; got: {:?}",
@@ -449,9 +485,7 @@ fn test_reduce_correct_order_compiles() {
     // The exact close-gate input: callback first, init second — the
     // correct order for Shape's `reduce(f, init)` signature.
     use super::test_utils::compile_with_prelude;
-    let result = compile_with_prelude(
-        "let _ = [1, 2, 3].reduce(|acc, x| acc + x, 0)",
-    );
+    let result = compile_with_prelude("let _ = [1, 2, 3].reduce(|acc, x| acc + x, 0)");
     assert!(
         result.is_ok(),
         "correct-order reduce(closure, init) must compile; got: {:?}",
@@ -466,17 +500,11 @@ fn test_reduce_wrong_order_int_first_is_clean_error() {
     // Pre-fix: re-entrant `main` miscompile (infinite loop, ec=124).
     // Post-fix: clean compile-time `SemanticError`.
     use super::test_utils::compile_with_prelude;
-    let result = compile_with_prelude(
-        "let _ = [1, 2, 3].reduce(0, |acc, x| acc + x)",
-    );
-    let err = result.expect_err(
-        "wrong-order reduce(int, closure) must be a clean compile error",
-    );
+    let result = compile_with_prelude("let _ = [1, 2, 3].reduce(0, |acc, x| acc + x)");
+    let err = result.expect_err("wrong-order reduce(int, closure) must be a clean compile error");
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("reduce")
-            && msg.contains("first argument")
-            && msg.contains("int"),
+        msg.contains("reduce") && msg.contains("first argument") && msg.contains("int"),
         "error must name `reduce`, the first-argument problem, and `int`; got: {msg}"
     );
 }
@@ -486,12 +514,8 @@ fn test_reduce_non_closure_first_arg_string_is_clean_error() {
     // A string literal as `reduce`'s first argument is equally
     // ill-typed and must surface a clean compile error.
     use super::test_utils::compile_with_prelude;
-    let result = compile_with_prelude(
-        "let _ = [1, 2, 3].reduce(\"seed\", |acc, x| acc + x)",
-    );
-    let err = result.expect_err(
-        "reduce with a string first arg must be a clean compile error",
-    );
+    let result = compile_with_prelude("let _ = [1, 2, 3].reduce(\"seed\", |acc, x| acc + x)");
+    let err = result.expect_err("reduce with a string first arg must be a clean compile error");
     let msg = format!("{err:?}");
     assert!(
         msg.contains("reduce") && msg.contains("string"),
@@ -506,8 +530,7 @@ fn test_map_non_closure_arg_is_clean_error() {
     // likewise be a clean compile error, not a miscompile.
     use super::test_utils::compile_with_prelude;
     let result = compile_with_prelude("let _ = [1, 2, 3].map(7)");
-    let err = result
-        .expect_err("map with a non-closure arg must be a clean compile error");
+    let err = result.expect_err("map with a non-closure arg must be a clean compile error");
     let msg = format!("{err:?}");
     assert!(
         msg.contains("map") && msg.contains("first argument"),
@@ -523,9 +546,8 @@ fn test_filter_named_function_arg_still_allowed() {
     // may still fail for other reasons, but it must NOT be rejected
     // with the arg-order/arg-kind diagnostic.
     use super::test_utils::compile_with_prelude;
-    let result = compile_with_prelude(
-        "fn keep(n: int) -> bool { n > 1 }\nlet _ = [1, 2, 3].filter(keep)",
-    );
+    let result =
+        compile_with_prelude("fn keep(n: int) -> bool { n > 1 }\nlet _ = [1, 2, 3].filter(keep)");
     if let Err(err) = &result {
         let msg = format!("{err:?}");
         assert!(
@@ -534,7 +556,6 @@ fn test_filter_named_function_arg_still_allowed() {
         );
     }
 }
-
 
 // ──────────────────────────────────────────────────────────────────────
 // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18)

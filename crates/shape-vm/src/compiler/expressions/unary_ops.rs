@@ -61,9 +61,7 @@ impl BytecodeCompiler {
                     let operand_desc = self
                         .infer_expr_type(operand)
                         .ok()
-                        .map(|t| {
-                            super::numeric_ops::type_display_name(&t)
-                        })
+                        .map(|t| super::numeric_ops::type_display_name(&t))
                         .unwrap_or_else(|| "unknown".to_string());
                     return Err(shape_ast::error::ShapeError::SemanticError {
                         message: format!(
@@ -114,7 +112,8 @@ impl BytecodeCompiler {
                             method_id: method_id.0,
                             arg_count: 0,
                             string_id,
-                         receiver_type_tag: 0xFF, }),
+                            receiver_type_tag: 0xFF,
+                        }),
                     ));
                     // ADR-006 §2.7.5 W10 conduit: persist the bytecode-time
                     // unary-trait-dispatch decision so the JIT MIR consumer
@@ -166,9 +165,7 @@ impl BytecodeCompiler {
                         // a concrete type) — default to `number`.
                         if matches!(
                             inferred,
-                            Type::Variable(_)
-                                | Type::Constrained { .. }
-                                | Type::Function { .. }
+                            Type::Variable(_) | Type::Constrained { .. } | Type::Function { .. }
                         ) {
                             self.emit(Instruction::simple(OpCode::NegNumber));
                             self.last_expr_numeric_type = Some(NumericType::Number);
@@ -190,7 +187,8 @@ impl BytecodeCompiler {
                 }
 
                 return Err(shape_ast::error::ShapeError::SemanticError {
-                    message: "Cannot infer operand type for unary `-` — add type annotations".to_string(),
+                    message: "Cannot infer operand type for unary `-` — add type annotations"
+                        .to_string(),
                     location: None,
                 });
             }

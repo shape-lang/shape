@@ -183,9 +183,7 @@ impl BytecodeCompiler {
     /// Extract the inner type `T` from a `Result<T, E>` annotation.
     fn unwrap_result_inner(ann: &TypeAnnotation) -> Option<&TypeAnnotation> {
         match ann {
-            TypeAnnotation::Generic { name, args }
-                if name == "Result" && !args.is_empty() =>
-            {
+            TypeAnnotation::Generic { name, args } if name == "Result" && !args.is_empty() => {
                 Some(&args[0])
             }
             _ => None,
@@ -556,10 +554,7 @@ impl BytecodeCompiler {
     /// and surface `"cannot convert kind Ptr(Option) to <T>"`, while the
     /// `None` arm (null sentinel, skipped by `IsNull`) succeeds — the
     /// asymmetric cast WS-12 fixes.
-    fn emit_option_lift_infallible(
-        &mut self,
-        convert_opcode: OpCode,
-    ) {
+    fn emit_option_lift_infallible(&mut self, convert_opcode: OpCode) {
         // Stack: [option_val]
         self.emit(Instruction::simple(OpCode::Dup));
         // Stack: [option_val, option_val]
@@ -587,10 +582,7 @@ impl BytecodeCompiler {
     /// its payload `t` and then try-converted. Same `UnwrapOption`
     /// requirement as `emit_option_lift_infallible` — see that method's
     /// doc comment.
-    fn emit_option_lift_fallible(
-        &mut self,
-        try_convert_opcode: OpCode,
-    ) {
+    fn emit_option_lift_fallible(&mut self, try_convert_opcode: OpCode) {
         // Same pattern as infallible but using TryConvertTo*.
         // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
         self.emit(Instruction::simple(OpCode::Dup));
@@ -608,10 +600,7 @@ impl BytecodeCompiler {
     ///
     /// Stack effect: replaces top-of-stack Result<T, E> with Result<M, E>.
     /// Err values pass through; Ok(t) values are unwrapped, converted, and re-wrapped.
-    fn emit_result_lift_infallible(
-        &mut self,
-        convert_opcode: OpCode,
-    ) -> Result<()> {
+    fn emit_result_lift_infallible(&mut self, convert_opcode: OpCode) -> Result<()> {
         // Stack: [result_val]
         self.emit(Instruction::simple(OpCode::Dup));
         // Stack: [result_val, result_val]
@@ -636,10 +625,7 @@ impl BytecodeCompiler {
     }
 
     /// Emit bytecode for Result<T, E> lifting with a fallible conversion.
-    fn emit_result_lift_fallible(
-        &mut self,
-        try_convert_opcode: OpCode,
-    ) -> Result<()> {
+    fn emit_result_lift_fallible(&mut self, try_convert_opcode: OpCode) -> Result<()> {
         self.emit(Instruction::simple(OpCode::Dup));
         self.emit(Instruction::simple(OpCode::IsOk));
         let jump_skip = self.emit_jump(OpCode::JumpIfFalse, 0);
@@ -760,9 +746,9 @@ impl BytecodeCompiler {
             }
             "bool" | "string" | "char" => {
                 self.last_expr_numeric_type = None;
-                self.last_expr_type_info = Some(
-                    crate::type_tracking::VariableTypeInfo::named(target_selector.to_string()),
-                );
+                self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
+                    target_selector.to_string(),
+                ));
             }
             // Non-primitive targets do not reach this helper (the caller
             // gates on `convert_opcode_for_primitive` being `Some`).
@@ -825,11 +811,9 @@ impl BytecodeCompiler {
             // Option/Result lift paths preserve current behaviour.
             if matches!(cast_kind, Some(CastLiftKind::Direct)) {
                 if let Some(source_name) = self.cast_source_name(expr) {
-                    if let Some(func_idx) = self.user_impl_method_for_cast(
-                        &source_name,
-                        &target_selector,
-                        true,
-                    ) {
+                    if let Some(func_idx) =
+                        self.user_impl_method_for_cast(&source_name, &target_selector, true)
+                    {
                         self.compile_expr(expr)?;
                         self.emit_user_impl_cast_call(func_idx);
                         return Ok(());
@@ -921,11 +905,9 @@ impl BytecodeCompiler {
             // and stdlib-redeclare semantics.
             if matches!(cast_kind, Some(CastLiftKind::Direct)) {
                 if let Some(source_name) = self.cast_source_name(expr) {
-                    if let Some(func_idx) = self.user_impl_method_for_cast(
-                        &source_name,
-                        &target_selector,
-                        false,
-                    ) {
+                    if let Some(func_idx) =
+                        self.user_impl_method_for_cast(&source_name, &target_selector, false)
+                    {
                         self.compile_expr(expr)?;
                         self.emit_user_impl_cast_call(func_idx);
                         return Ok(());

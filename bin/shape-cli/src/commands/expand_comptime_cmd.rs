@@ -355,6 +355,13 @@ fn format_type_annotation(ta: &TypeAnnotation) -> String {
         TypeAnnotation::Never => "never".to_string(),
         TypeAnnotation::Null => "null".to_string(),
         TypeAnnotation::Undefined => "undefined".to_string(),
-        TypeAnnotation::Dyn(bounds) => format!("dyn {}", bounds.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(" + ")),
+        TypeAnnotation::Dyn(bounds) => format!(
+            "dyn {}",
+            bounds
+                .iter()
+                .map(|t| t.as_str())
+                .collect::<Vec<_>>()
+                .join(" + ")
+        ),
     }
 }

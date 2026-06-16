@@ -93,15 +93,13 @@ impl VirtualMachine {
             // with parallel kinds. The kinds track is lockstep with the
             // stack data track per §2.7.7 invariant.
             let base = frame.base_pointer;
-            let end = base.saturating_add(frame.locals_count).min(self.stack.len());
+            let end = base
+                .saturating_add(frame.locals_count)
+                .min(self.stack.len());
             let mut locals: Vec<KindedSlot> = Vec::with_capacity(end - base);
             for i in base..end {
                 let bits = self.stack[i];
-                let kind = self
-                    .kinds
-                    .get(i)
-                    .copied()
-                    .unwrap_or(NativeKind::Bool);
+                let kind = self.kinds.get(i).copied().unwrap_or(NativeKind::Bool);
                 // Clone-on-read via clone_with_kind discipline: snapshot
                 // owns its own share.
                 let cloned = clone_slot_kinded(bits, kind);
@@ -117,7 +115,7 @@ impl VirtualMachine {
                 function_name,
                 blob_hash: frame.blob_hash.map(|h| h.0),
                 local_ip: 0, // Per-frame local IP recovery is the
-                             // W17-snapshot-callstack-localip follow-up.
+                // W17-snapshot-callstack-localip follow-up.
                 locals,
                 upvalues,
                 args: Vec::new(), // The per-frame args are at the lower stack
@@ -208,7 +206,11 @@ impl VirtualMachine {
                     break;
                 }
                 let bits = self.stack[slot_idx];
-                let kind = self.kinds.get(slot_idx).copied().unwrap_or(NativeKind::Bool);
+                let kind = self
+                    .kinds
+                    .get(slot_idx)
+                    .copied()
+                    .unwrap_or(NativeKind::Bool);
                 out.push(clone_slot_kinded(bits, kind));
             }
             out

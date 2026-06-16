@@ -17,9 +17,9 @@ use crate::context::JITContext;
 // Higher-order array-walk FFI functions below now route to surface-and-stop
 // per ADR-006 §2.7.4 / W10 jit-playbook §5; the kinded rebuild reads the
 // receiver as `Arc<TypedArrayData>` per-element-kind arm (§2.7.6/Q8).
-use crate::ffi::value_ffi::*;
 #[allow(unused_imports)]
 use crate::ffi::jit_kinds::*;
+use crate::ffi::value_ffi::*;
 use std::ffi::c_void;
 
 // ============================================================================
@@ -195,15 +195,11 @@ fn dispatch_call_via_trampoline_vm(
                 // kind for function-id-shaped callees (per
                 // `call_convention.rs:853-877` UInt64 arm).
                 use shape_value::{KindedSlot, ValueSlot};
-                let callee = KindedSlot::new(
-                    ValueSlot::from_raw(func_id as u64),
-                    NativeKind::UInt64,
-                );
+                let callee =
+                    KindedSlot::new(ValueSlot::from_raw(func_id as u64), NativeKind::UInt64);
                 let kinded_args: Vec<KindedSlot> = arg_pairs
                     .iter()
-                    .map(|(bits, kind)| {
-                        KindedSlot::new(ValueSlot::from_raw(*bits), *kind)
-                    })
+                    .map(|(bits, kind)| KindedSlot::new(ValueSlot::from_raw(*bits), *kind))
                     .collect();
                 match vm.call_value_immediate_nb(&callee, &kinded_args, None) {
                     Ok(result) => {
@@ -249,11 +245,7 @@ fn dispatch_call_via_trampoline_vm(
 }
 
 /// Dispatch a native module function call through the trampoline VM.
-fn dispatch_module_fn_call(
-    _module_fn_id: u32,
-    _jit_args: &[u64],
-    _ctx: *mut JITContext,
-) -> u64 {
+fn dispatch_module_fn_call(_module_fn_id: u32, _jit_args: &[u64], _ctx: *mut JITContext) -> u64 {
     todo!(
         "phase-2c §2.7.10/Q11: JIT-side kinded handler ABI rebuild — \
          dispatch_module_fn_call. ModuleFunction callee construction and \
@@ -403,9 +395,9 @@ pub extern "C" fn jit_call_function(
 /// - **Resurrecting `ValueWord::clone_from_bits` /
 ///   `value_word_drop::vw_drop`** — CLAUDE.md "Forbidden Patterns" #1.
 pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
+    use crate::context::JITClosure;
     use crate::ffi::jit_kinds::unified_unbox;
     use crate::ffi::stack_kind_code;
-    use crate::context::JITClosure;
     use shape_value::{HeapKind, NativeKind, heap_value::HeapValue};
     use std::sync::Arc;
 
@@ -587,28 +579,21 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                         && (function_id as usize) < ctx_ref.function_table_len
                     {
                         let raw_fn_ptr =
-                            *(ctx_ref.function_table as *const *const u8)
-                                .add(function_id as usize);
+                            *(ctx_ref.function_table as *const *const u8).add(function_id as usize);
                         if !raw_fn_ptr.is_null() {
                             ctx_ref.stack_ptr = 0;
                             let _signal = call_jit_fn_with_args(raw_fn_ptr, ctx, &args);
                             if ctx_ref.stack_ptr > 0 {
                                 ctx_ref.stack_ptr -= 1;
                                 let ret_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-                                ctx_ref.stack_kinds[ctx_ref.stack_ptr] =
-                                    stack_kind_code::SENTINEL;
+                                ctx_ref.stack_kinds[ctx_ref.stack_ptr] = stack_kind_code::SENTINEL;
                                 return ret_bits;
                             }
                             return TAG_NULL;
                         }
                     }
                     // Fall through to trampoline VM for the bare-fn case.
-                    return dispatch_call_via_trampoline_vm(
-                        function_id as u32,
-                        None,
-                        &args,
-                        ctx,
-                    );
+                    return dispatch_call_via_trampoline_vm(function_id as u32, None, &args, ctx);
                 }
                 // Borrow the `Arc<HeapValue>` (use `from_raw` + `into_raw`
                 // to avoid taking the share — the share stays in the
@@ -620,9 +605,8 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                         // §2.7.11/Q12: read the function_id from the
                         // TypedClosureHeader prefix at offset 8 (per
                         // `closure_raw.rs` `TypedClosureHeader` layout).
-                        let fid = shape_value::v2::closure_raw::typed_closure_function_id(
-                            block.as_ptr(),
-                        );
+                        let fid =
+                            shape_value::v2::closure_raw::typed_closure_function_id(block.as_ptr());
                         let cap_count = block.layout().capture_count();
                         let mut caps: Vec<u64> = Vec::with_capacity(cap_count);
                         for idx in 0..cap_count {
@@ -829,12 +813,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         //   - Raw-Arc HeapKind::Closure callees (Case 3 closed via the
         //     §2.7.11/Q12 kind dispatch above).
         let upvalues: Option<&[u64]> = vm_captures.as_deref();
-        dispatch_call_via_trampoline_vm(
-            function_id as u32,
-            upvalues,
-            &args,
-            ctx,
-        )
+        dispatch_call_via_trampoline_vm(function_id as u32, upvalues, &args, ctx)
     }
 }
 
@@ -873,9 +852,15 @@ pub(crate) unsafe fn call_jit_fn_with_args(
         3 => std::mem::transmute::<_, F3>(fn_ptr)(ctx, args[0], args[1], args[2]),
         4 => std::mem::transmute::<_, F4>(fn_ptr)(ctx, args[0], args[1], args[2], args[3]),
         5 => std::mem::transmute::<_, F5>(fn_ptr)(ctx, args[0], args[1], args[2], args[3], args[4]),
-        6 => std::mem::transmute::<_, F6>(fn_ptr)(ctx, args[0], args[1], args[2], args[3], args[4], args[5]),
-        7 => std::mem::transmute::<_, F7>(fn_ptr)(ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6]),
-        8 => std::mem::transmute::<_, F8>(fn_ptr)(ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]),
+        6 => std::mem::transmute::<_, F6>(fn_ptr)(
+            ctx, args[0], args[1], args[2], args[3], args[4], args[5],
+        ),
+        7 => std::mem::transmute::<_, F7>(fn_ptr)(
+            ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+        ),
+        8 => std::mem::transmute::<_, F8>(fn_ptr)(
+            ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+        ),
         _ => {
             // Too many args for direct dispatch — fall back to trampoline
             -1

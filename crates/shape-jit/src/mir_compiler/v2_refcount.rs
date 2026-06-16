@@ -264,8 +264,7 @@ mod tests {
         let mut builder = FunctionBuilder::new(&mut func, &mut func_ctx);
 
         // Declare the dealloc func ref
-        let dealloc_name =
-            cranelift::codegen::ir::ExternalName::testcase("jit_v2_dealloc");
+        let dealloc_name = cranelift::codegen::ir::ExternalName::testcase("jit_v2_dealloc");
         let dealloc_func_ref = builder.import_function(cranelift::codegen::ir::ExtFuncData {
             name: dealloc_name,
             signature: dealloc_sig_ref,
@@ -332,20 +331,11 @@ mod tests {
             "drop should emit atomic_rmw sub. IR:\n{ir}"
         );
         // Should contain an icmp for old == 1
-        assert!(
-            ir.contains("icmp"),
-            "drop should emit icmp. IR:\n{ir}"
-        );
+        assert!(ir.contains("icmp"), "drop should emit icmp. IR:\n{ir}");
         // Should contain a brif (conditional branch)
-        assert!(
-            ir.contains("brif"),
-            "drop should emit brif. IR:\n{ir}"
-        );
+        assert!(ir.contains("brif"), "drop should emit brif. IR:\n{ir}");
         // Should contain a fence instruction
-        assert!(
-            ir.contains("fence"),
-            "drop should emit fence. IR:\n{ir}"
-        );
+        assert!(ir.contains("fence"), "drop should emit fence. IR:\n{ir}");
         // Should contain a call to the free function
         assert!(
             ir.contains("call"),

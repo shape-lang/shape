@@ -73,9 +73,7 @@ let p = Point { x: 0.0, y: 0.0 }
 let q = Point { x: 1.0, y: 1.0 }
 let d = distance(
 ";
-    ShapeTest::new(code)
-        .at(pos(4, 17))
-        .expect_signature_help();
+    ShapeTest::new(code).at(pos(4, 17)).expect_signature_help();
 }
 
 #[test]
@@ -100,7 +98,5 @@ impl Greet for User {
 let u = User { name: \"a\" }
 let s = u.hello(
 ";
-    ShapeTest::new(code)
-        .at(pos(6, 16))
-        .expect_signature_help();
+    ShapeTest::new(code).at(pos(6, 16)).expect_signature_help();
 }

@@ -380,9 +380,7 @@ let a = MyType { x: 1 }
 
     assert_eq!(
         types.get("a"),
-        Some(&Type::Concrete(TypeAnnotation::Reference(
-            "MyType".into()
-        )))
+        Some(&Type::Concrete(TypeAnnotation::Reference("MyType".into())))
     );
 }
 
@@ -1168,12 +1166,8 @@ fn test_union_name_with_reference_types() {
     let mut engine = TypeInferenceEngine::new();
 
     let types = vec![
-        Type::Concrete(shape_ast::ast::TypeAnnotation::Reference(
-            "Currency".into(),
-        )),
-        Type::Concrete(shape_ast::ast::TypeAnnotation::Reference(
-            "Percent".into(),
-        )),
+        Type::Concrete(shape_ast::ast::TypeAnnotation::Reference("Currency".into())),
+        Type::Concrete(shape_ast::ast::TypeAnnotation::Reference("Percent".into())),
     ];
 
     let union_type = engine.create_nominal_union(&types);
@@ -1312,9 +1306,7 @@ fn test_type_name_for_various_types() {
     assert_eq!(engine.type_name_for_union(&bool_type), "bool");
 
     // Test reference types
-    let ref_type = Type::Concrete(shape_ast::ast::TypeAnnotation::Reference(
-        "MyType".into(),
-    ));
+    let ref_type = Type::Concrete(shape_ast::ast::TypeAnnotation::Reference("MyType".into()));
     assert_eq!(engine.type_name_for_union(&ref_type), "MyType");
 
     // Test array types
@@ -1742,10 +1734,9 @@ let r = quad(10)
     let (types, errors) = engine.infer_program_best_effort(&program);
     assert!(errors.is_empty(), "inference should succeed: {:?}", errors);
 
-    let (double_p, double_r) = fn_param_return_basic(
-        types.get("double").expect("double should be inferred"),
-    )
-    .expect("double should be fn(basic)->basic");
+    let (double_p, double_r) =
+        fn_param_return_basic(types.get("double").expect("double should be inferred"))
+            .expect("double should be fn(basic)->basic");
     assert_eq!(
         (double_p.as_str(), double_r.as_str()),
         ("int", "int"),
@@ -1753,10 +1744,9 @@ let r = quad(10)
          not collapse to the number default"
     );
 
-    let (quad_p, quad_r) = fn_param_return_basic(
-        types.get("quad").expect("quad should be inferred"),
-    )
-    .expect("quad should be fn(basic)->basic");
+    let (quad_p, quad_r) =
+        fn_param_return_basic(types.get("quad").expect("quad should be inferred"))
+            .expect("quad should be fn(basic)->basic");
     assert_eq!((quad_p.as_str(), quad_r.as_str()), ("int", "int"));
 
     assert!(
@@ -1785,10 +1775,9 @@ let r = quadf(10.0)
     let (types, errors) = engine.infer_program_best_effort(&program);
     assert!(errors.is_empty(), "inference should succeed: {:?}", errors);
 
-    let (scalef_p, scalef_r) = fn_param_return_basic(
-        types.get("scalef").expect("scalef should be inferred"),
-    )
-    .expect("scalef should be fn(basic)->basic");
+    let (scalef_p, scalef_r) =
+        fn_param_return_basic(types.get("scalef").expect("scalef should be inferred"))
+            .expect("scalef should be fn(basic)->basic");
     assert_eq!((scalef_p.as_str(), scalef_r.as_str()), ("number", "number"));
 
     assert!(
@@ -1942,7 +1931,9 @@ fn ws9_indexable_constraint_backward_propagates_element_type() {
     ];
 
     let mut solver = ConstraintSolver::new();
-    solver.solve(&mut constraints).expect("solve should succeed");
+    solver
+        .solve(&mut constraints)
+        .expect("solve should succeed");
 
     let resolved_elem = solver
         .unifier()

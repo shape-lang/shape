@@ -83,16 +83,16 @@ impl VirtualMachine {
             OpCode::ArrayPushI64 => self.op_array_push_i64_elem(instruction),
             OpCode::ArrayPushF64 => self.op_array_push_f64_elem(instruction),
             OpCode::ArrayLenTyped => self.op_array_len_typed(instruction),
-            _ => unreachable!("exec_typed_array_elem_ops called with {:?}", instruction.opcode),
+            _ => unreachable!(
+                "exec_typed_array_elem_ops called with {:?}",
+                instruction.opcode
+            ),
         }
     }
 
     /// Resolve the absolute stack slot from the instruction's Local operand.
     #[inline(always)]
-    fn resolve_local_slot(
-        &self,
-        instruction: &Instruction,
-    ) -> Result<usize, VMError> {
+    fn resolve_local_slot(&self, instruction: &Instruction) -> Result<usize, VMError> {
         match instruction.operand {
             Some(Operand::Local(idx)) => {
                 let slot = self.current_locals_base() + idx as usize;
@@ -136,7 +136,6 @@ impl VirtualMachine {
             }
             _ => return Err(ckpt5_typed_array_surface("GetElemI64", arr_kind)),
         };
-
         self.push_kinded(val as u64, NativeKind::Int64)
     }
 

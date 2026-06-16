@@ -106,7 +106,9 @@ const COMBO = comptime {
 }
 print(COMBO)
 "#;
-    ShapeTest::new(code).expect_run_ok().expect_output("combo-ok");
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("combo-ok");
 }
 
 /// W14.2-C1 (2b) interaction: chained property access on BOTH builtins
@@ -230,7 +232,9 @@ const X = comptime {
 }
 print(X)
 "#;
-    ShapeTest::new(code).expect_run_ok().expect_output("enum-ok");
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("enum-ok");
 }
 
 /// W14.2-C1 (4b) enum chained: `type_info("Color").kind` on enum —
@@ -302,7 +306,9 @@ const X = comptime {
 }
 print(X)
 "#;
-    ShapeTest::new(code).expect_run_ok().expect_output("undef-ok");
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("undef-ok");
 }
 
 /// W14.2-C1 (5b) error path: chained property access on an
@@ -356,7 +362,9 @@ const X = comptime {
 }
 print(X)
 "#;
-    ShapeTest::new(code).expect_run_ok().expect_output("string-ok");
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("string-ok");
 }
 
 /// W14.2-C1 (6c) primitives chained: `type_info("bool").kind` — the

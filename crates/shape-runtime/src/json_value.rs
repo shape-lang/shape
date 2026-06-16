@@ -377,7 +377,7 @@ fn typed_object_to_json_value(
     slots: &[shape_value::ValueSlot],
     heap_mask: u64,
 ) -> Result<JsonValue, String> {
-    use crate::type_schema::{lookup_schema_by_id_public, FieldType};
+    use crate::type_schema::{FieldType, lookup_schema_by_id_public};
 
     let schema = lookup_schema_by_id_public(schema_id as u32).ok_or_else(|| {
         format!(

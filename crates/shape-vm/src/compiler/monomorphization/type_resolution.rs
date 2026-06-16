@@ -139,10 +139,7 @@ use std::hash::{Hash, Hasher};
 /// Not cryptographic — this is a cache key, not a security boundary.
 /// Collisions produce incorrect cache hits; for the small AST sizes inside
 /// stdlib-bound closures the collision probability is negligible.
-pub fn hash_closure_body(
-    params: &[shape_ast::ast::FunctionParameter],
-    body: &[Statement],
-) -> u64 {
+pub fn hash_closure_body(params: &[shape_ast::ast::FunctionParameter], body: &[Statement]) -> u64 {
     let mut hasher = DefaultHasher::new();
     for p in params {
         // Param patterns: hash identifier names only, skip spans.
@@ -188,7 +185,7 @@ fn hash_pattern(p: &shape_ast::ast::DestructurePattern, h: &mut impl Hasher) {
 }
 
 fn hash_stmt(s: &Statement, h: &mut impl Hasher) {
-    use shape_ast::ast::{statements::ForInit, Statement};
+    use shape_ast::ast::{Statement, statements::ForInit};
     match s {
         Statement::Return(e, _) => {
             0u8.hash(h);
@@ -223,7 +220,11 @@ fn hash_stmt(s: &Statement, h: &mut impl Hasher) {
                     hash_pattern(pattern, h);
                     hash_expr(iter, h);
                 }
-                ForInit::ForC { init, condition, update } => {
+                ForInit::ForC {
+                    init,
+                    condition,
+                    update,
+                } => {
                     1u8.hash(h);
                     hash_stmt(init, h);
                     hash_expr(condition, h);
@@ -276,7 +277,9 @@ fn hash_expr(e: &Expr, h: &mut impl Hasher) {
             1u8.hash(h);
             name.hash(h);
         }
-        Expr::BinaryOp { left, op, right, .. } => {
+        Expr::BinaryOp {
+            left, op, right, ..
+        } => {
             2u8.hash(h);
             format!("{:?}", op).hash(h);
             hash_expr(left, h);
@@ -287,7 +290,12 @@ fn hash_expr(e: &Expr, h: &mut impl Hasher) {
             format!("{:?}", op).hash(h);
             hash_expr(operand, h);
         }
-        Expr::FunctionCall { name, args, named_args, .. } => {
+        Expr::FunctionCall {
+            name,
+            args,
+            named_args,
+            ..
+        } => {
             4u8.hash(h);
             name.hash(h);
             for a in args {
@@ -298,7 +306,14 @@ fn hash_expr(e: &Expr, h: &mut impl Hasher) {
                 hash_expr(v, h);
             }
         }
-        Expr::MethodCall { receiver, method, args, named_args, optional, .. } => {
+        Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            named_args,
+            optional,
+            ..
+        } => {
             5u8.hash(h);
             hash_expr(receiver, h);
             method.hash(h);
@@ -311,13 +326,23 @@ fn hash_expr(e: &Expr, h: &mut impl Hasher) {
                 hash_expr(v, h);
             }
         }
-        Expr::PropertyAccess { object, property, optional, .. } => {
+        Expr::PropertyAccess {
+            object,
+            property,
+            optional,
+            ..
+        } => {
             6u8.hash(h);
             hash_expr(object, h);
             property.hash(h);
             optional.hash(h);
         }
-        Expr::IndexAccess { object, index, end_index, .. } => {
+        Expr::IndexAccess {
+            object,
+            index,
+            end_index,
+            ..
+        } => {
             7u8.hash(h);
             hash_expr(object, h);
             hash_expr(index, h);
@@ -467,7 +492,11 @@ pub fn comptime_const_value_from_literal_expr(expr: &Expr) -> Option<ComptimeCon
         Expr::Literal(Literal::Number(f), _) => Some(ComptimeConstValue::Number(*f)),
         Expr::Literal(Literal::Bool(b), _) => Some(ComptimeConstValue::Bool(*b)),
         Expr::Literal(Literal::String(s), _) => Some(ComptimeConstValue::String(s.clone())),
-        Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => match operand.as_ref() {
+        Expr::UnaryOp {
+            op: UnaryOp::Neg,
+            operand,
+            ..
+        } => match operand.as_ref() {
             Expr::Literal(Literal::Int(i), _) => Some(ComptimeConstValue::Int(-*i)),
             Expr::Literal(Literal::Number(f), _) => Some(ComptimeConstValue::Number(-*f)),
             _ => None,
@@ -864,21 +893,22 @@ pub fn resolve_call_site_type_args_with_closures(
     // Both phases produce identical bindings when Phase A succeeds — the
     // permissive base resolver is a strict superset of the type-only
     // resolver's binding set.
-    let resolution_args = match resolve_call_site_type_args(compiler, fn_name, arg_types, generic_params) {
-        Some(base) => base.type_args,
-        None => {
-            // Phase A bailed. Try Phase B: permissive resolution that lets
-            // closure-only generics remain unbound until closure-return
-            // inference fills them in.
-            resolve_with_closure_return_inference(
-                compiler,
-                fn_name,
-                args,
-                arg_types,
-                generic_params,
-            )?
-        }
-    };
+    let resolution_args =
+        match resolve_call_site_type_args(compiler, fn_name, arg_types, generic_params) {
+            Some(base) => base.type_args,
+            None => {
+                // Phase A bailed. Try Phase B: permissive resolution that lets
+                // closure-only generics remain unbound until closure-return
+                // inference fills them in.
+                resolve_with_closure_return_inference(
+                    compiler,
+                    fn_name,
+                    args,
+                    arg_types,
+                    generic_params,
+                )?
+            }
+        };
 
     // Clone the fn def (we need to hold both a &mut compiler and an immutable
     // view of param annotations). The def is not hot — one clone per closure
@@ -910,20 +940,19 @@ pub fn resolve_call_site_type_args_with_closures(
         // shaped annotation for us to infer the return type. If it doesn't,
         // we still mint a ClosureTypeId (with `return_type = None`) so the
         // mono key is distinct per capture signature.
-        let return_type =
-            func_def
-                .params
-                .get(i)
-                .and_then(|p| p.type_annotation.as_ref())
-                .and_then(|ann| match ann {
-                    TypeAnnotation::Function { returns, .. } => Some(returns.as_ref()),
-                    _ => None,
-                })
-                .and_then(|ret_ann| {
-                    // Substitute type params through the return annotation,
-                    // then render to ConcreteType if possible.
-                    concrete_type_from_annotation(ret_ann, &bindings)
-                });
+        let return_type = func_def
+            .params
+            .get(i)
+            .and_then(|p| p.type_annotation.as_ref())
+            .and_then(|ann| match ann {
+                TypeAnnotation::Function { returns, .. } => Some(returns.as_ref()),
+                _ => None,
+            })
+            .and_then(|ret_ann| {
+                // Substitute type params through the return annotation,
+                // then render to ConcreteType if possible.
+                concrete_type_from_annotation(ret_ann, &bindings)
+            });
 
         // Mint a ClosureTypeId for the literal. Uses the captures-only
         // signature (Phase A semantics) so two structurally identical closure
@@ -1033,7 +1062,12 @@ fn resolve_with_closure_return_inference(
     // return-type name and unify against the callee's closure-param return
     // annotation to bind closure-only generics.
     for (param_idx, arg_expr) in args.iter().enumerate() {
-        let Expr::FunctionExpr { params: cparams, body: cbody, .. } = arg_expr else {
+        let Expr::FunctionExpr {
+            params: cparams,
+            body: cbody,
+            ..
+        } = arg_expr
+        else {
             continue;
         };
 
@@ -1042,15 +1076,20 @@ fn resolve_with_closure_return_inference(
         let Some(param) = func_def.params.get(param_idx) else {
             continue;
         };
-        let Some(TypeAnnotation::Function { params: cparam_anns, returns: ret_ann }) =
-            param.type_annotation.as_ref()
+        let Some(TypeAnnotation::Function {
+            params: cparam_anns,
+            returns: ret_ann,
+        }) = param.type_annotation.as_ref()
         else {
             continue;
         };
 
         // Short-circuit: if the closure-param's return annotation doesn't
         // mention any generic, there's nothing to bind here.
-        if !generics.iter().any(|g| annotation_mentions_any(ret_ann, &[g])) {
+        if !generics
+            .iter()
+            .any(|g| annotation_mentions_any(ret_ann, &[g]))
+        {
             continue;
         }
 
@@ -1237,12 +1276,14 @@ pub fn declared_annotation_concrete_type(
 ) -> Option<ConcreteType> {
     use shape_value::v2::concrete_type::{EnumLayoutId, StructLayoutId};
     match ann {
-        TypeAnnotation::Basic(name) => concrete_type_from_name(name)
-            .or_else(|| named_user_type_concrete(compiler, name, StructLayoutId(0), EnumLayoutId(0))),
+        TypeAnnotation::Basic(name) => concrete_type_from_name(name).or_else(|| {
+            named_user_type_concrete(compiler, name, StructLayoutId(0), EnumLayoutId(0))
+        }),
         TypeAnnotation::Reference(path) if !path.is_qualified() => {
             let n = path.as_str();
-            concrete_type_from_name(n)
-                .or_else(|| named_user_type_concrete(compiler, n, StructLayoutId(0), EnumLayoutId(0)))
+            concrete_type_from_name(n).or_else(|| {
+                named_user_type_concrete(compiler, n, StructLayoutId(0), EnumLayoutId(0))
+            })
         }
         TypeAnnotation::Generic { name, args } => {
             let base = name.as_str();
@@ -1421,15 +1462,16 @@ fn unify_annotation_with_concrete(
             }
         }
         TypeAnnotation::Tuple(items) => match actual {
-            ConcreteType::Tuple(actual_items) if actual_items.len() == items.len() => {
-                items
-                    .iter()
-                    .zip(actual_items.iter())
-                    .all(|(ann, ct)| unify_annotation_with_concrete(ann, ct, generics, bindings))
-            }
+            ConcreteType::Tuple(actual_items) if actual_items.len() == items.len() => items
+                .iter()
+                .zip(actual_items.iter())
+                .all(|(ann, ct)| unify_annotation_with_concrete(ann, ct, generics, bindings)),
             _ => !items.iter().any(|t| annotation_mentions_any(t, generics)),
         },
-        TypeAnnotation::Function { params: _, returns: _ } => {
+        TypeAnnotation::Function {
+            params: _,
+            returns: _,
+        } => {
             // Phase 1 represents closures as opaque
             // `ConcreteType::Closure(_)` / `ConcreteType::Function(_)` —
             // there's no nested type info to peel apart. We therefore can't
@@ -1586,11 +1628,7 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
                 | BinaryOp::BitShr => {
                     let lt = concrete_type_for_expr(compiler, left)?;
                     let rt = concrete_type_for_expr(compiler, right)?;
-                    if lt == rt {
-                        Some(lt)
-                    } else {
-                        None
-                    }
+                    if lt == rt { Some(lt) } else { None }
                 }
                 // NullCoalesce (`a ?? b`): result is the non-null branch type.
                 // Both branches should agree; resolve the right (default) type.
@@ -1630,7 +1668,9 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
         // specialized callee's substituted return-type annotation IS the
         // proof — same chain as the let-binding site at statements.rs:4931.
         // No tag-bit decode, no runtime probe, no fabricated default.
-        Expr::MethodCall { receiver, method, .. } => {
+        Expr::MethodCall {
+            receiver, method, ..
+        } => {
             // First: a monomorphized stdlib method call records its substituted
             // return annotation at the call site (the `.map`/`.filter` chain
             // path). When present, that IS the proof — use it verbatim.
@@ -1680,14 +1720,16 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
             match name.as_str() {
                 "Some" if args.len() == 1 => concrete_type_for_expr(compiler, &args[0])
                     .map(|inner| ConcreteType::Option(Box::new(inner))),
-                "Ok" if args.len() == 1 => concrete_type_for_expr(compiler, &args[0])
-                    .map(|inner| {
+                "Ok" if args.len() == 1 => {
+                    concrete_type_for_expr(compiler, &args[0]).map(|inner| {
                         ConcreteType::Result(Box::new(inner), Box::new(ConcreteType::Void))
-                    }),
-                "Err" if args.len() == 1 => concrete_type_for_expr(compiler, &args[0])
-                    .map(|inner| {
+                    })
+                }
+                "Err" if args.len() == 1 => {
+                    concrete_type_for_expr(compiler, &args[0]).map(|inner| {
                         ConcreteType::Result(Box::new(ConcreteType::Void), Box::new(inner))
-                    }),
+                    })
+                }
                 // `None` carries no payload — its `Option<T>` element type
                 // is genuinely unresolvable without call-site context.
                 // Returning `None` keeps `id(None)` a clean compile error.
@@ -1713,9 +1755,12 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
         // `ConcreteType::Enum`; the trinity enum names `Option` / `Result`
         // are handled by the `Some` / `Ok` / `Err` FunctionCall arms above
         // and the dedicated trinity arm here.
-        Expr::EnumConstructor { enum_name, variant, payload, .. } => {
-            enum_constructor_concrete_type(compiler, enum_name.name(), variant, payload)
-        }
+        Expr::EnumConstructor {
+            enum_name,
+            variant,
+            payload,
+            ..
+        } => enum_constructor_concrete_type(compiler, enum_name.name(), variant, payload),
 
         // Anything else (member accesses, closures, …) is opaque until we
         // have richer side-tables. Returning None lets the resolver fall back
@@ -1738,10 +1783,7 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
 ///
 /// Returns `None` for an unknown name; the resolver then falls back to the
 /// generic template (no fabrication).
-fn struct_or_enum_concrete_type(
-    compiler: &BytecodeCompiler,
-    name: &str,
-) -> Option<ConcreteType> {
+fn struct_or_enum_concrete_type(compiler: &BytecodeCompiler, name: &str) -> Option<ConcreteType> {
     use shape_value::v2::concrete_type::{EnumLayoutId, StructLayoutId};
     named_user_type_concrete(compiler, name, StructLayoutId(0), EnumLayoutId(0))
 }
@@ -1947,7 +1989,9 @@ pub fn method_call_receiver_derived_concrete_type(
     // Drive off the method's REGISTERED return shape — never a hardcoded list.
     // Builtin array methods register under the `"Vec"` receiver name (same key
     // the inference engine resolves against).
-    let sig = compiler.method_table.lookup_generic_signature("Vec", method)?;
+    let sig = compiler
+        .method_table
+        .lookup_generic_signature("Vec", method)?;
     match &sig.return_type {
         // `Self` → the receiver array type unchanged (sort/reverse/take/…).
         TypeParamExpr::SelfType => Some(receiver_ct),
@@ -2019,7 +2063,11 @@ fn identifier_concrete_type(compiler: &BytecodeCompiler, name: &str) -> Option<C
         // records its `ConcreteType` here at let-binding time (see
         // `statements.rs`). This covers the variable-argument cases that
         // the array / map element side-tables below do not.
-        if let Some(ct) = compiler.module_binding_concrete_types.get(&binding_idx).cloned() {
+        if let Some(ct) = compiler
+            .module_binding_concrete_types
+            .get(&binding_idx)
+            .cloned()
+        {
             return Some(ct);
         }
         if let Some(elem) = compiler
@@ -2259,7 +2307,9 @@ mod tests {
 
         let arg_types = vec![
             Some(ConcreteType::Array(Box::new(ConcreteType::I64))),
-            Some(ConcreteType::Function(shape_value::v2::concrete_type::FunctionTypeId(0))),
+            Some(ConcreteType::Function(
+                shape_value::v2::concrete_type::FunctionTypeId(0),
+            )),
         ];
 
         let resolution = resolve_call_site_type_args(
@@ -2268,7 +2318,10 @@ mod tests {
             &arg_types,
             &["T".to_string(), "U".to_string()],
         );
-        assert!(resolution.is_none(), "U cannot be inferred from opaque closure");
+        assert!(
+            resolution.is_none(),
+            "U cannot be inferred from opaque closure"
+        );
     }
 
     /// `filter<T>(arr: Array<T>, pred: (T) -> bool) -> Array<T>` called with
@@ -2289,7 +2342,9 @@ mod tests {
         let arg_types = vec![
             Some(ConcreteType::Array(Box::new(ConcreteType::F64))),
             // Closure: opaque in Phase 1.
-            Some(ConcreteType::Function(shape_value::v2::concrete_type::FunctionTypeId(0))),
+            Some(ConcreteType::Function(
+                shape_value::v2::concrete_type::FunctionTypeId(0),
+            )),
         ];
 
         let resolution =
@@ -2346,12 +2401,8 @@ mod tests {
     fn unknown_function_returns_none() {
         let compiler = BytecodeCompiler::new();
         let arg_types = vec![Some(ConcreteType::I64)];
-        let resolution = resolve_call_site_type_args(
-            &compiler,
-            "nonexistent",
-            &arg_types,
-            &["T".to_string()],
-        );
+        let resolution =
+            resolve_call_site_type_args(&compiler, "nonexistent", &arg_types, &["T".to_string()]);
         assert!(resolution.is_none());
     }
 
@@ -2490,18 +2541,20 @@ mod tests {
 
     #[test]
     fn const_value_segment_bool() {
-        assert_eq!(const_value_mono_segment(&ComptimeConstValue::Bool(true)), "bool_true");
-        assert_eq!(const_value_mono_segment(&ComptimeConstValue::Bool(false)), "bool_false");
+        assert_eq!(
+            const_value_mono_segment(&ComptimeConstValue::Bool(true)),
+            "bool_true"
+        );
+        assert_eq!(
+            const_value_mono_segment(&ComptimeConstValue::Bool(false)),
+            "bool_false"
+        );
     }
 
     #[test]
     fn build_mono_key_with_consts_only_const_args() {
         // No type args, single int const arg → "repeat::int_3"
-        let key = build_mono_key_with_consts(
-            "repeat",
-            &[],
-            &[ComptimeConstValue::Int(3)],
-        );
+        let key = build_mono_key_with_consts("repeat", &[], &[ComptimeConstValue::Int(3)]);
         assert_eq!(key, "repeat::int_3");
     }
 
@@ -2673,7 +2726,10 @@ mod tests {
                 span: Span::default(),
                 doc_comment: None,
                 ty: TypeAnnotation::Basic("int".into()),
-                default: Some(Expr::Literal(shape_ast::ast::Literal::Int(3), Span::default())),
+                default: Some(Expr::Literal(
+                    shape_ast::ast::Literal::Int(3),
+                    Span::default(),
+                )),
             },
             TypeParam::Type {
                 name: "U".into(),
@@ -2687,7 +2743,10 @@ mod tests {
                 span: Span::default(),
                 doc_comment: None,
                 ty: TypeAnnotation::Basic("int".into()),
-                default: Some(Expr::Literal(shape_ast::ast::Literal::Int(5), Span::default())),
+                default: Some(Expr::Literal(
+                    shape_ast::ast::Literal::Int(5),
+                    Span::default(),
+                )),
             },
         ];
         let (types, consts) = split_type_and_const_param_names(&params);
@@ -2989,9 +3048,7 @@ mod tests {
         // error, not be force-resolved. `concrete_type_for_expr` returns
         // `None` for a bare `None` constructor, so `resolve_call_site_type_args`
         // cannot bind the type parameter and the call is rejected.
-        let result = crate::test_utils::compile_with_prelude(
-            "fn id<T>(x: T) -> T { x }\nid(None)",
-        );
+        let result = crate::test_utils::compile_with_prelude("fn id<T>(x: T) -> T { x }\nid(None)");
         assert!(
             result.is_err(),
             "id(None) with no type context must be a clean compile error"

@@ -54,8 +54,8 @@
 //! Bodies REFUSED ON SIGHT under Refusal #1 (resurrection under rename
 //! per ckpt-1 close-marker at `heap_value.rs:3956`).
 
-use shape_runtime::context::ExecutionContext;
 use crate::executor::VirtualMachine;
+use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
 use shape_value::{KindedSlot, NativeKind, VMError};
 

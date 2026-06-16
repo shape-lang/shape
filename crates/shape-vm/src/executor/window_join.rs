@@ -39,9 +39,7 @@ use crate::bytecode::{Instruction, OpCode, Operand};
 use crate::executor::vm_impl::stack::drop_with_kind;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
-use shape_value::{
-    HeapValue, KindedSlot, NativeKind, TableViewData, VMError,
-};
+use shape_value::{HeapValue, KindedSlot, NativeKind, TableViewData, VMError};
 
 use super::VirtualMachine;
 
@@ -173,9 +171,9 @@ pub(crate) fn handle_window_sum_v2(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    let arg = args.first().ok_or_else(|| {
-        type_error("WindowSum requires at least 1 argument (value or array)")
-    })?;
+    let arg = args
+        .first()
+        .ok_or_else(|| type_error("WindowSum requires at least 1 argument (value or array)"))?;
     match arg.kind {
         NativeKind::Int64 | NativeKind::Float64 => Ok(arg.clone()),
         // V3-S5 ckpt-5: TypedArray arm surface; rebuild at ckpt-6 STRICT
@@ -194,9 +192,9 @@ pub(crate) fn handle_window_avg_v2(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    let arg = args.first().ok_or_else(|| {
-        type_error("WindowAvg requires at least 1 argument (value or array)")
-    })?;
+    let arg = args
+        .first()
+        .ok_or_else(|| type_error("WindowAvg requires at least 1 argument (value or array)"))?;
     match arg.kind {
         NativeKind::Int64 => {
             let i = arg.as_i64().expect("kind=Int64");
@@ -230,14 +228,11 @@ pub(crate) fn handle_window_max_v2(
     handle_window_min_max_inner(args, true)
 }
 
-fn handle_window_min_max_inner(
-    args: &[KindedSlot],
-    pick_max: bool,
-) -> Result<KindedSlot, VMError> {
+fn handle_window_min_max_inner(args: &[KindedSlot], pick_max: bool) -> Result<KindedSlot, VMError> {
     let _ = pick_max;
-    let arg = args.first().ok_or_else(|| {
-        type_error("WindowMin/Max requires at least 1 argument (value or array)")
-    })?;
+    let arg = args
+        .first()
+        .ok_or_else(|| type_error("WindowMin/Max requires at least 1 argument (value or array)"))?;
     match arg.kind {
         NativeKind::Int64 | NativeKind::Float64 => Ok(arg.clone()),
         // V3-S5 ckpt-5: TypedArray arm surface; ckpt-6 rebuild target.
@@ -499,10 +494,7 @@ impl VirtualMachine {
             Ok(_binding) => {
                 // Push a TypedTable TableView — playbook §3 per-HeapKind table:
                 // `Arc::into_raw::<TableViewData>` + `NativeKind::Ptr(HeapKind::TableView)`.
-                let tv = Arc::new(TableViewData::TypedTable {
-                    schema_id,
-                    table,
-                });
+                let tv = Arc::new(TableViewData::TypedTable { schema_id, table });
                 let out_bits = Arc::into_raw(tv) as u64;
                 self.push_kinded(out_bits, NativeKind::Ptr(HeapKind::TableView))?;
                 Ok(())

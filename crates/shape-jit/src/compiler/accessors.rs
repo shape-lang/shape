@@ -636,9 +636,9 @@ fn vm_only_opcode_reason(opcode: OpCode) -> Option<&'static str> {
     match opcode {
         OpCode::AllocSharedModuleBinding
         | OpCode::LoadSharedModuleBinding
-        | OpCode::StoreSharedModuleBinding => Some(
-            "A.1C.3 outer-scope Shared module-binding opcode; Cranelift lowering pending",
-        ),
+        | OpCode::StoreSharedModuleBinding => {
+            Some("A.1C.3 outer-scope Shared module-binding opcode; Cranelift lowering pending")
+        }
         OpCode::ConvertToInt
         | OpCode::ConvertToNumber
         | OpCode::ConvertToString

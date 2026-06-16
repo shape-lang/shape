@@ -822,7 +822,6 @@ impl<'a> TokenCollector<'a> {
         // Emit STRING token for suffix (" or """)
         self.add_token_from_span(Span::new(span.end - suffix_len, span.end), 9, 0);
     }
-
 }
 
 /// Find interpolation expression segments in a formatted string body.

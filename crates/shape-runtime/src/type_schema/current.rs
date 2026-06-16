@@ -101,8 +101,7 @@ impl SyncRegistryScope {
     /// Install `registry` as the current thread-local registry, saving the
     /// previous value for restoration on drop.
     pub fn enter(registry: Arc<TypeSchemaRegistry>) -> Self {
-        let prev = SYNC_CURRENT_SCHEMA_REGISTRY
-            .with(|cell| cell.borrow_mut().replace(registry));
+        let prev = SYNC_CURRENT_SCHEMA_REGISTRY.with(|cell| cell.borrow_mut().replace(registry));
         Self { prev }
     }
 }

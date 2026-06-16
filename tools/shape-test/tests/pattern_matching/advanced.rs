@@ -64,7 +64,8 @@ function name(c: Color) -> string {
 }
 name(Color::Red)
 "#;
-    ShapeTest::new(code).expect_run_err_contains("Non-exhaustive match on 'Color': missing variants Blue");
+    ShapeTest::new(code)
+        .expect_run_err_contains("Non-exhaustive match on 'Color': missing variants Blue");
 }
 
 #[test]
@@ -82,7 +83,8 @@ function name(c: Color) -> string {
 }
 name(Color::Blue)
 "#;
-    ShapeTest::new(code).expect_run_err_contains("Non-exhaustive match on 'Color': missing variants Blue");
+    ShapeTest::new(code)
+        .expect_run_err_contains("Non-exhaustive match on 'Color': missing variants Blue");
 }
 
 // ============================================================================

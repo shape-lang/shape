@@ -24,9 +24,9 @@
 #[cfg(feature = "jit")]
 use crate::bytecode::{DeoptInfo, OsrEntryPoint};
 #[cfg(feature = "jit")]
-use crate::executor::control_flow::jit_abi;
-#[cfg(feature = "jit")]
 use crate::executor::VirtualMachine;
+#[cfg(feature = "jit")]
+use crate::executor::control_flow::jit_abi;
 #[cfg(feature = "jit")]
 use crate::type_tracking::NativeKind;
 #[cfg(feature = "jit")]

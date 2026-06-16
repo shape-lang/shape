@@ -161,5 +161,7 @@ fn scoped_contract_snapshot_requires_explicit_import() {
 
 #[test]
 fn scoped_contract_global_stdlib_modules_require_imports() {
-    ShapeTest::new("set::new()").with_stdlib().expect_run_err_contains("set");
+    ShapeTest::new("set::new()")
+        .with_stdlib()
+        .expect_run_err_contains("set");
 }

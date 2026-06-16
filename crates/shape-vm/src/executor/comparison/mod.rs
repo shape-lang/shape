@@ -14,10 +14,13 @@
 
 use crate::{
     bytecode::{Instruction, OpCode},
-    executor::vm_impl::stack::drop_with_kind,
     executor::VirtualMachine,
+    executor::vm_impl::stack::drop_with_kind,
 };
-use shape_value::{NativeKind, VMError, heap_value::{HeapKind, HeapValue}, ValueSlot};
+use shape_value::{
+    NativeKind, VMError, ValueSlot,
+    heap_value::{HeapKind, HeapValue},
+};
 use std::cmp::Ordering;
 use std::sync::Arc;
 
@@ -172,12 +175,18 @@ impl VirtualMachine {
             EqInt => {
                 let (b_bits, _b_kind) = self.pop_kinded()?;
                 let (a_bits, _a_kind) = self.pop_kinded()?;
-                self.push_kinded(((a_bits as i64) == (b_bits as i64)) as u64, NativeKind::Bool)?;
+                self.push_kinded(
+                    ((a_bits as i64) == (b_bits as i64)) as u64,
+                    NativeKind::Bool,
+                )?;
             }
             NeqInt => {
                 let (b_bits, _b_kind) = self.pop_kinded()?;
                 let (a_bits, _a_kind) = self.pop_kinded()?;
-                self.push_kinded(((a_bits as i64) != (b_bits as i64)) as u64, NativeKind::Bool)?;
+                self.push_kinded(
+                    ((a_bits as i64) != (b_bits as i64)) as u64,
+                    NativeKind::Bool,
+                )?;
             }
             // ===== Number family — kind-aware coercion (Float64 fast, Int promote) =====
             //
@@ -597,12 +606,7 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
 // (Kept unused as a stable internal symbol for downstream wave migrations
 // that need cross-numeric ordering at the body site.)
 #[allow(dead_code)]
-fn _expose(
-    a_bits: u64,
-    a_kind: NativeKind,
-    b_bits: u64,
-    b_kind: NativeKind,
-) -> Option<Ordering> {
+fn _expose(a_bits: u64, a_kind: NativeKind, b_bits: u64, b_kind: NativeKind) -> Option<Ordering> {
     VirtualMachine::nb_compare_numeric_kinded(a_bits, a_kind, b_bits, b_kind)
 }
 
@@ -624,7 +628,10 @@ mod tests {
     }
 
     fn run_typed_cmp(vm: &mut VirtualMachine, opcode: OpCode) -> bool {
-        let instr = Instruction { opcode, operand: None };
+        let instr = Instruction {
+            opcode,
+            operand: None,
+        };
         vm.exec_typed_comparison(&instr).unwrap();
         // Wave 6.5: comparison handlers push `NativeKind::Bool` — read via
         // pop_kinded.
@@ -684,24 +691,30 @@ mod tests {
     #[test]
     fn typed_number_eq() {
         let mut vm = make_vm();
-        vm.push_kinded(1.5f64.to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded(1.5f64.to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded(1.5f64.to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded(1.5f64.to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::EqNumber));
     }
 
     #[test]
     fn typed_number_lt() {
         let mut vm = make_vm();
-        vm.push_kinded((-1.0f64).to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded(0.5f64.to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded((-1.0f64).to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded(0.5f64.to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::LtNumber));
     }
 
     #[test]
     fn typed_number_gt() {
         let mut vm = make_vm();
-        vm.push_kinded(3.14f64.to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded(2.71f64.to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded(3.14f64.to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded(2.71f64.to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::GtNumber));
     }
 
@@ -710,47 +723,60 @@ mod tests {
     #[test]
     fn typed_number_eq_nan_is_false() {
         let mut vm = make_vm();
-        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(!run_typed_cmp(&mut vm, OpCode::EqNumber));
     }
 
     #[test]
     fn typed_number_neq_nan_is_true() {
         let mut vm = make_vm();
-        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::NeqNumber));
     }
 
     #[test]
     fn typed_number_lt_nan_is_false() {
         let mut vm = make_vm();
-        vm.push_kinded(1.0f64.to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded(1.0f64.to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(!run_typed_cmp(&mut vm, OpCode::LtNumber));
     }
 
     #[test]
     fn typed_number_gt_nan_is_false() {
         let mut vm = make_vm();
-        vm.push_kinded(1.0f64.to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded(1.0f64.to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded(f64::NAN.to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(!run_typed_cmp(&mut vm, OpCode::GtNumber));
     }
 
     #[test]
     fn typed_number_eq_treats_neg_zero_as_zero() {
         let mut vm = make_vm();
-        vm.push_kinded((-0.0f64).to_bits(), NativeKind::Float64).unwrap();
-        vm.push_kinded((0.0f64).to_bits(), NativeKind::Float64).unwrap();
+        vm.push_kinded((-0.0f64).to_bits(), NativeKind::Float64)
+            .unwrap();
+        vm.push_kinded((0.0f64).to_bits(), NativeKind::Float64)
+            .unwrap();
         assert!(run_typed_cmp(&mut vm, OpCode::EqNumber));
     }
 
     // ----- IsNull -----
 
     fn run_is_null(vm: &mut VirtualMachine) -> bool {
-        let instr = Instruction { opcode: OpCode::IsNull, operand: None };
+        let instr = Instruction {
+            opcode: OpCode::IsNull,
+            operand: None,
+        };
         vm.exec_typed_comparison(&instr).unwrap();
         let (bits, kind) = vm.pop_kinded().unwrap();
         assert_eq!(kind, NativeKind::Bool);

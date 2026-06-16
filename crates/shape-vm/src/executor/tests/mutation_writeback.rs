@@ -472,7 +472,10 @@ fn writeback_emits_dup_storelocal_on_mut_method() {
         if ins.opcode == OpCode::CallMethod
             && i + 2 < top.len()
             && top[i + 1].opcode == OpCode::Dup
-            && matches!(top[i + 2].opcode, OpCode::StoreLocal | OpCode::StoreModuleBinding)
+            && matches!(
+                top[i + 2].opcode,
+                OpCode::StoreLocal | OpCode::StoreModuleBinding
+            )
         {
             saw_dup_after_call = true;
             break;

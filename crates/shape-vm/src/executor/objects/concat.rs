@@ -78,7 +78,10 @@ impl VirtualMachine {
         // into the result buffer. The `Arc<String>` reconstructions below
         // re-bump the strong count so the drop_with_kind at the end
         // releases the share that pop_kinded transferred to us.
-        let result = match (read_string_or_char(a_bits, a_kind), read_string_or_char(b_bits, b_kind)) {
+        let result = match (
+            read_string_or_char(a_bits, a_kind),
+            read_string_or_char(b_bits, b_kind),
+        ) {
             (Some(a), Some(b)) => format!("{}{}", a, b),
             _ => {
                 // Release the popped shares before erroring.
@@ -158,7 +161,10 @@ impl VirtualMachine {
         drop_with_kind(a_bits, a_kind);
 
         let new_ptr = result.map_err(|e| VMError::RuntimeError(format!("ArrayConcat: {}", e)))?;
-        self.push_kinded(new_ptr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))
+        self.push_kinded(
+            new_ptr as usize as u64,
+            NativeKind::Ptr(HeapKind::TypedArray),
+        )
     }
 }
 

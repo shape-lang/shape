@@ -462,13 +462,7 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
     mir: &crate::mir::MirFunction,
     callee_returns: Option<&dyn Fn(&str) -> Option<shape_value::v2::ConcreteType>>,
 ) -> Vec<shape_value::v2::ConcreteType> {
-    infer_top_level_concrete_types_from_mir_with_resolvers(
-        mir,
-        callee_returns,
-        None,
-        None,
-        None,
-    )
+    infer_top_level_concrete_types_from_mir_with_resolvers(mir, callee_returns, None, None, None)
 }
 
 /// Trait-method-aware variant of the conduit producer.
@@ -500,9 +494,7 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_returns(
 pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
     mir: &crate::mir::MirFunction,
     callee_returns: Option<&dyn Fn(&str) -> Option<shape_value::v2::ConcreteType>>,
-    method_returns: Option<
-        &dyn Fn(&str, &str) -> Option<shape_value::v2::ConcreteType>,
-    >,
+    method_returns: Option<&dyn Fn(&str, &str) -> Option<shape_value::v2::ConcreteType>>,
     // ADR-006 §2.7.5 V3-S6b conduit consumer.
     //
     // `monomorph_method_returns(call_site_span) -> Option<ConcreteType>`
@@ -575,8 +567,7 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
     // first, then the array's `ArrayStore` moves the temp. We probe the
     // pre-assigned temps' constant kinds so the array-element inference
     // can prove the typed-array kind from the indirect operand shape.
-    let mut slot_scalar_kind: Vec<Option<shape_value::v2::ConcreteType>> =
-        vec![None; n];
+    let mut slot_scalar_kind: Vec<Option<shape_value::v2::ConcreteType>> = vec![None; n];
     for block in mir.iter_blocks() {
         for stmt in &block.statements {
             if let StatementKind::Assign(
@@ -656,14 +647,8 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
     // array architectural-gap signal).
     for (slot, elem) in &mir.local_typed_array_element_types {
         let idx = slot.0 as usize;
-        if idx < n
-            && matches!(
-                concrete_types[idx],
-                shape_value::v2::ConcreteType::Void
-            )
-        {
-            concrete_types[idx] =
-                shape_value::v2::ConcreteType::Array(Box::new(elem.clone()));
+        if idx < n && matches!(concrete_types[idx], shape_value::v2::ConcreteType::Void) {
+            concrete_types[idx] = shape_value::v2::ConcreteType::Array(Box::new(elem.clone()));
         }
     }
 
@@ -749,10 +734,9 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                     if idx < n {
                         // MIR-shape inference has no source-level type name
                         // here — placeholder struct id (v0.3 WS-6).
-                        concrete_types[idx] =
-                            shape_value::v2::ConcreteType::placeholder_struct(
-                                shape_value::v2::concrete_type::StructLayoutId(0),
-                            );
+                        concrete_types[idx] = shape_value::v2::ConcreteType::placeholder_struct(
+                            shape_value::v2::concrete_type::StructLayoutId(0),
+                        );
                     }
                 }
                 StatementKind::EnumStore {
@@ -798,31 +782,21 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                             None
                         };
                         match (variant_tag, inner_concrete) {
-                            (
-                                Some(crate::mir::types::VariantTag::Ok),
-                                Some(inner),
-                            ) => {
+                            (Some(crate::mir::types::VariantTag::Ok), Some(inner)) => {
                                 concrete_types[idx] = shape_value::v2::ConcreteType::Result(
                                     Box::new(inner),
                                     Box::new(shape_value::v2::ConcreteType::Void),
                                 );
                             }
-                            (
-                                Some(crate::mir::types::VariantTag::Err),
-                                Some(inner),
-                            ) => {
+                            (Some(crate::mir::types::VariantTag::Err), Some(inner)) => {
                                 concrete_types[idx] = shape_value::v2::ConcreteType::Result(
                                     Box::new(shape_value::v2::ConcreteType::Void),
                                     Box::new(inner),
                                 );
                             }
-                            (
-                                Some(crate::mir::types::VariantTag::Some_),
-                                Some(inner),
-                            ) => {
-                                concrete_types[idx] = shape_value::v2::ConcreteType::Option(
-                                    Box::new(inner),
-                                );
+                            (Some(crate::mir::types::VariantTag::Some_), Some(inner)) => {
+                                concrete_types[idx] =
+                                    shape_value::v2::ConcreteType::Option(Box::new(inner));
                             }
                             (Some(crate::mir::types::VariantTag::None_), _) => {
                                 // None has no payload — inner is unknown.
@@ -922,16 +896,10 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                     if let crate::mir::types::Place::Local(dst) = destination {
                         let idx = dst.0 as usize;
                         if idx < n
-                            && matches!(
-                                concrete_types[idx],
-                                shape_value::v2::ConcreteType::Void
-                            )
+                            && matches!(concrete_types[idx], shape_value::v2::ConcreteType::Void)
                         {
                             if let Some(ct) = resolver(name.as_str()) {
-                                if !matches!(
-                                    ct,
-                                    shape_value::v2::ConcreteType::Void
-                                ) {
+                                if !matches!(ct, shape_value::v2::ConcreteType::Void) {
                                     concrete_types[idx] = ct;
                                 }
                             }
@@ -1020,17 +988,11 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                     if let crate::mir::types::Place::Local(dst) = destination {
                         let idx = dst.0 as usize;
                         if idx < n
-                            && matches!(
-                                concrete_types[idx],
-                                shape_value::v2::ConcreteType::Void
-                            )
+                            && matches!(concrete_types[idx], shape_value::v2::ConcreteType::Void)
                         {
                             let span = block.terminator.span;
                             if let Some(ct) = monomorph_resolver(span) {
-                                if !matches!(
-                                    ct,
-                                    shape_value::v2::ConcreteType::Void
-                                ) {
+                                if !matches!(ct, shape_value::v2::ConcreteType::Void) {
                                     concrete_types[idx] = ct;
                                 }
                             }
@@ -1098,18 +1060,11 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                 }
                 if let crate::mir::types::Place::Local(dst) = destination {
                     let idx = dst.0 as usize;
-                    if idx < n
-                        && matches!(
-                            concrete_types[idx],
-                            shape_value::v2::ConcreteType::Void
-                        )
+                    if idx < n && matches!(concrete_types[idx], shape_value::v2::ConcreteType::Void)
                     {
                         let span = block.terminator.span;
                         if let Some(ct) = value_call_resolver(span) {
-                            if !matches!(
-                                ct,
-                                shape_value::v2::ConcreteType::Void
-                            ) {
+                            if !matches!(ct, shape_value::v2::ConcreteType::Void) {
                                 concrete_types[idx] = ct;
                             }
                         }
@@ -1215,10 +1170,7 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                     if let crate::mir::types::Place::Local(dst) = destination {
                         let idx = dst.0 as usize;
                         if idx < n
-                            && matches!(
-                                concrete_types[idx],
-                                shape_value::v2::ConcreteType::Void
-                            )
+                            && matches!(concrete_types[idx], shape_value::v2::ConcreteType::Void)
                         {
                             // Receiver is `args[0]` per the MIR lowering
                             // convention at `mir/lowering/expr.rs::Expr::MethodCall`
@@ -1226,20 +1178,18 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                             let receiver_slot = match args.first() {
                                 Some(Operand::Move(crate::mir::types::Place::Local(s)))
                                 | Some(Operand::Copy(crate::mir::types::Place::Local(s)))
-                                | Some(Operand::MoveExplicit(crate::mir::types::Place::Local(s))) => s.0 as usize,
+                                | Some(Operand::MoveExplicit(crate::mir::types::Place::Local(s))) => {
+                                    s.0 as usize
+                                }
                                 _ => continue,
                             };
                             if receiver_slot >= n {
                                 continue;
                             }
                             if let Some(type_name) = struct_names[receiver_slot].clone() {
-                                if let Some(ct) =
-                                    method_resolver(&type_name, method_name.as_str())
+                                if let Some(ct) = method_resolver(&type_name, method_name.as_str())
                                 {
-                                    if !matches!(
-                                        ct,
-                                        shape_value::v2::ConcreteType::Void
-                                    ) {
+                                    if !matches!(ct, shape_value::v2::ConcreteType::Void) {
                                         concrete_types[idx] = ct;
                                         continue;
                                     }
@@ -1271,10 +1221,7 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                             // `function_return_concrete_types` for the
                             // specialized return type.
                             let receiver_ct = &concrete_types[receiver_slot];
-                            let inferred = match (
-                                method_name.as_str(),
-                                receiver_ct,
-                            ) {
+                            let inferred = match (method_name.as_str(), receiver_ct) {
                                 // V3-S6a resolver-extension follow-up:
                                 // Array element-typed accessors. The
                                 // VM-side `array_basic.rs` /
@@ -1295,10 +1242,9 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                                     "sum" | "mean" | "min" | "max",
                                     shape_value::v2::ConcreteType::Array(elem),
                                 ) => Some((**elem).clone()),
-                                (
-                                    "get",
-                                    shape_value::v2::ConcreteType::Array(elem),
-                                ) => Some((**elem).clone()),
+                                ("get", shape_value::v2::ConcreteType::Array(elem)) => {
+                                    Some((**elem).clone())
+                                }
                                 _ => None,
                             };
                             if let Some(ct) = inferred {
@@ -1355,12 +1301,8 @@ fn classify_fn_return_kind(return_type: &str) -> Option<shape_value::NativeKind>
         .unwrap_or(trimmed.len());
     let head = &trimmed[..head_end];
     match head {
-        "Result" => Some(shape_value::NativeKind::Ptr(
-            shape_value::HeapKind::Result,
-        )),
-        "Option" => Some(shape_value::NativeKind::Ptr(
-            shape_value::HeapKind::Option,
-        )),
+        "Result" => Some(shape_value::NativeKind::Ptr(shape_value::HeapKind::Result)),
+        "Option" => Some(shape_value::NativeKind::Ptr(shape_value::HeapKind::Option)),
         _ => None,
     }
 }
@@ -1399,8 +1341,7 @@ fn operand_concrete_type(
         Operand::Constant(MirConstant::Int(_)) => Some(shape_value::v2::ConcreteType::I64),
         Operand::Constant(MirConstant::Float(_)) => Some(shape_value::v2::ConcreteType::F64),
         Operand::Constant(MirConstant::Bool(_)) => Some(shape_value::v2::ConcreteType::Bool),
-        Operand::Constant(MirConstant::Str(_))
-        | Operand::Constant(MirConstant::StringId(_)) => {
+        Operand::Constant(MirConstant::Str(_)) | Operand::Constant(MirConstant::StringId(_)) => {
             Some(shape_value::v2::ConcreteType::String)
         }
         Operand::Move(Place::Local(s))
@@ -1459,15 +1400,9 @@ fn infer_array_elem_from_operands(
     let mut elem: Option<shape_value::v2::ConcreteType> = None;
     for op in operands {
         let here = match op {
-            Operand::Constant(MirConstant::Int(_)) => {
-                Some(shape_value::v2::ConcreteType::I64)
-            }
-            Operand::Constant(MirConstant::Float(_)) => {
-                Some(shape_value::v2::ConcreteType::F64)
-            }
-            Operand::Constant(MirConstant::Bool(_)) => {
-                Some(shape_value::v2::ConcreteType::Bool)
-            }
+            Operand::Constant(MirConstant::Int(_)) => Some(shape_value::v2::ConcreteType::I64),
+            Operand::Constant(MirConstant::Float(_)) => Some(shape_value::v2::ConcreteType::F64),
+            Operand::Constant(MirConstant::Bool(_)) => Some(shape_value::v2::ConcreteType::Bool),
             // Move/Copy of a local slot — consult two kind sources in
             // order:
             //
@@ -1895,11 +1830,25 @@ impl BytecodeCompiler {
     pub(super) fn tracker_type_name_is_primitive(name: &str) -> bool {
         matches!(
             name,
-            "int" | "i8" | "i16" | "i32" | "i64"
-            | "u8" | "u16" | "u32" | "u64"
-            | "number" | "f32" | "f64"
-            | "bool" | "string" | "decimal" | "bigint"
-            | "DateTime" | "Duration" | "TimeSpan"
+            "int"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "number"
+                | "f32"
+                | "f64"
+                | "bool"
+                | "string"
+                | "decimal"
+                | "bigint"
+                | "DateTime"
+                | "Duration"
+                | "TimeSpan"
         )
     }
 
@@ -2633,9 +2582,7 @@ impl BytecodeCompiler {
             // If `pos` is inside a nested function's range, jump past it.
             // `nested_ranges` is sorted; advance the cursor past any range
             // we've stepped over.
-            while nested_cursor < nested_ranges.len()
-                && nested_ranges[nested_cursor].1 <= pos
-            {
+            while nested_cursor < nested_ranges.len() && nested_ranges[nested_cursor].1 <= pos {
                 nested_cursor += 1;
             }
             if nested_cursor < nested_ranges.len() {
@@ -2807,10 +2754,7 @@ impl BytecodeCompiler {
         use crate::executor::typed_object_ops::{
             FIELD_TAG_BOOL, FIELD_TAG_F64, FIELD_TAG_I64, FIELD_TAG_TIMESTAMP,
         };
-        let Some(Operand::TypedField {
-            field_type_tag, ..
-        }) = &instr.operand
-        else {
+        let Some(Operand::TypedField { field_type_tag, .. }) = &instr.operand else {
             return None;
         };
         match *field_type_tag {
@@ -2888,10 +2832,7 @@ impl BytecodeCompiler {
         if make_field_ref.opcode != OpCode::MakeFieldRef {
             return None;
         }
-        let Some(Operand::TypedField {
-            field_type_tag, ..
-        }) = &make_field_ref.operand
-        else {
+        let Some(Operand::TypedField { field_type_tag, .. }) = &make_field_ref.operand else {
             return None;
         };
         match *field_type_tag {
@@ -3820,7 +3761,6 @@ impl BytecodeCompiler {
             frame.return_kind = return_kind;
             self.program.top_level_frame = Some(frame);
         }
-
 
         // Per ADR-006 §2.7.5.1, the wire-format
         // `module_binding_storage_hints: Vec<NativeKind>` requires every
@@ -5090,9 +5030,9 @@ impl BytecodeCompiler {
                 // (W17.2-B close commit e316e171). Single-arg shape only;
                 // malformed Option<...> annotations route through the
                 // residual TRANSITIONAL fallback below.
-                "Option" if args.len() == 1 => FieldType::Option(Box::new(
-                    Self::type_annotation_to_field_type(&args[0]),
-                )),
+                "Option" if args.len() == 1 => {
+                    FieldType::Option(Box::new(Self::type_annotation_to_field_type(&args[0])))
+                }
                 // W17.3-4.1 (v0.3 Round 7, supervisor ratify 2026-05-22):
                 // HashMap<K, V> and Map<K, V> PROPAGATE through the
                 // `FieldType::HashMap { key, value }` variant introduced
@@ -5113,9 +5053,9 @@ impl BytecodeCompiler {
                 // 1. Slot storage points to `HeapKind::HashSet` (ordinal
                 // 21 — Wave 13 W13-hashset-rebuild, already at HEAD; the
                 // audit §6.A surface-and-stop is stale — HashSet exists).
-                "Set" if args.len() == 1 => FieldType::Set(Box::new(
-                    Self::type_annotation_to_field_type(&args[0]),
-                )),
+                "Set" if args.len() == 1 => {
+                    FieldType::Set(Box::new(Self::type_annotation_to_field_type(&args[0])))
+                }
                 // §4.D.7 RESIDUAL TRANSITIONAL fallback per §9.B.3
                 // supervisor ratify 2026-05-19. `Result<T, E>` continues
                 // to lower to `FieldType::Any` pending its own per-
@@ -5638,9 +5578,7 @@ pub(crate) fn owned_mutable_typed_store_opcode(
 /// (recorded in `shared_capture_inner_kinds`) instead of the legacy
 /// polymorphic `LoadSharedCapture` (0x134).
 #[inline]
-pub(crate) fn shared_typed_load_opcode(
-    kind: shape_value::v2::struct_layout::FieldKind,
-) -> OpCode {
+pub(crate) fn shared_typed_load_opcode(kind: shape_value::v2::struct_layout::FieldKind) -> OpCode {
     use shape_value::v2::struct_layout::FieldKind;
     match kind {
         FieldKind::I64 => OpCode::LoadSharedCaptureI64,
@@ -5661,9 +5599,7 @@ pub(crate) fn shared_typed_load_opcode(
 /// `StoreSharedCapture<Kind>` opcode (D.2 codes 0x161-0x16B). Mirrors
 /// `owned_mutable_typed_store_opcode`.
 #[inline]
-pub(crate) fn shared_typed_store_opcode(
-    kind: shape_value::v2::struct_layout::FieldKind,
-) -> OpCode {
+pub(crate) fn shared_typed_store_opcode(kind: shape_value::v2::struct_layout::FieldKind) -> OpCode {
     use shape_value::v2::struct_layout::FieldKind;
     match kind {
         FieldKind::I64 => OpCode::StoreSharedCaptureI64,
@@ -5903,7 +5839,9 @@ pub(crate) mod typed_emit_metrics {
     /// else suggests a design gap.
     pub fn snapshot_joint() -> Vec<((&'static str, &'static str), u64)> {
         let counters = JOINT_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
-        let g = counters.lock().expect("typed_emit_metrics joint lock poisoned");
+        let g = counters
+            .lock()
+            .expect("typed_emit_metrics joint lock poisoned");
         let mut v: Vec<_> = g.iter().map(|(k, v)| (*k, *v)).collect();
         v.sort_by_key(|(k, _)| *k);
         v
@@ -6229,7 +6167,11 @@ mod tests {
             ],
         };
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
-        assert_ne!(ft, FieldType::Any, "HashMap<string,int> must resolve structurally");
+        assert_ne!(
+            ft,
+            FieldType::Any,
+            "HashMap<string,int> must resolve structurally"
+        );
     }
 
     #[test]
@@ -6598,11 +6540,7 @@ mod tests {
                 BinOperandKind::Numeric(NumericType::Int),
                 BinOperandKind::Numeric(NumericType::Number),
             ),
-            (
-                BinaryOp::Equal,
-                BinOperandKind::Bool,
-                BinOperandKind::Bool,
-            ),
+            (BinaryOp::Equal, BinOperandKind::Bool, BinOperandKind::Bool),
         ];
         for (op, lhs, rhs) in cases {
             let mut compiler = BytecodeCompiler::new();
@@ -6616,7 +6554,9 @@ mod tests {
             assert!(
                 compiler.program.instructions.is_empty(),
                 "no instruction must be emitted for {:?} with {:?},{:?}",
-                op, lhs, rhs
+                op,
+                lhs,
+                rhs
             );
         }
     }
@@ -7216,12 +7156,21 @@ mod tests {
 
         let joint: std::collections::HashMap<(&'static str, &'static str), u64> =
             typed_emit_metrics::snapshot_joint().into_iter().collect();
-        assert_eq!(joint.get(&("load_local", "string")).copied().unwrap_or(0), 1);
         assert_eq!(
-            joint.get(&("load_local", "nullable_i64")).copied().unwrap_or(0),
+            joint.get(&("load_local", "string")).copied().unwrap_or(0),
             1
         );
-        assert_eq!(joint.get(&("return_value", "string")).copied().unwrap_or(0), 1);
+        assert_eq!(
+            joint
+                .get(&("load_local", "nullable_i64"))
+                .copied()
+                .unwrap_or(0),
+            1
+        );
+        assert_eq!(
+            joint.get(&("return_value", "string")).copied().unwrap_or(0),
+            1
+        );
     }
 
     #[test]
@@ -7229,29 +7178,80 @@ mod tests {
         use crate::type_tracking::StorageHint;
         use shape_value::v2::struct_layout::FieldKind;
 
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Float64), Some(FieldKind::F64));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int64), Some(FieldKind::I64));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt64), Some(FieldKind::U64));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int32), Some(FieldKind::I32));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt32), Some(FieldKind::U32));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int16), Some(FieldKind::I16));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt16), Some(FieldKind::U16));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Int8), Some(FieldKind::I8));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UInt8), Some(FieldKind::U8));
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::Bool), Some(FieldKind::Bool));
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::Float64),
+            Some(FieldKind::F64)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::Int64),
+            Some(FieldKind::I64)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::UInt64),
+            Some(FieldKind::U64)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::Int32),
+            Some(FieldKind::I32)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::UInt32),
+            Some(FieldKind::U32)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::Int16),
+            Some(FieldKind::I16)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::UInt16),
+            Some(FieldKind::U16)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::Int8),
+            Some(FieldKind::I8)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::UInt8),
+            Some(FieldKind::U8)
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::Bool),
+            Some(FieldKind::Bool)
+        );
 
         // Post-strict-typing (ADR-006 §2.7.7): `Dynamic`/`Unknown` are
         // deleted from `NativeKind`. The polymorphic-fallback path is now
         // driven by heap/null sentinel hints only (String, IntSize,
         // UIntSize, the Nullable* family).
         assert_eq!(super::storage_hint_to_field_kind(StorageHint::String), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::IntSize), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::UIntSize), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableFloat64), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableInt64), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableInt32), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableUInt8), None);
-        assert_eq!(super::storage_hint_to_field_kind(StorageHint::NullableIntSize), None);
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::IntSize),
+            None
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::UIntSize),
+            None
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::NullableFloat64),
+            None
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::NullableInt64),
+            None
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::NullableInt32),
+            None
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::NullableUInt8),
+            None
+        );
+        assert_eq!(
+            super::storage_hint_to_field_kind(StorageHint::NullableIntSize),
+            None
+        );
     }
 }
 
@@ -7266,9 +7266,8 @@ mod tests {
 mod call_return_kind_tests {
     use super::*;
     use crate::mir::types::{
-        BasicBlock, BasicBlockId, MirConstant, MirFunction, Operand,
-        Place, Point, Rvalue, SlotId, StatementKind, Terminator,
-        TerminatorKind,
+        BasicBlock, BasicBlockId, MirConstant, MirFunction, Operand, Place, Point, Rvalue, SlotId,
+        StatementKind, Terminator, TerminatorKind,
     };
     use shape_value::v2::ConcreteType;
 
@@ -7293,9 +7292,7 @@ mod call_return_kind_tests {
             statements: vec![],
             terminator: Terminator {
                 kind: TerminatorKind::Call {
-                    func: Operand::Constant(MirConstant::Function(
-                        callee_name.to_string(),
-                    )),
+                    func: Operand::Constant(MirConstant::Function(callee_name.to_string())),
                     args: vec![],
                     destination: Place::Local(SlotId(dst_slot)),
                     next: BasicBlockId(1),
@@ -7310,10 +7307,7 @@ mod call_return_kind_tests {
             num_locals: n_locals,
             param_slots: vec![],
             param_reference_kinds: vec![],
-            local_types: vec![
-                crate::mir::types::LocalTypeInfo::Unknown;
-                n_locals as usize
-            ],
+            local_types: vec![crate::mir::types::LocalTypeInfo::Unknown; n_locals as usize],
             span,
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
@@ -7339,16 +7333,10 @@ mod call_return_kind_tests {
                 None
             }
         };
-        let result = infer_top_level_concrete_types_from_mir_with_returns(
-            &mir,
-            Some(&resolver),
-        );
+        let result = infer_top_level_concrete_types_from_mir_with_returns(&mir, Some(&resolver));
         assert_eq!(
             result[3],
-            ConcreteType::Result(
-                Box::new(ConcreteType::I64),
-                Box::new(ConcreteType::String),
-            ),
+            ConcreteType::Result(Box::new(ConcreteType::I64), Box::new(ConcreteType::String),),
             "Call destination slot 3 should be stamped Result(I64,String)"
         );
         // Other slots stay Void.
@@ -7372,10 +7360,7 @@ mod call_return_kind_tests {
         // forbidden #9).
         let mir = mk_mir_with_call("unknown_callee", 2);
         let resolver = |_name: &str| -> Option<ConcreteType> { None };
-        let result = infer_top_level_concrete_types_from_mir_with_returns(
-            &mir,
-            Some(&resolver),
-        );
+        let result = infer_top_level_concrete_types_from_mir_with_returns(&mir, Some(&resolver));
         assert_eq!(result[2], ConcreteType::Void);
     }
 
@@ -7407,9 +7392,7 @@ mod call_return_kind_tests {
             statements: vec![],
             terminator: Terminator {
                 kind: TerminatorKind::Call {
-                    func: Operand::Constant(MirConstant::Function(
-                        "divide".to_string(),
-                    )),
+                    func: Operand::Constant(MirConstant::Function("divide".to_string())),
                     args: vec![],
                     destination: Place::Local(SlotId(3)),
                     next: BasicBlockId(1),
@@ -7423,10 +7406,7 @@ mod call_return_kind_tests {
             num_locals: 6,
             param_slots: vec![],
             param_reference_kinds: vec![],
-            local_types: vec![
-                crate::mir::types::LocalTypeInfo::Unknown;
-                6
-            ],
+            local_types: vec![crate::mir::types::LocalTypeInfo::Unknown; 6],
             span,
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
@@ -7443,14 +7423,9 @@ mod call_return_kind_tests {
                 None
             }
         };
-        let result = infer_top_level_concrete_types_from_mir_with_returns(
-            &mir,
-            Some(&resolver),
-        );
-        let expected = ConcreteType::Result(
-            Box::new(ConcreteType::I64),
-            Box::new(ConcreteType::String),
-        );
+        let result = infer_top_level_concrete_types_from_mir_with_returns(&mir, Some(&resolver));
+        let expected =
+            ConcreteType::Result(Box::new(ConcreteType::I64), Box::new(ConcreteType::String));
         assert_eq!(result[3], expected, "Call destination slot stamped");
         assert_eq!(result[5], expected, "Move destination propagated");
     }
@@ -7484,10 +7459,7 @@ mod call_return_kind_tests {
             id: BasicBlockId(0),
             statements: vec![
                 crate::mir::types::MirStatement {
-                    kind: StatementKind::Assign(
-                        Place::Local(SlotId(2)),
-                        Rvalue::Aggregate(vec![]),
-                    ),
+                    kind: StatementKind::Assign(Place::Local(SlotId(2)), Rvalue::Aggregate(vec![])),
                     span,
                     point: Point(0),
                 },
@@ -7513,10 +7485,7 @@ mod call_return_kind_tests {
             num_locals: 4,
             param_slots: vec![],
             param_reference_kinds: vec![],
-            local_types: vec![
-                crate::mir::types::LocalTypeInfo::Unknown;
-                4
-            ],
+            local_types: vec![crate::mir::types::LocalTypeInfo::Unknown; 4],
             span,
             field_name_table: Default::default(),
             local_struct_type_names: Default::default(),
@@ -7573,9 +7542,7 @@ mod call_return_kind_tests {
             }],
             terminator: Terminator {
                 kind: TerminatorKind::Call {
-                    func: Operand::Constant(MirConstant::Method(
-                        "name".to_string(),
-                    )),
+                    func: Operand::Constant(MirConstant::Method("name".to_string())),
                     args: vec![Operand::Move(Place::Local(SlotId(2)))],
                     destination: Place::Local(SlotId(3)),
                     next: BasicBlockId(1),
@@ -7599,24 +7566,20 @@ mod call_return_kind_tests {
             num_locals: 5,
             param_slots: vec![],
             param_reference_kinds: vec![],
-            local_types: vec![
-                crate::mir::types::LocalTypeInfo::Unknown;
-                5
-            ],
+            local_types: vec![crate::mir::types::LocalTypeInfo::Unknown; 5],
             span,
             field_name_table: Default::default(),
             local_struct_type_names,
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
         };
-        let method_returns =
-            |type_name: &str, method_name: &str| -> Option<ConcreteType> {
-                if type_name == "X" && method_name == "name" {
-                    Some(ConcreteType::String)
-                } else {
-                    None
-                }
-            };
+        let method_returns = |type_name: &str, method_name: &str| -> Option<ConcreteType> {
+            if type_name == "X" && method_name == "name" {
+                Some(ConcreteType::String)
+            } else {
+                None
+            }
+        };
         let result = infer_top_level_concrete_types_from_mir_with_resolvers(
             &mir,
             None,
@@ -7673,9 +7636,7 @@ mod call_return_kind_tests {
             ],
             terminator: Terminator {
                 kind: TerminatorKind::Call {
-                    func: Operand::Constant(MirConstant::Method(
-                        "name".to_string(),
-                    )),
+                    func: Operand::Constant(MirConstant::Method("name".to_string())),
                     args: vec![Operand::Move(Place::Local(SlotId(3)))],
                     destination: Place::Local(SlotId(4)),
                     next: BasicBlockId(1),
@@ -7699,24 +7660,20 @@ mod call_return_kind_tests {
             num_locals: 6,
             param_slots: vec![],
             param_reference_kinds: vec![],
-            local_types: vec![
-                crate::mir::types::LocalTypeInfo::Unknown;
-                6
-            ],
+            local_types: vec![crate::mir::types::LocalTypeInfo::Unknown; 6],
             span,
             field_name_table: Default::default(),
             local_struct_type_names,
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
         };
-        let method_returns =
-            |type_name: &str, method_name: &str| -> Option<ConcreteType> {
-                if type_name == "X" && method_name == "name" {
-                    Some(ConcreteType::String)
-                } else {
-                    None
-                }
-            };
+        let method_returns = |type_name: &str, method_name: &str| -> Option<ConcreteType> {
+            if type_name == "X" && method_name == "name" {
+                Some(ConcreteType::String)
+            } else {
+                None
+            }
+        };
         let result = infer_top_level_concrete_types_from_mir_with_resolvers(
             &mir,
             None,
@@ -7755,9 +7712,7 @@ mod call_return_kind_tests {
             }],
             terminator: Terminator {
                 kind: TerminatorKind::Call {
-                    func: Operand::Constant(MirConstant::Method(
-                        "name".to_string(),
-                    )),
+                    func: Operand::Constant(MirConstant::Method("name".to_string())),
                     args: vec![Operand::Move(Place::Local(SlotId(2)))],
                     destination: Place::Local(SlotId(3)),
                     next: BasicBlockId(1),
@@ -7779,10 +7734,7 @@ mod call_return_kind_tests {
             num_locals: 5,
             param_slots: vec![],
             param_reference_kinds: vec![],
-            local_types: vec![
-                crate::mir::types::LocalTypeInfo::Unknown;
-                5
-            ],
+            local_types: vec![crate::mir::types::LocalTypeInfo::Unknown; 5],
             span,
             field_name_table: Default::default(),
             local_struct_type_names,
@@ -7813,9 +7765,7 @@ mod call_return_kind_tests {
             statements: vec![],
             terminator: Terminator {
                 kind: TerminatorKind::Call {
-                    func: Operand::Constant(MirConstant::Method(
-                        "name".to_string(),
-                    )),
+                    func: Operand::Constant(MirConstant::Method("name".to_string())),
                     args: vec![Operand::Move(Place::Local(SlotId(2)))],
                     destination: Place::Local(SlotId(3)),
                     next: BasicBlockId(1),
@@ -7837,10 +7787,7 @@ mod call_return_kind_tests {
             num_locals: 5,
             param_slots: vec![],
             param_reference_kinds: vec![],
-            local_types: vec![
-                crate::mir::types::LocalTypeInfo::Unknown;
-                5
-            ],
+            local_types: vec![crate::mir::types::LocalTypeInfo::Unknown; 5],
             span,
             field_name_table: Default::default(),
             local_struct_type_names: std::collections::HashMap::new(),
@@ -7947,9 +7894,7 @@ mod w17_3_4_2_type_annotation_lowering_tests {
             name: shape_ast::ast::type_path::TypePath::simple("HashMap"),
             args: vec![
                 TypeAnnotation::Basic("string".to_string()),
-                TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
-                    "int".to_string(),
-                ))),
+                TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("int".to_string()))),
             ],
         };
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
@@ -7981,9 +7926,7 @@ mod w17_3_4_2_type_annotation_lowering_tests {
     /// TypeAnnotation variant, not Generic-wrapped).
     #[test]
     fn type_annotation_array_threads_elem() {
-        let ann = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
-            "int".to_string(),
-        )));
+        let ann = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("int".to_string())));
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
         assert_eq!(ft, FieldType::Array(Box::new(FieldType::I64)));
     }

@@ -105,16 +105,46 @@ fn arrow_cell_display(array: &dyn arrow_array::Array, index: usize) -> String {
     use arrow_schema::DataType;
 
     match array.data_type() {
-        DataType::Int8 => array.as_primitive::<arrow_array::types::Int8Type>().value(index).to_string(),
-        DataType::Int16 => array.as_primitive::<arrow_array::types::Int16Type>().value(index).to_string(),
-        DataType::Int32 => array.as_primitive::<arrow_array::types::Int32Type>().value(index).to_string(),
-        DataType::Int64 => array.as_primitive::<arrow_array::types::Int64Type>().value(index).to_string(),
-        DataType::UInt8 => array.as_primitive::<arrow_array::types::UInt8Type>().value(index).to_string(),
-        DataType::UInt16 => array.as_primitive::<arrow_array::types::UInt16Type>().value(index).to_string(),
-        DataType::UInt32 => array.as_primitive::<arrow_array::types::UInt32Type>().value(index).to_string(),
-        DataType::UInt64 => array.as_primitive::<arrow_array::types::UInt64Type>().value(index).to_string(),
-        DataType::Float32 => array.as_primitive::<arrow_array::types::Float32Type>().value(index).to_string(),
-        DataType::Float64 => array.as_primitive::<arrow_array::types::Float64Type>().value(index).to_string(),
+        DataType::Int8 => array
+            .as_primitive::<arrow_array::types::Int8Type>()
+            .value(index)
+            .to_string(),
+        DataType::Int16 => array
+            .as_primitive::<arrow_array::types::Int16Type>()
+            .value(index)
+            .to_string(),
+        DataType::Int32 => array
+            .as_primitive::<arrow_array::types::Int32Type>()
+            .value(index)
+            .to_string(),
+        DataType::Int64 => array
+            .as_primitive::<arrow_array::types::Int64Type>()
+            .value(index)
+            .to_string(),
+        DataType::UInt8 => array
+            .as_primitive::<arrow_array::types::UInt8Type>()
+            .value(index)
+            .to_string(),
+        DataType::UInt16 => array
+            .as_primitive::<arrow_array::types::UInt16Type>()
+            .value(index)
+            .to_string(),
+        DataType::UInt32 => array
+            .as_primitive::<arrow_array::types::UInt32Type>()
+            .value(index)
+            .to_string(),
+        DataType::UInt64 => array
+            .as_primitive::<arrow_array::types::UInt64Type>()
+            .value(index)
+            .to_string(),
+        DataType::Float32 => array
+            .as_primitive::<arrow_array::types::Float32Type>()
+            .value(index)
+            .to_string(),
+        DataType::Float64 => array
+            .as_primitive::<arrow_array::types::Float64Type>()
+            .value(index)
+            .to_string(),
         DataType::Boolean => array.as_boolean().value(index).to_string(),
         DataType::Utf8 => array.as_string::<i32>().value(index).to_string(),
         DataType::LargeUtf8 => array.as_string::<i64>().value(index).to_string(),

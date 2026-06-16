@@ -307,8 +307,8 @@ impl super::VirtualMachine {
                     .get(i)
                     .copied()
                     .unwrap_or_else(|| expected_kind_from_serializable(sv));
-                let (bits, kind) =
-                    serializable_to_slot_ctx(sv, expected, store, &mut link).map_err(|msg| {
+                let (bits, kind) = serializable_to_slot_ctx(sv, expected, store, &mut link)
+                    .map_err(|msg| {
                         VMError::NotImplemented(format!(
                             "VirtualMachine::from_snapshot stack[{i}]: {msg}"
                         ))
@@ -468,9 +468,7 @@ impl super::VirtualMachine {
                     // just installed on the frame.
                     let block = unsafe { OwnedClosureBlock::from_raw(ptr as *const u8, layout) };
                     closure_heap_bits = Some(block.as_ptr() as u64);
-                    closure_heap_kind = Some(NativeKind::Ptr(
-                        shape_value::HeapKind::Closure,
-                    ));
+                    closure_heap_kind = Some(NativeKind::Ptr(shape_value::HeapKind::Closure));
                     std::mem::forget(block);
                 } else {
                     // No layout — store the raw payload bits as the
@@ -495,9 +493,7 @@ impl super::VirtualMachine {
                 }
             }
 
-            let blob_hash = sframe
-                .blob_hash
-                .map(crate::bytecode::FunctionHash);
+            let blob_hash = sframe.blob_hash.map(crate::bytecode::FunctionHash);
 
             self.call_stack.push(super::CallFrame {
                 return_ip: sframe.return_ip,
@@ -545,9 +541,7 @@ impl super::VirtualMachine {
             .collect()
     }
 
-    fn snapshot_timeframe_stack_for_export(
-        &self,
-    ) -> Vec<Option<shape_ast::data::Timeframe>> {
+    fn snapshot_timeframe_stack_for_export(&self) -> Vec<Option<shape_ast::data::Timeframe>> {
         self.timeframe_stack.clone()
     }
 
@@ -1019,12 +1013,8 @@ mod tests {
         assert_eq!(snap.stack.len(), 3);
 
         // Restore on a fresh VM with an empty program.
-        let restored = VirtualMachine::from_snapshot(
-            BytecodeProgram::default(),
-            &snap,
-            &store,
-        )
-        .expect("restore scalar state");
+        let restored = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store)
+            .expect("restore scalar state");
         let restored_snap = restored
             .snapshot(&store)
             .expect("re-snapshot restored state");
@@ -1048,8 +1038,7 @@ mod tests {
         let mut vm = VirtualMachine::new(VMConfig::default());
 
         // Ok(42)
-        let payload =
-            KindedSlot::new(ValueSlot::from_raw(42u64), NativeKind::Int64);
+        let payload = KindedSlot::new(ValueSlot::from_raw(42u64), NativeKind::Int64);
         let ok = Arc::new(ResultData::ok(payload));
         let ok_bits = Arc::into_raw(ok) as u64;
         vm.push_kinded(ok_bits, NativeKind::Ptr(HeapKind::Result))
@@ -1103,12 +1092,8 @@ mod tests {
         }
 
         // Restore via from_snapshot.
-        let restored = VirtualMachine::from_snapshot(
-            BytecodeProgram::default(),
-            &snap,
-            &store,
-        )
-        .expect("restore result+option");
+        let restored = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store)
+            .expect("restore result+option");
         let restored_snap = restored.snapshot(&store).expect("re-snapshot");
         assert_eq!(restored_snap.stack.len(), 3);
         // Round-trip preserves discriminator+payload.
@@ -1152,8 +1137,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store);
+        let result = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store);
         let err = match result {
             Ok(_) => panic!("expected Err for incompatible snapshot"),
             Err(e) => e,
@@ -1215,8 +1199,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store);
+        let result = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store);
         let err = match result {
             Ok(_) => panic!(
                 "legacy-upvalue branch must surface-and-stop on an \
@@ -1299,18 +1282,17 @@ mod tests {
         let sframe = &snap.call_stack[0];
         assert_eq!(sframe.locals_count, 2);
         assert_eq!(sframe.locals_base, 0);
-        assert!(sframe.upvalues.is_none(), "non-closure frame has no upvalues");
+        assert!(
+            sframe.upvalues.is_none(),
+            "non-closure frame has no upvalues"
+        );
 
         // Restore on a fresh VM. Pre-pad stack so locals_base=0 +
         // locals_count=2 has space; the test asserts the frame restores
         // structurally (function_id, locals_base, locals_count) not the
         // raw stack window.
-        let restored = VirtualMachine::from_snapshot(
-            BytecodeProgram::default(),
-            &snap,
-            &store,
-        )
-        .expect("restore non-closure callstack");
+        let restored = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store)
+            .expect("restore non-closure callstack");
         assert_eq!(restored.call_stack.len(), 1);
         let restored_frame = &restored.call_stack[0];
         assert_eq!(restored_frame.return_ip, 0);
@@ -1352,10 +1334,13 @@ mod tests {
 
         // Push four scalars to back two frames' local windows, then two
         // non-closure CallFrames (a multi-frame call stack).
-        vm.push_kinded(7i64 as u64, NativeKind::Int64).expect("push 7");
+        vm.push_kinded(7i64 as u64, NativeKind::Int64)
+            .expect("push 7");
         vm.push_kinded(1, NativeKind::Bool).expect("push true");
-        vm.push_kinded(11i64 as u64, NativeKind::Int64).expect("push 11");
-        vm.push_kinded(2.5f64.to_bits(), NativeKind::Float64).expect("push 2.5");
+        vm.push_kinded(11i64 as u64, NativeKind::Int64)
+            .expect("push 11");
+        vm.push_kinded(2.5f64.to_bits(), NativeKind::Float64)
+            .expect("push 2.5");
         vm.call_stack.push(CallFrame {
             return_ip: 0,
             base_pointer: 0,
@@ -1389,15 +1374,15 @@ mod tests {
         assert!(matches!(&snap.module_bindings[1], SV::String(s) if s == "world"));
 
         // Restore: from_snapshot rebuilds the VM in place.
-        let restored = VirtualMachine::from_snapshot(
-            BytecodeProgram::default(),
-            &snap,
-            &store,
-        )
-        .expect("restore multi-frame state");
+        let restored = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store)
+            .expect("restore multi-frame state");
 
         // call_stack restored NON-EMPTY with correct structural values.
-        assert_eq!(restored.call_stack.len(), 2, "call_stack restored non-empty");
+        assert_eq!(
+            restored.call_stack.len(),
+            2,
+            "call_stack restored non-empty"
+        );
         assert_eq!(restored.call_stack[0].locals_count, 2);
         assert_eq!(restored.call_stack[0].base_pointer, 0);
         assert_eq!(restored.call_stack[1].return_ip, 5);
@@ -1409,7 +1394,9 @@ mod tests {
         // (the `while len <= index` semantics), so index `needed` is a
         // trailing None-sentinel padding slot; the two written bindings
         // (0, 1) carry the round-tripped values.
-        let re = restored.snapshot(&store).expect("re-snapshot restored state");
+        let re = restored
+            .snapshot(&store)
+            .expect("re-snapshot restored state");
         assert!(
             re.module_bindings.len() >= 2,
             "module_bindings restored non-empty, got {}",
@@ -1441,9 +1428,7 @@ mod tests {
             HashMapData, HashMapKindedRef, RangeData, TypedObjectStorage,
         };
         use shape_value::v2::string_obj::StringObj;
-        use shape_value::v2::typed_array::{
-            stamp_elem_type, TypedArray, ELEM_TYPE_I64,
-        };
+        use shape_value::v2::typed_array::{ELEM_TYPE_I64, TypedArray, stamp_elem_type};
         use shape_value::{HeapKind, NativeKind, ValueSlot};
         use std::sync::Arc;
 
@@ -1460,11 +1445,8 @@ mod tests {
         // (2) TypedArray<i64> [10, 20, 30]
         let arr = TypedArray::<i64>::from_slice(&[10, 20, 30]);
         unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64) };
-        vm.push_kinded(
-            arr as usize as u64,
-            NativeKind::Ptr(HeapKind::TypedArray),
-        )
-        .expect("push typed array");
+        vm.push_kinded(arr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray))
+            .expect("push typed array");
 
         // (3) HashMap<string,string> {"k" -> "v"}
         let mut map: HashMapData<*const StringObj> = HashMapData::new();
@@ -1484,17 +1466,13 @@ mod tests {
             ValueSlot::from_raw(1.5f64.to_bits()),
         ]
         .into_boxed_slice();
-        let field_kinds: Arc<[NativeKind]> =
-            vec![NativeKind::Int64, NativeKind::Float64].into();
+        let field_kinds: Arc<[NativeKind]> = vec![NativeKind::Int64, NativeKind::Float64].into();
         // v2-raw `_new` carrier — matches the slot release path
         // (`release_elem` + carrier-side `_drop`) per the allocator-pair
         // contract (ADR-006 §2.3 amendment Wave 2 D1/D2).
         let to_ptr = TypedObjectStorage::_new(42, slots, 0, field_kinds);
-        vm.push_kinded(
-            to_ptr as u64,
-            NativeKind::Ptr(HeapKind::TypedObject),
-        )
-        .expect("push typed object");
+        vm.push_kinded(to_ptr as u64, NativeKind::Ptr(HeapKind::TypedObject))
+            .expect("push typed object");
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
@@ -1506,37 +1484,37 @@ mod tests {
             matches!(&snap.stack[0], SV::Range { start, end, inclusive: true }
                 if matches!(start.as_deref(), Some(SV::Int(3)))
                 && matches!(end.as_deref(), Some(SV::Int(7)))),
-            "range arm, got {:?}", snap.stack[0]
+            "range arm, got {:?}",
+            snap.stack[0]
         );
         assert!(
             matches!(&snap.stack[1], SV::Array(v)
                 if v.len() == 3
                 && matches!(v[0], SV::Int(10))
                 && matches!(v[2], SV::Int(30))),
-            "typed-array arm, got {:?}", snap.stack[1]
+            "typed-array arm, got {:?}",
+            snap.stack[1]
         );
         assert!(
             matches!(&snap.stack[2], SV::HashMap { keys, values }
                 if keys.len() == 1
                 && matches!(&keys[0], SV::String(k) if k == "k")
                 && matches!(&values[0], SV::String(v) if v == "v")),
-            "hashmap arm, got {:?}", snap.stack[2]
+            "hashmap arm, got {:?}",
+            snap.stack[2]
         );
         assert!(
             matches!(&snap.stack[3], SV::TypedObject { schema_id: 42, slot_data, .. }
                 if slot_data.len() == 2
                 && matches!(slot_data[0], SV::Int(5))
                 && matches!(slot_data[1], SV::Number(f) if (f - 1.5).abs() < 1e-9)),
-            "typed-object arm, got {:?}", snap.stack[3]
+            "typed-object arm, got {:?}",
+            snap.stack[3]
         );
 
         // restore-side: from_snapshot → re-snapshot → identical projections.
-        let restored = VirtualMachine::from_snapshot(
-            BytecodeProgram::default(),
-            &snap,
-            &store,
-        )
-        .expect("restore container arms");
+        let restored = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store)
+            .expect("restore container arms");
         let re = restored.snapshot(&store).expect("re-snapshot");
         assert_eq!(re.stack.len(), 4);
         assert!(matches!(&re.stack[0], SV::Range { start, .. }
@@ -1544,8 +1522,10 @@ mod tests {
         assert!(matches!(&re.stack[1], SV::Array(v) if v.len() == 3));
         assert!(matches!(&re.stack[2], SV::HashMap { values, .. }
             if matches!(&values[0], SV::String(v) if v == "v")));
-        assert!(matches!(&re.stack[3], SV::TypedObject { schema_id: 42, slot_data, .. }
-            if matches!(slot_data[0], SV::Int(5))));
+        assert!(
+            matches!(&re.stack[3], SV::TypedObject { schema_id: 42, slot_data, .. }
+            if matches!(slot_data[0], SV::Int(5)))
+        );
     }
 
     /// W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12):

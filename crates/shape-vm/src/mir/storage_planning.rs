@@ -260,9 +260,7 @@ fn slot_is_mutated(slot: SlotId, mir: &MirFunction) -> bool {
 /// Check whether an rvalue uses (reads from) a given slot.
 fn rvalue_uses_slot(rvalue: &Rvalue, slot: SlotId) -> bool {
     match rvalue {
-        Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => {
-            operand_uses_slot(op, slot)
-        }
+        Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => operand_uses_slot(op, slot),
         Rvalue::Borrow(_, place) => place.root_local() == slot,
         Rvalue::BinaryOp(_, lhs, rhs) => {
             operand_uses_slot(lhs, slot) || operand_uses_slot(rhs, slot)
@@ -326,8 +324,7 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
     let var_sharedcow_enabled = var_sharedcow_default_enabled();
     for slot_idx in 0..input.mir.num_locals {
         let slot = SlotId(slot_idx);
-        let (storage_class, semantics) =
-            decide_slot_storage(slot, input, var_sharedcow_enabled);
+        let (storage_class, semantics) = decide_slot_storage(slot, input, var_sharedcow_enabled);
         slot_classes.insert(slot, storage_class);
         slot_semantics.insert(slot, semantics);
     }
@@ -341,8 +338,7 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
     // a `ClosureCapture` statement) as escaping or non-escaping, using the
     // full §2.1 escape-vector table plus a fixed-point over transitive
     // closure captures.
-    let non_escaping_closure_slots =
-        detect_non_escaping_closure_slots(input, &slot_classes);
+    let non_escaping_closure_slots = detect_non_escaping_closure_slots(input, &slot_classes);
 
     // Closure Spec Phase D: promote the storage class of outer slots whose
     // ONLY heap-indirection driver is a mutable capture by a non-escaping
@@ -381,12 +377,7 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
         .reference_escape_promotions
         .iter()
         .map(|t| t.referent_local)
-        .filter(|slot| {
-            matches!(
-                slot_classes.get(slot),
-                Some(BindingStorageClass::SharedCow)
-            )
-        })
+        .filter(|slot| matches!(slot_classes.get(slot), Some(BindingStorageClass::SharedCow)))
         .collect();
 
     StoragePlan {
@@ -596,10 +587,7 @@ fn build_closure_capture_graph(
                         continue;
                     };
                     if closure_slots.contains(&root) {
-                        graph
-                            .entry(*closure_slot)
-                            .or_default()
-                            .insert(root);
+                        graph.entry(*closure_slot).or_default().insert(root);
                     }
                 }
             }
@@ -620,10 +608,7 @@ fn build_closure_capture_graph(
 /// of a tracked slot))` widens the tracked set to include `dest`. This mirrors
 /// the existing `slot_flows_to_return` pattern but generalized to every sink
 /// the table names, without requiring a separate dataflow pass.
-fn closure_slot_escapes_direct(
-    c: SlotId,
-    input: &StoragePlannerInput<'_>,
-) -> bool {
+fn closure_slot_escapes_direct(c: SlotId, input: &StoragePlannerInput<'_>) -> bool {
     let mir = input.mir;
 
     // Row 10: the semantics planner promoted the slot to heap-aliased
@@ -698,7 +683,10 @@ fn closure_slot_escapes_direct(
                         // v0.3.3 c6 (Wave 1): writes into a module-level
                         // binding always escape — the binding outlives the
                         // function.
-                        if operands.iter().any(|op| operand_uses_any_slot(op, &tracked)) {
+                        if operands
+                            .iter()
+                            .any(|op| operand_uses_any_slot(op, &tracked))
+                        {
                             return true;
                         }
                     }
@@ -707,7 +695,10 @@ fn closure_slot_escapes_direct(
                     // in the future, but Phase B takes the conservative
                     // verdict — any boundary is escape.
                     StatementKind::TaskBoundary(operands, _) => {
-                        if operands.iter().any(|op| operand_uses_any_slot(op, &tracked)) {
+                        if operands
+                            .iter()
+                            .any(|op| operand_uses_any_slot(op, &tracked))
+                        {
                             return true;
                         }
                     }
@@ -741,8 +732,8 @@ fn closure_slot_escapes_direct(
                     }
                 }
 
-                let callee_summary = callee_name
-                    .and_then(|n| input.callee_summaries.and_then(|m| m.get(n)));
+                let callee_summary =
+                    callee_name.and_then(|n| input.callee_summaries.and_then(|m| m.get(n)));
 
                 for (arg_idx, arg) in args.iter().enumerate() {
                     if !operand_uses_any_slot(arg, &tracked) {
@@ -865,10 +856,7 @@ fn detect_non_escaping_closure_slots(
     propagate_transitive_closure_escape(&closure_slots, &capture_graph, &mut escaping);
 
     // Step 3: invert — slots not in `escaping` are non-escaping.
-    closure_slots
-        .difference(&escaping)
-        .copied()
-        .collect()
+    closure_slots.difference(&escaping).copied().collect()
 }
 
 /// Does `rvalue` read from any slot in `slots`? Covers all rvalue shapes.
@@ -955,8 +943,8 @@ fn decide_slot_storage(
         .get(&slot.0)
         .map(|s| s.storage_class);
 
-    let is_escaped = detect_escape_status(slot, input.mir, input.closure_captures)
-        == EscapeStatus::Escaped;
+    let is_escaped =
+        detect_escape_status(slot, input.mir, input.closure_captures) == EscapeStatus::Escaped;
 
     let storage_class = if let Some(BindingStorageClass::Reference) = explicit_storage {
         // Already marked as a reference binding — preserve it.
@@ -975,9 +963,7 @@ fn decide_slot_storage(
     } else if is_mutably_captured {
         // Rule 2: Captured by closure with mutation → UniqueHeap.
         BindingStorageClass::UniqueHeap
-    } else if matches!(ownership, Some(BindingOwnershipClass::Flexible))
-        && is_aliased
-        && is_mutated
+    } else if matches!(ownership, Some(BindingOwnershipClass::Flexible)) && is_aliased && is_mutated
     {
         // Rule 3: `var` bindings that are aliased AND mutated → SharedCow.
         // Still present as a safety net: when the V0.a flag is disabled the
@@ -1080,11 +1066,7 @@ pub fn detect_escape_status(
     }
 }
 
-fn slot_flows_to_return(
-    slot: SlotId,
-    mir: &MirFunction,
-    visited: &mut HashSet<SlotId>,
-) -> bool {
+fn slot_flows_to_return(slot: SlotId, mir: &MirFunction, visited: &mut HashSet<SlotId>) -> bool {
     if !visited.insert(slot) {
         return false;
     }
@@ -1634,8 +1616,7 @@ mod tests {
         assert!(
             matches!(
                 class,
-                Some(BindingStorageClass::Direct)
-                    | Some(BindingStorageClass::LocalMutablePtr)
+                Some(BindingStorageClass::Direct) | Some(BindingStorageClass::LocalMutablePtr)
             ),
             "immutable capture stays on stack (Direct or LocalMutablePtr), got {:?}",
             class
@@ -2215,10 +2196,7 @@ mod tests {
             vec![BasicBlock {
                 id: BasicBlockId(0),
                 statements: vec![make_stmt(
-                    StatementKind::Assign(
-                        Place::Local(SlotId(1)),
-                        Rvalue::Aggregate(big_ops),
-                    ),
+                    StatementKind::Assign(Place::Local(SlotId(1)), Rvalue::Aggregate(big_ops)),
                     0,
                 )],
                 terminator: make_terminator(TerminatorKind::Return),
@@ -2371,10 +2349,7 @@ mod tests {
             vec![BasicBlock {
                 id: BasicBlockId(0),
                 statements: vec![make_stmt(
-                    StatementKind::Assign(
-                        Place::Local(SlotId(1)),
-                        Rvalue::Aggregate(ops),
-                    ),
+                    StatementKind::Assign(Place::Local(SlotId(1)), Rvalue::Aggregate(ops)),
                     0,
                 )],
                 terminator: make_terminator(TerminatorKind::Return),
@@ -2415,9 +2390,7 @@ mod tests {
                 statements: vec![make_stmt(
                     StatementKind::Assign(
                         Place::Local(SlotId(1)),
-                        Rvalue::Aggregate(vec![
-                            Operand::Constant(MirConstant::Int(1)),
-                        ]),
+                        Rvalue::Aggregate(vec![Operand::Constant(MirConstant::Int(1))]),
                     ),
                     0,
                 )],
@@ -2617,10 +2590,7 @@ mod tests {
             "phase_b_array_store",
             vec![
                 make_stmt(
-                    StatementKind::Assign(
-                        Place::Local(SlotId(1)),
-                        Rvalue::Aggregate(vec![]),
-                    ),
+                    StatementKind::Assign(Place::Local(SlotId(1)), Rvalue::Aggregate(vec![])),
                     0,
                 ),
                 make_stmt(
@@ -3574,9 +3544,7 @@ mod tests {
             ],
             terminator: Terminator {
                 kind: TerminatorKind::Call {
-                    func: Operand::Constant(MirConstant::Function(
-                        "snapshot".to_string(),
-                    )),
+                    func: Operand::Constant(MirConstant::Function("snapshot".to_string())),
                     args: vec![],
                     destination: Place::Local(SlotId(2)),
                     next: BasicBlockId(1),
@@ -3670,9 +3638,7 @@ mod tests {
             ],
             terminator: Terminator {
                 kind: TerminatorKind::Call {
-                    func: Operand::Constant(MirConstant::Function(
-                        "snapshot".to_string(),
-                    )),
+                    func: Operand::Constant(MirConstant::Function("snapshot".to_string())),
                     args: vec![],
                     destination: Place::Local(SlotId(3)),
                     next: BasicBlockId(1),

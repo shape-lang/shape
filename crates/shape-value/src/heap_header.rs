@@ -292,10 +292,7 @@ mod tests {
             Some(HeapKind::Char)
         );
         // One past the last variant must return None
-        assert_eq!(
-            HeapKind::from_u16(HeapKind::MAX_VARIANT as u16 + 1),
-            None
-        );
+        assert_eq!(HeapKind::from_u16(HeapKind::MAX_VARIANT as u16 + 1), None);
         assert_eq!(HeapKind::from_u16(255), None);
     }
 
@@ -320,8 +317,9 @@ mod tests {
     fn test_heap_kind_all_variants_roundtrip_through_transmute() {
         let max = HeapKind::MAX_VARIANT as u16;
         for i in 0..=max {
-            let kind = HeapKind::from_u16(i)
-                .unwrap_or_else(|| panic!("HeapKind::from_u16({i}) returned None — gap in contiguous repr(u8) enum"));
+            let kind = HeapKind::from_u16(i).unwrap_or_else(|| {
+                panic!("HeapKind::from_u16({i}) returned None — gap in contiguous repr(u8) enum")
+            });
             assert_eq!(
                 kind as u16, i,
                 "HeapKind variant at discriminant {i} round-tripped to {}",

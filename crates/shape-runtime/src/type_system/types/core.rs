@@ -402,9 +402,7 @@ impl SemanticType {
             SemanticType::Bool => Type::Concrete(TypeAnnotation::Basic("bool".to_string())),
             SemanticType::String => Type::Concrete(TypeAnnotation::Basic("string".to_string())),
             SemanticType::Option(inner) => Type::Generic {
-                base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                    "Option".into(),
-                ))),
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Option".into()))),
                 args: vec![inner.to_inference_type()],
             },
             SemanticType::Result { ok_type, err_type } => {
@@ -413,9 +411,7 @@ impl SemanticType {
                     args.push(err.to_inference_type());
                 }
                 Type::Generic {
-                    base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                        "Result".into(),
-                    ))),
+                    base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
                     args,
                 }
             }
@@ -436,7 +432,9 @@ impl SemanticType {
                 }
             }
             SemanticType::Generic { name, args } => Type::Generic {
-                base: Box::new(Type::Concrete(TypeAnnotation::Reference(name.as_str().into()))),
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference(
+                    name.as_str().into(),
+                ))),
                 args: args.iter().map(|a| a.to_inference_type()).collect(),
             },
             SemanticType::Void => Type::Concrete(TypeAnnotation::Void),
@@ -501,9 +499,7 @@ mod tests {
     #[test]
     fn test_type_to_semantic_option() {
         let option_num = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Option".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Option".into()))),
             args: vec![BuiltinTypes::number()],
         };
         let semantic = option_num.to_semantic().unwrap();
@@ -516,9 +512,7 @@ mod tests {
     #[test]
     fn test_type_to_semantic_result() {
         let result_num = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference(
-                "Result".into(),
-            ))),
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
             args: vec![BuiltinTypes::number()],
         };
         let semantic = result_num.to_semantic().unwrap();

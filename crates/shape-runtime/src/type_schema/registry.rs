@@ -490,11 +490,8 @@ impl TypeSchemaRegistry {
             .collect();
 
         let id = self.allocate_id();
-        let schema = TypeSchema::with_id(
-            id,
-            format!("__predecl_{}", fields.join("_")),
-            typed_fields,
-        );
+        let schema =
+            TypeSchema::with_id(id, format!("__predecl_{}", fields.join("_")), typed_fields);
 
         if let Ok(mut reg) = self.predeclared_by_id.write() {
             reg.insert(id, schema);
@@ -535,11 +532,8 @@ impl TypeSchemaRegistry {
             .map(|name| (name.clone(), FieldType::Any))
             .collect();
 
-        let schema = TypeSchema::with_id(
-            id,
-            format!("__predecl_{}", fields.join("_")),
-            typed_fields,
-        );
+        let schema =
+            TypeSchema::with_id(id, format!("__predecl_{}", fields.join("_")), typed_fields);
 
         if let Ok(mut reg) = self.predeclared_by_id.write() {
             reg.entry(id).or_insert(schema);
@@ -897,10 +891,8 @@ mod tests {
         // User-registered schemas go through the per-registry counter and
         // therefore get IDs from disjoint domains when allocated back-to-back
         // on independent registries.
-        let r1_user =
-            r1.register_type_scoped("UserA", vec![("x".to_string(), FieldType::F64)]);
-        let r2_user =
-            r2.register_type_scoped("UserA", vec![("x".to_string(), FieldType::F64)]);
+        let r1_user = r1.register_type_scoped("UserA", vec![("x".to_string(), FieldType::F64)]);
+        let r2_user = r2.register_type_scoped("UserA", vec![("x".to_string(), FieldType::F64)]);
 
         // Both "UserA" schemas resolve within their own registry.
         assert_eq!(r1.get("UserA").unwrap().id, r1_user);
@@ -909,13 +901,11 @@ mod tests {
         // The key invariant: r2's scoped ID is NOT advanced by allocations on
         // r1. Independent registries can produce equal IDs for the same name
         // without collision inside their own space.
-        let r1_user_b =
-            r1.register_type_scoped("UserB", vec![("y".to_string(), FieldType::F64)]);
+        let r1_user_b = r1.register_type_scoped("UserB", vec![("y".to_string(), FieldType::F64)]);
         assert_eq!(r1_user_b, r1_user + 1);
 
         // r2's counter is unaffected by r1_user_b.
-        let r2_user_b =
-            r2.register_type_scoped("UserB", vec![("y".to_string(), FieldType::F64)]);
+        let r2_user_b = r2.register_type_scoped("UserB", vec![("y".to_string(), FieldType::F64)]);
         assert_eq!(r2_user_b, r2_user + 1);
     }
 

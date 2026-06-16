@@ -632,8 +632,7 @@ mod tests {
     fn decide_load_on_all_preconditions() {
         let iface = iface_v(KNOWN_INTERFACE_SCHEMA);
         // fresh_key matches the stamped hash; interface present; schema known.
-        let action =
-            decide_cache_action(FORMAT_VERSION, "hashA", Some("hashA"), Some(&iface));
+        let action = decide_cache_action(FORMAT_VERSION, "hashA", Some("hashA"), Some(&iface));
         assert_eq!(action, CacheAction::LoadAndReplay);
         assert!(action.is_load());
     }
@@ -650,9 +649,11 @@ mod tests {
     #[test]
     fn decide_rebuild_on_source_hash_mismatch() {
         let iface = iface_v(KNOWN_INTERFACE_SCHEMA);
-        let action =
-            decide_cache_action(FORMAT_VERSION, "stale", Some("fresh"), Some(&iface));
-        assert_eq!(action, CacheAction::Rebuild(RebuildReason::SourceHashMismatch));
+        let action = decide_cache_action(FORMAT_VERSION, "stale", Some("fresh"), Some(&iface));
+        assert_eq!(
+            action,
+            CacheAction::Rebuild(RebuildReason::SourceHashMismatch)
+        );
     }
 
     #[test]
@@ -675,15 +676,13 @@ mod tests {
     fn decide_rebuild_on_container_version_out_of_range() {
         let iface = iface_v(KNOWN_INTERFACE_SCHEMA);
         // Above FORMAT_VERSION — a future bundle a binary this old cannot load.
-        let action =
-            decide_cache_action(FORMAT_VERSION + 1, "h", Some("h"), Some(&iface));
+        let action = decide_cache_action(FORMAT_VERSION + 1, "h", Some("h"), Some(&iface));
         assert_eq!(
             action,
             CacheAction::Rebuild(RebuildReason::ContainerVersionOutOfRange)
         );
         // Below MIN — a legacy bundle (would also lack the interface anyway).
-        let action_low =
-            decide_cache_action(MIN_FORMAT_VERSION - 1, "h", Some("h"), Some(&iface));
+        let action_low = decide_cache_action(MIN_FORMAT_VERSION - 1, "h", Some("h"), Some(&iface));
         assert_eq!(
             action_low,
             CacheAction::Rebuild(RebuildReason::ContainerVersionOutOfRange)

@@ -28,7 +28,7 @@
 //! struct. No nested buffer (Decimal payload is inline), so `drop` only frees
 //! `Layout::new::<Self>()`.
 
-use super::heap_header::{HeapHeader, HEAP_KIND_V2_DECIMAL};
+use super::heap_header::{HEAP_KIND_V2_DECIMAL, HeapHeader};
 use rust_decimal::Decimal;
 
 /// Refcounted, repr(C) Decimal carrier for v2 runtime.
@@ -161,7 +161,11 @@ mod tests {
             let ptr = DecimalObj::new(Decimal::ONE);
             let base = ptr as usize;
             let value_offset = &(*ptr).value as *const _ as usize - base;
-            assert_eq!(value_offset, DecimalObj::OFFSET_VALUE, "value must be at offset 8");
+            assert_eq!(
+                value_offset,
+                DecimalObj::OFFSET_VALUE,
+                "value must be at offset 8"
+            );
             DecimalObj::drop(ptr);
         }
     }

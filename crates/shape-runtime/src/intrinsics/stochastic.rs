@@ -28,8 +28,8 @@ use rand::Rng;
 /// Create the stochastic intrinsics module with all 4 typed-marshal entry points.
 pub fn create_stochastic_intrinsics_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::intrinsics::stochastic");
-    module.description = "Stochastic process intrinsics (Brownian motion, GBM, OU, random walk)"
-        .to_string();
+    module.description =
+        "Stochastic process intrinsics (Brownian motion, GBM, OU, random walk)".to_string();
 
     register_typed_fn_3::<_, i64, f64, f64>(
         &mut module,
@@ -45,9 +45,7 @@ pub fn create_stochastic_intrinsics_module() -> ModuleExports {
                 return Err("__intrinsic_brownian_motion: dt must be positive".to_string());
             }
             if sigma < 0.0 {
-                return Err(
-                    "__intrinsic_brownian_motion: sigma must be non-negative".to_string()
-                );
+                return Err("__intrinsic_brownian_motion: sigma must be non-negative".to_string());
             }
             let n = n as usize;
             let scale = sigma * dt.sqrt();

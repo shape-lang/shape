@@ -20,9 +20,9 @@
 //! guarantee that the JIT is actually executing the `let mut` closure
 //! body, not falling back to interpreter.
 
+use crate::JITConfig;
 use crate::compiler::JITCompiler;
 use crate::mixed_table::FunctionEntry;
-use crate::JITConfig;
 
 /// Compile Shape source end-to-end and return the MixedFunctionTable
 /// from the JIT compiler. Asserts that bytecode compilation and JIT
@@ -44,12 +44,8 @@ fn compile_to_mixed_table(
     // recognised during compilation.
     let mut loader = shape_runtime::module_loader::ModuleLoader::new();
     let (graph, stdlib_names, prelude_imports) =
-        shape_vm::module_resolution::build_graph_and_stdlib_names(
-            &program,
-            &mut loader,
-            &[],
-        )
-        .expect("module graph construction failed");
+        shape_vm::module_resolution::build_graph_and_stdlib_names(&program, &mut loader, &[])
+            .expect("module graph construction failed");
 
     let mut compiler = BytecodeCompiler::new();
     compiler.stdlib_function_names = stdlib_names;
@@ -77,14 +73,9 @@ fn has_native_closure(
     program: &shape_vm::bytecode::BytecodeProgram,
     table: &crate::mixed_table::MixedFunctionTable,
 ) -> bool {
-    program
-        .functions
-        .iter()
-        .enumerate()
-        .any(|(idx, func)| {
-            func.is_closure
-                && matches!(table.get(idx), Some(FunctionEntry::Native(_)))
-        })
+    program.functions.iter().enumerate().any(|(idx, func)| {
+        func.is_closure && matches!(table.get(idx), Some(FunctionEntry::Native(_)))
+    })
 }
 
 /// Run `source` end-to-end via JITExecutor and return the wire-level
@@ -206,18 +197,14 @@ fn a1d2_jit_let_mut_closure_preflight_did_not_reject() {
 /// pointer-deref lowering would fire on the wrong slot.
 #[test]
 fn a1d2_closure_layout_capture_kinds_classify_correctly() {
-    use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
     use shape_value::v2::ConcreteType;
+    use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
 
     // Mixed layout: capture 0 = Immutable (let), capture 1 =
     // OwnedMutable (let mut), capture 2 = Immutable. This is the
     // shape `MirToIR::register_owned_mutable_capture_slots` inspects
     // to decide which capture slots drive pointer-deref lowering.
-    let capture_types = vec![
-        ConcreteType::I64,
-        ConcreteType::I64,
-        ConcreteType::F64,
-    ];
+    let capture_types = vec![ConcreteType::I64, ConcreteType::I64, ConcreteType::F64];
     let kinds = vec![
         CaptureKind::Immutable,
         CaptureKind::OwnedMutable,

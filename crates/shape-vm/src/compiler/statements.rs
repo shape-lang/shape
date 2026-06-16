@@ -305,8 +305,7 @@ impl BytecodeCompiler {
                         &[],
                         &caller_arg_type_names,
                     )?;
-                let vec_emission =
-                    crate::compiler::v2_map_emission::concrete_type_from_annotation;
+                let vec_emission = crate::compiler::v2_map_emission::concrete_type_from_annotation;
                 vec_emission(&shape_ast::ast::TypeAnnotation::Basic(return_type_name))
             }
             // Element-preserving lazy adapters.
@@ -5022,9 +5021,7 @@ impl BytecodeCompiler {
                 // inference engine's element type is the proof — never a
                 // bit-reinterpret of the input carrier.
                 if let Some(init_expr) = var_decl.value.as_ref() {
-                    if let Some(reconciled) =
-                        self.reconcile_binding_typed_array_kind(init_expr)
-                    {
+                    if let Some(reconciled) = self.reconcile_binding_typed_array_kind(init_expr) {
                         captured_typed_array_kind = reconciled;
                     }
                 }
@@ -5203,9 +5200,7 @@ impl BytecodeCompiler {
                             // the slot stamp below, so a stale `Float64` stamp
                             // never reaches an `Int64` carrier.
                             if let Some(init_expr) = var_decl.value.as_ref() {
-                                self.check_let_annotation_element_type_strict(
-                                    type_ann, init_expr,
-                                )?;
+                                self.check_let_annotation_element_type_strict(type_ann, init_expr)?;
                             }
                             if let Some(type_name) =
                                 Self::tracked_type_name_from_annotation(type_ann)
@@ -5570,9 +5565,7 @@ impl BytecodeCompiler {
                             // `Array<number>`. Runs before the annotation stamps
                             // the local slot kind.
                             if let Some(init_expr) = var_decl.value.as_ref() {
-                                self.check_let_annotation_element_type_strict(
-                                    type_ann, init_expr,
-                                )?;
+                                self.check_let_annotation_element_type_strict(type_ann, init_expr)?;
                             }
                             if let Some(type_name) =
                                 Self::tracked_type_name_from_annotation(type_ann)

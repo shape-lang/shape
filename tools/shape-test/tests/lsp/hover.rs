@@ -72,7 +72,8 @@ fn hover_on_module_name_shows_description() {
 #[test]
 #[should_panic]
 fn hover_on_module_function_shows_signature() {
-    let code = "mod csv { fn load(path: string) { path } }\nlet df = csv::load(\"/tmp/test.csv\")\n";
+    let code =
+        "mod csv { fn load(path: string) { path } }\nlet df = csv::load(\"/tmp/test.csv\")\n";
     ShapeTest::new(code)
         .at(pos(1, 14))
         .expect_hover_contains("load");

@@ -432,7 +432,10 @@ impl TypedObjectOps for super::VirtualMachine {
                 crate::executor::vm_impl::stack::drop_with_kind(self.bits, self.kind);
             }
         }
-        let _guard = ReceiverGuard { bits: recv_bits, kind: recv_kind };
+        let _guard = ReceiverGuard {
+            bits: recv_bits,
+            kind: recv_kind,
+        };
         let storage: &shape_value::heap_value::TypedObjectStorage =
             unsafe { &*(recv_bits as *const shape_value::heap_value::TypedObjectStorage) };
 
@@ -449,9 +452,7 @@ impl TypedObjectOps for super::VirtualMachine {
             let sid = schema_id;
 
             // IC fast path: monomorphic per-schema cache hit.
-            if let Some(hit) =
-                crate::executor::ic_fast_paths::property_ic_check(self, ic_ip, sid)
-            {
+            if let Some(hit) = crate::executor::ic_fast_paths::property_ic_check(self, ic_ip, sid) {
                 let src_idx = hit.field_idx as usize;
                 if src_idx < field_count {
                     let is_heap = (storage.heap_mask & (1u64 << src_idx)) != 0;
@@ -476,8 +477,7 @@ impl TypedObjectOps for super::VirtualMachine {
             // registry (immutable borrow scope). Extract before any
             // mutable borrows.
             let resolved = {
-                let target_schema =
-                    self.program.type_schema_registry.get_by_id(*type_id as u32);
+                let target_schema = self.program.type_schema_registry.get_by_id(*type_id as u32);
                 let source_schema = self
                     .program
                     .type_schema_registry
@@ -605,22 +605,16 @@ impl TypedObjectOps for super::VirtualMachine {
             // `populate_module_objects` chain: `__comptime__` schema
             // fields are `FieldType::Any` but storage carries
             // `Ptr(HeapKind::ModuleFn)` kinds.
-            let result = if *field_type_tag == FIELD_TAG_ANY
-                && field_index < storage.field_kinds.len()
-            {
-                push_field_value_with_kind(
-                    self,
-                    &storage.slots[field_index],
-                    storage.field_kinds[field_index],
-                )
-            } else {
-                push_field_value(
-                    self,
-                    &storage.slots[field_index],
-                    is_heap,
-                    *field_type_tag,
-                )
-            };
+            let result =
+                if *field_type_tag == FIELD_TAG_ANY && field_index < storage.field_kinds.len() {
+                    push_field_value_with_kind(
+                        self,
+                        &storage.slots[field_index],
+                        storage.field_kinds[field_index],
+                    )
+                } else {
+                    push_field_value(self, &storage.slots[field_index], is_heap, *field_type_tag)
+                };
             return result;
         }
 
@@ -708,7 +702,10 @@ impl TypedObjectOps for super::VirtualMachine {
                 crate::executor::vm_impl::stack::drop_with_kind(self.bits, self.kind);
             }
         }
-        let guard = ReceiverGuard { bits: recv_bits, kind: recv_kind };
+        let guard = ReceiverGuard {
+            bits: recv_bits,
+            kind: recv_kind,
+        };
         let storage: &shape_value::heap_value::TypedObjectStorage =
             unsafe { &*(recv_bits as *const shape_value::heap_value::TypedObjectStorage) };
 
@@ -780,8 +777,7 @@ impl super::VirtualMachine {
         let ic_ip = self.ip;
 
         // IC fast path: monomorphic per-schema cache hit.
-        if let Some(hit) =
-            crate::executor::ic_fast_paths::property_ic_check(self, ic_ip, schema_id)
+        if let Some(hit) = crate::executor::ic_fast_paths::property_ic_check(self, ic_ip, schema_id)
         {
             let src_idx = hit.field_idx as usize;
             if src_idx < field_count {
@@ -798,7 +794,10 @@ impl super::VirtualMachine {
         // Resolve target field name + source-side index from the registry.
         let resolved = {
             let target_schema = self.program.type_schema_registry.get_by_id(type_id as u32);
-            let source_schema = self.program.type_schema_registry.get_by_id(schema_id as u32);
+            let source_schema = self
+                .program
+                .type_schema_registry
+                .get_by_id(schema_id as u32);
             match (target_schema, source_schema) {
                 (Some(target), Some(source)) => {
                     if let Some(target_field) = target.field_by_index(field_idx) {
@@ -1168,7 +1167,10 @@ mod tests {
         // type SetHolder { items: Set<int> }
         let schema = TypeSchema::new(
             "SetHolder".to_string(),
-            vec![("items".to_string(), FieldType::Set(Box::new(FieldType::I64)))],
+            vec![(
+                "items".to_string(),
+                FieldType::Set(Box::new(FieldType::I64)),
+            )],
         );
         let schema_id = schema.id;
         vm.program.type_schema_registry.register(schema);
@@ -1183,9 +1185,7 @@ mod tests {
             schema_id as u64,
             slots.into_boxed_slice(),
             1u64, // heap_mask: bit 0 set (field 0 is heap-backed)
-            Arc::from(
-                vec![NativeKind::Ptr(HeapKind::HashSet)].into_boxed_slice(),
-            ),
+            Arc::from(vec![NativeKind::Ptr(HeapKind::HashSet)].into_boxed_slice()),
         );
         let recv_bits = ptr as u64;
 
@@ -1211,7 +1211,8 @@ mod tests {
             field_type_tag: FIELD_TAG_SET,
         };
         let instr = Instruction::new(OpCode::SetFieldTyped, Some(operand));
-        vm.op_set_field_typed(&instr).expect("set_field_typed must succeed for Set field");
+        vm.op_set_field_typed(&instr)
+            .expect("set_field_typed must succeed for Set field");
 
         // Read the field back. op_get_field_typed pops the receiver and
         // pushes the field value (with one refcount share for the
@@ -1256,8 +1257,7 @@ mod tests {
         vm.program.type_schema_registry.register(schema);
 
         // Build initial HashMapKindedRef::I64 (string-keyed i64-valued).
-        let initial_map: Arc<HashMapKindedRef> =
-            Arc::new(HashMapKindedRef::I64(Arc::default()));
+        let initial_map: Arc<HashMapKindedRef> = Arc::new(HashMapKindedRef::I64(Arc::default()));
         let initial_bits = Arc::into_raw(initial_map) as u64;
         let slots = vec![ValueSlot::from_raw(initial_bits)];
         let ptr = TypedObjectStorage::_new(
@@ -1268,8 +1268,7 @@ mod tests {
         );
         let recv_bits = ptr as u64;
 
-        let new_map: Arc<HashMapKindedRef> =
-            Arc::new(HashMapKindedRef::I64(Arc::default()));
+        let new_map: Arc<HashMapKindedRef> = Arc::new(HashMapKindedRef::I64(Arc::default()));
         let new_bits = Arc::into_raw(new_map) as u64;
 
         vm.push_kinded(recv_bits, NativeKind::Ptr(HeapKind::TypedObject))

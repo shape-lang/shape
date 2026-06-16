@@ -26,10 +26,10 @@ use super::introspection::{
     state_capture_module_stub, state_capture_stub, state_locals_stub, state_resume_frame_stub,
     state_resume_stub,
 };
+use shape_runtime::marshal::register_typed_function;
 use shape_runtime::module_exports::{ModuleContext, ModuleExports, ModuleParam};
 use shape_runtime::type_schema::{FieldType, TypeSchema};
 use shape_runtime::typed_module_exports::{ConcreteType, TypedReturn};
-use shape_runtime::marshal::register_typed_function;
 use shape_value::KindedSlot;
 
 // ---------------------------------------------------------------------------
@@ -441,10 +441,7 @@ fn slot_to_serialized_bytes(slot: &KindedSlot) -> Result<Vec<u8>, String> {
 /// end-to-end via the kind-threaded `slot_to_serializable` API: the
 /// arg slot is projected to `SerializableVMValue`, bincode-encoded,
 /// then SHA-256-hashed. Returns the hash as a hex string.
-pub(crate) fn state_hash(
-    args: &[KindedSlot],
-    _ctx: &ModuleContext,
-) -> Result<TypedReturn, String> {
+pub(crate) fn state_hash(args: &[KindedSlot], _ctx: &ModuleContext) -> Result<TypedReturn, String> {
     let Some(arg) = args.first() else {
         return Err(content_surface("state.hash"));
     };
@@ -484,9 +481,7 @@ pub(crate) fn state_fn_hash(
             } else {
                 // SAFETY: bits is OwnedClosureBlock::ptr per §2.7.8.
                 let ptr = bits as *const u8;
-                Some(unsafe {
-                    shape_value::v2::closure_raw::typed_closure_function_id(ptr)
-                })
+                Some(unsafe { shape_value::v2::closure_raw::typed_closure_function_id(ptr) })
             }
         }
         _ => None,

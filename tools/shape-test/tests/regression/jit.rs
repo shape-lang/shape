@@ -15,7 +15,9 @@ fn jit_eval(source: &str) -> WireValue {
     let _ = initialize_shared_runtime();
     let mut engine = ShapeEngine::new().expect("engine creation failed");
     let program = shape_ast::parse_program(source).expect("parse failed");
-    let mut jit = JITExecutor { bytecode_executor: shape_vm::BytecodeExecutor::new() };
+    let mut jit = JITExecutor {
+        bytecode_executor: shape_vm::BytecodeExecutor::new(),
+    };
     let result = jit
         .execute_program(&mut engine, &program)
         .expect("JIT execution failed");
@@ -44,7 +46,9 @@ fn jit_preflight_accepts_all_builtins() {
     let _ = initialize_shared_runtime();
     let mut engine = ShapeEngine::new().expect("engine creation failed");
     let program = shape_ast::parse_program("toBool(1)").expect("parse failed");
-    let mut jit = JITExecutor { bytecode_executor: shape_vm::BytecodeExecutor::new() };
+    let mut jit = JITExecutor {
+        bytecode_executor: shape_vm::BytecodeExecutor::new(),
+    };
     let result = jit.execute_program(&mut engine, &program);
     assert!(
         result.is_ok(),
@@ -680,7 +684,9 @@ call_it(make_ok)
 "#,
     )
     .expect("parse failed");
-    let mut jit = JITExecutor { bytecode_executor: shape_vm::BytecodeExecutor::new() };
+    let mut jit = JITExecutor {
+        bytecode_executor: shape_vm::BytecodeExecutor::new(),
+    };
     let msg = match jit.execute_program(&mut engine, &program) {
         Ok(_) => panic!("strict checker must reject `?` in an int-returning function"),
         Err(e) => e.to_string(),

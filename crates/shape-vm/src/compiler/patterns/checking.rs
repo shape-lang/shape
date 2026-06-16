@@ -6,8 +6,8 @@ use crate::type_tracking::VariableTypeInfo;
 use shape_ast::ast::{Literal, Pattern, PatternConstructorFields};
 use shape_ast::error::{Result, ShapeError};
 
-use crate::compiler::BytecodeCompiler;
 use super::helpers::typed_eq_opcode_for_literal;
+use crate::compiler::BytecodeCompiler;
 
 // Reserved schema fields for TypedObject enum layout
 // __variant at offset 0, __payload_N at offsets 8, 16, etc.
@@ -116,15 +116,14 @@ impl BytecodeCompiler {
                 }
 
                 self.compile_literal(lit)?;
-                let eq_op = typed_eq_opcode_for_literal(lit).ok_or_else(|| {
-                    ShapeError::SemanticError {
+                let eq_op =
+                    typed_eq_opcode_for_literal(lit).ok_or_else(|| ShapeError::SemanticError {
                         message: format!(
                             "Pattern matching on {} literals is not yet supported",
                             lit
                         ),
                         location: None,
-                    }
-                })?;
+                    })?;
                 self.emit(Instruction::simple(eq_op));
                 let jump = self.emit_jump(OpCode::JumpIfFalse, 0);
                 fail_jumps.push(jump);
@@ -297,7 +296,10 @@ impl BytecodeCompiler {
                     (Some(enum_name), _) => {
                         // Look up enum schema - must be registered
                         let resolved_name = self.resolve_type_name(enum_name);
-                        let schema = self.type_tracker.schema_registry().get(resolved_name.as_str());
+                        let schema = self
+                            .type_tracker
+                            .schema_registry()
+                            .get(resolved_name.as_str());
                         let enum_info = schema.and_then(|s| s.get_enum_info());
                         let variant_info = enum_info.and_then(|e| e.variant_by_name(variant));
 

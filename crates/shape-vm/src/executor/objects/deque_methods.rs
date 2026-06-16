@@ -87,9 +87,9 @@ fn as_deque(slot: &KindedSlot) -> Result<Arc<DequeData>, VMError> {
 fn arg_slot_to_heap_value_arc(arg: &KindedSlot) -> Result<Arc<HeapValue>, VMError> {
     match arg.kind {
         NativeKind::Int64 => {
-            let i = arg.as_i64().ok_or_else(|| {
-                type_error("Deque element: Int64 slot bits not a valid integer")
-            })?;
+            let i = arg
+                .as_i64()
+                .ok_or_else(|| type_error("Deque element: Int64 slot bits not a valid integer"))?;
             Ok(Arc::new(HeapValue::BigInt(Arc::new(i))))
         }
         NativeKind::Float64 => Err(type_error(

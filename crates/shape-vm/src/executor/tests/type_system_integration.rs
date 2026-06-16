@@ -87,12 +87,16 @@ fn test_parse_extend_with_multi_generic() {
 fn test_method_table_is_self_returning() {
     use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
     let mut table = MethodTable::new();
+    table.register_user_generic_method("Vec", "filter", 0, vec![], TypeParamExpr::SelfType, vec![]);
     table.register_user_generic_method(
-        "Vec", "filter", 0, vec![], TypeParamExpr::SelfType, vec![],
-    );
-    table.register_user_generic_method(
-        "Vec", "map", 1, vec![],
-        TypeParamExpr::GenericContainer { name: "Vec".to_string(), args: vec![TypeParamExpr::MethodParam(0)] },
+        "Vec",
+        "map",
+        1,
+        vec![],
+        TypeParamExpr::GenericContainer {
+            name: "Vec".to_string(),
+            args: vec![TypeParamExpr::MethodParam(0)],
+        },
         vec![],
     );
     assert!(table.is_self_returning("Vec", "filter"));
@@ -101,16 +105,19 @@ fn test_method_table_is_self_returning() {
 
 #[test]
 fn test_method_table_takes_closure_with_receiver_param() {
-    use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
     use shape_runtime::type_system::BuiltinTypes;
+    use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
     let mut table = MethodTable::new();
     table.register_user_generic_method(
-        "Vec", "filter", 0,
+        "Vec",
+        "filter",
+        0,
         vec![TypeParamExpr::Function {
             params: vec![TypeParamExpr::ReceiverParam(0)],
             returns: Box::new(TypeParamExpr::Concrete(BuiltinTypes::boolean())),
         }],
-        TypeParamExpr::SelfType, vec![],
+        TypeParamExpr::SelfType,
+        vec![],
     );
     assert!(table.takes_closure_with_receiver_param("Vec", "filter"));
     assert!(!table.takes_closure_with_receiver_param("Vec", "len"));
@@ -128,7 +135,12 @@ fn test_resolve_result_unwrap() {
 
     let mut table = MethodTable::new();
     table.register_user_generic_method(
-        "Result", "unwrap", 0, vec![], TypeParamExpr::ReceiverParam(0), vec![],
+        "Result",
+        "unwrap",
+        0,
+        vec![],
+        TypeParamExpr::ReceiverParam(0),
+        vec![],
     );
 
     let result_type = Type::Generic {
@@ -152,12 +164,17 @@ fn test_resolve_option_map() {
 
     let mut table = MethodTable::new();
     table.register_user_generic_method(
-        "Option", "map", 1,
+        "Option",
+        "map",
+        1,
         vec![TypeParamExpr::Function {
             params: vec![TypeParamExpr::ReceiverParam(0)],
             returns: Box::new(TypeParamExpr::MethodParam(0)),
         }],
-        TypeParamExpr::GenericContainer { name: "Option".to_string(), args: vec![TypeParamExpr::MethodParam(0)] },
+        TypeParamExpr::GenericContainer {
+            name: "Option".to_string(),
+            args: vec![TypeParamExpr::MethodParam(0)],
+        },
         vec![],
     );
 
@@ -172,24 +189,30 @@ fn test_resolve_option_map() {
     assert!(
         matches!(&rt, Type::Generic { base, .. }
             if matches!(base.as_ref(), Type::Concrete(TypeAnnotation::Reference(n)) if n == "Option")),
-        "Option.map should return Option<U>, got {:?}", rt
+        "Option.map should return Option<U>, got {:?}",
+        rt
     );
 }
 
 #[test]
 fn test_resolve_table_map_returns_table_u() {
     use shape_ast::ast::TypeAnnotation;
-    use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
     use shape_runtime::type_system::Type;
+    use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
 
     let mut table = MethodTable::new();
     table.register_user_generic_method(
-        "Table", "map", 1,
+        "Table",
+        "map",
+        1,
         vec![TypeParamExpr::Function {
             params: vec![TypeParamExpr::ReceiverParam(0)],
             returns: Box::new(TypeParamExpr::MethodParam(0)),
         }],
-        TypeParamExpr::GenericContainer { name: "Table".to_string(), args: vec![TypeParamExpr::MethodParam(0)] },
+        TypeParamExpr::GenericContainer {
+            name: "Table".to_string(),
+            args: vec![TypeParamExpr::MethodParam(0)],
+        },
         vec![],
     );
 
@@ -204,7 +227,8 @@ fn test_resolve_table_map_returns_table_u() {
     assert!(
         matches!(&rt, Type::Generic { base, .. }
             if matches!(base.as_ref(), Type::Concrete(TypeAnnotation::Reference(n)) if n == "Table")),
-        "Table.map should return Table<U>, got {:?}", rt
+        "Table.map should return Table<U>, got {:?}",
+        rt
     );
 }
 
@@ -260,12 +284,16 @@ fn test_queryable_impl_for_custom_type() {
 
 #[test]
 fn test_extend_array_custom_method() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
+    )
 }
 
 #[test]
 fn test_extend_number_method_chaining() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
+    )
 }
 
 // =============================================================================
@@ -274,7 +302,9 @@ fn test_extend_number_method_chaining() {
 
 #[test]
 fn test_bug1_type_annotated_variable_arithmetic() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
+    )
 }
 
 #[test]
@@ -309,7 +339,9 @@ fn test_bug1_type_annotated_string_length() {
 
 #[test]
 fn test_bug1_toplevel_type_annotated_arithmetic() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
+    )
 }
 
 #[test]
@@ -329,17 +361,23 @@ fn test_bug2_toplevel_type_annotated_comparison() {
 
 #[test]
 fn test_bug1_type_annotated_value_not_wrapped() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
+    )
 }
 
 #[test]
 fn test_content_chart_from_table_value() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
+    )
 }
 
 #[test]
 fn test_content_chart_from_table_multi_y() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
+    )
 }
 
 // ===== Table Row Literal Tests =====
@@ -414,7 +452,9 @@ let t = [1, 2], [3, 4]
 
 #[test]
 fn test_table_row_literal_chart() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)")
+    todo!(
+        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
+    )
 }
 
 #[test]

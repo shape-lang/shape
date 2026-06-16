@@ -92,15 +92,13 @@ fn read_as_i64(slot: &KindedSlot) -> Result<i64, VMError> {
             // SAFETY: `NativeKind::String` means the slot bits are
             // `Arc::into_raw::<String>` and the carrier owns one share.
             let s: &String = unsafe { &*(bits as *const String) };
-            s.parse::<i64>().map_err(|_| {
-                VMError::RuntimeError(format!("cannot convert string '{s}' to int"))
-            })
+            s.parse::<i64>()
+                .map_err(|_| VMError::RuntimeError(format!("cannot convert string '{s}' to int")))
         }
         NativeKind::Ptr(HeapKind::Decimal) => {
             let bits = slot.slot.raw();
             // SAFETY: `Ptr(Decimal)` bits are `Arc::into_raw::<Decimal>`.
-            let d: &rust_decimal::Decimal =
-                unsafe { &*(bits as *const rust_decimal::Decimal) };
+            let d: &rust_decimal::Decimal = unsafe { &*(bits as *const rust_decimal::Decimal) };
             use rust_decimal::prelude::ToPrimitive;
             d.to_i64().ok_or_else(|| {
                 VMError::RuntimeError(format!("cannot convert decimal '{d}' to int"))
@@ -165,8 +163,7 @@ fn read_as_f64(slot: &KindedSlot) -> Result<f64, VMError> {
         NativeKind::Ptr(HeapKind::Decimal) => {
             let bits = slot.slot.raw();
             // SAFETY: `Ptr(Decimal)` => `Arc::into_raw::<Decimal>` bits.
-            let d: &rust_decimal::Decimal =
-                unsafe { &*(bits as *const rust_decimal::Decimal) };
+            let d: &rust_decimal::Decimal = unsafe { &*(bits as *const rust_decimal::Decimal) };
             use rust_decimal::prelude::ToPrimitive;
             d.to_f64().ok_or_else(|| {
                 VMError::RuntimeError(format!("cannot convert decimal '{d}' to number"))
@@ -230,8 +227,7 @@ fn read_as_bool(slot: &KindedSlot) -> Result<bool, VMError> {
         NativeKind::Ptr(HeapKind::Decimal) => {
             let bits = slot.slot.raw();
             // SAFETY: `Ptr(Decimal)` => `Arc::into_raw::<Decimal>` bits.
-            let d: &rust_decimal::Decimal =
-                unsafe { &*(bits as *const rust_decimal::Decimal) };
+            let d: &rust_decimal::Decimal = unsafe { &*(bits as *const rust_decimal::Decimal) };
             Ok(!rust_decimal::prelude::Zero::is_zero(d))
         }
         NativeKind::Ptr(HeapKind::BigInt) => {
@@ -347,9 +343,8 @@ fn read_as_char(slot: &KindedSlot) -> Result<char, VMError> {
         | NativeKind::NullableIntSize => {
             let i = slot.slot.as_i64();
             let code = i as u32;
-            char::from_u32(code).ok_or_else(|| {
-                VMError::RuntimeError(format!("invalid Unicode code point: {code}"))
-            })
+            char::from_u32(code)
+                .ok_or_else(|| VMError::RuntimeError(format!("invalid Unicode code point: {code}")))
         }
         NativeKind::UInt8
         | NativeKind::UInt16
@@ -362,9 +357,8 @@ fn read_as_char(slot: &KindedSlot) -> Result<char, VMError> {
         | NativeKind::NullableUInt64
         | NativeKind::NullableUIntSize => {
             let code = slot.slot.as_u64() as u32;
-            char::from_u32(code).ok_or_else(|| {
-                VMError::RuntimeError(format!("invalid Unicode code point: {code}"))
-            })
+            char::from_u32(code)
+                .ok_or_else(|| VMError::RuntimeError(format!("invalid Unicode code point: {code}")))
         }
         NativeKind::String => {
             let bits = slot.slot.raw();
@@ -444,8 +438,7 @@ fn read_as_string(
         NativeKind::Ptr(HeapKind::Decimal) => {
             let bits = slot.slot.raw();
             // SAFETY: `Ptr(Decimal)` => `Arc::into_raw::<Decimal>` bits.
-            let d: &rust_decimal::Decimal =
-                unsafe { &*(bits as *const rust_decimal::Decimal) };
+            let d: &rust_decimal::Decimal = unsafe { &*(bits as *const rust_decimal::Decimal) };
             Ok(d.to_string())
         }
         NativeKind::Ptr(HeapKind::BigInt) => {
@@ -891,10 +884,7 @@ mod tests {
         // wildcard heap fallback must surface-and-stop rather than
         // panic deep in the formatter.
         let registry = TypeSchemaRegistry::new();
-        let slot = KindedSlot::new(
-            ValueSlot::from_raw(0),
-            NativeKind::Ptr(HeapKind::Temporal),
-        );
+        let slot = KindedSlot::new(ValueSlot::from_raw(0), NativeKind::Ptr(HeapKind::Temporal));
         let err = read_as_string(&slot, Some(&registry)).unwrap_err();
         assert!(
             matches!(err, VMError::NotImplemented(ref msg) if msg.contains("Temporal")),
@@ -908,10 +898,7 @@ mod tests {
         // Closure arm in `format_heap_kind` is still SURFACE per
         // §2.7.8 / Q10 B7-closure-cells extension dependency.
         let registry = TypeSchemaRegistry::new();
-        let slot = KindedSlot::new(
-            ValueSlot::from_raw(0),
-            NativeKind::Ptr(HeapKind::Closure),
-        );
+        let slot = KindedSlot::new(ValueSlot::from_raw(0), NativeKind::Ptr(HeapKind::Closure));
         let err = read_as_string(&slot, Some(&registry)).unwrap_err();
         assert!(
             matches!(err, VMError::NotImplemented(ref msg) if msg.contains("Closure")),

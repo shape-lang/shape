@@ -101,11 +101,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .atomic_cas(MemFlags::trusted(), state_addr, unlocked, locked);
         // If prev != 0, the CAS failed (state was already locked). Call
         // the contended helper which spin-waits until it can flip to 1.
-        let ok = self.builder.ins().icmp_imm(
-            IntCC::Equal,
-            prev,
-            SHARED_CELL_UNLOCKED as i64,
-        );
+        let ok = self
+            .builder
+            .ins()
+            .icmp_imm(IntCC::Equal, prev, SHARED_CELL_UNLOCKED as i64);
         let contended_block = self.builder.create_block();
         let after_block = self.builder.create_block();
         self.builder
@@ -153,11 +152,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .builder
             .ins()
             .atomic_cas(MemFlags::trusted(), state_addr, locked, unlocked);
-        let ok = self.builder.ins().icmp_imm(
-            IntCC::Equal,
-            prev,
-            SHARED_CELL_LOCKED as i64,
-        );
+        let ok = self
+            .builder
+            .ins()
+            .icmp_imm(IntCC::Equal, prev, SHARED_CELL_LOCKED as i64);
         let contended_block = self.builder.create_block();
         let after_block = self.builder.create_block();
         self.builder
@@ -192,10 +190,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
         } else if val_type == types::I64 {
             val
-        } else if val_type == types::I32
-            || val_type == types::I16
-            || val_type == types::I8
-        {
+        } else if val_type == types::I32 || val_type == types::I16 || val_type == types::I8 {
             self.builder.ins().uextend(types::I64, val)
         } else {
             val
@@ -303,9 +298,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             FieldKind::I32 | FieldKind::U32 => raw,
             // Sub-32 ints come back from the FFI widened to I32 — narrow
             // to the slot's native Cranelift width.
-            FieldKind::I16 | FieldKind::U16 => {
-                self.builder.ins().ireduce(types::I16, raw)
-            }
+            FieldKind::I16 | FieldKind::U16 => self.builder.ins().ireduce(types::I16, raw),
             FieldKind::I8 | FieldKind::U8 | FieldKind::Bool => {
                 self.builder.ins().ireduce(types::I8, raw)
             }
@@ -320,11 +313,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// not the FFI's I32-widened param). Per ADR-006 §2.7.5 the cell
     /// carries the kind on the parallel companion; raw bits flow through
     /// untouched — no `I64 → TAG_INT` re-box.
-    pub(super) fn normalize_cell_read_inline(
-        &mut self,
-        raw: Value,
-        kind: FieldKind,
-    ) -> Value {
+    pub(super) fn normalize_cell_read_inline(&mut self, raw: Value, kind: FieldKind) -> Value {
         match kind {
             FieldKind::F64
             | FieldKind::U64
@@ -344,11 +333,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Shared cell's `cell_load_type_for_field_kind` width to store
     /// directly into the cell. Unboxes from the slot's downstream form,
     /// then sign-/zero-extends sub-32 ints to their native cell width.
-    pub(super) fn unbox_for_shared_inline_write(
-        &mut self,
-        val: Value,
-        kind: FieldKind,
-    ) -> Value {
+    pub(super) fn unbox_for_shared_inline_write(&mut self, val: Value, kind: FieldKind) -> Value {
         let val_ty = self.builder.func.dfg.value_type(val);
         match kind {
             FieldKind::F64 => {
@@ -463,11 +448,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     val
                 }
             }
-            FieldKind::I16
-            | FieldKind::U16
-            | FieldKind::I8
-            | FieldKind::U8
-            | FieldKind::Bool => {
+            FieldKind::I16 | FieldKind::U16 | FieldKind::I8 | FieldKind::U8 | FieldKind::Bool => {
                 // FFI param is I32 widened from sub-32. If we already
                 // hold I8/I16, sextend (signed) or uextend (unsigned/bool)
                 // to I32; if we hold I64/F64, normalise first.
@@ -482,8 +463,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 } else if val_ty == types::I64 {
                     self.builder.ins().ireduce(types::I32, val)
                 } else if val_ty == types::F64 {
-                    let bits =
-                        self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                    let bits = self.builder.ins().bitcast(types::I64, MemFlags::new(), val);
                     self.builder.ins().ireduce(types::I32, bits)
                 } else {
                     val
@@ -502,7 +482,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Masks off tag bits and the unified heap flag (bit 47).
     #[inline]
     fn emit_payload_ptr(&mut self, boxed: Value) -> Value {
-        let ptr_mask = self.builder.ins().iconst(types::I64, UNIFIED_PTR_MASK as i64);
+        let ptr_mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, UNIFIED_PTR_MASK as i64);
         self.builder.ins().band(boxed, ptr_mask)
     }
 
@@ -510,7 +493,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     #[inline]
     fn emit_array_ptr(&mut self, arr_boxed: Value) -> Value {
         let alloc_ptr = self.emit_payload_ptr(arr_boxed);
-        self.builder.ins().iadd_imm(alloc_ptr, JIT_ALLOC_DATA_OFFSET as i64)
+        self.builder
+            .ins()
+            .iadd_imm(alloc_ptr, JIT_ALLOC_DATA_OFFSET as i64)
     }
 
     /// Load (data_ptr, length) from a JitArray/UnifiedArray.
@@ -518,8 +503,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     #[inline]
     fn emit_array_data_and_len(&mut self, arr_boxed: Value) -> (Value, Value) {
         let arr_ptr = self.emit_array_ptr(arr_boxed);
-        let data_ptr = self.builder.ins().load(types::I64, MemFlags::trusted(), arr_ptr, 0);
-        let length = self.builder.ins().load(types::I64, MemFlags::trusted(), arr_ptr, 8);
+        let data_ptr = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), arr_ptr, 0);
+        let length = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), arr_ptr, 8);
         (data_ptr, length)
     }
 
@@ -531,11 +522,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // For performance, we use bitcast → fcvt which handles the common f64 case.
         // For NaN-boxed ints, fcvt_to_sint_sat on NaN gives 0, so we also extract
         // the int payload and select based on a check.
-        let tag_base = self.builder.ins().iconst(types::I64, 0xFFF8_0000_0000_0000u64 as i64);
-        let is_tagged = self.builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, index_bits, tag_base);
+        let tag_base = self
+            .builder
+            .ins()
+            .iconst(types::I64, 0xFFF8_0000_0000_0000u64 as i64);
+        let is_tagged =
+            self.builder
+                .ins()
+                .icmp(IntCC::UnsignedGreaterThanOrEqual, index_bits, tag_base);
 
         // Float path: bitcast to f64, convert to i64
-        let as_f64 = self.builder.ins().bitcast(types::F64, MemFlags::new(), index_bits);
+        let as_f64 = self
+            .builder
+            .ins()
+            .bitcast(types::F64, MemFlags::new(), index_bits);
         let from_float = self.builder.ins().fcvt_to_sint_sat(types::I64, as_f64);
 
         // Int path: sign-extend lower 48 bits
@@ -675,7 +675,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder.seal_block(in_bounds_block);
         let byte_offset = self.builder.ins().ishl_imm(final_idx, 3);
         let elem_addr = self.builder.ins().iadd(data_ptr, byte_offset);
-        self.builder.ins().store(MemFlags::trusted(), val, elem_addr, 0);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), val, elem_addr, 0);
     }
 
     /// Bounds-check-elided variant of `inline_array_get`.
@@ -706,7 +708,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let idx_i64 = self.index_to_i64(index_val);
         let byte_offset = self.builder.ins().ishl_imm(idx_i64, 3);
         let elem_addr = self.builder.ins().iadd(data_ptr, byte_offset);
-        self.builder.ins().store(MemFlags::trusted(), val, elem_addr, 0);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), val, elem_addr, 0);
     }
 
     /// Resolve a `Place::Index` operand to a `(arr_slot, iv_slot)` pair if
@@ -750,24 +754,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// 1. `uv_ptr = bits & UNIFIED_PTR_MASK` → `UnifiedValue<*const u8>*`
     /// 2. `to_ptr = load i64 [uv_ptr + 8]`   → `TypedObject*`
     fn emit_typed_object_ptr(&mut self, nanboxed_bits: Value) -> Value {
-        let ptr_mask = self.builder.ins().iconst(types::I64, UNIFIED_PTR_MASK as i64);
+        let ptr_mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, UNIFIED_PTR_MASK as i64);
         let uv_ptr = self.builder.ins().band(nanboxed_bits, ptr_mask);
         // Load the `data` field from the UnifiedValue wrapper
-        self.builder.ins().load(types::I64, MemFlags::trusted(), uv_ptr, UNIFIED_VALUE_DATA_OFFSET)
+        self.builder.ins().load(
+            types::I64,
+            MemFlags::trusted(),
+            uv_ptr,
+            UNIFIED_VALUE_DATA_OFFSET,
+        )
     }
 
     /// Inline typed field read: load u64 from `[typed_obj_ptr + HEADER + byte_off]`.
     fn inline_typed_field_get(&mut self, nanboxed_bits: Value, byte_off: u16) -> Value {
         let to_ptr = self.emit_typed_object_ptr(nanboxed_bits);
         let offset = TYPED_OBJ_HEADER + byte_off as i32;
-        self.builder.ins().load(types::I64, MemFlags::trusted(), to_ptr, offset)
+        self.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), to_ptr, offset)
     }
 
     /// Inline typed field write: store u64 to `[typed_obj_ptr + HEADER + byte_off]`.
     fn inline_typed_field_set(&mut self, nanboxed_bits: Value, byte_off: u16, val: Value) {
         let to_ptr = self.emit_typed_object_ptr(nanboxed_bits);
         let offset = TYPED_OBJ_HEADER + byte_off as i32;
-        self.builder.ins().store(MemFlags::trusted(), val, to_ptr, offset);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), val, to_ptr, offset);
     }
 
     /// γ-CP4 jit-makefieldref (ADR-006 §2.7.13 / §2.3): compute the
@@ -812,10 +828,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// `Rvalue::Borrow` field-address path. `pub(crate)` so `rvalues.rs`
     /// can decide between the inline field-address codegen and a clean
     /// surface-and-stop deopt when the offset is not statically known.
-    pub(crate) fn try_resolve_field_byte_offset_pub(
-        &self,
-        field_idx: &FieldIdx,
-    ) -> Option<u16> {
+    pub(crate) fn try_resolve_field_byte_offset_pub(&self, field_idx: &FieldIdx) -> Option<u16> {
         self.try_resolve_field_byte_offset(field_idx)
     }
 
@@ -858,20 +871,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // circuit + the param-init path both keep that invariant.
                 if self.ref_param_slots.contains(slot) {
                     let ref_addr = self.builder.use_var(
-                        *self.locals.get(slot).ok_or_else(|| {
-                            format!("MirToIR: unknown local slot {}", slot)
-                        })?,
+                        *self
+                            .locals
+                            .get(slot)
+                            .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?,
                     );
-                    return Ok(self.builder.ins().load(
-                        types::I64,
-                        MemFlags::new(),
-                        ref_addr,
-                        0,
-                    ));
+                    return Ok(self
+                        .builder
+                        .ins()
+                        .load(types::I64, MemFlags::new(), ref_addr, 0));
                 }
-                let var = self.locals.get(slot).ok_or_else(|| {
-                    format!("MirToIR: unknown local slot {}", slot)
-                })?;
+                let var = self
+                    .locals
+                    .get(slot)
+                    .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
                 // Track A.1D.2: OwnedMutable capture slots hold the raw
                 // `*mut ValueWord` bits of a `Box::into_raw`'d cell
                 // (allocated by `jit_alloc_owned_mut_cell` in
@@ -1016,7 +1029,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     Ok(self.builder.inst_results(inst)[0])
                 } else {
                     let field = self.builder.ins().iconst(types::I64, field_idx.0 as i64);
-                    let inst = self.builder.ins().call(self.ffi.get_prop, &[base_val, field]);
+                    let inst = self
+                        .builder
+                        .ins()
+                        .call(self.ffi.get_prop, &[base_val, field]);
                     Ok(self.builder.inst_results(inst)[0])
                 }
             }
@@ -1051,17 +1067,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
             Place::Deref(inner) => {
                 let ref_addr = self.read_place(inner)?;
-                Ok(self.builder.ins().load(types::I64, MemFlags::new(), ref_addr, 0))
+                Ok(self
+                    .builder
+                    .ins()
+                    .load(types::I64, MemFlags::new(), ref_addr, 0))
             }
         }
     }
 
     /// Write a value to a Place, converting to the slot's native type if needed.
-    pub(crate) fn write_place(
-        &mut self,
-        place: &Place,
-        val: Value,
-    ) -> Result<(), String> {
+    pub(crate) fn write_place(&mut self, place: &Place, val: Value) -> Result<(), String> {
         match place {
             Place::Local(slot) => {
                 // Phase 4b Round 5c-2-α jit-ref-param-chain-stamp (ADR-006
@@ -1075,13 +1090,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // reach the caller's `a` binding).
                 if self.ref_param_slots.contains(slot) {
                     let ref_addr = self.builder.use_var(
-                        *self.locals.get(slot).ok_or_else(|| {
-                            format!("MirToIR: unknown local slot {}", slot)
-                        })?,
+                        *self
+                            .locals
+                            .get(slot)
+                            .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?,
                     );
-                    self.builder
-                        .ins()
-                        .store(MemFlags::new(), val, ref_addr, 0);
+                    self.builder.ins().store(MemFlags::new(), val, ref_addr, 0);
                     return Ok(());
                 }
                 // Track A.1D.2: OwnedMutable capture slots redirect the
@@ -1114,15 +1128,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // the FFI helper which performs `std::ptr::write` at
                     // the cell's native width. No NaN-boxing crosses the
                     // cell boundary.
-                    let var = *self.locals.get(slot).ok_or_else(|| {
-                        format!("MirToIR: unknown local slot {}", slot)
-                    })?;
+                    let var = *self
+                        .locals
+                        .get(slot)
+                        .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
                     let cell_ptr = self.builder.use_var(var);
                     let native = self.unbox_for_cell_write(val, kind);
                     let write_func = self.owned_mut_write_func(kind);
-                    self.builder
-                        .ins()
-                        .call(write_func, &[cell_ptr, native]);
+                    self.builder.ins().call(write_func, &[cell_ptr, native]);
                     return Ok(());
                 }
                 // Track A.1E: Shared capture slot write — lock-gated
@@ -1139,9 +1152,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // until both ends (outer SharedCow + closure-body
                     // Shared captures) migrate together.
                     use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
-                    let var = *self.locals.get(slot).ok_or_else(|| {
-                        format!("MirToIR: unknown local slot {}", slot)
-                    })?;
+                    let var = *self
+                        .locals
+                        .get(slot)
+                        .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
                     let cell_ptr = self.builder.use_var(var);
                     let bits = self.coerce_value_to_i64_bits(val);
                     self.emit_shared_lock(cell_ptr);
@@ -1166,9 +1180,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // guard.
                 if self.shared_local_slots.contains(slot) {
                     use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
-                    let var = *self.locals.get(slot).ok_or_else(|| {
-                        format!("MirToIR: unknown local slot {}", slot)
-                    })?;
+                    let var = *self
+                        .locals
+                        .get(slot)
+                        .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
                     let cell_ptr = self.builder.use_var(var);
                     let bits = self.coerce_value_to_i64_bits(val);
                     self.emit_shared_lock(cell_ptr);
@@ -1184,9 +1199,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                 let target_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
                     .unwrap_or(shape_vm::type_tracking::NativeKind::Int64);
-                let var = *self.locals.get(slot).ok_or_else(|| {
-                    format!("MirToIR: unknown local slot {}", slot)
-                })?;
+                let var = *self
+                    .locals
+                    .get(slot)
+                    .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
                 // Convert value to match the slot's declared Cranelift type.
                 let converted = self.ensure_kind(val, target_kind);
                 self.builder.def_var(var, converted);
@@ -1204,10 +1220,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.inline_typed_field_set(base_val, byte_off, val);
                 } else if let Some(boxed_key) = self.field_idx_to_boxed_key(field_idx) {
                     let key = self.builder.ins().iconst(types::I64, boxed_key as i64);
-                    self.builder.ins().call(self.ffi.set_prop, &[base_val, key, val]);
+                    self.builder
+                        .ins()
+                        .call(self.ffi.set_prop, &[base_val, key, val]);
                 } else {
                     let field = self.builder.ins().iconst(types::I64, field_idx.0 as i64);
-                    self.builder.ins().call(self.ffi.set_prop, &[base_val, field, val]);
+                    self.builder
+                        .ins()
+                        .call(self.ffi.set_prop, &[base_val, field, val]);
                 }
                 Ok(())
             }
@@ -1284,9 +1304,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // pointer). `emit_drop` handles reclaim via
         // `jit_arc_shared_release`; this early-return preserves the
         // cell pointer until that release runs.
-        if matches!(place, Place::Local(_))
-            && self.shared_local_slots.contains(&slot)
-        {
+        if matches!(place, Place::Local(_)) && self.shared_local_slots.contains(&slot) {
             return Ok(());
         }
         // Phase 4b Round 5c-2-α jit-ref-param-chain-stamp (ADR-006 §2.7.13
@@ -1299,22 +1317,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // RHS temp slot, not the param slot, so the ref-param-slot null
         // path only matters when an explicit Move of the param value is
         // emitted; either way the pointer must survive).
-        if matches!(place, Place::Local(_))
-            && self.ref_param_slots.contains(&slot)
-        {
+        if matches!(place, Place::Local(_)) && self.ref_param_slots.contains(&slot) {
             return Ok(());
         }
         // Only null the root local for simple locals.
         // Field/Index moves don't null the entire container.
         if matches!(place, Place::Local(_)) {
-            let var = self.locals.get(&slot).ok_or_else(|| {
-                format!("MirToIR: unknown local slot {}", slot)
-            })?;
+            let var = self
+                .locals
+                .get(&slot)
+                .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
             let kind = self.slot_kind_of(slot);
             let null = match kind {
-                shape_vm::type_tracking::NativeKind::Float64 => {
-                    self.builder.ins().f64const(0.0)
-                }
+                shape_vm::type_tracking::NativeKind::Float64 => self.builder.ins().f64const(0.0),
                 shape_vm::type_tracking::NativeKind::Int32
                 | shape_vm::type_tracking::NativeKind::UInt32 => {
                     self.builder.ins().iconst(types::I32, 0)
@@ -1329,10 +1344,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.builder.ins().iconst(types::I16, 0)
                 }
                 // v2-boundary: I64 (NaN-boxed) slots use TAG_NULL as zero value
-                _ => self
-                    .builder
-                    .ins()
-                    .iconst(types::I64, 0i64),
+                _ => self.builder.ins().iconst(types::I64, 0i64),
             };
             self.builder.def_var(*var, null);
         }
@@ -1375,7 +1387,11 @@ mod tests {
     use cranelift_module::Module;
 
     /// Build a minimal Cranelift JIT environment for testing.
-    fn make_jit_env() -> (JITModule, cranelift::codegen::Context, FunctionBuilderContext) {
+    fn make_jit_env() -> (
+        JITModule,
+        cranelift::codegen::Context,
+        FunctionBuilderContext,
+    ) {
         let mut flag_builder = settings::builder();
         flag_builder.set("opt_level", "speed").unwrap();
         flag_builder.set("is_pic", "false").unwrap();
@@ -1556,12 +1572,9 @@ mod tests {
                 UNIFIED_VALUE_DATA_OFFSET,
             );
             // field at byte_off=0 -> total offset = TYPED_OBJ_HEADER(8) + 0 = 8
-            builder.ins().store(
-                MemFlags::trusted(),
-                val,
-                to_ptr,
-                TYPED_OBJ_HEADER + 0,
-            );
+            builder
+                .ins()
+                .store(MemFlags::trusted(), val, to_ptr, TYPED_OBJ_HEADER + 0);
 
             builder.ins().return_(&[]);
             builder.finalize();
@@ -1672,13 +1685,7 @@ mod tests {
     #[test]
     fn r4_2f_borrow_cell_roundtrip_bool_i8() {
         let (mut module, mut ctx, mut fb_ctx) = make_jit_env();
-        let code = build_roundtrip_fn(
-            &mut module,
-            &mut ctx,
-            &mut fb_ctx,
-            "rt_bool",
-            types::I8,
-        );
+        let code = build_roundtrip_fn(&mut module, &mut ctx, &mut fb_ctx, "rt_bool", types::I8);
         unsafe {
             let f: unsafe fn(u8) -> u8 = std::mem::transmute(code);
             assert_eq!(f(1), 1, "I8 borrow cell must preserve `true`");
@@ -1690,13 +1697,7 @@ mod tests {
     #[test]
     fn r4_2f_borrow_cell_roundtrip_int_i32() {
         let (mut module, mut ctx, mut fb_ctx) = make_jit_env();
-        let code = build_roundtrip_fn(
-            &mut module,
-            &mut ctx,
-            &mut fb_ctx,
-            "rt_i32",
-            types::I32,
-        );
+        let code = build_roundtrip_fn(&mut module, &mut ctx, &mut fb_ctx, "rt_i32", types::I32);
         unsafe {
             let f: unsafe fn(i32) -> i32 = std::mem::transmute(code);
             assert_eq!(f(0), 0);
@@ -1710,21 +1711,21 @@ mod tests {
     #[test]
     fn r4_2f_borrow_cell_roundtrip_number_f64() {
         let (mut module, mut ctx, mut fb_ctx) = make_jit_env();
-        let code = build_roundtrip_fn(
-            &mut module,
-            &mut ctx,
-            &mut fb_ctx,
-            "rt_f64",
-            types::F64,
-        );
+        let code = build_roundtrip_fn(&mut module, &mut ctx, &mut fb_ctx, "rt_f64", types::F64);
         unsafe {
             let f: unsafe fn(f64) -> f64 = std::mem::transmute(code);
             assert_eq!(f(1.5), 1.5, "F64 borrow cell must preserve fraction bits");
-            assert_eq!(f(-0.0).to_bits(), (-0.0f64).to_bits(),
-                "F64 borrow cell must preserve sign of zero");
+            assert_eq!(
+                f(-0.0).to_bits(),
+                (-0.0f64).to_bits(),
+                "F64 borrow cell must preserve sign of zero"
+            );
             let nan = f64::from_bits(0x7FF8_0000_0000_0001);
-            assert_eq!(f(nan).to_bits(), nan.to_bits(),
-                "F64 borrow cell must preserve NaN payload");
+            assert_eq!(
+                f(nan).to_bits(),
+                nan.to_bits(),
+                "F64 borrow cell must preserve NaN payload"
+            );
         }
     }
 
@@ -1733,19 +1734,16 @@ mod tests {
         // Non-native slot kinds (heap / string / unknown) → I64 cell.
         // This is the legacy 8-byte path and must remain byte-accurate.
         let (mut module, mut ctx, mut fb_ctx) = make_jit_env();
-        let code = build_roundtrip_fn(
-            &mut module,
-            &mut ctx,
-            &mut fb_ctx,
-            "rt_i64",
-            types::I64,
-        );
+        let code = build_roundtrip_fn(&mut module, &mut ctx, &mut fb_ctx, "rt_i64", types::I64);
         unsafe {
             let f: unsafe fn(u64) -> u64 = std::mem::transmute(code);
             assert_eq!(f(0), 0);
             assert_eq!(f(u64::MAX), u64::MAX);
-            assert_eq!(f(0xFFF8_0000_0000_0001), 0xFFF8_0000_0000_0001,
-                "I64 borrow cell must preserve NaN-boxed tag patterns");
+            assert_eq!(
+                f(0xFFF8_0000_0000_0001),
+                0xFFF8_0000_0000_0001,
+                "I64 borrow cell must preserve NaN-boxed tag patterns"
+            );
         }
     }
 }

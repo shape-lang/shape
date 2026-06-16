@@ -91,17 +91,15 @@
 
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
-    executor::{ExceptionHandler, VirtualMachine},
     executor::vm_impl::stack::drop_with_kind,
+    executor::{ExceptionHandler, VirtualMachine},
 };
 use shape_runtime::type_schema::builtin_schemas::{
-    ANYERROR_CATEGORY, ANYERROR_CAUSE, ANYERROR_CODE, ANYERROR_MESSAGE,
-    ANYERROR_PAYLOAD, ANYERROR_TRACE_INFO,
-};
-use shape_value::{
-    HeapKind, KindedSlot, NativeKind, TypedObjectStorage, VMError, ValueSlot,
+    ANYERROR_CATEGORY, ANYERROR_CAUSE, ANYERROR_CODE, ANYERROR_MESSAGE, ANYERROR_PAYLOAD,
+    ANYERROR_TRACE_INFO,
 };
 use shape_value::heap_value::{OptionData, ResultData};
+use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, VMError, ValueSlot};
 use std::sync::Arc;
 
 // WS-3 F4: the `PHASE_2C_EXCEPTION_OBJECT_SURFACE` and
@@ -200,8 +198,7 @@ impl VirtualMachine {
                 // SAFETY: kind says Ptr(TypedObject); bits are
                 // `Arc::into_raw::<TypedObjectStorage>`. Borrow transiently
                 // (no share retire) to inspect the schema + message field.
-                let obj: &TypedObjectStorage =
-                    unsafe { &*(bits as *const TypedObjectStorage) };
+                let obj: &TypedObjectStorage = unsafe { &*(bits as *const TypedObjectStorage) };
                 if obj.schema_id == self.builtin_schemas.any_error as u64 {
                     let msg = anyerror_message_field(obj);
                     let cause = anyerror_cause_field(obj);
@@ -216,9 +213,8 @@ impl VirtualMachine {
                 }
             }
         }
-        let formatter = crate::executor::printing::ValueFormatter::new(
-            &self.program.type_schema_registry,
-        );
+        let formatter =
+            crate::executor::printing::ValueFormatter::new(&self.program.type_schema_registry);
         format!("Uncaught error: {}", formatter.format_kinded(payload))
     }
 
@@ -462,9 +458,8 @@ impl VirtualMachine {
         // sharing (one allocation per schema) is an optimization
         // tracked separately — the Drop dispatch only cares that
         // each entry matches the slot's actual payload type.
-        let field_kinds: Arc<[NativeKind]> = Arc::from(
-            vec![NativeKind::String; 6].into_boxed_slice(),
-        );
+        let field_kinds: Arc<[NativeKind]> =
+            Arc::from(vec![NativeKind::String; 6].into_boxed_slice());
 
         // Wave 2 Round 4 D4 ckpt-1: migrated to v2-raw `_new` + D1's
         // `from_typed_object_raw` constructor — no variant signature
@@ -501,8 +496,7 @@ impl VirtualMachine {
                 // SAFETY: kind says Ptr(TypedObject); bits are
                 // `Arc::into_raw::<TypedObjectStorage>`; carrier owns one
                 // strong-count share. Borrow transiently to read schema_id.
-                let arc: Arc<TypedObjectStorage> =
-                    unsafe { Arc::from_raw(bits as *const _) };
+                let arc: Arc<TypedObjectStorage> = unsafe { Arc::from_raw(bits as *const _) };
                 let is_any_error = arc.schema_id == self.builtin_schemas.any_error as u64;
                 let _ = Arc::into_raw(arc);
                 if is_any_error {
@@ -624,8 +618,7 @@ impl VirtualMachine {
             // wire-tier representation of None, the user-facing
             // contract is identical.
             drop(value);
-            let none_cause =
-                KindedSlot::from_string_arc(Arc::new("Value was None".to_string()));
+            let none_cause = KindedSlot::from_string_arc(Arc::new("Value was None".to_string()));
             let trace = self.trace_info_full()?;
             let any_err = self.build_any_error(context, Some(none_cause), trace, None)?;
             let res = Arc::new(ResultData::err(any_err));
@@ -824,10 +817,7 @@ impl VirtualMachine {
         let return_kind = self
             .current_frame_descriptor()
             .and_then(|fd| fd.return_kind);
-        let lift_to_result_err = matches!(
-            return_kind,
-            Some(NativeKind::Ptr(HeapKind::Result))
-        );
+        let lift_to_result_err = matches!(return_kind, Some(NativeKind::Ptr(HeapKind::Result)));
 
         if lift_to_result_err {
             // Result-returning fn: LIFT None to Err(AnyError) wrapped
@@ -860,8 +850,7 @@ impl VirtualMachine {
     /// either to `handle_exception` (toplevel surface) or into a
     /// `ResultData::err` carrier (in-fn lift).
     fn build_option_none_any_error(&mut self) -> Result<KindedSlot, VMError> {
-        let payload =
-            KindedSlot::from_string_arc(Arc::new("Value was None".to_string()));
+        let payload = KindedSlot::from_string_arc(Arc::new("Value was None".to_string()));
         let trace = self.trace_info_full()?;
         self.build_any_error(payload, None, trace, Some("OPTION_NONE"))
     }
@@ -1142,10 +1131,7 @@ fn is_null_sentinel(slot: &KindedSlot) -> bool {
 /// emit sites for `op_type_check` per the W14-variant-codegen close —
 /// Basic scalars + Result/Option generics. Other forms conservatively
 /// return `false` rather than fabricate a match contract.
-fn type_check_kinded(
-    annotation: &shape_ast::ast::TypeAnnotation,
-    value: &KindedSlot,
-) -> bool {
+fn type_check_kinded(annotation: &shape_ast::ast::TypeAnnotation, value: &KindedSlot) -> bool {
     use shape_ast::ast::TypeAnnotation;
     match annotation {
         TypeAnnotation::Basic(name) => match name.as_str() {
@@ -1163,8 +1149,10 @@ fn type_check_kinded(
                     | NativeKind::UIntSize
             ),
             "number" | "float" => matches!(value.kind, NativeKind::Float64),
-            "bool" => matches!(value.kind, NativeKind::Bool) && value.slot.raw() != 0
-                || matches!(value.kind, NativeKind::Bool),
+            "bool" => {
+                matches!(value.kind, NativeKind::Bool) && value.slot.raw() != 0
+                    || matches!(value.kind, NativeKind::Bool)
+            }
             "string" => matches!(
                 value.kind,
                 NativeKind::String | NativeKind::Ptr(HeapKind::String)
@@ -1189,8 +1177,7 @@ fn type_check_kinded(
         TypeAnnotation::Generic { name, .. } => match name.as_str() {
             "Result" => matches!(value.kind, NativeKind::Ptr(HeapKind::Result)),
             "Option" => {
-                matches!(value.kind, NativeKind::Ptr(HeapKind::Option))
-                    || value.slot.raw() == 0
+                matches!(value.kind, NativeKind::Ptr(HeapKind::Option)) || value.slot.raw() == 0
             }
             "Array" | "Vec" => matches!(value.kind, NativeKind::Ptr(HeapKind::TypedArray)),
             "HashMap" | "Map" => matches!(value.kind, NativeKind::Ptr(HeapKind::HashMap)),
@@ -1256,8 +1243,7 @@ fn kinded_to_string_arc(slot: KindedSlot) -> Arc<String> {
             // `Arc::into_raw::<String>`; carrier owns one strong-count
             // share. `Arc::from_raw` reclaims that share into the
             // returned `Arc<String>`.
-            let arc: Arc<String> =
-                unsafe { Arc::from_raw(bits as *const String) };
+            let arc: Arc<String> = unsafe { Arc::from_raw(bits as *const String) };
             std::mem::forget(slot);
             return arc;
         }
@@ -1367,9 +1353,7 @@ fn stringify_non_string_kinded(slot: &KindedSlot) -> String {
         | NativeKind::NullableUInt32
         | NativeKind::NullableUInt64
         | NativeKind::NullableUIntSize => slot.slot().as_u64().to_string(),
-        NativeKind::Float64 | NativeKind::NullableFloat64 => {
-            slot.slot().as_f64().to_string()
-        }
+        NativeKind::Float64 | NativeKind::NullableFloat64 => slot.slot().as_f64().to_string(),
         other => format!("<error payload kind={:?}>", other),
     }
 }
@@ -1403,8 +1387,7 @@ mod build_any_error_tests {
         // an Arc<TypedObjectStorage>. We claim ownership of the share
         // for the duration of the test (the `result` carrier still owns
         // its share — we reconstruct without bumping).
-        let storage: Arc<TypedObjectStorage> =
-            unsafe { Arc::from_raw(bits as *const _) };
+        let storage: Arc<TypedObjectStorage> = unsafe { Arc::from_raw(bits as *const _) };
 
         // Schema ID matches AnyError.
         assert_eq!(storage.schema_id, vm.builtin_schemas.any_error as u64);
@@ -1451,8 +1434,7 @@ mod build_any_error_tests {
 
         assert_eq!(wrapped.kind(), NativeKind::Ptr(HeapKind::TypedObject));
         let bits = wrapped.slot().raw();
-        let storage: Arc<TypedObjectStorage> =
-            unsafe { Arc::from_raw(bits as *const _) };
+        let storage: Arc<TypedObjectStorage> = unsafe { Arc::from_raw(bits as *const _) };
         let msg_bits = storage.slots[ANYERROR_MESSAGE].raw();
         let msg_str: &String = unsafe { &*(msg_bits as *const String) };
         assert_eq!(msg_str.as_str(), "oops");

@@ -72,10 +72,7 @@ fn window_lag_offset_1() {
     // strict typing rejects at COMPILE time (method-not-found or the downstream
     // constraint cascade — checker pass ordering is nondeterministic).
     // Negative-test intent (lag not implemented) preserved.
-    .expect_run_err_contains_any(&[
-        "Method 'lag' not found on type 'Vec'",
-        "cannot have fields",
-    ]);
+    .expect_run_err_contains_any(&["Method 'lag' not found on type 'Vec'", "cannot have fields"]);
 }
 
 // TDD: window functions not yet implemented as built-in language feature

@@ -52,9 +52,7 @@ pub fn validate_token_format(token: &str) -> Result<(), String> {
         if ch.is_ascii_whitespace() {
             return Err(format!("API token contains whitespace at position {}", i));
         }
-        if !ch.is_ascii_alphanumeric()
-            && !matches!(ch, '-' | '_' | '.' | '~' | '+' | '/' | '=')
-        {
+        if !ch.is_ascii_alphanumeric() && !matches!(ch, '-' | '_' | '.' | '~' | '+' | '/' | '=') {
             return Err(format!(
                 "API token contains invalid character '{}' at position {}",
                 ch, i
@@ -86,24 +84,36 @@ mod tests {
     #[test]
     fn test_shape_config_dir_uses_env_var() {
         let saved = std::env::var("SHAPE_CONFIG_DIR").ok();
-        unsafe { std::env::set_var("SHAPE_CONFIG_DIR", "/tmp/shape-test-config"); }
+        unsafe {
+            std::env::set_var("SHAPE_CONFIG_DIR", "/tmp/shape-test-config");
+        }
         let result = shape_config_dir();
         assert_eq!(result, Some(PathBuf::from("/tmp/shape-test-config")));
         match saved {
-            Some(val) => unsafe { std::env::set_var("SHAPE_CONFIG_DIR", val); },
-            None => unsafe { std::env::remove_var("SHAPE_CONFIG_DIR"); },
+            Some(val) => unsafe {
+                std::env::set_var("SHAPE_CONFIG_DIR", val);
+            },
+            None => unsafe {
+                std::env::remove_var("SHAPE_CONFIG_DIR");
+            },
         }
     }
 
     #[test]
     fn test_shape_config_dir_ignores_empty_env() {
         let saved = std::env::var("SHAPE_CONFIG_DIR").ok();
-        unsafe { std::env::set_var("SHAPE_CONFIG_DIR", ""); }
+        unsafe {
+            std::env::set_var("SHAPE_CONFIG_DIR", "");
+        }
         let result = shape_config_dir();
         assert_ne!(result, Some(PathBuf::from("")));
         match saved {
-            Some(val) => unsafe { std::env::set_var("SHAPE_CONFIG_DIR", val); },
-            None => unsafe { std::env::remove_var("SHAPE_CONFIG_DIR"); },
+            Some(val) => unsafe {
+                std::env::set_var("SHAPE_CONFIG_DIR", val);
+            },
+            None => unsafe {
+                std::env::remove_var("SHAPE_CONFIG_DIR");
+            },
         }
     }
 

@@ -153,10 +153,7 @@ fn extract_found_token(source: &str, location: &SourceLocation) -> TokenInfo {
 
     // Convert char-based column to byte offset (Pest columns count characters, not bytes)
     let col0 = location.column - 1;
-    let byte_offset = line
-        .char_indices()
-        .nth(col0)
-        .map(|(i, _)| i);
+    let byte_offset = line.char_indices().nth(col0).map(|(i, _)| i);
 
     let Some(byte_offset) = byte_offset else {
         // Column is past the end of the line
@@ -788,11 +785,13 @@ mod tests {
     fn test_extract_found_token_multibyte_at_error_position() {
         // Trigger a parse error where the error position is on a multi-byte char
         let source = "let — = 1";
-        let pest_err =
-            ShapeParser::parse(Rule::program, source).expect_err("expected parse error");
+        let pest_err = ShapeParser::parse(Rule::program, source).expect_err("expected parse error");
         // Should not panic
         let structured = convert_pest_error(&pest_err, source);
         // kind should be set (not a default/empty error)
-        assert!(!matches!(structured.kind, ParseErrorKind::MissingComponent { .. }));
+        assert!(!matches!(
+            structured.kind,
+            ParseErrorKind::MissingComponent { .. }
+        ));
     }
 }

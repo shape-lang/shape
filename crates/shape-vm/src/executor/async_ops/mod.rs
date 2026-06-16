@@ -559,10 +559,7 @@ impl VirtualMachine {
                             task_ids: task_ids.clone(),
                         });
                         let result_bits = Arc::into_raw(aggregate) as u64;
-                        self.push_kinded(
-                            result_bits,
-                            NativeKind::Ptr(HeapKind::TaskGroup),
-                        )?;
+                        self.push_kinded(result_bits, NativeKind::Ptr(HeapKind::TaskGroup))?;
                     }
                     // Race: resolve all tasks; return the first result.
                     // Matches `TaskScheduler::resolve_task_group`'s
@@ -607,9 +604,7 @@ impl VirtualMachine {
                         }
                         if !pushed {
                             return Err(last_err.unwrap_or_else(|| {
-                                VMError::RuntimeError(
-                                    "Any join with empty task list".to_string(),
-                                )
+                                VMError::RuntimeError("Any join with empty task list".to_string())
                             }));
                         }
                     }
@@ -635,10 +630,7 @@ impl VirtualMachine {
                             task_ids: task_ids.clone(),
                         });
                         let result_bits = Arc::into_raw(aggregate) as u64;
-                        self.push_kinded(
-                            result_bits,
-                            NativeKind::Ptr(HeapKind::TaskGroup),
-                        )?;
+                        self.push_kinded(result_bits, NativeKind::Ptr(HeapKind::TaskGroup))?;
                     }
                     other => {
                         return Err(VMError::RuntimeError(format!(

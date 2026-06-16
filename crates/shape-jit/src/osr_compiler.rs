@@ -94,8 +94,13 @@ fn is_osr_supported_opcode(opcode: OpCode, operand: &Option<Operand>) -> bool {
         | OpCode::EqNumber
         | OpCode::NeqNumber => true,
         // Typed comparisons (string/decimal/null)
-        OpCode::EqString | OpCode::GtString | OpCode::LtString | OpCode::GteString
-        | OpCode::LteString | OpCode::EqDecimal | OpCode::IsNull => true,
+        OpCode::EqString
+        | OpCode::GtString
+        | OpCode::LtString
+        | OpCode::GteString
+        | OpCode::LteString
+        | OpCode::EqDecimal
+        | OpCode::IsNull => true,
         // Logic
         OpCode::And | OpCode::Or | OpCode::Not => true,
         // Control

@@ -67,7 +67,8 @@ fn b_int_var_cmp_number_var_rejected() {
 /// "field"; corpus FLD2).
 #[test]
 fn b_int_var_to_number_field_rejected() {
-    ShapeTest::new("type P { x: number }\nlet v: int = 7\nlet p = P { x: v }\np.x").expect_run_err();
+    ShapeTest::new("type P { x: number }\nlet v: int = 7\nlet p = P { x: v }\np.x")
+        .expect_run_err();
 }
 
 // =========================================================================

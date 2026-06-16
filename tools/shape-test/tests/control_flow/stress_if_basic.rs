@@ -84,8 +84,10 @@ fn test_if_comparison_lte() {
 /// Verifies if without else, condition true.
 #[test]
 fn test_if_without_else_true() {
-    ShapeTest::new("function test() {\n  let mut x = 0;\n  if true { x = 1; }\n  return x;\n}\ntest()")
-        .expect_number(1.0);
+    ShapeTest::new(
+        "function test() {\n  let mut x = 0;\n  if true { x = 1; }\n  return x;\n}\ntest()",
+    )
+    .expect_number(1.0);
 }
 
 /// Verifies if without else, condition false.

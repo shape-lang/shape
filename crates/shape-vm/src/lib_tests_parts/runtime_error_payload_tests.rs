@@ -30,4 +30,3 @@ mod runtime_error_payload_tests {
         }
     }
 }
-

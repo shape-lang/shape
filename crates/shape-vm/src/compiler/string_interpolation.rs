@@ -333,8 +333,7 @@ impl BytecodeCompiler {
             match part {
                 InterpolationPart::Literal(text) => {
                     // Push literal string, then FStringContentText.
-                    let const_idx =
-                        self.program.add_constant(Constant::String(text.clone()));
+                    let const_idx = self.program.add_constant(Constant::String(text.clone()));
                     self.emit(Instruction::new(
                         OpCode::PushConst,
                         Some(Operand::Const(const_idx)),
@@ -367,9 +366,7 @@ impl BytecodeCompiler {
                             // Plain or fixed/table-spec'd expression: route
                             // through the existing format path to a string,
                             // then wrap as plain content.
-                            self.emit_interpolation_format_call(
-                                format_spec.as_ref(),
-                            )?;
+                            self.emit_interpolation_format_call(format_spec.as_ref())?;
                             self.emit_fstring_content_text_call()?;
                         }
                     }
@@ -378,9 +375,7 @@ impl BytecodeCompiler {
         }
 
         // Combine all part-results into a Fragment.
-        let count_idx = self
-            .program
-            .add_constant(Constant::Int(part_count as i64));
+        let count_idx = self.program.add_constant(Constant::Int(part_count as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(count_idx)),
@@ -419,10 +414,7 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    fn emit_fstring_content_styled_text(
-        &mut self,
-        spec: &ContentFormatSpec,
-    ) -> Result<()> {
+    fn emit_fstring_content_styled_text(&mut self, spec: &ContentFormatSpec) -> Result<()> {
         // Stack on entry: [value_str]. Push 5 i64 style args, then 6 as
         // arg-count, then BuiltinCall.
         let (fg_kind, fg_payload) = encode_color_args(spec.fg.as_ref());
@@ -456,7 +448,6 @@ impl BytecodeCompiler {
         ));
         self.emit_fstring_content_text_call()
     }
-
 }
 
 #[cfg(test)]

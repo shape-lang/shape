@@ -881,8 +881,10 @@ impl BytecodeCompiler {
 
         // Repair candidate → second suggested fix when present.
         if let Some(repair) = error.repairs.first() {
-            builder =
-                builder.with_fix(shape_diagnostics::SuggestedFix::new(repair.description.clone(), 0.7));
+            builder = builder.with_fix(shape_diagnostics::SuggestedFix::new(
+                repair.description.clone(),
+                0.7,
+            ));
         }
 
         // Loan-origin note.
@@ -894,8 +896,7 @@ impl BytecodeCompiler {
 
         // Last-use note (when known).
         if let Some(last_use_span) = error.last_use_span {
-            let last_use_loc =
-                self.shape_loc_to_lsds(&self.span_to_source_location(last_use_span));
+            let last_use_loc = self.shape_loc_to_lsds(&self.span_to_source_location(last_use_span));
             builder = builder.with_note(shape_diagnostics::DiagnosticNote::new(
                 "borrow is still needed here",
                 Some(last_use_loc),
@@ -1355,13 +1356,11 @@ impl BytecodeCompiler {
         // collide. `finalize_function_empty_array_accumulators` (called at
         // every exit point) surface-and-stops any that were never resolved,
         // then restores the saved map.
-        let saved_empty_array_accumulators =
-            std::mem::take(&mut self.empty_array_accumulators);
+        let saved_empty_array_accumulators = std::mem::take(&mut self.empty_array_accumulators);
         // Per-function `v2_typed_array_locals` are also slot-index keyed;
         // isolate them so a promoted accumulator's typed-kind record cannot
         // bleed across function boundaries.
-        let saved_v2_typed_array_locals =
-            std::mem::take(&mut self.v2_typed_array_locals);
+        let saved_v2_typed_array_locals = std::mem::take(&mut self.v2_typed_array_locals);
 
         // Set up isolated locals for function compilation
         self.current_function = Some(func_idx);
@@ -1484,16 +1483,18 @@ impl BytecodeCompiler {
                                 // Per-field-typed schema layout migration
                                 // is v0.4 W17.3+ territory. Verification-
                                 // pass safety net via `__inline_obj_*`.
-                                let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> =
-                                    fields
-                                        .iter()
-                                        .map(|f| {
-                                            (
-                                                f.name.as_str(),
-                                                shape_runtime::type_schema::FieldType::Any,
-                                            )
-                                        })
-                                        .collect();
+                                let typed_fields: Vec<(
+                                    &str,
+                                    shape_runtime::type_schema::FieldType,
+                                )> = fields
+                                    .iter()
+                                    .map(|f| {
+                                        (
+                                            f.name.as_str(),
+                                            shape_runtime::type_schema::FieldType::Any,
+                                        )
+                                    })
+                                    .collect();
                                 let schema_id = self
                                     .type_tracker
                                     .register_inline_object_schema_typed(&typed_fields);
@@ -1556,13 +1557,11 @@ impl BytecodeCompiler {
                             .and_then(|entry| entry.clone());
                         let stamped_object_schema = object_fields.is_some();
                         if let Some(object_fields) = object_fields {
-                            let typed_fields: Vec<(
-                                &str,
-                                shape_runtime::type_schema::FieldType,
-                            )> = object_fields
-                                .iter()
-                                .map(|(n, ft)| (n.as_str(), ft.clone()))
-                                .collect();
+                            let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> =
+                                object_fields
+                                    .iter()
+                                    .map(|(n, ft)| (n.as_str(), ft.clone()))
+                                    .collect();
                             let schema_id = self
                                 .type_tracker
                                 .register_inline_object_schema_typed(&typed_fields);
@@ -1619,24 +1618,23 @@ impl BytecodeCompiler {
                         } else {
                             None
                         };
-                        let inferred_type_name = match (
-                            global_inferred.as_deref(),
-                            body_local_inferred.as_deref(),
-                        ) {
-                            // Ref-param widening attractor: global says
-                            // "number", body-local literal pairing says
-                            // "int" (or another narrower primitive). The
-                            // body-local signal observed the actual
-                            // operand in `x op <int-literal>` —
-                            // authoritative for the producer-side stamp.
-                            (Some("number"), Some(local @ ("int" | "i8" | "i16" | "i32" | "i64"
-                                | "u8" | "u16" | "u32" | "u64")))
-                                if param.is_reference =>
-                            {
-                                Some(local.to_string())
-                            }
-                            _ => global_inferred,
-                        };
+                        let inferred_type_name =
+                            match (global_inferred.as_deref(), body_local_inferred.as_deref()) {
+                                // Ref-param widening attractor: global says
+                                // "number", body-local literal pairing says
+                                // "int" (or another narrower primitive). The
+                                // body-local signal observed the actual
+                                // operand in `x op <int-literal>` —
+                                // authoritative for the producer-side stamp.
+                                (
+                                    Some("number"),
+                                    Some(
+                                        local @ ("int" | "i8" | "i16" | "i32" | "i64" | "u8"
+                                        | "u16" | "u32" | "u64"),
+                                    ),
+                                ) if param.is_reference => Some(local.to_string()),
+                                _ => global_inferred,
+                            };
                         if stamped_object_schema {
                             // WS-9b: the anonymous-object inline schema was
                             // already stamped above. `inferred_type_name`
@@ -1670,9 +1668,7 @@ impl BytecodeCompiler {
                             // synthesis uses — so e.g.
                             // `function add_ten(x) { x + 10 }` types
                             // x as int from the literal pairing.
-                            if let Some(type_name) =
-                                Self::tracked_type_name_from_annotation(&ann)
-                            {
+                            if let Some(type_name) = Self::tracked_type_name_from_annotation(&ann) {
                                 self.set_local_type_info(local_idx, &type_name);
                                 if Self::tracker_type_name_is_primitive(&type_name) {
                                     self.param_locals.remove(&local_idx);
@@ -1794,9 +1790,7 @@ impl BytecodeCompiler {
                         // PB1 Wave-1-extension: pass FunctionDef so
                         // Result/Option return-kind stamps onto
                         // `FrameDescriptor.return_kind` per audit 14a/14b.
-                        self.capture_function_local_storage_hints_with_def(
-                            func_idx, func_def,
-                        );
+                        self.capture_function_local_storage_hints_with_def(func_idx, func_def);
                         // Finalize blob builder and store completed blob
                         self.finalize_current_blob(func_idx);
                         self.current_blob_builder = saved_blob_builder;
@@ -1854,10 +1848,8 @@ impl BytecodeCompiler {
                             saved_current_function_returns_borrow;
                         // WS-1b: surface-and-stop any unresolved empty-array
                         // accumulator, then restore the caller's maps.
-                        let acc_result =
-                            self.finalize_unresolved_empty_array_accumulators();
-                        self.empty_array_accumulators =
-                            saved_empty_array_accumulators;
+                        let acc_result = self.finalize_unresolved_empty_array_accumulators();
+                        self.empty_array_accumulators = saved_empty_array_accumulators;
                         self.v2_typed_array_locals = saved_v2_typed_array_locals;
                         acc_result?;
                         // Patch the jump-over instruction if we emitted one

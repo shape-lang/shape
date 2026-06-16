@@ -507,9 +507,7 @@ pub unsafe extern "C" fn python_invoke(
                 || msg.contains("invalid function handle")
             {
                 PluginError::InvalidArgument
-            } else if msg.contains("pyo3 feature not enabled")
-                || msg.contains("not implemented")
-            {
+            } else if msg.contains("pyo3 feature not enabled") || msg.contains("not implemented") {
                 PluginError::NotImplemented
             } else {
                 PluginError::InternalError

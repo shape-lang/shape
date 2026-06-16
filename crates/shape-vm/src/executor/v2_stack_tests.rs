@@ -66,9 +66,7 @@ fn bits_as_bool(bits: u64) -> bool {
 #[test]
 fn v2_stack_raw_f64_push_pop_roundtrip() {
     let program = BytecodeProgram {
-        instructions: vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        ],
+        instructions: vec![Instruction::new(OpCode::PushConst, Some(Operand::Const(0)))],
         constants: vec![Constant::Number(3.14)],
         ..Default::default()
     };
@@ -81,9 +79,7 @@ fn v2_stack_raw_f64_push_pop_roundtrip() {
 fn v2_stack_raw_f64_special_values() {
     // Positive infinity
     let program = BytecodeProgram {
-        instructions: vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        ],
+        instructions: vec![Instruction::new(OpCode::PushConst, Some(Operand::Const(0)))],
         constants: vec![Constant::Number(f64::INFINITY)],
         ..Default::default()
     };
@@ -92,15 +88,16 @@ fn v2_stack_raw_f64_special_values() {
 
     // Negative zero
     let program = BytecodeProgram {
-        instructions: vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        ],
+        instructions: vec![Instruction::new(OpCode::PushConst, Some(Operand::Const(0)))],
         constants: vec![Constant::Number(-0.0f64)],
         ..Default::default()
     };
     let bits = execute_program(program).unwrap();
     let f = bits_as_f64(bits);
-    assert!(f.is_sign_negative() && f == 0.0, "negative zero must be preserved");
+    assert!(
+        f.is_sign_negative() && f == 0.0,
+        "negative zero must be preserved"
+    );
 }
 
 // =========================================================================
@@ -110,9 +107,7 @@ fn v2_stack_raw_f64_special_values() {
 #[test]
 fn v2_stack_raw_i64_push_pop_roundtrip() {
     let program = BytecodeProgram {
-        instructions: vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        ],
+        instructions: vec![Instruction::new(OpCode::PushConst, Some(Operand::Const(0)))],
         constants: vec![Constant::Int(-42)],
         ..Default::default()
     };
@@ -124,9 +119,7 @@ fn v2_stack_raw_i64_push_pop_roundtrip() {
 #[test]
 fn v2_stack_raw_i64_zero() {
     let program = BytecodeProgram {
-        instructions: vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        ],
+        instructions: vec![Instruction::new(OpCode::PushConst, Some(Operand::Const(0)))],
         constants: vec![Constant::Int(0)],
         ..Default::default()
     };
@@ -139,9 +132,7 @@ fn v2_stack_raw_i64_large_positive() {
     // i48 max range for inline: 2^47 - 1
     let val = (1i64 << 47) - 1;
     let program = BytecodeProgram {
-        instructions: vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        ],
+        instructions: vec![Instruction::new(OpCode::PushConst, Some(Operand::Const(0)))],
         constants: vec![Constant::Int(val)],
         ..Default::default()
     };
@@ -166,7 +157,8 @@ fn v2_stack_raw_i32_push_pop_roundtrip() {
     let val: i32 = 12345;
     // i32 zero-extends into the low 32 bits of the slot; `as i32` on
     // read recovers the signed value.
-    vm.push_kinded(val as u32 as u64, NativeKind::Int32).unwrap();
+    vm.push_kinded(val as u32 as u64, NativeKind::Int32)
+        .unwrap();
     let (bits, kind) = vm.pop_kinded().unwrap();
     assert_eq!(kind, NativeKind::Int32, "kind must be Int32");
     assert_eq!(bits as u32 as i32, val, "i32 value must round-trip exactly");
@@ -181,7 +173,8 @@ fn v2_stack_raw_i32_negative() {
     vm.load_program(BytecodeProgram::default());
 
     let val: i32 = -42;
-    vm.push_kinded(val as u32 as u64, NativeKind::Int32).unwrap();
+    vm.push_kinded(val as u32 as u64, NativeKind::Int32)
+        .unwrap();
     let (bits, kind) = vm.pop_kinded().unwrap();
     assert_eq!(kind, NativeKind::Int32);
     assert_eq!(bits as u32 as i32, val, "negative i32 round-trip");
@@ -194,9 +187,7 @@ fn v2_stack_raw_i32_negative() {
 #[test]
 fn v2_stack_raw_bool_push_pop_true() {
     let program = BytecodeProgram {
-        instructions: vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        ],
+        instructions: vec![Instruction::new(OpCode::PushConst, Some(Operand::Const(0)))],
         constants: vec![Constant::Bool(true)],
         ..Default::default()
     };
@@ -208,9 +199,7 @@ fn v2_stack_raw_bool_push_pop_true() {
 #[test]
 fn v2_stack_raw_bool_push_pop_false() {
     let program = BytecodeProgram {
-        instructions: vec![
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
-        ],
+        instructions: vec![Instruction::new(OpCode::PushConst, Some(Operand::Const(0)))],
         constants: vec![Constant::Bool(false)],
         ..Default::default()
     };
@@ -281,7 +270,8 @@ fn v2_stack_mixed_types_push_pop_order() {
 
     // Push f64, i64, bool in order — kinded API records each kind in
     // the parallel kinds track (ADR-006 §2.7.7).
-    vm.push_kinded(2.718f64.to_bits(), NativeKind::Float64).unwrap();
+    vm.push_kinded(2.718f64.to_bits(), NativeKind::Float64)
+        .unwrap();
     vm.push_kinded(42i64 as u64, NativeKind::Int64).unwrap();
     vm.push_kinded(1u64, NativeKind::Bool).unwrap();
 
@@ -296,11 +286,7 @@ fn v2_stack_mixed_types_push_pop_order() {
     assert_eq!(i_kind, NativeKind::Int64, "second pop must be Int64");
     assert_eq!(bits_as_i64(i_bits), 42, "i64 must be popped second");
     assert_eq!(f_kind, NativeKind::Float64, "third pop must be Float64");
-    assert_eq!(
-        f_bits,
-        2.718f64.to_bits(),
-        "f64 must be popped third"
-    );
+    assert_eq!(f_bits, 2.718f64.to_bits(), "f64 must be popped third");
 }
 
 #[test]
@@ -322,10 +308,12 @@ fn v2_stack_mixed_types_with_native_scalars() {
     let ptr_bits = Arc::into_raw(arc) as u64;
 
     // Push f64, i64, bool, i32, ptr — five mixed types in order.
-    vm.push_kinded(1.5f64.to_bits(), NativeKind::Float64).unwrap();
+    vm.push_kinded(1.5f64.to_bits(), NativeKind::Float64)
+        .unwrap();
     vm.push_kinded(99i64 as u64, NativeKind::Int64).unwrap();
     vm.push_kinded(1u64, NativeKind::Bool).unwrap();
-    vm.push_kinded((-7i32) as u32 as u64, NativeKind::Int32).unwrap();
+    vm.push_kinded((-7i32) as u32 as u64, NativeKind::Int32)
+        .unwrap();
     vm.push_kinded(ptr_bits, NativeKind::Ptr(HeapKind::String))
         .unwrap();
 
@@ -462,7 +450,10 @@ fn v2_stack_typed_gt_number_true() {
     };
 
     let bits = execute_program_typed(program, NativeKind::Bool).unwrap();
-    assert!(bits_as_bool(bits), "GtNumber 5.0>3.0 must produce raw bool true");
+    assert!(
+        bits_as_bool(bits),
+        "GtNumber 5.0>3.0 must produce raw bool true"
+    );
 }
 
 #[test]
@@ -587,7 +578,10 @@ fn v2_stack_typed_field_load_i64() {
     let mut program = BytecodeProgram::default();
     let schema_id = program.type_schema_registry.register_type(
         "__v2_test_counter",
-        vec![("count".to_string(), shape_runtime::type_schema::FieldType::I64)],
+        vec![(
+            "count".to_string(),
+            shape_runtime::type_schema::FieldType::I64,
+        )],
     );
     let schema_u16 = u16::try_from(schema_id).expect("schema id fits u16");
 
@@ -622,7 +616,10 @@ fn v2_stack_typed_field_load_bool() {
     let mut program = BytecodeProgram::default();
     let schema_id = program.type_schema_registry.register_type(
         "__v2_test_flag",
-        vec![("active".to_string(), shape_runtime::type_schema::FieldType::Bool)],
+        vec![(
+            "active".to_string(),
+            shape_runtime::type_schema::FieldType::Bool,
+        )],
     );
     let schema_u16 = u16::try_from(schema_id).expect("schema id fits u16");
 
@@ -733,7 +730,11 @@ fn v2_stack_int_to_number_conversion() {
     };
 
     let bits = execute_program(program).unwrap();
-    assert_eq!(bits_as_f64(bits), 42.0, "IntToNumber must convert i64 to f64");
+    assert_eq!(
+        bits_as_f64(bits),
+        42.0,
+        "IntToNumber must convert i64 to f64"
+    );
 }
 
 #[test]
@@ -810,7 +811,8 @@ fn v2_stack_large_mixed_types_500() {
     // (ADR-006 §2.7.7).
     for i in 0..500usize {
         if i % 2 == 0 {
-            vm.push_kinded((i as f64).to_bits(), NativeKind::Float64).unwrap();
+            vm.push_kinded((i as f64).to_bits(), NativeKind::Float64)
+                .unwrap();
         } else {
             vm.push_kinded(i as u64, NativeKind::Int64).unwrap();
         }
@@ -874,27 +876,27 @@ fn v2_stack_frame_with_typed_locals() {
     let program = BytecodeProgram {
         instructions: vec![
             // Main code
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),          // 0: arg count
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // 0: arg count
             Instruction::new(OpCode::Call, Some(Operand::Function(FunctionId(0)))), // 1
-            Instruction::new(OpCode::Jump, Some(Operand::Offset(11))),             // 2: skip func body
+            Instruction::new(OpCode::Jump, Some(Operand::Offset(11))),    // 2: skip func body
             // Function body (entry_point = 3)
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),          // 3: 3.14
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),         // 4
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),          // 5: 42
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),         // 6
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),          // 7: true
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))),         // 8
-            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),          // 9: load f64
-            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))),          // 10: load i64
-            Instruction::simple(OpCode::IntToNumber),                              // 11
-            Instruction::simple(OpCode::AddNumber),                                // 12: 3.14 + 42.0
-            Instruction::simple(OpCode::ReturnValue),                              // 13
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // 3: 3.14
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))), // 4
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 5: 42
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))), // 6
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 7: true
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))), // 8
+            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))), // 9: load f64
+            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))), // 10: load i64
+            Instruction::simple(OpCode::IntToNumber),                     // 11
+            Instruction::simple(OpCode::AddNumber),                       // 12: 3.14 + 42.0
+            Instruction::simple(OpCode::ReturnValue),                     // 13
         ],
         constants: vec![
-            Constant::Number(3.14),  // 0
-            Constant::Int(42),       // 1
-            Constant::Bool(true),    // 2
-            Constant::Number(0.0),   // 3 -- arg count
+            Constant::Number(3.14), // 0
+            Constant::Int(42),      // 1
+            Constant::Bool(true),   // 2
+            Constant::Number(0.0),  // 3 -- arg count
         ],
         functions: vec![Function {
             name: "__v2_test_locals".to_string(),
@@ -964,18 +966,18 @@ fn v2_stack_frame_locals_isolation() {
     let program = BytecodeProgram {
         instructions: vec![
             // Main code
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),          // 0: sentinel
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),          // 1: arg count
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // 0: sentinel
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // 1: arg count
             Instruction::new(OpCode::Call, Some(Operand::Function(FunctionId(0)))), // 2
-            Instruction::simple(OpCode::Pop),                                      // 3: discard result
-            Instruction::new(OpCode::Jump, Some(Operand::Offset(6))),              // 4: skip func body
+            Instruction::simple(OpCode::Pop),                             // 3: discard result
+            Instruction::new(OpCode::Jump, Some(Operand::Offset(6))),     // 4: skip func body
             // Function body (entry_point = 5)
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),          // 5: 77
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),         // 6
-            Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),          // 7: -1
-            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),         // 8
-            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),          // 9: push 77
-            Instruction::simple(OpCode::ReturnValue),                              // 10
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 5: 77
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))), // 6
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 7: -1
+            Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))), // 8
+            Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))), // 9: push 77
+            Instruction::simple(OpCode::ReturnValue),                     // 10
         ],
         constants: vec![
             Constant::Int(999),    // 0: sentinel
@@ -1054,7 +1056,8 @@ fn v2_stack_swap_preserves_types() {
     vm.load_program(BytecodeProgram::default());
 
     vm.push_kinded(10i64 as u64, NativeKind::Int64).unwrap();
-    vm.push_kinded(2.5f64.to_bits(), NativeKind::Float64).unwrap();
+    vm.push_kinded(2.5f64.to_bits(), NativeKind::Float64)
+        .unwrap();
 
     // Manually swap: pop both with kind, then push back in reversed order.
     let (b_bits, b_kind) = vm.pop_kinded().unwrap(); // 2.5 / Float64

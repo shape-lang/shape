@@ -14,9 +14,7 @@
 use arrow_array::{Array, Float64Array, Int64Array};
 use arrow_schema::{DataType, Field, Schema};
 use shape_runtime::context::ExecutionContext;
-use shape_value::{
-    DataTable, KindedSlot, NativeKind, ValueSlot, VMError, heap_value::HeapKind,
-};
+use shape_value::{DataTable, KindedSlot, NativeKind, VMError, ValueSlot, heap_value::HeapKind};
 use std::sync::Arc;
 
 use crate::executor::VirtualMachine;
@@ -27,7 +25,10 @@ use super::common::borrow_data_table;
 /// widens. Other types return an error.
 fn col_as_f64_vec(dt: &DataTable, col_name: &str, method: &str) -> Result<Vec<f64>, VMError> {
     let col = dt.column_by_name(col_name).ok_or_else(|| {
-        VMError::RuntimeError(format!("datatable.{}: unknown column: {}", method, col_name))
+        VMError::RuntimeError(format!(
+            "datatable.{}: unknown column: {}",
+            method, col_name
+        ))
     })?;
     let n = col.len();
     if let Some(f) = col.as_any().downcast_ref::<Float64Array>() {
@@ -79,10 +80,7 @@ fn arg_str<'a>(
 
 fn arg_window(args: &[KindedSlot], idx: usize, method: &str) -> Result<usize, VMError> {
     let slot = args.get(idx).ok_or_else(|| {
-        VMError::RuntimeError(format!(
-            "datatable.{}: missing window arg",
-            method
-        ))
+        VMError::RuntimeError(format!("datatable.{}: missing window arg", method))
     })?;
     let w = slot.as_i64().ok_or_else(|| {
         VMError::RuntimeError(format!(

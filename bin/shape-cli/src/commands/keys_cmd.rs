@@ -5,15 +5,13 @@ use crate::config;
 
 /// Default directory for storing Shape key files.
 fn keys_dir() -> Result<PathBuf> {
-    let config_dir =
-        config::shape_config_dir().context("could not determine config directory")?;
+    let config_dir = config::shape_config_dir().context("could not determine config directory")?;
     Ok(config_dir.join("keys"))
 }
 
 /// Default path for the trusted authors keychain file.
 fn keychain_path() -> Result<PathBuf> {
-    let config_dir =
-        config::shape_config_dir().context("could not determine config directory")?;
+    let config_dir = config::shape_config_dir().context("could not determine config directory")?;
     Ok(config_dir.join("trusted_authors.json"))
 }
 

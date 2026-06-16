@@ -326,9 +326,7 @@ pub extern "C" fn jit_print_u64(value: u64) {
 pub extern "C" fn jit_print_f64(value: f64) {
     // A transient empty registry suffices: the scalar `Float64` arm of
     // `format_kinded_inner` never consults the schema registry.
-    let registry = std::sync::Arc::new(
-        shape_runtime::type_schema::TypeSchemaRegistry::default(),
-    );
+    let registry = std::sync::Arc::new(shape_runtime::type_schema::TypeSchemaRegistry::default());
     let formatter = shape_vm::executor::printing::ValueFormatter::new(&registry);
     let kinded = shape_value::KindedSlot::from_number(value);
     println!("{}", formatter.format_kinded(&kinded));
@@ -380,26 +378,21 @@ fn registry_from_ctx(
     ctx_ptr: *const crate::context::JITContext,
 ) -> std::sync::Arc<shape_runtime::type_schema::TypeSchemaRegistry> {
     if ctx_ptr.is_null() {
-        return std::sync::Arc::new(
-            shape_runtime::type_schema::TypeSchemaRegistry::default(),
-        );
+        return std::sync::Arc::new(shape_runtime::type_schema::TypeSchemaRegistry::default());
     }
     // SAFETY: caller's contract — the JIT dispatch shell always passes
     // a valid `JITContext*` (either the worker-allocated context or the
     // out-of-process `JITContext::default()`-shaped harness instance).
     let ctx = unsafe { &*ctx_ptr };
     if ctx.exec_context_ptr.is_null() {
-        return std::sync::Arc::new(
-            shape_runtime::type_schema::TypeSchemaRegistry::default(),
-        );
+        return std::sync::Arc::new(shape_runtime::type_schema::TypeSchemaRegistry::default());
     }
     // SAFETY: `exec_context_ptr` is a `*mut c_void` pointing to a live
     // `ExecutionContext` owned by the VM driver for the lifetime of the
     // JIT call. Reading `type_schema_registry()` borrows through the
     // shared `Arc`; the returned `Arc` clone is independent.
-    let exec_ctx = unsafe {
-        &*(ctx.exec_context_ptr as *const shape_runtime::context::ExecutionContext)
-    };
+    let exec_ctx =
+        unsafe { &*(ctx.exec_context_ptr as *const shape_runtime::context::ExecutionContext) };
     std::sync::Arc::clone(exec_ctx.type_schema_registry())
 }
 
@@ -471,10 +464,7 @@ fn print_kinded_inner(
 /// producer. Null bits render as `None` per `format_kinded_inner` line
 /// 155 (the VM-side documented behaviour for a null String slot).
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_str(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_str(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     print_kinded_inner(ctx_ptr, bits, shape_value::NativeKind::String);
 }
 
@@ -490,10 +480,7 @@ pub extern "C" fn jit_print_str(
 /// shaped producer (VM-side `op_new_object_*` typed-object allocator,
 /// JIT-side `box_typed_object`).
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_typed_object(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_typed_object(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
     print_kinded_inner(
         ctx_ptr,
@@ -514,10 +501,7 @@ pub extern "C" fn jit_print_typed_object(
 /// producer (VM-side `BuiltinFunction::SomeCtor` / `NoneCtor`, JIT-side
 /// `jit_v2_make_option_some` / `_none`).
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_option(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_option(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
     print_kinded_inner(
         ctx_ptr,
@@ -536,10 +520,7 @@ pub extern "C" fn jit_print_option(
 /// producer (VM-side `BuiltinFunction::OkCtor` / `ErrCtor`, JIT-side
 /// `jit_v2_make_result_ok` / `_err`).
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_result(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_result(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
     print_kinded_inner(
         ctx_ptr,
@@ -595,16 +576,9 @@ pub extern "C" fn jit_print_char(value: u32) {
 /// the producer-site contract on every `KindedSlot::from_mutex`-shaped
 /// producer (VM-side `BuiltinFunction::MutexCtor`).
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_mutex(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_mutex(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
-    print_kinded_inner(
-        ctx_ptr,
-        bits,
-        shape_value::NativeKind::Ptr(HeapKind::Mutex),
-    );
+    print_kinded_inner(ctx_ptr, bits, shape_value::NativeKind::Ptr(HeapKind::Mutex));
 }
 
 /// Print an `Arc<AtomicData>`-shaped slot as `<atomic:N>` where N is
@@ -620,10 +594,7 @@ pub extern "C" fn jit_print_mutex(
 /// the producer-site contract on every `KindedSlot::from_atomic`-shaped
 /// producer (VM-side `BuiltinFunction::AtomicCtor`).
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_atomic(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_atomic(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
     print_kinded_inner(
         ctx_ptr,
@@ -645,16 +616,9 @@ pub extern "C" fn jit_print_atomic(
 /// the producer-site contract on every `KindedSlot::from_lazy`-shaped
 /// producer (VM-side `BuiltinFunction::LazyCtor`).
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_lazy(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_lazy(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
-    print_kinded_inner(
-        ctx_ptr,
-        bits,
-        shape_value::NativeKind::Ptr(HeapKind::Lazy),
-    );
+    print_kinded_inner(ctx_ptr, bits, shape_value::NativeKind::Ptr(HeapKind::Lazy));
 }
 
 /// Print an `Arc<ChannelData>`-shaped slot as `<channel:state:len>`
@@ -671,10 +635,7 @@ pub extern "C" fn jit_print_lazy(
 /// the producer-site contract on every `KindedSlot::from_channel`-shaped
 /// producer (VM-side `BuiltinFunction::ChannelCtor`).
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_channel(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_channel(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
     print_kinded_inner(
         ctx_ptr,
@@ -713,10 +674,7 @@ pub extern "C" fn jit_print_channel(
 /// (VM-side `BuiltinFunction::HashMapCtor` / Q25.B SUPERSEDED
 /// per-V monomorphization). ADR-006 §2.7.5.B 2026-05-16
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_hashmap(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_hashmap(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
     print_kinded_inner(
         ctx_ptr,
@@ -738,10 +696,7 @@ pub extern "C" fn jit_print_hashmap(
 /// producer (VM-side `BuiltinFunction::HashSetCtor`).
 /// ADR-006 §2.7.5.B 2026-05-16
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_hashset(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_hashset(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
     print_kinded_inner(
         ctx_ptr,
@@ -763,16 +718,9 @@ pub extern "C" fn jit_print_hashset(
 /// producer (VM-side `BuiltinFunction::DequeCtor`).
 /// ADR-006 §2.7.5.B 2026-05-16
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_deque(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_deque(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
-    print_kinded_inner(
-        ctx_ptr,
-        bits,
-        shape_value::NativeKind::Ptr(HeapKind::Deque),
-    );
+    print_kinded_inner(ctx_ptr, bits, shape_value::NativeKind::Ptr(HeapKind::Deque));
 }
 
 /// Print an `Arc<PriorityQueueData>`-shaped slot as
@@ -791,10 +739,7 @@ pub extern "C" fn jit_print_deque(
 /// (VM-side `BuiltinFunction::PriorityQueueCtor`).
 /// ADR-006 §2.7.5.B 2026-05-16
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_priority_queue(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_priority_queue(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
     print_kinded_inner(
         ctx_ptr,
@@ -816,16 +761,9 @@ pub extern "C" fn jit_print_priority_queue(
 /// producer (VM-side `op_make_range` / Range-literal lowering).
 /// ADR-006 §2.7.5.B 2026-05-16
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_range(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_range(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
-    print_kinded_inner(
-        ctx_ptr,
-        bits,
-        shape_value::NativeKind::Ptr(HeapKind::Range),
-    );
+    print_kinded_inner(ctx_ptr, bits, shape_value::NativeKind::Ptr(HeapKind::Range));
 }
 
 /// Print an `Arc<IteratorState>`-shaped slot as the opaque tag
@@ -850,10 +788,7 @@ pub extern "C" fn jit_print_range(
 /// factory builtins).
 /// ADR-006 §2.7.5.B 2026-05-16
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_iterator(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_iterator(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
     print_kinded_inner(
         ctx_ptr,
@@ -909,10 +844,7 @@ pub extern "C" fn jit_print_iterator(
 /// the call — no refcount work, no Drop (v2-raw arrays own their backing
 /// storage directly; the caller's slot keeps the active share).
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_print_typed_array(
-    ctx_ptr: *const crate::context::JITContext,
-    bits: u64,
-) {
+pub extern "C" fn jit_print_typed_array(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     if bits == 0 {
         println!("None");
         return;
@@ -1043,8 +975,10 @@ pub extern "C" fn jit_string_concat(
                 drop(arc);
                 out
             }
-            Some(NativeKind::Int64) | Some(NativeKind::UInt64)
-            | Some(NativeKind::IntSize) | Some(NativeKind::UIntSize) => {
+            Some(NativeKind::Int64)
+            | Some(NativeKind::UInt64)
+            | Some(NativeKind::IntSize)
+            | Some(NativeKind::UIntSize) => {
                 // Raw native i64/u64 — format directly per ADR-006 §2.7.5
                 // scalar carrier. No NaN-unbox.
                 format!("{}", bits as i64)
@@ -1075,7 +1009,11 @@ pub extern "C" fn jit_string_concat(
                 format!("{}", n)
             }
             Some(NativeKind::Bool) => {
-                if (bits as u8) != 0 { "true".to_string() } else { "false".to_string() }
+                if (bits as u8) != 0 {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
             }
             Some(NativeKind::Char) => {
                 let cp = bits as u32;
@@ -1126,7 +1064,11 @@ pub extern "C" fn jit_string_concat(
     }
 
     let mut out = consume_operand(a_bits, a_kind_code, "jit_string_concat[a]");
-    out.push_str(&consume_operand(b_bits, b_kind_code, "jit_string_concat[b]"));
+    out.push_str(&consume_operand(
+        b_bits,
+        b_kind_code,
+        "jit_string_concat[b]",
+    ));
     // Return the §2.7.5 `NativeKind::String` carrier: `Arc::into_raw(
     // Arc<String>) as u64`. Refcount = 1 (the fresh Arc share transferred
     // to the caller). The caller installs these bits in the destination
@@ -1219,9 +1161,8 @@ mod heap_arm_print_tests {
 
     unsafe fn drop_arc_typed_object(bits: u64) {
         if bits != 0 {
-            let _ = unsafe {
-                Arc::<TypedObjectStorage>::from_raw(bits as *const TypedObjectStorage)
-            };
+            let _ =
+                unsafe { Arc::<TypedObjectStorage>::from_raw(bits as *const TypedObjectStorage) };
         }
     }
 
@@ -1337,8 +1278,7 @@ mod heap_arm_print_tests {
         // requiring an ExecutionContext-tier schema registry.
         let slots: Box<[ValueSlot]> =
             vec![ValueSlot::from_int(3), ValueSlot::from_int(4)].into_boxed_slice();
-        let field_kinds: Arc<[NativeKind]> =
-            Arc::from(vec![NativeKind::Int64, NativeKind::Int64]);
+        let field_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64, NativeKind::Int64]);
         let storage = TypedObjectStorage::new(
             /* schema_id = */ 0xffff_ffff_ffff_ffff,
             slots,
@@ -1365,12 +1305,7 @@ mod heap_arm_print_tests {
         // through the positional-name path without crashing.
         let slots: Box<[ValueSlot]> = vec![ValueSlot::from_bool(true)].into_boxed_slice();
         let field_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Bool]);
-        let storage = TypedObjectStorage::new(
-            0xdead_beef,
-            slots,
-            0,
-            field_kinds,
-        );
+        let storage = TypedObjectStorage::new(0xdead_beef, slots, 0, field_kinds);
         let arc = Arc::new(storage);
         let bits = Arc::into_raw(arc) as u64;
 
@@ -1408,8 +1343,7 @@ mod heap_arm_print_tests {
         // VM-side rendering via the legacy `Ptr(HeapKind::Char)` arm — same
         // codepoint bits, different label; both must produce "A".
         let heap_slot = ValueSlot::from_char('A');
-        let heap_kinded =
-            KindedSlot::new(heap_slot, NativeKind::Ptr(HeapKind::Char));
+        let heap_kinded = KindedSlot::new(heap_slot, NativeKind::Ptr(HeapKind::Char));
         let heap_render = formatter.format_kinded(&heap_kinded);
         assert_eq!(heap_render, "A");
 
@@ -1478,8 +1412,7 @@ mod heap_arm_print_tests {
 
         // `LazyData::new_pending` / `LazyData::pending` style — build an
         // uninitialized Lazy. The format is `<lazy:pending>`.
-        let closure_kinded =
-            KindedSlot::new(ValueSlot::from_int(0), NativeKind::Int64);
+        let closure_kinded = KindedSlot::new(ValueSlot::from_int(0), NativeKind::Int64);
         let arc = Arc::new(LazyData::new(closure_kinded));
         let bits = Arc::into_raw(arc) as u64;
 
@@ -1549,9 +1482,7 @@ mod heap_arm_print_tests {
         jit_print_hashmap(null_ctx(), bits);
 
         unsafe {
-            let _ = Arc::<HashMapKindedRef>::from_raw(
-                bits as *const HashMapKindedRef,
-            );
+            let _ = Arc::<HashMapKindedRef>::from_raw(bits as *const HashMapKindedRef);
         }
     }
 
@@ -1624,16 +1555,13 @@ mod heap_arm_print_tests {
         // 3,1,2 (the min-heap rearranges to put `1` at the root; the
         // remaining order depends on sift-up: heap_array = [1, 3, 2]).
         // Per ADR-006 §2.7.18 + `printing.rs:725-740`.
-        let vm_render =
-            vm_format(bits, NativeKind::Ptr(HeapKind::PriorityQueue));
+        let vm_render = vm_format(bits, NativeKind::Ptr(HeapKind::PriorityQueue));
         assert_eq!(vm_render, "PriorityQueue[1, 3, 2]");
 
         jit_print_priority_queue(null_ctx(), bits);
 
         unsafe {
-            let _ = Arc::<PriorityQueueData>::from_raw(
-                bits as *const PriorityQueueData,
-            );
+            let _ = Arc::<PriorityQueueData>::from_raw(bits as *const PriorityQueueData);
         }
     }
 
@@ -1706,9 +1634,7 @@ mod heap_arm_print_tests {
         jit_print_iterator(null_ctx(), bits);
 
         unsafe {
-            let _ = Arc::<IteratorState>::from_raw(
-                bits as *const IteratorState,
-            );
+            let _ = Arc::<IteratorState>::from_raw(bits as *const IteratorState);
         }
     }
 }
@@ -1766,12 +1692,7 @@ mod jit_string_concat_w15_2_lang_7_tests {
         // bits) → one §2.7.5 Arc<String> output carrying the concat.
         let a = make_string_arc_bits("path: ");
         let b = make_string_arc_bits("events.csv");
-        let result = jit_string_concat(
-            a,
-            stack_kind_code::C_STRING,
-            b,
-            stack_kind_code::C_STRING,
-        );
+        let result = jit_string_concat(a, stack_kind_code::C_STRING, b, stack_kind_code::C_STRING);
         let out = unsafe { adopt_string_arc_bits(result) };
         assert_eq!(out, "path: events.csv");
     }
@@ -1788,12 +1709,7 @@ mod jit_string_concat_w15_2_lang_7_tests {
         // as a `String` struct and either crashed or read garbage.
         let a = make_string_arc_bits("hello");
         let b = make_string_arc_bits(" world");
-        let result = jit_string_concat(
-            a,
-            stack_kind_code::C_STRING,
-            b,
-            stack_kind_code::C_STRING,
-        );
+        let result = jit_string_concat(a, stack_kind_code::C_STRING, b, stack_kind_code::C_STRING);
         // The bits MUST be a valid `*const String` pointer. If
         // `jit_string_concat` regressed back to `box_string(out)`,
         // this `from_raw` would either crash or yield garbage.
@@ -1805,12 +1721,7 @@ mod jit_string_concat_w15_2_lang_7_tests {
     fn empty_strings_concat_to_empty() {
         let a = make_string_arc_bits("");
         let b = make_string_arc_bits("");
-        let result = jit_string_concat(
-            a,
-            stack_kind_code::C_STRING,
-            b,
-            stack_kind_code::C_STRING,
-        );
+        let result = jit_string_concat(a, stack_kind_code::C_STRING, b, stack_kind_code::C_STRING);
         let out = unsafe { adopt_string_arc_bits(result) };
         assert_eq!(out, "");
     }

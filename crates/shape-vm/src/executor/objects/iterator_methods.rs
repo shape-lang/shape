@@ -476,8 +476,7 @@ fn apply_stateful_stage(
             let _ = (vm, ctx);
             let mut out: Vec<KindedSlot> = Vec::with_capacity(upstream.len());
             for (i, elem) in upstream.into_iter().enumerate() {
-                let index_slot =
-                    KindedSlot::new(ValueSlot::from_int(i as i64), NativeKind::Int64);
+                let index_slot = KindedSlot::new(ValueSlot::from_int(i as i64), NativeKind::Int64);
                 let pair = shape_runtime::type_schema::typed_object_from_pairs(&[
                     ("_0", index_slot),
                     ("_1", elem),

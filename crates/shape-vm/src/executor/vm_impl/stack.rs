@@ -28,10 +28,10 @@ use super::super::*;
 use shape_value::{
     FilterNode, IteratorState, KindedSlot, NativeKind, RefTarget, VMError, ValueSlot,
     heap_value::{
-        AtomicData, ChannelData, DequeData, HashSetData, HeapKind, HeapValue,
-        IoHandleData, LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData,
-        PriorityQueueData, RangeData, TableViewData, TaskGroupData, TemporalData,
-        TraitObjectStorage, TypedObjectStorage,
+        AtomicData, ChannelData, DequeData, HashSetData, HeapKind, HeapValue, IoHandleData,
+        LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData, PriorityQueueData,
+        RangeData, TableViewData, TaskGroupData, TemporalData, TraitObjectStorage,
+        TypedObjectStorage,
     },
 };
 use std::sync::Arc;
@@ -799,11 +799,7 @@ impl VirtualMachine {
     /// Releases the overflow-dropped share via `drop_with_kind` (FR.1 / WB2.x).
     #[cold]
     #[inline(never)]
-    pub(crate) fn push_kinded_slow(
-        &mut self,
-        bits: u64,
-        kind: NativeKind,
-    ) -> Result<(), VMError> {
+    pub(crate) fn push_kinded_slow(&mut self, bits: u64, kind: NativeKind) -> Result<(), VMError> {
         if self.sp >= self.config.max_stack_size {
             // Release the share that would have been pushed.
             drop_with_kind(bits, kind);

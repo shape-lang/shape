@@ -313,6 +313,6 @@ mod tests {
         assert!(!h.release()); // 4 -> 3
         assert!(!h.release()); // 3 -> 2
         assert!(!h.release()); // 2 -> 1
-        assert!(h.release());  // 1 -> 0 => true
+        assert!(h.release()); // 1 -> 0 => true
     }
 }

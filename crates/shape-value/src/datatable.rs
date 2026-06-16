@@ -10,7 +10,6 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema};
 use std::sync::Arc;
 
-
 /// Raw pointers to Arrow column buffers for zero-cost field access.
 ///
 /// These pointers are derived from the underlying Arrow arrays and remain

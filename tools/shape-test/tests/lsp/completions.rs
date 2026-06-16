@@ -493,9 +493,7 @@ fn lsp_n_method_completion_after_dot_on_stdlib_array() {
     // by `"Vec"`, with the receiver-type lookup falling back to the
     // normalized type so `Array<int>` receivers match.
     let code = "let xs = [1, 2, 3]\nxs.\n";
-    ShapeTest::new(code)
-        .at(pos(1, 3))
-        .expect_completion("map");
+    ShapeTest::new(code).at(pos(1, 3)).expect_completion("map");
 }
 
 #[test]
@@ -510,9 +508,7 @@ type User { name: string }
 let u = User { name: \"a\" }
 u.
 ";
-    ShapeTest::new(code)
-        .at(pos(2, 2))
-        .expect_completion("name");
+    ShapeTest::new(code).at(pos(2, 2)).expect_completion("name");
 }
 
 #[test]

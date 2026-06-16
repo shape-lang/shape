@@ -4228,7 +4228,10 @@ mod tests {
         assert_eq!(Arc::strong_count(&arc), 1);
         let arc_raw = Arc::into_raw(arc); // share count still 1, now ours-by-raw
         let result = push_element(&view, arc_raw as u64, NativeKind::String);
-        assert!(result.is_ok(), "String push should materialize, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "String push should materialize, got {result:?}"
+        );
 
         unsafe {
             // The array now holds a fresh, distinct StringObj with the copied

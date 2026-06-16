@@ -73,20 +73,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     fn default_value_for_kind(&mut self, kind: NativeKind) -> Value {
         match kind {
             NativeKind::Float64 => self.builder.ins().f64const(0.0),
-            NativeKind::Int32 | NativeKind::UInt32 => {
-                self.builder.ins().iconst(types::I32, 0)
-            }
+            NativeKind::Int32 | NativeKind::UInt32 => self.builder.ins().iconst(types::I32, 0),
             NativeKind::Int8 | NativeKind::UInt8 | NativeKind::Bool => {
                 self.builder.ins().iconst(types::I8, 0)
             }
-            NativeKind::Int16 | NativeKind::UInt16 => {
-                self.builder.ins().iconst(types::I16, 0)
-            }
+            NativeKind::Int16 | NativeKind::UInt16 => self.builder.ins().iconst(types::I16, 0),
             // v2-boundary: I64 NaN-boxed slots use TAG_NULL as default
-            _ => self
-                .builder
-                .ins()
-                .iconst(types::I64, 0i64),
+            _ => self.builder.ins().iconst(types::I64, 0i64),
         }
     }
 
@@ -141,10 +134,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 .builder
                 .ins()
                 .iconst(types::I64, crate::ffi::value_ffi::TAG_NULL as i64);
-            let inst = self
-                .builder
-                .ins()
-                .call(self.ffi.alloc_shared_cell, &[init]);
+            let inst = self.builder.ins().call(self.ffi.alloc_shared_cell, &[init]);
             let cell_ptr = self.builder.inst_results(inst)[0];
             self.builder.def_var(var, cell_ptr);
         }

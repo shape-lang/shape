@@ -68,7 +68,8 @@ fn where_clause_multiple_bounds_parses() {
 fn associated_type_parses() {
     // Associated type declarations parse; Self.Item syntax is not yet supported,
     // so we test the type declaration itself with a simple return type.
-    ShapeTest::new("trait Iterator {\n    type Item;\n    method next() -> any\n}").expect_parse_ok();
+    ShapeTest::new("trait Iterator {\n    type Item;\n    method next() -> any\n}")
+        .expect_parse_ok();
 }
 
 // -- Trait semantic tokens --------------------------------------------------

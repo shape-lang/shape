@@ -53,17 +53,20 @@ pub fn cranelift_type_for_slot(kind: NativeKind) -> types::Type {
     match kind {
         NativeKind::Float64 | NativeKind::NullableFloat64 => types::F64,
 
-        NativeKind::Int64 | NativeKind::NullableInt64 | NativeKind::UInt64 | NativeKind::NullableUInt64 => {
-            types::I64
-        }
+        NativeKind::Int64
+        | NativeKind::NullableInt64
+        | NativeKind::UInt64
+        | NativeKind::NullableUInt64 => types::I64,
 
-        NativeKind::Int32 | NativeKind::NullableInt32 | NativeKind::UInt32 | NativeKind::NullableUInt32 => {
-            types::I32
-        }
+        NativeKind::Int32
+        | NativeKind::NullableInt32
+        | NativeKind::UInt32
+        | NativeKind::NullableUInt32 => types::I32,
 
-        NativeKind::Int16 | NativeKind::NullableInt16 | NativeKind::UInt16 | NativeKind::NullableUInt16 => {
-            types::I16
-        }
+        NativeKind::Int16
+        | NativeKind::NullableInt16
+        | NativeKind::UInt16
+        | NativeKind::NullableUInt16 => types::I16,
 
         NativeKind::Int8
         | NativeKind::NullableInt8
@@ -106,15 +109,18 @@ pub fn cranelift_type_for_slot(kind: NativeKind) -> types::Type {
 pub fn slot_byte_width(kind: NativeKind) -> u32 {
     match kind {
         NativeKind::Float64 | NativeKind::NullableFloat64 => 8,
-        NativeKind::Int64 | NativeKind::NullableInt64 | NativeKind::UInt64 | NativeKind::NullableUInt64 => {
-            8
-        }
-        NativeKind::Int32 | NativeKind::NullableInt32 | NativeKind::UInt32 | NativeKind::NullableUInt32 => {
-            4
-        }
-        NativeKind::Int16 | NativeKind::NullableInt16 | NativeKind::UInt16 | NativeKind::NullableUInt16 => {
-            2
-        }
+        NativeKind::Int64
+        | NativeKind::NullableInt64
+        | NativeKind::UInt64
+        | NativeKind::NullableUInt64 => 8,
+        NativeKind::Int32
+        | NativeKind::NullableInt32
+        | NativeKind::UInt32
+        | NativeKind::NullableUInt32 => 4,
+        NativeKind::Int16
+        | NativeKind::NullableInt16
+        | NativeKind::UInt16
+        | NativeKind::NullableUInt16 => 2,
         NativeKind::Int8
         | NativeKind::NullableInt8
         | NativeKind::UInt8
@@ -230,9 +236,12 @@ impl<'a, 'b: 'a> MirToIR<'a, 'b> {
         field_type: NativeKind,
     ) -> Value {
         let cl_type = cranelift_type_for_slot(field_type);
-        self.builder
-            .ins()
-            .load(cl_type, MemFlags::trusted(), struct_ptr, field_offset as i32)
+        self.builder.ins().load(
+            cl_type,
+            MemFlags::trusted(),
+            struct_ptr,
+            field_offset as i32,
+        )
     }
 
     /// Emit an inline typed field write: `store T val -> [struct_ptr + field_offset]`.
@@ -459,7 +468,10 @@ mod tests {
     #[test]
     fn v2_field_slot_to_cranelift_type() {
         assert_eq!(cranelift_type_for_slot(NativeKind::Float64), types::F64);
-        assert_eq!(cranelift_type_for_slot(NativeKind::NullableFloat64), types::F64);
+        assert_eq!(
+            cranelift_type_for_slot(NativeKind::NullableFloat64),
+            types::F64
+        );
         assert_eq!(cranelift_type_for_slot(NativeKind::Int64), types::I64);
         assert_eq!(cranelift_type_for_slot(NativeKind::Int32), types::I32);
         assert_eq!(cranelift_type_for_slot(NativeKind::Int16), types::I16);
@@ -470,7 +482,9 @@ mod tests {
         // ex-`Dynamic` slot mapping (raw u64 storage) is now covered by
         // any heap-pointer kind — `Ptr(HeapKind::TypedArray)` stands in.
         assert_eq!(
-            cranelift_type_for_slot(NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedArray)),
+            cranelift_type_for_slot(NativeKind::Ptr(
+                shape_value::heap_value::HeapKind::TypedArray
+            )),
             types::I64
         );
         assert_eq!(cranelift_type_for_slot(NativeKind::String), types::I64);
@@ -816,11 +830,7 @@ mod tests {
         sig.returns.push(AbiParam::new(types::F64));
 
         let func_id = module
-            .declare_function(
-                "test_mixed_value",
-                cranelift_module::Linkage::Local,
-                &sig,
-            )
+            .declare_function("test_mixed_value", cranelift_module::Linkage::Local, &sig)
             .unwrap();
 
         let fields = vec![

@@ -30,9 +30,10 @@ impl JITCompiler {
         program: &BytecodeProgram,
     ) -> Result<JittedStrategyFn, String> {
         // MirToIR is the ONLY compilation path.
-        let mir_data = program.top_level_mir.as_ref().ok_or_else(|| {
-            "MirToIR: top-level code has no MIR data".to_string()
-        })?;
+        let mir_data = program
+            .top_level_mir
+            .as_ref()
+            .ok_or_else(|| "MirToIR: top-level code has no MIR data".to_string())?;
         let preflight = crate::mir_compiler::preflight(mir_data);
         if !preflight.can_compile {
             return Err(format!(
@@ -134,8 +135,7 @@ impl JITCompiler {
                 // accesses and install the plan before compile_body. The
                 // analyzer is conservative; an empty plan preserves the
                 // bounds-checked path for every access.
-                let elision_plan =
-                    crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
+                let elision_plan = crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
                 mir_compiler.set_bounds_elision_plan(elision_plan);
                 // W14.2-E-followup SURFACE-A2 fix (2026-05-19): same as
                 // the per-user-function path at `program.rs` — pre-
@@ -190,9 +190,10 @@ impl JITCompiler {
         ctx.func.signature = sig;
 
         // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).
-        let mir_data = program.top_level_mir.as_ref().ok_or_else(|| {
-            "MirToIR: top-level code has no MIR data".to_string()
-        })?;
+        let mir_data = program
+            .top_level_mir
+            .as_ref()
+            .ok_or_else(|| "MirToIR: top-level code has no MIR data".to_string())?;
         let preflight = crate::mir_compiler::preflight(mir_data);
         if !preflight.can_compile {
             return Err(format!(
@@ -274,8 +275,7 @@ impl JITCompiler {
                 mir_compiler.set_operator_trait_dispatch_sites(
                     program.operator_trait_dispatch_sites.clone(),
                 );
-                let elision_plan =
-                    crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
+                let elision_plan = crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
                 mir_compiler.set_bounds_elision_plan(elision_plan);
                 // W14.2-E-followup SURFACE-A2 fix (2026-05-19): top-level
                 // with user-funcs path — same schema pre-population as

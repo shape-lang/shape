@@ -144,11 +144,7 @@ fn soak_nested_loops_10k() {
         }
         total
     "#;
-    assert_eq!(
-        eval_typed_i64(source),
-        990_000,
-        "Nested loop soak failed"
-    );
+    assert_eq!(eval_typed_i64(source), 990_000, "Nested loop soak failed");
 }
 
 // ── Soak: function calls in loop ────────────────────────────────────

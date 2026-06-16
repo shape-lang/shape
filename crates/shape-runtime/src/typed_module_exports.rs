@@ -385,9 +385,7 @@ pub struct TypedModuleFunction {
     /// [`Self::arg_kinds`]) plus the `ModuleContext`; returns a
     /// `TypedReturn`.
     pub invoke: Arc<
-        dyn for<'ctx> Fn(&[u64], &ModuleContext<'ctx>) -> Result<TypedReturn, String>
-            + Send
-            + Sync,
+        dyn for<'ctx> Fn(&[u64], &ModuleContext<'ctx>) -> Result<TypedReturn, String> + Send + Sync,
     >,
     /// Declared return type (used for LSP and consistency checks).
     pub return_type: ConcreteType,
@@ -413,9 +411,7 @@ pub struct TypedModuleAsyncFunction {
     /// `'static` future bounds. Receives raw `Vec<u64>` slot bits
     /// whose kinds match `Self::arg_kinds`.
     pub invoke: Arc<
-        dyn Fn(
-                Vec<u64>,
-            ) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
+        dyn Fn(Vec<u64>) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
             + Send
             + Sync,
     >,

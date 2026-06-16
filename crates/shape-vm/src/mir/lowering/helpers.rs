@@ -477,10 +477,7 @@ pub(super) fn lower_unary_op(op: ast::UnaryOp) -> Option<UnOp> {
     }
 }
 
-pub(super) fn operand_crosses_task_boundary(
-    outer_locals_cutoff: u16,
-    operand: &Operand,
-) -> bool {
+pub(super) fn operand_crosses_task_boundary(outer_locals_cutoff: u16, operand: &Operand) -> bool {
     match operand {
         Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
             place.root_local().0 < outer_locals_cutoff

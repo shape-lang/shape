@@ -88,8 +88,7 @@ pub fn create_toml_module() -> ModuleExports {
         ConcreteType::Result(Box::new(ConcreteType::String)),
         |_args, _ctx| {
             Ok(TypedReturn::Err(ConcreteReturn::String(
-                "toml.stringify() pending N4 (any-input marshal) — see ADR-006 §2.7.4"
-                    .to_string(),
+                "toml.stringify() pending N4 (any-input marshal) — see ADR-006 §2.7.4".to_string(),
             )))
         },
     );

@@ -2006,10 +2006,7 @@ define_opcodes! {
 impl OpCode {
     /// Returns true if this is a trusted opcode variant (compiler-proved types, no runtime guard).
     pub const fn is_trusted(self) -> bool {
-        matches!(
-            self,
-            OpCode::LoadLocalTrusted | OpCode::JumpIfFalseTrusted
-        )
+        matches!(self, OpCode::LoadLocalTrusted | OpCode::JumpIfFalseTrusted)
     }
 
     /// Map a trusted opcode back to its guarded (runtime-checked) counterpart.
@@ -3205,7 +3202,10 @@ mod tests {
     #[test]
     fn r55_string_scalar_concat_opcodes_are_object_category() {
         assert_eq!(OpCode::StringConcatInt.category(), OpcodeCategory::Object);
-        assert_eq!(OpCode::StringConcatNumber.category(), OpcodeCategory::Object);
+        assert_eq!(
+            OpCode::StringConcatNumber.category(),
+            OpcodeCategory::Object
+        );
         assert_eq!(OpCode::StringConcatBool.category(), OpcodeCategory::Object);
     }
 

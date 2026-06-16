@@ -47,8 +47,9 @@ impl BytecodeCompiler {
         // local/binding tracker with `"DateTime"`. Reading that back at the
         // arithmetic site then lets the retarget at
         // `binary_ops.rs:750` / `:1049` fire for let-locals.
-        self.last_expr_type_info =
-            Some(crate::type_tracking::VariableTypeInfo::named("DateTime".to_string()));
+        self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
+            "DateTime".to_string(),
+        ));
         Ok(())
     }
 
@@ -68,8 +69,9 @@ impl BytecodeCompiler {
         // slot (see compile_expr_datetime). Duration literals produce
         // `TimeSpan` at runtime; track it as `"Duration"` so the retarget
         // guard's "Duration" arm fires uniformly for let-locals.
-        self.last_expr_type_info =
-            Some(crate::type_tracking::VariableTypeInfo::named("Duration".to_string()));
+        self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
+            "Duration".to_string(),
+        ));
         Ok(())
     }
 
@@ -114,8 +116,8 @@ impl BytecodeCompiler {
 #[cfg(test)]
 mod tests {
     use crate::test_utils::eval;
-    use shape_value::{KindedSlot, NativeKind};
     use shape_value::heap_value::{HeapKind, TemporalData};
+    use shape_value::{KindedSlot, NativeKind};
 
     /// Borrow `&TemporalData` from a Temporal-kinded `KindedSlot`.
     ///

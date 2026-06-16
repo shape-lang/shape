@@ -64,14 +64,12 @@
 
 use crate::{
     bytecode::{Instruction, Operand},
-    executor::vm_impl::stack::drop_with_kind,
     executor::VirtualMachine,
+    executor::vm_impl::stack::drop_with_kind,
 };
 use rust_decimal::prelude::ToPrimitive;
 use shape_runtime::type_schema::FieldType;
-use shape_value::{
-    HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot, VMError,
-};
+use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, VMError, ValueSlot};
 use std::sync::Arc;
 
 fn field_type_to_int_width(ft: &FieldType) -> Option<shape_ast::IntWidth> {
@@ -198,8 +196,7 @@ impl VirtualMachine {
         let mut heap_mask: u64 = 0;
         for (i, (bits, kind)) in popped.iter().enumerate() {
             let field_type = field_types.as_ref().and_then(|types| types.get(i));
-            let (slot, is_heap, resolved_kind) =
-                kinded_to_slot(*bits, *kind, field_type);
+            let (slot, is_heap, resolved_kind) = kinded_to_slot(*bits, *kind, field_type);
             if is_heap {
                 heap_mask |= 1u64 << i;
             }
@@ -304,8 +301,7 @@ impl VirtualMachine {
         }
         popped.reverse();
 
-        let mut data =
-            shape_value::aligned_vec::AlignedVec::<f64>::with_capacity(total);
+        let mut data = shape_value::aligned_vec::AlignedVec::<f64>::with_capacity(total);
         for (bits, kind) in popped.iter() {
             let v = match kind {
                 NativeKind::Float64 => f64::from_bits(*bits),
@@ -563,9 +559,7 @@ fn kinded_to_slot(
         // pre-bulldozer behaviour. heap_mask remains 0 — the value is
         // inline, and the popped kind is the source of truth (no
         // schema normalization happened to the bits).
-        Some(FieldType::Any) | None | Some(_) => {
-            (ValueSlot::from_raw(bits), false, kind)
-        }
+        Some(FieldType::Any) | None | Some(_) => (ValueSlot::from_raw(bits), false, kind),
     }
 }
 

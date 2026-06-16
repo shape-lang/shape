@@ -1681,30 +1681,20 @@ fn borrow_error_message(
         BorrowErrorKind::ReadWhileExclusivelyBorrowed => {
             "cannot read this value while it is mutably borrowed"
         }
-        BorrowErrorKind::WriteWhileBorrowed => {
-            "cannot write to this value while it is borrowed"
-        }
+        BorrowErrorKind::WriteWhileBorrowed => "cannot write to this value while it is borrowed",
         BorrowErrorKind::ReferenceEscape => {
             "cannot return or store a reference that outlives its owner"
         }
-        BorrowErrorKind::ReferenceStoredInArray => {
-            "cannot store a reference in an array"
-        }
+        BorrowErrorKind::ReferenceStoredInArray => "cannot store a reference in an array",
         BorrowErrorKind::ReferenceStoredInObject => {
             "cannot store a reference in an object or struct literal"
         }
-        BorrowErrorKind::ReferenceStoredInEnum => {
-            "cannot store a reference in an enum payload"
-        }
-        BorrowErrorKind::ReferenceEscapeIntoClosure => {
-            "reference cannot escape into a closure"
-        }
+        BorrowErrorKind::ReferenceStoredInEnum => "cannot store a reference in an enum payload",
+        BorrowErrorKind::ReferenceEscapeIntoClosure => "reference cannot escape into a closure",
         BorrowErrorKind::ReferenceEscapeIntoModuleBinding => {
             "cannot return or store a reference that outlives its owner"
         }
-        BorrowErrorKind::UseAfterMove => {
-            "cannot use this value after it was moved"
-        }
+        BorrowErrorKind::UseAfterMove => "cannot use this value after it was moved",
         BorrowErrorKind::ExclusiveRefAcrossTaskBoundary => {
             "cannot move an exclusive reference across a task boundary"
         }
@@ -1741,9 +1731,7 @@ fn borrow_error_hint(kind: &shape_vm::mir::analysis::BorrowErrorKind) -> &'stati
         BorrowErrorKind::ReferenceEscape => "return an owned value instead of a reference",
         BorrowErrorKind::ReferenceStoredInArray
         | BorrowErrorKind::ReferenceStoredInObject
-        | BorrowErrorKind::ReferenceStoredInEnum => {
-            "store owned values instead of references"
-        }
+        | BorrowErrorKind::ReferenceStoredInEnum => "store owned values instead of references",
         BorrowErrorKind::ReferenceEscapeIntoClosure => {
             "capture an owned value instead of a reference"
         }
@@ -1786,9 +1774,7 @@ fn borrow_origin_note(kind: &shape_vm::mir::analysis::BorrowErrorKind) -> String
         | BorrowErrorKind::ReferenceEscapeIntoClosure
         | BorrowErrorKind::ReferenceEscapeIntoModuleBinding
         | BorrowErrorKind::ExclusiveRefAcrossTaskBoundary
-        | BorrowErrorKind::SharedRefAcrossDetachedTask => {
-            "reference originates here".to_string()
-        }
+        | BorrowErrorKind::SharedRefAcrossDetachedTask => "reference originates here".to_string(),
         BorrowErrorKind::UseAfterMove => "value was moved here".to_string(),
         BorrowErrorKind::InconsistentReferenceReturn => {
             "borrowed origin on another return path originates here".to_string()
@@ -2578,10 +2564,7 @@ function my_func() {
         assert_eq!(diagnostics.len(), 1, "Should produce one diagnostic");
         let diag = &diagnostics[0];
         assert_eq!(diag.severity, Some(DiagnosticSeverity::ERROR));
-        assert_eq!(
-            diag.code,
-            Some(NumberOrString::String("B0001".to_string()))
-        );
+        assert_eq!(diag.code, Some(NumberOrString::String("B0001".to_string())));
         assert_eq!(diag.source.as_deref(), Some("shape-borrow"));
         assert!(
             diag.message.contains("cannot mutably borrow"),
@@ -2619,10 +2602,7 @@ function my_func() {
         assert_eq!(diagnostics.len(), 1);
         let diag = &diagnostics[0];
         assert!(diag.message.contains("cannot assign to let binding"));
-        assert_eq!(
-            diag.code,
-            Some(NumberOrString::String("E0384".to_string()))
-        );
+        assert_eq!(diag.code, Some(NumberOrString::String("E0384".to_string())));
         let related = diag.related_information.as_ref().unwrap();
         assert_eq!(related.len(), 1);
         assert!(related[0].message.contains("declared here"));

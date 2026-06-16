@@ -10,8 +10,8 @@ use shape_runtime::type_schema::{FieldType, SchemaId};
 use super::super::BytecodeCompiler;
 use super::numeric_ops::{
     CoercionPlan, apply_coercion, inferred_type_to_numeric, is_function_type,
-    is_ordered_comparison, is_strict_arithmetic, is_strict_bitwise, is_type_numeric,
-    plan_coercion, type_display_name, typed_opcode_for,
+    is_ordered_comparison, is_strict_arithmetic, is_strict_bitwise, is_type_numeric, plan_coercion,
+    type_display_name, typed_opcode_for,
 };
 
 /// Map a BinaryOp to its operator trait name, if one exists.
@@ -33,9 +33,7 @@ fn operator_trait_for_op(op: &BinaryOp) -> Option<&'static str> {
         BinaryOp::BitXor => Some("BitXor"),
         BinaryOp::BitShl => Some("Shl"),
         BinaryOp::BitShr => Some("Shr"),
-        BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
-            Some("Ord")
-        }
+        BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => Some("Ord"),
         // W1.7: Eq/Neq dispatch for user-defined types. Built-in
         // scalar types take typed `EqInt`/`EqString`/... before this
         // mapping is consulted (`compile_typed_equality` resolves
@@ -64,9 +62,7 @@ fn operator_trait_method_for_op(op: &BinaryOp) -> Option<&'static str> {
         BinaryOp::BitXor => Some("bitxor"),
         BinaryOp::BitShl => Some("shl"),
         BinaryOp::BitShr => Some("shr"),
-        BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => {
-            Some("cmp")
-        }
+        BinaryOp::Greater | BinaryOp::Less | BinaryOp::GreaterEq | BinaryOp::LessEq => Some("cmp"),
         // W1.7: `Eq::eq(self, other) -> bool`. Both `==` and `!=` map
         // to the same method; the negation for `!=` is emitted by the
         // caller (`compile_typed_equality`) after the dispatch.
@@ -78,7 +74,10 @@ fn operator_trait_method_for_op(op: &BinaryOp) -> Option<&'static str> {
 fn emit_cmp_result_comparison(compiler: &mut BytecodeCompiler, op: &BinaryOp) {
     use crate::bytecode::Constant;
     let zero_idx = compiler.program.add_constant(Constant::Int(0));
-    compiler.emit(Instruction::new(OpCode::PushConst, Some(Operand::Const(zero_idx))));
+    compiler.emit(Instruction::new(
+        OpCode::PushConst,
+        Some(Operand::Const(zero_idx)),
+    ));
     let cmp_op = match op {
         BinaryOp::Greater => OpCode::GtInt,
         BinaryOp::Less => OpCode::LtInt,
@@ -109,19 +108,44 @@ fn reference_operand_span(left: &Expr, right: &Expr) -> Option<Span> {
     None
 }
 
-fn try_emit_trait_dispatch(compiler: &mut BytecodeCompiler, op: &BinaryOp, left_schema: Option<SchemaId>, left_expr: &Expr, op_span: Span) -> bool {
-    let trait_name = match operator_trait_for_op(op) { Some(t) => t, None => return false };
-    let method_name = match operator_trait_method_for_op(op) { Some(m) => m, None => return false };
+fn try_emit_trait_dispatch(
+    compiler: &mut BytecodeCompiler,
+    op: &BinaryOp,
+    left_schema: Option<SchemaId>,
+    left_expr: &Expr,
+    op_span: Span,
+) -> bool {
+    let trait_name = match operator_trait_for_op(op) {
+        Some(t) => t,
+        None => return false,
+    };
+    let method_name = match operator_trait_method_for_op(op) {
+        Some(m) => m,
+        None => return false,
+    };
     let has_trait_via_schema = left_schema
         .and_then(|sid| compiler.type_tracker.schema_registry().get_by_id(sid))
-        .is_some_and(|schema| compiler.type_inference.env.type_implements_trait(&schema.name, trait_name));
-    let has_trait = has_trait_via_schema || compiler.infer_expr_type(left_expr).ok().is_some_and(|ty| {
-        let name = type_display_name(&ty);
-        compiler.type_inference.env.type_implements_trait(&name, trait_name)
-    });
-    if !has_trait { return false; }
+        .is_some_and(|schema| {
+            compiler
+                .type_inference
+                .env
+                .type_implements_trait(&schema.name, trait_name)
+        });
+    let has_trait = has_trait_via_schema
+        || compiler.infer_expr_type(left_expr).ok().is_some_and(|ty| {
+            let name = type_display_name(&ty);
+            compiler
+                .type_inference
+                .env
+                .type_implements_trait(&name, trait_name)
+        });
+    if !has_trait {
+        return false;
+    }
     emit_operator_trait_call(compiler, method_name, op_span);
-    if is_ordered_comparison(op) { emit_cmp_result_comparison(compiler, op); }
+    if is_ordered_comparison(op) {
+        emit_cmp_result_comparison(compiler, op);
+    }
     true
 }
 
@@ -137,7 +161,11 @@ fn try_emit_trait_dispatch(compiler: &mut BytecodeCompiler, op: &BinaryOp, left_
 /// `Rvalue::BinaryOp` / `Rvalue::UnaryOp` site (keyed by the same span
 /// the MIR lowering at `crates/shape-vm/src/mir/lowering/expr.rs::
 /// lower_expr_to_temp` stamps on the statement via `expr.span()`).
-fn emit_operator_trait_call(compiler: &mut BytecodeCompiler, method_name: &'static str, op_span: Span) {
+fn emit_operator_trait_call(
+    compiler: &mut BytecodeCompiler,
+    method_name: &'static str,
+    op_span: Span,
+) {
     let method_id = shape_value::MethodId::from_name(method_name);
     let string_id = compiler.program.add_string(method_name.to_string());
     compiler.emit(Instruction::new(
@@ -146,7 +174,8 @@ fn emit_operator_trait_call(compiler: &mut BytecodeCompiler, method_name: &'stat
             method_id: method_id.0,
             arg_count: 1,
             string_id,
-         receiver_type_tag: 0xFF, }),
+            receiver_type_tag: 0xFF,
+        }),
     ));
     // ADR-006 §2.7.5 W10 conduit: persist the bytecode-time trait-dispatch
     // decision so the JIT MIR consumer can lift `Rvalue::BinaryOp` at the
@@ -226,8 +255,16 @@ fn string_plus_nonstring_error(
              implicitly convert `{}` to a string for concatenation. Use f-string \
              interpolation, e.g. `f\"{{...}}\"`, or convert the value to a string \
              explicitly before concatenating.",
-            if lhs_type == "string" || lhs_type == "char" { rhs_type } else { lhs_type },
-            if lhs_type == "string" || lhs_type == "char" { rhs_type } else { lhs_type },
+            if lhs_type == "string" || lhs_type == "char" {
+                rhs_type
+            } else {
+                lhs_type
+            },
+            if lhs_type == "string" || lhs_type == "char" {
+                rhs_type
+            } else {
+                lhs_type
+            },
         ),
         location: Some(compiler.span_to_source_location(combined_span(left, right))),
     }
@@ -447,7 +484,10 @@ impl BytecodeCompiler {
             return true;
         }
         matches!(
-            self.infer_expr_type(expr).ok().map(|t| type_display_name(&t)).as_deref(),
+            self.infer_expr_type(expr)
+                .ok()
+                .map(|t| type_display_name(&t))
+                .as_deref(),
             Some("string") | Some("char")
         )
     }
@@ -685,12 +725,11 @@ impl BytecodeCompiler {
             // falls back to passthrough on raw native 0u64/1u64 bits and
             // `as_bool()` returns `None`.
             if is_comparison {
-                self.last_expr_type_info = Some(
-                    crate::type_tracking::VariableTypeInfo::with_storage(
+                self.last_expr_type_info =
+                    Some(crate::type_tracking::VariableTypeInfo::with_storage(
                         "bool".to_string(),
                         crate::type_tracking::StorageHint::Bool,
-                    ),
-                );
+                    ));
             } else {
                 self.last_expr_type_info = None;
             }
@@ -816,12 +855,10 @@ impl BytecodeCompiler {
             // Result is bool — record so the implicit-return path
             // emits `ReturnValueBool` and the host-boundary synthesizer
             // re-tags the raw native bool bits.
-            self.last_expr_type_info = Some(
-                crate::type_tracking::VariableTypeInfo::with_storage(
-                    "bool".to_string(),
-                    crate::type_tracking::StorageHint::Bool,
-                ),
-            );
+            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::with_storage(
+                "bool".to_string(),
+                crate::type_tracking::StorageHint::Bool,
+            ));
             self.last_expr_numeric_type = None;
             return Ok(true);
         }
@@ -862,12 +899,10 @@ impl BytecodeCompiler {
             // Result is bool — record so the implicit-return path
             // emits `ReturnValueBool` and the host-boundary synthesizer
             // re-tags the raw native bool bits.
-            self.last_expr_type_info = Some(
-                crate::type_tracking::VariableTypeInfo::with_storage(
-                    "bool".to_string(),
-                    crate::type_tracking::StorageHint::Bool,
-                ),
-            );
+            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::with_storage(
+                "bool".to_string(),
+                crate::type_tracking::StorageHint::Bool,
+            ));
             self.last_expr_numeric_type = None;
             return Ok(true);
         }
@@ -902,9 +937,11 @@ impl BytecodeCompiler {
         } else {
             None
         };
-        let mut has_eq_impl = slot_type_name
-            .as_ref()
-            .is_some_and(|name| self.type_inference.env.type_implements_trait(name, trait_name));
+        let mut has_eq_impl = slot_type_name.as_ref().is_some_and(|name| {
+            self.type_inference
+                .env
+                .type_implements_trait(name, trait_name)
+        });
         if !has_eq_impl {
             has_eq_impl = self.infer_expr_type(left).ok().is_some_and(|ty| {
                 let name = type_display_name(&ty);
@@ -925,12 +962,10 @@ impl BytecodeCompiler {
             // `ReturnValueBool` and the host-boundary synthesizer
             // re-tags the raw native bool bits.
             self.last_expr_schema = None;
-            self.last_expr_type_info = Some(
-                crate::type_tracking::VariableTypeInfo::with_storage(
-                    "bool".to_string(),
-                    crate::type_tracking::StorageHint::Bool,
-                ),
-            );
+            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::with_storage(
+                "bool".to_string(),
+                crate::type_tracking::StorageHint::Bool,
+            ));
             self.last_expr_numeric_type = None;
             return Ok(true);
         }
@@ -940,7 +975,11 @@ impl BytecodeCompiler {
         // `emit_binary_op` shim with `BinOperandKind::Unknown` operands and
         // emitted `EqDynamic` / `NeqDynamic`. That dynamic-fallback path is
         // now a hard compile error.
-        let typed_op = if is_neq { BinaryOp::NotEqual } else { BinaryOp::Equal };
+        let typed_op = if is_neq {
+            BinaryOp::NotEqual
+        } else {
+            BinaryOp::Equal
+        };
         Err(strict_typing_binop_error(self, &typed_op, left, right))
     }
 
@@ -1330,9 +1369,7 @@ impl BytecodeCompiler {
                         // propagate so chained concats and assignment-target
                         // type tracking see the type.
                         self.last_expr_type_info = Some(
-                            crate::type_tracking::VariableTypeInfo::named(
-                                "string".to_string(),
-                            ),
+                            crate::type_tracking::VariableTypeInfo::named("string".to_string()),
                         );
                         self.last_expr_numeric_type = None;
                         return Ok(());
@@ -1411,16 +1448,26 @@ impl BytecodeCompiler {
                     let is_temporal = |n: &Option<String>| {
                         matches!(
                             n.as_deref(),
-                            Some("DateTime") | Some("Duration") | Some("TimeSpan")
-                                | Some("datetime") | Some("duration") | Some("timespan")
+                            Some("DateTime")
+                                | Some("Duration")
+                                | Some("TimeSpan")
+                                | Some("datetime")
+                                | Some("duration")
+                                | Some("timespan")
                         )
                     };
                     if is_temporal(&lhs_name) || is_temporal(&rhs_name) {
                         let method_id = shape_value::MethodId::from_name("add");
                         let string_id = self.program.add_string("add".to_string());
-                        self.emit(Instruction::new(OpCode::CallMethod, Some(Operand::TypedMethodCall {
-                            method_id: method_id.0, arg_count: 1, string_id,
-                         receiver_type_tag: 0xFF, })));
+                        self.emit(Instruction::new(
+                            OpCode::CallMethod,
+                            Some(Operand::TypedMethodCall {
+                                method_id: method_id.0,
+                                arg_count: 1,
+                                string_id,
+                                receiver_type_tag: 0xFF,
+                            }),
+                        ));
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
                         self.last_expr_numeric_type = None;
@@ -1478,8 +1525,12 @@ impl BytecodeCompiler {
                                 if let Some(info) = self.type_tracker.get_local_type(idx) {
                                     if let Some(ref tn) = info.type_name {
                                         return match tn.as_str() {
-                                            "int" | "Int" | "Integer" | "i64" => Some(NumericType::Int),
-                                            "number" | "Number" | "Float" | "f64" => Some(NumericType::Number),
+                                            "int" | "Int" | "Integer" | "i64" => {
+                                                Some(NumericType::Int)
+                                            }
+                                            "number" | "Number" | "Float" | "f64" => {
+                                                Some(NumericType::Number)
+                                            }
                                             "decimal" | "Decimal" => Some(NumericType::Decimal),
                                             _ => None,
                                         };
@@ -1549,7 +1600,13 @@ impl BytecodeCompiler {
                             // mixed string, polyglot value). Strict-typing
                             // sweep (Phase 1): that dynamic-fallback emission
                             // is now a hard compile error.
-                            if !try_emit_trait_dispatch(self, &BinaryOp::Add, left_schema, left, op_span) {
+                            if !try_emit_trait_dispatch(
+                                self,
+                                &BinaryOp::Add,
+                                left_schema,
+                                left,
+                                op_span,
+                            ) {
                                 // A-final ROOT-C: defer the dead deferred-template
                                 // body's unprovable-kind `a + b` (emit Pop, no
                                 // typed opcode) instead of the strict-typing error.
@@ -1601,10 +1658,9 @@ impl BytecodeCompiler {
                 // pattern at L756-790 and Sub/Mul/Div/Mod's trait
                 // dispatch at L1462-1475.
                 if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor) {
-                    if let (Some(trait_name), Some(method_name)) = (
-                        operator_trait_for_op(op),
-                        operator_trait_method_for_op(op),
-                    ) {
+                    if let (Some(trait_name), Some(method_name)) =
+                        (operator_trait_for_op(op), operator_trait_method_for_op(op))
+                    {
                         let left_implements = left_schema
                             .and_then(|sid| self.type_tracker.schema_registry().get_by_id(sid))
                             .is_some_and(|schema| {
@@ -1675,28 +1731,21 @@ impl BytecodeCompiler {
                 if !both_int && matches!(op, BinaryOp::BitShl | BinaryOp::BitShr) {
                     let trait_name = operator_trait_for_op(op);
                     let method_name = operator_trait_method_for_op(op);
-                    if let (Some(trait_name), Some(method_name)) =
-                        (trait_name, method_name)
-                    {
+                    if let (Some(trait_name), Some(method_name)) = (trait_name, method_name) {
                         let has_trait_via_schema = left_schema
-                            .and_then(|sid| {
-                                self.type_tracker.schema_registry().get_by_id(sid)
-                            })
+                            .and_then(|sid| self.type_tracker.schema_registry().get_by_id(sid))
                             .is_some_and(|schema| {
                                 self.type_inference
                                     .env
                                     .type_implements_trait(&schema.name, trait_name)
                             });
                         let has_trait = has_trait_via_schema
-                            || self
-                                .infer_expr_type(left)
-                                .ok()
-                                .is_some_and(|ty| {
-                                    let name = type_display_name(&ty);
-                                    self.type_inference
-                                        .env
-                                        .type_implements_trait(&name, trait_name)
-                                });
+                            || self.infer_expr_type(left).ok().is_some_and(|ty| {
+                                let name = type_display_name(&ty);
+                                self.type_inference
+                                    .env
+                                    .type_implements_trait(&name, trait_name)
+                            });
                         if has_trait {
                             emit_operator_trait_call(self, method_name, op_span);
                             return Ok(());
@@ -1768,9 +1817,7 @@ impl BytecodeCompiler {
                              (e.g. `(x as int) {} (y as int)`) when intentional.",
                             op_symbol, left_desc, right_desc, op_symbol,
                         ),
-                        location: Some(
-                            self.span_to_source_location(combined_span(left, right)),
-                        ),
+                        location: Some(self.span_to_source_location(combined_span(left, right))),
                     });
                 }
 
@@ -1839,7 +1886,9 @@ impl BytecodeCompiler {
                 // ordered comparison (>, <, >=, <=), emit the specialized
                 // string comparison opcode for zero-dispatch execution.
                 if is_ordered_comparison(op) {
-                    if let (Ok(lt), Ok(rt)) = (self.infer_expr_type(left), self.infer_expr_type(right)) {
+                    if let (Ok(lt), Ok(rt)) =
+                        (self.infer_expr_type(left), self.infer_expr_type(right))
+                    {
                         let lt_name = type_display_name(&lt);
                         let rt_name = type_display_name(&rt);
                         let is_strish = |n: &str| matches!(n, "string" | "char");
@@ -1867,7 +1916,9 @@ impl BytecodeCompiler {
                 // CallMethod instead of falling through to the strict
                 // arithmetic check which would reject non-numeric types.
                 if matches!(op, BinaryOp::Sub) {
-                    if let (Ok(lt), Ok(rt)) = (self.infer_expr_type(left), self.infer_expr_type(right)) {
+                    if let (Ok(lt), Ok(rt)) =
+                        (self.infer_expr_type(left), self.infer_expr_type(right))
+                    {
                         let lt_name = type_display_name(&lt);
                         let rt_name = type_display_name(&rt);
                         // Phase 3e: accept both PascalCase ("DateTime") and
@@ -1875,19 +1926,31 @@ impl BytecodeCompiler {
                         // tracker uses PascalCase but the runtime
                         // inference engine returns lowercase for
                         // Expr::DateTime / Expr::Duration literals.
-                        let is_temporal = |n: &str| matches!(
-                            n,
-                            "DateTime" | "Duration" | "TimeSpan"
-                                | "datetime" | "duration" | "timespan"
-                        );
+                        let is_temporal = |n: &str| {
+                            matches!(
+                                n,
+                                "DateTime"
+                                    | "Duration"
+                                    | "TimeSpan"
+                                    | "datetime"
+                                    | "duration"
+                                    | "timespan"
+                            )
+                        };
                         if is_temporal(&lt_name) || is_temporal(&rt_name) {
                             self.compile_expr(left)?;
                             self.compile_expr(right)?;
                             let method_id = shape_value::MethodId::from_name("sub");
                             let string_id = self.program.add_string("sub".to_string());
-                            self.emit(Instruction::new(OpCode::CallMethod, Some(Operand::TypedMethodCall {
-                                method_id: method_id.0, arg_count: 1, string_id,
-                             receiver_type_tag: 0xFF, })));
+                            self.emit(Instruction::new(
+                                OpCode::CallMethod,
+                                Some(Operand::TypedMethodCall {
+                                    method_id: method_id.0,
+                                    arg_count: 1,
+                                    string_id,
+                                    receiver_type_tag: 0xFF,
+                                }),
+                            ));
                             self.last_expr_schema = None;
                             self.last_expr_type_info = None;
                             self.last_expr_numeric_type = None;
@@ -2013,10 +2076,7 @@ impl BytecodeCompiler {
                 //   default is introduced for property access).
                 if is_strict_arithmetic(op) || is_ordered_comparison(op) {
                     let is_access = |e: &Expr| {
-                        matches!(
-                            e,
-                            Expr::IndexAccess { .. } | Expr::PropertyAccess { .. }
-                        )
+                        matches!(e, Expr::IndexAccess { .. } | Expr::PropertyAccess { .. })
                     };
                     if left_numeric.is_none() && is_access(left) {
                         left_numeric = self
@@ -2195,9 +2255,7 @@ impl BytecodeCompiler {
                                     if self.defer_template_numeric_binop() {
                                         return Ok(());
                                     }
-                                    return Err(strict_typing_binop_error(
-                                        self, op, left, right,
-                                    ));
+                                    return Err(strict_typing_binop_error(self, op, left, right));
                                 }
                             }
                         }
@@ -2616,7 +2674,14 @@ mod u64_literal_inference_tests {
     #[test]
     fn narrow_sibling_promotes_int_literal() {
         // `x + 28`: x:i8, 28:Int literal → 28 adopts IntWidth(I8).
-        for w in [IntWidth::I8, IntWidth::I16, IntWidth::I32, IntWidth::U8, IntWidth::U16, IntWidth::U32] {
+        for w in [
+            IntWidth::I8,
+            IntWidth::I16,
+            IntWidth::I32,
+            IntWidth::U8,
+            IntWidth::U16,
+            IntWidth::U32,
+        ] {
             let mut l = Some(NumericType::IntWidth(w));
             let mut r = Some(NumericType::Int);
             BytecodeCompiler::promote_int_literal_to_width_sibling(
@@ -2645,7 +2710,11 @@ mod u64_literal_inference_tests {
             &mut l,
             &mut r,
         );
-        assert_eq!(r, Some(NumericType::Int), "negative literal stays Int for u64 sibling");
+        assert_eq!(
+            r,
+            Some(NumericType::Int),
+            "negative literal stays Int for u64 sibling"
+        );
     }
 
     #[test]
@@ -2674,7 +2743,11 @@ mod u64_literal_inference_tests {
             &mut l,
             &mut r,
         );
-        assert_eq!(r, Some(NumericType::Int), "non-literal Int sibling stays Int");
+        assert_eq!(
+            r,
+            Some(NumericType::Int),
+            "non-literal Int sibling stays Int"
+        );
     }
 
     #[test]
@@ -2717,9 +2790,7 @@ mod u64_literal_inference_tests {
     fn u64_var_div_literal_emits_div_typed_u64() {
         // `a / 2` on `a: u64` must emit `DivTyped` width U64 — the unsigned
         // carrier — NOT the signed `DivInt`.
-        let instrs = compile_top_level(
-            "let a: u64 = 100\nlet b: u64 = a / 2\n",
-        );
+        let instrs = compile_top_level("let a: u64 = 100\nlet b: u64 = a / 2\n");
         assert!(
             has_width_typed(&instrs, OpCode::DivTyped, NumericWidth::U64),
             "u64 / literal must emit DivTyped(U64): {:?}",
@@ -2733,9 +2804,7 @@ mod u64_literal_inference_tests {
 
     #[test]
     fn u64_var_mod_literal_emits_mod_typed_u64() {
-        let instrs = compile_top_level(
-            "let a: u64 = 100\nlet b: u64 = a % 10\n",
-        );
+        let instrs = compile_top_level("let a: u64 = 100\nlet b: u64 = a % 10\n");
         assert!(
             has_width_typed(&instrs, OpCode::ModTyped, NumericWidth::U64),
             "u64 % literal must emit ModTyped(U64)"
@@ -2746,9 +2815,7 @@ mod u64_literal_inference_tests {
     #[test]
     fn u64_literal_on_left_emits_div_typed_u64() {
         // `100 / a` — literal on the LEFT.
-        let instrs = compile_top_level(
-            "let a: u64 = 7\nlet b: u64 = 100 / a\n",
-        );
+        let instrs = compile_top_level("let a: u64 = 7\nlet b: u64 = 100 / a\n");
         assert!(
             has_width_typed(&instrs, OpCode::DivTyped, NumericWidth::U64),
             "literal / u64 must emit DivTyped(U64)"
@@ -2758,9 +2825,7 @@ mod u64_literal_inference_tests {
     #[test]
     fn u64_var_add_literal_stays_u64_carrier() {
         // `a + 1` on `a: u64` must emit `AddTyped` width U64.
-        let instrs = compile_top_level(
-            "let a: u64 = 100\nlet b: u64 = a + 1\n",
-        );
+        let instrs = compile_top_level("let a: u64 = 100\nlet b: u64 = a + 1\n");
         assert!(
             has_width_typed(&instrs, OpCode::AddTyped, NumericWidth::U64),
             "u64 + literal must emit AddTyped(U64)"
@@ -2780,9 +2845,7 @@ mod u64_literal_inference_tests {
     fn narrow_var_add_literal_stays_narrow_carrier() {
         // `x + 28` on `x: i8` must emit `AddTyped` width I8 — the truncating
         // narrow carrier — NOT the signed-default `AddInt`.
-        let instrs = compile_top_level(
-            "let x: i8 = 100\nlet y: i8 = x + 28\n",
-        );
+        let instrs = compile_top_level("let x: i8 = 100\nlet y: i8 = x + 28\n");
         assert!(
             has_width_typed(&instrs, OpCode::AddTyped, NumericWidth::I8),
             "i8 + literal must emit AddTyped(I8): {:?}",
@@ -2793,9 +2856,7 @@ mod u64_literal_inference_tests {
 
     #[test]
     fn narrow_u32_div_literal_stays_narrow_carrier() {
-        let instrs = compile_top_level(
-            "let x: u32 = 4000000000\nlet y: u32 = x / 4\n",
-        );
+        let instrs = compile_top_level("let x: u32 = 4000000000\nlet y: u32 = x / 4\n");
         assert!(
             has_width_typed(&instrs, OpCode::DivTyped, NumericWidth::U32),
             "u32 / literal must emit DivTyped(U32)"

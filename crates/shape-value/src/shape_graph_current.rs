@@ -103,8 +103,7 @@ thread_local! {
 /// per-process table instead of getting `None`. Scoped callers
 /// (Runtime-installed) still get their own per-VM isolation, which
 /// was the B5 goal.
-static DEFAULT_SHAPE_TABLE: LazyLock<Arc<ShapeTableHandle>> =
-    LazyLock::new(ShapeTableHandle::new);
+static DEFAULT_SHAPE_TABLE: LazyLock<Arc<ShapeTableHandle>> = LazyLock::new(ShapeTableHandle::new);
 
 /// RAII guard that installs a shape-table handle on the thread-local
 /// slot for the lifetime of the guard.
@@ -122,8 +121,7 @@ impl SyncShapeTableScope {
     /// Install `handle` as the current thread-local shape-table handle,
     /// saving the previous value for restoration on drop.
     pub fn enter(handle: Arc<ShapeTableHandle>) -> Self {
-        let prev = SYNC_CURRENT_SHAPE_TABLE
-            .with(|cell| cell.borrow_mut().replace(handle));
+        let prev = SYNC_CURRENT_SHAPE_TABLE.with(|cell| cell.borrow_mut().replace(handle));
         Self { prev }
     }
 }

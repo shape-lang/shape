@@ -246,11 +246,9 @@ fn local_init_kind(
                 },
                 _ => None,
             },
-            OpCode::AddInt
-            | OpCode::SubInt
-            | OpCode::MulInt
-            | OpCode::DivInt
-            | OpCode::ModInt => Some(NumericKind::Int),
+            OpCode::AddInt | OpCode::SubInt | OpCode::MulInt | OpCode::DivInt | OpCode::ModInt => {
+                Some(NumericKind::Int)
+            }
             OpCode::AddNumber
             | OpCode::SubNumber
             | OpCode::MulNumber

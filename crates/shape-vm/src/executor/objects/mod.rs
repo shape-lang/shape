@@ -188,7 +188,7 @@ use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
 };
-use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, TemporalData, ValueSlot, VMError};
+use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, TemporalData, VMError, ValueSlot};
 
 /// Select the method-registry PHF lookup for a v2-raw `TypedArray<T>`
 /// receiver, classified by its stamped element-type discriminant.
@@ -440,9 +440,7 @@ impl VirtualMachine {
         if self.sp >= arg_count + 1 {
             let receiver_idx_check = self.sp - arg_count - 1;
             let (_, receiver_kind_peek) = self.stack_read_kinded_raw(receiver_idx_check);
-            if receiver_kind_peek
-                == NativeKind::Ptr(shape_value::HeapKind::TraitObject)
-            {
+            if receiver_kind_peek == NativeKind::Ptr(shape_value::HeapKind::TraitObject) {
                 // Reconstruct the instruction with `arg_count` /
                 // `string_id` operands and call into the dyn dispatch
                 // path. The TypedMethodCall operand layout matches
@@ -481,18 +479,18 @@ impl VirtualMachine {
         // owned `String` to release the immutable borrow on
         // `self.program.strings` before the `dispatch_method_kinded`
         // call below takes a mutable borrow on `self`.
-        let method_name: String = self
-            .program
-            .strings
-            .get(string_id)
-            .cloned()
-            .ok_or_else(|| {
-                VMError::RuntimeError(format!(
-                    "op_call_method: string_id {} out of bounds (pool size {})",
-                    string_id,
-                    self.program.strings.len()
-                ))
-            })?;
+        let method_name: String =
+            self.program
+                .strings
+                .get(string_id)
+                .cloned()
+                .ok_or_else(|| {
+                    VMError::RuntimeError(format!(
+                        "op_call_method: string_id {} out of bounds (pool size {})",
+                        string_id,
+                        self.program.strings.len()
+                    ))
+                })?;
 
         // Classify the receiver, resolve the handler, and dispatch via
         // the shared `dispatch_method_kinded` entry — borrow-only ABI per
@@ -590,11 +588,7 @@ impl VirtualMachine {
     /// per §2.3 typed-Arc invariant + Wave 2 Round 4 D4 ckpt-3 v2-raw
     /// migration; the borrowed `KindedSlot` in `args[0]` owns one share
     /// so the pointee stays live for this scope.
-    fn resolve_typed_object_ufcs(
-        &self,
-        args: &[KindedSlot],
-        method_name: &str,
-    ) -> Option<u16> {
+    fn resolve_typed_object_ufcs(&self, args: &[KindedSlot], method_name: &str) -> Option<u16> {
         let receiver_bits = args[0].slot.raw();
         if receiver_bits == 0 {
             return None;
@@ -605,9 +599,8 @@ impl VirtualMachine {
         // `heap_value.rs:3497`); the borrowed `KindedSlot` carrier in
         // `args[0]` owns one share so the pointee stays live for this
         // scope. Transient borrow — no Arc reconstruction.
-        let schema_id = unsafe {
-            (*(receiver_bits as *const shape_value::TypedObjectStorage)).schema_id
-        };
+        let schema_id =
+            unsafe { (*(receiver_bits as *const shape_value::TypedObjectStorage)).schema_id };
         let concrete_type_name = self
             .program
             .type_schema_registry
@@ -719,7 +712,9 @@ impl VirtualMachine {
             | NativeKind::IntSize
             | NativeKind::NullableIntSize
             | NativeKind::UIntSize
-            | NativeKind::NullableUIntSize => method_registry::NUMBER_METHODS.get(method_name).copied(),
+            | NativeKind::NullableUIntSize => {
+                method_registry::NUMBER_METHODS.get(method_name).copied()
+            }
             NativeKind::Bool => method_registry::BOOL_METHODS.get(method_name).copied(),
             NativeKind::String => method_registry::STRING_METHODS.get(method_name).copied(),
             // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
@@ -1001,7 +996,8 @@ impl VirtualMachine {
                 return Err(VMError::RuntimeError(
                     "MakeRange: inclusive flag operand must be Bool (kind-source bug \
                      at compile site — `compiler/expressions/misc.rs` emits a \
-                     `PushConst<Bool>` for the inclusive flag)".into(),
+                     `PushConst<Bool>` for the inclusive flag)"
+                        .into(),
                 ));
             }
         };

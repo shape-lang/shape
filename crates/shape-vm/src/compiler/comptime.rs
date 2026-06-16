@@ -8,8 +8,7 @@ use crate::compiler::BytecodeCompiler;
 use crate::executor::{VMConfig, VirtualMachine};
 use shape_ast::ast::{
     AnnotationHandlerParam, DestructurePattern, Expr, FunctionDef, FunctionParameter, Item,
-    ObjectEntry, ObjectTypeField, Program, Span, Statement, TypeAnnotation, VarKind,
-    VariableDecl,
+    ObjectEntry, ObjectTypeField, Program, Span, Statement, TypeAnnotation, VarKind, VariableDecl,
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_value::heap_value::{HeapKind, HeapValue};
@@ -522,10 +521,7 @@ fn rebind_typed_object_bindings_to_bytecode_schemas(
         // need re-pointing into the fresh bytecode registry. Other
         // kinds (scalars, strings, arrays, etc.) are independent of
         // the bytecode's `TypeSchemaRegistry`.
-        if !matches!(
-            value.kind(),
-            NativeKind::Ptr(HeapKind::TypedObject)
-        ) {
+        if !matches!(value.kind(), NativeKind::Ptr(HeapKind::TypedObject)) {
             continue;
         }
         let src_bits = value.slot().raw();
@@ -547,8 +543,7 @@ fn rebind_typed_object_bindings_to_bytecode_schemas(
         // `TypedObjectStorage`. The binding owns one strong-count share
         // on the HeapHeader-at-offset-0 refcount for the duration of
         // this iteration; the storage cannot be deallocated under us.
-        let src_storage: &TypedObjectStorage =
-            unsafe { &*(src_bits as *const TypedObjectStorage) };
+        let src_storage: &TypedObjectStorage = unsafe { &*(src_bits as *const TypedObjectStorage) };
 
         // Resolve the source schema (the ambient registry holds both
         // stdlib + predeclared schemas, including any registered by
@@ -628,12 +623,8 @@ fn rebind_typed_object_bindings_to_bytecode_schemas(
             // construction-side parallel kind table (§2.7.7 / Q9).
             let src_kind = src_storage.field_kinds[src_idx];
             let src_slot = src_storage.slots[src_idx];
-            let kinded = read_typed_object_field(
-                src_slot,
-                src_kind,
-                src_storage.heap_mask,
-                src_idx,
-            );
+            let kinded =
+                read_typed_object_field(src_slot, src_kind, src_storage.heap_mask, src_idx);
 
             // Transfer the share into `new_slots`; the rebuilt
             // TypedObject's `_drop` releases it via `drop_fields`.
@@ -1130,10 +1121,7 @@ pub(crate) fn nb_to_literal(nb: &KindedSlot) -> shape_ast::ast::Literal {
 
 /// Public entry point for converting a comptime KindedSlot to an AST
 /// expression.
-pub(crate) fn nb_to_expr_public(
-    nb: &KindedSlot,
-    span: Span,
-) -> std::result::Result<Expr, String> {
+pub(crate) fn nb_to_expr_public(nb: &KindedSlot, span: Span) -> std::result::Result<Expr, String> {
     nb_to_expr(nb, span)
 }
 
@@ -1338,9 +1326,7 @@ fn read_typed_object_field(
                     shape_value::v2::refcount::v2_retain(hdr);
                 }
                 HeapKind::TypedObject => {
-                    Arc::increment_strong_count(
-                        bits as *const shape_value::TypedObjectStorage,
-                    );
+                    Arc::increment_strong_count(bits as *const shape_value::TypedObjectStorage);
                 }
                 HeapKind::Decimal => {
                     Arc::increment_strong_count(bits as *const rust_decimal::Decimal);
@@ -1596,8 +1582,7 @@ mod tests {
         );
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
-            err_msg.contains("comptime-only builtin")
-                || err_msg.contains("comptime { }"),
+            err_msg.contains("comptime-only builtin") || err_msg.contains("comptime { }"),
             "Error should surface the comptime-only-builtin gate (W7): {}",
             err_msg
         );
@@ -1665,8 +1650,7 @@ mod tests {
             Ok(Err(e)) => {
                 let msg = format!("{:?}", e);
                 assert!(
-                    !msg.contains("populate_module_objects")
-                        && !msg.contains("NotImplemented"),
+                    !msg.contains("populate_module_objects") && !msg.contains("NotImplemented"),
                     "{ctx}: dispatch chain must not surface the pre-§2.7.26 \
                      NotImplemented stub: {msg}",
                 );
@@ -1686,7 +1670,10 @@ mod tests {
         }
     }
 
-    fn snapshot_with_struct(name: &str, fields: &[(&str, TypeAnn)]) -> crate::compiler::comptime_builtins::TypeReflectionSnapshot {
+    fn snapshot_with_struct(
+        name: &str,
+        fields: &[(&str, TypeAnn)],
+    ) -> crate::compiler::comptime_builtins::TypeReflectionSnapshot {
         let mut snapshot = crate::compiler::comptime_builtins::TypeReflectionSnapshot::default();
         let ordered: Vec<(String, TypeAnn)> = fields
             .iter()
@@ -1696,7 +1683,10 @@ mod tests {
         snapshot
     }
 
-    fn snapshot_with_enum(name: &str, variants: &[&str]) -> crate::compiler::comptime_builtins::TypeReflectionSnapshot {
+    fn snapshot_with_enum(
+        name: &str,
+        variants: &[&str],
+    ) -> crate::compiler::comptime_builtins::TypeReflectionSnapshot {
         let mut snapshot = crate::compiler::comptime_builtins::TypeReflectionSnapshot::default();
         snapshot.enum_defs.insert(
             name.to_string(),
@@ -1768,10 +1758,7 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let snapshot = snapshot_with_struct(
-            "Point",
-            &[("x", TypeAnn::Basic("int".to_string()))],
-        );
+        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -1817,10 +1804,7 @@ mod tests {
                 Span::DUMMY,
             ),
         ];
-        let snapshot = snapshot_with_struct(
-            "Point",
-            &[("x", TypeAnn::Basic("int".to_string()))],
-        );
+        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -1868,10 +1852,7 @@ mod tests {
                 Span::DUMMY,
             ),
         ];
-        let snapshot = snapshot_with_struct(
-            "Point",
-            &[("x", TypeAnn::Basic("int".to_string()))],
-        );
+        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -1927,10 +1908,7 @@ mod tests {
                 Span::DUMMY,
             ),
         ];
-        let snapshot = snapshot_with_struct(
-            "Point",
-            &[("x", TypeAnn::Basic("int".to_string()))],
-        );
+        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -1988,10 +1966,7 @@ mod tests {
             }),
             Span::DUMMY,
         )];
-        let snapshot = snapshot_with_struct(
-            "Point",
-            &[("x", TypeAnn::Basic("int".to_string()))],
-        );
+        let snapshot = snapshot_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
         assert_dispatch_reached(
             stmts,
             Default::default(),
@@ -2211,8 +2186,7 @@ const KIND = comptime {
             "W14.2-C1: chained `type_info(Point).kind` must parse: {:?}",
             program.err()
         );
-        let result =
-            crate::compiler::BytecodeCompiler::new().compile(&program.unwrap());
+        let result = crate::compiler::BytecodeCompiler::new().compile(&program.unwrap());
         // Compile may fail due to documented pre-existing gaps; but it
         // MUST NOT surface either retired legacy gate.
         if let Err(e) = result {
@@ -2255,8 +2229,7 @@ const COMBO = comptime {
             "W14.2-C1: build_config + type_info combo must parse: {:?}",
             program.err()
         );
-        let result =
-            crate::compiler::BytecodeCompiler::new().compile(&program.unwrap());
+        let result = crate::compiler::BytecodeCompiler::new().compile(&program.unwrap());
         if let Err(e) = result {
             let msg = format!("{}", e);
             assert!(
@@ -2334,7 +2307,14 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
+        let result = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
         assert!(
             result.is_ok(),
             "Comptime should succeed: {:?}",
@@ -2353,7 +2333,14 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
+        let result = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
         assert!(
             result.is_ok(),
             "Comptime should succeed: {:?}",
@@ -2379,7 +2366,14 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
+        let result = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
         assert!(
             result.is_ok(),
             "Comptime arithmetic should succeed: {:?}",
@@ -2402,7 +2396,8 @@ mod tests_deferred {
         use shape_runtime::module_exports::ModuleExports;
 
         let mut ext = ModuleExports::new("mock_db");
-        register_test_function(&mut ext, 
+        register_test_function(
+            &mut ext,
             "get_schema",
             |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
                 Ok(ValueWord::from_string(Arc::new(
@@ -2453,7 +2448,8 @@ mod tests_deferred {
         use shape_runtime::module_exports::ModuleExports;
 
         let mut ext = ModuleExports::new("test_ext");
-        register_test_function(&mut ext, 
+        register_test_function(
+            &mut ext,
             "version",
             |_args, _ctx: &shape_runtime::module_exports::ModuleContext| {
                 Ok(ValueWord::from_string(Arc::new("1.0".to_string())))
@@ -2522,7 +2518,14 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
+        let result = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
         assert!(
             result.is_ok(),
             "Comptime multiplication should succeed: {:?}",
@@ -2551,8 +2554,15 @@ mod tests_deferred {
             }),
             Span::DUMMY,
         )];
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default())
-            .map(|r| r.value);
+        let result = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .map(|r| r.value);
         assert!(
             result.is_ok(),
             "build_config() should work in comptime: {:?}",
@@ -2590,7 +2600,14 @@ mod tests_deferred {
             Span::DUMMY,
         )];
 
-        let result = execute_comptime(&stmts, &[], &[], Default::default(), Default::default(), Default::default());
+        let result = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
         assert!(
             result.is_ok(),
             "print(build_config()) should execute in comptime: {:?}",
@@ -2641,11 +2658,23 @@ mod tests_deferred {
                 "name",
                 ValueWord::from_string(Arc::new("my_func".to_string())),
             ),
-            ("fields", ValueWord::from_array(shape_value::vmarray_from_vec(vec![]))),
-            ("params", ValueWord::from_array(shape_value::vmarray_from_vec(vec![]))),
+            (
+                "fields",
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![])),
+            ),
+            (
+                "params",
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![])),
+            ),
             ("return_type", ValueWord::none()),
-            ("annotations", ValueWord::from_array(shape_value::vmarray_from_vec(vec![]))),
-            ("captures", ValueWord::from_array(shape_value::vmarray_from_vec(vec![]))),
+            (
+                "annotations",
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![])),
+            ),
+            (
+                "captures",
+                ValueWord::from_array(shape_value::vmarray_from_vec(vec![])),
+            ),
         ]);
 
         let result = execute_comptime_with_target(

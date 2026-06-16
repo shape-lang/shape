@@ -289,7 +289,8 @@ impl JITExecutor {
                           interpreter via this `[jit-fallback]` path preserves \
                           VM == JIT semantics. Tracked via \
                           `docs/v0.3-close-summary.md` §5.16 (v0.4 / planned: JIT \
-                          identifier-eval lowering root-cause fix)".to_string(),
+                          identifier-eval lowering root-cause fix)"
+                    .to_string(),
                 location: None,
             });
         }
@@ -347,7 +348,8 @@ impl JITExecutor {
                           Tracked via `docs/v0.3-close-summary.md` §5.16 (v0.4 / \
                           planned: JIT ModuleFn dispatch root-cause fix at \
                           `dispatch_module_fn_call` todo!() + §2.7.10/Q11 kinded \
-                          handler ABI rebuild)".to_string(),
+                          handler ABI rebuild)"
+                    .to_string(),
                 location: None,
             });
         }
@@ -418,7 +420,8 @@ impl JITExecutor {
                           supervisor 2026-05-28 c4-4B ratification + \
                           `docs/cluster-audits/v0.3.3/04-pointer-as-float-leak.md` \
                           §4B (Sub-cluster 4B FN-REG-CORRECTNESS / RELEASE-BLOCKING; \
-                          this SURFACE-deopt is the ratified v0.3.3 fix shape)".to_string(),
+                          this SURFACE-deopt is the ratified v0.3.3 fix shape)"
+                    .to_string(),
                 location: None,
             });
         }
@@ -708,9 +711,15 @@ impl JITExecutor {
             target: "shape_jit::arc_counters",
             tracing::Level::INFO,
         );
-        let (retain_before, release_before, frees_before,
-             str_allocs_before, str_retain_before,
-             str_release_before, str_frees_before) = if arc_counters_enabled {
+        let (
+            retain_before,
+            release_before,
+            frees_before,
+            str_allocs_before,
+            str_retain_before,
+            str_release_before,
+            str_frees_before,
+        ) = if arc_counters_enabled {
             (
                 crate::ffi::arc::JIT_ARC_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed),
                 crate::ffi::arc::JIT_ARC_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed),
@@ -736,17 +745,13 @@ impl JITExecutor {
             let frees_after =
                 crate::ffi::arc::JIT_ARC_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed);
             let str_allocs_after =
-                crate::ffi::arc::STRING_CONSTANT_ALLOCS
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                crate::ffi::arc::STRING_CONSTANT_ALLOCS.load(std::sync::atomic::Ordering::Relaxed);
             let str_retain_after =
-                crate::ffi::arc::STRING_RETAIN_CALLS
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                crate::ffi::arc::STRING_RETAIN_CALLS.load(std::sync::atomic::Ordering::Relaxed);
             let str_release_after =
-                crate::ffi::arc::STRING_RELEASE_CALLS
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                crate::ffi::arc::STRING_RELEASE_CALLS.load(std::sync::atomic::Ordering::Relaxed);
             let str_frees_after =
-                crate::ffi::arc::STRING_RELEASE_FREES
-                    .load(std::sync::atomic::Ordering::Relaxed);
+                crate::ffi::arc::STRING_RELEASE_FREES.load(std::sync::atomic::Ordering::Relaxed);
             tracing::info!(
                 target: "shape_jit::arc_counters",
                 retain_calls = retain_after - retain_before,
@@ -834,11 +839,10 @@ impl JITExecutor {
                     // was stored in the `JIT_RUNTIME_ERROR` thread-local —
                     // surface it verbatim so `--mode jit` reports the SAME
                     // error the interpreter would.
-                    let message =
-                        match crate::ffi::control::take_jit_runtime_error() {
-                            Some(vm_err) => vm_err,
-                            None => format!("JIT execution error (code: {})", signal),
-                        };
+                    let message = match crate::ffi::control::take_jit_runtime_error() {
+                        Some(vm_err) => vm_err,
+                        None => format!("JIT execution error (code: {})", signal),
+                    };
                     return Ok(Err(shape_runtime::error::ShapeError::RuntimeError {
                         message,
                         location: None,
@@ -859,18 +863,10 @@ impl JITExecutor {
         // v2: check return_type_tag for native-typed return values.
         // Non-zero tags bypass NaN-box decoding entirely.
         let wire_value = match jit_ctx.return_type_tag {
-            crate::context::RETURN_TAG_F64 => {
-                WireValue::Number(f64::from_bits(raw_result))
-            }
-            crate::context::RETURN_TAG_I64 => {
-                WireValue::Integer(raw_result as i64)
-            }
-            crate::context::RETURN_TAG_I32 => {
-                WireValue::Integer((raw_result as i32) as i64)
-            }
-            crate::context::RETURN_TAG_BOOL => {
-                WireValue::Bool(raw_result != 0)
-            }
+            crate::context::RETURN_TAG_F64 => WireValue::Number(f64::from_bits(raw_result)),
+            crate::context::RETURN_TAG_I64 => WireValue::Integer(raw_result as i64),
+            crate::context::RETURN_TAG_I32 => WireValue::Integer((raw_result as i32) as i64),
+            crate::context::RETURN_TAG_BOOL => WireValue::Bool(raw_result != 0),
             crate::context::RETURN_TAG_UNIT => {
                 // W11-jit-new-array: `()`-typed return — the program's
                 // terminal expression produced no value. Map to Null

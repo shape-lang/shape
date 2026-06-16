@@ -1,7 +1,7 @@
 use crate::module_cache::ModuleCache;
 use shape_ast::ast::{
-    DocTargetKind, ExportItem, FunctionParameter, TraitMemberSignature, Item, Program, Span,
-    TraitMember, TypeAnnotation, TypeParam, extend_method_doc_path, impl_method_doc_path,
+    DocTargetKind, ExportItem, FunctionParameter, Item, Program, Span, TraitMember,
+    TraitMemberSignature, TypeAnnotation, TypeParam, extend_method_doc_path, impl_method_doc_path,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

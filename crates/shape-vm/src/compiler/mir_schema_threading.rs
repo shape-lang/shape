@@ -114,11 +114,10 @@ pub(crate) fn back_patch_schema_ids(mir: &mut MirFunction, type_tracker: &mut Ty
                 // surrounding comment explains the carrier-tier site).
                 // Verification-pass safety net catches via the
                 // `__inline_obj_*` transitional row.
-                let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> =
-                    field_names
-                        .iter()
-                        .map(|s| (s.as_str(), shape_runtime::type_schema::FieldType::Any))
-                        .collect();
+                let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = field_names
+                    .iter()
+                    .map(|s| (s.as_str(), shape_runtime::type_schema::FieldType::Any))
+                    .collect();
                 // `register_inline_object_schema_typed` is idempotent: a
                 // second call with the same field ordering + types
                 // returns the existing schema id (the registry's

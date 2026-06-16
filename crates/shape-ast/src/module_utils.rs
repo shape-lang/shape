@@ -47,9 +47,7 @@ pub struct ModuleExportSymbol {
 /// resolution handled by [`collect_exported_symbols`].
 pub fn direct_export_target(export_item: &ExportItem) -> Option<(String, ModuleExportKind)> {
     match export_item {
-        ExportItem::Function(function) => {
-            Some((function.name.clone(), ModuleExportKind::Function))
-        }
+        ExportItem::Function(function) => Some((function.name.clone(), ModuleExportKind::Function)),
         ExportItem::BuiltinFunction(function) => {
             Some((function.name.clone(), ModuleExportKind::BuiltinFunction))
         }
@@ -61,9 +59,7 @@ pub fn direct_export_target(export_item: &ExportItem) -> Option<(String, ModuleE
         ExportItem::Struct(struct_def) => {
             Some((struct_def.name.clone(), ModuleExportKind::TypeAlias))
         }
-        ExportItem::Trait(trait_def) => {
-            Some((trait_def.name.clone(), ModuleExportKind::Trait))
-        }
+        ExportItem::Trait(trait_def) => Some((trait_def.name.clone(), ModuleExportKind::Trait)),
         ExportItem::Annotation(annotation) => {
             Some((annotation.name.clone(), ModuleExportKind::Annotation))
         }

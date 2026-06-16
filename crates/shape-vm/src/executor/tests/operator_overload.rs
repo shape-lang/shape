@@ -653,5 +653,3 @@ fn test_r5_4e_mat_add_runtime_returns_correct_values() {
 // `test_r5_4e_mat_add_runtime_returns_correct_values` above, where
 // R5.4B's nested-array typed-inference rule produces operands in the
 // `HeapValue::Array` shape that `extract_matrix_f64` accepts.
-
-

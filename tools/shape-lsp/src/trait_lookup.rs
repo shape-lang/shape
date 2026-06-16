@@ -138,7 +138,8 @@ pub fn collect_impls_for_type(
     }
 
     if let (Some(cache), Some(current_file)) = (module_cache, current_file) {
-        let mut import_paths = cache.list_importable_modules_with_context(current_file, workspace_root);
+        let mut import_paths =
+            cache.list_importable_modules_with_context(current_file, workspace_root);
         import_paths.sort();
         for import_path in import_paths {
             let Some(resolved) = cache.resolve_import(&import_path, current_file, workspace_root)

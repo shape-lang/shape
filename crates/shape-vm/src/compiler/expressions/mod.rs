@@ -1370,10 +1370,7 @@ impl BytecodeCompiler {
 
         if let Expr::Identifier(name, _) = expr {
             if let Some(type_name) = self.tracker_type_name_for_identifier(name) {
-                if matches!(
-                    type_name.as_str(),
-                    "DateTime" | "Duration" | "TimeSpan"
-                ) {
+                if matches!(type_name.as_str(), "DateTime" | "Duration" | "TimeSpan") {
                     return Ok(Type::Concrete(TypeAnnotation::Basic(type_name)));
                 }
                 // Strict-typing-sweep: trust the type tracker for any
@@ -1388,10 +1385,7 @@ impl BytecodeCompiler {
                 // routed through the deleted *Dynamic* shim.
                 if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(&type_name)
                     || shape_runtime::type_system::BuiltinTypes::is_number_type_name(&type_name)
-                    || matches!(
-                        type_name.as_str(),
-                        "bool" | "string" | "decimal" | "bigint"
-                    )
+                    || matches!(type_name.as_str(), "bool" | "string" | "decimal" | "bigint")
                 {
                     return Ok(Type::Concrete(TypeAnnotation::Basic(type_name)));
                 }
@@ -1448,11 +1442,7 @@ impl BytecodeCompiler {
                     }
                 }
             }
-            if let Some(rt_name) = self
-                .type_tracker
-                .get_function_return_type(name)
-                .cloned()
-            {
+            if let Some(rt_name) = self.type_tracker.get_function_return_type(name).cloned() {
                 return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
             }
             // Sweep phase 3c.1: closure-binding return type. When the
@@ -1462,11 +1452,7 @@ impl BytecodeCompiler {
             // `f(5) + f(7)` would fail strict typing as
             // `unknown + unknown`.
             if let Some(local_idx) = self.resolve_local(name) {
-                if let Some(rt_name) = self
-                    .local_callable_return_types
-                    .get(&local_idx)
-                    .cloned()
-                {
+                if let Some(rt_name) = self.local_callable_return_types.get(&local_idx).cloned() {
                     return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
                 }
             }
@@ -1524,7 +1510,10 @@ impl BytecodeCompiler {
         // from `local_array_callable_return_types` /
         // `module_binding_array_callable_return_types` so binops like
         // `arr[0](1) + arr[1](1)` can dispatch under strict typing.
-        if let Expr::MethodCall { receiver, method, .. } = expr {
+        if let Expr::MethodCall {
+            receiver, method, ..
+        } = expr
+        {
             if method == "__call__" {
                 if let Expr::IndexAccess { object, .. } = receiver.as_ref() {
                     if let Expr::Identifier(arr_name, _) = object.as_ref() {
@@ -1537,20 +1526,14 @@ impl BytecodeCompiler {
                                 return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
                             }
                         }
-                        if let Some(scoped) =
-                            self.resolve_scoped_module_binding_name(arr_name)
-                        {
-                            if let Some(&binding_idx) =
-                                self.module_bindings.get(&scoped)
-                            {
+                        if let Some(scoped) = self.resolve_scoped_module_binding_name(arr_name) {
+                            if let Some(&binding_idx) = self.module_bindings.get(&scoped) {
                                 if let Some(rt_name) = self
                                     .module_binding_array_callable_return_types
                                     .get(&binding_idx)
                                     .cloned()
                                 {
-                                    return Ok(Type::Concrete(TypeAnnotation::Basic(
-                                        rt_name,
-                                    )));
+                                    return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
                                 }
                             }
                         }
@@ -1573,7 +1556,13 @@ impl BytecodeCompiler {
         // accumulator types from the tracker, so chained concats like
         // `result + name + " "` would otherwise resolve to Unknown for
         // any inner sub-expression that isn't a bare identifier.
-        if let Expr::BinaryOp { op: shape_ast::ast::BinaryOp::Add, left, right, .. } = expr {
+        if let Expr::BinaryOp {
+            op: shape_ast::ast::BinaryOp::Add,
+            left,
+            right,
+            ..
+        } = expr
+        {
             let lt = self.infer_expr_type(left).ok();
             let rt = self.infer_expr_type(right).ok();
             let is_string = |t: &Option<shape_runtime::type_system::Type>| {
@@ -1597,7 +1586,13 @@ impl BytecodeCompiler {
         // hole where `infer_expr_type` for `self.name` would fall through
         // to the runtime inference engine — which doesn't know `self`'s
         // type — and return Unknown.
-        if let Expr::PropertyAccess { object, property, optional, .. } = expr {
+        if let Expr::PropertyAccess {
+            object,
+            property,
+            optional,
+            ..
+        } = expr
+        {
             if !*optional {
                 if let Some(schema_id) = self.tracker_schema_id_for_expr(object) {
                     if let Some(field_ty) = self
@@ -1646,7 +1641,12 @@ impl BytecodeCompiler {
         // a kind: if inference could not prove the parameter is an array the
         // tracker name is absent and this returns `None`, so the operand
         // stays unproven and the binop emitter raises a loud compile error.
-        if let Expr::IndexAccess { object, end_index: None, .. } = expr {
+        if let Expr::IndexAccess {
+            object,
+            end_index: None,
+            ..
+        } = expr
+        {
             if let Some(elem) = self.tracked_array_element_type(object) {
                 return Ok(elem);
             }
@@ -1666,7 +1666,10 @@ impl BytecodeCompiler {
         // own `Array<T>` for a `SelfType` method, the element `T` for a
         // `ReceiverParam(0)` method. An unproven receiver / non-array / other
         // return shape falls through to the engine below — no fabrication.
-        if let Expr::MethodCall { receiver, method, .. } = expr {
+        if let Expr::MethodCall {
+            receiver, method, ..
+        } = expr
+        {
             if let Some(result_ct) =
                 crate::compiler::monomorphization::type_resolution::method_call_receiver_derived_concrete_type(
                     self, receiver, method,

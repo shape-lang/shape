@@ -35,8 +35,8 @@ pub fn create_archive_module() -> ModuleExports {
         |data, _ctx| {
             use std::io::{Cursor, Read};
 
-            let bytes = bytes_from_i64_slice(&data)
-                .map_err(|e| format!("archive.zip_extract(): {}", e))?;
+            let bytes =
+                bytes_from_i64_slice(&data).map_err(|e| format!("archive.zip_extract(): {}", e))?;
 
             let cursor = Cursor::new(bytes);
             let mut archive = zip::ZipArchive::new(cursor)
@@ -79,8 +79,8 @@ pub fn create_archive_module() -> ModuleExports {
         |data, _ctx| {
             use std::io::{Cursor, Read};
 
-            let bytes = bytes_from_i64_slice(&data)
-                .map_err(|e| format!("archive.tar_extract(): {}", e))?;
+            let bytes =
+                bytes_from_i64_slice(&data).map_err(|e| format!("archive.tar_extract(): {}", e))?;
 
             let cursor = Cursor::new(bytes);
             let mut archive = tar::Archive::new(cursor);

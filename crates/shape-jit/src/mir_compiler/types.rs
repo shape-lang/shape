@@ -393,9 +393,7 @@ pub(crate) fn infer_slot_kinds_with_concrete(
                                 // chained terminal's receiver classified as
                                 // Iterator → VM-trampoline delegation, never
                                 // the legacy `UInt64` garbage path.
-                                .or_else(|| {
-                                    iterator_adapter_return_kind(name, args, &kinds)
-                                })
+                                .or_else(|| iterator_adapter_return_kind(name, args, &kinds))
                         }
                         Operand::Constant(MirConstant::Function(name)) => {
                             well_known_function_return_kind(name)

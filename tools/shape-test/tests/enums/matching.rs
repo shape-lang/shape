@@ -187,7 +187,9 @@ fn area(s: Shape) -> number {
 print(area(Shape::Rectangle(3.0, 4.0)))
 print(area(Shape::Point))
 "#;
-    ShapeTest::new(code).expect_run_ok().expect_output("12.0\n0");
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("12.0\n0");
 }
 
 // =========================================================================

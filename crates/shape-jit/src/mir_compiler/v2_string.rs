@@ -29,10 +29,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// `str_ptr` is a Cranelift value holding a pointer to a `StringObj`.
     /// Returns the byte length as an i64 value.
     pub(crate) fn compile_string_len(&mut self, str_ptr: Value) -> Value {
-        let len = self
-            .builder
-            .ins()
-            .load(types::I32, MemFlags::new(), str_ptr, STRING_OBJ_LEN_OFFSET);
+        let len =
+            self.builder
+                .ins()
+                .load(types::I32, MemFlags::new(), str_ptr, STRING_OBJ_LEN_OFFSET);
         self.builder.ins().uextend(types::I64, len)
     }
 
@@ -144,9 +144,7 @@ mod tests {
 
         let str_ptr = fbuilder.block_params(block)[0];
         // Same pattern as compile_string_data_ptr
-        let data = fbuilder
-            .ins()
-            .load(types::I64, MemFlags::new(), str_ptr, 8); // STRING_OBJ_DATA_OFFSET
+        let data = fbuilder.ins().load(types::I64, MemFlags::new(), str_ptr, 8); // STRING_OBJ_DATA_OFFSET
         fbuilder.ins().return_(&[data]);
         fbuilder.finalize();
 

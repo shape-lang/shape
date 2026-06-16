@@ -123,11 +123,7 @@ pub fn create_csv_module() -> ModuleExports {
         |data, delimiter, _ctx| {
             let rows = rows_from_heap_array(&data, "csv.stringify()")?;
 
-            let delim_byte = delimiter
-                .as_bytes()
-                .first()
-                .copied()
-                .unwrap_or(b',');
+            let delim_byte = delimiter.as_bytes().first().copied().unwrap_or(b',');
 
             let mut writer = csv::WriterBuilder::new()
                 .delimiter(delim_byte)
@@ -241,9 +237,8 @@ pub fn create_csv_module() -> ModuleExports {
             // dedupes by field-name list; subsequent CSV files with the
             // same header columns reuse the same SchemaId.
             let schema_id = register_predeclared_any_schema(&headers);
-            let field_kinds: Arc<[NativeKind]> = Arc::from(
-                vec![NativeKind::String; headers.len()].into_boxed_slice(),
-            );
+            let field_kinds: Arc<[NativeKind]> =
+                Arc::from(vec![NativeKind::String; headers.len()].into_boxed_slice());
             // Heap mask: every field is a string (heap-resident).
             let heap_mask: u64 = if headers.len() >= 64 {
                 u64::MAX
@@ -253,8 +248,7 @@ pub fn create_csv_module() -> ModuleExports {
 
             let mut records: Vec<Arc<HeapValue>> = Vec::new();
             for result in reader.records() {
-                let record =
-                    result.map_err(|e| format!("csv.parse_records() failed: {}", e))?;
+                let record = result.map_err(|e| format!("csv.parse_records() failed: {}", e))?;
                 let n = headers.len().min(record.len());
                 let mut slots: Vec<ValueSlot> = Vec::with_capacity(headers.len());
                 // Use min(headers, record) length plus pad with empty
@@ -305,16 +299,14 @@ pub fn create_csv_module() -> ModuleExports {
                 name: "data".to_string(),
                 type_name: "Array<HashMap<string, string>>".to_string(),
                 required: true,
-                description: "Array of records (hashmaps with string keys and values)"
-                    .to_string(),
+                description: "Array of records (hashmaps with string keys and values)".to_string(),
                 ..Default::default()
             },
             ModuleParam {
                 name: "headers".to_string(),
                 type_name: "Array<string>".to_string(),
                 required: false,
-                description: "Explicit header order (default: keys from first record)"
-                    .to_string(),
+                description: "Explicit header order (default: keys from first record)".to_string(),
                 default_snippet: Some("[]".to_string()),
                 ..Default::default()
             },
@@ -349,10 +341,14 @@ pub fn create_csv_module() -> ModuleExports {
                             shape_value::heap_value::HashMapKindedRef::TraitObject(arc) => arc.keys,
                             shape_value::heap_value::HashMapKindedRef::HashMap(arc) => arc.keys,
                         };
-                        let n = unsafe { shape_value::v2::typed_array::TypedArray::len(keys_ptr) as usize };
+                        let n = unsafe {
+                            shape_value::v2::typed_array::TypedArray::len(keys_ptr) as usize
+                        };
                         (0..n)
                             .map(|i| unsafe {
-                                let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(keys_ptr, i as u32);
+                                let ptr = shape_value::v2::typed_array::TypedArray::get_unchecked(
+                                    keys_ptr, i as u32,
+                                );
                                 shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
                             })
                             .collect()
@@ -379,9 +375,7 @@ pub fn create_csv_module() -> ModuleExports {
                     }
                 }
             } else {
-                return Ok(TypedReturn::Concrete(ConcreteReturn::String(
-                    String::new(),
-                )));
+                return Ok(TypedReturn::Concrete(ConcreteReturn::String(String::new())));
             };
 
             let mut writer = csv::WriterBuilder::new().from_writer(Vec::new());
@@ -407,7 +401,8 @@ pub fn create_csv_module() -> ModuleExports {
                                             let ptr: *const shape_value::v2::string_obj::StringObj =
                                                 unsafe { *(*arc.values).data.add(idx) };
                                             unsafe {
-                                                shape_value::v2::string_obj::StringObj::as_str(ptr).to_owned()
+                                                shape_value::v2::string_obj::StringObj::as_str(ptr)
+                                                    .to_owned()
                                             }
                                         })
                                         .unwrap_or_default()
@@ -438,11 +433,7 @@ pub fn create_csv_module() -> ModuleExports {
                             // Resolve header → slot index via the schema's
                             // field list. Empty cell when the record's
                             // schema doesn't have the requested header.
-                            let cell = match schema
-                                .fields
-                                .iter()
-                                .position(|f| f.name == *header)
-                            {
+                            let cell = match schema.fields.iter().position(|f| f.name == *header) {
                                 Some(idx) if idx < storage.slots.len() => {
                                     // Slot is a string per parse_records'
                                     // construction; read via the kind table.

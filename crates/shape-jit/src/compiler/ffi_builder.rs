@@ -382,7 +382,6 @@ impl JITCompiler {
             // `release_func_for_place` Closure arm.
             arc_closure_retain: r!("jit_arc_closure_retain"),
             arc_closure_release: r!("jit_arc_closure_release"),
-
             // v2 typed HashMap<string, ...>
             //
             // SURFACE (ADR-006 §2.7.14 Q15 / W11-jit-carrier-conversion):

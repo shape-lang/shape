@@ -704,8 +704,7 @@ pub struct BytecodeCompiler {
     ///   stays unannotated and the body's own heuristics / clean error apply).
     /// * `int` and `number` do not unify — distinct annotations at the same
     ///   slot are a conflict.
-    pub(crate) closure_callsite_param_hints:
-        std::collections::HashMap<String, ClosureCallsiteHint>,
+    pub(crate) closure_callsite_param_hints: std::collections::HashMap<String, ClosureCallsiteHint>,
 
     /// Unified type metadata for the last compiled expression.
     ///

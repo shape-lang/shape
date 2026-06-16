@@ -174,9 +174,7 @@ pub fn v2_has(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 2 {
-        return Err(type_error(
-            "Set.has() requires exactly 1 argument (key)",
-        ));
+        return Err(type_error("Set.has() requires exactly 1 argument (key)"));
     }
     let set = as_hashset(&args[0])?;
     let key = as_string_key(&args[1])?;
@@ -262,9 +260,7 @@ pub fn v2_add(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 2 {
-        return Err(type_error(
-            "Set.add() requires exactly 1 argument (key)",
-        ));
+        return Err(type_error("Set.add() requires exactly 1 argument (key)"));
     }
     let key_arc: Arc<String> = result_slot_to_string_arc(&args[1]).ok_or_else(|| {
         type_error(format!(
@@ -290,9 +286,7 @@ pub fn v2_delete(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 2 {
-        return Err(type_error(
-            "Set.delete() requires exactly 1 argument (key)",
-        ));
+        return Err(type_error("Set.delete() requires exactly 1 argument (key)"));
     }
     let key = as_string_key(&args[1])?;
     let mut hs: Arc<HashSetData> = as_hashset(&args[0])?;
@@ -434,9 +428,7 @@ pub fn v2_map(
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 2 {
-        return Err(type_error(
-            "Set.map() requires exactly 1 argument (mapper)",
-        ));
+        return Err(type_error("Set.map() requires exactly 1 argument (mapper)"));
     }
     let set: Arc<HashSetData> = as_hashset(&args[0])?;
     let closure = &args[1];

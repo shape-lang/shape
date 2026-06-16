@@ -2,9 +2,7 @@
 // Series/Column Builtin Functions (shift, fillna, rolling, cumulative)
 // ============================================================================
 
-use crate::ffi::value_ffi::{
-    TAG_NULL, box_column_result, extract_column, is_number, unbox_number,
-};
+use crate::ffi::value_ffi::{TAG_NULL, box_column_result, extract_column, is_number, unbox_number};
 
 /// Shift a column by n periods, filling with NaN.
 pub extern "C" fn jit_series_shift(series_bits: u64, n_bits: u64) -> u64 {

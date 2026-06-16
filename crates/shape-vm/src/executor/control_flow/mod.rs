@@ -11,7 +11,7 @@ use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
 };
-use shape_value::{KindedSlot, NativeKind, ValueSlot, VMError};
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 
 /// ADR-006 §2.7.4 / §2.7.7 surface marker for the closure-call /
 /// extern-FFI / JIT-dispatch paths in this module that still depended on
@@ -589,9 +589,7 @@ impl VirtualMachine {
                         let inner = layout.capture_inner_kind(i);
                         let cell_ptr_bits: u64 = match inner {
                             FieldKind::I64 => alloc_owned_mutable_i64(*bits as i64) as u64,
-                            FieldKind::F64 => {
-                                alloc_owned_mutable_f64(f64::from_bits(*bits)) as u64
-                            }
+                            FieldKind::F64 => alloc_owned_mutable_f64(f64::from_bits(*bits)) as u64,
                             FieldKind::I32 => alloc_owned_mutable_i32(*bits as i64 as i32) as u64,
                             FieldKind::I16 => alloc_owned_mutable_i16(*bits as i64 as i16) as u64,
                             FieldKind::I8 => alloc_owned_mutable_i8(*bits as i64 as i8) as u64,
@@ -641,7 +639,6 @@ impl VirtualMachine {
         let bits = Arc::into_raw(arc) as u64;
         self.push_kinded(bits, NativeKind::Ptr(HeapKind::Closure))
     }
-
 
     // Foreign function call
 
@@ -889,4 +886,3 @@ impl VirtualMachine {
         self.return_value_inner(bits, src_kind)
     }
 }
-

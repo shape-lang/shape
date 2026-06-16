@@ -48,7 +48,7 @@
 use rmpv::Value as Rmp;
 use shape_runtime::type_schema::{FieldType, TypeSchema, TypeSchemaRegistry};
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectPtr};
-use shape_value::{KindedSlot, NativeKind, TypedObjectStorage, ValueSlot, VMError};
+use shape_value::{KindedSlot, NativeKind, TypedObjectStorage, VMError, ValueSlot};
 use std::sync::Arc;
 
 // ============================================================================
@@ -62,10 +62,7 @@ use std::sync::Arc;
 /// `kinded_slot_to_msgpack`. Heap-kinded arms dispatch via
 /// `slot.slot().as_heap_value()` (ADR-005 §1 single-discriminator) +
 /// `HeapValue::*` match.
-pub fn marshal_args(
-    args: &[KindedSlot],
-    schemas: &TypeSchemaRegistry,
-) -> Result<Vec<u8>, VMError> {
+pub fn marshal_args(args: &[KindedSlot], schemas: &TypeSchemaRegistry) -> Result<Vec<u8>, VMError> {
     let mut values = Vec::with_capacity(args.len());
     for arg in args {
         values.push(kinded_slot_to_msgpack(arg, schemas)?);
@@ -85,10 +82,7 @@ pub fn marshal_args(
 /// (ADR-005 §1). The String / StringV2 / DecimalV2 arms read the
 /// inline carrier directly — `NativeKind` is the discriminator, the
 /// deleted `tag_bits` dispatch has no role here.
-fn kinded_slot_to_msgpack(
-    slot: &KindedSlot,
-    schemas: &TypeSchemaRegistry,
-) -> Result<Rmp, VMError> {
+fn kinded_slot_to_msgpack(slot: &KindedSlot, schemas: &TypeSchemaRegistry) -> Result<Rmp, VMError> {
     let bits = slot.raw();
     match slot.kind() {
         // ── Scalar kinds (post-proof per §2.7.5) ───────────────────────
@@ -212,8 +206,7 @@ fn heap_slot_to_msgpack(
             Ok(Rmp::Integer(v.into()))
         },
         HeapKind::Decimal => unsafe {
-            let arc =
-                Arc::<rust_decimal::Decimal>::from_raw(bits as *const rust_decimal::Decimal);
+            let arc = Arc::<rust_decimal::Decimal>::from_raw(bits as *const rust_decimal::Decimal);
             let v = *arc;
             let _ = Arc::into_raw(arc);
             Ok(Rmp::String(v.to_string().into()))
@@ -391,9 +384,9 @@ fn msgpack_to_kinded_slot(
         },
         "string" | "String" => match val {
             Rmp::String(s) => {
-                let s = s.as_str().ok_or_else(|| {
-                    marshal_error("string contains invalid UTF-8")
-                })?;
+                let s = s
+                    .as_str()
+                    .ok_or_else(|| marshal_error("string contains invalid UTF-8"))?;
                 Ok(KindedSlot::from_string(s))
             }
             _ => Err(marshal_error(format!(
@@ -537,10 +530,7 @@ fn marshal_typed_object_from_msgpack(
 fn is_heap_kind(kind: NativeKind) -> bool {
     matches!(
         kind,
-        NativeKind::String
-            | NativeKind::StringV2
-            | NativeKind::DecimalV2
-            | NativeKind::Ptr(_)
+        NativeKind::String | NativeKind::StringV2 | NativeKind::DecimalV2 | NativeKind::Ptr(_)
     )
 }
 
@@ -603,13 +593,15 @@ fn build_field_slot(
                     _ => None,
                 })
                 .unwrap_or_default();
-            Ok((
-                ValueSlot::from_string_arc(Arc::new(s)),
-                NativeKind::String,
-            ))
+            Ok((ValueSlot::from_string_arc(Arc::new(s)), NativeKind::String))
         }
-        FieldType::I8 | FieldType::U8 | FieldType::I16 | FieldType::U16
-        | FieldType::I32 | FieldType::U32 | FieldType::U64
+        FieldType::I8
+        | FieldType::U8
+        | FieldType::I16
+        | FieldType::U16
+        | FieldType::I32
+        | FieldType::U32
+        | FieldType::U64
         | FieldType::Timestamp => {
             let n = val
                 .and_then(|v| match v {

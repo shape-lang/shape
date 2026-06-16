@@ -80,16 +80,13 @@ fn as_priority_queue(slot: &KindedSlot) -> Result<Arc<PriorityQueueData>, VMErro
     }
     let bits = slot.slot.raw();
     if bits == 0 {
-        return Err(type_error(
-            "PriorityQueue method receiver slot bits null",
-        ));
+        return Err(type_error("PriorityQueue method receiver slot bits null"));
     }
     // SAFETY: see `set_methods::as_hashset` for the canonical form.
     // `KindedSlot::from_priority_queue` stores
     // `Arc::into_raw(Arc<PriorityQueueData>)` directly per §2.7.18;
     // recovery uses the same typed-Arc shape.
-    let arc =
-        unsafe { Arc::<PriorityQueueData>::from_raw(bits as *const PriorityQueueData) };
+    let arc = unsafe { Arc::<PriorityQueueData>::from_raw(bits as *const PriorityQueueData) };
     let cloned = Arc::clone(&arc);
     let _ = Arc::into_raw(arc);
     Ok(cloned)
@@ -119,9 +116,7 @@ pub fn v2_size(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 1 {
-        return Err(type_error(
-            "PriorityQueue.size() takes no arguments",
-        ));
+        return Err(type_error("PriorityQueue.size() takes no arguments"));
     }
     let pq = as_priority_queue(&args[0])?;
     Ok(KindedSlot::from_int(pq.len() as i64))
@@ -134,9 +129,7 @@ pub fn v2_is_empty(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 1 {
-        return Err(type_error(
-            "PriorityQueue.isEmpty() takes no arguments",
-        ));
+        return Err(type_error("PriorityQueue.isEmpty() takes no arguments"));
     }
     let pq = as_priority_queue(&args[0])?;
     Ok(KindedSlot::from_bool(pq.is_empty()))
@@ -150,9 +143,7 @@ pub fn v2_peek(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 1 {
-        return Err(type_error(
-            "PriorityQueue.peek() takes no arguments",
-        ));
+        return Err(type_error("PriorityQueue.peek() takes no arguments"));
     }
     let pq = as_priority_queue(&args[0])?;
     Ok(KindedSlot::from_int(pq.peek().unwrap_or(0)))
@@ -177,9 +168,7 @@ pub fn v2_to_array(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 1 {
-        return Err(type_error(
-            "PriorityQueue.toArray() takes no arguments",
-        ));
+        return Err(type_error("PriorityQueue.toArray() takes no arguments"));
     }
     let _pq = as_priority_queue(&args[0])?;
     Err(VMError::NotImplemented(
@@ -268,9 +257,7 @@ pub fn v2_pop(
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 1 {
-        return Err(type_error(
-            "PriorityQueue.pop() takes no arguments",
-        ));
+        return Err(type_error("PriorityQueue.pop() takes no arguments"));
     }
     let pq = as_priority_queue(&args[0])?;
     let mut owned = pq;

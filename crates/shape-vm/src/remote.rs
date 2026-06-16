@@ -539,10 +539,8 @@ pub fn program_from_blobs_by_hash(
         function_local_concrete_types: source.function_local_concrete_types.clone(),
         function_return_concrete_types: source.function_return_concrete_types.clone(),
         monomorphized_method_call_sites: source.monomorphized_method_call_sites.clone(),
-        value_call_return_concrete_types:
-            source.value_call_return_concrete_types.clone(),
-        operator_trait_dispatch_sites:
-            source.operator_trait_dispatch_sites.clone(),
+        value_call_return_concrete_types: source.value_call_return_concrete_types.clone(),
+        operator_trait_dispatch_sites: source.operator_trait_dispatch_sites.clone(),
         data_schema: source.data_schema.clone(),
         type_schema_registry: source.type_schema_registry.clone(),
         trait_method_symbols: source.trait_method_symbols.clone(),
@@ -719,8 +717,7 @@ fn run_remote_call(
     let mut program: BytecodeProgram = request.program;
     program.type_schema_registry = request.type_schemas;
 
-    if let (Some(blobs), Some(entry_hash)) =
-        (request.function_blobs.clone(), request.function_hash)
+    if let (Some(blobs), Some(entry_hash)) = (request.function_blobs.clone(), request.function_hash)
     {
         if let Some(ca) = program_from_blobs_by_hash(blobs, entry_hash, &program) {
             program.content_addressed = Some(ca);
@@ -845,15 +842,14 @@ fn run_remote_call(
     let mut args: Vec<KindedSlot> = Vec::with_capacity(arity);
     for (idx, sv) in request.arguments.iter().enumerate() {
         let expected = arg_kinds[idx];
-        let (bits, kind) = serializable_to_slot(sv, expected, store).map_err(|e| {
-            RemoteCallError {
+        let (bits, kind) =
+            serializable_to_slot(sv, expected, store).map_err(|e| RemoteCallError {
                 message: format!(
                     "arg {} marshal failure (expected kind {:?}): {}",
                     idx, expected, e,
                 ),
                 kind: RemoteErrorKind::ArgumentError,
-            }
-        })?;
+            })?;
         args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
     }
 
@@ -934,19 +930,15 @@ fn create_stub_program(program: &BytecodeProgram) -> BytecodeProgram {
             function_local_concrete_types: ca.function_local_concrete_types.clone(),
             function_return_concrete_types: ca.function_return_concrete_types.clone(),
             monomorphized_method_call_sites: ca.monomorphized_method_call_sites.clone(),
-            value_call_return_concrete_types:
-                ca.value_call_return_concrete_types.clone(),
-            operator_trait_dispatch_sites:
-                ca.operator_trait_dispatch_sites.clone(),
+            value_call_return_concrete_types: ca.value_call_return_concrete_types.clone(),
+            operator_trait_dispatch_sites: ca.operator_trait_dispatch_sites.clone(),
             data_schema: ca.data_schema.clone(),
             type_schema_registry: ca.type_schema_registry.clone(),
             trait_method_symbols: ca.trait_method_symbols.clone(),
             foreign_functions: ca.foreign_functions.clone(),
             native_struct_layouts: ca.native_struct_layouts.clone(),
             debug_info: ca.debug_info.clone(),
-            closure_function_layouts_by_name: ca
-                .closure_function_layouts_by_name
-                .clone(),
+            closure_function_layouts_by_name: ca.closure_function_layouts_by_name.clone(),
             trait_vtables: ca.trait_vtables.clone(),
             // R8 W8 Cluster A surface-and-stop flag propagation.
             has_imported_const_inline: ca.has_imported_const_inline,
@@ -1239,7 +1231,6 @@ pub fn handle_wire_message(
         }
 
         // --- V2 message stubs ---
-
         WireMessage::Execute(req) => WireMessage::ExecuteResponse(ExecuteResponse {
             request_id: req.request_id,
             success: false,
@@ -1282,38 +1273,34 @@ pub fn handle_wire_message(
                 column: None,
             }],
         }),
-        WireMessage::ValidateResponse(_) => {
-            WireMessage::ExecuteResponse(ExecuteResponse {
-                request_id: 0,
-                success: false,
-                value: WireValue::Null,
-                stdout: None,
-                error: Some("Unexpected ValidateResponse on server side".to_string()),
-                content_terminal: None,
-                content_html: None,
-                diagnostics: vec![],
-                metrics: None,
-                print_output: None,
-            })
-        }
+        WireMessage::ValidateResponse(_) => WireMessage::ExecuteResponse(ExecuteResponse {
+            request_id: 0,
+            success: false,
+            value: WireValue::Null,
+            stdout: None,
+            error: Some("Unexpected ValidateResponse on server side".to_string()),
+            content_terminal: None,
+            content_html: None,
+            diagnostics: vec![],
+            metrics: None,
+            print_output: None,
+        }),
         WireMessage::Auth(_req) => WireMessage::AuthResponse(AuthResponse {
             authenticated: false,
             error: Some("V2 Auth handler not yet implemented".to_string()),
         }),
-        WireMessage::AuthResponse(_) => {
-            WireMessage::ExecuteResponse(ExecuteResponse {
-                request_id: 0,
-                success: false,
-                value: WireValue::Null,
-                stdout: None,
-                error: Some("Unexpected AuthResponse on server side".to_string()),
-                content_terminal: None,
-                content_html: None,
-                diagnostics: vec![],
-                metrics: None,
-                print_output: None,
-            })
-        }
+        WireMessage::AuthResponse(_) => WireMessage::ExecuteResponse(ExecuteResponse {
+            request_id: 0,
+            success: false,
+            value: WireValue::Null,
+            stdout: None,
+            error: Some("Unexpected AuthResponse on server side".to_string()),
+            content_terminal: None,
+            content_html: None,
+            diagnostics: vec![],
+            metrics: None,
+            print_output: None,
+        }),
         WireMessage::ExecuteFile(req) => WireMessage::ExecuteResponse(ExecuteResponse {
             request_id: req.request_id,
             success: false,

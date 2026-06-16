@@ -57,8 +57,7 @@ use super::transport_provider;
 /// through to the raw transport when caching is disabled.
 pub(super) struct TransportHandle {
     pub(super) transport: Arc<dyn Transport>,
-    pub(super) memoized:
-        Option<Arc<MemoizedTransport<Arc<dyn Transport>>>>,
+    pub(super) memoized: Option<Arc<MemoizedTransport<Arc<dyn Transport>>>>,
 }
 
 /// Wrapper for `Box<dyn Connection>` so it can be stored in
@@ -77,10 +76,7 @@ pub(super) struct BoxedConnection(pub(super) std::sync::Mutex<Box<dyn Connection
 /// downcasts the inner `IoResource::Custom` payload to `TransportHandle`
 /// — typed-Arc payload through the module symbol-table boundary
 /// (ADR-006 §2.7.4 addendum).
-fn extract_transport(
-    handle: &IoHandleData,
-    fn_name: &str,
-) -> Result<Arc<dyn Transport>, String> {
+fn extract_transport(handle: &IoHandleData, fn_name: &str) -> Result<Arc<dyn Transport>, String> {
     let guard = handle
         .resource
         .lock()
@@ -181,7 +177,9 @@ pub fn create_transport_module() -> ModuleExports {
                 }),
                 "transport:tcp".to_string(),
             );
-            Ok(TypedReturn::Concrete(ConcreteReturn::IoHandle(Arc::new(handle))))
+            Ok(TypedReturn::Concrete(ConcreteReturn::IoHandle(Arc::new(
+                handle,
+            ))))
         },
     );
 
@@ -207,7 +205,9 @@ pub fn create_transport_module() -> ModuleExports {
                 }),
                 "transport:quic".to_string(),
             );
-            Ok(TypedReturn::Concrete(ConcreteReturn::IoHandle(Arc::new(handle))))
+            Ok(TypedReturn::Concrete(ConcreteReturn::IoHandle(Arc::new(
+                handle,
+            ))))
         },
     );
 
@@ -243,9 +243,7 @@ pub fn create_transport_module() -> ModuleExports {
                 }
             };
             match transport.send(dest.as_str(), &bytes) {
-                Ok(response) => {
-                    Ok(TypedReturn::Ok(ConcreteReturn::Bytes(response)))
-                }
+                Ok(response) => Ok(TypedReturn::Ok(ConcreteReturn::Bytes(response))),
                 Err(e) => Ok(TypedReturn::Err(ConcreteReturn::String(format!(
                     "transport.send(): {}",
                     e
@@ -404,8 +402,7 @@ pub fn create_transport_module() -> ModuleExports {
             if let IoResource::Custom(any) = resource {
                 if let Some(boxed) = any.downcast_mut::<BoxedConnection>() {
                     let mut conn_guard = boxed.0.lock().map_err(|_| {
-                        "transport.connection_recv(): connection lock poisoned"
-                            .to_string()
+                        "transport.connection_recv(): connection lock poisoned".to_string()
                     })?;
                     return match conn_guard.recv(timeout) {
                         Ok(bytes) => Ok(TypedReturn::Ok(ConcreteReturn::Bytes(bytes))),
@@ -453,8 +450,7 @@ pub fn create_transport_module() -> ModuleExports {
             if let IoResource::Custom(any) = resource {
                 if let Some(boxed) = any.downcast_mut::<BoxedConnection>() {
                     let mut conn_guard = boxed.0.lock().map_err(|_| {
-                        "transport.connection_close(): connection lock poisoned"
-                            .to_string()
+                        "transport.connection_close(): connection lock poisoned".to_string()
                     })?;
                     let result = match conn_guard.close() {
                         Ok(()) => TypedReturn::Ok(ConcreteReturn::Unit),
@@ -517,7 +513,9 @@ pub fn create_transport_module() -> ModuleExports {
                 }),
                 "transport:memoized".to_string(),
             );
-            Ok(TypedReturn::Concrete(ConcreteReturn::IoHandle(Arc::new(handle))))
+            Ok(TypedReturn::Concrete(ConcreteReturn::IoHandle(Arc::new(
+                handle,
+            ))))
         },
     );
 

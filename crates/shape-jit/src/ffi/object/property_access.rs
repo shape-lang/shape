@@ -60,10 +60,9 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
         }
         if let Some(kind) = heap_kind(obj_bits) {
             match kind {
-                HK_ARRAY | HK_FLOAT_ARRAY | HK_INT_ARRAY | HK_FLOAT_ARRAY_SLICE
-                | HK_BOOL_ARRAY | HK_I8_ARRAY | HK_I16_ARRAY | HK_I32_ARRAY
-                | HK_U8_ARRAY | HK_U16_ARRAY | HK_U32_ARRAY | HK_U64_ARRAY
-                | HK_F32_ARRAY => {
+                HK_ARRAY | HK_FLOAT_ARRAY | HK_INT_ARRAY | HK_FLOAT_ARRAY_SLICE | HK_BOOL_ARRAY
+                | HK_I8_ARRAY | HK_I16_ARRAY | HK_I32_ARRAY | HK_U8_ARRAY | HK_U16_ARRAY
+                | HK_U32_ARRAY | HK_U64_ARRAY | HK_F32_ARRAY => {
                     // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4):
                     // length / first / last / index decoded the
                     // deleted `JitArray` heap layout. Kinded rebuild
@@ -208,21 +207,24 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
                     // JIT-allocated TypedObject — resolve field by name via schema.
                     // Check both the global stdlib registry AND the trampoline VM's
                     // bytecode schema registry (for user-defined types).
-                    let ptr =
-                        unbox_typed_object(obj_bits) as *const super::super::typed_object::TypedObject;
+                    let ptr = unbox_typed_object(obj_bits)
+                        as *const super::super::typed_object::TypedObject;
                     if !ptr.is_null() {
                         if let Some(key) = key_str {
                             let schema_id = (*ptr).schema_id;
                             // Try global registry first
-                            let mut field_idx = shape_runtime::type_schema::lookup_schema_by_id_public(schema_id)
-                                .and_then(|s| s.field_names().position(|n| n == key));
+                            let mut field_idx =
+                                shape_runtime::type_schema::lookup_schema_by_id_public(schema_id)
+                                    .and_then(|s| s.field_names().position(|n| n == key));
                             // Fall back to trampoline VM's bytecode registry
                             if field_idx.is_none() {
                                 field_idx = super::super::control::with_trampoline_vm(|vm| {
-                                    vm.program().type_schema_registry
+                                    vm.program()
+                                        .type_schema_registry
                                         .get_by_id(schema_id)
                                         .and_then(|s| s.field_names().position(|n| n == key))
-                                }).flatten();
+                                })
+                                .flatten();
                             }
                             if let Some(idx) = field_idx {
                                 return (*ptr).get_field(idx * 8);
@@ -300,11 +302,19 @@ pub extern "C" fn jit_hashmap_value_at(_obj_bits: u64, _slot_index: u64) -> u64 
 #[inline(always)]
 pub extern "C" fn jit_length(value_bits: u64) -> u64 {
     let len = match heap_kind(value_bits) {
-        Some(HK_ARRAY) | Some(HK_FLOAT_ARRAY) | Some(HK_INT_ARRAY)
-        | Some(HK_FLOAT_ARRAY_SLICE) | Some(HK_BOOL_ARRAY)
-        | Some(HK_I8_ARRAY) | Some(HK_I16_ARRAY) | Some(HK_I32_ARRAY)
-        | Some(HK_U8_ARRAY) | Some(HK_U16_ARRAY) | Some(HK_U32_ARRAY)
-        | Some(HK_U64_ARRAY) | Some(HK_F32_ARRAY) => {
+        Some(HK_ARRAY)
+        | Some(HK_FLOAT_ARRAY)
+        | Some(HK_INT_ARRAY)
+        | Some(HK_FLOAT_ARRAY_SLICE)
+        | Some(HK_BOOL_ARRAY)
+        | Some(HK_I8_ARRAY)
+        | Some(HK_I16_ARRAY)
+        | Some(HK_I32_ARRAY)
+        | Some(HK_U8_ARRAY)
+        | Some(HK_U16_ARRAY)
+        | Some(HK_U32_ARRAY)
+        | Some(HK_U64_ARRAY)
+        | Some(HK_F32_ARRAY) => {
             // SURFACE (W10 jit-playbook §5 / ADR-006 §2.7.4): array
             // length read decoded the deleted JitArray layout. Kinded
             // rebuild reads `Arc<TypedArrayData>::len` per §2.7.6/Q8.

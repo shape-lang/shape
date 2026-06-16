@@ -397,9 +397,7 @@ fn match_whitelist(
     WHITELIST.iter().find(|entry| match entry.rule {
         WhitelistRule::SchemaName(name) => name == schema_name,
         WhitelistRule::SchemaNamePrefix(prefix) => schema_name.starts_with(prefix),
-        WhitelistRule::EnumPayloadField => {
-            is_enum_schema && field_name.starts_with("__payload_")
-        }
+        WhitelistRule::EnumPayloadField => is_enum_schema && field_name.starts_with("__payload_"),
     })
 }
 
@@ -566,9 +564,7 @@ fn emit_e0900(schema: &TypeSchema, field_name: &str, ft: &FieldType) -> ShapeErr
 /// `Err(ShapeError::MultiError(errors))` with one structured E0900 per
 /// unmatched site (or a single `ShapeError::SemanticError` if only one
 /// site fires) otherwise.
-pub fn verify_no_post_inference_any(
-    program: &BytecodeProgram,
-) -> Result<(), ShapeError> {
+pub fn verify_no_post_inference_any(program: &BytecodeProgram) -> Result<(), ShapeError> {
     let mut errors: Vec<ShapeError> = Vec::new();
     verify_registry(&program.type_schema_registry, &mut errors);
     finalize(errors)
@@ -576,10 +572,7 @@ pub fn verify_no_post_inference_any(
 
 /// Verify a `TypeSchemaRegistry` in isolation — used by the tests and
 /// callable from the top-level entry [`verify_no_post_inference_any`].
-pub(crate) fn verify_registry(
-    registry: &TypeSchemaRegistry,
-    errors: &mut Vec<ShapeError>,
-) {
+pub(crate) fn verify_registry(registry: &TypeSchemaRegistry, errors: &mut Vec<ShapeError>) {
     // Iterate every named schema; `type_names()` yields the keys of the
     // `by_name` map per the public API contract at
     // `crates/shape-runtime/src/type_schema/registry.rs:218`.
@@ -638,11 +631,8 @@ mod tests {
         let mut reg = TypeSchemaRegistry::new();
         for name in &["FrameState", "VmState", "ModuleState", "CallPayload"] {
             let id = reg.allocate_id();
-            let schema = TypeSchema::with_id(
-                id,
-                *name,
-                vec![("contents".to_string(), FieldType::Any)],
-            );
+            let schema =
+                TypeSchema::with_id(id, *name, vec![("contents".to_string(), FieldType::Any)]);
             reg.register(schema);
         }
         assert!(
@@ -742,10 +732,7 @@ mod tests {
     /// Helper that mirrors `verify_registry` but uses only the
     /// PERMANENT subset of the whitelist (the post-R5b take-both
     /// shape). Tests the diagnostic emission path that R5b unlocks.
-    fn verify_registry_permanent_only(
-        registry: &TypeSchemaRegistry,
-        errors: &mut Vec<ShapeError>,
-    ) {
+    fn verify_registry_permanent_only(registry: &TypeSchemaRegistry, errors: &mut Vec<ShapeError>) {
         let names: Vec<String> = registry.type_names().map(|s| s.to_string()).collect();
         for name in &names {
             if let Some(schema) = registry.get(name) {
@@ -776,8 +763,10 @@ mod tests {
             if !field_type_contains_any(&field.field_type) {
                 continue;
             }
-            let matched = WHITELIST.iter().filter(|e| e.permanent).find(|entry| {
-                match entry.rule {
+            let matched = WHITELIST
+                .iter()
+                .filter(|e| e.permanent)
+                .find(|entry| match entry.rule {
                     WhitelistRule::SchemaName(name) => name == schema.name,
                     WhitelistRule::SchemaNamePrefix(prefix) => {
                         !prefix.is_empty() && schema.name.starts_with(prefix)
@@ -785,8 +774,7 @@ mod tests {
                     WhitelistRule::EnumPayloadField => {
                         is_enum_schema && field.name.starts_with("__payload_")
                     }
-                }
-            });
+                });
             if matched.is_none() {
                 errors.push(emit_e0900(schema, &field.name, &field.field_type));
             }
@@ -800,11 +788,7 @@ mod tests {
     fn negative_user_any_annotation_fires_e0900() {
         let mut reg = TypeSchemaRegistry::new();
         let id = reg.allocate_id();
-        let schema = TypeSchema::with_id(
-            id,
-            "T",
-            vec![("x".to_string(), FieldType::Any)],
-        );
+        let schema = TypeSchema::with_id(id, "T", vec![("x".to_string(), FieldType::Any)]);
         reg.register(schema);
 
         let mut errors = Vec::new();
@@ -970,10 +954,7 @@ mod tests {
         let schema = TypeSchema::with_id(
             id,
             "OptionalIntField",
-            vec![(
-                "x".to_string(),
-                FieldType::Option(Box::new(FieldType::I64)),
-            )],
+            vec![("x".to_string(), FieldType::Option(Box::new(FieldType::I64)))],
         );
         reg.register(schema);
         assert!(
@@ -994,10 +975,7 @@ mod tests {
         let schema = TypeSchema::with_id(
             id,
             "OptionalAnyField",
-            vec![(
-                "x".to_string(),
-                FieldType::Option(Box::new(FieldType::Any)),
-            )],
+            vec![("x".to_string(), FieldType::Option(Box::new(FieldType::Any)))],
         );
         reg.register(schema);
         let mut errors = Vec::new();

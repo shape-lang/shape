@@ -83,8 +83,7 @@ pub fn create_yaml_module() -> ModuleExports {
         ConcreteType::Result(Box::new(ConcreteType::Array)),
         |_args, _ctx| {
             Ok(TypedReturn::Err(ConcreteReturn::String(
-                "yaml.parse_all() pending N6 (any-output marshal) — see ADR-006 §2.7.4"
-                    .to_string(),
+                "yaml.parse_all() pending N6 (any-output marshal) — see ADR-006 §2.7.4".to_string(),
             )))
         },
     );
@@ -104,8 +103,7 @@ pub fn create_yaml_module() -> ModuleExports {
         ConcreteType::Result(Box::new(ConcreteType::String)),
         |_args, _ctx| {
             Ok(TypedReturn::Err(ConcreteReturn::String(
-                "yaml.stringify() pending N4 (any-input marshal) — see ADR-006 §2.7.4"
-                    .to_string(),
+                "yaml.stringify() pending N4 (any-input marshal) — see ADR-006 §2.7.4".to_string(),
             )))
         },
     );

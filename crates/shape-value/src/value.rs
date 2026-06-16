@@ -139,10 +139,7 @@ pub enum VTableEntry {
     /// The thunk consumes `type_param_count` `&TypeInfo` parameters
     /// alongside the regular arguments per §Q25.C.3 and dispatches on
     /// `concrete_type_id` for each.
-    Generic {
-        thunk_id: u16,
-        type_param_count: u8,
-    },
+    Generic { thunk_id: u16, type_param_count: u8 },
 
     /// Combination of `BoxedReturn` / `SelfArg` / `Generic`. The thunk
     /// dispatches per `flags` bit set.
@@ -346,7 +343,9 @@ impl ErasureType {
                 // emission tier reads `wrap_targets` for the actual
                 // boxing-site information, the type itself becomes a
                 // `dyn T` carrier).
-                Ok(ErasureType::Concrete { type_token: trait_id })
+                Ok(ErasureType::Concrete {
+                    type_token: trait_id,
+                })
             }
             ErasureType::SelfRef => {
                 wrap_targets.push(WrapTarget {
@@ -355,7 +354,9 @@ impl ErasureType {
                 });
                 Ok(ErasureType::Reference {
                     mutable: false,
-                    inner: Box::new(ErasureType::Concrete { type_token: trait_id }),
+                    inner: Box::new(ErasureType::Concrete {
+                        type_token: trait_id,
+                    }),
                 })
             }
             ErasureType::SelfRefMut => {
@@ -365,10 +366,15 @@ impl ErasureType {
                 });
                 Ok(ErasureType::Reference {
                     mutable: true,
-                    inner: Box::new(ErasureType::Concrete { type_token: trait_id }),
+                    inner: Box::new(ErasureType::Concrete {
+                        type_token: trait_id,
+                    }),
                 })
             }
-            ErasureType::SelfAssoc { assoc_name, bound_trait_id } => match bound_trait_id {
+            ErasureType::SelfAssoc {
+                assoc_name,
+                bound_trait_id,
+            } => match bound_trait_id {
                 Some(bound) => {
                     wrap_targets.push(WrapTarget {
                         path: path.clone(),
@@ -396,8 +402,7 @@ impl ErasureType {
                 // References themselves are unchanged; recurse into
                 // payload without pushing a path step (the reference
                 // is a transparent wrapper for `Erase_T` purposes).
-                let new_inner =
-                    Self::rewrite_inner(inner.as_ref(), trait_id, wrap_targets, path)?;
+                let new_inner = Self::rewrite_inner(inner.as_ref(), trait_id, wrap_targets, path)?;
                 Ok(ErasureType::Reference {
                     mutable: *mutable,
                     inner: Box::new(new_inner),
@@ -676,17 +681,13 @@ mod erase_t_tests {
             path: SmallVec::new(),
             wrap_as_trait_id: 1,
         });
-        let sig = ThunkSignature::build(
-            1,
-            2,
-            "clone".to_string(),
-            wts,
-            SmallVec::new(),
-            0,
-        );
+        let sig = ThunkSignature::build(1, 2, "clone".to_string(), wts, SmallVec::new(), 0);
         assert!(!sig.is_direct());
         match sig.to_vtable_entry(9) {
-            VTableEntry::BoxedReturn { thunk_id, wrap_targets } => {
+            VTableEntry::BoxedReturn {
+                thunk_id,
+                wrap_targets,
+            } => {
                 assert_eq!(thunk_id, 9);
                 assert_eq!(wrap_targets.len(), 1);
             }
@@ -702,16 +703,14 @@ mod erase_t_tests {
             path: SmallVec::new(),
             wrap_as_trait_id: 5,
         });
-        let sig = ThunkSignature::build(
-            1,
-            5,
-            "compound".to_string(),
-            wts,
-            SmallVec::new(),
-            1,
-        );
+        let sig = ThunkSignature::build(1, 5, "compound".to_string(), wts, SmallVec::new(), 1);
         match sig.to_vtable_entry(11) {
-            VTableEntry::Compound { thunk_id, flags, type_param_count, .. } => {
+            VTableEntry::Compound {
+                thunk_id,
+                flags,
+                type_param_count,
+                ..
+            } => {
                 assert_eq!(thunk_id, 11);
                 assert!(flags.is_boxed_return());
                 assert!(flags.is_generic());

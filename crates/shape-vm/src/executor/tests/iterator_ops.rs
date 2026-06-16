@@ -42,7 +42,7 @@ fn test_iterable_trait_registered() {
 
 #[test]
 fn test_iterable_trait_has_iter_method() {
-    use shape_ast::ast::{TraitMemberSignature, TraitMember};
+    use shape_ast::ast::{TraitMember, TraitMemberSignature};
     use shape_runtime::type_system::environment::TypeEnvironment;
 
     let env = TypeEnvironment::new();

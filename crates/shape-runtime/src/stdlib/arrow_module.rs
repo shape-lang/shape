@@ -132,10 +132,8 @@ pub fn create_arrow_module() -> ModuleExports {
             let schema = reader.schema();
             let meta = schema.metadata();
 
-            let pairs: Vec<(String, String)> = meta
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
+            let pairs: Vec<(String, String)> =
+                meta.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             Ok(TypedReturn::Ok(ConcreteReturn::HashMapStringString(pairs)))
         },
     );

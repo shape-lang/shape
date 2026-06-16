@@ -3,7 +3,7 @@
 //! Handles parsing module files, compiling AST, and processing exports.
 
 use shape_ast::ast::{
-    AnnotationDef, BuiltinFunctionDecl, Expr, ExportItem, ExportStmt, FunctionDef, Item, Literal,
+    AnnotationDef, BuiltinFunctionDecl, ExportItem, ExportStmt, Expr, FunctionDef, Item, Literal,
     Program, Span, UnaryOp, VarKind, VariableDecl,
 };
 use shape_ast::error::{Result, ShapeError};
@@ -543,4 +543,3 @@ pub(super) fn process_export_with_scope(
 
     Ok(())
 }
-

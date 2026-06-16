@@ -223,8 +223,15 @@ pub fn split_into_blocks(source: &str) -> Vec<String> {
     let mut blocks = Vec::new();
     let lines: Vec<&str> = source.lines().collect();
     let head_keywords = [
-        "fn ", "async fn ", "enum ", "type ", "trait ", "impl ", "extend ",
-        "extern ", "pub ",
+        "fn ",
+        "async fn ",
+        "enum ",
+        "type ",
+        "trait ",
+        "impl ",
+        "extend ",
+        "extern ",
+        "pub ",
     ];
 
     let mut i = 0;

@@ -112,7 +112,11 @@ fn test_variable_consistency() {
         "let x = 10; let y = 20; x + y",
         30.0
     ));
-    assert!(check_number("var_reassign", "let mut x = 5; x = x + 1; x", 6.0));
+    assert!(check_number(
+        "var_reassign",
+        "let mut x = 5; x = x + 1; x",
+        6.0
+    ));
 }
 
 #[test]

@@ -239,8 +239,7 @@ impl ComptimeTarget {
         let nb_str = |s: &str| KindedSlot::from_string_arc(Arc::new(s.to_string()));
         let nb_string = |s: String| KindedSlot::from_string_arc(Arc::new(s));
         let ensure_schema = |names: &[&str]| {
-            let field_names: Vec<String> =
-                names.iter().map(|name| (*name).to_string()).collect();
+            let field_names: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
             let _ = register_predeclared_any_schema(&field_names);
         };
 

@@ -361,11 +361,10 @@ pub fn parse_type_params(pair: Pair<Rule>) -> Result<Vec<crate::ast::TypeParam>>
             // them into specialized bodies.
             if first.as_rule() == Rule::const_type_param {
                 let mut const_inner = first.into_inner();
-                let name_pair =
-                    const_inner.next().ok_or_else(|| ShapeError::ParseError {
-                        message: "expected const generic parameter name".to_string(),
-                        location: Some(pair_loc.clone()),
-                    })?;
+                let name_pair = const_inner.next().ok_or_else(|| ShapeError::ParseError {
+                    message: "expected const generic parameter name".to_string(),
+                    location: Some(pair_loc.clone()),
+                })?;
                 let name = name_pair.as_str().to_string();
                 let ty_pair = const_inner.next().ok_or_else(|| ShapeError::ParseError {
                     message: "expected const generic parameter type annotation".to_string(),
@@ -485,7 +484,10 @@ pub fn parse_generic_type(pair: Pair<Rule>) -> Result<TypeAnnotation> {
     if (name == "Vec" || name == "Array") && args.len() == 1 {
         Ok(TypeAnnotation::Array(Box::new(args.remove(0))))
     } else {
-        Ok(TypeAnnotation::Generic { name: name.into(), args })
+        Ok(TypeAnnotation::Generic {
+            name: name.into(),
+            args,
+        })
     }
 }
 

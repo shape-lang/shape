@@ -370,12 +370,11 @@ impl JITCompiler {
                 // couldn't prove a particular slot) → MirToIR's v2 fast
                 // path falls through to the legacy NaN-boxed path / surfaces
                 // honestly per ADR-006 §2.7.5.1 (no Bool-default).
-                let concrete_types: Vec<shape_value::v2::ConcreteType> =
-                    program
-                        .function_local_concrete_types
-                        .get(func_idx)
-                        .cloned()
-                        .unwrap_or_default();
+                let concrete_types: Vec<shape_value::v2::ConcreteType> = program
+                    .function_local_concrete_types
+                    .get(func_idx)
+                    .cloned()
+                    .unwrap_or_default();
                 // Build function name → index map for Call terminator resolution.
                 // Use the original program's functions (sub_program has empty functions list).
                 let function_indices: std::collections::HashMap<String, u16> = program
@@ -439,8 +438,7 @@ impl JITCompiler {
                 // before MIR codegen so `Place::Index` lowering can
                 // bypass the inline bounds check on trusted (arr, iv)
                 // pairs. Default empty plan keeps every access checked.
-                let elision_plan =
-                    crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
+                let elision_plan = crate::mir_compiler::bounds_elision::analyze(&mir_data.mir);
                 mir_compiler.set_bounds_elision_plan(elision_plan);
                 // W14.2-E-followup SURFACE-A2 fix (2026-05-19, v0.3-gating
                 // SOUNDNESS BUG per supervisor ratify): pre-populate
@@ -644,9 +642,10 @@ impl JITCompiler {
             let instructions = &program.instructions[func.entry_point..func_end];
             let report = preflight_instructions(instructions);
             let bytecode_ok = report.can_jit();
-            let mir_ok = func.mir_data.as_ref().is_some_and(|md| {
-                crate::mir_compiler::preflight(md).can_compile
-            });
+            let mir_ok = func
+                .mir_data
+                .as_ref()
+                .is_some_and(|md| crate::mir_compiler::preflight(md).can_compile);
             // Track A.1D / A.1D.2: the A.1B/A.1C.1/A.1C.3 mutable-cell
             // opcodes carry runtime semantics the MIR layer cannot
             // reconstruct from its slot-based model — MIR just sees

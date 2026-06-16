@@ -301,15 +301,17 @@ impl BytecodeCompiler {
         // Look up the original FunctionDef AST. The bytecode compiler always
         // populates `function_defs` during `register_function`, so this is
         // the canonical store for substitution input.
-        let original_def = self.function_defs.get(base_fn_name).cloned().ok_or_else(|| {
-            ShapeError::SemanticError {
+        let original_def = self
+            .function_defs
+            .get(base_fn_name)
+            .cloned()
+            .ok_or_else(|| ShapeError::SemanticError {
                 message: format!(
                     "ensure_monomorphic_function: no FunctionDef AST recorded for '{}'",
                     base_fn_name
                 ),
                 location: None,
-            }
-        })?;
+            })?;
 
         // Build the {type-param-name -> ConcreteType} substitution map that
         // Agent 2's `substitute_function_def` consumes. This requires the
@@ -371,23 +373,24 @@ impl BytecodeCompiler {
         // `function_defs`, `function_arity_bounds`, etc.
         self.register_function(&specialized_def)?;
         let specialization_idx_usize =
-            self.find_function(&specialized_name).ok_or_else(|| {
-                ShapeError::SemanticError {
+            self.find_function(&specialized_name)
+                .ok_or_else(|| ShapeError::SemanticError {
                     message: format!(
                         "ensure_monomorphic_function: failed to register specialization '{}'",
                         specialized_name
                     ),
                     location: None,
-                }
-            })?;
+                })?;
         let specialization_idx: u16 =
-            specialization_idx_usize.try_into().map_err(|_| ShapeError::SemanticError {
-                message: format!(
-                    "ensure_monomorphic_function: function index {} for '{}' overflows u16",
-                    specialization_idx_usize, specialized_name
-                ),
-                location: None,
-            })?;
+            specialization_idx_usize
+                .try_into()
+                .map_err(|_| ShapeError::SemanticError {
+                    message: format!(
+                        "ensure_monomorphic_function: function index {} for '{}' overflows u16",
+                        specialization_idx_usize, specialized_name
+                    ),
+                    location: None,
+                })?;
 
         // Cache the index BEFORE compiling the body so recursive calls inside
         // the specialized function self-reference the same cache entry instead
@@ -413,8 +416,7 @@ impl BytecodeCompiler {
         // call. Without this guard the outer back-patcher pairs the wrong
         // `ClosureCapture` with the wrong `function_id`, tripping the
         // MIR-to-IR `capture-count mismatch` assertion.
-        let saved_closure_function_ids =
-            std::mem::take(&mut self.closure_function_ids);
+        let saved_closure_function_ids = std::mem::take(&mut self.closure_function_ids);
         // v0.3 WS-6: save/restore the per-function local ConcreteType table
         // across the nested specialized-body `compile_function`. That call
         // clears + repopulates `current_function_local_concrete_types` for
@@ -503,15 +505,17 @@ impl BytecodeCompiler {
             });
         }
 
-        let original_def = self.function_defs.get(base_fn_name).cloned().ok_or_else(|| {
-            ShapeError::SemanticError {
+        let original_def = self
+            .function_defs
+            .get(base_fn_name)
+            .cloned()
+            .ok_or_else(|| ShapeError::SemanticError {
                 message: format!(
                     "ensure_monomorphic_function_with_consts: no FunctionDef AST recorded for '{}'",
                     base_fn_name
                 ),
                 location: None,
-            }
-        })?;
+            })?;
 
         // Partition the declared generic params into type-kind names and
         // const-kind names (positional against `type_args` / `const_args`
@@ -609,8 +613,7 @@ impl BytecodeCompiler {
         self.monomorphization_in_progress.insert(mono_key.clone());
 
         // F7: see note in `ensure_monomorphic_function` above.
-        let saved_closure_function_ids =
-            std::mem::take(&mut self.closure_function_ids);
+        let saved_closure_function_ids = std::mem::take(&mut self.closure_function_ids);
         // v0.3 WS-6: see `ensure_monomorphic_function` — save/restore the
         // per-function local ConcreteType table across the nested compile.
         let saved_local_concrete_types =
@@ -757,11 +760,7 @@ impl BytecodeCompiler {
                     })
                     .and_then(|p| p.type_annotation.as_ref())
                     .and_then(|ann| {
-                        if let shape_ast::ast::TypeAnnotation::Function {
-                            params: fps,
-                            ..
-                        } = ann
-                        {
+                        if let shape_ast::ast::TypeAnnotation::Function { params: fps, .. } = ann {
                             Some(
                                 fps.iter()
                                     .map(|fp| Some(fp.type_annotation.clone()))
@@ -825,15 +824,13 @@ impl BytecodeCompiler {
         self.monomorphization_cache
             .insert(mono_key.clone(), specialization_idx);
         self.next_monomorphization_id = self.next_monomorphization_id.saturating_add(1);
-        self.closure_specialization_count =
-            self.closure_specialization_count.saturating_add(1);
+        self.closure_specialization_count = self.closure_specialization_count.saturating_add(1);
 
         // BUG3 — mark this key as in-progress while its body is compiled.
         self.monomorphization_in_progress.insert(mono_key.clone());
 
         // F7: see note in `ensure_monomorphic_function`.
-        let saved_closure_function_ids =
-            std::mem::take(&mut self.closure_function_ids);
+        let saved_closure_function_ids = std::mem::take(&mut self.closure_function_ids);
         // v0.3 WS-6: see `ensure_monomorphic_function` — save/restore the
         // per-function local ConcreteType table across the nested compile.
         let saved_local_concrete_types =
@@ -941,10 +938,7 @@ mod tests {
     fn multiple_instantiations_produce_distinct_keys() {
         let mut cache = MonomorphizationCache::new();
 
-        let key_int_string = build_mono_key(
-            "map",
-            &[ConcreteType::I64, ConcreteType::String],
-        );
+        let key_int_string = build_mono_key("map", &[ConcreteType::I64, ConcreteType::String]);
         let key_f64_bool = build_mono_key("map", &[ConcreteType::F64, ConcreteType::Bool]);
         let key_array_f64 = build_mono_key(
             "map",
@@ -1010,10 +1004,8 @@ mod tests {
     #[test]
     fn ensure_monomorphic_function_unknown_name_errors() {
         let mut compiler = BytecodeCompiler::new();
-        let result = compiler.ensure_monomorphic_function(
-            "definitely_not_a_function",
-            &[ConcreteType::I64],
-        );
+        let result =
+            compiler.ensure_monomorphic_function("definitely_not_a_function", &[ConcreteType::I64]);
         assert!(result.is_err(), "expected error for unknown function name");
         let msg = format!("{:?}", result.err().unwrap());
         assert!(
@@ -1035,11 +1027,7 @@ mod tests {
         // Simulate "repeat<3>(...)": the call site builds a mono_key via
         // build_mono_key_with_consts and inserts a specialization index.
         let mut cache = MonomorphizationCache::new();
-        let key = build_mono_key_with_consts(
-            "repeat",
-            &[],
-            &[ComptimeConstValue::Int(3)],
-        );
+        let key = build_mono_key_with_consts("repeat", &[], &[ComptimeConstValue::Int(3)]);
         assert_eq!(key, "repeat::int_3");
         cache.insert(key.clone(), 11);
         assert_eq!(cache.lookup(&key), Some(11));
@@ -1049,16 +1037,8 @@ mod tests {
     #[test]
     fn const_generic_repeat_n_3_and_n_5_produce_two_entries() {
         let mut cache = MonomorphizationCache::new();
-        let k3 = build_mono_key_with_consts(
-            "repeat",
-            &[],
-            &[ComptimeConstValue::Int(3)],
-        );
-        let k5 = build_mono_key_with_consts(
-            "repeat",
-            &[],
-            &[ComptimeConstValue::Int(5)],
-        );
+        let k3 = build_mono_key_with_consts("repeat", &[], &[ComptimeConstValue::Int(3)]);
+        let k5 = build_mono_key_with_consts("repeat", &[], &[ComptimeConstValue::Int(5)]);
         assert_ne!(k3, k5);
         cache.insert(k3.clone(), 11);
         cache.insert(k5.clone(), 12);
@@ -1073,11 +1053,7 @@ mod tests {
         // that by inserting twice with the same key and verifying the cache
         // length never grows past 1 (and the second insert overwrites).
         let mut cache = MonomorphizationCache::new();
-        let key = build_mono_key_with_consts(
-            "repeat",
-            &[],
-            &[ComptimeConstValue::Int(3)],
-        );
+        let key = build_mono_key_with_consts("repeat", &[], &[ComptimeConstValue::Int(3)]);
         cache.insert(key.clone(), 11);
         cache.insert(key.clone(), 11);
         assert_eq!(cache.len(), 1);
@@ -1273,7 +1249,10 @@ mod tests {
             return_type: Some(TypeAnnotation::Basic("int".into())),
             where_clause: None,
             body: vec![shape_ast::ast::Statement::Return(
-                Some(shape_ast::ast::Expr::Identifier("x".into(), Span::default())),
+                Some(shape_ast::ast::Expr::Identifier(
+                    "x".into(),
+                    Span::default(),
+                )),
                 Span::default(),
             )],
             annotations: Vec::new(),
@@ -1288,7 +1267,8 @@ mod tests {
             span: Span::default(),
             doc_comment: None,
             ty: TypeAnnotation::Basic("int".into()),
-            default: default.map(|v| shape_ast::ast::Expr::Literal(Literal::Int(v), Span::default())),
+            default: default
+                .map(|v| shape_ast::ast::Expr::Literal(Literal::Int(v), Span::default())),
         }
     }
 
@@ -1327,7 +1307,10 @@ mod tests {
             Some(idx8)
         );
 
-        assert_ne!(idx4, idx8, "distinct const values must produce distinct specializations");
+        assert_ne!(
+            idx4, idx8,
+            "distinct const values must produce distinct specializations"
+        );
         assert_eq!(compiler.monomorphization_cache.len(), 2);
     }
 
@@ -1351,7 +1334,10 @@ mod tests {
                 &[ComptimeConstValue::Int(4)],
             )
             .unwrap();
-        assert_eq!(a, b, "identical const args must collapse to one cache entry");
+        assert_eq!(
+            a, b,
+            "identical const args must collapse to one cache entry"
+        );
         assert_eq!(compiler.monomorphization_cache.len(), 1);
     }
 
@@ -1422,7 +1408,10 @@ mod tests {
             "type-only entry must route through the const-aware mono key"
         );
         assert!(
-            compiler.monomorphization_cache.lookup("identity_n").is_none(),
+            compiler
+                .monomorphization_cache
+                .lookup("identity_n")
+                .is_none(),
             "bare `identity_n` key must NOT appear — const params always differentiate"
         );
     }
@@ -1575,9 +1564,18 @@ mod tests {
         let idx_4 = b5_register_and_monomorphize(&mut compiler, def_4).unwrap();
         let idx_8 = b5_register_and_monomorphize(&mut compiler, def_8).unwrap();
 
-        assert_eq!(compiler.monomorphization_cache.lookup("add_4::int_4"), Some(idx_4));
-        assert_eq!(compiler.monomorphization_cache.lookup("add_8::int_8"), Some(idx_8));
-        assert_ne!(idx_4, idx_8, "distinct defaults must produce distinct specializations");
+        assert_eq!(
+            compiler.monomorphization_cache.lookup("add_4::int_4"),
+            Some(idx_4)
+        );
+        assert_eq!(
+            compiler.monomorphization_cache.lookup("add_8::int_8"),
+            Some(idx_8)
+        );
+        assert_ne!(
+            idx_4, idx_8,
+            "distinct defaults must produce distinct specializations"
+        );
     }
 
     #[test]

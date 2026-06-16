@@ -50,22 +50,29 @@ const LEN_OFFSET: i32 = 16;
 fn elem_type_info(kind: NativeKind) -> (types::Type, i64) {
     match kind {
         NativeKind::Float64 | NativeKind::NullableFloat64 => (types::F64, 8),
-        NativeKind::Int64 | NativeKind::NullableInt64 | NativeKind::UInt64 | NativeKind::NullableUInt64 => {
-            (types::I64, 8)
-        }
-        NativeKind::IntSize | NativeKind::NullableIntSize | NativeKind::UIntSize | NativeKind::NullableUIntSize => {
+        NativeKind::Int64
+        | NativeKind::NullableInt64
+        | NativeKind::UInt64
+        | NativeKind::NullableUInt64 => (types::I64, 8),
+        NativeKind::IntSize
+        | NativeKind::NullableIntSize
+        | NativeKind::UIntSize
+        | NativeKind::NullableUIntSize => {
             // Pointer-sized — 8 bytes on 64-bit targets.
             (types::I64, 8)
         }
-        NativeKind::Int32 | NativeKind::NullableInt32 | NativeKind::UInt32 | NativeKind::NullableUInt32 => {
-            (types::I32, 4)
-        }
-        NativeKind::Int16 | NativeKind::NullableInt16 | NativeKind::UInt16 | NativeKind::NullableUInt16 => {
-            (types::I16, 2)
-        }
-        NativeKind::Int8 | NativeKind::NullableInt8 | NativeKind::UInt8 | NativeKind::NullableUInt8 => {
-            (types::I8, 1)
-        }
+        NativeKind::Int32
+        | NativeKind::NullableInt32
+        | NativeKind::UInt32
+        | NativeKind::NullableUInt32 => (types::I32, 4),
+        NativeKind::Int16
+        | NativeKind::NullableInt16
+        | NativeKind::UInt16
+        | NativeKind::NullableUInt16 => (types::I16, 2),
+        NativeKind::Int8
+        | NativeKind::NullableInt8
+        | NativeKind::UInt8
+        | NativeKind::NullableUInt8 => (types::I8, 1),
         NativeKind::Bool => (types::I8, 1),
         // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
         // 8-byte raw pointer carrier (`*const TypedObjectStorage`). Same shape as
@@ -209,9 +216,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         return true;
                     }
                 }
-                TerminatorKind::Goto(_)
-                | TerminatorKind::Return
-                | TerminatorKind::Unreachable => {}
+                TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => {}
             }
         }
         false
@@ -263,12 +268,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// v2-raw heap-element shape produced by VM-side `NewStringV2` /
     /// `NewDecimalV2` opcodes at
     /// `crates/shape-vm/src/executor/v2_handlers/array.rs:803-858`.
-    pub(crate) fn v2_array_new_func(&self, elem: NativeKind) -> Option<cranelift::codegen::ir::FuncRef> {
+    pub(crate) fn v2_array_new_func(
+        &self,
+        elem: NativeKind,
+    ) -> Option<cranelift::codegen::ir::FuncRef> {
         match elem {
             NativeKind::Float64 => Some(self.ffi.v2_array_new_f64),
             NativeKind::Int64 | NativeKind::UInt64 => Some(self.ffi.v2_array_new_i64),
             NativeKind::Int32 | NativeKind::UInt32 => Some(self.ffi.v2_array_new_i32),
-            NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => Some(self.ffi.v2_array_new_bool),
+            NativeKind::Bool | NativeKind::Int8 | NativeKind::UInt8 => {
+                Some(self.ffi.v2_array_new_bool)
+            }
             NativeKind::StringV2 => Some(self.ffi.v2_array_new_string),
             NativeKind::DecimalV2 => Some(self.ffi.v2_array_new_decimal),
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
@@ -348,10 +358,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
         } else if val_type == types::I64 {
             val
-        } else if val_type == types::I32
-            || val_type == types::I16
-            || val_type == types::I8
-        {
+        } else if val_type == types::I32 || val_type == types::I16 || val_type == types::I8 {
             // Zero-extend: the dispatcher uses only the low `elem_size` bytes,
             // so sign bits above that are ignored.
             self.builder.ins().uextend(types::I64, val)
@@ -440,10 +447,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         if idx_type == types::I32 {
             index_val
         } else if idx_type == types::F64 {
-            let i64_val = self
-                .builder
-                .ins()
-                .fcvt_to_sint_sat(types::I64, index_val);
+            let i64_val = self.builder.ins().fcvt_to_sint_sat(types::I64, index_val);
             self.builder.ins().ireduce(types::I32, i64_val)
         } else if idx_type == types::I8 {
             self.builder.ins().uextend(types::I32, index_val)
@@ -516,7 +520,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                      out of bounds (pool len = {}) — string-pool conduit \
                                      mismatch at JIT compile time. ADR-006 §2.7.5 / Group X \
                                      JIT FFI String/Decimal BUILD.",
-                                    id, self.strings.len()
+                                    id,
+                                    self.strings.len()
                                 ));
                             }
                             self.strings[idx].clone()
@@ -610,9 +615,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // ordinary scalar array literals (`[1, 2, 3]`) are not
                 // over-broadly bailed.
                 for op in operands {
-                    if let Some(NativeKind::Ptr(heap_kind)) =
-                        self.operand_slot_kind(op)
-                    {
+                    if let Some(NativeKind::Ptr(heap_kind)) = self.operand_slot_kind(op) {
                         return Err(format!(
                             "emit_v2_array_aggregate: SURFACE — scalar \
                              element kind {:?} array has an operand with \
@@ -999,19 +1002,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// `arr_ptr` is a Cranelift `i64` value pointing to a `TypedArrayHeader`.
     /// `index` is a Cranelift `i32` value (unsigned index).
     /// Returns the loaded element value (type depends on `elem_type`).
-    pub fn v2_array_get(
-        &mut self,
-        arr_ptr: Value,
-        index: Value,
-        elem_type: NativeKind,
-    ) -> Value {
+    pub fn v2_array_get(&mut self, arr_ptr: Value, index: Value, elem_type: NativeKind) -> Value {
         let (cl_type, elem_size) = elem_type_info(elem_type);
 
         // 1. Load data pointer (i64) from arr_ptr + DATA_PTR_OFFSET
-        let data_ptr = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), arr_ptr, DATA_PTR_OFFSET);
+        let data_ptr =
+            self.builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), arr_ptr, DATA_PTR_OFFSET);
 
         // 2. Load length (u32) from arr_ptr + LEN_OFFSET
         let len = self
@@ -1027,10 +1025,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // The merge block receives the result as a block parameter.
         self.builder.append_block_param(merge_block, cl_type);
 
-        let cmp = self
-            .builder
-            .ins()
-            .icmp(IntCC::UnsignedLessThan, index, len);
+        let cmp = self.builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
         self.builder
             .ins()
             .brif(cmp, in_bounds_block, &[], oob_block, &[]);
@@ -1114,10 +1109,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let (_cl_type, elem_size) = elem_type_info(elem_type);
 
         // 1. Load data pointer
-        let data_ptr = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), arr_ptr, DATA_PTR_OFFSET);
+        let data_ptr =
+            self.builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), arr_ptr, DATA_PTR_OFFSET);
 
         // 2. Load length
         let len = self
@@ -1130,10 +1125,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let oob_block = self.builder.create_block();
         let continue_block = self.builder.create_block();
 
-        let cmp = self
-            .builder
-            .ins()
-            .icmp(IntCC::UnsignedLessThan, index, len);
+        let cmp = self.builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
         self.builder
             .ins()
             .brif(cmp, in_bounds_block, &[], oob_block, &[]);
@@ -1183,4 +1175,3 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
-

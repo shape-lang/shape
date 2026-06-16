@@ -33,7 +33,9 @@
 //! `I16`/`U16` use 2; `I8`/`U8`/`Bool` use 1; `Ptr` uses 8 and participates
 //! in the `heap_capture_mask` retain/release cycle.
 
-use super::closure_layout::{ClosureLayout, SHARED_CELL_VALUE_OFFSET, SharedCell, TypedClosureHeader};
+use super::closure_layout::{
+    ClosureLayout, SHARED_CELL_VALUE_OFFSET, SharedCell, TypedClosureHeader,
+};
 use super::heap_header::{HEAP_KIND_V2_CLOSURE, HeapHeader};
 use super::struct_layout::FieldKind;
 use crate::kinded_slot::KindedSlot;
@@ -1756,12 +1758,7 @@ impl ClosureCell {
     ///
     /// Panics if `idx >= self.len()`.
     #[inline]
-    pub unsafe fn replace(
-        &mut self,
-        idx: usize,
-        bits: u64,
-        kind: NativeKind,
-    ) -> (u64, NativeKind) {
+    pub unsafe fn replace(&mut self, idx: usize, bits: u64, kind: NativeKind) -> (u64, NativeKind) {
         debug_assert_eq!(
             self.bits.len(),
             self.kinds.len(),
@@ -2017,11 +2014,8 @@ mod owned_closure_block_kinded_tests {
         // Mixed-kind layout: per-capture kinds match per-capture types,
         // demonstrating that `read_capture_kinded` walks the kind track
         // in lockstep with the bit slots.
-        let layout = arc_immutable_layout(&[
-            ConcreteType::F64,
-            ConcreteType::I32,
-            ConcreteType::Bool,
-        ]);
+        let layout =
+            arc_immutable_layout(&[ConcreteType::F64, ConcreteType::I32, ConcreteType::Bool]);
         // SAFETY: alloc + per-slot writes are paired.
         unsafe {
             let ptr = alloc_typed_closure(0, 0, &layout);
@@ -2044,4 +2038,3 @@ mod owned_closure_block_kinded_tests {
         }
     }
 }
-

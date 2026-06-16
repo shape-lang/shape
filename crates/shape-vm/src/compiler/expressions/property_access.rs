@@ -275,10 +275,7 @@ impl BytecodeCompiler {
                  empty chain for a resolved typed_field_place",
             );
             for field_operand in field_chain {
-                self.emit(Instruction::new(
-                    OpCode::MakeFieldRef,
-                    Some(field_operand),
-                ));
+                self.emit(Instruction::new(OpCode::MakeFieldRef, Some(field_operand)));
             }
             self.emit(Instruction::new(
                 OpCode::StoreLocal,
@@ -412,10 +409,8 @@ impl BytecodeCompiler {
                         .get_v2_layout(schema_id)
                         .and_then(|layout| {
                             // Find the field index by name in the layout
-                            let field_idx = layout
-                                .fields
-                                .iter()
-                                .position(|f| f.name == property)?;
+                            let field_idx =
+                                layout.fields.iter().position(|f| f.name == property)?;
                             let byte_offset = layout.field_offset(field_idx);
                             let field_kind = layout.field_kind(field_idx);
                             // Map FieldKind to v2 load opcode
@@ -635,10 +630,7 @@ impl BytecodeCompiler {
         if end_index.is_none() {
             if let Some((slot, elem_opcode)) = self.try_resolve_typed_elem_get(object) {
                 self.compile_expr(index)?;
-                self.emit(Instruction::new(
-                    elem_opcode,
-                    Some(Operand::Local(slot)),
-                ));
+                self.emit(Instruction::new(elem_opcode, Some(Operand::Local(slot))));
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
                 self.last_expr_numeric_type = inferred_numeric;
@@ -712,7 +704,11 @@ impl BytecodeCompiler {
             let is_string = self
                 .type_tracker
                 .get_local_type(local_idx)
-                .and_then(|info| info.type_name.as_deref().map(|n| n == "string" || n == "String"))
+                .and_then(|info| {
+                    info.type_name
+                        .as_deref()
+                        .map(|n| n == "string" || n == "String")
+                })
                 .unwrap_or(false);
             if is_string {
                 return Some(TypedLengthLocal::String(local_idx));

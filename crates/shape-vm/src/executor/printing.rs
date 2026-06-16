@@ -27,9 +27,7 @@
 //! recovery, per the playbook's surface-and-stop discipline.
 
 use shape_runtime::type_schema::{EnumVariantKind, TypeSchema, TypeSchemaRegistry};
-use shape_value::heap_value::{
-    HeapKind, HeapValue, TypedObjectStorage,
-};
+use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectStorage};
 use shape_value::{KindedSlot, NativeKind, ValueSlot};
 use std::sync::Arc;
 
@@ -137,9 +135,7 @@ impl<'a> ValueFormatter<'a> {
             // `as_v2_typed_array(bits, UInt64)` probe dereferenced an
             // arbitrary scalar `u64` value (e.g. `u64::MAX`) as a
             // `*const HeapHeader` → SIGSEGV on `print(x)`. Render directly.
-            NativeKind::UInt64 | NativeKind::NullableUInt64 => {
-                slot.slot.as_u64().to_string()
-            }
+            NativeKind::UInt64 | NativeKind::NullableUInt64 => slot.slot.as_u64().to_string(),
             NativeKind::UInt8
             | NativeKind::NullableUInt8
             | NativeKind::UInt16
@@ -148,9 +144,7 @@ impl<'a> ValueFormatter<'a> {
             | NativeKind::NullableUInt32
             | NativeKind::UIntSize
             | NativeKind::NullableUIntSize => slot.slot.as_u64().to_string(),
-            NativeKind::Float64 | NativeKind::NullableFloat64 => {
-                format_number(slot.slot.as_f64())
-            }
+            NativeKind::Float64 | NativeKind::NullableFloat64 => format_number(slot.slot.as_f64()),
             // Round 19 S1.5 W12-nativekind-scalar-additions (2026-05-14):
             // ADR-006 §2.7.5 amendment adds F32 + Char as 4-byte scalar
             // variants. F32 prints via `format_number(f64::from(f32))`
@@ -247,8 +241,7 @@ impl<'a> ValueFormatter<'a> {
                 }
             }
             HeapKind::Decimal => {
-                let d: &rust_decimal::Decimal =
-                    unsafe { &*(bits as *const rust_decimal::Decimal) };
+                let d: &rust_decimal::Decimal = unsafe { &*(bits as *const rust_decimal::Decimal) };
                 format!("{}D", d)
             }
             HeapKind::BigInt => {
@@ -292,8 +285,7 @@ impl<'a> ValueFormatter<'a> {
                 // resolve field names via the schema registry. SAFETY:
                 // construction-side contract on `KindedSlot::from_typed_object`
                 // — `TypedObject`-kind bits are `Arc::into_raw(Arc<TypedObjectStorage>)`.
-                let storage: &TypedObjectStorage =
-                    unsafe { &*(bits as *const TypedObjectStorage) };
+                let storage: &TypedObjectStorage = unsafe { &*(bits as *const TypedObjectStorage) };
                 self.format_typed_object(storage, depth)
             }
             HeapKind::HashMap => {
@@ -365,8 +357,7 @@ impl<'a> ValueFormatter<'a> {
                 renderer.render(node)
             }
             HeapKind::Instant => {
-                let t: &std::time::Instant =
-                    unsafe { &*(bits as *const std::time::Instant) };
+                let t: &std::time::Instant = unsafe { &*(bits as *const std::time::Instant) };
                 format!("<instant:{:?}>", t.elapsed())
             }
             HeapKind::IoHandle => {
@@ -614,9 +605,8 @@ impl<'a> ValueFormatter<'a> {
             // `KindedSlot::from_trait_object` — TraitObject-kind
             // bits are `Arc::into_raw(Arc<TraitObjectStorage>)`.
             HeapKind::TraitObject => {
-                let t: &shape_value::heap_value::TraitObjectStorage = unsafe {
-                    &*(bits as *const shape_value::heap_value::TraitObjectStorage)
-                };
+                let t: &shape_value::heap_value::TraitObjectStorage =
+                    unsafe { &*(bits as *const shape_value::heap_value::TraitObjectStorage) };
                 let trait_name = t
                     .vtable
                     .trait_names
@@ -654,8 +644,7 @@ impl<'a> ValueFormatter<'a> {
                 let s: &shape_value::heap_value::MatrixSliceData =
                     unsafe { &*(bits as *const shape_value::heap_value::MatrixSliceData) };
                 let slice = s.as_slice();
-                let elems: Vec<String> =
-                    slice.iter().map(|v| format_array_float(*v)).collect();
+                let elems: Vec<String> = slice.iter().map(|v| format_array_float(*v)).collect();
                 format!("[{}]", elems.join(", "))
             }
         }
@@ -681,8 +670,7 @@ impl<'a> ValueFormatter<'a> {
             // Float64 / Int64 / Int32 / Bool per the v2 typed-array
             // contract. Format each through the canonical scalar arms.
             if let Some((bits, kind)) = read_element(view, i) {
-                let elem_slot =
-                    KindedSlot::new(ValueSlot::from_raw(bits), kind);
+                let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
                 out.push_str(&self.format_kinded_inner(&elem_slot, 0, true));
                 std::mem::forget(elem_slot);
             } else {
@@ -892,11 +880,7 @@ impl<'a> ValueFormatter<'a> {
             if i > 0 {
                 out.push_str(", ");
             }
-            let name: &str = schema
-                .fields
-                .get(i)
-                .map(|f| f.name.as_str())
-                .unwrap_or("_");
+            let name: &str = schema.fields.get(i).map(|f| f.name.as_str()).unwrap_or("_");
             if name == "_" {
                 out.push_str(&format!("_{}", i));
             } else {
@@ -918,10 +902,7 @@ impl<'a> ValueFormatter<'a> {
     /// Q19) — i64-priority min-heap render shape (mirror of HashSet's
     /// render shape with the values column carrying i64 instead of
     /// quoted strings).
-    fn format_priority_queue(
-        &self,
-        pq: &shape_value::heap_value::PriorityQueueData,
-    ) -> String {
+    fn format_priority_queue(&self, pq: &shape_value::heap_value::PriorityQueueData) -> String {
         let n = pq.heap.len();
         let mut out = String::with_capacity(16 + n * 4);
         out.push_str("PriorityQueue[");
@@ -1156,8 +1137,7 @@ impl<'a> ValueFormatter<'a> {
                 // TerminalRenderer per the TERMINAL-as-default
                 // print() dispatch.
                 use shape_runtime::content_renderer::ContentRenderer;
-                let renderer =
-                    shape_runtime::renderers::terminal::TerminalRenderer::new();
+                let renderer = shape_runtime::renderers::terminal::TerminalRenderer::new();
                 renderer.render(n)
             }
             HeapValue::Instant(t) => format!("<instant:{:?}>", t.elapsed()),
@@ -1261,8 +1241,7 @@ impl<'a> ValueFormatter<'a> {
             HeapValue::Matrix(m) => format!("<Mat<number>:{}x{}>", m.rows, m.cols),
             HeapValue::MatrixSlice(s) => {
                 let slice = s.as_slice();
-                let elems: Vec<String> =
-                    slice.iter().map(|v| format_array_float(*v)).collect();
+                let elems: Vec<String> = slice.iter().map(|v| format_array_float(*v)).collect();
                 format!("[{}]", elems.join(", "))
             }
         }
@@ -1312,14 +1291,8 @@ mod tests {
         let reg = create_test_registry();
         let formatter = ValueFormatter::new(&reg);
 
-        assert_eq!(
-            formatter.format_kinded(&KindedSlot::from_int(42)),
-            "42"
-        );
-        assert_eq!(
-            formatter.format_kinded(&KindedSlot::from_int(-100)),
-            "-100"
-        );
+        assert_eq!(formatter.format_kinded(&KindedSlot::from_int(42)), "42");
+        assert_eq!(formatter.format_kinded(&KindedSlot::from_int(-100)), "-100");
         assert_eq!(
             formatter.format_kinded(&KindedSlot::from_bool(true)),
             "true"
@@ -1417,10 +1390,7 @@ mod tests {
         let formatter = ValueFormatter::new(&reg);
 
         for &v in &[0u64, 42u64, 1000u64, u64::MAX, u64::MAX - 1] {
-            let slot = KindedSlot::new(
-                ValueSlot::from_raw(v),
-                NativeKind::UInt64,
-            );
+            let slot = KindedSlot::new(ValueSlot::from_raw(v), NativeKind::UInt64);
             assert_eq!(formatter.format_kinded(&slot), v.to_string());
             std::mem::forget(slot);
         }
@@ -1433,8 +1403,8 @@ mod tests {
     /// element-type byte and renders the elements.
     #[test]
     fn test_format_typed_array_via_ptr_carrier() {
-        use shape_value::v2::typed_array::{TypedArray, ELEM_TYPE_I64};
         use crate::executor::v2_handlers::v2_array_detect::stamp_elem_type;
+        use shape_value::v2::typed_array::{ELEM_TYPE_I64, TypedArray};
 
         let reg = create_test_registry();
         let formatter = ValueFormatter::new(&reg);
@@ -1486,9 +1456,7 @@ mod tests {
         );
         std::mem::forget(slot);
         unsafe {
-            let _ = std::sync::Arc::from_raw(
-                bits as *const shape_value::content::ContentNode,
-            );
+            let _ = std::sync::Arc::from_raw(bits as *const shape_value::content::ContentNode);
         }
 
         // Styled Content node — TerminalRenderer should emit ANSI
@@ -1514,9 +1482,7 @@ mod tests {
         assert!(styled_out.contains("hi"));
         std::mem::forget(slot2);
         unsafe {
-            let _ = std::sync::Arc::from_raw(
-                bits2 as *const shape_value::content::ContentNode,
-            );
+            let _ = std::sync::Arc::from_raw(bits2 as *const shape_value::content::ContentNode);
         }
     }
 }

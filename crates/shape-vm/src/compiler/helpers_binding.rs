@@ -187,7 +187,9 @@ impl BytecodeCompiler {
             return Some(name);
         }
         // Fall back to non-function MIR context (top-level code)
-        self.non_function_mir_context_stack.last().map(|s| s.as_str())
+        self.non_function_mir_context_stack
+            .last()
+            .map(|s| s.as_str())
     }
 
     /// Query the MIR borrow analysis for the ownership decision at a given span.
@@ -236,11 +238,7 @@ impl BytecodeCompiler {
     /// only.
     ///
     /// Flag off: emission is byte-identical to pre-V1.1C.
-    pub(super) fn emit_load_local_owned(
-        &mut self,
-        slot: u16,
-        span: &shape_ast::ast::Span,
-    ) {
+    pub(super) fn emit_load_local_owned(&mut self, slot: u16, span: &shape_ast::ast::Span) {
         use crate::bytecode::{Instruction, OpCode, Operand};
         use crate::mir::analysis::OwnershipDecision;
 
@@ -546,12 +544,13 @@ impl BytecodeCompiler {
                     .resolve_scoped_module_binding_name(&name)
                     .unwrap_or(name);
                 if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
-                    if let Some(mut sem) =
-                        self.type_tracker.get_binding_semantics(binding_idx).copied()
+                    if let Some(mut sem) = self
+                        .type_tracker
+                        .get_binding_semantics(binding_idx)
+                        .copied()
                     {
                         sem.return_ownership_hint = Some(hint);
-                        self.type_tracker
-                            .set_binding_semantics(binding_idx, sem);
+                        self.type_tracker.set_binding_semantics(binding_idx, sem);
                     }
                 }
             }

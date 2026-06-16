@@ -48,7 +48,10 @@ pub struct NamedTypeId<Id> {
 impl<Id> NamedTypeId<Id> {
     /// A named type id — the name is the load-bearing identity.
     pub fn named(layout: Id, name: impl Into<std::sync::Arc<str>>) -> Self {
-        NamedTypeId { layout, name: Some(name.into()) }
+        NamedTypeId {
+            layout,
+            name: Some(name.into()),
+        }
     }
 
     /// A placeholder type id — no name threaded (legacy producers).
@@ -247,10 +250,7 @@ impl ConcreteType {
             ConcreteType::I16 | ConcreteType::U16 => 2,
             // Round 19 S1.5 (2026-05-14): F32 and Char are 4-byte
             // scalars per the §2.7.5 amendment.
-            ConcreteType::I32
-            | ConcreteType::U32
-            | ConcreteType::F32
-            | ConcreteType::Char => 4,
+            ConcreteType::I32 | ConcreteType::U32 | ConcreteType::F32 | ConcreteType::Char => 4,
             _ => 8, // f64, i64, u64, pointers, etc.
         }
     }
@@ -263,10 +263,7 @@ impl ConcreteType {
             ConcreteType::I16 | ConcreteType::U16 => 2,
             // Round 19 S1.5 (2026-05-14): F32 and Char are 4-byte
             // scalars per the §2.7.5 amendment.
-            ConcreteType::I32
-            | ConcreteType::U32
-            | ConcreteType::F32
-            | ConcreteType::Char => 4,
+            ConcreteType::I32 | ConcreteType::U32 | ConcreteType::F32 | ConcreteType::Char => 4,
             _ => 8,
         }
     }
@@ -590,15 +587,12 @@ mod tests {
         let arr_f64 = ConcreteType::Array(Box::new(ConcreteType::F64));
         assert_eq!(arr_f64.mono_key(), "array_f64");
 
-        let map = ConcreteType::HashMap(
-            Box::new(ConcreteType::String),
-            Box::new(ConcreteType::I64),
-        );
+        let map =
+            ConcreteType::HashMap(Box::new(ConcreteType::String), Box::new(ConcreteType::I64));
         assert_eq!(map.mono_key(), "hashmap_string_i64");
 
-        let nested = ConcreteType::Array(Box::new(ConcreteType::Array(Box::new(
-            ConcreteType::I32,
-        ))));
+        let nested =
+            ConcreteType::Array(Box::new(ConcreteType::Array(Box::new(ConcreteType::I32))));
         assert_eq!(nested.mono_key(), "array_array_i32");
     }
 

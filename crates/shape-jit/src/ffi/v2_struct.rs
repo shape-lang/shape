@@ -21,7 +21,7 @@
 //! Field access uses raw pointer arithmetic with byte offsets known at
 //! compile time, giving O(1) access with no schema lookup.
 
-use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::alloc::{Layout, alloc_zeroed, dealloc};
 
 /// Heap kind tag for v2 typed structs.
 /// Uses a JIT-private range (132+) to avoid collision with existing HK_ constants.

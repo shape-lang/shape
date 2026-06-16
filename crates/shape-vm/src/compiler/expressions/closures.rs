@@ -41,9 +41,7 @@ fn infer_callsite_arg_type(arg: &Expr) -> Option<TypeAnnotation> {
             operand,
             ..
         } => match operand.as_ref() {
-            Expr::Literal(Literal::Int(_), _) => {
-                Some(TypeAnnotation::Basic("int".to_string()))
-            }
+            Expr::Literal(Literal::Int(_), _) => Some(TypeAnnotation::Basic("int".to_string())),
             Expr::Literal(Literal::Number(_), _) => {
                 Some(TypeAnnotation::Basic("number".to_string()))
             }
@@ -206,11 +204,7 @@ pub(crate) fn collect_closure_callsite_param_hints(
         }
     }
 
-    fn bind_expr(
-        expr: &Expr,
-        closure_names: &mut HashSet<String>,
-        shadowed: &mut HashSet<String>,
-    ) {
+    fn bind_expr(expr: &Expr, closure_names: &mut HashSet<String>, shadowed: &mut HashSet<String>) {
         match expr {
             Expr::FunctionCall { args, .. } | Expr::QualifiedFunctionCall { args, .. } => {
                 for a in args {
@@ -289,11 +283,7 @@ pub(crate) fn collect_closure_callsite_param_hints(
         }
     }
 
-    fn bind_item(
-        item: &Item,
-        closure_names: &mut HashSet<String>,
-        shadowed: &mut HashSet<String>,
-    ) {
+    fn bind_item(item: &Item, closure_names: &mut HashSet<String>, shadowed: &mut HashSet<String>) {
         match item {
             Item::Statement(stmt, _) => bind_stmt(stmt, closure_names, shadowed),
             Item::Expression(e, _) => bind_expr(e, closure_names, shadowed),
@@ -490,9 +480,7 @@ pub(crate) fn collect_closure_callsite_param_hints(
         match item {
             Item::Statement(stmt, _) => walk_stmt(stmt, &closure_binding_names, &mut hints),
             Item::Expression(e, _) => walk_expr(e, &closure_binding_names, &mut hints),
-            Item::Assignment(asgn, _) => {
-                walk_expr(&asgn.value, &closure_binding_names, &mut hints)
-            }
+            Item::Assignment(asgn, _) => walk_expr(&asgn.value, &closure_binding_names, &mut hints),
             Item::VariableDecl(decl, _) => {
                 if let Some(v) = decl.value.as_ref() {
                     walk_expr(v, &closure_binding_names, &mut hints);
@@ -2108,9 +2096,7 @@ impl BytecodeCompiler {
         // (`Arc<NativeViewData>` vs the closure's `Arc<HeapValue>`) and is
         // rejected by the `call_value_immediate_nb` callee match.
         if self.current_closure_callee_captures.contains(name) {
-            return ConcreteType::Function(
-                shape_value::v2::concrete_type::FunctionTypeId(0),
-            );
+            return ConcreteType::Function(shape_value::v2::concrete_type::FunctionTypeId(0));
         }
         ConcreteType::Pointer(Box::new(ConcreteType::Void))
     }
@@ -2462,9 +2448,7 @@ fn collect_callee_names_in_expr(
             }
         }
         Expr::PropertyAccess { object, .. } => collect_callee_names_in_expr(object, out),
-        Expr::Return(Some(e), _) | Expr::Break(Some(e), _) => {
-            collect_callee_names_in_expr(e, out)
-        }
+        Expr::Return(Some(e), _) | Expr::Break(Some(e), _) => collect_callee_names_in_expr(e, out),
         Expr::TryOperator(e, _) | Expr::Await(e, _) | Expr::Spread(e, _) => {
             collect_callee_names_in_expr(e, out)
         }

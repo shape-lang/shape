@@ -29,8 +29,8 @@
 
 use crate::{
     bytecode::{Instruction, NumericWidth, OpCode, Operand},
-    executor::vm_impl::stack::drop_with_kind,
     executor::VirtualMachine,
+    executor::vm_impl::stack::drop_with_kind,
 };
 use shape_value::{
     NativeKind, VMError,
@@ -176,7 +176,10 @@ impl VirtualMachine {
                 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
                 let result = match (decimal_ref(a_bits, a_kind), decimal_ref(b_bits, b_kind)) {
                     (Some(base), Some(exp)) => {
-                        let r = base.to_f64().unwrap_or(0.0).powf(exp.to_f64().unwrap_or(0.0));
+                        let r = base
+                            .to_f64()
+                            .unwrap_or(0.0)
+                            .powf(exp.to_f64().unwrap_or(0.0));
                         rust_decimal::Decimal::from_f64(r).unwrap_or_default()
                     }
                     _ => rust_decimal::Decimal::default(),
@@ -563,10 +566,7 @@ impl VirtualMachine {
     /// Division by zero is a clean `VMError::DivisionByZero` (mirrors the
     /// signed path). The result is stamped `NativeKind::UInt64`.
     #[inline(always)]
-    fn compact_int_divmod_u64(
-        &mut self,
-        op: impl FnOnce(u64, u64) -> u64,
-    ) -> Result<(), VMError> {
+    fn compact_int_divmod_u64(&mut self, op: impl FnOnce(u64, u64) -> u64) -> Result<(), VMError> {
         let (b_bits, _b_kind) = self.pop_kinded()?;
         let (a_bits, _a_kind) = self.pop_kinded()?;
         if b_bits == 0 {
@@ -593,10 +593,7 @@ impl VirtualMachine {
     }
 
     #[inline(always)]
-    fn compact_float_divmod(
-        &mut self,
-        op: impl FnOnce(f64, f64) -> f64,
-    ) -> Result<(), VMError> {
+    fn compact_float_divmod(&mut self, op: impl FnOnce(f64, f64) -> f64) -> Result<(), VMError> {
         let (b_bits, b_kind) = self.pop_kinded()?;
         let (a_bits, a_kind) = self.pop_kinded()?;
         let lhs = coerce_to_f64_kinded(a_bits, a_kind).ok_or_else(|| VMError::TypeError {
@@ -946,11 +943,8 @@ mod tests {
     fn int_add_exact_far_above_2_pow_53() {
         // Both the operand and the sum lie above 2^53, where f64 cannot
         // represent every integer exactly; the old route lost precision.
-        let (v, k) = exec_typed_int_binop_kinded(
-            9_007_199_254_740_993,
-            1_000_000_001,
-            OpCode::AddInt,
-        );
+        let (v, k) =
+            exec_typed_int_binop_kinded(9_007_199_254_740_993, 1_000_000_001, OpCode::AddInt);
         assert_eq!(v, 9_007_200_254_740_994);
         assert_eq!(k, NativeKind::Int64);
     }
@@ -1002,8 +996,7 @@ mod tests {
     #[test]
     fn int_div_exact_above_2_pow_53() {
         // Large exact quotient — old f64 route would lose precision.
-        let (v, k) =
-            exec_typed_int_binop_kinded(9_007_199_254_740_993_000, 1000, OpCode::DivInt);
+        let (v, k) = exec_typed_int_binop_kinded(9_007_199_254_740_993_000, 1000, OpCode::DivInt);
         assert_eq!(v, 9_007_199_254_740_993);
         assert_eq!(k, NativeKind::Int64);
     }
@@ -1037,8 +1030,7 @@ mod tests {
 
     #[test]
     fn int_mod_exact_above_2_pow_53() {
-        let (v, k) =
-            exec_typed_int_binop_kinded(9_007_199_254_740_993_007, 1000, OpCode::ModInt);
+        let (v, k) = exec_typed_int_binop_kinded(9_007_199_254_740_993_007, 1000, OpCode::ModInt);
         assert_eq!(v, 7);
         assert_eq!(k, NativeKind::Int64);
     }
@@ -1181,12 +1173,7 @@ mod tests {
 
     // ── Compact typed family ─────────────────────────────────────────────
 
-    fn run_typed_op_int(
-        opcode: OpCode,
-        width: NumericWidth,
-        a: i64,
-        b: i64,
-    ) -> i64 {
+    fn run_typed_op_int(opcode: OpCode, width: NumericWidth, a: i64, b: i64) -> i64 {
         let mut vm = make_vm();
         push_int(&mut vm, a);
         push_int(&mut vm, b);
@@ -1195,12 +1182,7 @@ mod tests {
         pop_int(&mut vm)
     }
 
-    fn run_typed_op_f64(
-        opcode: OpCode,
-        width: NumericWidth,
-        a: f64,
-        b: f64,
-    ) -> f64 {
+    fn run_typed_op_f64(opcode: OpCode, width: NumericWidth, a: f64, b: f64) -> f64 {
         let mut vm = make_vm();
         push_f64(&mut vm, a);
         push_f64(&mut vm, b);
@@ -1211,7 +1193,10 @@ mod tests {
 
     #[test]
     fn add_typed_i64() {
-        assert_eq!(run_typed_op_int(OpCode::AddTyped, NumericWidth::I64, 10, 20), 30);
+        assert_eq!(
+            run_typed_op_int(OpCode::AddTyped, NumericWidth::I64, 10, 20),
+            30
+        );
     }
 
     #[test]
@@ -1222,17 +1207,26 @@ mod tests {
 
     #[test]
     fn sub_typed_i64() {
-        assert_eq!(run_typed_op_int(OpCode::SubTyped, NumericWidth::I64, 50, 20), 30);
+        assert_eq!(
+            run_typed_op_int(OpCode::SubTyped, NumericWidth::I64, 50, 20),
+            30
+        );
     }
 
     #[test]
     fn mul_typed_i64() {
-        assert_eq!(run_typed_op_int(OpCode::MulTyped, NumericWidth::I64, 6, 7), 42);
+        assert_eq!(
+            run_typed_op_int(OpCode::MulTyped, NumericWidth::I64, 6, 7),
+            42
+        );
     }
 
     #[test]
     fn div_typed_i64() {
-        assert_eq!(run_typed_op_int(OpCode::DivTyped, NumericWidth::I64, 100, 4), 25);
+        assert_eq!(
+            run_typed_op_int(OpCode::DivTyped, NumericWidth::I64, 100, 4),
+            25
+        );
     }
 
     #[test]
@@ -1247,22 +1241,34 @@ mod tests {
 
     #[test]
     fn mod_typed_i64() {
-        assert_eq!(run_typed_op_int(OpCode::ModTyped, NumericWidth::I64, 17, 5), 2);
+        assert_eq!(
+            run_typed_op_int(OpCode::ModTyped, NumericWidth::I64, 17, 5),
+            2
+        );
     }
 
     #[test]
     fn cmp_typed_i64_less() {
-        assert_eq!(run_typed_op_int(OpCode::CmpTyped, NumericWidth::I64, 3, 10), -1);
+        assert_eq!(
+            run_typed_op_int(OpCode::CmpTyped, NumericWidth::I64, 3, 10),
+            -1
+        );
     }
 
     #[test]
     fn cmp_typed_i64_equal() {
-        assert_eq!(run_typed_op_int(OpCode::CmpTyped, NumericWidth::I64, 7, 7), 0);
+        assert_eq!(
+            run_typed_op_int(OpCode::CmpTyped, NumericWidth::I64, 7, 7),
+            0
+        );
     }
 
     #[test]
     fn cmp_typed_i64_greater() {
-        assert_eq!(run_typed_op_int(OpCode::CmpTyped, NumericWidth::I64, 10, 3), 1);
+        assert_eq!(
+            run_typed_op_int(OpCode::CmpTyped, NumericWidth::I64, 10, 3),
+            1
+        );
     }
 
     #[test]
@@ -1280,18 +1286,27 @@ mod tests {
     #[test]
     fn i8_add_wraps() {
         // 127 + 1 = -128 (wrapping)
-        assert_eq!(run_typed_op_int(OpCode::AddTyped, NumericWidth::I8, 127, 1), -128);
+        assert_eq!(
+            run_typed_op_int(OpCode::AddTyped, NumericWidth::I8, 127, 1),
+            -128
+        );
     }
 
     #[test]
     fn u8_add_wraps() {
         // 255 + 1 = 0 (wrapping)
-        assert_eq!(run_typed_op_int(OpCode::AddTyped, NumericWidth::U8, 255, 1), 0);
+        assert_eq!(
+            run_typed_op_int(OpCode::AddTyped, NumericWidth::U8, 255, 1),
+            0
+        );
     }
 
     #[test]
     fn i16_add_wraps() {
-        assert_eq!(run_typed_op_int(OpCode::AddTyped, NumericWidth::I16, 32767, 1), -32768);
+        assert_eq!(
+            run_typed_op_int(OpCode::AddTyped, NumericWidth::I16, 32767, 1),
+            -32768
+        );
     }
 
     #[test]
@@ -1307,7 +1322,8 @@ mod tests {
     fn push_decimal_test(vm: &mut VirtualMachine, d: rust_decimal::Decimal) {
         let arc = std::sync::Arc::new(d);
         let bits = std::sync::Arc::into_raw(arc) as u64;
-        vm.push_kinded(bits, NativeKind::Ptr(HeapKind::Decimal)).unwrap();
+        vm.push_kinded(bits, NativeKind::Ptr(HeapKind::Decimal))
+            .unwrap();
     }
 
     fn pop_decimal_test(vm: &mut VirtualMachine) -> rust_decimal::Decimal {
@@ -1328,7 +1344,10 @@ mod tests {
         push_decimal_test(&mut vm, Decimal::from_str("2.25").unwrap());
         let instr = Instruction::simple(OpCode::AddDecimal);
         vm.exec_typed_arithmetic(&instr).unwrap();
-        assert_eq!(pop_decimal_test(&mut vm), Decimal::from_str("3.75").unwrap());
+        assert_eq!(
+            pop_decimal_test(&mut vm),
+            Decimal::from_str("3.75").unwrap()
+        );
     }
 
     #[test]
@@ -1339,7 +1358,10 @@ mod tests {
         push_decimal_test(&mut vm, Decimal::from_str("3.14").unwrap());
         let instr = Instruction::simple(OpCode::NegDecimal);
         vm.exec_typed_arithmetic(&instr).unwrap();
-        assert_eq!(pop_decimal_test(&mut vm), Decimal::from_str("-3.14").unwrap());
+        assert_eq!(
+            pop_decimal_test(&mut vm),
+            Decimal::from_str("-3.14").unwrap()
+        );
     }
 
     // ── u64 full-range carrier — R5c-2-β-γ checkpoint (b) ─────────────────
@@ -1392,7 +1414,10 @@ mod tests {
             10_000_000_000_000_000_000,
             10_000_000_000_000_000_000,
         );
-        assert_eq!(v, 10_000_000_000_000_000_000u64.wrapping_mul(10_000_000_000_000_000_000));
+        assert_eq!(
+            v,
+            10_000_000_000_000_000_000u64.wrapping_mul(10_000_000_000_000_000_000)
+        );
         assert_eq!(k, NativeKind::UInt64);
     }
 

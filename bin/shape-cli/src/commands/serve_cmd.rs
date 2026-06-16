@@ -293,7 +293,9 @@ async fn handle_connection(
                         success: false,
                         value: WireValue::Null,
                         stdout: None,
-                        error: Some("Authentication required. Send Auth message first.".to_string()),
+                        error: Some(
+                            "Authentication required. Send Auth message first.".to_string(),
+                        ),
                         content_terminal: None,
                         content_html: None,
                         diagnostics: vec![],
@@ -301,7 +303,9 @@ async fn handle_connection(
                         print_output: None,
                     }))
                 } else {
-                    let _permit = semaphore.acquire().await
+                    let _permit = semaphore
+                        .acquire()
+                        .await
                         .map_err(|_| anyhow::anyhow!("semaphore closed"))?;
                     Some(handle_execute_file(req, config).await)
                 }
@@ -313,7 +317,9 @@ async fn handle_connection(
                         success: false,
                         value: WireValue::Null,
                         stdout: None,
-                        error: Some("Authentication required. Send Auth message first.".to_string()),
+                        error: Some(
+                            "Authentication required. Send Auth message first.".to_string(),
+                        ),
                         content_terminal: None,
                         content_html: None,
                         diagnostics: vec![],
@@ -321,7 +327,9 @@ async fn handle_connection(
                         print_output: None,
                     }))
                 } else {
-                    let _permit = semaphore.acquire().await
+                    let _permit = semaphore
+                        .acquire()
+                        .await
                         .map_err(|_| anyhow::anyhow!("semaphore closed"))?;
                     Some(handle_execute_project(req, config).await)
                 }
@@ -342,9 +350,7 @@ async fn handle_connection(
                     Some(handle_validate_path(req))
                 }
             }
-            WireMessage::BlobNegotiation(req) => {
-                Some(handle_negotiation(req, &state.blob_cache))
-            }
+            WireMessage::BlobNegotiation(req) => Some(handle_negotiation(req, &state.blob_cache)),
             WireMessage::Sidecar(s) => {
                 state.pending_sidecars.insert(s.sidecar_id, s);
                 continue;
@@ -619,25 +625,31 @@ fn handle_validate_path(req: ValidatePathRequest) -> WireMessage {
     let (source, context_path) = if path.is_dir() {
         // Project directory — find entry point from shape.toml
         match shape_runtime::project::find_project_root(path) {
-            Some(project) => {
-                match &project.config.project.entry {
-                    Some(entry) => {
-                        let entry_path = project.root_path.join(entry);
-                        match std::fs::read_to_string(&entry_path) {
-                            Ok(src) => (src, entry_path),
-                            Err(e) => return WireMessage::ValidateResponse(ValidateResponse {
+            Some(project) => match &project.config.project.entry {
+                Some(entry) => {
+                    let entry_path = project.root_path.join(entry);
+                    match std::fs::read_to_string(&entry_path) {
+                        Ok(src) => (src, entry_path),
+                        Err(e) => {
+                            return WireMessage::ValidateResponse(ValidateResponse {
                                 request_id: req.request_id,
                                 success: false,
                                 diagnostics: vec![WireDiagnostic {
                                     severity: "error".to_string(),
-                                    message: format!("Failed to read entry file '{}': {}", entry_path.display(), e),
+                                    message: format!(
+                                        "Failed to read entry file '{}': {}",
+                                        entry_path.display(),
+                                        e
+                                    ),
                                     line: None,
                                     column: None,
                                 }],
-                            }),
+                            });
                         }
                     }
-                    None => return WireMessage::ValidateResponse(ValidateResponse {
+                }
+                None => {
+                    return WireMessage::ValidateResponse(ValidateResponse {
                         request_id: req.request_id,
                         success: false,
                         diagnostics: vec![WireDiagnostic {
@@ -646,34 +658,38 @@ fn handle_validate_path(req: ValidatePathRequest) -> WireMessage {
                             line: None,
                             column: None,
                         }],
-                    }),
+                    });
                 }
+            },
+            None => {
+                return WireMessage::ValidateResponse(ValidateResponse {
+                    request_id: req.request_id,
+                    success: false,
+                    diagnostics: vec![WireDiagnostic {
+                        severity: "error".to_string(),
+                        message: format!("No shape.toml found in '{}'", path.display()),
+                        line: None,
+                        column: None,
+                    }],
+                });
             }
-            None => return WireMessage::ValidateResponse(ValidateResponse {
-                request_id: req.request_id,
-                success: false,
-                diagnostics: vec![WireDiagnostic {
-                    severity: "error".to_string(),
-                    message: format!("No shape.toml found in '{}'", path.display()),
-                    line: None,
-                    column: None,
-                }],
-            }),
         }
     } else {
         // Single .shape file
         match std::fs::read_to_string(path) {
             Ok(src) => (src, path.to_path_buf()),
-            Err(e) => return WireMessage::ValidateResponse(ValidateResponse {
-                request_id: req.request_id,
-                success: false,
-                diagnostics: vec![WireDiagnostic {
-                    severity: "error".to_string(),
-                    message: format!("Failed to read '{}': {}", path.display(), e),
-                    line: None,
-                    column: None,
-                }],
-            }),
+            Err(e) => {
+                return WireMessage::ValidateResponse(ValidateResponse {
+                    request_id: req.request_id,
+                    success: false,
+                    diagnostics: vec![WireDiagnostic {
+                        severity: "error".to_string(),
+                        message: format!("Failed to read '{}': {}", path.display(), e),
+                        line: None,
+                        column: None,
+                    }],
+                });
+            }
         }
     };
 
@@ -842,8 +858,8 @@ fn execute_file_in_process(
 
     let start = Instant::now();
 
-    let mut engine = ShapeEngine::new()
-        .map_err(|e| anyhow::anyhow!("failed to create Shape engine: {}", e))?;
+    let mut engine =
+        ShapeEngine::new().map_err(|e| anyhow::anyhow!("failed to create Shape engine: {}", e))?;
 
     let mut executor = BytecodeExecutor::new();
 
@@ -879,7 +895,11 @@ fn execute_file_in_process(
 
     Ok(InProcessResult {
         value: result.value,
-        stdout: if stdout.is_empty() { None } else { Some(stdout) },
+        stdout: if stdout.is_empty() {
+            None
+        } else {
+            Some(stdout)
+        },
         content_terminal: result.content_terminal,
         content_html: if printed_content_html.is_empty() {
             result.content_html
@@ -901,12 +921,20 @@ fn execute_project_in_process(
     let project = shape_runtime::project::find_project_root(dir)
         .ok_or_else(|| anyhow::anyhow!("No shape.toml found in '{}'", project_dir))?;
 
-    let entry = project.config.project.entry.as_ref()
+    let entry = project
+        .config
+        .project
+        .entry
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("shape.toml has no [project].entry field"))?;
 
     let entry_path = project.root_path.join(entry);
     if !entry_path.is_file() {
-        bail!("Entry file '{}' not found (resolved to {})", entry, entry_path.display());
+        bail!(
+            "Entry file '{}' not found (resolved to {})",
+            entry,
+            entry_path.display()
+        );
     }
 
     execute_file_in_process(

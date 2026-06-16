@@ -70,8 +70,7 @@ impl VirtualMachine {
         // key carries one strong-count share per WB2.4; we drop it after
         // the dispatch completes.
         let key_str: Option<&str> = match key_kind {
-            NativeKind::String
-            | NativeKind::Ptr(HeapKind::String) => {
+            NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
                 if key_bits == 0 {
                     None
                 } else {
@@ -194,8 +193,7 @@ impl VirtualMachine {
 
             // ── HashMap, String index, NativeView, Temporal, TableView,
             //    DataTable, Decimal, BigInt, etc. ─────────────────────────
-            NativeKind::String
-            | NativeKind::Ptr(_) => Err(VMError::NotImplemented(format!(
+            NativeKind::String | NativeKind::Ptr(_) => Err(VMError::NotImplemented(format!(
                 "SURFACE: GetProp on {:?} not yet kinded — requires the \
                  W17-typed-carrier-monomorphization replacement for the \
                  deleted HashMapData::values: `Arc<Buf<Arc<HeapValue>>>` \
@@ -227,9 +225,7 @@ impl VirtualMachine {
             .get_by_id(storage.schema_id as u32)
             .cloned()
             .or_else(|| {
-                shape_runtime::type_schema::lookup_schema_by_id_public(
-                    storage.schema_id as u32,
-                )
+                shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
             })
             .ok_or_else(|| {
                 VMError::RuntimeError(format!(
@@ -313,12 +309,8 @@ impl VirtualMachine {
             let storage_arc: Arc<shape_value::heap_value::TypedObjectStorage> =
                 unsafe { Arc::from_raw(obj_bits as *const _) };
 
-            let write_result = self.write_typed_object_field_by_name(
-                &storage_arc,
-                ks,
-                val_bits,
-                val_kind,
-            );
+            let write_result =
+                self.write_typed_object_field_by_name(&storage_arc, ks, val_bits, val_kind);
 
             let obj_bits_back = Arc::into_raw(storage_arc) as u64;
 
@@ -362,12 +354,9 @@ impl VirtualMachine {
             .get_by_id(storage.schema_id as u32)
             .cloned()
             .or_else(|| {
-                shape_runtime::type_schema::lookup_schema_by_id_public(
-                    storage.schema_id as u32,
-                )
+                shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
             });
-        let Some(schema) = schema_owned.as_ref()
-        else {
+        let Some(schema) = schema_owned.as_ref() else {
             drop_with_kind(val_bits, val_kind);
             return Err(VMError::RuntimeError(format!(
                 "Schema {} not found in registry",
@@ -411,13 +400,8 @@ impl VirtualMachine {
                         | NativeKind::UInt16
                         | NativeKind::UInt32
                         | NativeKind::UInt64,
-                ) | (
-                    NativeKind::String,
-                    NativeKind::Ptr(HeapKind::String),
-                ) | (
-                    NativeKind::Ptr(HeapKind::String),
-                    NativeKind::String,
-                )
+                ) | (NativeKind::String, NativeKind::Ptr(HeapKind::String),)
+                    | (NativeKind::Ptr(HeapKind::String), NativeKind::String,)
             );
         if !kind_compatible {
             drop_with_kind(val_bits, val_kind);
@@ -462,9 +446,7 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
-        use crate::executor::v2_handlers::v2_array_detect::{
-            as_v2_typed_array, write_element,
-        };
+        use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, write_element};
         let Some(Operand::Local(local_idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -602,9 +584,7 @@ impl VirtualMachine {
                 } else {
                     use crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array;
                     match as_v2_typed_array(bits, kind) {
-                        Some(view) => {
-                            self.push_kinded(view.len as u64, NativeKind::Int64)
-                        }
+                        Some(view) => self.push_kinded(view.len as u64, NativeKind::Int64),
                         None => Err(VMError::TypeError {
                             expected: "array, object, or string",
                             got: "scalar",
@@ -614,9 +594,7 @@ impl VirtualMachine {
             }
             NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
                 if bits == 0 {
-                    Err(VMError::RuntimeError(
-                        "length() on null string".to_string(),
-                    ))
+                    Err(VMError::RuntimeError("length() on null string".to_string()))
                 } else {
                     // SAFETY: kind is `String` / `Ptr(HeapKind::String)`;
                     // bits are `Arc::into_raw::<String>`. Transient borrow.
@@ -635,9 +613,8 @@ impl VirtualMachine {
                     // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): bits are
                     // `Arc::into_raw(Arc<HashMapKindedRef>)`. Transient
                     // borrow to read `len()` via the kinded ref accessor.
-                    let map: Arc<HashMapKindedRef> = unsafe {
-                        Arc::from_raw(bits as *const HashMapKindedRef)
-                    };
+                    let map: Arc<HashMapKindedRef> =
+                        unsafe { Arc::from_raw(bits as *const HashMapKindedRef) };
                     let len = map.len() as i64;
                     let _ = Arc::into_raw(map);
                     self.push_kinded(len as u64, NativeKind::Int64)
@@ -775,10 +752,7 @@ mod tests {
         let mut vm = VirtualMachine::new(VMConfig::default());
 
         // Build a single-field schema (`x: int`) and register it.
-        let schema = TypeSchema::new(
-            "Probe".to_string(),
-            vec![("x".to_string(), FieldType::I64)],
-        );
+        let schema = TypeSchema::new("Probe".to_string(), vec![("x".to_string(), FieldType::I64)]);
         let schema_id = schema.id;
         vm.program.type_schema_registry.register(schema);
 

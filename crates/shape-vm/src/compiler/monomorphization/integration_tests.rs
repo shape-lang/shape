@@ -124,7 +124,9 @@ mod e2e_tests {
         let bytecode = compile_with_prelude(source).expect("compile failed");
         let cache_keys = &bytecode.monomorphization_keys;
         assert!(
-            cache_keys.iter().any(|k| k.contains("map") && k.contains("i64")),
+            cache_keys
+                .iter()
+                .any(|k| k.contains("map") && k.contains("i64")),
             "expected a map specialization keyed on i64 in cache, got: {:?}",
             cache_keys
         );
@@ -147,7 +149,9 @@ mod e2e_tests {
         let bytecode = compile_with_prelude(source).expect("compile failed");
         let cache_keys = &bytecode.monomorphization_keys;
         assert!(
-            cache_keys.iter().any(|k| k.contains("map") && k.contains("f64")),
+            cache_keys
+                .iter()
+                .any(|k| k.contains("map") && k.contains("f64")),
             "expected a map specialization keyed on f64 in cache, got: {:?}",
             cache_keys
         );
@@ -165,7 +169,9 @@ mod e2e_tests {
         let bytecode = compile_with_prelude(source).expect("compile failed");
         let cache_keys = &bytecode.monomorphization_keys;
         assert!(
-            cache_keys.iter().any(|k| k.contains("filter") && k.contains("i64")),
+            cache_keys
+                .iter()
+                .any(|k| k.contains("filter") && k.contains("i64")),
             "expected a filter<i64> specialization in cache, got: {:?}",
             cache_keys
         );
@@ -234,8 +240,7 @@ mod e2e_tests {
             "two distinct map specializations expected, got: {:?}",
             map_specializations
         );
-        let unique: std::collections::HashSet<&&String> =
-            map_specializations.iter().collect();
+        let unique: std::collections::HashSet<&&String> = map_specializations.iter().collect();
         assert_eq!(unique.len(), map_specializations.len());
     }
 
@@ -354,14 +359,9 @@ mod e2e_tests {
             .iter()
             .find(|f| f.name.contains("map") && f.name.contains("closure_"))
             .expect("expected Phase C specialization");
-        let type_only = bytecode
-            .functions
-            .iter()
-            .find(|f| {
-                f.name.contains("map")
-                    && f.name.contains("i64")
-                    && !f.name.contains("closure_")
-            });
+        let type_only = bytecode.functions.iter().find(|f| {
+            f.name.contains("map") && f.name.contains("i64") && !f.name.contains("closure_")
+        });
 
         fn count_call_value(
             bc: &crate::bytecode::BytecodeProgram,
@@ -391,7 +391,8 @@ mod e2e_tests {
             assert!(
                 phase_c_count <= 1,
                 "Phase C '{}' has {} CallValue opcodes — inlining regressed",
-                phase_c.name, phase_c_count
+                phase_c.name,
+                phase_c_count
             );
         }
     }
@@ -513,8 +514,7 @@ mod e2e_tests {
             "captured vs uncaptured closures must produce distinct Phase C keys, got: {:?}",
             phase_c_keys
         );
-        let mut unique: std::collections::HashSet<&&String> =
-            std::collections::HashSet::new();
+        let mut unique: std::collections::HashSet<&&String> = std::collections::HashSet::new();
         for k in &phase_c_keys {
             unique.insert(k);
         }
@@ -657,7 +657,6 @@ mod e2e_tests {
             "has(20) on [10,20,30] should return true"
         );
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -697,10 +696,7 @@ mod phase_3a_trait_bounds {
         let bytecode = compiler.compile(&program).expect("compile failed");
 
         let cache_keys = &bytecode.monomorphization_keys;
-        let clamp_specs: Vec<&String> = cache_keys
-            .iter()
-            .filter(|k| k.contains("clamp"))
-            .collect();
+        let clamp_specs: Vec<&String> = cache_keys.iter().filter(|k| k.contains("clamp")).collect();
         assert!(
             clamp_specs.iter().any(|k| k.contains("i64")),
             "missing clamp::i64 specialization, got: {:?}",

@@ -29,9 +29,7 @@ use crate::marshal::MarshalError;
 use arrow_ipc::{reader::FileReader, writer::FileWriter};
 use shape_value::heap_value::HeapValue;
 use shape_value::{DataTable, HeapKind, NativeKind};
-use shape_wire::{
-    DurationUnit as WireDurationUnit, ValueEnvelope, WireTable, WireValue,
-};
+use shape_wire::{DurationUnit as WireDurationUnit, ValueEnvelope, WireTable, WireValue};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -383,9 +381,7 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
             // schema-aware closure printer.
             WireValue::String("<closure>".to_string())
         }
-        HeapValue::TaskGroup(_data) => {
-            WireValue::String("<task_group>".to_string())
-        }
+        HeapValue::TaskGroup(_data) => WireValue::String("<task_group>".to_string()),
         // V3-S5 ckpt-5-prime (2026-05-15): `HeapValue::TypedArray(arc)` arm
         // RETIRED in lockstep with the deleted `HeapValue::TypedArray` variant
         // (ckpt-4) + deleted `TypedArrayData` inner enum (ckpt-1). Wire
@@ -446,12 +442,9 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
         // 2026-05-10): PriorityQueue wire serialisation projects to a
         // `WireValue::Array` of i64 priorities in heap-array order
         // (mirror of the JSON shape — i64-priority-only at landing).
-        HeapValue::PriorityQueue(d) => WireValue::Array(
-            d.heap
-                .iter()
-                .map(|v| WireValue::Integer(*v))
-                .collect(),
-        ),
+        HeapValue::PriorityQueue(d) => {
+            WireValue::Array(d.heap.iter().map(|v| WireValue::Integer(*v)).collect())
+        }
         // W15-range (ADR-006 §2.7.23 / Q24, 2026-05-10): Range
         // serializes as a JSON-ish `{"start", "end", "step",
         // "inclusive"}` payload via the `as_array_for_wire` shape
@@ -652,8 +645,7 @@ pub fn slot_extract_content(
             }
         }
         HeapKind::DataTable => {
-            let dt: &shape_value::DataTable =
-                unsafe { &*(bits as *const shape_value::DataTable) };
+            let dt: &shape_value::DataTable = unsafe { &*(bits as *const shape_value::DataTable) };
             Some(crate::content_dispatch::datatable_to_content_node(dt, None))
         }
         HeapKind::TableView => {
@@ -896,11 +888,7 @@ mod char_wire_tests {
     #[test]
     fn slot_to_wire_char_label_return_value_path_is_safe() {
         let ctx = ExecutionContext::new_empty();
-        let wire = slot_to_wire(
-            'c' as u64,
-            NativeKind::Ptr(HeapKind::Char),
-            &ctx,
-        );
+        let wire = slot_to_wire('c' as u64, NativeKind::Ptr(HeapKind::Char), &ctx);
         assert_eq!(wire, WireValue::String("c".to_string()));
     }
 }

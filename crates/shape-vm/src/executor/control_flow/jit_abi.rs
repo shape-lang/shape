@@ -264,9 +264,9 @@ mod tests {
         // Simulate a function with signature: fn(int, float, bool)
         let kinds = [NativeKind::Int64, NativeKind::Float64, NativeKind::Bool];
         let arg_bits = [
-            10u64,             // int arg
-            2.5f64.to_bits(),  // float arg
-            1u64,              // bool arg (true)
+            10u64,            // int arg
+            2.5f64.to_bits(), // float arg
+            1u64,             // bool arg (true)
         ];
 
         let marshaled: Vec<u64> = arg_bits

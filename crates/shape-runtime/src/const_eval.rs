@@ -56,7 +56,8 @@ impl ConstEvaluator {
     /// silently produce wrong values.
     pub fn eval(&self, _expr: &Expr) -> Result<KindedSlot> {
         Err(ShapeError::RuntimeError {
-            message: "ConstEvaluator: pending Phase 2c kind-threaded rebuild — see ADR-006 §2.7.4".to_string(),
+            message: "ConstEvaluator: pending Phase 2c kind-threaded rebuild — see ADR-006 §2.7.4"
+                .to_string(),
             location: None,
         })
     }

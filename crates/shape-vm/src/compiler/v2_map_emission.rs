@@ -116,8 +116,7 @@ impl BytecodeCompiler {
                     }
                 }
                 if let Some(&binding_idx) = self.module_bindings.get(name) {
-                    if let Some(kv) = self.map_key_value_for_module_binding(binding_idx).cloned()
-                    {
+                    if let Some(kv) = self.map_key_value_for_module_binding(binding_idx).cloned() {
                         return Some(kv);
                     }
                 }
@@ -216,7 +215,12 @@ impl BytecodeCompiler {
         // carries the inner receiver's typed-map kind. Recurse on the inner
         // receiver — `concrete_type_for_expr` does not model the typed-map
         // fast path's fluent return, so this structural step covers it.
-        if let Expr::MethodCall { receiver: inner, method, .. } = receiver {
+        if let Expr::MethodCall {
+            receiver: inner,
+            method,
+            ..
+        } = receiver
+        {
             if matches!(method.as_str(), "set" | "delete") {
                 if let Some(kind) = self.resolve_receiver_typed_map_kind(inner) {
                     return Some(kind);
@@ -224,7 +228,10 @@ impl BytecodeCompiler {
             }
         }
 
-        if matches!(receiver, Expr::FunctionCall { .. } | Expr::MethodCall { .. }) {
+        if matches!(
+            receiver,
+            Expr::FunctionCall { .. } | Expr::MethodCall { .. }
+        ) {
             if let Some(shape_value::v2::ConcreteType::HashMap(k, v)) =
                 crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
                     self, receiver,
@@ -295,7 +302,9 @@ fn typed_map_kind_to_concrete_kv(
 ///
 /// Used by [`BytecodeCompiler::resolve_receiver_map_key_value`] as a fallback
 /// when the v2 side-tables don't carry an entry but the type tracker does.
-pub(crate) fn parse_hashmap_kv_from_tracked_name(name: &str) -> Option<(ConcreteType, ConcreteType)> {
+pub(crate) fn parse_hashmap_kv_from_tracked_name(
+    name: &str,
+) -> Option<(ConcreteType, ConcreteType)> {
     let trimmed = name.trim();
     let inner = trimmed
         .strip_prefix("HashMap<")

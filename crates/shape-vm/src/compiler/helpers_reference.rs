@@ -827,12 +827,8 @@ impl BytecodeCompiler {
                             .cloned();
                     }
                     if from_arr.is_none() {
-                        if let Some(scoped) =
-                            self.resolve_scoped_module_binding_name(arr_name)
-                        {
-                            if let Some(&binding_idx) =
-                                self.module_bindings.get(&scoped)
-                            {
+                        if let Some(scoped) = self.resolve_scoped_module_binding_name(arr_name) {
+                            if let Some(&binding_idx) = self.module_bindings.get(&scoped) {
                                 from_arr = self
                                     .module_binding_array_callable_return_types
                                     .get(&binding_idx)
@@ -983,7 +979,8 @@ impl BytecodeCompiler {
                 self.local_callable_return_types.remove(&slot);
             }
             if let Some(array_rt) = array_callable_return_type_name {
-                self.local_array_callable_return_types.insert(slot, array_rt);
+                self.local_array_callable_return_types
+                    .insert(slot, array_rt);
             } else {
                 self.local_array_callable_return_types.remove(&slot);
             }
@@ -1033,7 +1030,8 @@ impl BytecodeCompiler {
             // peek on the module-binding side. Parallels the local-slot
             // branch above.
             if let Some(peek) = closure_body_peek {
-                self.module_binding_callable_closure_bodies.insert(slot, peek);
+                self.module_binding_callable_closure_bodies
+                    .insert(slot, peek);
             } else {
                 self.module_binding_callable_closure_bodies.remove(&slot);
             }
@@ -1054,7 +1052,8 @@ impl BytecodeCompiler {
             self.module_binding_callable_return_reference_summaries
                 .remove(&slot);
             self.module_binding_callable_return_types.remove(&slot);
-            self.module_binding_array_callable_return_types.remove(&slot);
+            self.module_binding_array_callable_return_types
+                .remove(&slot);
             // cluster-2-cw-IB-class-b: release retained module-binding
             // closure body peek alongside the other module-binding
             // callable state.

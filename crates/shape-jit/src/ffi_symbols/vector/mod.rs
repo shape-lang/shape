@@ -46,51 +46,27 @@ pub extern "C" fn jit_intrinsic_vec_exp(_ctx: *mut JITContext, _arg_bits: u64) -
     vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_add(
-    _ctx: *mut JITContext,
-    _a_bits: u64,
-    _b_bits: u64,
-) -> u64 {
+pub extern "C" fn jit_intrinsic_vec_add(_ctx: *mut JITContext, _a_bits: u64, _b_bits: u64) -> u64 {
     vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_sub(
-    _ctx: *mut JITContext,
-    _a_bits: u64,
-    _b_bits: u64,
-) -> u64 {
+pub extern "C" fn jit_intrinsic_vec_sub(_ctx: *mut JITContext, _a_bits: u64, _b_bits: u64) -> u64 {
     vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_mul(
-    _ctx: *mut JITContext,
-    _a_bits: u64,
-    _b_bits: u64,
-) -> u64 {
+pub extern "C" fn jit_intrinsic_vec_mul(_ctx: *mut JITContext, _a_bits: u64, _b_bits: u64) -> u64 {
     vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_div(
-    _ctx: *mut JITContext,
-    _a_bits: u64,
-    _b_bits: u64,
-) -> u64 {
+pub extern "C" fn jit_intrinsic_vec_div(_ctx: *mut JITContext, _a_bits: u64, _b_bits: u64) -> u64 {
     vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_max(
-    _ctx: *mut JITContext,
-    _a_bits: u64,
-    _b_bits: u64,
-) -> u64 {
+pub extern "C" fn jit_intrinsic_vec_max(_ctx: *mut JITContext, _a_bits: u64, _b_bits: u64) -> u64 {
     vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_vec_min(
-    _ctx: *mut JITContext,
-    _a_bits: u64,
-    _b_bits: u64,
-) -> u64 {
+pub extern "C" fn jit_intrinsic_vec_min(_ctx: *mut JITContext, _a_bits: u64, _b_bits: u64) -> u64 {
     vector_intrinsic_phase_2c()
 }
 
@@ -123,18 +99,10 @@ pub extern "C" fn jit_intrinsic_vec_add_i64(
     vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_mat_add(
-    _ctx: *mut JITContext,
-    _a_bits: u64,
-    _b_bits: u64,
-) -> u64 {
+pub extern "C" fn jit_intrinsic_mat_add(_ctx: *mut JITContext, _a_bits: u64, _b_bits: u64) -> u64 {
     vector_intrinsic_phase_2c()
 }
 
-pub extern "C" fn jit_intrinsic_mat_sub(
-    _ctx: *mut JITContext,
-    _a_bits: u64,
-    _b_bits: u64,
-) -> u64 {
+pub extern "C" fn jit_intrinsic_mat_sub(_ctx: *mut JITContext, _a_bits: u64, _b_bits: u64) -> u64 {
     vector_intrinsic_phase_2c()
 }

@@ -84,8 +84,7 @@ pub extern "C" fn jit_arc_string_retain(bits: u64) {
     // share retain count for the §2.7.5 `Arc<String>` carrier. Independent
     // counter from `JIT_ARC_RETAIN_CALLS` (the UnifiedValue<T> path) per
     // the carrier-shape distinction at this module's docstring.
-    super::arc::STRING_RETAIN_CALLS
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    super::arc::STRING_RETAIN_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // SAFETY: see fn docs. The §2.7.5 String carrier contract names the
     // bits as `Arc::into_raw(Arc<String>) as u64`; `Arc::increment_strong_
     // count` operates on the Arc control block at offset -16.
@@ -110,8 +109,7 @@ pub extern "C" fn jit_arc_string_release(bits: u64) {
     // carrier. Independent counters from `JIT_ARC_RELEASE_CALLS` /
     // `JIT_ARC_RELEASE_FREES` (the UnifiedValue<T> path) per the carrier-
     // shape distinction at this module's docstring.
-    super::arc::STRING_RELEASE_CALLS
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    super::arc::STRING_RELEASE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // SAFETY: see fn docs. Read strong-count BEFORE decrement to detect
     // the drop-to-zero transition (Arc's decrement returns void; we cannot
     // observe the post-decrement count atomically without racing). The
@@ -128,8 +126,7 @@ pub extern "C" fn jit_arc_string_release(bits: u64) {
         let pre_release_count = Arc::strong_count(&arc);
         let _ = Arc::into_raw(arc); // restore the share we adopted
         if pre_release_count == 1 {
-            super::arc::STRING_RELEASE_FREES
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            super::arc::STRING_RELEASE_FREES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Arc::decrement_strong_count(bits as *const String);
     }
@@ -224,8 +221,7 @@ pub fn arc_string_constant(s: String) -> u64 {
         // Dedup miss: allocate one Arc, insert into the pool. The pool
         // retains the permanent share — this allocation is the §F.1
         // leak surface for this content, counted once.
-        super::arc::STRING_CONSTANT_ALLOCS
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        super::arc::STRING_CONSTANT_ALLOCS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Arc::new(key.clone())
         // Dedup hit (else branch): or_insert_with_key skips the closure;
         // STRING_CONSTANT_ALLOCS does NOT increment (the counter

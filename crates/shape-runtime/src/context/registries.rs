@@ -329,9 +329,7 @@ mod tests {
             let registry = ctx.annotation_context_mut().registry("test_registry");
             registry.set(
                 "key1".to_string(),
-                shape_value::KindedSlot::from_string_arc(std::sync::Arc::new(
-                    "value1".to_string(),
-                )),
+                shape_value::KindedSlot::from_string_arc(std::sync::Arc::new("value1".to_string())),
             );
         }
 

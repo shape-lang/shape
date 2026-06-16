@@ -47,10 +47,7 @@ pub enum HarnessError {
     /// Failed to read the snippet at the requested path.
     SnippetRead { path: PathBuf, source: io::Error },
     /// Failed to spawn the `shape` binary subprocess.
-    SpawnFailed {
-        binary: PathBuf,
-        source: io::Error,
-    },
+    SpawnFailed { binary: PathBuf, source: io::Error },
     /// Failed while waiting on or killing the subprocess.
     WaitFailed(io::Error),
     /// I/O failure while writing a findings record.
@@ -207,12 +204,11 @@ pub fn record_finding(
 ) -> Result<PathBuf, HarnessError> {
     fs::create_dir_all(output_dir).map_err(HarnessError::FindingsWrite)?;
 
-    let snippet_source = fs::read_to_string(&cmp.snippet).map_err(|source| {
-        HarnessError::SnippetRead {
+    let snippet_source =
+        fs::read_to_string(&cmp.snippet).map_err(|source| HarnessError::SnippetRead {
             path: cmp.snippet.clone(),
             source,
-        }
-    })?;
+        })?;
 
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

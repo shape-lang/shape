@@ -84,8 +84,7 @@ pub fn declare_arc_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Str
     {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
-        if let Ok(func_id) =
-            module.declare_function("jit_arc_string_retain", Linkage::Import, &sig)
+        if let Ok(func_id) = module.declare_function("jit_arc_string_retain", Linkage::Import, &sig)
         {
             ffi_funcs.insert("jit_arc_string_retain".to_string(), func_id);
         }

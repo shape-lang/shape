@@ -61,7 +61,14 @@ fn format_type_annotation(annotation: &TypeAnnotation) -> String {
         TypeAnnotation::Never => "never".to_string(),
         TypeAnnotation::Null => "None".to_string(),
         TypeAnnotation::Undefined => "undefined".to_string(),
-        TypeAnnotation::Dyn(traits) => format!("dyn {}", traits.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(" + ")),
+        TypeAnnotation::Dyn(traits) => format!(
+            "dyn {}",
+            traits
+                .iter()
+                .map(|t| t.as_str())
+                .collect::<Vec<_>>()
+                .join(" + ")
+        ),
     }
 }
 

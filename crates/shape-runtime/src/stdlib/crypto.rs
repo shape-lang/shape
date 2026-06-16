@@ -8,7 +8,9 @@
 //! Phase 2c: migrated to the typed marshal layer
 //! (`crate::marshal::register_typed_fn_N`).
 
-use crate::marshal::{register_typed_fn_0, register_typed_fn_1, register_typed_fn_2, register_typed_fn_3};
+use crate::marshal::{
+    register_typed_fn_0, register_typed_fn_1, register_typed_fn_2, register_typed_fn_3,
+};
 use crate::module_exports::ModuleExports;
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use std::sync::Arc;
@@ -31,7 +33,9 @@ pub fn create_crypto_module() -> ModuleExports {
             let mut hasher = Sha256::new();
             hasher.update(data.as_bytes());
             let result = hasher.finalize();
-            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(result))))
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(
+                result,
+            ))))
         },
     );
 
@@ -50,7 +54,9 @@ pub fn create_crypto_module() -> ModuleExports {
                 .map_err(|e| format!("crypto.hmac_sha256() key error: {}", e))?;
             mac.update(data.as_bytes());
             let result = mac.finalize();
-            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(result.into_bytes()))))
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(
+                result.into_bytes(),
+            ))))
         },
     );
 
@@ -97,7 +103,9 @@ pub fn create_crypto_module() -> ModuleExports {
         "string",
         ConcreteType::String,
         |data, _ctx| {
-            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(data.as_bytes()))))
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(
+                data.as_bytes(),
+            ))))
         },
     );
 
@@ -131,7 +139,9 @@ pub fn create_crypto_module() -> ModuleExports {
             let mut hasher = Sha512::new();
             hasher.update(data.as_bytes());
             let result = hasher.finalize();
-            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(result))))
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(
+                result,
+            ))))
         },
     );
 
@@ -148,7 +158,9 @@ pub fn create_crypto_module() -> ModuleExports {
             let mut hasher = sha1::Sha1::new();
             hasher.update(data.as_bytes());
             let result = hasher.finalize();
-            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(result))))
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(
+                result,
+            ))))
         },
     );
 
@@ -165,7 +177,9 @@ pub fn create_crypto_module() -> ModuleExports {
             let mut hasher = md5::Md5::new();
             hasher.update(data.as_bytes());
             let result = hasher.finalize();
-            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(result))))
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(
+                result,
+            ))))
         },
     );
 
@@ -185,7 +199,9 @@ pub fn create_crypto_module() -> ModuleExports {
             }
             let mut buf = vec![0u8; n as usize];
             rand::thread_rng().fill_bytes(&mut buf);
-            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(buf))))
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(
+                buf,
+            ))))
         },
     );
 
@@ -234,7 +250,9 @@ pub fn create_crypto_module() -> ModuleExports {
             })?;
             let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_arr);
             let signature = signing_key.sign(message.as_bytes());
-            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(signature.to_bytes()))))
+            Ok(TypedReturn::Concrete(ConcreteReturn::String(hex::encode(
+                signature.to_bytes(),
+            ))))
         },
     );
 
@@ -243,7 +261,11 @@ pub fn create_crypto_module() -> ModuleExports {
         &mut module,
         "ed25519_verify",
         "Verify an Ed25519 signature against a message and public key",
-        [("message", "string"), ("signature", "string"), ("public_key", "string")],
+        [
+            ("message", "string"),
+            ("signature", "string"),
+            ("public_key", "string"),
+        ],
         ConcreteType::Bool,
         |message, sig_hex, pub_hex, _ctx| {
             use ed25519_dalek::Verifier;

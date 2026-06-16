@@ -22,8 +22,8 @@
 use crate::executor::objects::raw_helpers;
 use crate::{
     bytecode::{Instruction, OpCode},
-    executor::vm_impl::stack::drop_with_kind,
     executor::VirtualMachine,
+    executor::vm_impl::stack::drop_with_kind,
 };
 use shape_value::{FilterNode, NativeKind, VMError, heap_value::HeapKind};
 use std::sync::Arc;

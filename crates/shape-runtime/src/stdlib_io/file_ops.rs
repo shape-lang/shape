@@ -8,8 +8,7 @@
 //! the shape-vm cascade provides a typed test harness.
 
 use crate::marshal::{
-    register_typed_fn_1, register_typed_fn_2, register_typed_fn_2_full,
-    register_typed_fn_3_full,
+    register_typed_fn_1, register_typed_fn_2, register_typed_fn_2_full, register_typed_fn_3_full,
 };
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
@@ -133,7 +132,9 @@ pub fn register_file_io_handle_ops(module: &mut ModuleExports) {
             };
 
             let handle = IoHandleData::new_file(file, path.to_string(), mode.to_string());
-            Ok(TypedReturn::Concrete(ConcreteReturn::IoHandle(Arc::new(handle))))
+            Ok(TypedReturn::Concrete(ConcreteReturn::IoHandle(Arc::new(
+                handle,
+            ))))
         },
     );
 
@@ -188,7 +189,9 @@ pub fn register_file_io_handle_ops(module: &mut ModuleExports) {
             let contents = if n >= 0 {
                 let n = n as usize;
                 let mut buf = vec![0u8; n];
-                let bytes_read = file.read(&mut buf).map_err(|e| format!("io.read(): {}", e))?;
+                let bytes_read = file
+                    .read(&mut buf)
+                    .map_err(|e| format!("io.read(): {}", e))?;
                 buf.truncate(bytes_read);
                 String::from_utf8(buf).map_err(|e| format!("io.read(): invalid UTF-8: {}", e))?
             } else {
@@ -260,7 +263,9 @@ pub fn register_file_io_handle_ops(module: &mut ModuleExports) {
             let bytes_written = file
                 .write(data.as_bytes())
                 .map_err(|e| format!("io.write(): {}", e))?;
-            Ok(TypedReturn::Concrete(ConcreteReturn::I64(bytes_written as i64)))
+            Ok(TypedReturn::Concrete(ConcreteReturn::I64(
+                bytes_written as i64,
+            )))
         },
     );
 
@@ -310,7 +315,11 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         ConcreteType::Bool,
         |path, ctx| {
             let path = path.as_str();
-            crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, path)?;
+            crate::module_exports::check_fs_permission(
+                ctx,
+                shape_abi_v1::Permission::FsRead,
+                path,
+            )?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Bool(
                 std::path::Path::new(path).exists(),
             )))
@@ -327,9 +336,13 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         ConcreteType::TypedObject,
         |path, ctx| {
             let path = path.as_str();
-            crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, path)?;
-            let metadata = std::fs::metadata(path)
-                .map_err(|e| format!("io.stat(\"{}\"): {}", path, e))?;
+            crate::module_exports::check_fs_permission(
+                ctx,
+                shape_abi_v1::Permission::FsRead,
+                path,
+            )?;
+            let metadata =
+                std::fs::metadata(path).map_err(|e| format!("io.stat(\"{}\"): {}", path, e))?;
             let modified_ms = metadata
                 .modified()
                 .ok()
@@ -343,11 +356,20 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
                 .map(|d| d.as_millis() as f64)
                 .unwrap_or(0.0);
             Ok(TypedReturn::TypedObject(vec![
-                ("size".to_string(), ConcreteReturn::I64(metadata.len() as i64)),
+                (
+                    "size".to_string(),
+                    ConcreteReturn::I64(metadata.len() as i64),
+                ),
                 ("modified".to_string(), ConcreteReturn::F64(modified_ms)),
                 ("created".to_string(), ConcreteReturn::F64(created_ms)),
-                ("is_file".to_string(), ConcreteReturn::Bool(metadata.is_file())),
-                ("is_dir".to_string(), ConcreteReturn::Bool(metadata.is_dir())),
+                (
+                    "is_file".to_string(),
+                    ConcreteReturn::Bool(metadata.is_file()),
+                ),
+                (
+                    "is_dir".to_string(),
+                    ConcreteReturn::Bool(metadata.is_dir()),
+                ),
             ]))
         },
     );
@@ -362,7 +384,11 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         ConcreteType::Bool,
         |path, ctx| {
             let path = path.as_str();
-            crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, path)?;
+            crate::module_exports::check_fs_permission(
+                ctx,
+                shape_abi_v1::Permission::FsRead,
+                path,
+            )?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Bool(
                 std::path::Path::new(path).is_file(),
             )))
@@ -379,7 +405,11 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         ConcreteType::Bool,
         |path, ctx| {
             let path = path.as_str();
-            crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, path)?;
+            crate::module_exports::check_fs_permission(
+                ctx,
+                shape_abi_v1::Permission::FsRead,
+                path,
+            )?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Bool(
                 std::path::Path::new(path).is_dir(),
             )))
@@ -411,13 +441,16 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         ConcreteType::Unit,
         |path, recursive, ctx| {
             let path = path.as_str();
-            crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsWrite, path)?;
+            crate::module_exports::check_fs_permission(
+                ctx,
+                shape_abi_v1::Permission::FsWrite,
+                path,
+            )?;
             if recursive {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("io.mkdir(\"{}\"): {}", path, e))?;
             } else {
-                std::fs::create_dir(path)
-                    .map_err(|e| format!("io.mkdir(\"{}\"): {}", path, e))?;
+                std::fs::create_dir(path).map_err(|e| format!("io.mkdir(\"{}\"): {}", path, e))?;
             }
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
@@ -433,7 +466,11 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         ConcreteType::Unit,
         |path, ctx| {
             let path = path.as_str();
-            crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsWrite, path)?;
+            crate::module_exports::check_fs_permission(
+                ctx,
+                shape_abi_v1::Permission::FsWrite,
+                path,
+            )?;
             let p = std::path::Path::new(path);
             if p.is_dir() {
                 std::fs::remove_dir_all(path)
@@ -456,8 +493,16 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         |old, new, ctx| {
             let old = old.as_str();
             let new = new.as_str();
-            crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsWrite, old)?;
-            crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsWrite, new)?;
+            crate::module_exports::check_fs_permission(
+                ctx,
+                shape_abi_v1::Permission::FsWrite,
+                old,
+            )?;
+            crate::module_exports::check_fs_permission(
+                ctx,
+                shape_abi_v1::Permission::FsWrite,
+                new,
+            )?;
             std::fs::rename(old, new)
                 .map_err(|e| format!("io.rename(\"{}\", \"{}\"): {}", old, new, e))?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
@@ -474,7 +519,11 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         ConcreteType::ArrayString,
         |path, ctx| {
             let path = path.as_str();
-            crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, path)?;
+            crate::module_exports::check_fs_permission(
+                ctx,
+                shape_abi_v1::Permission::FsRead,
+                path,
+            )?;
             let entries: Vec<String> = std::fs::read_dir(path)
                 .map_err(|e| format!("io.read_dir(\"{}\"): {}", path, e))?
                 .filter_map(|entry| entry.ok().map(|e| e.path().to_string_lossy().to_string()))
@@ -493,7 +542,11 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         ConcreteType::String,
         |path, ctx| {
             let path = path.as_str();
-            crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsRead, path)?;
+            crate::module_exports::check_fs_permission(
+                ctx,
+                shape_abi_v1::Permission::FsRead,
+                path,
+            )?;
             let file = std::fs::File::open(path)
                 .map_err(|e| format!("io.read_gzip(\"{}\"): {}", path, e))?;
             let mut decoder = flate2::read::GzDecoder::new(file);
@@ -537,12 +590,15 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         ConcreteType::Unit,
         |path, data, level, ctx| {
             let path = path.as_str();
-            crate::module_exports::check_fs_permission(ctx, shape_abi_v1::Permission::FsWrite, path)?;
+            crate::module_exports::check_fs_permission(
+                ctx,
+                shape_abi_v1::Permission::FsWrite,
+                path,
+            )?;
             let level = level as u32;
             let file = std::fs::File::create(path)
                 .map_err(|e| format!("io.write_gzip(\"{}\"): {}", path, e))?;
-            let mut encoder =
-                flate2::write::GzEncoder::new(file, flate2::Compression::new(level));
+            let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::new(level));
             encoder
                 .write_all(data.as_bytes())
                 .map_err(|e| format!("io.write_gzip(\"{}\"): compression failed: {}", path, e))?;

@@ -25,8 +25,8 @@ pub mod wire_serve_cmd;
 
 // Re-export command entry points
 pub use add_cmd::run_add;
-pub use check_cmd::run_check;
 pub use build_cmd::run_build;
+pub use check_cmd::run_check;
 pub use doctest_cmd::run_doctest;
 pub use expand_comptime_cmd::run_expand_comptime;
 pub use ext_cmd::{run_ext_install, run_ext_list, run_ext_remove};

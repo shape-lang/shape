@@ -162,10 +162,7 @@ error[B0013]: cannot pass the same variable to multiple parameters that require 
         )
         .build();
         let out = render(&diag);
-        assert_eq!(
-            out,
-            "error[E0100]: type mismatch\n --> test.shape:3:1\n"
-        );
+        assert_eq!(out, "error[E0100]: type mismatch\n --> test.shape:3:1\n");
     }
 
     #[test]

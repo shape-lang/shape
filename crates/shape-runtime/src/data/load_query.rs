@@ -88,9 +88,7 @@ mod tests {
     #[test]
     fn test_basic_query_metadata() {
         // Metadata-only test that doesn't invoke the deferred body.
-        let query = LoadQuery::new()
-            .with_provider("data")
-            .with_type("Candle");
+        let query = LoadQuery::new().with_provider("data").with_type("Candle");
 
         assert_eq!(query.provider, Some("data".to_string()));
         assert_eq!(query.target_type, Some("Candle".to_string()));

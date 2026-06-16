@@ -81,8 +81,10 @@ impl BytecodeCache {
             .as_ref()
             .map(|ca| !ca.trait_vtables.is_empty())
             .unwrap_or(false);
-        if has_closure_layouts || has_ca_closure_layouts
-            || has_trait_vtables || has_ca_trait_vtables
+        if has_closure_layouts
+            || has_ca_closure_layouts
+            || has_trait_vtables
+            || has_ca_trait_vtables
         {
             // Skip caching for closure-bearing OR trait-bearing programs.
             return Ok(());

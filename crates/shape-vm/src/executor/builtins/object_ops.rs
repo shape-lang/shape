@@ -44,9 +44,7 @@ impl VirtualMachine {
                 ));
             }
             _ => {
-                return Err(type_error(
-                    "object_rest() second argument must be an array",
-                ));
+                return Err(type_error("object_rest() second argument must be an array"));
             }
         }
         // Suppress dead-code warnings via fake variable construction.
@@ -72,9 +70,7 @@ impl VirtualMachine {
                 bits as *const TypedObjectStorage
             }
             _ => {
-                return Err(type_error(
-                    "object_rest() first argument must be an object",
-                ));
+                return Err(type_error("object_rest() first argument must be an object"));
             }
         };
         // SAFETY: `receiver_storage_ptr` is a live `*const TypedObjectStorage`
@@ -86,9 +82,9 @@ impl VirtualMachine {
 
         // Collect kept field indices before mutable borrow of self.
         let kept_indices: Vec<usize> = {
-            let schema = self.lookup_schema(sid).ok_or_else(|| {
-                type_error(format!("Schema {} not found", sid))
-            })?;
+            let schema = self
+                .lookup_schema(sid)
+                .ok_or_else(|| type_error(format!("Schema {} not found", sid)))?;
             schema
                 .fields
                 .iter()
@@ -107,8 +103,7 @@ impl VirtualMachine {
         let orig_mask = receiver_storage.heap_mask;
         let orig_kinds = &receiver_storage.field_kinds;
 
-        let mut new_slots: Vec<shape_value::ValueSlot> =
-            Vec::with_capacity(kept_indices.len());
+        let mut new_slots: Vec<shape_value::ValueSlot> = Vec::with_capacity(kept_indices.len());
         let mut new_kinds: Vec<NativeKind> = Vec::with_capacity(kept_indices.len());
         let mut new_mask: u64 = 0;
 
@@ -145,9 +140,7 @@ impl VirtualMachine {
                                 shape_value::v2::refcount::v2_retain(hdr);
                             }
                             NativeKind::Ptr(HeapKind::TypedObject) => {
-                                Arc::increment_strong_count(
-                                    bits as *const TypedObjectStorage,
-                                );
+                                Arc::increment_strong_count(bits as *const TypedObjectStorage);
                             }
                             NativeKind::Ptr(HeapKind::HashMap) => {
                                 // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
@@ -158,9 +151,7 @@ impl VirtualMachine {
                                 );
                             }
                             NativeKind::Ptr(HeapKind::Decimal) => {
-                                Arc::increment_strong_count(
-                                    bits as *const rust_decimal::Decimal,
-                                );
+                                Arc::increment_strong_count(bits as *const rust_decimal::Decimal);
                             }
                             NativeKind::Ptr(HeapKind::BigInt) => {
                                 Arc::increment_strong_count(bits as *const i64);

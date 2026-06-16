@@ -365,7 +365,10 @@ mod tests {
             },
             42,
         )
-        .with_locals(vec![KindedSlot::from_number(1.0), KindedSlot::from_number(2.0)]);
+        .with_locals(vec![
+            KindedSlot::from_number(1.0),
+            KindedSlot::from_number(2.0),
+        ]);
 
         assert_eq!(state.resume_pc, 42);
         assert_eq!(state.saved_locals.len(), 2);

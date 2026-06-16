@@ -273,8 +273,8 @@ fn get_quick_fixes(
     // through the diagnostic shape). Code guard is defensive: a future
     // compiler emitter with a different message format but the right
     // code still benefits from the fallback.
-    let is_non_exhaustive = matches!(code, Some("E0103"))
-        || message.contains("Non-exhaustive match");
+    let is_non_exhaustive =
+        matches!(code, Some("E0103")) || message.contains("Non-exhaustive match");
     if is_non_exhaustive
         && let Some((enum_name, missing_variants)) = parse_non_exhaustive_match(message)
     {
@@ -305,8 +305,8 @@ fn get_quick_fixes(
     // stub. E0401 emitted by `validate_trait_bounds` in `diagnostics.rs`
     // is the canonical code; message fallback catches any compiler-side
     // emitters that haven't been routed through the code table yet.
-    let is_missing_method = matches!(code, Some("E0401"))
-        || message.contains("Missing required method");
+    let is_missing_method =
+        matches!(code, Some("E0401")) || message.contains("Missing required method");
     if is_missing_method {
         if let Some(method_name) = extract_quoted_name(message) {
             // Find the closing brace of the impl block on the diagnostic line
@@ -339,8 +339,7 @@ fn get_quick_fixes(
     // W0102 = unused-import lint (W2.3 / 1.19). W0103 reserved for
     // unused-variable. Both trigger the underscore-prefix fix; message
     // fallback covers any future compiler-emitted "unused" diagnostics.
-    let is_unused =
-        matches!(code, Some("W0102") | Some("W0103")) || message.contains("unused");
+    let is_unused = matches!(code, Some("W0102") | Some("W0103")) || message.contains("unused");
     if is_unused {
         if let Some(var_name) = extract_unused_name(message) {
             if !var_name.starts_with('_') {
@@ -1350,8 +1349,9 @@ mod tests {
 
     #[test]
     fn test_parse_non_exhaustive_match_basic() {
-        let parsed =
-            parse_non_exhaustive_match("Non-exhaustive match on 'Color': missing variants Red, Green, Blue");
+        let parsed = parse_non_exhaustive_match(
+            "Non-exhaustive match on 'Color': missing variants Red, Green, Blue",
+        );
         assert!(parsed.is_some());
         let (name, variants) = parsed.unwrap();
         assert_eq!(name, "Color");
@@ -1366,8 +1366,7 @@ mod tests {
 
     #[test]
     fn test_parse_non_exhaustive_match_no_variants() {
-        let parsed =
-            parse_non_exhaustive_match("Non-exhaustive match on 'Foo': missing variants ");
+        let parsed = parse_non_exhaustive_match("Non-exhaustive match on 'Foo': missing variants ");
         assert!(parsed.is_none());
     }
 
@@ -1385,7 +1384,10 @@ mod tests {
             },
         };
         let result = find_match_arm_insert_position(text, range);
-        assert!(result.is_some(), "expected to find a closing brace position");
+        assert!(
+            result.is_some(),
+            "expected to find a closing brace position"
+        );
         let (pos, indent) = result.unwrap();
         // Should point to line 3 (the closing brace)
         assert_eq!(pos.line, 3);
@@ -1407,7 +1409,10 @@ mod tests {
             },
         };
         let result = find_match_arm_insert_position(text, range);
-        assert!(result.is_none(), "expected None when no closing brace exists");
+        assert!(
+            result.is_none(),
+            "expected None when no closing brace exists"
+        );
     }
 
     #[test]
@@ -1478,10 +1483,7 @@ mod tests {
         let kinds = &[CodeActionKind::SOURCE];
         assert!(is_group_requested(Some(kinds), "source"));
         // Sub-kinds should also be permitted under group "source"
-        assert!(is_kind_requested(
-            Some(kinds),
-            "source.organizeImports"
-        ));
+        assert!(is_kind_requested(Some(kinds), "source.organizeImports"));
     }
 
     #[test]
@@ -1502,7 +1504,11 @@ mod tests {
             ..Default::default()
         });
         let deduped = dedupe_actions(vec![action1, action2, action3]);
-        assert_eq!(deduped.len(), 2, "expected dedupe to collapse same-title actions");
+        assert_eq!(
+            deduped.len(),
+            2,
+            "expected dedupe to collapse same-title actions"
+        );
     }
 
     #[test]

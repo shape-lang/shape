@@ -19,10 +19,7 @@ mod module_qualified_type_tests {
         eval_with_kind_opt(code, Some(kind))
     }
 
-    fn eval_with_kind_opt(
-        code: &str,
-        kind: Option<crate::type_tracking::NativeKind>,
-    ) -> ValueWord {
+    fn eval_with_kind_opt(code: &str, kind: Option<crate::type_tracking::NativeKind>) -> ValueWord {
         // Install a per-test TypeSchemaRegistry scope so compile-time
         // predeclared-schema registration and VM-side schema lookups
         // consult a fresh registry instead of the process-global
@@ -31,9 +28,7 @@ mod module_qualified_type_tests {
         // TypedObjects with overlapping field layouts, producing the
         // schema-ID drift observed in these tests.
         let _schema_scope = shape_runtime::type_schema::SyncRegistryScope::enter(
-            std::sync::Arc::new(
-                shape_runtime::type_schema::TypeSchemaRegistry::new_with_stdlib(),
-            ),
+            std::sync::Arc::new(shape_runtime::type_schema::TypeSchemaRegistry::new_with_stdlib()),
         );
 
         let program = shape_ast::parser::parse_program(code).expect("parse failed");
@@ -58,7 +53,11 @@ mod module_qualified_type_tests {
         let source = "let x: foo::Bar = 1";
         let program = shape_ast::parser::parse_program(source).expect("parse");
         let items = &program.items;
-        if let shape_ast::ast::Item::Statement(shape_ast::ast::Statement::VariableDecl(decl, _), _) = &items[0] {
+        if let shape_ast::ast::Item::Statement(
+            shape_ast::ast::Statement::VariableDecl(decl, _),
+            _,
+        ) = &items[0]
+        {
             match &decl.type_annotation {
                 Some(shape_ast::ast::TypeAnnotation::Reference(path)) => {
                     assert_eq!(path.as_str(), "foo::Bar");
@@ -77,7 +76,11 @@ mod module_qualified_type_tests {
         let source = "let x: foo::Container<int> = 1";
         let program = shape_ast::parser::parse_program(source).expect("parse");
         let items = &program.items;
-        if let shape_ast::ast::Item::Statement(shape_ast::ast::Statement::VariableDecl(decl, _), _) = &items[0] {
+        if let shape_ast::ast::Item::Statement(
+            shape_ast::ast::Statement::VariableDecl(decl, _),
+            _,
+        ) = &items[0]
+        {
             match &decl.type_annotation {
                 Some(shape_ast::ast::TypeAnnotation::Generic { name, args }) => {
                     assert_eq!(name.as_str(), "foo::Container");
@@ -96,13 +99,22 @@ mod module_qualified_type_tests {
         let source = "let c = types::Color::Red";
         let program = shape_ast::parser::parse_program(source).expect("parse");
         let items = &program.items;
-        if let shape_ast::ast::Item::Statement(shape_ast::ast::Statement::VariableDecl(decl, _), _) = &items[0] {
+        if let shape_ast::ast::Item::Statement(
+            shape_ast::ast::Statement::VariableDecl(decl, _),
+            _,
+        ) = &items[0]
+        {
             match &decl.value {
-                Some(shape_ast::ast::Expr::EnumConstructor { enum_name, variant, .. }) => {
+                Some(shape_ast::ast::Expr::EnumConstructor {
+                    enum_name, variant, ..
+                }) => {
                     assert_eq!(enum_name.as_str(), "types::Color");
                     assert_eq!(variant, "Red");
                 }
-                other => panic!("Expected EnumConstructor, got {:?}", other.as_ref().map(std::mem::discriminant)),
+                other => panic!(
+                    "Expected EnumConstructor, got {:?}",
+                    other.as_ref().map(std::mem::discriminant)
+                ),
             }
         } else {
             panic!("Expected VariableDecl");
@@ -114,13 +126,22 @@ mod module_qualified_type_tests {
         let source = "let c = a::b::Color::Red";
         let program = shape_ast::parser::parse_program(source).expect("parse");
         let items = &program.items;
-        if let shape_ast::ast::Item::Statement(shape_ast::ast::Statement::VariableDecl(decl, _), _) = &items[0] {
+        if let shape_ast::ast::Item::Statement(
+            shape_ast::ast::Statement::VariableDecl(decl, _),
+            _,
+        ) = &items[0]
+        {
             match &decl.value {
-                Some(shape_ast::ast::Expr::EnumConstructor { enum_name, variant, .. }) => {
+                Some(shape_ast::ast::Expr::EnumConstructor {
+                    enum_name, variant, ..
+                }) => {
                     assert_eq!(enum_name.as_str(), "a::b::Color");
                     assert_eq!(variant, "Red");
                 }
-                other => panic!("Expected EnumConstructor, got {:?}", other.as_ref().map(std::mem::discriminant)),
+                other => panic!(
+                    "Expected EnumConstructor, got {:?}",
+                    other.as_ref().map(std::mem::discriminant)
+                ),
             }
         } else {
             panic!("Expected VariableDecl");
@@ -141,10 +162,12 @@ mod module_qualified_type_tests {
     fn test_module_struct_literal_qualified() {
         // m::P { x: 42 } parses as EnumConstructor(enum="m", variant="P", payload=Struct)
         // The compiler's enum→struct fallback in compile_expr_enum_constructor handles this
-        let result = eval(r#"
+        let result = eval(
+            r#"
             mod m { type P { x: int } }
             m::P { x: 42 }.x
-        "#);
+        "#,
+        );
         assert_eq!(result.as_i64(), Some(42));
     }
 
@@ -152,19 +175,23 @@ mod module_qualified_type_tests {
     fn test_module_enum_constructor_and_match() {
         // After Wave-E+5, the typed `match` arms return raw native i64
         // bits at the top-level. Stamp Int64 so `as_i64()` decodes them.
-        let result = eval_with_kind(r#"
+        let result = eval_with_kind(
+            r#"
             mod m { enum C { R, B } }
             match m::C::R {
                 m::C::R => 1,
                 m::C::B => 2,
             }
-        "#, crate::type_tracking::NativeKind::Int64);
+        "#,
+            crate::type_tracking::NativeKind::Int64,
+        );
         assert_eq!(result.as_i64(), Some(1));
     }
 
     #[test]
     fn test_module_extend_method() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             mod m {
                 type P { x: int }
                 extend P {
@@ -172,36 +199,42 @@ mod module_qualified_type_tests {
                 }
             }
             m::P { x: 5 }.dbl()
-        "#);
+        "#,
+        );
         assert_eq!(result.as_i64(), Some(10));
     }
 
     #[test]
     fn test_module_unqualified_access_inside() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             mod m {
                 type P { x: int }
                 fn mk() -> P { P { x: 3 } }
             }
             m::mk().x
-        "#);
+        "#,
+        );
         assert_eq!(result.as_i64(), Some(3));
     }
 
     #[test]
     fn test_module_enum_tuple_payload() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             mod m { enum S { C(int) } }
             match m::S::C(7) {
                 m::S::C(n) => n,
             }
-        "#);
+        "#,
+        );
         assert_eq!(result.as_i64(), Some(7));
     }
 
     #[test]
     fn test_module_impl_trait() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             mod m {
                 trait Greet { method greet() -> string }
                 type P { name: string }
@@ -210,7 +243,8 @@ mod module_qualified_type_tests {
                 }
             }
             m::P { name: "hi" }.greet()
-        "#);
+        "#,
+        );
         assert_eq!(
             result.as_arc_string().expect("Expected String").as_ref() as &str,
             "hi"
@@ -222,48 +256,56 @@ mod module_qualified_type_tests {
     #[test]
     fn test_module_type_alias() {
         // Type aliases inside modules should be qualified to m::Alias
-        let result = eval(r#"
+        let result = eval(
+            r#"
             mod m {
                 type Alias = int
                 fn make() -> Alias { 99 }
             }
             m::make()
-        "#);
+        "#,
+        );
         assert_eq!(result.as_i64(), Some(99));
     }
 
     #[test]
     fn test_module_enum_struct_variant() {
         // Enum struct variants should work with qualified names
-        let result = eval_with_kind(r#"
+        let result = eval_with_kind(
+            r#"
             mod m {
                 enum E { V { x: int, y: int } }
             }
             match m::E::V { x: 1, y: 2 } {
                 m::E::V { x, y } => x + y,
             }
-        "#, crate::type_tracking::NativeKind::Int64);
+        "#,
+            crate::type_tracking::NativeKind::Int64,
+        );
         assert_eq!(result.as_i64(), Some(3));
     }
 
     #[test]
     fn test_module_multiple_types() {
         // Multiple types in the same module should all be qualified independently
-        let result = eval(r#"
+        let result = eval(
+            r#"
             mod m {
                 type A { x: int }
                 type B { y: int }
                 fn sum(a: A, b: B) -> int { a.x + b.y }
             }
             m::sum(m::A { x: 10 }, m::B { y: 20 })
-        "#);
+        "#,
+        );
         assert_eq!(result.as_i64(), Some(30));
     }
 
     #[test]
     fn test_module_enum_used_in_function_signature() {
         // Module-qualified enum used as function return type
-        let result = eval_with_kind(r#"
+        let result = eval_with_kind(
+            r#"
             mod m {
                 enum Color { Red, Blue }
                 fn pick() -> Color { Color::Red }
@@ -272,14 +314,17 @@ mod module_qualified_type_tests {
                 m::Color::Red => 1,
                 m::Color::Blue => 2,
             }
-        "#, crate::type_tracking::NativeKind::Int64);
+        "#,
+            crate::type_tracking::NativeKind::Int64,
+        );
         assert_eq!(result.as_i64(), Some(1));
     }
 
     #[test]
     fn test_module_struct_with_method_chaining() {
         // Extend method chaining on module-qualified types
-        let result = eval_with_kind(r#"
+        let result = eval_with_kind(
+            r#"
             mod m {
                 type Counter { n: int }
                 extend Counter {
@@ -288,18 +333,22 @@ mod module_qualified_type_tests {
                 }
             }
             m::Counter { n: 0 }.inc().inc().inc().value()
-        "#, crate::type_tracking::NativeKind::Int64);
+        "#,
+            crate::type_tracking::NativeKind::Int64,
+        );
         assert_eq!(result.as_i64(), Some(3));
     }
 
     #[test]
     fn test_module_type_in_let_binding_annotation() {
         // Qualified type annotation in let binding
-        let result = eval(r#"
+        let result = eval(
+            r#"
             mod m { type P { x: int } }
             let p: m::P = m::P { x: 7 }
             p.x
-        "#);
+        "#,
+        );
         assert_eq!(result.as_i64(), Some(7));
     }
 
@@ -310,7 +359,11 @@ mod module_qualified_type_tests {
         let source = "let x: dyn foo::Bar = 1";
         let program = shape_ast::parser::parse_program(source).expect("parse");
         let items = &program.items;
-        if let shape_ast::ast::Item::Statement(shape_ast::ast::Statement::VariableDecl(decl, _), _) = &items[0] {
+        if let shape_ast::ast::Item::Statement(
+            shape_ast::ast::Statement::VariableDecl(decl, _),
+            _,
+        ) = &items[0]
+        {
             match &decl.type_annotation {
                 Some(shape_ast::ast::TypeAnnotation::Dyn(traits)) => {
                     assert_eq!(traits.len(), 1);

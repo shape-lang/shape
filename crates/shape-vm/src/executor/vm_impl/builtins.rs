@@ -74,8 +74,8 @@ impl VirtualMachine {
         // call-site emit changes in `compiler/expressions/function_calls.rs`.
         let (count_bits, count_kind) = self.pop_kinded()?;
         let count_slot = KindedSlot::new(ValueSlot::from_raw(count_bits), count_kind);
-        let count = crate::executor::builtins::kind_coerce::int_operand(&count_slot)
-            .map_err(|_| {
+        let count =
+            crate::executor::builtins::kind_coerce::int_operand(&count_slot).map_err(|_| {
                 VMError::RuntimeError(format!(
                     "pop_builtin_args: arg-count slot must be integer-family, got kind {:?}",
                     count_kind
@@ -341,14 +341,11 @@ impl VirtualMachine {
                     self.builtin_print(&args, _ctx)?;
                     let null_slot = KindedSlot::new(
                         ValueSlot::from_raw(0),
-                        shape_value::NativeKind::Ptr(
-                            shape_value::HeapKind::String,
-                        ),
+                        shape_value::NativeKind::Ptr(shape_value::HeapKind::String),
                     );
                     self.push_kinded_slot(null_slot)?;
                 }
-                BuiltinFunction::Format
-                | BuiltinFunction::FormatValueWithMeta => {
+                BuiltinFunction::Format | BuiltinFunction::FormatValueWithMeta => {
                     // Universal value-to-string. `Format` joins multiple
                     // args without separator (Shape's `format("a", "b")`
                     // → `"ab"` legacy semantics); `FormatValueWithMeta`
@@ -390,9 +387,7 @@ impl VirtualMachine {
                         builtin
                     )));
                 }
-                BuiltinFunction::ToString
-                | BuiltinFunction::ToNumber
-                | BuiltinFunction::ToBool => {
+                BuiltinFunction::ToString | BuiltinFunction::ToNumber | BuiltinFunction::ToBool => {
                     // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5c —
                     // conversion body migration (`dispatch_conversion_builtin`)
                     // deferred. Drain args to balance the §2.7.7 parallel-
@@ -615,9 +610,8 @@ impl VirtualMachine {
                         )));
                     }
                     let payload = args.remove(0);
-                    let opt = std::sync::Arc::new(
-                        shape_value::heap_value::OptionData::some(payload),
-                    );
+                    let opt =
+                        std::sync::Arc::new(shape_value::heap_value::OptionData::some(payload));
                     self.push_kinded_slot(KindedSlot::from_option(opt))?;
                 }
                 BuiltinFunction::OkCtor => {
@@ -633,9 +627,7 @@ impl VirtualMachine {
                         )));
                     }
                     let payload = args.remove(0);
-                    let res = std::sync::Arc::new(
-                        shape_value::heap_value::ResultData::ok(payload),
-                    );
+                    let res = std::sync::Arc::new(shape_value::heap_value::ResultData::ok(payload));
                     self.push_kinded_slot(KindedSlot::from_result(res))?;
                 }
                 BuiltinFunction::ErrCtor => {
@@ -651,9 +643,8 @@ impl VirtualMachine {
                         )));
                     }
                     let payload = args.remove(0);
-                    let res = std::sync::Arc::new(
-                        shape_value::heap_value::ResultData::err(payload),
-                    );
+                    let res =
+                        std::sync::Arc::new(shape_value::heap_value::ResultData::err(payload));
                     self.push_kinded_slot(KindedSlot::from_result(res))?;
                 }
                 BuiltinFunction::HashMapCtor => {
@@ -668,11 +659,9 @@ impl VirtualMachine {
                     // Arc::into_raw::<HashMapKindedRef>.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
                     let empty_kref = shape_value::heap_value::HashMapKindedRef::String(
-                        std::sync::Arc::new(
-                            shape_value::heap_value::HashMapData::<
-                                *const shape_value::v2::string_obj::StringObj,
-                            >::new(),
-                        ),
+                        std::sync::Arc::new(shape_value::heap_value::HashMapData::<
+                            *const shape_value::v2::string_obj::StringObj,
+                        >::new()),
                     );
                     let hm = std::sync::Arc::new(empty_kref);
                     self.push_kinded_slot(KindedSlot::from_hashmap(hm))?;
@@ -684,9 +673,7 @@ impl VirtualMachine {
                     // is a follow-up. Build empty Arc<HashSetData> and
                     // push via KindedSlot::from_hashset.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    let empty = std::sync::Arc::new(
-                        shape_value::heap_value::HashSetData::new(),
-                    );
+                    let empty = std::sync::Arc::new(shape_value::heap_value::HashSetData::new());
                     let result = KindedSlot::from_hashset(empty);
                     self.push_kinded_slot(result)?;
                 }
@@ -699,9 +686,7 @@ impl VirtualMachine {
                     // Reader contract: kind == Ptr(HeapKind::Deque),
                     // bits = Arc::into_raw::<DequeData>.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    let empty = std::sync::Arc::new(
-                        shape_value::heap_value::DequeData::new(),
-                    );
+                    let empty = std::sync::Arc::new(shape_value::heap_value::DequeData::new());
                     let result = KindedSlot::from_deque(empty);
                     self.push_kinded_slot(result)?;
                 }
@@ -715,9 +700,8 @@ impl VirtualMachine {
                     // `Arc::new(PriorityQueueData::new())` and push as
                     // a `KindedSlot::from_priority_queue(...)`.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    let empty = std::sync::Arc::new(
-                        shape_value::heap_value::PriorityQueueData::new(),
-                    );
+                    let empty =
+                        std::sync::Arc::new(shape_value::heap_value::PriorityQueueData::new());
                     let result = KindedSlot::from_priority_queue(empty);
                     self.push_kinded_slot(result)?;
                 }
@@ -736,9 +720,7 @@ impl VirtualMachine {
                     // method body — see
                     // `executor/objects/channel_methods.rs`.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    let empty = std::sync::Arc::new(
-                        shape_value::heap_value::ChannelData::new(),
-                    );
+                    let empty = std::sync::Arc::new(shape_value::heap_value::ChannelData::new());
                     let result = KindedSlot::from_channel(empty);
                     self.push_kinded_slot(result)?;
                 }
@@ -759,9 +741,7 @@ impl VirtualMachine {
                         )));
                     }
                     let initial = args.remove(0);
-                    let m = std::sync::Arc::new(
-                        shape_value::heap_value::MutexData::new(initial),
-                    );
+                    let m = std::sync::Arc::new(shape_value::heap_value::MutexData::new(initial));
                     let result = KindedSlot::from_mutex(m);
                     self.push_kinded_slot(result)?;
                 }
@@ -786,9 +766,7 @@ impl VirtualMachine {
                             args[0].kind
                         ))
                     })?;
-                    let a = std::sync::Arc::new(
-                        shape_value::heap_value::AtomicData::new(initial),
-                    );
+                    let a = std::sync::Arc::new(shape_value::heap_value::AtomicData::new(initial));
                     let result = KindedSlot::from_atomic(a);
                     self.push_kinded_slot(result)?;
                 }
@@ -814,9 +792,7 @@ impl VirtualMachine {
                     // requires Ptr(HeapKind::Closure) callee kind).
                     if !matches!(
                         initializer.kind,
-                        shape_value::NativeKind::Ptr(
-                            shape_value::heap_value::HeapKind::Closure
-                        )
+                        shape_value::NativeKind::Ptr(shape_value::heap_value::HeapKind::Closure)
                     ) {
                         return Err(VMError::RuntimeError(format!(
                             "Lazy() argument must be a closure (got \
@@ -824,9 +800,8 @@ impl VirtualMachine {
                             initializer.kind
                         )));
                     }
-                    let l = std::sync::Arc::new(
-                        shape_value::heap_value::LazyData::new(initializer),
-                    );
+                    let l =
+                        std::sync::Arc::new(shape_value::heap_value::LazyData::new(initializer));
                     let result = KindedSlot::from_lazy(l);
                     self.push_kinded_slot(result)?;
                 }
@@ -1033,8 +1008,7 @@ impl VirtualMachine {
                         ))
                     })?;
                     let node = shape_value::content::ContentNode::plain(s);
-                    let result =
-                        KindedSlot::from_content(std::sync::Arc::new(node));
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
                     self.push_kinded_slot(result)?;
                 }
                 BuiltinFunction::FStringContentStyledText => {
@@ -1060,43 +1034,34 @@ impl VirtualMachine {
                     })?;
                     let fg_kind = args[1].as_i64().ok_or_else(|| {
                         VMError::RuntimeError(
-                            "FStringContentStyledText fg_kind must be int"
-                                .to_string(),
+                            "FStringContentStyledText fg_kind must be int".to_string(),
                         )
                     })?;
                     let fg_payload = args[2].as_i64().ok_or_else(|| {
                         VMError::RuntimeError(
-                            "FStringContentStyledText fg_payload must be int"
-                                .to_string(),
+                            "FStringContentStyledText fg_payload must be int".to_string(),
                         )
                     })?;
                     let bg_kind = args[3].as_i64().ok_or_else(|| {
                         VMError::RuntimeError(
-                            "FStringContentStyledText bg_kind must be int"
-                                .to_string(),
+                            "FStringContentStyledText bg_kind must be int".to_string(),
                         )
                     })?;
                     let bg_payload = args[4].as_i64().ok_or_else(|| {
                         VMError::RuntimeError(
-                            "FStringContentStyledText bg_payload must be int"
-                                .to_string(),
+                            "FStringContentStyledText bg_payload must be int".to_string(),
                         )
                     })?;
                     let flags = args[5].as_i64().ok_or_else(|| {
                         VMError::RuntimeError(
-                            "FStringContentStyledText flags must be int"
-                                .to_string(),
+                            "FStringContentStyledText flags must be int".to_string(),
                         )
                     })?;
 
-                    let style = decode_fstring_style(
-                        fg_kind, fg_payload, bg_kind, bg_payload, flags,
-                    )?;
-                    let node = shape_value::content::ContentNode::styled(
-                        value, style,
-                    );
-                    let result =
-                        KindedSlot::from_content(std::sync::Arc::new(node));
+                    let style =
+                        decode_fstring_style(fg_kind, fg_payload, bg_kind, bg_payload, flags)?;
+                    let node = shape_value::content::ContentNode::styled(value, style);
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
                     self.push_kinded_slot(result)?;
                 }
                 BuiltinFunction::FStringContentFragment => {
@@ -1113,10 +1078,7 @@ impl VirtualMachine {
                     let mut nodes: Vec<shape_value::content::ContentNode> =
                         Vec::with_capacity(args.len());
                     for (i, arg) in args.iter().enumerate() {
-                        if arg.kind
-                            != shape_value::NativeKind::Ptr(
-                                shape_value::HeapKind::Content,
-                            )
+                        if arg.kind != shape_value::NativeKind::Ptr(shape_value::HeapKind::Content)
                         {
                             return Err(VMError::RuntimeError(format!(
                                 "FStringContentFragment arg #{} must be a \
@@ -1143,16 +1105,12 @@ impl VirtualMachine {
                         // node enum carries owned strings + Vecs) into the
                         // Fragment because the receiving Vec owns its
                         // elements.
-                        let node: &shape_value::content::ContentNode = unsafe {
-                            &*(bits as *const shape_value::content::ContentNode)
-                        };
+                        let node: &shape_value::content::ContentNode =
+                            unsafe { &*(bits as *const shape_value::content::ContentNode) };
                         nodes.push(node.clone());
                     }
-                    let node = shape_value::content::ContentNode::Fragment(
-                        nodes,
-                    );
-                    let result =
-                        KindedSlot::from_content(std::sync::Arc::new(node));
+                    let node = shape_value::content::ContentNode::Fragment(nodes);
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
                     self.push_kinded_slot(result)?;
                 }
                 // ── Wave 5e: DateTime constructor builtins ────────────────
@@ -1164,53 +1122,47 @@ impl VirtualMachine {
                 // `&[KindedSlot] -> Result<KindedSlot, VMError>` carrier ABI.
                 BuiltinFunction::DateTimeNow => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::builtins::datetime_builtins::builtin_datetime_now(
-                        &args,
-                    )?;
+                    let r = super::super::builtins::datetime_builtins::builtin_datetime_now(&args)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::DateTimeUtc => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::builtins::datetime_builtins::builtin_datetime_utc(
-                        &args,
-                    )?;
+                    let r = super::super::builtins::datetime_builtins::builtin_datetime_utc(&args)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::DateTimeParse => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::builtins::datetime_builtins::builtin_datetime_parse(
-                        &args,
-                    )?;
+                    let r =
+                        super::super::builtins::datetime_builtins::builtin_datetime_parse(&args)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::DateTimeFromEpoch => {
                     let args = self.pop_builtin_args()?;
-                    let r =
-                        super::super::builtins::datetime_builtins::builtin_datetime_from_epoch(
-                            &args,
-                        )?;
+                    let r = super::super::builtins::datetime_builtins::builtin_datetime_from_epoch(
+                        &args,
+                    )?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::DateTimeFromParts => {
                     let args = self.pop_builtin_args()?;
-                    let r =
-                        super::super::builtins::datetime_builtins::builtin_datetime_from_parts(
-                            &args,
-                        )?;
+                    let r = super::super::builtins::datetime_builtins::builtin_datetime_from_parts(
+                        &args,
+                    )?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::DateTimeFromUnixSecs => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::builtins::datetime_builtins
-                        ::builtin_datetime_from_unix_secs(&args)?;
+                    let r =
+                        super::super::builtins::datetime_builtins::builtin_datetime_from_unix_secs(
+                            &args,
+                        )?;
                     self.push_kinded_slot(r)?;
                 }
                 // ── Wave 5e: mat() row-major matrix constructor ───────────
                 BuiltinFunction::MatFromFlat => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::builtins::datetime_builtins::builtin_mat_from_flat(
-                        &args,
-                    )?;
+                    let r =
+                        super::super::builtins::datetime_builtins::builtin_mat_from_flat(&args)?;
                     self.push_kinded_slot(r)?;
                 }
                 // ── Wave 5e: Table<T> from-rows constructor ───────────────
@@ -1251,60 +1203,46 @@ impl VirtualMachine {
                 | BuiltinFunction::WindowDenseRank
                 | BuiltinFunction::WindowNtile => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_row_number_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r =
+                        super::super::window_join::handle_window_row_number_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::WindowLag | BuiltinFunction::WindowLead => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_lag_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r = super::super::window_join::handle_window_lag_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::WindowFirstValue
                 | BuiltinFunction::WindowLastValue
                 | BuiltinFunction::WindowNthValue => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_first_value_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r =
+                        super::super::window_join::handle_window_first_value_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::WindowSum => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_sum_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r = super::super::window_join::handle_window_sum_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::WindowAvg => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_avg_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r = super::super::window_join::handle_window_avg_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::WindowMin => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_min_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r = super::super::window_join::handle_window_min_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::WindowMax => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_max_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r = super::super::window_join::handle_window_max_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::WindowCount => {
                     let args = self.pop_builtin_args()?;
-                    let r = super::super::window_join::handle_window_count_v2(
-                        self, &args, _ctx,
-                    )?;
+                    let r = super::super::window_join::handle_window_count_v2(self, &args, _ctx)?;
                     self.push_kinded_slot(r)?;
                 }
                 BuiltinFunction::JoinExecute => {
@@ -1360,8 +1298,7 @@ impl VirtualMachine {
                 | BuiltinFunction::EvalDataRelative
                 | BuiltinFunction::EvalDataRelativeRange => {
                     return Err(VMError::RuntimeError(
-                        "DataReference / DataRow type has been removed"
-                            .to_string(),
+                        "DataReference / DataRow type has been removed".to_string(),
                     ));
                 }
             }
@@ -1466,10 +1403,7 @@ impl VirtualMachine {
     /// did not pass it to nested calls; the Display body is expected to
     /// be pure / cheap (a single `Content.text(...)` wrap is the
     /// canonical pattern).
-    fn try_dispatch_display(
-        &mut self,
-        arg: &KindedSlot,
-    ) -> Result<Option<KindedSlot>, VMError> {
+    fn try_dispatch_display(&mut self, arg: &KindedSlot) -> Result<Option<KindedSlot>, VMError> {
         use shape_value::heap_value::HeapKind;
         // Only TypedObject receivers can have user-defined Display impls.
         let shape_value::NativeKind::Ptr(HeapKind::TypedObject) = arg.kind else {
@@ -1525,10 +1459,7 @@ impl VirtualMachine {
     /// a `String`-kinded `KindedSlot`. Used by `format(…)` (multi-arg
     /// concat) and by `FormatValueWithMeta` (single-arg
     /// `expr.to_string()` / interpolation).
-    pub(crate) fn builtin_format(
-        &mut self,
-        args: &[KindedSlot],
-    ) -> Result<KindedSlot, VMError> {
+    pub(crate) fn builtin_format(&mut self, args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
         let formatter =
             super::super::printing::ValueFormatter::new(&self.program.type_schema_registry);
         let mut out = String::new();
@@ -1581,8 +1512,9 @@ impl VirtualMachine {
                 // Coerce numeric kinds; non-numeric fall back to default
                 // formatting so the spec is a no-op rather than an error.
                 let f = match v.kind {
-                    shape_value::NativeKind::Float64
-                    | shape_value::NativeKind::NullableFloat64 => Some(v.slot.as_f64()),
+                    shape_value::NativeKind::Float64 | shape_value::NativeKind::NullableFloat64 => {
+                        Some(v.slot.as_f64())
+                    }
                     shape_value::NativeKind::Int64
                     | shape_value::NativeKind::Int32
                     | shape_value::NativeKind::Int16
@@ -1599,20 +1531,22 @@ impl VirtualMachine {
                     (Some(f), Some(p)) if p >= 0 => {
                         format!("{:.*}", p as usize, f)
                     }
-                    _ => self.builtin_format(&args[..1])?.as_str().unwrap_or("").to_string(),
+                    _ => self
+                        .builtin_format(&args[..1])?
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
                 };
                 Ok(KindedSlot::from_string_arc(std::sync::Arc::new(rendered)))
             }
-            Some(tag) if tag == FORMAT_SPEC_TABLE => {
-                Err(VMError::NotImplemented(
-                    "FormatValueWithSpec: FORMAT_SPEC_TABLE rendering deferred — \
+            Some(tag) if tag == FORMAT_SPEC_TABLE => Err(VMError::NotImplemented(
+                "FormatValueWithSpec: FORMAT_SPEC_TABLE rendering deferred — \
                      W13-print-formatter scope is the FORMAT_SPEC_FIXED + \
                      no-spec path. Table rendering reuses the DataTable / \
                      TableView Display impls; surface-and-stop pending the \
                      next pass per W13 playbook §7.4."
-                        .to_string(),
-                ))
-            }
+                    .to_string(),
+            )),
             _ => self.builtin_format(&args[..1]),
         }
     }
@@ -1651,7 +1585,7 @@ impl VirtualMachine {
 /// contents — each element is copied out of the array's interned UTF-8.
 pub(in crate::executor) fn read_string_array(slot: &KindedSlot) -> Option<Vec<String>> {
     use crate::executor::v2_handlers::v2_array_detect::{
-        as_v2_typed_array, read_element, V2ElemType,
+        V2ElemType, as_v2_typed_array, read_element,
     };
     use shape_value::{HeapKind, NativeKind};
     if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
@@ -1737,9 +1671,7 @@ fn build_table_from_headers_and_rows(
     // Rows is an Array<Array<string>>. The outer array carries
     // TypedArray-of-TypedArray pointers. Read each inner row via
     // `read_string_array`.
-    use crate::executor::v2_handlers::v2_array_detect::{
-        as_v2_typed_array, read_element,
-    };
+    use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, read_element};
     use shape_value::{HeapKind, NativeKind};
     if args[1].kind != NativeKind::Ptr(HeapKind::TypedArray) {
         return Err(VMError::RuntimeError(format!(
@@ -1748,12 +1680,9 @@ fn build_table_from_headers_and_rows(
             args[1].kind
         )));
     }
-    let outer_view = as_v2_typed_array(args[1].slot.raw(), args[1].kind)
-        .ok_or_else(|| {
-            VMError::RuntimeError(
-                "Content.table: rows array has invalid v2 header".to_string(),
-            )
-        })?;
+    let outer_view = as_v2_typed_array(args[1].slot.raw(), args[1].kind).ok_or_else(|| {
+        VMError::RuntimeError("Content.table: rows array has invalid v2 header".to_string())
+    })?;
     let mut rows: Vec<Vec<shape_value::content::ContentNode>> =
         Vec::with_capacity(outer_view.len as usize);
     for i in 0..outer_view.len {
@@ -1808,9 +1737,7 @@ fn build_kv_pairs_from_keys_values(
             args[0].kind
         ))
     })?;
-    use crate::executor::v2_handlers::v2_array_detect::{
-        as_v2_typed_array, read_element,
-    };
+    use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, read_element};
     use shape_value::{HeapKind, NativeKind};
     if args[1].kind != NativeKind::Ptr(HeapKind::TypedArray) {
         return Err(VMError::RuntimeError(format!(
@@ -1857,9 +1784,7 @@ fn collect_content_nodes_from_array_arg(
             args.len()
         )));
     }
-    use crate::executor::v2_handlers::v2_array_detect::{
-        as_v2_typed_array, read_element,
-    };
+    use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, read_element};
     use shape_value::{HeapKind, NativeKind};
     if args[0].kind != NativeKind::Ptr(HeapKind::TypedArray) {
         return Err(VMError::RuntimeError(format!(
@@ -1869,17 +1794,12 @@ fn collect_content_nodes_from_array_arg(
         )));
     }
     let view = as_v2_typed_array(args[0].slot.raw(), args[0].kind).ok_or_else(|| {
-        VMError::RuntimeError(
-            "Content.fragment: parts array has invalid v2 header".to_string(),
-        )
+        VMError::RuntimeError("Content.fragment: parts array has invalid v2 header".to_string())
     })?;
     let mut parts = Vec::with_capacity(view.len as usize);
     for i in 0..view.len {
         let (bits, kind) = read_element(&view, i).ok_or_else(|| {
-            VMError::RuntimeError(format!(
-                "Content.fragment: failed to read element {}",
-                i
-            ))
+            VMError::RuntimeError(format!("Content.fragment: failed to read element {}", i))
         })?;
         let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
         let arc = read_content_arc(&elem_slot).ok_or_else(|| {
@@ -1923,7 +1843,10 @@ const FSTRING_FLAG_ITALIC: i64 = 2;
 const FSTRING_FLAG_UNDERLINE: i64 = 4;
 const FSTRING_FLAG_DIM: i64 = 8;
 
-fn decode_fstring_color(kind: i64, payload: i64) -> Result<Option<shape_value::content::Color>, VMError> {
+fn decode_fstring_color(
+    kind: i64,
+    payload: i64,
+) -> Result<Option<shape_value::content::Color>, VMError> {
     use shape_value::content::{Color, NamedColor};
     match kind {
         FSTRING_COLOR_NONE => Ok(None),
@@ -2029,10 +1952,7 @@ mod fstring_decode_tests {
             0,
             FSTRING_COLOR_NONE,
             0,
-            FSTRING_FLAG_BOLD
-                | FSTRING_FLAG_ITALIC
-                | FSTRING_FLAG_UNDERLINE
-                | FSTRING_FLAG_DIM,
+            FSTRING_FLAG_BOLD | FSTRING_FLAG_ITALIC | FSTRING_FLAG_UNDERLINE | FSTRING_FLAG_DIM,
         )
         .unwrap();
         assert!(style.bold);

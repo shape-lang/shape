@@ -837,7 +837,12 @@ impl MethodTable {
             // receiver; a user impl overrides it with the user's own body.
             ("next", 0, vec![], opt_of(t())),
             // --- lazy adapters (return a new Iterator) ---
-            ("map", 1, vec![func(vec![t()], E::MethodParam(0))], iter_of(E::MethodParam(0))),
+            (
+                "map",
+                1,
+                vec![func(vec![t()], E::MethodParam(0))],
+                iter_of(E::MethodParam(0)),
+            ),
             ("filter", 0, vec![func(vec![t()], boolean())], iter_of(t())),
             ("take", 0, vec![int()], iter_of(t())),
             ("skip", 0, vec![int()], iter_of(t())),
@@ -869,7 +874,10 @@ impl MethodTable {
             (
                 "reduce",
                 1,
-                vec![func(vec![E::MethodParam(0), t()], E::MethodParam(0)), E::MethodParam(0)],
+                vec![
+                    func(vec![E::MethodParam(0), t()], E::MethodParam(0)),
+                    E::MethodParam(0),
+                ],
                 E::MethodParam(0),
             ),
             ("count", 0, vec![], int()),

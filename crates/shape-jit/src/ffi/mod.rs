@@ -5,11 +5,11 @@
 
 pub mod arc;
 pub mod array;
-pub mod jit_release;
 pub mod data;
 pub mod jit_kinds;
-pub mod stack_kind_code;
+pub mod jit_release;
 pub mod object;
+pub mod stack_kind_code;
 // DELETED: Finance-specific indicator JIT module
 // pub mod indicator;
 pub mod async_ops;
@@ -40,11 +40,11 @@ pub mod v2_struct;
 pub mod v2_typed;
 
 // Re-export all FFI functions for easy access
-pub use jit_kinds::*;
-pub use value_ffi::*;
 pub use array::*;
 pub use data::*;
+pub use jit_kinds::*;
 pub use object::*;
+pub use value_ffi::*;
 // DELETED: Finance-specific indicator exports
 // pub use indicator::*;
 pub use async_ops::*;

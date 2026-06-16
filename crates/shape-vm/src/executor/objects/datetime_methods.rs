@@ -83,7 +83,7 @@ use crate::executor::VirtualMachine;
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Timelike};
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::{HeapKind, TemporalData};
-use shape_value::{KindedSlot, NativeKind, ValueSlot, VMError};
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 use std::sync::Arc;
 
 use crate::executor::builtins::kind_coerce::number_operand;
@@ -152,7 +152,11 @@ fn recv_timespan<'a>(args: &'a [KindedSlot]) -> Result<&'a chrono::Duration, VME
 /// Borrow `args[idx]` as `&TemporalData`. Errors if the kind is not
 /// `Ptr(HeapKind::Temporal)`. Argument-side equivalent of `recv_temporal`.
 #[inline]
-fn arg_temporal<'a>(args: &'a [KindedSlot], idx: usize, label: &str) -> Result<&'a TemporalData, VMError> {
+fn arg_temporal<'a>(
+    args: &'a [KindedSlot],
+    idx: usize,
+    label: &str,
+) -> Result<&'a TemporalData, VMError> {
     if idx >= args.len() {
         return Err(VMError::RuntimeError(format!(
             "{}: missing argument at position {}",
@@ -310,7 +314,7 @@ pub fn v2_day_of_week(
 ) -> Result<KindedSlot, VMError> {
     let dt = recv_dt(args)?;
     Ok(KindedSlot::from_int(
-        dt.weekday().num_days_from_monday() as i64,
+        dt.weekday().num_days_from_monday() as i64
     ))
 }
 
@@ -516,9 +520,9 @@ pub fn v2_add(
     let rhs = arg_temporal(args, 1, "DateTime.add")?;
     match rhs {
         TemporalData::TimeSpan(dur) => {
-            let result = dt.checked_add_signed(*dur).ok_or_else(|| {
-                VMError::RuntimeError("DateTime overflow in add".to_string())
-            })?;
+            let result = dt
+                .checked_add_signed(*dur)
+                .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add".to_string()))?;
             Ok(temporal_result(TemporalData::DateTime(result)))
         }
         other => Err(VMError::RuntimeError(format!(
@@ -539,9 +543,9 @@ pub fn v2_sub(
     let rhs = arg_temporal(args, 1, "DateTime.sub")?;
     match rhs {
         TemporalData::TimeSpan(dur) => {
-            let result = dt.checked_sub_signed(*dur).ok_or_else(|| {
-                VMError::RuntimeError("DateTime overflow in sub".to_string())
-            })?;
+            let result = dt
+                .checked_sub_signed(*dur)
+                .ok_or_else(|| VMError::RuntimeError("DateTime overflow in sub".to_string()))?;
             Ok(temporal_result(TemporalData::DateTime(result)))
         }
         TemporalData::DateTime(other_dt) => {
@@ -708,15 +712,15 @@ pub fn v2_timespan_add(
     let rhs = arg_temporal(args, 1, "TimeSpan.add")?;
     match rhs {
         TemporalData::TimeSpan(other_dur) => {
-            let result = dur.checked_add(other_dur).ok_or_else(|| {
-                VMError::RuntimeError("Duration overflow in add".to_string())
-            })?;
+            let result = dur
+                .checked_add(other_dur)
+                .ok_or_else(|| VMError::RuntimeError("Duration overflow in add".to_string()))?;
             Ok(temporal_result(TemporalData::TimeSpan(result)))
         }
         TemporalData::DateTime(dt) => {
-            let result = dt.checked_add_signed(dur).ok_or_else(|| {
-                VMError::RuntimeError("DateTime overflow in add".to_string())
-            })?;
+            let result = dt
+                .checked_add_signed(dur)
+                .ok_or_else(|| VMError::RuntimeError("DateTime overflow in add".to_string()))?;
             Ok(temporal_result(TemporalData::DateTime(result)))
         }
         other => Err(VMError::RuntimeError(format!(
@@ -736,9 +740,9 @@ pub fn v2_timespan_sub(
     let rhs = arg_temporal(args, 1, "TimeSpan.sub")?;
     match rhs {
         TemporalData::TimeSpan(other_dur) => {
-            let result = dur.checked_sub(other_dur).ok_or_else(|| {
-                VMError::RuntimeError("Duration overflow in sub".to_string())
-            })?;
+            let result = dur
+                .checked_sub(other_dur)
+                .ok_or_else(|| VMError::RuntimeError("Duration overflow in sub".to_string()))?;
             Ok(temporal_result(TemporalData::TimeSpan(result)))
         }
         other => Err(VMError::RuntimeError(format!(
@@ -907,7 +911,10 @@ mod tests {
     #[test]
     fn test_add_days() {
         let mut vm = create_test_vm();
-        let args = [dt_arg(utc_dt(2024, 1, 15, 0, 0, 0)), KindedSlot::from_int(7)];
+        let args = [
+            dt_arg(utc_dt(2024, 1, 15, 0, 0, 0)),
+            KindedSlot::from_int(7),
+        ];
         let r = v2_add_days(&mut vm, &args, None).unwrap();
         assert_eq!(extract_dt(&r), utc_dt(2024, 1, 22, 0, 0, 0));
     }

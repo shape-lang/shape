@@ -23,8 +23,7 @@ fn project_concrete_return(
     use shape_value::heap_value::{HashMapData, HashMapKindedRef};
     use shape_value::v2::string_obj::StringObj;
     use shape_value::v2::typed_array::{
-        stamp_elem_type, TypedArray, ELEM_TYPE_F64, ELEM_TYPE_I64,
-        ELEM_TYPE_STRING,
+        ELEM_TYPE_F64, ELEM_TYPE_I64, ELEM_TYPE_STRING, TypedArray, stamp_elem_type,
     };
     use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
     use std::sync::Arc;
@@ -41,22 +40,17 @@ fn project_concrete_return(
             ValueSlot::from_raw(if b { 1 } else { 0 }),
             NativeKind::Bool,
         )),
-        ConcreteReturn::Unit => Ok(KindedSlot::new(
-            ValueSlot::from_raw(0),
-            NativeKind::Bool,
-        )),
-        ConcreteReturn::String(s) => {
-            Ok(KindedSlot::from_string_arc(Arc::new(s)))
-        }
+        ConcreteReturn::Unit => Ok(KindedSlot::new(ValueSlot::from_raw(0), NativeKind::Bool)),
+        ConcreteReturn::String(s) => Ok(KindedSlot::from_string_arc(Arc::new(s))),
         ConcreteReturn::OpaqueTypedObject(hv) => {
             // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): hv is
             // `Arc<HeapValue::TypedObject(TypedObjectPtr)>`. Clone the
             // wrapper (bumps v2-raw refcount); into_raw moves the share
             // to the slot via `from_typed_object_raw`.
             match &*hv {
-                shape_value::heap_value::HeapValue::TypedObject(s) => Ok(
-                    KindedSlot::from_typed_object_raw(s.clone().into_raw()),
-                ),
+                shape_value::heap_value::HeapValue::TypedObject(s) => {
+                    Ok(KindedSlot::from_typed_object_raw(s.clone().into_raw()))
+                }
                 other => Err(VMError::RuntimeError(format!(
                     "project_concrete_return: OpaqueTypedObject expected \
                      HeapValue::TypedObject payload, got {:?}",
@@ -115,9 +109,7 @@ fn project_concrete_return(
             // Each element is a fresh `StringObj` (refcount = 1); the
             // array owns each allocation outright. Mirror of the marshal
             // `ToSlot<Vec<Arc<String>>>` producer.
-            let arr = TypedArray::<*const StringObj>::with_capacity(
-                v.len() as u32,
-            );
+            let arr = TypedArray::<*const StringObj>::with_capacity(v.len() as u32);
             unsafe {
                 stamp_elem_type(arr as *mut u8, ELEM_TYPE_STRING);
                 for s in &v {
@@ -220,8 +212,8 @@ fn project_typed_return(
 ) -> Result<shape_value::KindedSlot, VMError> {
     use shape_runtime::type_schema::typed_object_from_pairs;
     use shape_runtime::typed_module_exports::{ConcreteReturn, TypedReturn};
-    use shape_value::heap_value::{OptionData, ResultData};
     use shape_value::KindedSlot;
+    use shape_value::heap_value::{OptionData, ResultData};
     use std::sync::Arc;
 
     // Build a `TypedObjectStorage`-backed KindedSlot from string→leaf
@@ -233,8 +225,7 @@ fn project_typed_return(
     ) -> Result<KindedSlot, VMError> {
         // Project each leaf, holding the owned (name, KindedSlot) pairs so
         // the `&str` borrows the builder needs live across the call.
-        let mut owned: Vec<(String, KindedSlot)> =
-            Vec::with_capacity(pairs.len());
+        let mut owned: Vec<(String, KindedSlot)> = Vec::with_capacity(pairs.len());
         for (name, c) in pairs {
             owned.push((name, project_concrete_return(c)?));
         }
@@ -305,14 +296,12 @@ fn project_typed_return(
         // `TypedObjectStorage` allocations — the array-element-construction
         // path that pairs with the K2 `Vec<Arc<HeapValue>>` producer but
         // is not in K1 scope. Surface clean rather than shim.
-        other_tr @ TypedReturn::ArrayObjectPairs(_) => {
-            Err(VMError::NotImplemented(format!(
-                "project_typed_return: TypedReturn::{:?} (array of typed \
+        other_tr @ TypedReturn::ArrayObjectPairs(_) => Err(VMError::NotImplemented(format!(
+            "project_typed_return: TypedReturn::{:?} (array of typed \
                  objects) needs the typed-object-array element-construction \
                  path. SURFACED per ADR-006 §2.7.4 — no shim.",
-                std::mem::discriminant(&other_tr)
-            )))
-        }
+            std::mem::discriminant(&other_tr)
+        ))),
     }
 }
 
@@ -449,8 +438,8 @@ impl VirtualMachine {
                 // and returns `Result<TypedReturn, String>`. Translate
                 // `&[KindedSlot]` to `Vec<u64>` at the boundary.
                 let raw_bits: Vec<u64> = args.iter().map(|s| s.slot().raw()).collect();
-                let typed_return = (typed.invoke)(&raw_bits, &ctx)
-                    .map_err(VMError::RuntimeError)?;
+                let typed_return =
+                    (typed.invoke)(&raw_bits, &ctx).map_err(VMError::RuntimeError)?;
                 project_typed_return(typed_return)
             }
             shape_runtime::module_exports::ModuleFnEntry::TypedAsync(async_entry) => {
@@ -567,10 +556,7 @@ impl VirtualMachine {
                 let mut entries: Vec<(String, ModuleFnEntry)> =
                     Vec::with_capacity(typed.functions.len() + typed.async_functions.len());
                 for (export_name, typed_fn) in &typed.functions {
-                    entries.push((
-                        export_name.clone(),
-                        ModuleFnEntry::Typed(typed_fn.clone()),
-                    ));
+                    entries.push((export_name.clone(), ModuleFnEntry::Typed(typed_fn.clone())));
                 }
                 for (export_name, typed_async) in &typed.async_functions {
                     entries.push((
@@ -713,9 +699,7 @@ mod stage_k1_tests {
     use shape_runtime::typed_module_exports::{
         ConcreteReturn, ConcreteType, TypedModuleFunction, TypedReturn,
     };
-    use shape_value::heap_value::{
-        HashMapKindedRef, OptionData, ResultData, TypedObjectStorage,
-    };
+    use shape_value::heap_value::{HashMapKindedRef, OptionData, ResultData, TypedObjectStorage};
     use shape_value::v2::string_obj::StringObj;
     use shape_value::v2::typed_array::TypedArray;
     use shape_value::{HeapKind, KindedSlot, NativeKind};
@@ -739,8 +723,7 @@ mod stage_k1_tests {
             arg_types: vec![],
             arg_kinds: vec![],
         };
-        let entry =
-            shape_runtime::module_exports::ModuleFnEntry::Typed(tmf);
+        let entry = shape_runtime::module_exports::ModuleFnEntry::Typed(tmf);
         let fn_id = vm.register_module_fn_entry(entry);
         vm.invoke_module_fn_id_stub(fn_id, &[])
             .expect("module-fn invocation projects cleanly")
@@ -748,9 +731,9 @@ mod stage_k1_tests {
 
     #[test]
     fn array_i64_roundtrips() {
-        let slot = roundtrip(TypedReturn::Concrete(ConcreteReturn::ArrayI64(
-            vec![1, 2, 3, -7],
-        )));
+        let slot = roundtrip(TypedReturn::Concrete(ConcreteReturn::ArrayI64(vec![
+            1, 2, 3, -7,
+        ])));
         assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedArray));
         let arr = slot.raw() as *const TypedArray<i64>;
         let got = unsafe { TypedArray::<i64>::as_slice(arr) };
@@ -759,9 +742,9 @@ mod stage_k1_tests {
 
     #[test]
     fn array_f64_roundtrips() {
-        let slot = roundtrip(TypedReturn::Concrete(ConcreteReturn::ArrayF64(
-            vec![1.5, 2.5, -0.25],
-        )));
+        let slot = roundtrip(TypedReturn::Concrete(ConcreteReturn::ArrayF64(vec![
+            1.5, 2.5, -0.25,
+        ])));
         assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedArray));
         let arr = slot.raw() as *const TypedArray<f64>;
         let got = unsafe { TypedArray::<f64>::as_slice(arr) };
@@ -770,9 +753,9 @@ mod stage_k1_tests {
 
     #[test]
     fn bytes_roundtrips_as_array_int() {
-        let slot = roundtrip(TypedReturn::Concrete(ConcreteReturn::Bytes(
-            vec![0u8, 127, 255],
-        )));
+        let slot = roundtrip(TypedReturn::Concrete(ConcreteReturn::Bytes(vec![
+            0u8, 127, 255,
+        ])));
         assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedArray));
         // Bytes surface as Array<int>: each byte widened to i64.
         let arr = slot.raw() as *const TypedArray<i64>;
@@ -782,17 +765,17 @@ mod stage_k1_tests {
 
     #[test]
     fn array_string_roundtrips() {
-        let slot = roundtrip(TypedReturn::Concrete(
-            ConcreteReturn::ArrayString(vec![
-                "alpha".to_string(),
-                "beta".to_string(),
-            ]),
-        ));
+        let slot = roundtrip(TypedReturn::Concrete(ConcreteReturn::ArrayString(vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+        ])));
         assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedArray));
         let arr = slot.raw() as *const TypedArray<*const StringObj>;
         let ptrs = unsafe { TypedArray::<*const StringObj>::as_slice(arr) };
-        let got: Vec<&str> =
-            ptrs.iter().map(|&p| unsafe { StringObj::as_str(p) }).collect();
+        let got: Vec<&str> = ptrs
+            .iter()
+            .map(|&p| unsafe { StringObj::as_str(p) })
+            .collect();
         assert_eq!(got, vec!["alpha", "beta"]);
     }
 
@@ -803,9 +786,7 @@ mod stage_k1_tests {
         // dispatcher's ArrayHeapValue arm.
         let obj = super::project_concrete_return_for_test_typed_object();
         let elems = vec![obj];
-        let slot = roundtrip(TypedReturn::Concrete(
-            ConcreteReturn::ArrayHeapValue(elems),
-        ));
+        let slot = roundtrip(TypedReturn::Concrete(ConcreteReturn::ArrayHeapValue(elems)));
         assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedArray));
         let arr = slot.raw() as *const TypedArray<*const TypedObjectStorage>;
         let n = unsafe { TypedArray::<*const TypedObjectStorage>::len(arr) };
@@ -814,30 +795,24 @@ mod stage_k1_tests {
 
     #[test]
     fn hashmap_string_string_roundtrips() {
-        let slot = roundtrip(TypedReturn::Concrete(
-            ConcreteReturn::HashMapStringString(vec![
+        let slot = roundtrip(TypedReturn::Concrete(ConcreteReturn::HashMapStringString(
+            vec![
                 ("k1".to_string(), "v1".to_string()),
                 ("k2".to_string(), "v2".to_string()),
-            ]),
-        ));
+            ],
+        )));
         assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::HashMap));
         let kref = slot.raw() as *const HashMapKindedRef;
         match unsafe { &*kref } {
             HashMapKindedRef::String(data) => {
                 assert_eq!(data.len(), 2);
                 // keys + values are parallel string arrays.
-                let keys = unsafe {
-                    TypedArray::<*const StringObj>::as_slice(data.keys)
-                };
-                let vals = unsafe {
-                    TypedArray::<*const StringObj>::as_slice(data.values)
-                };
+                let keys = unsafe { TypedArray::<*const StringObj>::as_slice(data.keys) };
+                let vals = unsafe { TypedArray::<*const StringObj>::as_slice(data.values) };
                 let pairs: Vec<(&str, &str)> = keys
                     .iter()
                     .zip(vals.iter())
-                    .map(|(&k, &v)| unsafe {
-                        (StringObj::as_str(k), StringObj::as_str(v))
-                    })
+                    .map(|(&k, &v)| unsafe { (StringObj::as_str(k), StringObj::as_str(v)) })
                     .collect();
                 assert!(pairs.contains(&("k1", "v1")));
                 assert!(pairs.contains(&("k2", "v2")));
@@ -851,8 +826,7 @@ mod stage_k1_tests {
 
     #[test]
     fn ok_wrapper_roundtrips() {
-        let slot =
-            roundtrip(TypedReturn::Ok(ConcreteReturn::I64(99)));
+        let slot = roundtrip(TypedReturn::Ok(ConcreteReturn::I64(99)));
         assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::Result));
         unsafe {
             let arc = Arc::<ResultData>::from_raw(slot.raw() as *const ResultData);
@@ -865,9 +839,7 @@ mod stage_k1_tests {
 
     #[test]
     fn err_wrapper_roundtrips() {
-        let slot = roundtrip(TypedReturn::Err(ConcreteReturn::String(
-            "boom".to_string(),
-        )));
+        let slot = roundtrip(TypedReturn::Err(ConcreteReturn::String("boom".to_string())));
         assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::Result));
         unsafe {
             let arc = Arc::<ResultData>::from_raw(slot.raw() as *const ResultData);
@@ -925,10 +897,7 @@ mod stage_k1_tests {
         unsafe {
             let arc = Arc::<ResultData>::from_raw(slot.raw() as *const ResultData);
             assert!(arc.is_ok);
-            assert_eq!(
-                arc.payload.kind(),
-                NativeKind::Ptr(HeapKind::TypedObject)
-            );
+            assert_eq!(arc.payload.kind(), NativeKind::Ptr(HeapKind::TypedObject));
             let _ = Arc::into_raw(arc);
         }
     }
@@ -938,22 +907,17 @@ mod stage_k1_tests {
         // SURFACED arm (genuine — needs the runtime Json enum-construction
         // subsystem). Must NOT shim.
         let mut vm = VirtualMachine::new(VMConfig::default());
-        let tr_cell = std::sync::Mutex::new(Some(TypedReturn::Ok(
-            ConcreteReturn::JsonValue(
-                shape_runtime::json_value::JsonValue::Int(1),
-            ),
-        )));
+        let tr_cell = std::sync::Mutex::new(Some(TypedReturn::Ok(ConcreteReturn::JsonValue(
+            shape_runtime::json_value::JsonValue::Int(1),
+        ))));
         let tmf = TypedModuleFunction {
-            invoke: Arc::new(move |_slots, _ctx| {
-                Ok(tr_cell.lock().unwrap().take().unwrap())
-            }),
+            invoke: Arc::new(move |_slots, _ctx| Ok(tr_cell.lock().unwrap().take().unwrap())),
             return_type: ConcreteType::Any,
             arg_types: vec![],
             arg_kinds: vec![],
         };
-        let fn_id = vm.register_module_fn_entry(
-            shape_runtime::module_exports::ModuleFnEntry::Typed(tmf),
-        );
+        let fn_id =
+            vm.register_module_fn_entry(shape_runtime::module_exports::ModuleFnEntry::Typed(tmf));
         let err = vm.invoke_module_fn_id_stub(fn_id, &[]).unwrap_err();
         assert!(
             matches!(err, shape_value::VMError::NotImplemented(_)),
@@ -968,22 +932,16 @@ mod stage_k1_tests {
         let mut vm = VirtualMachine::new(VMConfig::default());
         let obj = super::project_concrete_return_for_test_typed_object();
         let tr_cell = std::sync::Mutex::new(Some(TypedReturn::Concrete(
-            ConcreteReturn::HashMapStringHeapValue(vec![(
-                "k".to_string(),
-                obj,
-            )]),
+            ConcreteReturn::HashMapStringHeapValue(vec![("k".to_string(), obj)]),
         )));
         let tmf = TypedModuleFunction {
-            invoke: Arc::new(move |_slots, _ctx| {
-                Ok(tr_cell.lock().unwrap().take().unwrap())
-            }),
+            invoke: Arc::new(move |_slots, _ctx| Ok(tr_cell.lock().unwrap().take().unwrap())),
             return_type: ConcreteType::Any,
             arg_types: vec![],
             arg_kinds: vec![],
         };
-        let fn_id = vm.register_module_fn_entry(
-            shape_runtime::module_exports::ModuleFnEntry::Typed(tmf),
-        );
+        let fn_id =
+            vm.register_module_fn_entry(shape_runtime::module_exports::ModuleFnEntry::Typed(tmf));
         let err = vm.invoke_module_fn_id_stub(fn_id, &[]).unwrap_err();
         assert!(
             matches!(err, shape_value::VMError::NotImplemented(_)),
@@ -997,18 +955,16 @@ mod stage_k1_tests {
 /// the `#[cfg(test)]` module so it can be a `super::` reference from the
 /// nested test module while still being compiled only under `cfg(test)`.
 #[cfg(test)]
-fn project_concrete_return_for_test_typed_object(
-) -> std::sync::Arc<shape_value::heap_value::HeapValue> {
+fn project_concrete_return_for_test_typed_object()
+-> std::sync::Arc<shape_value::heap_value::HeapValue> {
     use shape_runtime::type_schema::typed_object_from_pairs;
-    use shape_value::heap_value::HeapValue;
     use shape_value::KindedSlot;
+    use shape_value::heap_value::HeapValue;
     // Build a 1-field typed object via the shared builder, then recover its
     // raw TypedObject pointer into an Arc<HeapValue::TypedObject> carrier
     // (the ArrayHeapValue / HashMapStringHeapValue element shape).
-    let slot: KindedSlot =
-        typed_object_from_pairs(&[("id", KindedSlot::from_int(7))]);
-    let ptr =
-        slot.raw() as *const shape_value::heap_value::TypedObjectStorage;
+    let slot: KindedSlot = typed_object_from_pairs(&[("id", KindedSlot::from_int(7))]);
+    let ptr = slot.raw() as *const shape_value::heap_value::TypedObjectStorage;
     // The slot owns one share; transfer it into the Arc<HeapValue> wrapper
     // via `TypedObjectPtr::new` (which takes over that single share).
     std::mem::forget(slot);

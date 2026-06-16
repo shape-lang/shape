@@ -235,7 +235,10 @@ mod tests {
     #[test]
     fn test_int_enum_maps_to_i64_ptr() {
         assert_eq!(
-            should_use_typed_map(&ConcreteType::I64, &ConcreteType::placeholder_enum(EnumLayoutId(0))),
+            should_use_typed_map(
+                &ConcreteType::I64,
+                &ConcreteType::placeholder_enum(EnumLayoutId(0))
+            ),
             Some(TypedMapKind::I64Ptr)
         );
     }

@@ -5,8 +5,8 @@
 //! - `jit_print(value_bits: u64)` -> type-specific print functions
 //! - arc_retain/arc_release -> pointer-based retain/release
 
-use super::typed_object::TypedObject;
 use super::conversion::format_value_word;
+use super::typed_object::TypedObject;
 
 // ============================================================================
 // Retain / Release — operate on raw heap pointers

@@ -59,16 +59,15 @@
 //!   `read_element` `None` surfaces a structured `RuntimeError`.
 //! - ADR-005 §1 single-discriminator preserved.
 
-use crate::executor::v2_handlers::v2_array_detect::{
-    allocate_empty_typed_array, as_v2_typed_array, contains_element,
-    native_kind_to_v2_elem_type, position_of, push_element, read_element, V2ElemType,
-    V2TypedArrayView,
-};
 use crate::executor::VirtualMachine;
+use crate::executor::v2_handlers::v2_array_detect::{
+    V2ElemType, V2TypedArrayView, allocate_empty_typed_array, as_v2_typed_array, contains_element,
+    native_kind_to_v2_elem_type, position_of, push_element, read_element,
+};
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
 use shape_value::v2::typed_array::release_v2_typed_array;
-use shape_value::{KindedSlot, NativeKind, ValueSlot, VMError};
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // W16.2-J.4-rest kind-generic header-view helpers (mirror of
@@ -767,9 +766,7 @@ pub(crate) fn handle_single_v2(
         }
     }
     found.ok_or_else(|| {
-        VMError::RuntimeError(
-            "Array.single: no element matched the predicate".into(),
-        )
+        VMError::RuntimeError("Array.single: no element matched the predicate".into())
     })
 }
 
@@ -842,4 +839,3 @@ pub(crate) fn handle_for_each_v2(
     }
     Ok(KindedSlot::none())
 }
-

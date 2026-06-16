@@ -223,9 +223,7 @@ impl BytecodeCompiler {
                                         // Store it back into the slot (block-item
                                         // statement context discards the result).
                                         if self.compile_first_push_to_empty_accumulator(
-                                            recv_name,
-                                            &args[0],
-                                            None,
+                                            recv_name, &args[0], None,
                                         )? {
                                             if let Some(local_idx) = self.resolve_local(name) {
                                                 self.emit(Instruction::new(
@@ -584,9 +582,7 @@ impl BytecodeCompiler {
         };
 
         // Push arg count and emit the builtin call
-        let count_const = self
-            .program
-            .add_constant(Constant::Int(arg_count as i64));
+        let count_const = self.program.add_constant(Constant::Int(arg_count as i64));
         self.emit(Instruction::new(
             OpCode::PushConst,
             Some(Operand::Const(count_const)),
@@ -798,11 +794,10 @@ impl BytecodeCompiler {
         // top-level comptime-for outside a comptime block.
         let _ = cf;
         Err(ShapeError::SemanticError {
-            message:
-                "comptime-for unroll outside a comptime block is dormant pending the \
+            message: "comptime-for unroll outside a comptime block is dormant pending the \
                  phase-2c ComptimeExecutionResult / Literal-projection rebuild \
                  (ADR-006 §2.4 / §2.7.4)"
-                    .to_string(),
+                .to_string(),
             location: Some(self.span_to_source_location(span)),
         })
     }

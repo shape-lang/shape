@@ -60,9 +60,8 @@ pub(crate) fn coerce_to_f64(slot: &KindedSlot) -> Option<f64> {
 /// dispatch meaning).
 #[inline]
 pub(crate) fn number_operand(slot: &KindedSlot) -> Result<f64, VMError> {
-    coerce_to_f64(slot).ok_or_else(|| {
-        VMError::RuntimeError(format!("expected int or float, got {:?}", slot.kind))
-    })
+    coerce_to_f64(slot)
+        .ok_or_else(|| VMError::RuntimeError(format!("expected int or float, got {:?}", slot.kind)))
 }
 
 /// Coerce a `KindedSlot` to `i64`, surfacing a `VMError::TypeError` when the
@@ -81,9 +80,9 @@ pub(crate) fn int_operand(slot: &KindedSlot) -> Result<i64, VMError> {
         | NativeKind::UInt16
         | NativeKind::UInt32
         | NativeKind::UInt64
-        | NativeKind::UIntSize => slot.as_i64().ok_or_else(|| {
-            VMError::RuntimeError(format!("expected integer, got {:?}", slot.kind))
-        }),
+        | NativeKind::UIntSize => slot
+            .as_i64()
+            .ok_or_else(|| VMError::RuntimeError(format!("expected integer, got {:?}", slot.kind))),
         _ => Err(VMError::RuntimeError(format!(
             "expected integer, got {:?}",
             slot.kind
