@@ -43,17 +43,24 @@ fn test_map_double() {
 }
 
 /// Verifies map to float.
+///
+/// strict-flip (v0.3.3 numeric lossless-only): `x * 1.5` is `int * number`,
+/// which under the strict numeric rule requires an explicit `as number` cast on
+/// the `int` operand (no implicit int↔number widening). The map OUTPUT element
+/// is the closure RETURN type (`number`), so the result is `Array<number>` and
+/// the per-element value is the float product — intent preserved, written in
+/// the strict-valid form.
 #[test]
 fn test_map_to_float() {
     ShapeTest::new(
         r#"(
-        [1, 2, 3].map(|x| x * 1.5)
+        [1, 2, 3].map(|x| (x as number) * 1.5)
     )[0]"#,
     )
     .expect_number(1.5);
     ShapeTest::new(
         r#"(
-        [1, 2, 3].map(|x| x * 1.5)
+        [1, 2, 3].map(|x| (x as number) * 1.5)
     )[2]"#,
     )
     .expect_number(4.5);

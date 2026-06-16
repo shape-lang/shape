@@ -475,9 +475,45 @@ impl TypeInferenceEngine {
                 .push((constrained_expected_return.clone(), expected_return.clone()));
         }
 
-        // Constrain inferred callable return to expected return type
-        self.constraints
-            .push((inferred_return_type.clone(), constrained_expected_return.clone()));
+        // Constrain inferred callable return to expected return type.
+        //
+        // STRICT-FLIP (v0.3.3 map-output element-stamp NARROWING): the hard
+        // constraint here is ONLY load-bearing when the expected closure return
+        // is a bare `Type::Variable` — the `MethodParam` OUTPUT-element var of
+        // `map` / `flatMap` / `select` (`fn(ReceiverParam(0)) -> MethodParam(0)`),
+        // where the closure's return type literally BECOMES the result array's
+        // element. There it MUST be exact so `Array<int> != Array<number>` holds
+        // (the soundness the element-stamp established): `int` stays `int`,
+        // `number` stays `number`, they do NOT unify (CLAUDE.md §Type-System).
+        //
+        // For an element-PRESERVING / terminal method the expected return is
+        // CONCRETE and the closure result is NOT the output element — it is
+        // discarded ordering data or unit:
+        //   - `sort`'s comparator `(T,T) -> number`, `orderBy` / `sortBy`'s key
+        //     `(T) -> number` — the numeric family of the key is not stored, so
+        //     `|x| x` over `Array<int>` (key returns `int`) must not hard-reject
+        //     against the registered `number` expected return; the result is the
+        //     SelfType array (`Array<int>` — element PRESERVED, never `number`);
+        //   - `forEach`'s `(T) -> void` — a unit closure body whose inferred and
+        //     expected return are both `void` produced a degenerate `void ~ void`
+        //     constraint the solver rejected;
+        //   - `reduce`'s accumulator return is bound through the `MethodParam`
+        //     value-position path, not this var arm.
+        // Route the concrete case through the SOFT unify probe (same semantics as
+        // `synth_with_hint`'s fallback) so closure PARAMS are still bound (already
+        // done above) but the non-load-bearing return does not hard-fail the
+        // solve. This restores the pre-R3 soft behavior for these methods WITHOUT
+        // loosening the map/flatMap element-var arm. No coercion, no fabrication.
+        if matches!(constrained_expected_return, Type::Variable(_)) {
+            self.constraints.push((
+                inferred_return_type.clone(),
+                constrained_expected_return.clone(),
+            ));
+        } else {
+            let _ = self
+                .unifier
+                .try_unify(&inferred_return_type, &constrained_expected_return);
+        }
 
         // STRICT-FLIP (v0.3.3 map/collect OUTPUT element stamp): when the
         // expected return is a bare `MethodParam` var (the
