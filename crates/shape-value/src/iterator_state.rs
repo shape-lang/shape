@@ -244,6 +244,11 @@ pub enum IteratorTransform {
     /// returned by `closure(element)` and concatenate the results.
     FlatMap(Arc<HeapValue>),
 
+    /// `iter.flatten()` — each element is itself an array; concatenate the
+    /// inner arrays one level. The closure-free sibling of `FlatMap` (the
+    /// element IS the inner array). Stateless per-element transform.
+    Flatten,
+
     /// `iter.enumerate()` — replace each element `e` with the 2-element
     /// inner array `[index, e]`.
     Enumerate,

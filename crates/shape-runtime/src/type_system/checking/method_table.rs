@@ -298,7 +298,15 @@ impl MethodTable {
             ("slice", 0, vec![int(), int()], E::SelfType),
             ("take", 0, vec![int()], E::SelfType),
             ("drop", 0, vec![int()], E::SelfType),
-            ("flatten", 0, vec![], E::SelfType),
+            // `flatten()` on `Array<Array<T>>` removes one level → `Array<T>`,
+            // which is exactly the receiver's element type `ReceiverParam(0)`
+            // (the receiver type-param of `Array<Array<T>>` is `Array<T>`).
+            // `SelfType` was wrong: it modeled the result as the *nested*
+            // `Array<Array<T>>`, so the strict checker rejected the assignment
+            // `let flat: Array<T> = nested.flatten()` (Vec<Vec<int>> not
+            // compatible with Vec<int>). The VM-side `handle_flatten_v2`
+            // concatenates one level — element-of-element is the correct type.
+            ("flatten", 0, vec![], E::ReceiverParam(0)),
             ("unique", 0, vec![], E::SelfType),
             ("concat", 0, vec![E::SelfType], E::SelfType),
             ("indexOf", 0, vec![E::ReceiverParam(0)], int()),
@@ -823,6 +831,15 @@ impl MethodTable {
                 vec![func(vec![t()], iter_of(E::MethodParam(0)))],
                 iter_of(E::MethodParam(0)),
             ),
+            // `flatten()` on `Iterator<Array<U>>` removes one level →
+            // `Iterator<U>`. The receiver element type `T = ReceiverParam(0)`
+            // is itself an array; the flattened element `U` is introduced as a
+            // method type-param (`MethodParam(0)`) since the `TypeParamExpr`
+            // combinators have no "element-of-element" form. `MethodParam(0)`
+            // is left unconstrained at the signature level (the closure-free
+            // flatten carries no param to bind it); downstream terminals
+            // (`collect()` → `Vec<MethodParam(0)>`) thread the fresh var.
+            ("flatten", 1, vec![], iter_of(E::MethodParam(0))),
             // `enumerate()` -> Iterator<[int, T]> ([index, value] pairs).
             ("enumerate", 0, vec![], iter_of(vec_of(t()))),
             ("chain", 0, vec![iter_of(t())], iter_of(t())),

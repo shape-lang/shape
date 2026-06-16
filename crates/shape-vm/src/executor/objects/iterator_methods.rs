@@ -315,6 +315,34 @@ where
             std::mem::forget(inner);
             Ok(cont)
         }
+        IteratorTransform::Flatten => {
+            // Closure-free sibling of FlatMap: the element IS the inner array.
+            // Mechanical clone of the FlatMap arm above MINUS the closure call.
+            let inner = elem;
+            if inner.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+                return Err(type_error(format!(
+                    "Iterator.flatten: every element must be an array, got kind {:?}. \
+                     flatten flattens one level.",
+                    inner.kind
+                )));
+            }
+            let inner_view = as_v2_typed_array(inner.slot.raw(), inner.kind).ok_or_else(|| {
+                type_error("Iterator.flatten: inner array failed v2 TypedArray detection")
+            })?;
+            let mut cont = true;
+            for j in 0..inner_view.len {
+                if let Some((ib, ik)) = read_element(&inner_view, j) {
+                    let inner_elem = KindedSlot::new(ValueSlot::from_raw(ib), ik);
+                    if !apply_transforms(vm, rest, inner_elem, ctx.as_deref_mut(), sink)? {
+                        cont = false;
+                        break;
+                    }
+                }
+            }
+            unsafe { release_v2_typed_array(inner.slot.raw() as *mut u8) };
+            std::mem::forget(inner);
+            Ok(cont)
+        }
         // Chain/Take/Skip/Enumerate are stateful across elements; the stateful
         // driver pre-handles them. Reaching them here is a driver-routing bug.
         IteratorTransform::Take(_)
@@ -427,25 +455,43 @@ fn apply_stateful_stage(
             Ok(up)
         }
         IteratorTransform::Enumerate => {
-            // Each element `e` becomes a 2-element `[index, e]` inner array.
-            // This is nested-array / heap-element construction — V3-S5
-            // territory for non-scalar `e`; for scalar `e` we materialize the
-            // `[i, e]` pair as a `TypedArray`. To keep enumerate uniform and
-            // sound, surface cleanly (the pair carrier's element kind is the
-            // join of `Int64` and the element kind — a tuple/heterogeneous
-            // carrier Shape doesn't have).
+            // Each upstream element `e` at position `i` becomes a `(i, e)`
+            // tuple. Per ADR-006 the tuple carrier is a `TypedObject`
+            // (`closure_layout.rs:964`: `Tuple = Ptr(HeapKind::TypedObject)`),
+            // NOT a heterogeneous inner array — Shape has no `Array<Any>`.
+            // The `_0` / `_1` field convention + `typed_object_from_pairs`
+            // schema-registration path mirror `handle_zip_v2`
+            // (`array_basic.rs::handle_zip_v2`), the proven `Array<Pair<A,B>>`
+            // producer. The index slot is a literal `Int64`; the element slot
+            // carries its own kind from the upstream parallel-kind track.
+            //
+            // Refcount: `typed_object_from_pairs` takes its `(&str, KindedSlot)`
+            // pairs by reference, CLONES each input slot (bumping any heap
+            // refcount) and `mem::forget`s the clone into the new object — it
+            // does NOT consume the slots passed in. So `index_slot` (an inline
+            // `Int64` scalar — no share) and `elem` (its own upstream share)
+            // both drop at the end of each iteration, releasing the share
+            // `typed_object_from_pairs` cloned. The constructed pair owns one
+            // fresh `TypedObject` share, transferred into `out`.
             let _ = (vm, ctx);
-            // Release the upstream shares before surfacing.
-            drop(upstream);
-            Err(VMError::NotImplemented(
-                "Iterator.enumerate: SURFACE — the `[index, element]` pair yield \
-                 is a 2-element heterogeneous inner array (`Int64` index + \
-                 element kind); Shape has no tuple/`Array<Any>` carrier, so the \
-                 pair materialization couples to the V3-S5 nested-array / \
-                 heap-element TypedArray landing. NO Bool-default, NO coercion \
-                 (CLAUDE.md §Type System Rules)."
-                    .to_string(),
-            ))
+            let mut out: Vec<KindedSlot> = Vec::with_capacity(upstream.len());
+            for (i, elem) in upstream.into_iter().enumerate() {
+                let index_slot =
+                    KindedSlot::new(ValueSlot::from_int(i as i64), NativeKind::Int64);
+                let pair = shape_runtime::type_schema::typed_object_from_pairs(&[
+                    ("_0", index_slot),
+                    ("_1", elem),
+                ]);
+                if pair.kind != NativeKind::Ptr(HeapKind::TypedObject) {
+                    return Err(type_error(format!(
+                        "Iterator.enumerate: typed_object_from_pairs returned \
+                         unexpected kind {:?}",
+                        pair.kind
+                    )));
+                }
+                out.push(pair);
+            }
+            Ok(out)
         }
         IteratorTransform::Chain(other) => {
             // Materialize the other iterator's yields and append.
@@ -458,7 +504,8 @@ fn apply_stateful_stage(
         // first stateful stage). Reaching this is a driver-routing bug.
         IteratorTransform::Map(_)
         | IteratorTransform::Filter(_)
-        | IteratorTransform::FlatMap(_) => {
+        | IteratorTransform::FlatMap(_)
+        | IteratorTransform::Flatten => {
             drop(upstream);
             Err(type_error(
                 "Iterator: stateless transform routed to apply_stateful_stage (driver bug)",
@@ -709,6 +756,15 @@ pub(crate) fn handle_flat_map(
             .ok_or_else(|| type_error("Iterator.flatMap: missing closure argument"))?,
     )?;
     append_transform(args, "flatMap", IteratorTransform::FlatMap(closure))
+}
+
+/// `Iterator.flatten()` — append a Flatten transform (closure-free FlatMap).
+pub(crate) fn handle_flatten(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    append_transform(args, "flatten", IteratorTransform::Flatten)
 }
 
 /// `Iterator.enumerate()` — append an Enumerate transform.

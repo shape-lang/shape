@@ -491,12 +491,155 @@ pub(crate) fn handle_skip_v2(
 }
 
 /// `arr.flatten()` — one-level array-of-array flatten.
+///
+/// Mechanical clone of `handle_flat_map_v2` MINUS the per-element closure:
+/// flatten simply concatenates the receiver's inner arrays in order. Each
+/// receiver element is itself an INNER array (nested-array carrier — the
+/// same `read_element` / `as_v2_typed_array` path flatMap drains); the inner
+/// elements are concatenated into a single flat output array.
+///
+/// Output element kind = the inner arrays' element kind, established by the
+/// first NON-EMPTY inner array (empty inner arrays carry no kind to
+/// establish per ADR-006 §2.7.14 — no Bool-default). A subsequent inner
+/// array whose element kind differs surfaces a structured `RuntimeError`
+/// (no coercion, no `Array<Any>`). If every inner array is empty, the output
+/// is an empty array stamped with the receiver's elem_type as a well-typed
+/// neutral fallback (matches `flatMap`'s empty-input contract).
+///
+/// Refcount: `read_element` on the receiver hands a fresh share for the
+/// inner-array carrier; that share is released via `release_v2_typed_array`
+/// once its elements are drained. Each inner `read_element` hands a fresh
+/// element share; `push_element` into the output transfers it, so the
+/// inner-element slot is `mem::forget`-ed after a successful push.
 pub(crate) fn handle_flatten_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt2_surface("flatten", args))
+    use crate::executor::v2_handlers::v2_array_detect::{
+        V2ElemType, allocate_empty_typed_array, push_element, read_element,
+    };
+    use shape_value::v2::typed_array::release_v2_typed_array;
+
+    let view = extract_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.flatten: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+
+    // Output allocation is deferred until the first non-empty inner array
+    // establishes the element kind.
+    let mut out: Option<(*mut u8, V2TypedArrayView)> = None;
+    let mut established_elem: Option<V2ElemType> = None;
+
+    for i in 0..view.len {
+        let (bits, kind) = match read_element(&view, i) {
+            Some(p) => p,
+            None => {
+                if let Some((ptr, _)) = out {
+                    unsafe { release_v2_typed_array(ptr) };
+                }
+                return Err(VMError::RuntimeError(format!(
+                    "Array.flatten: read_element({i}) returned None for element kind {:?}",
+                    view.elem_type
+                )));
+            }
+        };
+        let inner = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+
+        // Each receiver element must itself be an array (nested TypedArray
+        // carrier).
+        if inner.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+            if let Some((ptr, _)) = out {
+                unsafe { release_v2_typed_array(ptr) };
+            }
+            return Err(VMError::RuntimeError(format!(
+                "Array.flatten: every element must be an array, got kind {:?} at index {i}. \
+                 flatten flattens one level — the receiver must be an array of arrays.",
+                inner.kind
+            )));
+        }
+        let inner_view = match as_v2_typed_array(inner.slot.raw(), inner.kind) {
+            Some(v) => v,
+            None => {
+                if let Some((ptr, _)) = out {
+                    unsafe { release_v2_typed_array(ptr) };
+                }
+                unsafe { release_v2_typed_array(inner.slot.raw() as *mut u8) };
+                return Err(VMError::RuntimeError(
+                    "Array.flatten: inner array failed v2 TypedArray detection".into(),
+                ));
+            }
+        };
+
+        // Establish / validate the output element kind from the inner array.
+        if inner_view.len > 0 {
+            match established_elem {
+                None => {
+                    established_elem = Some(inner_view.elem_type);
+                    let ptr = allocate_empty_typed_array(inner_view.elem_type, view.len);
+                    let ov = as_v2_typed_array(
+                        ptr as usize as u64,
+                        NativeKind::Ptr(HeapKind::TypedArray),
+                    )
+                    .expect("freshly-allocated typed array re-detects");
+                    out = Some((ptr, ov));
+                }
+                Some(prev) if prev != inner_view.elem_type => {
+                    if let Some((ptr, _)) = out {
+                        unsafe { release_v2_typed_array(ptr) };
+                    }
+                    unsafe { release_v2_typed_array(inner.slot.raw() as *mut u8) };
+                    return Err(VMError::RuntimeError(format!(
+                        "Array.flatten: inner-array element kind mismatch at index {i}: \
+                         expected {prev:?} (established by an earlier inner array), got {:?}. \
+                         flatten requires a single output element kind per CLAUDE.md \
+                         \"No `any` type\" rule (no coercion).",
+                        inner_view.elem_type
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        // Drain the inner array's elements into the output.
+        if let Some((ptr, ov)) = out {
+            for j in 0..inner_view.len {
+                let (ib, ik) = match read_element(&inner_view, j) {
+                    Some(p) => p,
+                    None => {
+                        unsafe { release_v2_typed_array(ptr) };
+                        unsafe { release_v2_typed_array(inner.slot.raw() as *mut u8) };
+                        return Err(VMError::RuntimeError(format!(
+                            "Array.flatten: inner read_element({j}) returned None"
+                        )));
+                    }
+                };
+                let inner_elem = KindedSlot::new(ValueSlot::from_raw(ib), ik);
+                if let Err(msg) = push_element(&ov, inner_elem.slot.raw(), inner_elem.kind) {
+                    unsafe { release_v2_typed_array(ptr) };
+                    unsafe { release_v2_typed_array(inner.slot.raw() as *mut u8) };
+                    return Err(VMError::RuntimeError(format!(
+                        "Array.flatten: push_element failed: {msg}"
+                    )));
+                }
+                std::mem::forget(inner_elem);
+            }
+        }
+
+        // Release the inner array's owning share (its elements were drained
+        // by value into the output above; the inner carrier itself is no
+        // longer needed).
+        unsafe { release_v2_typed_array(inner.slot.raw() as *mut u8) };
+        std::mem::forget(inner);
+    }
+
+    let out_ptr = match out {
+        Some((ptr, _)) => ptr,
+        None => allocate_empty_typed_array(established_elem.unwrap_or(view.elem_type), 0),
+    };
+    Ok(new_array_slot(out_ptr))
 }
 
 /// `arr.flatMap(|x| ...)` — map-then-flatten.

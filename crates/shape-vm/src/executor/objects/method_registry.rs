@@ -642,6 +642,7 @@ pub static ITERATOR_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "take" => crate::executor::objects::iterator_methods::handle_take,
     "skip" => crate::executor::objects::iterator_methods::handle_skip,
     "flatMap" => crate::executor::objects::iterator_methods::handle_flat_map,
+    "flatten" => crate::executor::objects::iterator_methods::handle_flatten,
     "enumerate" => crate::executor::objects::iterator_methods::handle_enumerate,
     "chain" => crate::executor::objects::iterator_methods::handle_chain,
 
