@@ -36,10 +36,43 @@ impl TypeInferenceEngine {
                 | ("Content", "code")
                 | ("Content", "kv")
                 | ("Content", "fragment")
+                // SC1 (R8 — supervisor): `Color.rgb(r,g,b)` is the only
+                // call-form style-spec constructor (returns a `string`
+                // carrier). Named members are PropertyAccess, handled
+                // separately in `infer_expr`'s PropertyAccess arm.
+                | ("Color", "rgb")
                 | ("Table", "new")
                 | ("Code", "new")
                 | ("KeyValue", "new")
         )
+    }
+
+    /// SC1: whether `namespace.member` is a known style-spec member access
+    /// (`Color.red`, `Border.rounded`, `ChartType.line`, …). These lower to
+    /// a `string` carrier; the call-form `Color.rgb(r,g,b)` is handled via
+    /// `is_namespace_constructor`, not here. Kept in lockstep with the
+    /// bytecode compiler's `style_spec_members`
+    /// (`compiler/expressions/property_access.rs`).
+    fn is_style_spec_member(namespace: &str, member: &str) -> bool {
+        let members: &[&str] = match namespace {
+            "Color" => &[
+                "red", "green", "blue", "yellow", "magenta", "cyan", "white", "default",
+            ],
+            "Border" => &["rounded", "sharp", "heavy", "double", "minimal", "none"],
+            "ChartType" => &[
+                "line",
+                "bar",
+                "scatter",
+                "area",
+                "candlestick",
+                "histogram",
+                "boxplot",
+                "heatmap",
+                "bubble",
+            ],
+            _ => &[],
+        };
+        members.contains(&member)
     }
 
     /// Infer type of an expression
@@ -97,8 +130,11 @@ impl TypeInferenceEngine {
                     .or_else(|| {
                         // Recognize built-in namespace identifiers that have static
                         // constructor methods (e.g. DateTime.now(), Content.chart()).
+                        // `Color` is included for the call-form `Color.rgb(r,g,b)`
+                        // (SC1); its named members are PropertyAccess, intercepted
+                        // before the object is inferred.
                         match name.as_str() {
-                            "DateTime" | "Content" => Some(Type::Concrete(
+                            "DateTime" | "Content" | "Color" => Some(Type::Concrete(
                                 TypeAnnotation::Reference(name.as_str().into()),
                             )),
                             _ => None,
@@ -171,6 +207,35 @@ impl TypeInferenceEngine {
                 span,
                 ..
             } => {
+                // SC1 (R8 — supervisor): style-spec namespace member access.
+                // `Color.red` / `Border.rounded` / `ChartType.line` are NOT
+                // variables — `Color` etc. are compile-time-constant
+                // namespaces, not values. Infer the result as `string`
+                // (the runtime carrier) WITHOUT inferring the object, which
+                // would otherwise reject with UndefinedVariable. Bounded
+                // tightly: bare-identifier object that is not a user struct
+                // / type-alias / variable, AND an exact style-spec member.
+                if let Expr::Identifier(ns, _) = object.as_ref() {
+                    let is_user_shadow = self.struct_type_defs.contains_key(ns.as_str())
+                        || self.env.lookup_type_alias(ns).is_some()
+                        || self.env.lookup(ns).is_some();
+                    if !is_user_shadow {
+                        if Self::is_style_spec_member(ns, property) {
+                            return Ok(BuiltinTypes::string());
+                        }
+                        // An unknown member on a style-spec namespace rejects
+                        // cleanly here (e.g. `Color.bogus`) with a precise
+                        // message rather than the generic "Reference(..) cannot
+                        // have fields" from `infer_property_access`.
+                        if matches!(ns.as_str(), "Color" | "Border" | "ChartType") {
+                            return Err(TypeError::UnknownProperty(
+                                ns.clone(),
+                                property.clone(),
+                            ));
+                        }
+                    }
+                }
+
                 // Track the variable name for hoisting lookup
                 let var_name = if let Expr::Identifier(name, _) = object.as_ref() {
                     Some(name.clone())

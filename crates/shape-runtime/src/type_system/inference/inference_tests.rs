@@ -150,6 +150,68 @@ let a = Some(1)
     }
 }
 
+// ─── SC1: Color / Border / ChartType namespace constructors ───────────
+
+#[test]
+fn sc1_named_style_spec_members_infer_string() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+let c = Color.red
+let b = Border.rounded
+let ct = ChartType.line
+let cd = Color.default
+let cb = ChartType.boxplot
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let types = engine
+        .infer_program(&program)
+        .expect("SC1 named members must infer as string, not reject");
+
+    for name in ["c", "b", "ct", "cd", "cb"] {
+        let ty = types.get(name).unwrap_or_else(|| panic!("{name} inferred"));
+        assert!(
+            matches!(ty, Type::Concrete(TypeAnnotation::Basic(n)) if n == "string"),
+            "{name} should be string carrier, got {ty:?}"
+        );
+    }
+}
+
+#[test]
+fn sc1_color_rgb_call_does_not_reject() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+let c = Color.rgb(255, 0, 0)
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    engine
+        .infer_program(&program)
+        .expect("SC1 Color.rgb(...) call must type-check");
+}
+
+#[test]
+fn sc1_unknown_style_spec_member_rejects_cleanly() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+let c = Color.bogus
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let err = engine
+        .infer_program(&program)
+        .expect_err("Color.bogus must reject");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("bogus") && msg.contains("Color"),
+        "expected a clean unknown-member rejection naming Color.bogus, got: {msg}"
+    );
+}
+
 #[test]
 fn test_ok_err_constructors_do_not_degrade_to_any() {
     use shape_ast::ast::TypeAnnotation;

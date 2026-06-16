@@ -920,6 +920,48 @@ impl VirtualMachine {
                     let result = KindedSlot::from_content(std::sync::Arc::new(node));
                     self.push_kinded_slot(result)?;
                 }
+                BuiltinFunction::ColorRgbCtor => {
+                    // SC1 (R8 — supervisor): `Color.rgb(r, g, b) -> string`.
+                    // The runtime carrier for every style spec (Color /
+                    // Border / ChartType) is a `NativeKind::String` holding
+                    // the canonical spec text; this arm builds the explicit
+                    // `rgb(r,g,b)` form from three proven-int channel values.
+                    // The named members (`Color.red`, etc.) are emitted as
+                    // compile-time `Constant::String` by the property-access
+                    // path, so this is the only style-spec arm needing a
+                    // runtime builtin. Channels validate to 0–255; the
+                    // string is consumed by the existing string-typed
+                    // `.border(style)` method and the future `.fg`/`.bg`
+                    // parsers (no new HeapKind, no parallel discriminator).
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 3 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Color.rgb() requires exactly 3 arguments (r, g, b), got {}",
+                            args.len()
+                        )));
+                    }
+                    let channel = |idx: usize, name: &str| -> Result<u8, VMError> {
+                        let v = args[idx].as_i64().ok_or_else(|| {
+                            VMError::RuntimeError(format!(
+                                "Color.rgb(): {} channel must be an int (got kind {:?})",
+                                name, args[idx].kind
+                            ))
+                        })?;
+                        if !(0..=255).contains(&v) {
+                            return Err(VMError::RuntimeError(format!(
+                                "Color.rgb(): {} channel {} out of range 0–255",
+                                name, v
+                            )));
+                        }
+                        Ok(v as u8)
+                    };
+                    let r = channel(0, "red")?;
+                    let g = channel(1, "green")?;
+                    let b = channel(2, "blue")?;
+                    let spec = format!("rgb({},{},{})", r, g, b);
+                    let result = KindedSlot::from_string_arc(std::sync::Arc::new(spec));
+                    self.push_kinded_slot(result)?;
+                }
                 BuiltinFunction::TableBuilderNew => {
                     // W18.5 (R8 W4, 2026-05-24 — supervisor D4):
                     // `Table::new()` returns an empty `ContentNode::Table`

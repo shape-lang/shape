@@ -2653,6 +2653,21 @@ pub enum BuiltinFunction {
     /// Content.fragment(parts) — create a fragment ContentNode
     ContentFragmentCtor,
 
+    // Style-spec namespace constructors (SC1, R8 — supervisor)
+    //
+    // `Color.rgb(r, g, b)` — the only call-form style-spec constructor.
+    // Named members (`Color.red`, `Border.rounded`, `ChartType.line`,
+    // etc.) are compile-time-constant strings emitted directly as
+    // `Constant::String` by the property-access path — no builtin needed.
+    // The runtime carrier for every style spec is `NativeKind::String`
+    // (the canonical serde snake_case name; `rgb(r,g,b)` for the explicit
+    // RGB form) so the existing string-typed `.border(style)` method and
+    // the future `.fg`/`.bg`/`Content.chart` parsers consume them with no
+    // new HeapKind and no parallel discriminator.
+    /// Color.rgb(r, g, b) — build an `rgb(r,g,b)` color-spec string from
+    /// three int channel values (0–255 each, validated at runtime).
+    ColorRgbCtor,
+
     // DateTime constructors
     /// DateTime.now() — current local time as DateTime<FixedOffset>
     DateTimeNow,
@@ -2932,6 +2947,8 @@ impl BuiltinFunction {
             BuiltinFunction::ContentCodeCtor,
             BuiltinFunction::ContentKvCtor,
             BuiltinFunction::ContentFragmentCtor,
+            // Style-spec ctors (1) — SC1
+            BuiltinFunction::ColorRgbCtor,
             // DateTime (6)
             BuiltinFunction::DateTimeNow,
             BuiltinFunction::DateTimeUtc,

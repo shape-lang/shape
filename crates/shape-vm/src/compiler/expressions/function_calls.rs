@@ -1704,6 +1704,12 @@ impl BytecodeCompiler {
             ("Content", "code") => Some(BuiltinFunction::ContentCodeCtor),
             ("Content", "kv") => Some(BuiltinFunction::ContentKvCtor),
             ("Content", "fragment") => Some(BuiltinFunction::ContentFragmentCtor),
+            // SC1 (R8 — supervisor): `Color.rgb(r, g, b)` is the only
+            // call-form style-spec constructor. It returns a string carrier
+            // (`rgb(r,g,b)`). Named members `Color.red` / `Border.rounded`
+            // / `ChartType.line` are compile-time-constant strings emitted
+            // directly by the property-access path, not routed here.
+            ("Color", "rgb") => Some(BuiltinFunction::ColorRgbCtor),
             // W18.5 per-type builder constructors (supervisor D4,
             // R8 W3 2026-05-24): `Table::new()` / `Code::new()` /
             // `KeyValue::new()` → empty `ContentNode` of the matching
@@ -1739,7 +1745,16 @@ impl BytecodeCompiler {
         ));
         self.last_expr_schema = None;
         self.last_expr_numeric_type = None;
-        self.last_expr_type_info = None;
+        // SC1: `Color.rgb(...)` returns a `string` carrier; the remaining
+        // namespace ctors produce Content / DateTime values whose type the
+        // downstream dispatch infers structurally (left as `None`).
+        self.last_expr_type_info = if matches!(builtin, BuiltinFunction::ColorRgbCtor) {
+            Some(crate::type_tracking::VariableTypeInfo::named(
+                "string".to_string(),
+            ))
+        } else {
+            None
+        };
         self.clear_last_expr_reference_result();
         let _ = span;
         Ok(true)

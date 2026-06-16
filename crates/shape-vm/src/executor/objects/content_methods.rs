@@ -536,3 +536,62 @@ pub fn v2_content_y_label_camel(
 ) -> Result<KindedSlot, VMError> {
     Err(surface("yLabel"))
 }
+
+#[cfg(test)]
+mod sc1_style_spec_tests {
+    //! SC1 (R8 — supervisor): Color / Border / ChartType namespace
+    //! constructors. The runtime carrier is a `string` (canonical serde
+    //! snake_case name; `rgb(r,g,b)` for the explicit RGB form), so the
+    //! existing string-typed `.border(style)` method consumes them with no
+    //! new HeapKind. Named members lower to a `Constant::String` at the
+    //! property-access compile path; `Color.rgb(...)` is the `ColorRgbCtor`
+    //! builtin.
+    use crate::executor::tests::test_utils::{eval, eval_result};
+
+    #[test]
+    fn color_red_member_is_string() {
+        let v = eval(r#"Color.red"#);
+        assert_eq!(v.as_str(), Some("red"));
+    }
+
+    #[test]
+    fn border_rounded_member_is_string() {
+        let v = eval(r#"Border.rounded"#);
+        assert_eq!(v.as_str(), Some("rounded"));
+    }
+
+    #[test]
+    fn chart_type_member_is_string() {
+        let v = eval(r#"ChartType.candlestick"#);
+        assert_eq!(v.as_str(), Some("candlestick"));
+    }
+
+    #[test]
+    fn color_rgb_call_builds_spec_string() {
+        let v = eval(r#"Color.rgb(255, 0, 0)"#);
+        assert_eq!(v.as_str(), Some("rgb(255,0,0)"));
+    }
+
+    #[test]
+    fn color_rgb_out_of_range_rejects() {
+        let err = eval_result(r#"Color.rgb(300, 0, 0)"#);
+        assert!(err.is_err(), "out-of-range channel must reject");
+    }
+
+    #[test]
+    fn border_member_consumable_by_border_method() {
+        // The string carrier flows into the existing string-typed
+        // `.border(style)` method and produces a Content (Table) slot —
+        // proving Border.rounded is consumable with no new carrier.
+        use shape_value::{HeapKind, NativeKind};
+        let v = eval_result(r#"Content.table(["A"], [["1"]]).border(Border.rounded)"#)
+            .expect(".border(Border.rounded) must succeed");
+        assert_eq!(v.kind, NativeKind::Ptr(HeapKind::Content));
+    }
+
+    #[test]
+    fn unknown_style_spec_member_rejects() {
+        let err = eval_result(r#"Color.bogus"#);
+        assert!(err.is_err(), "Color.bogus must reject cleanly");
+    }
+}

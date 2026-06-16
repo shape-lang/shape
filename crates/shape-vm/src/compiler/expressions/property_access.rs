@@ -39,6 +39,61 @@ fn field_type_to_numeric(ft: &FieldType) -> Option<NumericType> {
     }
 }
 
+/// SC1 style-spec namespace member resolution.
+///
+/// `Color` / `Border` / `ChartType` are not types or variables — they are
+/// compile-time-constant namespaces whose members (`Color.red`,
+/// `Border.rounded`, `ChartType.line`, …) lower to a canonical string
+/// carrier matching the Rust `NamedColor` / `BorderStyle` / `ChartType`
+/// enums in `shape-value/src/content.rs`. The returned string is the
+/// serde snake_case spec name; `None` means the namespace+member pair is
+/// not a recognised style spec.
+///
+/// NOTE: `NamedColor` has 8 variants (red/green/blue/yellow/magenta/cyan/
+/// white/default) — there is NO `black`, matching the book. `BorderStyle`
+/// has 6, `ChartType` has 9 (the book writes `boxplot` one word; the Rust
+/// variant is `BoxPlot`, serde `box_plot`, so the user-facing member name
+/// is `boxplot`).
+fn style_spec_member(namespace: &str, member: &str) -> Option<String> {
+    let valid = style_spec_members(namespace);
+    if valid.contains(&member) {
+        Some(member.to_string())
+    } else {
+        None
+    }
+}
+
+/// Whether `namespace` is one of the SC1 style-spec namespaces (used to
+/// reject unknown members cleanly rather than emit a generic
+/// "Undefined variable").
+fn is_style_spec_namespace(namespace: &str) -> bool {
+    matches!(namespace, "Color" | "Border" | "ChartType")
+}
+
+/// The valid member names for a style-spec namespace. `Color.rgb` is the
+/// call-form constructor (handled as a builtin, not a member), so it is
+/// not listed here.
+fn style_spec_members(namespace: &str) -> &'static [&'static str] {
+    match namespace {
+        "Color" => &[
+            "red", "green", "blue", "yellow", "magenta", "cyan", "white", "default",
+        ],
+        "Border" => &["rounded", "sharp", "heavy", "double", "minimal", "none"],
+        "ChartType" => &[
+            "line",
+            "bar",
+            "scatter",
+            "area",
+            "candlestick",
+            "histogram",
+            "boxplot",
+            "heatmap",
+            "bubble",
+        ],
+        _ => &[],
+    }
+}
+
 fn basic_name_to_numeric(name: &str) -> Option<NumericType> {
     if BuiltinTypes::is_integer_type_name(name) {
         return Some(NumericType::Int);
@@ -102,6 +157,60 @@ impl BytecodeCompiler {
                 message: format!(
                     "Module namespace access must use `::`. Replace `{}.{}` with an explicit import or `{}::...` call.",
                     name, property, name
+                ),
+                location: Some(self.span_to_source_location(*span)),
+            });
+        }
+
+        // SC1 (R8 — supervisor): style-spec namespace member access.
+        // `Color.red` / `Border.rounded` / `ChartType.line` etc. are NOT
+        // variables — they are compile-time-constant style specs. The
+        // runtime carrier is a `string` holding the canonical serde
+        // snake_case name (mirroring the Rust `NamedColor` / `BorderStyle`
+        // / `ChartType` enums in `shape-value/src/content.rs`). Emitting a
+        // `Constant::String` directly reuses the existing string-typed
+        // `.border(style)` method and the future `.fg`/`.bg`/`Content.chart`
+        // parsers with no new HeapKind and no parallel discriminator. The
+        // call-form `Color.rgb(r,g,b)` is handled separately as a builtin
+        // (it has runtime args). An unknown member rejects cleanly.
+        if !optional
+            && let Expr::Identifier(ns, span) = object
+            && self.resolve_local(ns).is_none()
+            && !self.mutable_closure_captures.contains_key(ns.as_str())
+            && self.type_tracker.schema_registry().get(ns).is_none()
+            && let Some(spec) = style_spec_member(ns, property)
+        {
+            let const_idx = self.program.add_constant(Constant::String(spec));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(const_idx)),
+            ));
+            self.last_expr_schema = None;
+            self.last_expr_numeric_type = None;
+            self.last_expr_type_info = Some(
+                crate::type_tracking::VariableTypeInfo::named("string".to_string()),
+            );
+            self.clear_last_expr_reference_result();
+            let _ = span;
+            return Ok(());
+        }
+        // A bare style-spec namespace member that does not match any known
+        // variant rejects cleanly (e.g. `Color.bogus`) rather than falling
+        // through to a generic "Undefined variable" on the namespace name.
+        if !optional
+            && let Expr::Identifier(ns, span) = object
+            && self.resolve_local(ns).is_none()
+            && !self.mutable_closure_captures.contains_key(ns.as_str())
+            && self.type_tracker.schema_registry().get(ns).is_none()
+            && is_style_spec_namespace(ns)
+        {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Unknown {} member '{}.{}'. Valid members: {}",
+                    ns,
+                    ns,
+                    property,
+                    style_spec_members(ns).join(", "),
                 ),
                 location: Some(self.span_to_source_location(*span)),
             });
