@@ -7,9 +7,9 @@
 //! `ContentNode` and applies one of the `content.rs` `with_*` mutation
 //! helpers, returning a fresh Content slot (or a String slot for
 //! `toString`, which renders via the same `TerminalRenderer` the `print()`
-//! Content arm uses). The chart-builder methods (`series` / `title` /
-//! `x_label` / `y_label`) remain `NotImplemented(SURFACE)` because
-//! `Content.chart` itself is deferred to v0.4 (supervisor D4).
+//! Content arm uses). The chart-builder methods (`add` / `series` / `title`
+//! / `x_label` / `y_label` / `width` / `height`) clone-mutate-rewrap the
+//! underlying `ChartSpec` the same way (ChartBuilder, strict-flip SC).
 //!
 //! `Content` is a surviving `HeapKind` variant
 //! (`Content(Arc<ContentNode>)` per ADR-006 §2.3 +
@@ -27,20 +27,6 @@
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::{HeapKind, KindedSlot, NativeKind, VMError};
-
-/// Chart-builder methods (`series` / `title` / `x_label` / `y_label`)
-/// stay surfaced because `Content.chart` itself is deferred to v0.4
-/// (supervisor D4). They are wired here so the method names resolve, but
-/// building a `ChartSpec` is out of scope until chart rendering lands.
-#[inline]
-fn surface(method: &str) -> VMError {
-    VMError::NotImplemented(format!(
-        "Content.{}(): chart builder methods are deferred to v0.4 \
-         (supervisor D4) — Content.chart rendering is not implemented this \
-         round.",
-        method
-    ))
-}
 
 // ─────────────────────────────────────────────────────────────────────────
 // W18.5 Content builder method helpers (R8 W4, 2026-05-24 — supervisor D4)
@@ -624,52 +610,307 @@ pub fn v2_content_max_rows_camel(
     content_max_rows_impl(args, "maxRows")
 }
 
-pub fn v2_content_series(
+// ─────────────────────────────────────────────────────────────────────────
+// ChartBuilder (strict-flip SC, 2026-06): chart-builder methods on a
+// `ContentNode::Chart(ChartSpec)` receiver. Each method clones the inner
+// ChartSpec, mutates one field (title / x_label / y_label / width / height)
+// or appends a `ChartChannel` (`.add`), and rewraps a fresh Content slot —
+// the SC2 clone-mutate-rewrap shape. `Content.chart(...)` produces the
+// receiver; these fill it. No Bool-default, no dynamic fallback.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Which string-valued chart field a setter targets.
+#[derive(Clone, Copy)]
+enum ChartStringField {
+    Title,
+    XLabel,
+    YLabel,
+}
+
+/// Shared clone-mutate-rewrap for the string-setter chart methods
+/// (`.title` / `.x_label` / `.y_label`). Rejects on a non-Chart receiver.
+fn chart_set_string(
+    args: &[KindedSlot],
+    method: &str,
+    field: ChartStringField,
+) -> Result<KindedSlot, VMError> {
+    let node = recv_content(args, method)?;
+    if args.len() != 2 {
+        return Err(VMError::RuntimeError(format!(
+            "Content.{}(text) requires exactly 1 argument, got {}",
+            method,
+            args.len().saturating_sub(1)
+        )));
+    }
+    let text = args[1].as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Content.{}(): argument must be a string, got kind {:?}",
+            method, args[1].kind
+        ))
+    })?;
+    match node {
+        shape_value::content::ContentNode::Chart(spec) => {
+            let mut new_spec = spec.clone();
+            match field {
+                ChartStringField::Title => new_spec.title = Some(text.to_string()),
+                ChartStringField::XLabel => new_spec.x_label = Some(text.to_string()),
+                ChartStringField::YLabel => new_spec.y_label = Some(text.to_string()),
+            }
+            Ok(content_slot(shape_value::content::ContentNode::Chart(
+                new_spec,
+            )))
+        }
+        other => Err(VMError::RuntimeError(format!(
+            "Content.{}() is only valid on Chart receivers (got {})",
+            method,
+            describe_content_variant(other)
+        ))),
+    }
+}
+
+/// Which usize-valued chart field a setter targets.
+#[derive(Clone, Copy)]
+enum ChartSizeField {
+    Width,
+    Height,
+}
+
+/// Shared clone-mutate-rewrap for the size-setter chart methods
+/// (`.width` / `.height`). Rejects on a non-Chart receiver. A value `<= 0`
+/// clears the hint.
+fn chart_set_size(
+    args: &[KindedSlot],
+    method: &str,
+    field: ChartSizeField,
+) -> Result<KindedSlot, VMError> {
+    let node = recv_content(args, method)?;
+    if args.len() != 2 {
+        return Err(VMError::RuntimeError(format!(
+            "Content.{}(n) requires exactly 1 argument, got {}",
+            method,
+            args.len().saturating_sub(1)
+        )));
+    }
+    let n = args[1].as_i64().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Content.{}(): argument must be an int, got kind {:?}",
+            method, args[1].kind
+        ))
+    })?;
+    let hint = if n <= 0 { None } else { Some(n as usize) };
+    match node {
+        shape_value::content::ContentNode::Chart(spec) => {
+            let mut new_spec = spec.clone();
+            match field {
+                ChartSizeField::Width => new_spec.width = hint,
+                ChartSizeField::Height => new_spec.height = hint,
+            }
+            Ok(content_slot(shape_value::content::ContentNode::Chart(
+                new_spec,
+            )))
+        }
+        other => Err(VMError::RuntimeError(format!(
+            "Content.{}() is only valid on Chart receivers (got {})",
+            method,
+            describe_content_variant(other)
+        ))),
+    }
+}
+
+/// Decode a v2-array element `(bits, kind)` to an `f64`. Accepts the
+/// numeric element kinds an `Array<number>` / `Array<int>` produces
+/// (`Float64` / the integer family). Returns `None` on a non-numeric kind.
+#[inline]
+fn chart_elem_to_f64(bits: u64, kind: NativeKind) -> Option<f64> {
+    match kind {
+        NativeKind::Float64 => Some(f64::from_bits(bits)),
+        NativeKind::Int64 => Some(bits as i64 as f64),
+        NativeKind::Int32 => Some(bits as u32 as i32 as f64),
+        NativeKind::Int16 => Some(bits as u16 as i16 as f64),
+        NativeKind::Int8 => Some(bits as u8 as i8 as f64),
+        NativeKind::UInt64 => Some(bits as f64),
+        NativeKind::UInt32 => Some(bits as u32 as f64),
+        NativeKind::UInt16 => Some(bits as u16 as f64),
+        NativeKind::UInt8 => Some(bits as u8 as f64),
+        _ => None,
+    }
+}
+
+/// Read a numeric v2 array (`Array<number>` / `Array<int>`) into `Vec<f64>`.
+fn read_number_array(slot: &KindedSlot) -> Option<Vec<f64>> {
+    use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, read_element};
+    if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+        return None;
+    }
+    let view = as_v2_typed_array(slot.slot.raw(), slot.kind)?;
+    let mut out = Vec::with_capacity(view.len as usize);
+    for i in 0..view.len {
+        let (bits, kind) = read_element(&view, i)?;
+        out.push(chart_elem_to_f64(bits, kind)?);
+    }
+    Some(out)
+}
+
+/// Read a `[[x, y], ...]` array (the `.add(label, data)` data argument) into
+/// parallel `(xs, ys)` vectors. The outer array's elements are inner numeric
+/// arrays (`Ptr(HeapKind::TypedArray)`), each a 2-element `[x, y]` pair.
+fn read_xy_pairs(slot: &KindedSlot) -> Result<(Vec<f64>, Vec<f64>), VMError> {
+    use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, read_element};
+    if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err(VMError::RuntimeError(format!(
+            "Content.add(): data argument must be an Array of [x, y] pairs, \
+             got kind {:?}",
+            slot.kind
+        )));
+    }
+    let outer = as_v2_typed_array(slot.slot.raw(), slot.kind).ok_or_else(|| {
+        VMError::RuntimeError("Content.add(): data array has invalid v2 header".to_string())
+    })?;
+    let mut xs = Vec::with_capacity(outer.len as usize);
+    let mut ys = Vec::with_capacity(outer.len as usize);
+    for i in 0..outer.len {
+        let (bits, kind) = read_element(&outer, i).ok_or_else(|| {
+            VMError::RuntimeError(format!("Content.add(): failed to read data point {}", i))
+        })?;
+        let inner_slot = KindedSlot::new(shape_value::ValueSlot::from_raw(bits), kind);
+        let pair = read_number_array(&inner_slot).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Content.add(): data point {} must be a numeric [x, y] array, \
+                 got kind {:?}",
+                i, kind
+            ))
+        })?;
+        if pair.len() != 2 {
+            return Err(VMError::RuntimeError(format!(
+                "Content.add(): data point {} must have exactly 2 values \
+                 ([x, y]), got {}",
+                i,
+                pair.len()
+            )));
+        }
+        xs.push(pair[0]);
+        ys.push(pair[1]);
+    }
+    Ok((xs, ys))
+}
+
+/// `chart.add(label: string, data: Array<Array<number>>) -> content` — add a
+/// named data series of `[x, y]` pairs to a Chart receiver. The first `.add`
+/// establishes the shared `"x"` channel; every `.add` appends a `"y"`
+/// channel labeled with `label`. Mirrors `ChartSpec::from_series` channel
+/// semantics, applied incrementally. Returns a fresh Content slot.
+pub fn v2_content_add(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("series"))
+    let node = recv_content(args, "add")?;
+    if args.len() != 3 {
+        return Err(VMError::RuntimeError(format!(
+            "Content.add(label, data) requires exactly 2 arguments, got {}",
+            args.len().saturating_sub(1)
+        )));
+    }
+    let label = args[1].as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Content.add(): label argument must be a string, got kind {:?}",
+            args[1].kind
+        ))
+    })?;
+    let (xs, ys) = read_xy_pairs(&args[2])?;
+    match node {
+        shape_value::content::ContentNode::Chart(spec) => {
+            let mut new_spec = spec.clone();
+            // Establish the shared "x" channel from the first series only.
+            if new_spec.channel("x").is_none() {
+                new_spec.channels.push(shape_value::content::ChartChannel {
+                    name: "x".to_string(),
+                    label: "x".to_string(),
+                    values: xs,
+                    color: None,
+                });
+            }
+            new_spec.channels.push(shape_value::content::ChartChannel {
+                name: "y".to_string(),
+                label: label.to_string(),
+                values: ys,
+                color: None,
+            });
+            Ok(content_slot(shape_value::content::ContentNode::Chart(
+                new_spec,
+            )))
+        }
+        other => Err(VMError::RuntimeError(format!(
+            "Content.add() is only valid on Chart receivers (got {})",
+            describe_content_variant(other)
+        ))),
+    }
+}
+
+/// `chart.series(label, data)` — alias of `.add` retained for the documented
+/// channel-based vocabulary.
+pub fn v2_content_series(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    v2_content_add(_vm, args, ctx)
 }
 
 pub fn v2_content_title(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("title"))
+    chart_set_string(args, "title", ChartStringField::Title)
 }
 
 pub fn v2_content_x_label(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("x_label"))
+    chart_set_string(args, "x_label", ChartStringField::XLabel)
 }
 
 pub fn v2_content_x_label_camel(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("xLabel"))
+    chart_set_string(args, "xLabel", ChartStringField::XLabel)
 }
 
 pub fn v2_content_y_label(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("y_label"))
+    chart_set_string(args, "y_label", ChartStringField::YLabel)
 }
 
 pub fn v2_content_y_label_camel(
     _vm: &mut VirtualMachine,
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(surface("yLabel"))
+    chart_set_string(args, "yLabel", ChartStringField::YLabel)
+}
+
+pub fn v2_content_width(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    chart_set_size(args, "width", ChartSizeField::Width)
+}
+
+pub fn v2_content_height(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    chart_set_size(args, "height", ChartSizeField::Height)
 }
 
 #[cfg(test)]
@@ -806,11 +1047,144 @@ mod sc2_style_chain_tests {
     }
 
     #[test]
-    fn chart_builder_methods_remain_surfaced() {
-        // Content.chart is deferred (D4 v0.4); the chart-builder methods
-        // stay NotImplemented(SURFACE). Calling .title on a non-chart
-        // Content surfaces rather than mutating.
+    fn chart_title_on_text_receiver_rejects() {
+        // ChartBuilder: .title is only valid on a Chart receiver. On a Text
+        // Content it must reject (not silently mutate).
         let err = eval_result(r#"Content.text("hi").title("x")"#);
-        assert!(err.is_err(), "title() must remain surfaced (chart deferred)");
+        assert!(err.is_err(), "title() on a Text receiver must reject");
+    }
+}
+
+#[cfg(test)]
+mod chart_builder_tests {
+    //! ChartBuilder (strict-flip SC, 2026-06): `Content.chart(ChartType.x)`
+    //! constructor + the chart builder-method chain (`.add` / `.title` /
+    //! `.x_label` / `.y_label` / `.width` / `.height`). The ctor wraps an
+    //! empty-channel `ChartSpec`; the methods clone-mutate-rewrap it. We
+    //! verify the variant + the resolved fields via `toString` (Display
+    //! renders `[Chart: <title>]`) and via the carrier kind.
+    use crate::executor::tests::test_utils::{eval, eval_result};
+    use shape_value::{HeapKind, NativeKind};
+
+    #[test]
+    fn chart_ctor_from_namespace_member_builds_content() {
+        let v = eval_result(r#"Content.chart(ChartType.line)"#)
+            .expect("Content.chart(ChartType.line) must build a Content slot");
+        assert_eq!(v.kind, NativeKind::Ptr(HeapKind::Content));
+    }
+
+    #[test]
+    fn chart_ctor_from_string_literal_builds_content() {
+        let v = eval_result(r#"Content.chart("bar")"#)
+            .expect("Content.chart(\"bar\") must build a Content slot");
+        assert_eq!(v.kind, NativeKind::Ptr(HeapKind::Content));
+    }
+
+    #[test]
+    fn chart_ctor_unknown_type_rejects() {
+        let err = eval_result(r#"Content.chart("octagon")"#);
+        assert!(err.is_err(), "unknown chart type must reject");
+    }
+
+    #[test]
+    fn chart_title_sets_title() {
+        // toString renders through the real TerminalRenderer / terminal_chart
+        // path (the same one print() uses). An empty-channel Line chart with a
+        // title renders a header line carrying the title text — proving .title
+        // set the ChartSpec.title field through the clone-mutate-rewrap path.
+        let v = eval(r#"Content.chart(ChartType.line).title("Revenue").toString()"#);
+        let s = v.as_str().expect("toString returns a string");
+        assert!(
+            s.contains("Revenue"),
+            "rendered chart must carry the title, got {:?}",
+            s
+        );
+    }
+
+    #[test]
+    fn chart_untitled_when_no_title() {
+        let v = eval(r#"Content.chart(ChartType.line).toString()"#);
+        let s = v.as_str().expect("toString returns a string");
+        // Empty-channel chart with no title: renderer reports "untitled" and
+        // "0 series" (no .add was called).
+        assert!(
+            s.contains("untitled") && s.contains("0 series"),
+            "empty untitled chart render mismatch, got {:?}",
+            s
+        );
+    }
+
+    #[test]
+    fn chart_full_chain_builds_content() {
+        // The documented chain: ctor + .add([[x,y],...]) + axis/size hints.
+        let v = eval_result(
+            r#"Content.chart(ChartType.line)
+                .add("Revenue", [[1, 100], [2, 200], [3, 350]])
+                .title("Quarterly Revenue")
+                .x_label("Quarter")
+                .y_label("USD")
+                .width(80)
+                .height(20)"#,
+        )
+        .expect("full chart builder chain must succeed");
+        assert_eq!(v.kind, NativeKind::Ptr(HeapKind::Content));
+    }
+
+    #[test]
+    fn chart_chain_preserves_title_after_add() {
+        // After .add populates the x/y channels, .title still sets the title:
+        // the rendered chart carries "Q1" and is a real (non-empty) plot.
+        let v = eval(
+            r#"Content.chart(ChartType.line)
+                .add("Revenue", [[1, 100], [2, 200]])
+                .title("Q1")
+                .toString()"#,
+        );
+        let s = v.as_str().expect("toString returns a string");
+        assert!(
+            s.contains("Q1"),
+            "chart render must carry the title after .add, got {:?}",
+            s
+        );
+        // The y values 100 / 200 from the [[x,y]] pairs reach the axis labels.
+        assert!(
+            s.contains("200") && s.contains("100"),
+            "chart render must reflect the .add data, got {:?}",
+            s
+        );
+    }
+
+    #[test]
+    fn chart_multi_add_builds_content() {
+        let v = eval_result(
+            r#"Content.chart(ChartType.line)
+                .add("Revenue", [[1, 100], [2, 200]])
+                .add("Costs",   [[1, 80],  [2, 90]])
+                .title("Revenue vs Costs")"#,
+        )
+        .expect("multiple .add series must succeed");
+        assert_eq!(v.kind, NativeKind::Ptr(HeapKind::Content));
+    }
+
+    #[test]
+    fn chart_add_float_pairs_builds_content() {
+        let v = eval_result(
+            r#"Content.chart(ChartType.scatter).add("S", [[1.5, 2.5], [3.0, 4.0]])"#,
+        )
+        .expect(".add with float [x,y] pairs must succeed");
+        assert_eq!(v.kind, NativeKind::Ptr(HeapKind::Content));
+    }
+
+    #[test]
+    fn chart_method_on_table_rejects() {
+        // .title on a Table receiver must reject (Chart-only method).
+        let err = eval_result(r#"Content.table(["A"], [["1"]]).title("x")"#);
+        assert!(err.is_err(), ".title on a Table receiver must reject");
+    }
+
+    #[test]
+    fn chart_width_on_text_rejects() {
+        let err = eval_result(r#"Content.text("hi").width(80)"#);
+        assert!(err.is_err(), ".width on a Text receiver must reject");
     }
 }

@@ -863,19 +863,50 @@ impl VirtualMachine {
                     self.push_kinded_slot(result)?;
                 }
                 BuiltinFunction::ContentChart => {
-                    // Chart constructor is v0.4 scope per supervisor D4
-                    // (R8 W3, 2026-05-24) — ECharts integration is its own
-                    // workstream. W18.5 ships Table / Code / KeyValue only;
-                    // surfacing the Chart MVP keeps the dispatch arm honest
-                    // (no Bool-default kinded shim per playbook §4 #9).
-                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    return Err(VMError::NotImplemented(
-                        "Content.chart(...) is v0.4 scope per supervisor D4 \
-                         (R8 W3, 2026-05-24) — ECharts integration is its \
-                         own workstream. W18.5 ships Table / Code / KeyValue \
-                         builders only."
-                            .to_string(),
-                    ));
+                    // ChartBuilder (strict-flip SC, 2026-06): `Content.chart(t)
+                    // -> content` constructor. `t` is the string carrier of a
+                    // `ChartType` namespace member (`ChartType.line` lowers to
+                    // the canonical `"line"` string per SC1 property-access
+                    // path) or a plain string literal (`"line"`). Wraps an
+                    // empty-channel `ChartSpec` of the given type into a
+                    // `Ptr(HeapKind::Content)` slot — sibling to
+                    // `ContentTableCtor`. Channels / title / axis labels are
+                    // filled by the chart builder-method chain
+                    // (`content_methods.rs` `.add` / `.title` / `.x_label` /
+                    // `.y_label` / `.width` / `.height`). No Bool-default, no
+                    // dynamic fallback: the chart-type string is the only arg
+                    // and validates against the 9-variant `ChartType` enum.
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    if args.len() != 1 {
+                        return Err(VMError::RuntimeError(format!(
+                            "Content.chart() requires exactly 1 argument \
+                             (chart type), got {}",
+                            args.len()
+                        )));
+                    }
+                    let type_str = args[0].as_str().ok_or_else(|| {
+                        VMError::RuntimeError(format!(
+                            "Content.chart() argument must be a chart-type \
+                             string (e.g. ChartType.line), got kind {:?}",
+                            args[0].kind
+                        ))
+                    })?;
+                    let chart_type = parse_chart_type(type_str)?;
+                    let spec = shape_value::content::ChartSpec {
+                        chart_type,
+                        channels: Vec::new(),
+                        x_categories: None,
+                        title: None,
+                        x_label: None,
+                        y_label: None,
+                        width: None,
+                        height: None,
+                        echarts_options: None,
+                        interactive: true,
+                    };
+                    let node = shape_value::content::ContentNode::Chart(spec);
+                    let result = KindedSlot::from_content(std::sync::Arc::new(node));
+                    self.push_kinded_slot(result)?;
                 }
                 BuiltinFunction::ContentTableCtor => {
                     // W18.5 (R8 W4, 2026-05-24 — supervisor D4):
@@ -1684,6 +1715,34 @@ pub(in crate::executor) fn read_content_arc(
         let cloned = arc.clone();
         std::mem::forget(arc);
         Some(cloned)
+    }
+}
+
+/// Parse a chart-type string (the carrier of a `ChartType` namespace member,
+/// or a plain string literal) into the matching `ChartType` enum variant.
+///
+/// The user-facing member names mirror `is_style_spec_member`
+/// (`property_access.rs`): the book writes `boxplot` one word while the Rust
+/// variant is `BoxPlot` (serde `box_plot`), so both spellings are accepted.
+/// Unknown strings reject cleanly — no Bool-default, no dynamic fallback.
+pub fn parse_chart_type(s: &str) -> Result<shape_value::content::ChartType, VMError> {
+    use shape_value::content::ChartType;
+    match s.to_ascii_lowercase().as_str() {
+        "line" => Ok(ChartType::Line),
+        "bar" => Ok(ChartType::Bar),
+        "scatter" => Ok(ChartType::Scatter),
+        "area" => Ok(ChartType::Area),
+        "candlestick" => Ok(ChartType::Candlestick),
+        "histogram" => Ok(ChartType::Histogram),
+        "boxplot" | "box_plot" => Ok(ChartType::BoxPlot),
+        "heatmap" => Ok(ChartType::Heatmap),
+        "bubble" => Ok(ChartType::Bubble),
+        other => Err(VMError::RuntimeError(format!(
+            "Content.chart(): unknown chart type '{}' — expected one of \
+             line, bar, scatter, area, candlestick, histogram, boxplot, \
+             heatmap, bubble (e.g. ChartType.line)",
+            other
+        ))),
     }
 }
 

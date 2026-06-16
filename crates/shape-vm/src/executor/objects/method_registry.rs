@@ -1024,12 +1024,15 @@ pub static CONTENT_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "border" => crate::executor::objects::content_methods::v2_content_border,
     "max_rows" => crate::executor::objects::content_methods::v2_content_max_rows,
     "maxRows" => crate::executor::objects::content_methods::v2_content_max_rows_camel,
+    "add" => crate::executor::objects::content_methods::v2_content_add,
     "series" => crate::executor::objects::content_methods::v2_content_series,
     "title" => crate::executor::objects::content_methods::v2_content_title,
     "x_label" => crate::executor::objects::content_methods::v2_content_x_label,
     "xLabel" => crate::executor::objects::content_methods::v2_content_x_label_camel,
     "y_label" => crate::executor::objects::content_methods::v2_content_y_label,
     "yLabel" => crate::executor::objects::content_methods::v2_content_y_label_camel,
+    "width" => crate::executor::objects::content_methods::v2_content_width,
+    "height" => crate::executor::objects::content_methods::v2_content_height,
     // W18.5 builder methods (R8 W4, 2026-05-24 — supervisor D4): per-type
     // builder chain ergonomics for `Table::new()` / `Code::new()` /
     // `KeyValue::new()`. The receiver kind is always
