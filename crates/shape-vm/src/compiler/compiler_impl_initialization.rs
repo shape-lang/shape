@@ -1,5 +1,23 @@
 use super::*;
 
+/// Clamp a (possibly out-of-range) byte offset into `source` to a valid char
+/// boundary at or below it.
+///
+/// AST span byte offsets can land in the middle of a multibyte UTF-8 char
+/// (e.g. the 2nd byte of an em-dash `—` inside a comment). Slicing `source` at
+/// such an offset panics ("byte index N is not a char boundary"), which would
+/// mask the real compile error with a panic. This first saturates to
+/// `source.len()`, then floors to the nearest char boundary so the resulting
+/// index is always safe to slice at. For ASCII offsets (the common case) the
+/// value is returned unchanged, preserving existing line/col semantics.
+fn clamp_to_char_boundary(source: &str, byte_offset: usize) -> usize {
+    let mut idx = byte_offset.min(source.len());
+    while idx > 0 && !source.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 impl BytecodeCompiler {
     pub(super) fn collect_namespace_import_bindings(program: &Program) -> Vec<String> {
         use shape_ast::ast::{ImportItems, Item};
@@ -646,8 +664,12 @@ impl BytecodeCompiler {
     /// Set line from a Span (converts byte offset to line number)
     pub fn set_line_from_span(&mut self, span: shape_ast::ast::Span) {
         if let Some(source) = &self.source_text {
-            // Count newlines up to span.start to get line number
-            let line = source[..span.start.min(source.len())]
+            // Count newlines up to span.start to get line number.
+            // Clamp + floor to a char boundary: span byte offsets can land in
+            // the middle of a multibyte UTF-8 char (e.g. an em-dash in a
+            // comment), and slicing there would panic and mask the real error.
+            let clamped = clamp_to_char_boundary(source, span.start);
+            let line = source[..clamped]
                 .chars()
                 .filter(|c| *c == '\n')
                 .count() as u32
@@ -669,7 +691,10 @@ impl BytecodeCompiler {
         span: shape_ast::ast::Span,
     ) -> shape_ast::error::SourceLocation {
         let (line, column) = if let Some(source) = &self.source_text {
-            let clamped = span.start.min(source.len());
+            // Floor to a char boundary so a span offset landing mid-multibyte
+            // char (e.g. an em-dash in a comment) cannot panic the slice and
+            // mask the real compile error.
+            let clamped = clamp_to_char_boundary(source, span.start);
             let line = source[..clamped].chars().filter(|c| *c == '\n').count() + 1;
             let last_nl = source[..clamped].rfind('\n').map(|p| p + 1).unwrap_or(0);
             let column = clamped - last_nl + 1;
@@ -1017,5 +1042,107 @@ impl BytecodeCompiler {
         }
 
         by_function
+    }
+}
+
+#[cfg(test)]
+mod char_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn clamp_to_char_boundary_ascii_is_identity() {
+        let s = "let x = foo();\nlet y = bar();";
+        // Every ASCII offset is a char boundary -> returned unchanged.
+        for i in 0..=s.len() {
+            assert_eq!(clamp_to_char_boundary(s, i), i, "ascii offset {i} changed");
+        }
+    }
+
+    #[test]
+    fn clamp_to_char_boundary_floors_mid_multibyte() {
+        // "a" (1 byte) + em-dash "—" (3 bytes: E2 80 94) + "b".
+        let s = "a—b";
+        assert!(s.is_char_boundary(0));
+        assert!(s.is_char_boundary(1)); // start of em-dash
+        assert!(!s.is_char_boundary(2)); // 2nd byte of em-dash
+        assert!(!s.is_char_boundary(3)); // 3rd byte of em-dash
+        assert!(s.is_char_boundary(4)); // start of "b"
+
+        // Mid-char offsets floor down to the start of the em-dash (1).
+        assert_eq!(clamp_to_char_boundary(s, 2), 1);
+        assert_eq!(clamp_to_char_boundary(s, 3), 1);
+        // Boundaries are preserved.
+        assert_eq!(clamp_to_char_boundary(s, 1), 1);
+        assert_eq!(clamp_to_char_boundary(s, 4), 4);
+    }
+
+    #[test]
+    fn clamp_to_char_boundary_saturates_past_end() {
+        let s = "abc";
+        assert_eq!(clamp_to_char_boundary(s, 999), 3);
+    }
+
+    /// Regression: a span offset that lands mid-multibyte-char must NOT panic
+    /// the source slice in the span->line/col helpers (it previously did,
+    /// masking the real compile error with a UTF-8 char-boundary panic).
+    #[test]
+    fn span_helpers_do_not_panic_on_mid_char_offset() {
+        // "// — comment\nlet x = 1\n" — the em-dash spans bytes 3..6.
+        let source = "// — comment\nlet x = 1\n";
+        let mut compiler = BytecodeCompiler::new();
+        compiler.set_source(source);
+
+        // Offset 4 == 2nd byte of the em-dash: a raw slice here would panic.
+        let mid_char_offset = 4;
+        assert!(!source.is_char_boundary(mid_char_offset));
+
+        // Both fixed paths must run without panicking.
+        compiler.set_line_from_span(shape_ast::ast::Span {
+            start: mid_char_offset,
+            end: mid_char_offset,
+        });
+        let loc = compiler.span_to_source_location(shape_ast::ast::Span {
+            start: mid_char_offset,
+            end: mid_char_offset + 1,
+        });
+        // Em-dash is on line 1; behaviour is "floor to char boundary", so the
+        // result is a sane, real location rather than a panic.
+        assert_eq!(loc.line, 1);
+    }
+
+    /// End-to-end: a source with a deliberate compile error AND a multibyte
+    /// char in a comment near the error must surface the REAL semantic error
+    /// (Err), not panic.
+    #[test]
+    fn compile_error_with_multibyte_comment_reports_error_not_panic() {
+        // Undefined variable `nope` is a compile error; the preceding comment
+        // carries an em-dash so error-context spans hit the multibyte window.
+        let source = "// boundary — note: this errors\nlet x = nope\n";
+        let program = shape_ast::parse_program(source).expect("parse should succeed");
+        let compiler = BytecodeCompiler::new();
+        let result = compiler.compile_with_source(&program, source);
+        // The key assertion is "did not panic". A compile error is the
+        // expected, correct outcome.
+        assert!(
+            result.is_err(),
+            "expected a semantic compile error for undefined `nope`, got Ok"
+        );
+    }
+
+    /// ASCII-only error source must report identical line/col as the
+    /// char-boundary floor is a no-op for ASCII.
+    #[test]
+    fn ascii_span_location_unchanged() {
+        let source = "let a = 1\nlet b = 2\nlet c = 3\n";
+        let mut compiler = BytecodeCompiler::new();
+        compiler.set_source(source);
+        // Offset at start of line 3 ("let c").
+        let offset = source.find("let c").unwrap();
+        let loc = compiler.span_to_source_location(shape_ast::ast::Span {
+            start: offset,
+            end: offset + 5,
+        });
+        assert_eq!(loc.line, 3);
+        assert_eq!(loc.column, 1);
     }
 }
