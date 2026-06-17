@@ -1037,6 +1037,22 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 }
             }
             Place::Index(base, operand) => {
+                // String indexing `s[i]` is NOT an array element load — the
+                // JIT has no string-char producer, and `inline_array_get`
+                // would reinterpret the `Arc<String>` as an array layout and
+                // crash on a downstream retain. Surface-and-stop → interpreter
+                // fallthrough (correct). See `index_base_is_string`.
+                if self.index_base_is_string(base) {
+                    return Err("MirToIR: string indexing `s[i]` — the JIT has \
+                         no string-char element producer (the VM lowers this \
+                         through the `GetProp` String arm producing a 1-char \
+                         Arc<String>); surface-and-stop per CLAUDE.md \
+                         \"surface-and-stop, not force\" so the interpreter's \
+                         correct String-arm path runs. See \
+                         `index_base_is_string`."
+                        .to_string());
+                }
+
                 // v2 fast path: when the base local holds a v2 `Array<scalar>`
                 // pointer, use the inline `v2_array_get` helper.
                 if let Some(elem_kind) = self.v2_typed_array_elem_kind(base) {
@@ -1232,6 +1248,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(())
             }
             Place::Index(base, operand) => {
+                // String indexing surface-and-stop (mirror of read_place).
+                // Strings are immutable so `s[i] = v` is not a valid source
+                // shape, but a string base reaching the array-set path would
+                // corrupt the heap identically — surface honestly.
+                if self.index_base_is_string(base) {
+                    return Err("MirToIR: string-base index write `s[i] = v` — \
+                         strings are immutable and the JIT has no string-index \
+                         set path; surface-and-stop → interpreter. See \
+                         `index_base_is_string`."
+                        .to_string());
+                }
+
                 // v2 fast path: same logic as `read_place`. The slot is a raw
                 // `*mut TypedArray<T>`, the index becomes an i32, and the
                 // value is coerced to the element's native type.

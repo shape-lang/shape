@@ -99,6 +99,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         }
     }
 
+    /// `true` when the indexing base is a `string` receiver (`s[i]`).
+    ///
+    /// String indexing is NOT an array element load: the VM lowers `s[i]`
+    /// through the `GetProp` String arm (`dispatch_get_prop`), which
+    /// allocates a real 1-char `NativeKind::String` (`Arc<String>`) —
+    /// byte-identical to `op_string_char_at` (typed_access.rs). The JIT's
+    /// `Place::Index` arms, in contrast, only model ARRAY element access
+    /// (`inline_array_get` / the v2 typed-array fast path), so a string
+    /// base falls through to `inline_array_get`, which reinterprets the
+    /// `Arc<String>` heap pointer as a v1 array layout (data@+0/len@+8),
+    /// reads a wild "element pointer", and then a downstream retain
+    /// (`Rvalue::Clone` / Copy disposition) dereferences it → SIGSEGV
+    /// (`jit_arc_retain` on garbage bits). The defended-against repro is
+    /// `s[i] == "x"` (book `fundamentals/strings.mdx`: "Index chars via
+    /// `s[i]`"). There is no JIT string-char producer wired today, so the
+    /// principled response per CLAUDE.md "surface-and-stop, not force" is
+    /// to fail JIT compilation here and fall through to the interpreter,
+    /// whose String-arm path is correct (verified: `--mode vm` returns the
+    /// right result). Returns `true` ONLY for a `Place::Local` base whose
+    /// recorded `ConcreteType` is `String`.
+    pub(crate) fn index_base_is_string(&self, place: &Place) -> bool {
+        match place {
+            Place::Local(s) => matches!(
+                self.concrete_types.get(s.0 as usize),
+                Some(ConcreteType::String)
+            ),
+            _ => false,
+        }
+    }
+
     /// If the place is known to hold a v2 `Array<T>` whose element type
     /// is a scalar primitive, return the matching element `NativeKind`.
     /// Returns `None` for non-array places, arrays of non-scalar
