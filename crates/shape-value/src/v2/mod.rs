@@ -1,3 +1,4 @@
+pub mod alloc_budget;
 pub mod closure_layout;
 pub mod closure_raw;
 pub mod concrete_type;

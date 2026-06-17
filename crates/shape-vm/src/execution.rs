@@ -445,6 +445,13 @@ impl ProgramExecutor for BytecodeExecutor {
         // themselves; the host-boundary persistence + completion-value
         // synthesis is what's deferred to Phase-2c.
         let mut vm = VirtualMachine::new(VMConfig::default());
+        // Install resource limits (if configured) so a runaway program fails
+        // in-process via the dispatch-loop tick_instruction / record_allocation
+        // caps rather than exhausting the host. `None` (default) = unlimited,
+        // preserving trusted CLI semantics.
+        if let Some(limits) = self.resource_limits.clone() {
+            vm = vm.with_resource_limits(limits);
+        }
         vm.set_interrupt(self.interrupt.clone());
         vm.load_program(bytecode);
         for ext in &self.extensions {
@@ -536,6 +543,19 @@ impl ProgramExecutor for BytecodeExecutor {
         if repl_persistence {
             Self::load_module_bindings_from_context(&mut vm, ctx_borrow);
         }
+
+        // Install the per-execution heap-growth budget (if a memory cap is
+        // configured) for the duration of this VM run. The doubling-realloc
+        // growth paths (TypedArray, etc.) charge against it, so an unbounded
+        // allocating loop fails in-process at the cap rather than climbing RSS
+        // until the host OOM-killer reaps the process. The guard restores the
+        // prior budget on drop, so nested/sequential executions are isolated.
+        // No memory cap configured (CLI default) => unlimited, no-op.
+        let _alloc_budget_guard = shape_value::v2::alloc_budget::BudgetGuard::new(
+            self.resource_limits
+                .as_ref()
+                .and_then(|l| l.max_memory_bytes),
+        );
 
         let completion: KindedSlot = vm.execute(Some(ctx_borrow)).map_err(|e| {
             shape_runtime::error::ShapeError::RuntimeError {

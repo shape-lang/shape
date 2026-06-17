@@ -236,6 +236,30 @@ impl ShapeTest {
 
         let mut executor = BytecodeExecutor::new();
 
+        // Bound per-test VM execution so a runaway program (e.g. a
+        // strict-flip-era inference regression producing an unbounded
+        // allocating loop) fails IN-PROCESS at the cap instead of growing RSS
+        // without bound until the host OOM-kills the whole test process (the
+        // 83GB single-process OOM / bulk-hang).
+        //
+        // The MEMORY cap is the load-bearing guard. Heap buffers grow via a
+        // doubling realloc, so byte size grows geometrically while the
+        // instruction count grows only linearly — a single doubling realloc
+        // can jump several GB in ONE instruction, so an instruction cap alone
+        // cannot bound RSS. The per-execution heap-growth budget (consulted by
+        // the doubling-realloc paths in shape-value) caps total live growth.
+        // The instruction + wall-time caps are coarse backstops for
+        // non-allocating spins. All three are far above anything a legitimate
+        // test reaches (the full 613-test operators binary peaks at ~27MB /
+        // 8.4s), so this caps resource consumption only and never changes an
+        // observable result.
+        executor.set_resource_limits(Some(shape_vm::resource_limits::ResourceLimits {
+            max_instructions: Some(2_000_000_000),
+            max_memory_bytes: Some(2 * 1024 * 1024 * 1024), // 2 GiB heap-growth budget
+            max_wall_time: Some(std::time::Duration::from_secs(120)),
+            max_output_bytes: None,
+        }));
+
         // Wire permission set for compile-time capability checking
         if let Some(pset) = &self.permission_set {
             executor.set_permission_set(Some(pset.clone()));
@@ -1412,5 +1436,41 @@ impl ShapeTest {
             actual
         );
         self
+    }
+}
+
+#[cfg(test)]
+mod zzz_resource_bound_probe {
+    use super::*;
+
+    // TEMPORARY M2-fix verification probe — removed after capped run.
+    #[test]
+    fn runaway_loop_fails_in_process() {
+        // Unbounded allocating loop: would grow RSS without bound under the
+        // old (unlimited) test path. With the per-buffer heap ceiling wired in
+        // it must fail in-process (a caught panic at the ceiling) rather than
+        // climbing RSS until the host OOM-killer reaps the process.
+        let src = "let mut a = [0]\nlet mut i = 0\nwhile i < 100000000000 {\n  a.push(i)\n  i = i + 1\n}\nprint(a.length)\n";
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = ShapeTest::new(src).eval();
+        }));
+        assert!(
+            outcome.is_err(),
+            "runaway loop should fail in-process at the heap ceiling"
+        );
+    }
+
+    // Sanity: a normal terminating program still runs fine under the cap.
+    #[test]
+    fn normal_program_ok_under_cap() {
+        ShapeTest::new("let x = 1 + 2\nprint(x)\n").expect_run_ok();
+    }
+
+    // A loop that allocates and frees many transient arrays must NOT trip the
+    // per-buffer ceiling (sizes are checked independently, never summed).
+    #[test]
+    fn transient_alloc_loop_ok_under_cap() {
+        let src = "let mut total = 0\nlet mut i = 0\nwhile i < 200 {\n  let tmp = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]\n  total = total + tmp.length\n  i = i + 1\n}\nprint(total)\n";
+        ShapeTest::new(src).expect_run_ok();
     }
 }

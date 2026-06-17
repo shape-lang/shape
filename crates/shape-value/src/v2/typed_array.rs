@@ -265,6 +265,17 @@ impl<T: Copy> TypedArray<T> {
             };
             let new_layout = Layout::array::<T>(new_cap as usize).expect("invalid array layout");
 
+            // Enforce the per-execution per-buffer heap ceiling, if installed.
+            // A doubling realloc can jump several GB in a single instruction,
+            // so a memory ceiling — not the instruction cap — is what bounds
+            // the RSS of an allocation-heavy runaway loop (the canonical case:
+            // one buffer growing without bound). Over the ceiling => fail
+            // in-process here rather than letting RSS climb until the host
+            // OOM-killer reaps the process. No ceiling (CLI default) => no-op.
+            if let Err(e) = crate::v2::alloc_budget::check_size(new_layout.size() as u64) {
+                panic!("{e}");
+            }
+
             let new_data = if arr.cap == 0 || arr.data.is_null() {
                 alloc(new_layout) as *mut T
             } else {

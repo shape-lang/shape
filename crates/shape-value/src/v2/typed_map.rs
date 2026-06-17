@@ -174,6 +174,16 @@ impl<K: Copy, V: Copy> TypedMap<K, V> {
             let old_count = map.bucket_count;
 
             let new_count = old_count * 2;
+            // Enforce the per-execution per-buffer heap ceiling, if installed,
+            // so an unbounded-growth runaway map fails in-process at the cap
+            // rather than climbing RSS until the host OOM-killer reaps the
+            // process. No ceiling (CLI default) => no-op. (Same rationale as
+            // TypedArray::grow.)
+            let new_bytes = (new_count as u64)
+                .saturating_mul(std::mem::size_of::<Bucket<K, V>>() as u64);
+            if let Err(e) = crate::v2::alloc_budget::check_size(new_bytes) {
+                panic!("{e}");
+            }
             let new_buckets = Self::alloc_buckets(new_count);
             let mask = new_count - 1; // power-of-2 mask
 
