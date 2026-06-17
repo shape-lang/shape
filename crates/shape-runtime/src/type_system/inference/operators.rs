@@ -16,6 +16,16 @@ use super::TypeInferenceEngine;
 use crate::type_system::*;
 use shape_ast::ast::{BinaryOp, Expr, Literal, Span, TypeAnnotation, UnaryOp};
 
+/// Classification of a temporal operand for the documented DateTime/Duration
+/// operator arithmetic (datetime book chapter). Duration is its own type, NOT
+/// Numeric — these kinds drive a result-type table separate from the numeric
+/// arithmetic path, with no int/number coercion.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TemporalKind {
+    DateTime,
+    Duration,
+}
+
 impl TypeInferenceEngine {
     /// Infer type of a literal
     pub(crate) fn infer_literal(&mut self, lit: &Literal) -> TypeResult<Type> {
@@ -604,6 +614,66 @@ impl TypeInferenceEngine {
             .filter(|fam| matches!(*fam, "int" | "number" | "decimal"))
     }
 
+    /// Temporal operand classification for the datetime/duration operator
+    /// arithmetic documented in the datetime book chapter. Returns the kind of
+    /// a CONCRETE DateTime or Duration (TimeSpan) operand, accepting both the
+    /// PascalCase (`DateTime`, `Duration`, `TimeSpan`) forms the compiler's
+    /// tracker uses and the lowercase (`datetime`, `duration`, `timespan`)
+    /// forms the inference engine stamps on the literals. `None` for any other
+    /// type (including type vars) — those flow to the existing numeric path.
+    fn temporal_operand_kind(ty: &Type) -> Option<TemporalKind> {
+        let name = match ty {
+            Type::Concrete(TypeAnnotation::Basic(n)) => n.as_str(),
+            Type::Concrete(TypeAnnotation::Reference(n)) => n.as_str(),
+            _ => return None,
+        };
+        match name {
+            "DateTime" | "datetime" => Some(TemporalKind::DateTime),
+            "Duration" | "TimeSpan" | "duration" | "timespan" => Some(TemporalKind::Duration),
+            _ => None,
+        }
+    }
+
+    /// Result type for the documented DateTime/Duration `+`/`-` operator rules:
+    ///
+    /// * `DateTime + Duration` / `Duration + DateTime` -> `DateTime`
+    /// * `DateTime - Duration` -> `DateTime`
+    /// * `DateTime - DateTime` -> `Duration`
+    /// * `Duration ± Duration` -> `Duration`
+    ///
+    /// Duration is NOT Numeric — these rules are separate from the numeric
+    /// arithmetic path and introduce no int/number coercion. `None` when the
+    /// operand combination is not one of the documented temporal forms (e.g.
+    /// `DateTime + DateTime`), which then rejects through the normal path.
+    fn temporal_arithmetic_result(
+        op: &BinaryOp,
+        left: &Type,
+        right: &Type,
+    ) -> Option<Type> {
+        let lk = Self::temporal_operand_kind(left)?;
+        let rk = Self::temporal_operand_kind(right)?;
+        let datetime = || Type::Concrete(TypeAnnotation::Reference("DateTime".into()));
+        let duration = || Type::Concrete(TypeAnnotation::Basic("duration".into()));
+        match (op, lk, rk) {
+            // DateTime + Duration / Duration + DateTime -> DateTime
+            (BinaryOp::Add, TemporalKind::DateTime, TemporalKind::Duration)
+            | (BinaryOp::Add, TemporalKind::Duration, TemporalKind::DateTime) => {
+                Some(datetime())
+            }
+            // Duration + Duration -> Duration
+            (BinaryOp::Add, TemporalKind::Duration, TemporalKind::Duration) => Some(duration()),
+            // DateTime - Duration -> DateTime
+            (BinaryOp::Sub, TemporalKind::DateTime, TemporalKind::Duration) => Some(datetime()),
+            // DateTime - DateTime -> Duration
+            (BinaryOp::Sub, TemporalKind::DateTime, TemporalKind::DateTime) => Some(duration()),
+            // Duration - Duration -> Duration
+            (BinaryOp::Sub, TemporalKind::Duration, TemporalKind::Duration) => Some(duration()),
+            // Any other combination (e.g. DateTime + DateTime,
+            // Duration - DateTime) is not a documented form.
+            _ => None,
+        }
+    }
+
     /// Infer type of binary operation
     ///
     /// Supports Option propagation: if either operand is Option<T>, the result is Option<T>.
@@ -631,6 +701,15 @@ impl TypeInferenceEngine {
                 if Self::is_string_like(left) || Self::is_string_like(right) {
                     return Ok(BuiltinTypes::string());
                 }
+                // Temporal operator arithmetic (datetime book chapter):
+                // `DateTime + Duration` -> `DateTime`, `Duration + Duration` ->
+                // `Duration`. Must run before the numeric fallback, which would
+                // reject `Duration` as non-Numeric. Duration is NOT Numeric — no
+                // int/number coercion is introduced. The bytecode compiler
+                // dispatches these via `CallMethod("add")` (binary_ops.rs).
+                if let Some(result) = Self::temporal_arithmetic_result(&BinaryOp::Add, left, right) {
+                    return Ok(result);
+                }
                 // Operator trait fallback: if left type implements Add, return left type
                 if let Some(result_type) = self.check_operator_trait(left, "Add") {
                     return Ok(result_type);
@@ -651,6 +730,19 @@ impl TypeInferenceEngine {
                 self.infer_numeric_arithmetic_op(left, right, span)
             }
             BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
+                // Temporal operator arithmetic (datetime book chapter):
+                // `DateTime - Duration` -> `DateTime`, `DateTime - DateTime` ->
+                // `Duration`, `Duration - Duration` -> `Duration`. Only `Sub`
+                // has temporal forms (`*`/`/`/`%` on temporals are not
+                // documented). Runs before the numeric fallback which would
+                // reject the non-Numeric `Duration`/`DateTime` operands.
+                if matches!(op, BinaryOp::Sub) {
+                    if let Some(result) =
+                        Self::temporal_arithmetic_result(&BinaryOp::Sub, left, right)
+                    {
+                        return Ok(result);
+                    }
+                }
                 if matches!(op, BinaryOp::Mul) {
                     if Self::is_mat_number(left) && Self::is_vec_number(right) {
                         return Ok(Self::vec_number_type());

@@ -1696,6 +1696,33 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
         Expr::MethodCall {
             receiver, method, ..
         } => {
+            // The `DateTime` namespace constructors all yield a `DateTime`
+            // value (datetime book chapter). Recording `ConcreteType::DateTime`
+            // for `let a = DateTime.parse(..)` is what lets the binding's
+            // tracker type-name surface "DateTime" at a downstream operator
+            // site (`a - b`, `a + 3d`) so the temporal Add/Sub dispatch fires;
+            // without it the operand stays `unknown` and strict typing rejects.
+            // Bounded to a bare-identifier `DateTime` receiver that is NOT a
+            // user struct / alias / local (mirrors the inference-engine
+            // `is_namespace_constructor` guard). The name IS the proof
+            // (ADR-006 §2.7.5) — no runtime probe.
+            if let Expr::Identifier(recv_name, _) = receiver.as_ref() {
+                if recv_name == "DateTime"
+                    && matches!(
+                        method.as_str(),
+                        "now"
+                            | "utc"
+                            | "parse"
+                            | "from_epoch"
+                            | "from_parts"
+                            | "from_unix_secs"
+                    )
+                    && compiler.resolve_local(recv_name).is_none()
+                    && !compiler.module_bindings.contains_key(recv_name.as_str())
+                {
+                    return Some(ConcreteType::DateTime);
+                }
+            }
             // First: a monomorphized stdlib method call records its substituted
             // return annotation at the call site (the `.map`/`.filter` chain
             // path). When present, that IS the proof — use it verbatim.

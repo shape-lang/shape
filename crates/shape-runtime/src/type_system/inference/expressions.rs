@@ -684,6 +684,25 @@ impl TypeInferenceEngine {
                         for arg in args {
                             self.infer_expr(arg)?;
                         }
+                        // The `DateTime` namespace constructors
+                        // (`now`/`utc`/`parse`/`from_epoch`/`from_parts`/
+                        // `from_unix_secs`) all yield a `DateTime` value per the
+                        // datetime book chapter. Returning the concrete
+                        // `Reference("DateTime")` (rather than a fresh,
+                        // never-pinned var) is what lets a `let a =
+                        // DateTime.parse(..)` binding carry a known type into
+                        // downstream operator arithmetic (`a - b`,
+                        // `a + 3d`) — without it both operands lower to
+                        // `unknown` and strict typing rejects the op. The other
+                        // namespace constructors (Content/Color/Table/…) keep
+                        // the fresh-var behavior: their return types are
+                        // resolved authoritatively by the bytecode compiler and
+                        // are not consumed by the temporal operator rules.
+                        if recv_name == "DateTime" {
+                            return Ok(Type::Concrete(TypeAnnotation::Reference(
+                                "DateTime".into(),
+                            )));
+                        }
                         return Ok(self.fresh_type_var());
                     }
                 }

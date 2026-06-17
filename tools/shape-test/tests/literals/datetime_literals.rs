@@ -123,3 +123,91 @@ fn datetime_literal_as_fn_arg() {
     )
     .expect_output("2026");
 }
+
+// ===== Operator arithmetic (STAGE DT2) =====
+//
+// The datetime book chapter (fundamentals/datetime §Operator Arithmetic)
+// documents `+`/`-` on DateTime/Duration values:
+//   DateTime + Duration -> DateTime
+//   DateTime - Duration -> DateTime
+//   DateTime - DateTime -> Duration
+//   Duration ± Duration -> Duration
+//
+// These must TYPE-CHECK under strict typing. Before STAGE DT2 they failed
+// the type-checker: a `let a = DateTime.parse(..)` binding lowered to
+// `unknown` (so `a - b` reported "operand types are `unknown` and `unknown`")
+// and a Duration operand was rejected as non-Numeric ("`duration` does not
+// implement trait `Numeric`"). The fix recognizes the DateTime/Duration
+// operand types and produces the documented result type WITHOUT weakening
+// `int != number` — Duration is its own type, not Numeric, so there is no
+// silent coercion. All datetimes are FIXED epochs (no `now()`).
+
+#[test]
+fn datetime_plus_duration_yields_datetime() {
+    // DateTime + Duration -> DateTime (book: `a + 3d` => day 18).
+    ShapeTest::new(
+        r#"
+        let a = DateTime.parse("2024-06-15T12:00:00+00:00")
+        let future = a + 3d
+        print(future.day())
+    "#,
+    )
+    .expect_output("18");
+}
+
+#[test]
+fn datetime_minus_duration_yields_datetime() {
+    // DateTime - Duration -> DateTime (book: `a - 1w` => day 8).
+    ShapeTest::new(
+        r#"
+        let a = DateTime.parse("2024-06-15T12:00:00+00:00")
+        let past = a - 1w
+        print(past.day())
+    "#,
+    )
+    .expect_output("8");
+}
+
+#[test]
+fn datetime_minus_datetime_yields_duration() {
+    // DateTime - DateTime -> Duration. 2024-06-15 minus 2024-06-10 is 5 days;
+    // the Duration renders as the ISO-8601 form (5 days == 432000 seconds).
+    ShapeTest::new(
+        r#"
+        let a = DateTime.parse("2024-06-15T12:00:00+00:00")
+        let b = DateTime.parse("2024-06-10T12:00:00+00:00")
+        let diff = a - b
+        print(f"{diff}")
+    "#,
+    )
+    .expect_output("PT432000S");
+}
+
+#[test]
+fn datetime_literal_chained_duration_arithmetic() {
+    // Book runnable example (datetime.mdx §DateTime Literals):
+    // `@"2024-06-15" + 30d - 1w` == 2024-07-08. Exercises a `@"..."` DateTime
+    // literal as the left operand of chained `+`/`-` duration arithmetic.
+    ShapeTest::new(
+        r#"
+        let future = @"2024-06-15" + 30d - 1w
+        print(future.format("%Y-%m-%d"))
+    "#,
+    )
+    .expect_output("2024-07-08");
+}
+
+#[test]
+fn duration_not_numeric_rejects_plus_int() {
+    // Strict guard: Duration is NOT Numeric. `1d + 1` (Duration + int) is a
+    // compile error — the temporal operator rules only accept the documented
+    // DateTime/Duration operand combinations; there is no silent coercion of a
+    // Duration to a number.
+    ShapeTest::new(
+        r#"
+        let bad = 1d + 1
+        print(bad)
+    "#,
+    )
+    .expect_run_err_contains("Numeric");
+}
