@@ -1447,6 +1447,23 @@ impl TypeInferenceEngine {
                 if break_types.is_empty() {
                     Ok(BuiltinTypes::void())
                 } else {
+                    // Every `break <value>` in the same `loop` must agree on a
+                    // single type — `loop` is no more permissive than `if`/
+                    // `match`, which push a direct `(then, else)` / arm-vs-arm
+                    // unify constraint (see `Expr::If` above). Without these
+                    // pairwise constraints, `combine_return_types` would brand a
+                    // *nominal union* over mismatched break types and let it leak
+                    // through the binding annotation (e.g. `let r: int = loop {
+                    // break "s"; break 7 }` would compile and bind a string into
+                    // an `int` slot). int!=number never unify here either — a
+                    // mixed `break 1` / `break 2.0` is a compile error, no silent
+                    // coercion. Constrain each break type to the first; the
+                    // constraint solver surfaces the mismatch as a real type
+                    // error rather than a fabricated union.
+                    let head = break_types[0].clone();
+                    for other in break_types.iter().skip(1) {
+                        self.constraints.push((head.clone(), other.clone()));
+                    }
                     self.combine_return_types(&break_types)
                 }
             }

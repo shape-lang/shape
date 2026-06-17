@@ -2675,6 +2675,57 @@ let r: int = loop {
 }
 
 #[test]
+fn test_loop_mismatched_break_values_rejected() {
+    use shape_ast::parser::parse_program;
+
+    // Two `break <value>` of different types in the SAME loop must NOT unify —
+    // `loop` is no more permissive than `if`/`match`, which directly constrain
+    // arm-vs-arm. Before the fix, `combine_return_types` branded a nominal
+    // union over [int, string] WITHOUT pushing the pairwise unify constraint,
+    // so this program compiled and bound a string into an `int` slot (heap
+    // pointer reinterpreted as a scalar of the wrong declared type). With the
+    // pairwise break-type constraints in place this is a real type error.
+    let code = r#"
+var i = 0
+let r: int = loop {
+    i = i + 1
+    if i == 1 { break "this is a string" }
+    break 7
+}
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    assert!(
+        engine.infer_program(&program).is_err(),
+        "mismatched break-value types (string vs int) must not unify into a loop type"
+    );
+}
+
+#[test]
+fn test_loop_mismatched_break_int_number_rejected() {
+    use shape_ast::parser::parse_program;
+
+    // int and number never unify — a `break 1` / `break 2.0` mix is a compile
+    // error, no silent numeric coercion (CLAUDE.md §Type System Rules).
+    let code = r#"
+var i = 0
+let r = loop {
+    i = i + 1
+    if i == 1 { break 1 }
+    break 2.0
+}
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    assert!(
+        engine.infer_program(&program).is_err(),
+        "a mixed int/number break must be rejected (int != number, no coercion)"
+    );
+}
+
+#[test]
 fn test_value_less_loop_stays_void() {
     use shape_ast::ast::TypeAnnotation;
     use shape_ast::parser::parse_program;
