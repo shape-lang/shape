@@ -662,54 +662,83 @@ impl VirtualMachine {
     // ── TryConvertTo* family ─────────────────────────────────────────
     //
     // `TryConvertTo*` is the FALLIBLE cast opcode for `expr as Type?`.
-    // Its result is an `Option<Target>` carried in the null-coded
-    // convention `op_try_unwrap` consumes (`executor/exceptions/mod.rs`):
-    // a bare scalar of the target kind ≡ `Some(v)`; the `(0,
-    // NativeKind::Null)` sentinel ≡ `None`. A successful conversion
-    // produces the scalar (same as the infallible sibling); a
-    // conversion FAILURE produces `None` rather than throwing.
+    // Per the book (`fundamentals/error-handling.mdx` §Fallible: "result
+    // type is `Result<Type, AnyError>`"), its result is a proper
+    // `Result<Target, AnyError>` carrier — `KindedSlot::from_result(
+    // Arc<ResultData>)`, kind `Ptr(HeapKind::Result)`. A successful
+    // conversion produces `Ok(v)` (the converted scalar wrapped in
+    // `ResultData::ok`); a conversion FAILURE produces `Err(AnyError)`
+    // (the conversion-failure message wrapped in `ResultData::err`)
+    // rather than throwing.
     //
-    // This is what makes the compiler's direct fallible path correct:
-    // `compile_expr_type_assertion` emits a bare `TryConvertTo*` for a
-    // direct `string as int?` (no `emit_option_lift_*` wrapping), and
-    // the enclosing `?` (`op_try_unwrap`) then sees the `None` sentinel
-    // on failure and early-returns `Err(AnyError{OPTION_NONE})` to the
-    // caller — never observing a thrown exception. PB5 (v0.3.3
-    // Wave-1-extension, 2026-05-29): before this, the bodies delegated
-    // to the THROWING infallible `op_convert_to_*`, so `(raw as int?)?`
-    // on a non-numeric string threw "cannot convert string '…' to int"
-    // instead of yielding `None` for `?` to propagate.
+    // This is what makes BOTH consumers correct with ONE carrier:
+    //   - `match (raw as int?) { Ok(v) => …, Err(e) => … }` destructures
+    //     the Result enum directly (the bare-scalar / null-sentinel
+    //     pre-fix shape matched NEITHER arm — "No match arm matched");
+    //   - the enclosing `?` (`op_try_unwrap`, `executor/exceptions/
+    //     mod.rs`) sees `Ok(v)` and unwraps, or sees `Err(e)` and
+    //     early-returns the Err carrier to the caller — same Result
+    //     carrier both modes consume, byte-identical.
+    //
+    // Pre-fix history: PB5 (v0.3.3 Wave-1-extension, 2026-05-29) made
+    // the bodies map a conversion failure to a null-coded `None`
+    // sentinel instead of throwing, so `(raw as int?)?` propagated. But
+    // a null/bare carrier is NOT a `Result` enum, so `match` could not
+    // destructure it (Stage B5). The fix below produces the real Result
+    // carrier the book documents; `op_try_unwrap` already handles a
+    // `ResultData` carrier (Ok → unwrap, Err → early-return), so the
+    // `?`-form is preserved.
     //
     // Only a conversion-failure `VMError::RuntimeError` (the `read_as_*`
     // failure modes — unparseable string, non-integer float, unproven
-    // source kind) maps to `None`. Other error variants (notably the
-    // `VMError::NotImplemented` SURFACE arms in `read_as_string` for
-    // still-SURFACE heap kinds) propagate verbatim — masking a SURFACE
-    // gap as `None` is forbidden.
+    // source kind) maps to `Err(AnyError)`. Other error variants
+    // (notably the `VMError::NotImplemented` SURFACE arms in
+    // `read_as_string` for still-SURFACE heap kinds) propagate verbatim
+    // — masking a SURFACE gap as `Err` is forbidden.
 
-    /// Run an infallible `op_convert_to_*` body but map a conversion
-    /// failure (`VMError::RuntimeError`) to the `None` sentinel `(0,
-    /// NativeKind::Null)` instead of throwing — the fallible `as Type?`
-    /// contract. Non-`RuntimeError` variants (SURFACE `NotImplemented`,
-    /// stack underflow, …) propagate unchanged.
+    /// Run an infallible `op_convert_to_*` body but wrap its outcome in
+    /// a `Result<Target, AnyError>` carrier — the fallible `as Type?`
+    /// contract per the book. On success the converted scalar the inner
+    /// body pushed is re-wrapped as `Ok(v)`; a conversion failure
+    /// (`VMError::RuntimeError`) becomes `Err(AnyError{message})`.
+    /// Non-`RuntimeError` variants (SURFACE `NotImplemented`, stack
+    /// underflow, …) propagate unchanged.
     #[inline]
     fn try_convert_or_none(
         &mut self,
         convert: impl FnOnce(&mut Self) -> Result<(), VMError>,
     ) -> Result<(), VMError> {
         match convert(self) {
-            Ok(()) => Ok(()),
-            // Conversion failure → `None`. The infallible body already
-            // popped + dropped its source carrier before the `read_as_*`
-            // error returned, so the stack is balanced; we only push the
-            // null sentinel.
-            Err(VMError::RuntimeError(_)) => self.push_kinded(0, NativeKind::Null),
+            Ok(()) => {
+                // Success: the inner body pushed the converted scalar.
+                // Re-wrap it as `Ok(v)` so the carrier kind is
+                // `Ptr(HeapKind::Result)` and `match`/`?` see a real
+                // Result enum. Transferring the share into the payload
+                // KindedSlot (no clone) keeps refcounting balanced.
+                let value = pop_one_kinded(self)?;
+                let res = Arc::new(shape_value::heap_value::ResultData::ok(value));
+                self.push_kinded_slot(KindedSlot::from_result(res))
+            }
+            // Conversion failure → `Err(AnyError)`. The infallible body
+            // already popped + dropped its source carrier before the
+            // `read_as_*` error returned, so the stack is balanced; we
+            // build a fresh AnyError carrier from the failure message
+            // and wrap it in `ResultData::err`.
+            Err(VMError::RuntimeError(msg)) => {
+                let payload = KindedSlot::from_string_arc(Arc::new(msg));
+                let trace = self.trace_info_full()?;
+                let any_err =
+                    self.build_any_error(payload, None, trace, Some("CONVERSION_FAILED"))?;
+                let res = Arc::new(shape_value::heap_value::ResultData::err(any_err));
+                self.push_kinded_slot(KindedSlot::from_result(res))
+            }
             Err(other) => Err(other),
         }
     }
 
-    /// `TryConvertToInt` (`expr as int?`): `Some(i)` on success, `None`
-    /// on conversion failure. Success path mirrors `op_convert_to_int`.
+    /// `TryConvertToInt` (`expr as int?`): `Ok(i)` on success,
+    /// `Err(AnyError)` on conversion failure. Success path mirrors
+    /// `op_convert_to_int`, then wraps in a `Result` carrier.
     #[inline]
     pub(in crate::executor) fn op_try_convert_to_int(&mut self) -> Result<(), VMError> {
         self.try_convert_or_none(Self::op_convert_to_int)

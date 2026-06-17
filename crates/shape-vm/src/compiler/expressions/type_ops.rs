@@ -583,7 +583,15 @@ impl BytecodeCompiler {
     /// requirement as `emit_option_lift_infallible` — see that method's
     /// doc comment.
     fn emit_option_lift_fallible(&mut self, try_convert_opcode: OpCode) {
-        // Same pattern as infallible but using TryConvertTo*.
+        // `Option<T> as M?` lift. The Some arm unwraps T and runs the
+        // try-convert, which now produces a `Result<M, AnyError>`
+        // carrier directly (book §Fallible) — no re-wrap needed. The
+        // None arm leaves the null-coded None on the stack; for the `?`
+        // consumer that is the early-out None, identical to pre-fix.
+        // (The bare-None `match` edge — source statically Option — has
+        // no test coverage; the direct-primitive `as Type?` contract the
+        // book documents is the covered path and produces a real
+        // Result.)
         // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
         self.emit(Instruction::simple(OpCode::Dup));
         self.emit(Instruction::simple(OpCode::IsNull));
@@ -630,9 +638,12 @@ impl BytecodeCompiler {
         self.emit(Instruction::simple(OpCode::IsOk));
         let jump_skip = self.emit_jump(OpCode::JumpIfFalse, 0);
         self.emit(Instruction::simple(OpCode::UnwrapOk));
+        // `TryConvertTo*` now produces a `Result<M, AnyError>` carrier
+        // directly (book §Fallible), so the Ok payload is converted AND
+        // re-wrapped by the opcode itself — NO `emit_call_ok` here, else
+        // we'd double-wrap to `Ok(Ok(v))`. The Err arm (jump_skip) keeps
+        // the original Err carrier as the early-out value.
         self.emit(Instruction::new(try_convert_opcode, None));
-        // Re-wrap in Ok()
-        self.emit_call_ok()?;
         let jump_end = self.emit_jump(OpCode::Jump, 0);
         self.patch_jump(jump_skip);
         self.patch_jump(jump_end);

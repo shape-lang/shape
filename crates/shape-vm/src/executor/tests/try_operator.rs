@@ -369,26 +369,33 @@ let val = opt as int
 }
 
 // =========================================================================
-// PB5 (v0.3.3 Wave-1-extension, 2026-05-29) — direct fallible cast
-// `expr as Type?` yields None on conversion failure, not a throw.
+// Stage B5 (v0.3.3, 2026-06) — direct fallible cast `expr as Type?`
+// produces a real `Result<Type, AnyError>` carrier the book documents
+// (`fundamentals/error-handling.mdx` §Fallible: "result type is
+// `Result<Type, AnyError>`"), matchable via `Ok(v)` / `Err(e)`.
 //
-// `TryConvertTo*` is the fallible cast opcode. Its result is an
-// `Option<Target>` in the null-coded convention `op_try_unwrap` consumes:
-// a bare scalar ≡ Some, the `(0, NativeKind::Null)` sentinel ≡ None. A
-// successful parse produces Some(v); a FAILED parse produces None — so
-// the enclosing `?` propagates Err rather than the cast throwing. Before
-// PB5 the `op_try_convert_to_*` bodies delegated to the THROWING
-// infallible `op_convert_to_*`, so `(raw as int?)?` on a non-numeric
-// string threw "cannot convert string '…' to int" instead of yielding
-// None for `?` to propagate. Root: `executor/builtins/type_ops.rs`
+// `TryConvertTo*` is the fallible cast opcode. Pre-Stage-B5 (PB5,
+// 2026-05-29) its result was an Option-shaped null-coded sentinel — a
+// bare scalar ≡ Some, the `(0, NativeKind::Null)` sentinel ≡ None — which
+// ONLY the `?` operator (`op_try_unwrap`) understood: a `match` on it hit
+// NEITHER `Ok` nor `Err` ("No match arm matched"). Stage B5 makes the
+// opcode produce `ResultData::ok(v)` on success and
+// `ResultData::err(AnyError)` on conversion failure, so BOTH `match` and
+// `?` consume the SAME Result carrier. The success path still feeds `?`
+// (Ok → unwrap); the failure path still propagates (Err → early-return).
+// Root: `executor/builtins/type_ops.rs` `try_convert_or_none` /
 // `op_try_convert_to_int` family.
 // =========================================================================
 
 #[test]
-fn pb5_direct_string_as_int_fallible_success_yields_some() {
-    // "42" as int? → Some(42): the bare scalar (null-coded Some).
+fn stage_b5_direct_string_as_int_fallible_success_matches_ok_arm() {
+    // "12" as int? → Ok(12); a `match` destructures the Ok arm and binds
+    // the converted value. (Book §Fallible runnable contract.)
     let source = r#"
-"42" as int?
+match ("12" as int?) {
+    Ok(v) => v
+    Err(e) => -1
+}
 "#;
     let mut bytecode = compile_source(source).expect("compile should succeed");
     let mut frame = bytecode
@@ -402,26 +409,41 @@ fn pb5_direct_string_as_int_fallible_success_yields_some() {
     let result = vm.execute(None).expect("execution should succeed").clone();
     assert_eq!(
         result.as_i64(),
-        Some(42),
-        "\"42\" as int? should be Some(42)"
+        Some(12),
+        "\"12\" as int? must be Ok(12) — the match Ok arm binds 12"
     );
 }
 
 #[test]
-fn pb5_direct_string_as_int_fallible_failure_yields_none_not_throw() {
-    // "not-int" as int? → None (null sentinel). Must NOT throw — this is
-    // the PB5 root defect: the fallible cast on a non-numeric string used
-    // to surface VMError::RuntimeError instead of None.
+fn stage_b5_direct_string_as_int_fallible_failure_matches_err_arm() {
+    // "xx" as int? → Err(AnyError); a `match` destructures the Err arm
+    // (NOT a throw, NOT a None that matches neither arm). This is the
+    // Stage B5 root defect: the fallible cast produced an Option-shaped
+    // sentinel that matched neither `Ok` nor `Err`.
     let source = r#"
-("not-int" as int?) == None
+match ("xx" as int?) {
+    Ok(v) => v
+    Err(e) => -1
+}
 "#;
-    let bytecode = compile_source(source).expect("compile should succeed");
+    let mut bytecode = compile_source(source).expect("compile should succeed");
+    let mut frame = bytecode
+        .top_level_frame
+        .clone()
+        .unwrap_or_else(crate::type_tracking::FrameDescriptor::new);
+    frame.return_kind = Some(crate::type_tracking::NativeKind::Int64);
+    bytecode.top_level_frame = Some(frame);
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
-    let raw = vm
-        .execute_raw(None)
-        .expect("execution should succeed (None, not a throw)");
-    assert_eq!(raw, 1u64, "\"not-int\" as int? should be None");
+    let result = vm
+        .execute(None)
+        .expect("execution should succeed (Err, not a throw)")
+        .clone();
+    assert_eq!(
+        result.as_i64(),
+        Some(-1),
+        "\"xx\" as int? must be Err(_) — the match Err arm yields -1"
+    );
 }
 
 #[test]
