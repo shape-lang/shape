@@ -19,6 +19,7 @@ impl TypeInferenceEngine {
         match item {
             Item::Function(func, _) => self.predeclare_function_signature(func),
             Item::ForeignFunction(def, _) => self.predeclare_foreign_function(def),
+            Item::BuiltinFunctionDecl(def, _) => self.predeclare_builtin_function_decl(def),
             Item::StructType(struct_def, _) => self.predeclare_struct_type(struct_def),
             Item::Export(export, _) => {
                 if let shape_ast::ast::ExportItem::Function(func) = &export.item {
@@ -113,6 +114,60 @@ impl TypeInferenceEngine {
 
         let func_type = BuiltinTypes::function(param_types, return_type);
         let scheme = TypeScheme::mono(func_type);
+        self.env.define(&def.name, scheme);
+        Ok(())
+    }
+
+    /// Predeclare a signature-only callable (`pub builtin fn` form). This is the
+    /// inference-tier carrier the bytecode compiler uses to teach the type
+    /// checker about IMPORTED module functions: it has full param + return
+    /// annotations but no body, so the function name resolves at every use
+    /// position (let-initializer, nested arg, call statement) without the
+    /// checker needing to re-infer the dependency module's body.
+    fn predeclare_builtin_function_decl(
+        &mut self,
+        def: &shape_ast::ast::BuiltinFunctionDecl,
+    ) -> TypeResult<()> {
+        self.callable_param_defaults.insert(
+            def.name.clone(),
+            def.params
+                .iter()
+                .map(|p| p.default_value.is_some())
+                .collect(),
+        );
+
+        self.env.push_scope();
+        if let Some(type_params) = &def.type_params {
+            for tp in type_params {
+                let var = TypeVar::new(tp.name().to_string());
+                self.env
+                    .define(tp.name(), TypeScheme::mono(Type::Variable(var)));
+            }
+        }
+
+        let param_types: Vec<Type> = def
+            .params
+            .iter()
+            .map(|p| match p.type_annotation.as_ref() {
+                Some(ann) => self.resolve_type_annotation(ann),
+                None => self.fresh_type_var(),
+            })
+            .collect();
+        let return_type = self.resolve_type_annotation(&def.return_type);
+        self.env.pop_scope();
+
+        let func_type = BuiltinTypes::function(param_types, return_type);
+        // Quantify free type vars (generic imported fn) so each call site
+        // instantiates a fresh copy, matching `predeclare_function_signature`.
+        let scheme = if let Some(type_params) = &def.type_params {
+            let quantified: Vec<_> = type_params
+                .iter()
+                .map(|tp| TypeVar::new(tp.name().to_string()))
+                .collect();
+            TypeScheme::poly(quantified, func_type)
+        } else {
+            self.env.generalize(&func_type)
+        };
         self.env.define(&def.name, scheme);
         Ok(())
     }
@@ -3295,6 +3350,99 @@ mod tests {
         assert!(
             engine.env.lookup("uses_undefined").is_some(),
             "the fn signature is registered by the predeclare pass"
+        );
+    }
+
+    // STAGE Modules: a signature-only `builtin fn` decl is the inference-tier
+    // carrier the bytecode compiler injects for an IMPORTED module function. It
+    // must resolve the name at every use position — in particular in a
+    // let-INITIALIZER, which previously raised `UndefinedFunction` because the
+    // checker only tolerated an undefined call in statement-expression position.
+    #[test]
+    fn imported_signature_resolves_in_let_initializer() {
+        use shape_ast::parser::parse_program;
+        let code = r#"
+            builtin fn imax(a: int, b: int) -> int;
+            let m = imax(3, 9)
+        "#;
+        let program = parse_program(code).expect("should parse");
+        let mut engine = TypeInferenceEngine::new();
+        let (types, errors) = engine.infer_program_best_effort(&program);
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, TypeError::UndefinedFunction(_))),
+            "imported signature must resolve in a let-initializer; got: {:?}",
+            errors
+        );
+        // The let-binding's type is the imported fn's return type.
+        let m_ty = format!("{:?}", types.get("m"));
+        assert!(
+            m_ty.contains("int"),
+            "let m = imax(3, 9) should infer m: int, got: {:?}",
+            types.get("m")
+        );
+    }
+
+    #[test]
+    fn imported_signature_resolves_when_nested() {
+        use shape_ast::parser::parse_program;
+        let code = r#"
+            builtin fn imax(a: int, b: int) -> int;
+            builtin fn imin(a: int, b: int) -> int;
+            let n = imin(imax(2, 5), 7)
+        "#;
+        let program = parse_program(code).expect("should parse");
+        let mut engine = TypeInferenceEngine::new();
+        let (_types, errors) = engine.infer_program_best_effort(&program);
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, TypeError::UndefinedFunction(_))),
+            "nested imported calls must resolve; got: {:?}",
+            errors
+        );
+    }
+
+    // STAGE Modules: an imported `pub type` (modeled here as a local struct
+    // decl, exactly what `build_imported_analysis_items` injects renamed to the
+    // local name) is constructable + field-readable in the importing module.
+    #[test]
+    fn imported_struct_constructs_and_reads_fields() {
+        use shape_ast::parser::parse_program;
+        let code = r#"
+            type Rect { w: int, h: int }
+            let r = Rect { w: 4, h: 6 }
+            let a = r.w
+        "#;
+        let program = parse_program(code).expect("should parse");
+        let mut engine = TypeInferenceEngine::new();
+        let (_types, errors) = engine.infer_program_best_effort(&program);
+        assert!(
+            errors.is_empty(),
+            "imported struct construction + field read must type-check; got: {:?}",
+            errors
+        );
+    }
+
+    // Generic imported signature: each call site instantiates a fresh copy.
+    #[test]
+    fn imported_generic_signature_instantiates_per_callsite() {
+        use shape_ast::parser::parse_program;
+        let code = r#"
+            builtin fn ident<T>(x: T) -> T;
+            let a = ident(3)
+            let b = ident(true)
+        "#;
+        let program = parse_program(code).expect("should parse");
+        let mut engine = TypeInferenceEngine::new();
+        let (_types, errors) = engine.infer_program_best_effort(&program);
+        assert!(
+            !errors
+                .iter()
+                .any(|e| matches!(e, TypeError::UndefinedFunction(_))),
+            "generic imported signature must resolve at each call site; got: {:?}",
+            errors
         );
     }
 }

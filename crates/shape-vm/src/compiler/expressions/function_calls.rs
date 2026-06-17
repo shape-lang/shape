@@ -3901,11 +3901,26 @@ impl BytecodeCompiler {
         // Shape-source module exports (non-native) compile as regular functions.
         // Route namespace calls to direct function dispatch so const-template
         // specialization/comptime handlers run in the same compiler context.
-        let scoped_name = format!("{}::{}", namespace_name, method);
-        if !self.is_native_module_export(namespace_name, method)
-            && self.find_function(&scoped_name).is_some()
-        {
-            return self.compile_expr_function_call(&scoped_name, args, namespace_span);
+        //
+        // The compiled dep-module functions are qualified under the CANONICAL
+        // module path (`calc::numbers::imax`), not the local alias the call site
+        // uses (`numbers::imax`). Resolve the local namespace name to its
+        // canonical path first, then try the canonical-qualified scoped name,
+        // falling back to the literal `namespace::method` form (already-canonical
+        // call sites / nested module scopes).
+        let canonical_scoped_name = format!("{}::{}", canonical_module, method);
+        let local_scoped_name = format!("{}::{}", namespace_name, method);
+        if !self.is_native_module_export(namespace_name, method) {
+            if self.find_function(&canonical_scoped_name).is_some() {
+                return self.compile_expr_function_call(
+                    &canonical_scoped_name,
+                    args,
+                    namespace_span,
+                );
+            }
+            if self.find_function(&local_scoped_name).is_some() {
+                return self.compile_expr_function_call(&local_scoped_name, args, namespace_span);
+            }
         }
 
         if self.is_native_module_export(namespace_name, method)

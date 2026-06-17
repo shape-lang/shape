@@ -1739,6 +1739,123 @@ impl BytecodeCompiler {
         })
     }
 
+    /// STAGE Modules: build synthetic top-level AST items for every NAMED
+    /// import of the root module, so the shared type checker resolves imported
+    /// functions and types at every use position (let-initializer, nested
+    /// argument, type construction), not just in tolerated statement-expression
+    /// position.
+    ///
+    /// Reads the root node's `resolved_imports` straight from the module graph
+    /// (the single source of truth) — the per-compiler import tables are not
+    /// populated until later in `compile()`. For each imported symbol it emits:
+    ///   * Function  → a signature-only `BuiltinFunctionDecl` renamed to the
+    ///     local name (inference predeclares the signature; no body re-check).
+    ///     A function without a return annotation can't be a `BuiltinFunctionDecl`
+    ///     (return type is required), so it falls back to the renamed full
+    ///     function with its real body.
+    ///   * Struct / Enum / TypeAlias → the real definition renamed to the local
+    ///     name, so `LocalName { .. }` construction + field reads type-check.
+    fn build_imported_analysis_items(&self) -> Vec<shape_ast::ast::Item> {
+        use crate::module_graph::ResolvedImport;
+        use shape_ast::ast::{ExportItem, Item};
+
+        let Some(graph) = self.module_graph.as_ref() else {
+            return Vec::new();
+        };
+        let root = graph.node(graph.root_id());
+        let mut items: Vec<Item> = Vec::new();
+
+        for ri in &root.resolved_imports {
+            let ResolvedImport::Named {
+                module_id: dep_id,
+                symbols,
+                ..
+            } = ri
+            else {
+                continue;
+            };
+            let dep_node = graph.node(*dep_id);
+            let Some(dep_ast) = dep_node.ast.as_ref() else {
+                continue;
+            };
+            for sym in symbols {
+                if sym.is_annotation {
+                    continue;
+                }
+                let Some(export_item) =
+                    Self::find_exported_item(dep_ast, &sym.original_name)
+                else {
+                    continue;
+                };
+                match export_item {
+                    ExportItem::Function(func) => {
+                        // Inject a SIGNATURE-ONLY decl (never the body): the body
+                        // may call intrinsics / sibling functions not visible in
+                        // the root's analysis program, which would mis-fire as
+                        // "undefined function". A function without a return
+                        // annotation can't be a signature-only `BuiltinFunctionDecl`
+                        // — skip it (it still resolves at the bytecode-compiler
+                        // layer via `imported_names`, and the checker tolerates an
+                        // undefined call in statement-expression position).
+                        let Some(ret) = func.return_type.clone() else {
+                            continue;
+                        };
+                        let decl = shape_ast::ast::BuiltinFunctionDecl {
+                            name: sym.local_name.clone(),
+                            name_span: shape_ast::ast::Span::DUMMY,
+                            doc_comment: None,
+                            type_params: func.type_params.clone(),
+                            params: func.params.clone(),
+                            return_type: ret,
+                        };
+                        items.push(Item::BuiltinFunctionDecl(decl, shape_ast::ast::Span::DUMMY));
+                    }
+                    ExportItem::Struct(struct_def) => {
+                        let mut renamed = struct_def.clone();
+                        renamed.name = sym.local_name.clone();
+                        items.push(Item::StructType(renamed, shape_ast::ast::Span::DUMMY));
+                    }
+                    ExportItem::Enum(enum_def) => {
+                        let mut renamed = enum_def.clone();
+                        renamed.name = sym.local_name.clone();
+                        items.push(Item::Enum(renamed, shape_ast::ast::Span::DUMMY));
+                    }
+                    ExportItem::TypeAlias(alias) => {
+                        let mut renamed = alias.clone();
+                        renamed.name = sym.local_name.clone();
+                        items.push(Item::TypeAlias(renamed, shape_ast::ast::Span::DUMMY));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        items
+    }
+
+    /// Find the `ExportItem` for a named export in a dependency module's AST.
+    fn find_exported_item<'a>(
+        dep_ast: &'a Program,
+        original_name: &str,
+    ) -> Option<&'a shape_ast::ast::ExportItem> {
+        use shape_ast::ast::{ExportItem, Item};
+        for item in &dep_ast.items {
+            if let Item::Export(export, _) = item {
+                let name = match &export.item {
+                    ExportItem::Function(f) => &f.name,
+                    ExportItem::Struct(s) => &s.name,
+                    ExportItem::Enum(e) => &e.name,
+                    ExportItem::TypeAlias(a) => &a.name,
+                    _ => continue,
+                };
+                if name == original_name {
+                    return Some(&export.item);
+                }
+            }
+        }
+        None
+    }
+
     /// Compile a program to bytecode
     pub fn compile(mut self, program: &Program) -> Result<BytecodeProgram> {
         // First: desugar the program (converts FromQuery to method chains, etc.)
@@ -1766,8 +1883,25 @@ impl BytecodeCompiler {
         // rejection).
         self.closure_callsite_param_hints =
             crate::compiler::expressions::closures::collect_closure_callsite_param_hints(&program);
-        let analysis_program =
+        let mut analysis_program =
             shape_ast::transform::augment_program_with_generated_extends(&program);
+
+        // STAGE Modules: teach the type checker (and the reference-model
+        // inference) about IMPORTED module symbols. The module graph is the
+        // single source of truth for `from m use { f, T }` resolution, but the
+        // root's import tables are not registered until later in `compile()`
+        // (after the analyzer runs). So read the root node's resolved imports
+        // straight from the graph and prepend signature-only function decls +
+        // renamed type defs for every named-imported symbol. Without this an
+        // imported call only resolves in statement-expression position (which
+        // the checker tolerates) and fails in a let-initializer / nested arg,
+        // and an imported `pub type` cannot be constructed.
+        let imported_items = self.build_imported_analysis_items();
+        if !imported_items.is_empty() {
+            let mut merged = imported_items;
+            merged.extend(analysis_program.items.drain(..));
+            analysis_program.items = merged;
+        }
 
         // Run the shared analyzer and surface diagnostics that are currently
         // proven reliable in the compiler execution path.
