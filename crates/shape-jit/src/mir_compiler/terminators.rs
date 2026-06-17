@@ -39,6 +39,58 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         found
     }
 
+    /// `true` when `method_name` is a string method whose result is itself a
+    /// string (heap `Arc<String>`), as opposed to a scalar (number / bool /
+    /// int). Used by the STAGE-M1 jit-string-method-return-carrier deopt gate
+    /// in `compile_terminator`'s method-call trampoline path.
+    ///
+    /// The set mirrors the `box_string` arms of
+    /// `crates/shape-jit/src/ffi/call_method/string.rs::call_string_method`
+    /// (the trampoline that runs on a proven-`NativeKind::String` receiver).
+    /// `split` / `chars` produce array carriers (their string.rs arms are
+    /// `todo!()` / SURFACE today) — included so a `String`-receiver call to
+    /// them also deopts cleanly to the interpreter rather than reaching an FFI
+    /// panic. Scalar-returning string methods (`length`/`len`/`contains`/
+    /// `includes`/`startsWith`/`endsWith`/`indexOf`/`lastIndexOf`/`toNumber`/
+    /// `toBool`/`isEmpty`) are deliberately ABSENT — they carry no heap
+    /// pointer, so the trampoline's `box_number`/`TAG_BOOL_*` result matches
+    /// the destination's scalar kind and JIT compilation proceeds.
+    ///
+    /// Both camelCase and snake_case aliases are listed (the checker + UFCS
+    /// register both per commit 67d71387 `register snake_case string-method
+    /// aliases`).
+    pub(crate) fn string_method_returns_string(method_name: &str) -> bool {
+        matches!(
+            method_name,
+            "toUpperCase"
+                | "to_upper_case"
+                | "toLowerCase"
+                | "to_lower_case"
+                | "trim"
+                | "trimStart"
+                | "trim_start"
+                | "trimEnd"
+                | "trim_end"
+                | "replace"
+                | "replaceAll"
+                | "replace_all"
+                | "charAt"
+                | "char_at"
+                | "substring"
+                | "slice"
+                | "concat"
+                | "repeat"
+                | "padStart"
+                | "pad_start"
+                | "padEnd"
+                | "pad_end"
+                // array-carrier results — deopt rather than hit the
+                // `todo!()` / SURFACE FFI arms.
+                | "split"
+                | "chars"
+        )
+    }
+
     /// Compile a MIR terminator.
     pub(crate) fn compile_terminator(&mut self, terminator: &Terminator) -> Result<(), String> {
         match &terminator.kind {
@@ -365,6 +417,80 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 //   [receiver, arg0, ..., method_name_string, arg_count_number]
                 // then call jit_call_method(ctx, total_count).
                 if let Operand::Constant(MirConstant::Method(method_name)) = func {
+                    // ── STAGE-M1 jit-string-method-return-carrier deopt ──────
+                    // CARRIER-SHAPE MISMATCH (CONFIRMED machine-killer — the
+                    // 804GiB/ASCII-as-pointer heap corruption). When the proven
+                    // receiver kind is `NativeKind::String` and the method
+                    // RETURNS a string, `jit_call_method` (the VM trampoline)
+                    // builds the result via `ffi/call_method/string.rs::
+                    // box_string`, which returns a NaN-boxed `unified_box(
+                    // HK_STRING, Arc<String>)` (TAG_HEAP mantissa-set pointer).
+                    // But every §2.7.5 `NativeKind::String` consumer in the JIT
+                    // (the eventual `acc`/return slot's `jit_arc_string_retain` /
+                    // `_release`, `release_old_value_if_heap` →
+                    // `release_func_for_place`, the VM-trampoline `KindedSlot::
+                    // Drop` for `NativeKind::String`) decodes the carrier as
+                    // `Arc::into_raw(Arc<String>) as u64` — a RAW Arc pointer,
+                    // NOT a NaN-box. The NaN-boxed result propagates out of this
+                    // (possibly inlined / value-returning) function into a real
+                    // `String`-kinded slot, where `Arc::decrement_strong_count(
+                    // boxed_bits as *const String)` dereferences the mantissa-set
+                    // bits as an Arc control block at offset -16 → wild pointer →
+                    // the huge-alloc / double-free / SIGSEGV (under unlimited
+                    // ulimit, the 804GiB OOM that hangs the box).
+                    //
+                    // The local destination slot's `NativeKind` is often
+                    // unproven (`LocalTypeInfo::Unknown` implicit-return /
+                    // temporary slot → `RefcountDisposition::Skip`), so a
+                    // destination-kind gate does NOT catch it — the corruption is
+                    // realized one frame later. The PROVEN, fabrication-free
+                    // signal available HERE is the receiver's `NativeKind::String`
+                    // (read from the §2.7.5 slot-kind track, not synthesized from
+                    // bits) combined with the statically-known string-RETURNING
+                    // method-name set (`string.rs::call_string_method`'s
+                    // `box_string` arms). Scalar-returning string methods
+                    // (`length`/`len`/`contains`/`startsWith`/`indexOf`/
+                    // `toNumber`/`toBool`/`isEmpty`/...) return Int/Float/Bool —
+                    // no heap carrier, no mismatch — and keep JITing.
+                    //
+                    // There is no NaN-box→raw-Arc carrier conversion wired at this
+                    // trampoline return site (adding a bit-reinterpret /
+                    // Convert<X>To<Y> / carrier rename would be a CLAUDE.md
+                    // Forbidden pattern). Per "surface-and-stop, not force": fail
+                    // JIT compilation (whole-function Err → bytecode-interpreter
+                    // fallthrough, whose String-arm method dispatch is correct —
+                    // verified `--mode vm` returns the right value). NO
+                    // bit-reinterpret, NO carrier rename, NO Bool-default.
+                    let receiver_is_string = args
+                        .first()
+                        .map(|recv| {
+                            matches!(
+                                self.operand_slot_kind(recv),
+                                Some(shape_value::NativeKind::String)
+                            )
+                        })
+                        .unwrap_or(false);
+                    if receiver_is_string && Self::string_method_returns_string(method_name) {
+                        return Err(format!(
+                            "MirToIR: string method `.{}(...)` on a proven \
+                             `NativeKind::String` receiver returns a string, but \
+                             the `jit_call_method` VM trampoline produces a \
+                             NaN-boxed `box_string` carrier that does NOT match \
+                             the §2.7.5 `NativeKind::String` raw-Arc retain/release \
+                             contract (`Arc::into_raw(Arc<String>) as u64`). The \
+                             mis-carried result propagates into a `String`-kinded \
+                             slot whose `Arc::decrement_strong_count` then \
+                             dereferences NaN-box bits → heap corruption / SIGSEGV \
+                             (the 804GiB machine-killer). No NaN-box→raw-Arc \
+                             conversion is wired here; surface-and-stop per \
+                             CLAUDE.md \"surface-and-stop, not force\" → \
+                             whole-function deopt to the bytecode interpreter \
+                             (correct String-arm dispatch). \
+                             STAGE-M1 jit-string-method-return-carrier.",
+                            method_name
+                        ));
+                    }
+
                     let stack_base_offset = crate::context::STACK_OFFSET as i32;
                     let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
 

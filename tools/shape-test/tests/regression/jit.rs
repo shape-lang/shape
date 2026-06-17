@@ -719,3 +719,95 @@ call_it(get_greeting)
         other => panic!("Expected String(\"hello\"), got {:?}", other),
     }
 }
+
+/// STAGE-M1 jit-string-method-return-carrier: a string-RETURNING string
+/// method (`slice`/`toUpperCase`/`trim`/`replace`/...) inside a hot
+/// (tier-up >= 100 calls) JIT-compiled function used to corrupt the heap —
+/// the VM trampoline's `box_string` NaN-boxed carrier was stored into a
+/// `NativeKind::String` slot whose retain/release contract is raw
+/// `Arc::into_raw(Arc<String>)`, so the next iteration's
+/// `Arc::decrement_strong_count(boxed_bits as *const String)` dereferenced
+/// mantissa-set bits → SIGSEGV / 804GiB huge-alloc (the machine-killer).
+///
+/// The fix (terminators.rs `string_method_returns_string` gate) makes the
+/// JIT surface-and-stop: a method call on a proven-`NativeKind::String`
+/// receiver returning a string fails JIT compilation, and the function
+/// deopts to the bytecode interpreter (whose String-arm dispatch is
+/// correct). The deopt is transparent through `JITExecutor`, so these
+/// programs must return the byte-identical interpreter result with NO
+/// corruption.
+#[test]
+fn jit_string_returning_method_in_hot_fn_deopts_cleanly() {
+    // `slice` — the confirmed repro shape. A user fn whose body is a
+    // string-returning string method, called in a hot loop.
+    let result = jit_eval(
+        r#"
+fn firstchar(s: string) -> string { s.slice(0, 1) }
+let mut acc = ""
+let mut i = 0
+while i < 200 { acc = firstchar("hello"); i = i + 1 }
+acc
+"#,
+    );
+    match result {
+        WireValue::String(s) => assert_eq!(s, "h"),
+        other => panic!("Expected String(\"h\"), got {:?}", other),
+    }
+}
+
+#[test]
+fn jit_string_returning_method_siblings_deopt_cleanly() {
+    // Sibling string-returning methods in the same hot-fn shape — each must
+    // deopt cleanly and produce the correct value (VM == JIT), not segfault.
+    let cases: &[(&str, &str)] = &[
+        ("s.toUpperCase()", "HELLO"),
+        ("s.toLowerCase()", "hello"),
+        ("s.trim()", "hello"),
+        ("s.trimStart()", "hello"),
+        ("s.trimEnd()", "hello"),
+        ("s.substring(0, 2)", "he"),
+        ("s.replace(\"l\", \"L\")", "heLLo"),
+        ("s.repeat(2)", "hellohello"),
+        ("s.padStart(7, \"-\")", "--hello"),
+        ("s.padEnd(7, \"-\")", "hello--"),
+    ];
+    for (call, expected) in cases {
+        let src = format!(
+            r#"
+fn hf(s: string) -> string {{ {call} }}
+let mut acc = ""
+let mut i = 0
+while i < 200 {{ acc = hf("hello"); i = i + 1 }}
+acc
+"#,
+        );
+        match jit_eval(&src) {
+            WireValue::String(s) => assert_eq!(
+                &s, expected,
+                "string method `{call}` JIT result mismatch"
+            ),
+            other => panic!("`{call}`: expected String(\"{expected}\"), got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn jit_hot_numeric_fn_still_jits_no_over_deopt() {
+    // The string-method deopt gate must NOT over-deopt non-string hot
+    // functions — a pure numeric kernel still JITs and is correct.
+    // last iteration i==199: sq(199) = 199*199 + 199 - 1 = 39799
+    let result = jit_eval(
+        r#"
+fn sq(n: int) -> int { n * n + n - 1 }
+let mut acc = 0
+let mut i = 0
+while i < 200 { acc = sq(i); i = i + 1 }
+acc
+"#,
+    );
+    match result {
+        WireValue::Integer(n) | WireValue::I64(n) => assert_eq!(n, 39799),
+        WireValue::Number(n) => assert!((n - 39799.0).abs() < 1e-6, "got {n}"),
+        other => panic!("Expected Integer(39799), got {other:?}"),
+    }
+}
