@@ -51,8 +51,6 @@ impl ProgramExecutor for JITExecutor {
         engine: &mut ShapeEngine,
         program: &Program,
     ) -> Result<shape_runtime::engine::ProgramExecutorResult> {
-        use shape_vm::BytecodeCompiler;
-
         // REPL cross-cell persistence (WS-11): when the engine is a REPL
         // (`init_repl` enabled persistence), execute the cell on the
         // bytecode interpreter. Cross-cell `let`/`var` bindings and
@@ -87,57 +85,34 @@ impl ProgramExecutor for JITExecutor {
             tracing::Level::INFO,
         );
 
-        // Capture source text before getting runtime reference (for error messages)
-        let source_for_compilation = engine.current_source().map(|s| s.to_string());
-
-        // Compile to bytecode first to check JIT compatibility
-        let runtime = engine.get_runtime_mut();
-
-        // Get known module bindings — prefer persistent context, fallback to precompiled names
-        let known_bindings: Vec<String> = if let Some(ctx) = runtime.persistent_context() {
-            let names = ctx.root_scope_binding_names();
-            if names.is_empty() {
-                shape_vm::stdlib::core_binding_names(runtime)
-            } else {
-                names
-            }
-        } else {
-            shape_vm::stdlib::core_binding_names(runtime)
-        };
-
-        // Build module graph and compile via graph pipeline.
+        // STAGE-modules JIT-divergence fix: build the bytecode through the
+        // SAME configured pipeline the VM (`--mode vm`) uses, by delegating to
+        // `BytecodeExecutor::compile_program_for_inspection`
+        // (→ `compile_program_impl`). That path consumes `self.bytecode_executor`'s
+        // CONFIGURED module loader (`set_module_loader` wired by the CLI's
+        // `wire_vm_executor_module_loading`), its `dependency_paths`,
+        // `native_resolution_context`, and `root_package_key` — exactly the
+        // project / search-root context that lets `from mathx::stats use { .. }`
+        // resolve when the script lives in a `shape.toml` project run from
+        // outside the project directory.
         //
-        // W9: pass `self.bytecode_executor.extensions()` so the graph build
-        // can hybridize native extension modules with their Shape overlay
-        // (e.g. `std::core::remote`'s `pub annotation remote(addr)`). Without
-        // the extensions list, the graph would skip the hybridization probe
-        // and the namespace import path would lose annotation visibility.
-        let extensions = self.bytecode_executor.extensions().to_vec();
-        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
-        let (graph, stdlib_names, prelude_imports) =
-            shape_vm::module_resolution::build_graph_and_stdlib_names(
-                program,
-                &mut loader,
-                &extensions,
-            )
-            .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
-                message: format!("Module graph construction failed: {}", e),
-                location: None,
-            })?;
-
+        // The previous body built the module graph with a FRESH, unconfigured
+        // `ModuleLoader::new()`, so project-mode imports only resolved when the
+        // process CWD happened to be the project root. Outside that CWD the
+        // graph build / type-check raised "Undefined function" at compile time
+        // and `execute_program` returned the error BEFORE the W12 fall-through
+        // (line below) could run the program under the interpreter — a hard
+        // VM != JIT divergence (`small/main.shape`, `large/main.shape`).
+        //
+        // Delegating produces byte-identical bytecode to `--mode vm` (same
+        // loader, same `compile_with_graph_and_prelude`, same imported-symbol
+        // injection), so the JIT-compatibility probe + W12 interpreter
+        // fall-through both observe the SAME program the VM does. No new dynamic
+        // path; no fresh-loader divergence.
         let bytecode_compile_start = Instant::now();
-        let mut compiler = if extensions.is_empty() {
-            BytecodeCompiler::new()
-        } else {
-            BytecodeCompiler::new().with_extensions(extensions.clone())
-        };
-        compiler.stdlib_function_names = stdlib_names;
-        compiler.register_known_bindings(&known_bindings);
-        if let Some(source) = &source_for_compilation {
-            compiler.set_source(source);
-        }
-        let bytecode = compiler
-            .compile_with_graph_and_prelude(program, graph, &prelude_imports)
+        let bytecode = self
+            .bytecode_executor
+            .compile_program_for_inspection(engine, program)
             .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
                 message: format!("Bytecode compilation failed: {}", e),
                 location: None,
