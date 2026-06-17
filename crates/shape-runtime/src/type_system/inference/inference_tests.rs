@@ -2593,3 +2593,137 @@ let r = apply2(mulf, 2.0, 3.0)
         other => panic!("expected function type for apply2, got {:?}", other),
     }
 }
+
+// control-flow.mdx "Break with Value": a `loop { ... break <v> }` used as a
+// value is an expression whose type is the unified type of all `break <v>`
+// values. A value-less `loop { break }` stays Void.
+
+#[test]
+fn test_loop_break_value_types_as_unified_break_type() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    // `let r = loop { i = i + 1; if i == 5 { break i * 10 } }` — r must be int,
+    // NOT Void (the pre-fix bug typed the whole loop Void, making r unusable in
+    // any typed context).
+    let code = r#"
+var i = 0
+let r = loop {
+    i = i + 1
+    if i == 5 { break i * 10 }
+}
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let types = engine
+        .infer_program(&program)
+        .expect("inference should succeed");
+
+    let r_type = types.get("r").expect("r should be inferred");
+    let ann = r_type
+        .to_annotation()
+        .expect("r should convert to annotation");
+    assert!(
+        matches!(&ann, TypeAnnotation::Basic(name) if name == "int"),
+        "loop-with-break-value `r` must type as the break value's type (int), got {:?}",
+        ann
+    );
+}
+
+#[test]
+fn test_loop_break_value_checks_against_let_annotation() {
+    use shape_ast::parser::parse_program;
+
+    // `let r: int = loop { ... break 7 }` must type-check (the break value
+    // unifies with the declared annotation).
+    let code = r#"
+var i = 0
+let r: int = loop {
+    i = i + 1
+    if i == 3 { break 7 }
+}
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    engine
+        .infer_program(&program)
+        .expect("loop break-value should satisfy the `let r: int` annotation");
+}
+
+#[test]
+fn test_loop_break_value_string_rejected_against_int_annotation() {
+    use shape_ast::parser::parse_program;
+
+    // `break "hello"` against `let r: int` is a genuine type error — int and
+    // string never unify (no silent coercion).
+    let code = r#"
+var i = 0
+let r: int = loop {
+    i = i + 1
+    if i == 3 { break "hello" }
+}
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    assert!(
+        engine.infer_program(&program).is_err(),
+        "a string break value must not satisfy a `let r: int` annotation"
+    );
+}
+
+#[test]
+fn test_value_less_loop_stays_void() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    // A `loop { break }` with no value-carrying break never produces a value:
+    // it stays Void.
+    let code = r#"
+var i = 0
+let r = loop {
+    i = i + 1
+    if i == 3 { break }
+}
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let types = engine
+        .infer_program(&program)
+        .expect("inference should succeed");
+
+    let r_type = types.get("r").expect("r should be inferred");
+    let ann = r_type
+        .to_annotation()
+        .expect("r should convert to annotation");
+    assert!(
+        matches!(&ann, TypeAnnotation::Void),
+        "a value-less loop must stay Void, got {:?}",
+        ann
+    );
+}
+
+#[test]
+fn test_if_else_semicolon_discarded_tail_type_checks() {
+    use shape_ast::parser::parse_program;
+
+    // `;`-discard at an if/else branch tail: a trailing `expr;` in each arm
+    // discards to Unit, so the arm types do NOT have to unify into the
+    // if-expression type. Here the two arms call fns of DIFFERENT types
+    // (int vs string); the trailing `;` must keep the `if` a Unit statement.
+    let code = r#"
+fn f() -> int { 1 }
+fn g() -> string { "two" }
+let x = 5
+if x > 0 { f(); } else { g(); }
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    engine
+        .infer_program(&program)
+        .expect("`;`-discarded if/else branch tails must type-check (arms discard to Unit)");
+}

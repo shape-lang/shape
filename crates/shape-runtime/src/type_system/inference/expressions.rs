@@ -1370,8 +1370,13 @@ impl TypeInferenceEngine {
                 let cond_type = self.infer_expr(&while_expr.condition)?;
                 self.constraints.push((cond_type, BuiltinTypes::boolean()));
 
-                self.infer_expr(&while_expr.body)?;
-                // While loops return void (or the break value if any)
+                // Barrier scope: catches `break <value>` so it does not leak
+                // into an enclosing `loop`'s break-type collection. `while`
+                // itself is always Void.
+                self.push_break_scope();
+                let body_result = self.infer_expr(&while_expr.body);
+                self.pop_break_scope();
+                body_result?;
                 Ok(BuiltinTypes::void())
             }
 
@@ -1416,18 +1421,34 @@ impl TypeInferenceEngine {
                         .define(&name, TypeScheme::mono(element_type.clone()));
                 }
 
-                self.infer_expr(&for_expr.body)?;
+                // Barrier scope: catches `break <value>` so it does not leak
+                // into an enclosing `loop`'s break-type collection. `for`
+                // itself is always Void.
+                self.push_break_scope();
+                let body_result = self.infer_expr(&for_expr.body);
+                self.pop_break_scope();
                 self.env.pop_scope();
+                body_result?;
 
                 // For expressions return void (or collected values if used as expression)
                 Ok(BuiltinTypes::void())
             }
 
-            // Loop expression
+            // Loop expression — `loop { ... break v }` is an expression whose
+            // type is the unified type of every `break <value>` it can take
+            // (control-flow.mdx "Break with Value"). A `loop` with no
+            // value-carrying break stays Void (it never produces a value).
             Expr::Loop(loop_expr, _) => {
-                self.infer_expr(&loop_expr.body)?;
-                // Loop returns void (or the break value)
-                Ok(BuiltinTypes::void())
+                self.push_break_scope();
+                let body_result = self.infer_expr(&loop_expr.body);
+                let break_types = self.pop_break_scope();
+                body_result?;
+
+                if break_types.is_empty() {
+                    Ok(BuiltinTypes::void())
+                } else {
+                    self.combine_return_types(&break_types)
+                }
             }
 
             // Let expression
@@ -1542,7 +1563,19 @@ impl TypeInferenceEngine {
                             self.infer_assignment(assign, *block_span)?;
                             BuiltinTypes::void()
                         }
-                        shape_ast::ast::BlockItem::Statement(stmt) => self.infer_statement(stmt)?,
+                        // A `BlockItem::Statement` is a non-tail / `;`-terminated
+                        // item — the parser only leaves the trailing value as
+                        // `BlockItem::Expression` (and promotes a trailing
+                        // value-`if`/`match` to one). A statement therefore
+                        // contributes NOTHING to the block's value: it discards
+                        // to Unit. This is what honors `;`-discard at an if/else
+                        // branch tail (`if c { f(); } else { g(); }` is Unit, not
+                        // forced into f()/g()'s type). We still walk the
+                        // statement for its constraints / implicit-return effects.
+                        shape_ast::ast::BlockItem::Statement(stmt) => {
+                            self.infer_statement(stmt)?;
+                            BuiltinTypes::void()
+                        }
                         shape_ast::ast::BlockItem::Expression(expr) => self.infer_expr(expr)?,
                     };
                 }
@@ -1702,10 +1735,15 @@ impl TypeInferenceEngine {
             // Control flow - these return void or break/continue semantics
             Expr::Break(value, _) => {
                 if let Some(val) = value {
-                    self.infer_expr(val)
-                } else {
-                    Ok(BuiltinTypes::void())
+                    let val_type = self.infer_expr(val)?;
+                    // Record into the innermost enclosing loop construct so a
+                    // `loop` can collect+unify its break-value types. `for`/
+                    // `while` install barrier scopes that absorb (and discard)
+                    // the value. `break` itself diverges, so it yields the
+                    // never-type (void) as its own expression value.
+                    self.record_break_type(val_type);
                 }
+                Ok(BuiltinTypes::void())
             }
 
             Expr::Continue(_) => Ok(BuiltinTypes::void()),

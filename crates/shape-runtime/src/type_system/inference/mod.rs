@@ -194,6 +194,11 @@ pub struct TypeInferenceEngine {
     /// Stack of expression-statement result types collected for callable
     /// bodies. Used to infer implicit return unions for expression-style code.
     pub(crate) implicit_return_scopes: Vec<Vec<Type>>,
+    /// Stack of `break <value>` types collected for the currently-inferred
+    /// `loop` bodies. A `loop` with at least one value-carrying break is an
+    /// expression whose type is the unified type of all break values
+    /// (control-flow.mdx "Break with Value"). A value-less `loop` stays Void.
+    pub(crate) break_scopes: Vec<Vec<Type>>,
     /// Numeric-conversion §4 literal adoption (return context). Stack of the
     /// currently-enclosing callables' DECLARED return types (one entry pushed
     /// per callable body with an explicit numeric `-> T` annotation; `None`
@@ -284,6 +289,7 @@ impl TypeInferenceEngine {
             return_var_aliases: HashMap::new(),
             return_scopes: Vec::new(),
             implicit_return_scopes: Vec::new(),
+            break_scopes: Vec::new(),
             expected_return_types: Vec::new(),
             struct_type_defs: HashMap::new(),
             callsite_type_args: HashMap::new(),
@@ -380,6 +386,27 @@ impl TypeInferenceEngine {
     pub(crate) fn record_implicit_return_type(&mut self, ty: Type) {
         if let Some(scope_returns) = self.implicit_return_scopes.last_mut() {
             scope_returns.push(ty);
+        }
+    }
+
+    pub(crate) fn push_break_scope(&mut self) {
+        self.break_scopes.push(Vec::new());
+    }
+
+    pub(crate) fn pop_break_scope(&mut self) -> Vec<Type> {
+        self.break_scopes.pop().unwrap_or_default()
+    }
+
+    /// Record a `break <value>` type into the innermost enclosing `loop` scope.
+    /// Returns `true` if a loop scope was present to record into (i.e. the break
+    /// targets a `loop`, not a `for`/`while`), letting the caller distinguish a
+    /// loop-break from other break sites.
+    pub(crate) fn record_break_type(&mut self, ty: Type) -> bool {
+        if let Some(scope_breaks) = self.break_scopes.last_mut() {
+            scope_breaks.push(ty);
+            true
+        } else {
+            false
         }
     }
 
