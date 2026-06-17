@@ -46,6 +46,7 @@ mod pop_mutation;
 mod priority_queue_ops;
 mod seam_c_for_loop;
 mod set_ops;
+mod string_method_aliases;
 mod soak_tests;
 mod table_iteration;
 mod try_operator;

@@ -549,6 +549,11 @@ impl MethodTable {
             ("isEmpty", vec![], BuiltinTypes::boolean()),
             ("toLowerCase", vec![], BuiltinTypes::string()),
             ("toUpperCase", vec![], BuiltinTypes::string()),
+            // snake_case aliases documented in book strings.mdx §Methods.
+            // Resolve to the same handlers as their camelCase equivalents
+            // (PHF registry: method_registry.rs:910-920).
+            ("to_lower_case", vec![], BuiltinTypes::string()),
+            ("to_upper_case", vec![], BuiltinTypes::string()),
             ("trim", vec![], BuiltinTypes::string()),
             (
                 "split",
@@ -579,6 +584,9 @@ impl MethodTable {
             ),
             ("trimStart", vec![], BuiltinTypes::string()),
             ("trimEnd", vec![], BuiltinTypes::string()),
+            // snake_case aliases (book strings.mdx §Methods).
+            ("trim_start", vec![], BuiltinTypes::string()),
+            ("trim_end", vec![], BuiltinTypes::string()),
             ("toNumber", vec![], BuiltinTypes::number()),
             ("toBool", vec![], BuiltinTypes::boolean()),
             (

@@ -4790,6 +4790,8 @@ impl BytecodeCompiler {
             "toUpperCase" | "toLowerCase" | "trim" | "contains" | "startsWith"
             | "endsWith" | "split" | "replace" | "substring" | "charAt"
             | "padStart" | "padEnd" | "repeat" | "toString"
+            // snake_case aliases (book strings.mdx §Methods)
+            | "to_upper_case" | "to_lower_case" | "trim_start" | "trim_end"
         )
         // Object methods handled by handle_object_method
         || matches!(method, "keys" | "values" | "has" | "get" | "set" | "len")
