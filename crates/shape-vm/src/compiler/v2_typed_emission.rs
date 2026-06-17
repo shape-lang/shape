@@ -291,6 +291,19 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
         // HeapKind dispatch (clone_with_kind / drop_with_kind / ...) handles
         // the carrier uniformly without per-instantiation discriminator.
         ConcreteType::Struct(_) => Some(TypedArrayKind::TypedObject),
+        // STAGE C2 (2026-06-17): enum-element arrays reuse the W16.2-A
+        // TypedObject carrier. Enum values are TypedObjects at runtime
+        // (`compile_expr_enum_constructor` emits `NewTypedObject` carrying
+        // `NativeKind::Ptr(HeapKind::TypedObject)` for unit / tuple-payload /
+        // struct-payload variants alike), so an enum element's slot-bits kind
+        // is identical to a struct's. The 4-table HeapKind dispatch handles the
+        // carrier uniformly; no new HeapKind / ELEM_TYPE discriminant. This arm
+        // is what lets the `Vec.filter` body's `result.push(item)` accumulator
+        // resolve its element kind when `item: SomeEnum` (the R3-subcase shape
+        // for enum-element arrays). Per ADR-006 §2.7.5 the producer-side proof
+        // is `ConcreteType::Enum`; the enum-vs-struct distinction is irrelevant
+        // to the runtime carrier.
+        ConcreteType::Enum(_) => Some(TypedArrayKind::TypedObject),
         _ => None,
     }
 }
@@ -815,6 +828,26 @@ impl super::BytecodeCompiler {
             .map(|s| s.as_str())
             .unwrap_or(inner_name);
         if self.struct_types.contains_key(resolved) || self.struct_types.contains_key(inner_name) {
+            return Some(TypedArrayKind::TypedObject);
+        }
+        // STAGE C2 (2026-06-17): `Array<Color>` where `Color` is a registered
+        // enum. Enum values are TypedObjects at runtime — `compile_expr_enum_constructor`
+        // emits `NewTypedObject` (collections.rs:1569) carrying
+        // `NativeKind::Ptr(HeapKind::TypedObject)` for unit / tuple-payload /
+        // struct-payload variants alike. So an enum-element array reuses the
+        // W16.2-A `TypedArray<*const TypedObjectStorage>` carrier — no new
+        // HeapKind, no new ELEM_TYPE discriminant. The producer-side proof is
+        // the explicit annotation + the registered enum schema (ADR-006
+        // §2.7.5 stamp-at-compile-time); the enum-vs-struct distinction is
+        // irrelevant to the runtime carrier (both are TypedObject pointers).
+        let is_enum = self
+            .type_tracker
+            .schema_registry()
+            .get(resolved)
+            .or_else(|| self.type_tracker.schema_registry().get(inner_name))
+            .and_then(|s| s.get_enum_info())
+            .is_some();
+        if is_enum {
             Some(TypedArrayKind::TypedObject)
         } else {
             None
@@ -1345,10 +1378,20 @@ mod tests {
     }
 
     #[test]
-    fn test_enum_falls_back_to_legacy() {
+    fn test_enum_maps_to_typed_object() {
+        // STAGE C2 (2026-06-17): enum elements reuse the W16.2-A TypedObject
+        // carrier — enum values are TypedObjects at runtime (the enum
+        // constructor emits `NewTypedObject` carrying
+        // `NativeKind::Ptr(HeapKind::TypedObject)`). Pre-C2 this returned
+        // `None`, which surfaced "cannot infer the element type of this array
+        // literal" for `let xs: Array<Color> = [...]`.
         assert_eq!(
             should_use_typed_array(&ConcreteType::placeholder_enum(EnumLayoutId(0))),
-            None
+            Some(TypedArrayKind::TypedObject)
+        );
+        assert_eq!(
+            should_use_typed_array(&ConcreteType::placeholder_enum(EnumLayoutId(7))),
+            Some(TypedArrayKind::TypedObject)
         );
     }
 

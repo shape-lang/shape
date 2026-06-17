@@ -636,6 +636,138 @@ fn test_typed_object_array_struct_with_number_field() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// STAGE C2 op_new_array-enum-element (2026-06-17)
+//
+// `Array<EnumType>` was unconstructable even with an explicit annotation:
+// the literal surfaced "cannot infer the element type of this array
+// literal" because the annotation resolver (`resolve_typed_array_kind_from_
+// annotation`) only recognized registered STRUCT inner types, and the
+// inference helper (`should_use_typed_array`) had no `ConcreteType::Enum`
+// arm. Enum values are TypedObjects at runtime — `compile_expr_enum_
+// constructor` (collections.rs) emits `NewTypedObject` carrying
+// `NativeKind::Ptr(HeapKind::TypedObject)` for unit / tuple-payload /
+// struct-payload variants alike. So an enum-element array REUSES the
+// W16.2-A `TypedArray<*const TypedObjectStorage>` carrier — no new HeapKind,
+// no new ELEM_TYPE discriminant (V3-S5 element-carrier binders: per-T
+// monomorphization only). Per ADR-006 §2.7.5 the producer-side proof is the
+// explicit annotation + the registered enum schema; the enum-vs-struct
+// distinction is irrelevant to the runtime carrier.
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_enum_array_unit_variant_iterate_match() {
+    // Unit-variant array: construct, iterate, match each element. The match
+    // returns a per-variant int so a wrong element / carrier mismatch surfaces.
+    let result = eval(
+        "enum Color { Red, Green, Blue }\n\
+         let colors: Array<Color> = [Color::Red, Color::Green, Color::Blue]\n\
+         let mut sum = 0\n\
+         for c in colors {\n\
+           sum = sum + match c { Color::Red => 1, Color::Green => 2, Color::Blue => 3 }\n\
+         }\n\
+         sum",
+    );
+    assert_eq!(result.as_i64(), Some(6));
+}
+
+#[test]
+fn test_enum_array_tuple_payload_variant_match() {
+    // Tuple-payload-variant array: each element carries a payload destructured
+    // in the match. `Shape::Circle(2.0)` / `Shape::Rect(3.0, 4.0)`.
+    let result = eval(
+        "enum Shape { Circle(number), Rect(number, number) }\n\
+         let shapes: Array<Shape> = [Shape::Circle(2.0), Shape::Rect(3.0, 4.0)]\n\
+         let mut total = 0.0\n\
+         for s in shapes {\n\
+           total = total + match s { Shape::Circle(r) => r, Shape::Rect(w, h) => w + h }\n\
+         }\n\
+         total",
+    );
+    assert_eq!(result.as_f64(), Some(9.0));
+}
+
+#[test]
+fn test_enum_array_struct_payload_variant_match() {
+    // Struct-payload-variant array: `Msg::Move { x, y }` destructured by field.
+    let result = eval(
+        "enum Msg { Quit, Move { x: int, y: int } }\n\
+         let msgs: Array<Msg> = [Msg::Quit, Msg::Move { x: 3, y: 4 }]\n\
+         let mut acc = 0\n\
+         for m in msgs {\n\
+           acc = acc + match m { Msg::Quit => 100, Msg::Move { x, y } => x + y }\n\
+         }\n\
+         acc",
+    );
+    // 100 (Quit) + 7 (Move{3,4}) = 107
+    assert_eq!(result.as_i64(), Some(107));
+}
+
+#[test]
+fn test_enum_array_index_access() {
+    // Index access round-trip through the TypedObject carrier (TypedArrayGet).
+    let result = eval(
+        "enum Color { Red, Green, Blue }\n\
+         let colors: Array<Color> = [Color::Red, Color::Green, Color::Blue]\n\
+         match colors[1] { Color::Red => 1, Color::Green => 2, Color::Blue => 3 }",
+    );
+    assert_eq!(result.as_i64(), Some(2));
+}
+
+#[test]
+fn test_enum_array_map_over_elements() {
+    // `.map` over Array<enum> with an annotated int result carrier.
+    let result = eval(
+        "enum Color { Red, Green, Blue }\n\
+         let colors: Array<Color> = [Color::Red, Color::Green, Color::Blue]\n\
+         let nums: Array<int> = colors.map(|c| match c { Color::Red => 10, Color::Green => 20, Color::Blue => 30 })\n\
+         nums[2]",
+    );
+    assert_eq!(result.as_i64(), Some(30));
+}
+
+#[test]
+fn test_enum_array_filter_over_elements() {
+    // `.filter` over Array<enum> returning an Array<enum> result carrier. This
+    // exercises the `Vec.filter` body's `result.push(item)` accumulator where
+    // `item: Color` — the path that needed the `ConcreteType::Enum` arm in
+    // `should_use_typed_array` to resolve the result element kind.
+    let result = eval(
+        "enum Color { Red, Green, Blue }\n\
+         let colors: Array<Color> = [Color::Red, Color::Green, Color::Blue]\n\
+         let reds: Array<Color> = colors.filter(|c| match c { Color::Red => true, _ => false })\n\
+         reds.len()",
+    );
+    assert_eq!(result.as_i64(), Some(1));
+}
+
+#[test]
+fn test_enum_array_emits_typed_object_carrier() {
+    // Producer-side proof: `Array<Color>` MUST emit the v2-raw
+    // `TypedArray<*const TypedObjectStorage>` carrier (`NewTypedArrayTypedObject`
+    // + per-element `TypedArrayPushTypedObject`), the SAME carrier as the
+    // W16.2-A struct case — NOT an untyped `NewArray`. Per the V3-S5
+    // element-carrier binders, enum elements reuse the TypedObject carrier
+    // (no new HeapKind / ELEM_TYPE discriminant).
+    use crate::bytecode::OpCode;
+    use crate::executor::tests::test_utils::compile_with_prelude;
+    let prog = compile_with_prelude(
+        "enum Color { Red, Green, Blue }\n\
+         let colors: Array<Color> = [Color::Red, Color::Green, Color::Blue]\n\
+         colors.len()",
+    )
+    .expect("compile failed");
+    let has = |op: OpCode| prog.instructions.iter().any(|i| i.opcode == op);
+    assert!(
+        has(OpCode::NewTypedArrayTypedObject),
+        "Array<EnumType> must emit NewTypedArrayTypedObject (TypedObject carrier), not an untyped NewArray"
+    );
+    assert!(
+        has(OpCode::TypedArrayPushTypedObject),
+        "Array<EnumType> elements must push via TypedArrayPushTypedObject"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05)
 //
 // Per ADR-006 §2.7.5 stamp-at-compile-time + §2.7.24 Q25.C (TraitObject
