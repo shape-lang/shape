@@ -758,4 +758,40 @@ words.reduce(|acc, w| acc + w, "")
         );
         assert_eq!(slot.as_str(), Some("foobarbaz"));
     }
+
+    // ── C3: `.length` on a StringV2 `Array<string>` element ─────────────
+    //
+    // `Array<string>` elements read back with `NativeKind::StringV2` (the
+    // v2-raw `*const StringObj` carrier). Pre-fix, `op_length` only accepted
+    // `NativeKind::String` / `Ptr(HeapKind::String)`, so `.length` on an
+    // element fell through to the scalar `_` arm and raised a spurious
+    // "TypeError: expected array, object, or string, got scalar". The fix
+    // adds a `StringV2` arm to `op_length` mirroring the `Arc<String>` arm's
+    // `chars().count()` semantics. `.toUpperCase()` (method dispatch) already
+    // tolerated the carrier; only the `.length` property path was missing it.
+
+    /// `.length` on an `Array<string>` element (StringV2 carrier) — char count.
+    #[test]
+    fn length_on_string_array_element_accepts_stringv2() {
+        let slot = eval_with_prelude(
+            r#"
+let ws: Array<string> = ["alpha", "beta"]
+ws[1].length
+"#,
+        );
+        assert_eq!(slot.as_i64(), Some(4));
+    }
+
+    /// `.length` counts chars, not bytes, on a multi-byte StringV2 element.
+    #[test]
+    fn length_on_string_array_element_counts_chars_not_bytes() {
+        let slot = eval_with_prelude(
+            r#"
+let ws: Array<string> = ["héllo"]
+ws[0].length
+"#,
+        );
+        // "héllo" = 5 chars (é is 2 bytes); must match the Arc<String> arm.
+        assert_eq!(slot.as_i64(), Some(5));
+    }
 }

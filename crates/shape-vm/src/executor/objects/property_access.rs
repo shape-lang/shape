@@ -604,6 +604,25 @@ impl VirtualMachine {
                     self.push_kinded(len as u64, NativeKind::Int64)
                 }
             }
+            NativeKind::StringV2 => {
+                // C3: `Array<string>` elements read back with the v2-raw
+                // `*const StringObj` carrier (`NativeKind::StringV2`), not the
+                // Arc<String> carrier. `.length` on such an element reached the
+                // scalar `_` arm and raised a spurious TypeError. Borrow the
+                // StringObj's UTF-8 bytes and count chars to match the
+                // `String`/`Ptr(String)` arm's semantics exactly. The popped
+                // share is retired by `drop_with_kind` below.
+                if bits == 0 {
+                    Err(VMError::RuntimeError("length() on null string".to_string()))
+                } else {
+                    use shape_value::v2::string_obj::StringObj;
+                    // SAFETY: kind == StringV2 means bits = `*const StringObj`
+                    // (the v2-raw carrier the element-read producer stamped).
+                    let s = unsafe { StringObj::as_str(bits as *const StringObj) };
+                    let len = s.chars().count() as i64;
+                    self.push_kinded(len as u64, NativeKind::Int64)
+                }
+            }
             NativeKind::Ptr(HeapKind::HashMap) => {
                 if bits == 0 {
                     Err(VMError::RuntimeError(
