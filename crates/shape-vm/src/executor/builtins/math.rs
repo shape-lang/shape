@@ -161,41 +161,131 @@ pub(in crate::executor) fn builtin_atan(args: &[KindedSlot]) -> Result<KindedSlo
     Ok(KindedSlot::from_number(x.atan()))
 }
 
-pub(in crate::executor) fn builtin_min(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
-    // Two-argument scalar form. Single-argument array form drops here in
-    // Wave 5b; array reduction path lives in `Array::min()` PHF method
-    // dispatch, not the bare-name builtin. (CLAUDE.md: array methods are
-    // dispatch-only; bare-name aliases removed.)
-    if args.len() != 2 {
-        return Err(type_error("min() requires 2 arguments"));
-    }
-    let a = coerce_to_f64(&args[0]).ok_or_else(|| type_error("min() argument must be a number"))?;
-    let b = coerce_to_f64(&args[1]).ok_or_else(|| type_error("min() argument must be a number"))?;
-    // Preserve Int kind when both inputs are Int.
-    match (args[0].kind, args[1].kind) {
-        (NativeKind::Int64, NativeKind::Int64) => {
-            let ai = args[0].as_i64().expect("kind=Int64");
-            let bi = args[1].as_i64().expect("kind=Int64");
-            Ok(KindedSlot::from_int(ai.min(bi)))
+// Reduction selector for the variadic / series min / max fold below. `Min`
+// and `Max` differ only in the comparison direction; everything else (kind
+// preservation, the empty-series error, the array-vs-scalar dispatch) is
+// shared.
+#[derive(Clone, Copy)]
+enum MinMax {
+    Min,
+    Max,
+}
+
+impl MinMax {
+    #[inline]
+    fn name(self) -> &'static str {
+        match self {
+            MinMax::Min => "min",
+            MinMax::Max => "max",
         }
-        _ => Ok(KindedSlot::from_number(a.min(b))),
+    }
+    #[inline]
+    fn pick_f64(self, a: f64, b: f64) -> f64 {
+        match self {
+            MinMax::Min => a.min(b),
+            MinMax::Max => a.max(b),
+        }
+    }
+    #[inline]
+    fn pick_i64(self, a: i64, b: i64) -> i64 {
+        match self {
+            MinMax::Min => a.min(b),
+            MinMax::Max => a.max(b),
+        }
     }
 }
 
-pub(in crate::executor) fn builtin_max(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
-    if args.len() != 2 {
-        return Err(type_error("max() requires 2 arguments"));
-    }
-    let a = coerce_to_f64(&args[0]).ok_or_else(|| type_error("max() argument must be a number"))?;
-    let b = coerce_to_f64(&args[1]).ok_or_else(|| type_error("max() argument must be a number"))?;
-    match (args[0].kind, args[1].kind) {
-        (NativeKind::Int64, NativeKind::Int64) => {
-            let ai = args[0].as_i64().expect("kind=Int64");
-            let bi = args[1].as_i64().expect("kind=Int64");
-            Ok(KindedSlot::from_int(ai.max(bi)))
+/// Shared body for the bare-name `min` / `max` builtins.
+///
+/// Book spec (`stdlib/native/math.mdx`): `min(a, b, ...)` works "across
+/// arguments OR a series". Two documented call shapes:
+///
+/// 1. **Variadic** — two or more scalar numeric arguments
+///    (`min(3.0, 7.0)`, `max(1, 4, 2, 9)`). Folds left-to-right. The result
+///    kind is preserved strictly: an all-`int` fold returns `int`, an
+///    all-`number` fold returns `number`. Mixed `int`/`number` is rejected
+///    at the type checker (it never reaches here); the runtime stays
+///    defensive — if a heterogeneous slot ever arrives it coerces to `f64`
+///    and returns `number`, never silently re-stamps an `int`.
+///
+/// 2. **Series** — exactly one `Array<T>` argument (`min([3.0, 7.0, 2.0])`).
+///    The argument arrives as a `Ptr(HeapKind::TypedArray)` slot; the fold
+///    reuses the same kind-generic `v2_array_detect::{min,max}_elements`
+///    primitive that backs the `arr.min()` / `arr.max()` PHF methods, so a
+///    series over `Array<int>` returns `int` and a series over
+///    `Array<number>` returns `number` (no int/number mix, no coercion).
+///
+/// `int` and `number` never unify here: the only place an `int` becomes a
+/// `number` is an explicit heterogeneous-scalar fold, which the strict
+/// checker already forbids. No bit-reinterpret, no Bool-default.
+fn min_max_reduce(op: MinMax, args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    // ── Series form: a single Array<T> argument ───────────────────────────
+    if args.len() == 1 {
+        if let NativeKind::Ptr(shape_value::HeapKind::TypedArray) = args[0].kind {
+            let view = crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(
+                args[0].slot().raw(),
+                args[0].kind,
+            )
+            .ok_or_else(|| {
+                type_error(format!(
+                    "{}() series argument is not a typed array",
+                    op.name()
+                ))
+            })?;
+            let pair = match op {
+                MinMax::Min => crate::executor::v2_handlers::v2_array_detect::min_elements(&view),
+                MinMax::Max => crate::executor::v2_handlers::v2_array_detect::max_elements(&view),
+            };
+            return match pair {
+                Some((bits, kind)) => Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind)),
+                None => Err(type_error(format!(
+                    "{}() of an empty or non-numeric series",
+                    op.name()
+                ))),
+            };
         }
-        _ => Ok(KindedSlot::from_number(a.max(b))),
+        // A single scalar argument has no min/max to compute.
+        return Err(type_error(format!(
+            "{}() requires at least 2 arguments or a single numeric array",
+            op.name()
+        )));
     }
+
+    // ── Variadic form: two or more scalar numeric arguments ────────────────
+    if args.is_empty() {
+        return Err(type_error(format!(
+            "{}() requires at least 2 arguments or a single numeric array",
+            op.name()
+        )));
+    }
+
+    // All-`int` fold preserves `int`; any non-Int64 slot drops to the f64
+    // fold and yields `number`.
+    let all_int = args.iter().all(|a| a.kind == NativeKind::Int64);
+    if all_int {
+        let mut acc = args[0].as_i64().expect("kind=Int64");
+        for a in &args[1..] {
+            acc = op.pick_i64(acc, a.as_i64().expect("kind=Int64"));
+        }
+        return Ok(KindedSlot::from_int(acc));
+    }
+
+    let mut acc = coerce_to_f64(&args[0])
+        .ok_or_else(|| type_error(format!("{}() argument must be a number", op.name())))?;
+    for a in &args[1..] {
+        let v = coerce_to_f64(a)
+            .ok_or_else(|| type_error(format!("{}() argument must be a number", op.name())))?;
+        acc = op.pick_f64(acc, v);
+    }
+    Ok(KindedSlot::from_number(acc))
+}
+
+pub(in crate::executor) fn builtin_min(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    min_max_reduce(MinMax::Min, args)
+}
+
+pub(in crate::executor) fn builtin_max(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    min_max_reduce(MinMax::Max, args)
 }
 
 pub(in crate::executor) fn builtin_sign(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
@@ -328,9 +418,8 @@ fn collect_number_series(name: &str, slot: &KindedSlot) -> Result<Vec<f64>, VMEr
     })?;
     let mut out: Vec<f64> = Vec::with_capacity(view.len as usize);
     for i in 0..view.len {
-        let (bits, kind) = read_element(&view, i).ok_or_else(|| {
-            type_error(format!("{name}(): failed to read array element {i}"))
-        })?;
+        let (bits, kind) = read_element(&view, i)
+            .ok_or_else(|| type_error(format!("{name}(): failed to read array element {i}")))?;
         let elem = KindedSlot::new(ValueSlot::from_raw(bits), kind);
         let v = coerce_to_f64(&elem).ok_or_else(|| {
             type_error(format!(
@@ -475,6 +564,65 @@ mod tests {
         let r = builtin_min(&[KindedSlot::from_int(3), KindedSlot::from_number(1.5)]).unwrap();
         assert_eq!(r.kind, NativeKind::Float64);
         assert_eq!(r.as_f64(), Some(1.5));
+    }
+
+    // MA3: variadic form — `min`/`max` fold "across arguments" per the book.
+    // All-int variadic preserves int; all-number stays number. (Series-array
+    // form is covered end-to-end by the bytecode integration suite — it needs
+    // a live heap-allocated TypedArray that the scalar-only unit harness here
+    // cannot construct.)
+    #[test]
+    fn max_variadic_all_int_stays_int() {
+        let r = builtin_max(&[
+            KindedSlot::from_int(3),
+            KindedSlot::from_int(7),
+            KindedSlot::from_int(2),
+            KindedSlot::from_int(9),
+            KindedSlot::from_int(1),
+        ])
+        .unwrap();
+        assert_eq!(r.kind, NativeKind::Int64);
+        assert_eq!(r.as_i64(), Some(9));
+    }
+
+    #[test]
+    fn min_variadic_all_int_stays_int() {
+        let r = builtin_min(&[
+            KindedSlot::from_int(3),
+            KindedSlot::from_int(7),
+            KindedSlot::from_int(2),
+        ])
+        .unwrap();
+        assert_eq!(r.kind, NativeKind::Int64);
+        assert_eq!(r.as_i64(), Some(2));
+    }
+
+    #[test]
+    fn max_variadic_all_number_stays_number() {
+        let r = builtin_max(&[
+            KindedSlot::from_number(3.0),
+            KindedSlot::from_number(7.0),
+            KindedSlot::from_number(2.0),
+            KindedSlot::from_number(9.0),
+            KindedSlot::from_number(1.0),
+        ])
+        .unwrap();
+        assert_eq!(r.kind, NativeKind::Float64);
+        assert_eq!(r.as_f64(), Some(9.0));
+    }
+
+    #[test]
+    fn min_two_arg_form_preserved() {
+        let r = builtin_max(&[KindedSlot::from_number(3.0), KindedSlot::from_number(7.0)]).unwrap();
+        assert_eq!(r.kind, NativeKind::Float64);
+        assert_eq!(r.as_f64(), Some(7.0));
+    }
+
+    #[test]
+    fn min_single_scalar_is_error() {
+        // A lone scalar (no array) has no min to compute.
+        assert!(builtin_min(&[KindedSlot::from_number(5.0)]).is_err());
+        assert!(builtin_max(&[KindedSlot::from_int(5)]).is_err());
     }
 
     // floor/ceil/round return a REAL int (book spec: (number) -> int).

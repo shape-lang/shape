@@ -635,6 +635,32 @@ impl TypeInferenceEngine {
         ));
     }
 
+    /// Extract `T` from an `Array<T>` / `Vec<T>` type shape, for the series
+    /// form of `min` / `max`. Returns `None` for non-array types (the call
+    /// then falls through to the "requires a numeric array" error). Mirrors
+    /// the private `array_element_type` in `operators.rs`.
+    fn min_max_array_element_type(ty: &Type) -> Option<Type> {
+        match ty {
+            Type::Concrete(TypeAnnotation::Array(inner)) => Some(Type::Concrete((**inner).clone())),
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if (name == "Array" || name == "Vec") && args.len() == 1 =>
+            {
+                Some(Type::Concrete(args[0].clone()))
+            }
+            Type::Generic { base, args }
+                if args.len() == 1
+                    && matches!(
+                        base.as_ref(),
+                        Type::Concrete(ann)
+                            if matches!(ann.as_type_name_str(), Some("Array") | Some("Vec"))
+                    ) =>
+            {
+                Some(args[0].clone())
+            }
+            _ => None,
+        }
+    }
+
     /// Infer type of function call
     pub(crate) fn infer_function_call(
         &mut self,
@@ -770,6 +796,88 @@ impl TypeInferenceEngine {
                 self.push_constraint_with_origin(arg_ty.clone(), BuiltinTypes::integer(), origin);
             }
             return Ok(BuiltinTypes::array(BuiltinTypes::integer()));
+        }
+
+        // `min` / `max` are documented (stdlib/native/math.mdx) as working
+        // "across arguments OR a series" — two non-fixed-arity shapes the
+        // single `(T, T) -> T` symbol-table scheme cannot represent:
+        //
+        //   1. Variadic: two-or-more scalar numerics, all the SAME numeric
+        //      type T (`min(3.0, 7.0, 2.0)`), returning T.
+        //   2. Series: exactly one `Array<T>` (`min([3.0, 7.0, 2.0])`),
+        //      returning the element type T.
+        //
+        // Strict-typing: every argument (or the array's element type) is
+        // unified to a single `Numeric`-bounded var T, and the call returns
+        // T. `min` over `Array<int>` returns `int`; over `Array<number>`
+        // returns `number`. `int` and `number` never unify — a heterogeneous
+        // `min(1, 2.0)` is rejected by the same-T unification, no silent
+        // coercion. (The legacy fixed 2-arg form is the `actual_arity == 2`
+        // scalar case, preserved.)
+        if name == "min" || name == "max" {
+            let origin = self
+                .lookup_callable_origin_for_name(name)
+                .unwrap_or(call_span);
+
+            // Series form: a single Array<T> argument.
+            if arg_types.len() == 1 {
+                let resolved = self.unifier.apply_substitutions(&arg_types[0]);
+                if let Some(elem) = Self::min_max_array_element_type(&resolved) {
+                    // Constrain the element type to Numeric and return it.
+                    let bound = self.fresh_var();
+                    self.push_constraint_with_origin(
+                        elem.clone(),
+                        Type::Constrained {
+                            var: bound,
+                            constraint: Box::new(TypeConstraint::ImplementsTrait {
+                                trait_name: "Numeric".to_string(),
+                            }),
+                        },
+                        origin,
+                    );
+                    return Ok(elem);
+                }
+                return Err(TypeError::ConstraintViolation(format!(
+                    "Function '{}' over a single argument requires a numeric array (Array<int> or Array<number>)",
+                    name
+                )));
+            }
+
+            // Variadic form: two-or-more scalar numerics, all the same T.
+            if arg_types.len() >= 2 {
+                // Pin the common result type T to the FIRST argument's
+                // (substitution-resolved) type, and unify every other argument
+                // against it. Returning the resolved first-arg type (rather than
+                // a bare fresh var) keeps the result CONCRETE for downstream
+                // typed-opcode proof — `min(10, 5, 8) * 2` must type as
+                // `int * int`, not leave an unresolved `?T` the binary-op
+                // checker cannot prove. A mixed `min(1, 2.0)` still fails: the
+                // second arg's `number` unifies against the first arg's `int`
+                // and the solver rejects (int !~ number) — no silent coercion.
+                let result = self.unifier.apply_substitutions(&arg_types[0]);
+                for arg_ty in arg_types.iter().skip(1) {
+                    self.push_constraint_with_origin(arg_ty.clone(), result.clone(), origin);
+                }
+                // T must be Numeric.
+                let bound = self.fresh_var();
+                self.push_constraint_with_origin(
+                    result.clone(),
+                    Type::Constrained {
+                        var: bound,
+                        constraint: Box::new(TypeConstraint::ImplementsTrait {
+                            trait_name: "Numeric".to_string(),
+                        }),
+                    },
+                    origin,
+                );
+                return Ok(result);
+            }
+
+            return Err(TypeError::ConstraintViolation(format!(
+                "Function '{}' expects at least 2 arguments or a single numeric array, got {}",
+                name,
+                arg_types.len()
+            )));
         }
 
         // Look up function type after argument inference so argument errors
@@ -954,9 +1062,9 @@ impl TypeInferenceEngine {
         // type — same contract the arg-side unwrap relies on. NOT a coercion: the
         // inner referent annotation is forwarded verbatim (`&Point` -> `Point`,
         // `&int` -> `int`); `int` and `number` never meet here.
-        let had_borrow_param = params.iter().any(|p| {
-            matches!(p, Type::Concrete(TypeAnnotation::Borrow { .. }))
-        });
+        let had_borrow_param = params
+            .iter()
+            .any(|p| matches!(p, Type::Concrete(TypeAnnotation::Borrow { .. })));
         let params: Vec<Type> = params
             .into_iter()
             .map(|p| match p {
