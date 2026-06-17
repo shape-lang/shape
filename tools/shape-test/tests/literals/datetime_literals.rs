@@ -211,3 +211,62 @@ fn duration_not_numeric_rejects_plus_int() {
     )
     .expect_run_err_contains("Numeric");
 }
+
+#[test]
+fn datetime_format_tz_name_z_specifier() {
+    // Book datetime.mdx §Formatting: `%Z` renders the timezone *name* (`UTC`
+    // for a UTC datetime), NOT the numeric offset chrono gives a FixedOffset.
+    // `%z` stays the numeric offset. Multi-timezone report shape from the book.
+    ShapeTest::new(
+        r#"
+        let dt = DateTime.parse("2024-06-15T14:30:00+00:00")
+        print(dt.format("%H:%M %Z"))
+        print(dt.format("%z"))
+    "#,
+    )
+    .expect_output("14:30 UTC\n+0000");
+}
+
+#[test]
+fn datetime_method_result_array_element_infers() {
+    // STAGE DT4 (concrete_type_for_expr DateTime-instance-method arm): a
+    // DateTime instance method on a proven-DateTime receiver surfaces its
+    // documented return `ConcreteType`, so an array literal whose element is
+    // such a call proves a homogeneous element kind. Pre-fix,
+    // `[dt.format(..)]` / `[dt.year()]` surfaced "cannot infer the element
+    // type of this array literal" because the method result was opaque to the
+    // bytecode compiler's element-type resolver.
+    ShapeTest::new(
+        r#"
+        let dt = @"2024-06-15T14:30:45+00:00"
+        let strs = [dt.format("%Y-%m-%d")]
+        let ints = [dt.year()]
+        print(strs[0])
+        print(ints[0])
+    "#,
+    )
+    .expect_output("2024-06-15\n2024");
+}
+
+#[test]
+fn datetime_array_accumulation_with_annotation() {
+    // Book datetime.mdx §Date Range Iteration shape: accumulate formatted
+    // DateTime strings into an annotated `Array<string>` across an add_days
+    // loop. Exercises the DT4 method-result element-type proof end to end on
+    // an `acc + [dt.format(..)]` reassignment. FIXED epochs — deterministic.
+    ShapeTest::new(
+        r#"
+        let start = @"2024-01-01T00:00:00+00:00"
+        let stop = @"2024-01-04T00:00:00+00:00"
+        let mut current = start
+        let mut days: Array<string> = []
+        while current.is_before(stop) or current.is_same_day(stop) {
+            days = days + [current.format("%Y-%m-%d")]
+            current = current.add_days(1)
+        }
+        print(days.length())
+        for d in days { print(d) }
+    "#,
+    )
+    .expect_output("4\n2024-01-01\n2024-01-02\n2024-01-03\n2024-01-04");
+}
