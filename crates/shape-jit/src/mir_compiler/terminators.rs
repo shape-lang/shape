@@ -1391,8 +1391,25 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                             let inst = self.builder.ins().call(ffi_ref, &[f64_arg]);
                             let result_f64 = self.builder.inst_results(inst)[0];
 
+                            // floor/ceil/round return a REAL `int` (i64) per the
+                            // book spec (`(number) -> int`); the VM stamps the
+                            // result slot `NativeKind::Int64`. The FFI helper
+                            // (`floor_f64`, etc.) computes the rounded f64; we
+                            // convert it to a native i64 via `fcvt_to_sint` so
+                            // the destination Int64 slot receives a genuine
+                            // integer, NOT the f64 bit-pattern reinterpreted as
+                            // an i64 (that would be the forbidden bit-reinterpret
+                            // corruption). All other math fns here (sqrt/sin/…)
+                            // stay f64. ADR-006 §2.7.5 stamp-at-compile-time.
+                            let result_val = match name.as_str() {
+                                "floor" | "ceil" | "round" => {
+                                    self.builder.ins().fcvt_to_sint(types::I64, result_f64)
+                                }
+                                _ => result_f64,
+                            };
+
                             self.release_old_value_if_heap(destination)?;
-                            self.write_place(destination, result_f64)?;
+                            self.write_place(destination, result_val)?;
                             self.reload_referenced_locals();
 
                             let next_block = self.block_map.get(next).ok_or_else(|| {

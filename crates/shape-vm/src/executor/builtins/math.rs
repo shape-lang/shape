@@ -57,25 +57,31 @@ pub(in crate::executor) fn builtin_sqrt(args: &[KindedSlot]) -> Result<KindedSlo
     Ok(KindedSlot::from_number(x.sqrt()))
 }
 
+// floor/ceil/round return a REAL `int` (i64) per the book spec
+// (stdlib/native/math.mdx: `floor(x) : (number) -> int`). The result is a
+// genuine integer (the value truncated/rounded to an integer), stamped
+// `NativeKind::Int64` via `KindedSlot::from_int` — NOT a coerced number and
+// NOT a bit-reinterpret. `int` and `number` never unify: `floor(3.7)` is the
+// int `3`, usable where an int is expected (e.g. an array index).
 pub(in crate::executor) fn builtin_floor(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "floor")?;
     let x =
         coerce_to_f64(&args[0]).ok_or_else(|| type_error("floor() argument must be a number"))?;
-    Ok(KindedSlot::from_number(x.floor()))
+    Ok(KindedSlot::from_int(x.floor() as i64))
 }
 
 pub(in crate::executor) fn builtin_ceil(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "ceil")?;
     let x =
         coerce_to_f64(&args[0]).ok_or_else(|| type_error("ceil() argument must be a number"))?;
-    Ok(KindedSlot::from_number(x.ceil()))
+    Ok(KindedSlot::from_int(x.ceil() as i64))
 }
 
 pub(in crate::executor) fn builtin_round(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "round")?;
     let x =
         coerce_to_f64(&args[0]).ok_or_else(|| type_error("round() argument must be a number"))?;
-    Ok(KindedSlot::from_number(x.round()))
+    Ok(KindedSlot::from_int(x.round() as i64))
 }
 
 pub(in crate::executor) fn builtin_ln(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
@@ -469,6 +475,40 @@ mod tests {
         let r = builtin_min(&[KindedSlot::from_int(3), KindedSlot::from_number(1.5)]).unwrap();
         assert_eq!(r.kind, NativeKind::Float64);
         assert_eq!(r.as_f64(), Some(1.5));
+    }
+
+    // floor/ceil/round return a REAL int (book spec: (number) -> int).
+    // The result carries NativeKind::Int64 — a genuine integer, not a coerced
+    // number and not a bit-reinterpret of the f64.
+    #[test]
+    fn floor_returns_int64() {
+        let r = builtin_floor(&[KindedSlot::from_number(3.7)]).unwrap();
+        assert_eq!(r.kind, NativeKind::Int64);
+        assert_eq!(r.as_i64(), Some(3));
+    }
+
+    #[test]
+    fn ceil_returns_int64() {
+        let r = builtin_ceil(&[KindedSlot::from_number(3.2)]).unwrap();
+        assert_eq!(r.kind, NativeKind::Int64);
+        assert_eq!(r.as_i64(), Some(4));
+    }
+
+    #[test]
+    fn round_returns_int64_half_away_from_zero() {
+        let r = builtin_round(&[KindedSlot::from_number(2.5)]).unwrap();
+        assert_eq!(r.kind, NativeKind::Int64);
+        assert_eq!(r.as_i64(), Some(3));
+        let neg = builtin_round(&[KindedSlot::from_number(-2.5)]).unwrap();
+        assert_eq!(neg.kind, NativeKind::Int64);
+        assert_eq!(neg.as_i64(), Some(-3));
+    }
+
+    #[test]
+    fn floor_negative_returns_int64() {
+        let r = builtin_floor(&[KindedSlot::from_number(-3.2)]).unwrap();
+        assert_eq!(r.kind, NativeKind::Int64);
+        assert_eq!(r.as_i64(), Some(-4));
     }
 
     #[test]

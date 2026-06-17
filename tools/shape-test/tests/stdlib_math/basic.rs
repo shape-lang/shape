@@ -168,6 +168,80 @@ fn round_down() {
     .expect_number(2.0);
 }
 
+// ===== floor/ceil/round return a REAL int (book spec: (number) -> int) =====
+//
+// STAGE MA2: the book documents floor/ceil/round as `(number) -> int`. The
+// result is a genuine integer — usable as an array index and in int arithmetic
+// — NOT a coerced number and NOT a bit-reinterpret. `int` and `number` never
+// unify, so these results must NOT implicitly widen back to `number`.
+
+#[test]
+fn floor_result_usable_as_array_index() {
+    // arr[floor(2.9)] == arr[2]; a `number` would be rejected as an index, so
+    // a successful index access proves floor(x) is a real int.
+    ShapeTest::new(
+        r#"
+        let arr = [10, 20, 30, 40]
+        arr[floor(2.9)]
+    "#,
+    )
+    .expect_number(30.0);
+}
+
+#[test]
+fn ceil_result_usable_as_array_index() {
+    ShapeTest::new(
+        r#"
+        let arr = [10, 20, 30, 40]
+        arr[ceil(2.1)]
+    "#,
+    )
+    .expect_number(40.0);
+}
+
+#[test]
+fn round_result_usable_as_array_index() {
+    ShapeTest::new(
+        r#"
+        let arr = [10, 20, 30, 40]
+        arr[round(1.5)]
+    "#,
+    )
+    .expect_number(30.0);
+}
+
+#[test]
+fn floor_result_in_int_arithmetic() {
+    // floor(3.7) + 1 == 4 as an int (not 4.0). int + int stays int.
+    ShapeTest::new(
+        r#"
+        floor(3.7) + 1
+    "#,
+    )
+    .expect_number(4.0);
+}
+
+#[test]
+fn floor_negative_is_int() {
+    ShapeTest::new(
+        r#"
+        floor(-3.2)
+    "#,
+    )
+    .expect_number(-4.0);
+}
+
+#[test]
+fn round_half_away_from_zero_negative() {
+    // f64::round rounds half away from zero: round(-2.5) == -3.
+    ShapeTest::new(
+        r#"
+        round(-2.5)
+    "#,
+    )
+    .expect_number(-3.0);
+}
+
 // ===== min / max =====
 
 #[test]

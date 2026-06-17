@@ -148,8 +148,15 @@ fn return_type_to_numeric(type_name: &str) -> Option<NumericType> {
 /// Get the known return NumericType for a builtin function name.
 fn builtin_return_numeric_type(name: &str) -> Option<NumericType> {
     match name {
+        // Int-returning builtins. floor/ceil/round return a REAL `int` per the
+        // book spec (stdlib/native/math.mdx: `(number) -> int`). This stamp is
+        // load-bearing: it drives `last_expr_numeric_type` so downstream int
+        // arithmetic (`floor(3.7) + 1` => 4, an int) and int-index use
+        // (`arr[floor(2.9)]`) compile as int ops, not number ops. `int` and
+        // `number` never unify — no implicit widening back to `number`.
+        "floor" | "ceil" | "round" => Some(NumericType::Int),
         // Number-returning builtins
-        "abs" | "sqrt" | "ceil" | "floor" | "round" | "sum" | "mean" | "min" | "max" | "sin"
+        "abs" | "sqrt" | "sum" | "mean" | "min" | "max" | "sin"
         | "cos" | "tan" | "exp" | "ln" | "log" | "stddev" | "std" | "variance"
         // STRICT-FLIP (v0.3.3, STAGE-2 MATH): `pow`, `asin`, `acos`, `atan`
         // were absent from this table, so the compiler's typed-opcode

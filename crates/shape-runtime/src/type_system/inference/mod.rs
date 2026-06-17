@@ -250,8 +250,10 @@ impl TypeInferenceEngine {
     fn seed_builtin_callable_defaults(defaults: &mut HashMap<String, Vec<bool>>) {
         // range(n), range(start, end), range(start, end, step)
         defaults.insert("range".to_string(), vec![false, true, true]);
-        // round(value), round(value, decimals)
-        defaults.insert("round".to_string(), vec![false, true]);
+        // round(value) -> int — single-arg only (the legacy 2-arg
+        // round(value, decimals) form was dead at runtime; see
+        // type_system/environment/mod.rs). No optional 2nd arg.
+        defaults.insert("round".to_string(), vec![false]);
     }
 
     pub fn new() -> Self {

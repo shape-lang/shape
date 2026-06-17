@@ -198,7 +198,7 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
     },
     BuiltinMetadata {
         name: "floor",
-        signature: "floor(value: number) -> number",
+        signature: "floor(value: number) -> int",
         description: "Round down to the nearest integer.",
         category: "Math",
         parameters: &[BuiltinParam {
@@ -207,12 +207,12 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
             optional: false,
             description: "Input value",
         }],
-        return_type: "number",
+        return_type: "int",
         example: Some("floor(3.7) // 3"),
     },
     BuiltinMetadata {
         name: "ceil",
-        signature: "ceil(value: number) -> number",
+        signature: "ceil(value: number) -> int",
         description: "Round up to the nearest integer.",
         category: "Math",
         parameters: &[BuiltinParam {
@@ -221,30 +221,22 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
             optional: false,
             description: "Input value",
         }],
-        return_type: "number",
+        return_type: "int",
         example: Some("ceil(3.2) // 4"),
     },
     BuiltinMetadata {
         name: "round",
-        signature: "round(value: number, decimals?: number) -> number",
-        description: "Round a number to the specified number of decimal places.",
+        signature: "round(value: number) -> int",
+        description: "Round to the nearest integer.",
         category: "Math",
-        parameters: &[
-            BuiltinParam {
-                name: "value",
-                param_type: "number",
-                optional: false,
-                description: "Input value",
-            },
-            BuiltinParam {
-                name: "decimals",
-                param_type: "number",
-                optional: true,
-                description: "Decimal places (default 0)",
-            },
-        ],
-        return_type: "number",
-        example: Some("round(3.456, 2) // 3.46"),
+        parameters: &[BuiltinParam {
+            name: "value",
+            param_type: "number",
+            optional: false,
+            description: "Input value",
+        }],
+        return_type: "int",
+        example: Some("round(3.5) // 4"),
     },
     BuiltinMetadata {
         name: "max",

@@ -116,13 +116,18 @@ impl TypeEnvironment {
 
         self.define_builtin("sqrt", vec![BuiltinTypes::number()], BuiltinTypes::number());
 
+        // floor/ceil/round return `int` per the book spec
+        // (stdlib/native/math.mdx: `(number) -> int`). The result is a real
+        // integer — usable as an array index and in int arithmetic. `int` and
+        // `number` never unify, so this return type is load-bearing for the
+        // strict checker (no implicit widening back to `number`).
         self.define_builtin(
             "floor",
             vec![BuiltinTypes::number()],
-            BuiltinTypes::number(),
+            BuiltinTypes::integer(),
         );
 
-        self.define_builtin("ceil", vec![BuiltinTypes::number()], BuiltinTypes::number());
+        self.define_builtin("ceil", vec![BuiltinTypes::number()], BuiltinTypes::integer());
 
         // STRICT-FLIP (v0.3.3, STAGE-2 MATH): the trig / transcendental /
         // power math fns resolve at the bytecode-compiler level — bare `sin`,
@@ -164,12 +169,16 @@ impl TypeEnvironment {
             vec![BuiltinTypes::number(), BuiltinTypes::number()],
             BuiltinTypes::number(),
         );
-        // round(value, decimals = 0) — 2-arg shape; the 1-arg call is admitted
-        // by the `round` default-flag seed in `seed_builtin_callable_defaults`.
+        // round(value) -> int per the book spec (stdlib/native/math.mdx:
+        // `(number) -> int`). Single-arg only: the runtime `builtin_round`
+        // rejects a 2-arg call ("round() requires 1 argument"), so the legacy
+        // 2-arg `round(value, decimals) -> number` shape was dead at runtime
+        // and is not in the book — removed here (SURFACED to user). Returns a
+        // real `int`, never a coerced number.
         self.define_builtin(
             "round",
-            vec![BuiltinTypes::number(), BuiltinTypes::number()],
-            BuiltinTypes::number(),
+            vec![BuiltinTypes::number()],
+            BuiltinTypes::integer(),
         );
 
         // Array functions (polymorphic)
