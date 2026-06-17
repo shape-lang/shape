@@ -4,5 +4,6 @@
 //! are direct compiler builtins in Shape, not module methods.
 
 mod basic;
+mod helpers;
 mod statistical;
 mod trig;
