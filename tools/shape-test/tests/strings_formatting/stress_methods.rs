@@ -1524,3 +1524,72 @@ test()"#,
     )
     .expect_string("abc");
 }
+
+// ========================================================================
+// STAGE-S5: string-method results infer `string` (concatenable + comparable)
+//
+// The STAGE-S4 char model makes a single character a real 1-char `string`,
+// so `s.charAt(i)` / `s.slice(..)` / `s.substring(..)` MUST infer `string`
+// (book strings.mdx §Methods: each is typed `-> string`). Before the
+// STAGE-S5 `infer_expr_type` MethodCall arm, the bytecode compiler resolved
+// these to `unknown`, so a strict-typed downstream use (`s.charAt(0) + "!"`,
+// `s.slice(0,2) == "he"`) was rejected as `string + unknown`. These tests
+// pin the parity with the `s[i]` index arm.
+// ========================================================================
+
+/// `charAt` result concatenates with a string literal under strict typing.
+#[test]
+fn test_char_at_concat_is_string() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let s: string = "hello"
+            s.charAt(0) + "!"
+        }
+test()"#,
+    )
+    .expect_string("h!");
+}
+
+/// `slice` result concatenates with a string literal under strict typing.
+#[test]
+fn test_slice_concat_is_string() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let s: string = "hello"
+            s.slice(0, 2) + "!"
+        }
+test()"#,
+    )
+    .expect_string("he!");
+}
+
+/// `substring` result compares against a string literal under strict typing.
+#[test]
+fn test_substring_eq_is_string() {
+    ShapeTest::new(
+        r#"fn test() -> bool {
+            let s: string = "hello"
+            s.substring(0, 2) == "he"
+        }
+test()"#,
+    )
+    .expect_bool(true);
+}
+
+/// Loop accumulator over `charAt` concatenation (the book `acc + s[i]`
+/// shape, method form): infers `string` so `acc + s.charAt(i)` compiles.
+#[test]
+fn test_char_at_concat_accumulate() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let s: string = "abc"
+            let mut acc: string = ""
+            for i in 0..3 {
+                acc = acc + s.charAt(i)
+            }
+            acc
+        }
+test()"#,
+    )
+    .expect_string("abc");
+}

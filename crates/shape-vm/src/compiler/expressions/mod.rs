@@ -1537,6 +1537,57 @@ impl BytecodeCompiler {
             }
         }
 
+        // STAGE-S5 (string-method return-type recovery). The built-in
+        // string-returning string methods (`charAt`, `slice`, `substring`,
+        // `toUpperCase`, ... — the book strings.mdx §Methods set, typed
+        // `... -> string` in `MethodTable::register_builtin_methods`) are not
+        // monomorphized stdlib functions, so the module-scope inference engine
+        // below has no binding for them and resolves `s.charAt(0)` /
+        // `s.slice(1,3)` to `unknown`. That broke strict-typed downstream uses
+        // exactly like the STAGE-S1 `s[i]` gap did before its fix: `s.charAt(0)
+        // + "!"` rejected as `string + unknown`, and `print(s.charAt(0) ==
+        // "h")` corrupted the heap (the `==` operand stayed unproven so no
+        // typed `EqString` was emitted). The STAGE-S4 char model makes a single
+        // character a real 1-char `string`, so `s.charAt(i)` MUST infer
+        // `string` — exact parity with the `s[i]` arm below. Prove the receiver
+        // is a `string` from its OWN resolved type (reading the receiver's
+        // proof, not fabricating); the method's registered return type is
+        // statically known per ADR-006 §2.7.5. A non-string receiver falls
+        // through to the engine — no fabrication.
+        if let Expr::MethodCall {
+            receiver, method, ..
+        } = expr
+        {
+            let returns_string = matches!(
+                method.as_str(),
+                "charAt"
+                    | "slice"
+                    | "substring"
+                    | "toUpperCase"
+                    | "toLowerCase"
+                    | "trim"
+                    | "trimStart"
+                    | "trimEnd"
+                    | "to_upper_case"
+                    | "to_lower_case"
+                    | "trim_start"
+                    | "trim_end"
+                    | "replace"
+                    | "padStart"
+                    | "padEnd"
+                    | "repeat"
+                    | "reverse"
+            );
+            if returns_string
+                && matches!(
+                    self.infer_expr_type(receiver),
+                    Ok(Type::Concrete(TypeAnnotation::Basic(ref n))) if n == "string"
+                )
+            {
+                return Ok(Type::Concrete(TypeAnnotation::Basic("string".to_string())));
+            }
+        }
+
         // Sweep phase 3c.x: callable-array-element invocation. The parser
         // models `arr[i](args...)` as
         // `MethodCall { method: "__call__", receiver: IndexAccess { object: Identifier(arr), .. }, .. }`.
