@@ -525,6 +525,30 @@ pub fn v2_string_substring(
     Ok(string_result(result))
 }
 
+/// slice(start, end) — char-indexed half-open `[start, end)` substring.
+///
+/// Book spec (`fundamentals/strings.mdx`): both bounds required, indices count
+/// by Unicode scalar (char), half-open so `"hello".slice(1, 3) == "el"`. Bounds
+/// clamp into `[0, len]`; an empty/inverted range yields `""`. Returns a fresh
+/// `StringV2` carrier via `string_result` (no scalar-bits fabrication).
+pub fn v2_string_slice(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let s = receiver_str(args)?;
+    let start = int_arg(args, 1)?;
+    let end = int_arg(args, 2)?;
+    let total = s.chars().count() as i64;
+    let s_idx = start.clamp(0, total) as usize;
+    let e_idx = end.clamp(0, total) as usize;
+    if s_idx >= e_idx {
+        return Ok(string_result(String::new()));
+    }
+    let result: String = s.chars().skip(s_idx).take(e_idx - s_idx).collect();
+    Ok(string_result(result))
+}
+
 /// join — `Array<string>` receiver, separator (`string`) argument.
 ///
 /// V3-S5 ckpt-6 STRICT close (2026-06-16): walk the receiver `Array<string>`

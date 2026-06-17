@@ -464,6 +464,72 @@ test()"#,
 }
 
 // ========================================================================
+// 8b. slice()  — book SPEC lead substring method (fundamentals/strings.mdx)
+//     char-indexed half-open [start, end)
+// ========================================================================
+
+/// STAGE-S2: `s.slice(start, end)` — book llm_summary lead method.
+#[test]
+fn test_slice_basic() {
+    ShapeTest::new(
+        r#"fn test() -> string { "hello".slice(1, 3) }
+test()"#,
+    )
+    .expect_string("el");
+}
+
+/// slice over the whole string.
+#[test]
+fn test_slice_full() {
+    ShapeTest::new(
+        r#"fn test() -> string { "hello".slice(0, 5) }
+test()"#,
+    )
+    .expect_string("hello");
+}
+
+/// slice empty range yields "".
+#[test]
+fn test_slice_empty_range() {
+    ShapeTest::new(
+        r#"fn test() -> string { "hello".slice(2, 2) }
+test()"#,
+    )
+    .expect_string("");
+}
+
+/// slice inverted range (start > end) yields "".
+#[test]
+fn test_slice_inverted_range() {
+    ShapeTest::new(
+        r#"fn test() -> string { "hello".slice(3, 1) }
+test()"#,
+    )
+    .expect_string("");
+}
+
+/// slice end-bound clamps past the string length.
+#[test]
+fn test_slice_clamps_end() {
+    ShapeTest::new(
+        r#"fn test() -> string { "hello".slice(0, 100) }
+test()"#,
+    )
+    .expect_string("hello");
+}
+
+/// slice is char-indexed (Unicode scalars), not byte-indexed.
+#[test]
+fn test_slice_multibyte_chars() {
+    // "日本語テスト" chars: 日(0) 本(1) 語(2) テ(3) ス(4) ト(5)
+    ShapeTest::new(
+        r#"fn test() -> string { "日本語テスト".slice(1, 3) }
+test()"#,
+    )
+    .expect_string("本語");
+}
+
+// ========================================================================
 // 9. toUpperCase() / toLowerCase()
 // ========================================================================
 

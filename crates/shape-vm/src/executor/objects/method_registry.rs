@@ -940,6 +940,7 @@ pub static STRING_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "split" => crate::executor::objects::string_methods::v2_string_split,
     "replace" => crate::executor::objects::string_methods::v2_string_replace,
     "substring" => crate::executor::objects::string_methods::v2_string_substring,
+    "slice" => crate::executor::objects::string_methods::v2_string_slice,
     "join" => crate::executor::objects::string_methods::v2_string_join,
 
     // Padding

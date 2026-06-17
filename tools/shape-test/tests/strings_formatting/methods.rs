@@ -137,7 +137,8 @@ fn string_split() {
     .expect_number(3.0);
 }
 
-// TDD: .slice() is not supported on String type
+// STAGE-S2: `.slice(start, end)` is the book llm_summary lead substring
+// method (fundamentals/strings.mdx) — char-indexed half-open [start, end).
 #[test]
 fn string_slice() {
     ShapeTest::new(
@@ -145,5 +146,5 @@ fn string_slice() {
         "hello world".slice(0, 5)
     "#,
     )
-    .expect_run_err();
+    .expect_string("hello");
 }
