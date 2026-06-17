@@ -198,6 +198,32 @@ impl VirtualMachine {
                 let s_ptr = bits as *const String;
                 Ok(unsafe { (*s_ptr).as_str() })
             }
+            NativeKind::StringV2 => {
+                // C3-follow-up: `Array<string>` elements bound into a local
+                // slot (the `.map(|w| ...)` / `.charAt`-in-closure shape) read
+                // back with the v2-raw `*const StringObj` carrier
+                // (`NativeKind::StringV2`), not the `Arc<String>` carrier. The
+                // typed slot-direct string opcodes (`StringLenTyped`,
+                // `StringCharAt`) route through here; pre-fix the StringV2
+                // carrier fell to the `_` arm and raised a spurious
+                // "TypeError: expected string, got string" (both ARE string —
+                // the StringV2 carrier was the unrecognized one). Mirror the
+                // `op_length` StringV2 arm: borrow the StringObj's UTF-8 bytes.
+                // Pure runtime carrier-recognition extension — no widening, no
+                // Bool-default, no bit-reinterpret; the compiler still proves
+                // the receiver `string` before emitting the typed opcode.
+                if bits == 0 {
+                    return Err(VMError::TypeError {
+                        expected: "string",
+                        got: "null",
+                    });
+                }
+                use shape_value::v2::string_obj::StringObj;
+                // SAFETY: kind == StringV2 means bits = `*const StringObj`
+                // (the v2-raw carrier the element-read producer stamped); the
+                // slot owns the carrier for the borrow's duration.
+                Ok(unsafe { StringObj::as_str(bits as *const StringObj) })
+            }
             _ => Err(VMError::TypeError {
                 expected: "string",
                 got: kind_type_name(kind),
@@ -793,5 +819,59 @@ ws[0].length
         );
         // "héllo" = 5 chars (é is 2 bytes); must match the Arc<String> arm.
         assert_eq!(slot.as_i64(), Some(5));
+    }
+
+    // ── C3-follow-up: StringV2 through the typed slot-direct string opcodes ──
+    //
+    // `op_length` (the property-pop path) was fixed for StringV2 in C3, but the
+    // typed slot-direct string opcodes `StringLenTyped` / `StringCharAt` route
+    // through `borrow_string_slot`, which was still StringV2-blind. The
+    // `.map(|w| w.length)` / `.map(|w| w.charAt(0))` shapes bind a string
+    // element into a local slot (kind `NativeKind::StringV2`) and the compiler
+    // proves `w: string`, so it emits the typed slot-direct opcode rather than
+    // the property-pop `op_length`. Pre-fix that surfaced a spurious
+    // "TypeError: expected string, got string" (both ARE string — the StringV2
+    // carrier was the unrecognized one). The fix adds a `StringV2` arm to
+    // `borrow_string_slot` mirroring the `op_length` StringV2 arm.
+
+    /// `.length` on the map-closure string parameter (StringLenTyped /
+    /// borrow_string_slot StringV2 carrier path).
+    #[test]
+    fn map_closure_string_length_accepts_stringv2_slot() {
+        let slot = eval_with_prelude(
+            r#"
+let ws: Array<string> = ["alpha", "beta", "gamma"]
+let lens: Array<int> = ws.map(|w| w.length)
+lens[1]
+"#,
+        );
+        assert_eq!(slot.as_i64(), Some(4));
+    }
+
+    /// `.length` summed across a for-loop over a string array whose elements
+    /// were produced by a prior `.map` — pins that the `StringLenTyped`
+    /// slot-direct path accepts the StringV2 carrier the map result delivers.
+    /// (Pre-fix this surfaced "TypeError: expected string, got string" once a
+    /// string-returning `.map` appeared in the same program.)
+    ///
+    /// NOTE: `.charAt`-result-into-`Array<string>` is intentionally NOT
+    /// exercised here — `charAt` yields a `NativeKind::Char` scalar, and
+    /// pushing it into an `Array<string>` then index-reading it reinterprets
+    /// the 4-byte codepoint as a `*const StringObj` → SIGSEGV under BOTH vm and
+    /// jit. That storage-side carrier mismatch is a pre-existing bug distinct
+    /// from this StringV2 receiver-read fix.
+    #[test]
+    fn string_array_length_typed_after_map_accepts_stringv2_slot() {
+        let slot = eval_with_prelude(
+            r#"
+let ws: Array<string> = ["alpha", "beta", "gamma"]
+let upper: Array<string> = ws.map(|w| w.toUpperCase())
+let mut total = 0
+for w in ws { total = total + w.length }
+total
+"#,
+        );
+        // 5 + 4 + 5 = 14.
+        assert_eq!(slot.as_i64(), Some(14));
     }
 }
