@@ -191,9 +191,53 @@ impl VirtualMachine {
                 }
             }
 
-            // ── HashMap, String index, NativeView, Temporal, TableView,
+            // ── String index `s[i]` — the i-th character ────────────────
+            //
+            // Book model (`fundamentals/strings.mdx` llm_summary + operators.mdx
+            // §Indexing): `s[i]` reads the i-th character of a `string`. Shape
+            // has NO first-class `char` type (STAGE-S4) — a single character is
+            // a real 1-char `NativeKind::String`. This makes `s[i]` exact sugar
+            // for `s.charAt(i)`: same producer (`op_string_char_at` /
+            // `v2_string_char_at`), same Unicode `chars().nth(i)` codepoint
+            // semantics, same out-of-range neutral (empty string — incl. a
+            // negative `int` index, which the string char-model treats as a
+            // miss rather than an array-style `IndexOutOfBounds`). Materializes
+            // a fresh `Arc<String>` — NO bit-reinterpret of the codepoint into
+            // a pointer slot (the deleted `NativeKind::Char`-into-`Array<string>`
+            // SIGSEGV the S4 fix retired). Accepts all three string carriers
+            // (`String` / `Ptr(HeapKind::String)` Arc carriers + the v2-raw
+            // `StringV2` `*const StringObj`) via `borrow_string_for_index`,
+            // which copies bytes and does NOT consume the share the popped
+            // slot owns (the caller's `drop_with_kind` releases it).
+            NativeKind::String
+            | NativeKind::Ptr(HeapKind::String)
+            | NativeKind::StringV2 => {
+                let s = match borrow_string_for_index(obj_bits, obj_kind) {
+                    Some(s) => s,
+                    None => {
+                        // Kind says a string carrier but bits are null —
+                        // an empty string indexes to the empty neutral.
+                        String::new()
+                    }
+                };
+                let idx = string_index_from_kinded(key_bits, key_kind)?;
+                // Negative `idx` (sign-preserved as i64) and past-the-end both
+                // miss `chars().nth(_)` → empty string, identical to charAt.
+                let ch_str = if idx < 0 {
+                    String::new()
+                } else {
+                    match s.chars().nth(idx as usize) {
+                        Some(ch) => ch.to_string(),
+                        None => String::new(),
+                    }
+                };
+                let bits = Arc::into_raw(Arc::new(ch_str)) as u64;
+                self.push_kinded(bits, NativeKind::String)
+            }
+
+            // ── HashMap, NativeView, Temporal, TableView,
             //    DataTable, Decimal, BigInt, etc. ─────────────────────────
-            NativeKind::String | NativeKind::Ptr(_) => Err(VMError::NotImplemented(format!(
+            NativeKind::Ptr(_) => Err(VMError::NotImplemented(format!(
                 "SURFACE: GetProp on {:?} not yet kinded — requires the \
                  W17-typed-carrier-monomorphization replacement for the \
                  deleted HashMapData::values: `Arc<Buf<Arc<HeapValue>>>` \
@@ -707,6 +751,65 @@ fn numeric_index_from_kinded(bits: u64, kind: NativeKind) -> Result<usize, VMErr
     Ok(i as usize)
 }
 
+/// Sign-preserving `(bits, kind) → i64` projection for the `s[i]` string
+/// index path. Unlike `numeric_index_from_kinded` (which rejects negatives
+/// with `IndexOutOfBounds` for the array-receiver model), the string
+/// char-model treats a negative or out-of-range index as a *miss* that
+/// yields the empty string (charAt parity, STAGE-S4). So the caller needs
+/// the signed value back, not an early error — only a genuinely non-numeric
+/// key kind is a `TypeError`.
+#[inline]
+fn string_index_from_kinded(bits: u64, kind: NativeKind) -> Result<i64, VMError> {
+    match kind {
+        NativeKind::Int8 => Ok((bits as i8) as i64),
+        NativeKind::Int16 => Ok((bits as i16) as i64),
+        NativeKind::Int32 => Ok((bits as i32) as i64),
+        NativeKind::Int64 | NativeKind::IntSize => Ok(bits as i64),
+        NativeKind::UInt8 => Ok((bits as u8) as i64),
+        NativeKind::UInt16 => Ok((bits as u16) as i64),
+        NativeKind::UInt32 => Ok((bits as u32) as i64),
+        NativeKind::UInt64 | NativeKind::UIntSize => Ok(bits as i64),
+        _ => Err(VMError::TypeError {
+            expected: "int",
+            got: "non-int string index",
+        }),
+    }
+}
+
+/// Borrow a string operand from any of the three string carriers
+/// (`NativeKind::String` / `Ptr(HeapKind::String)` Arc carriers + the
+/// v2-raw `StringV2` `*const StringObj`) and copy its bytes into an owned
+/// `String`. Does NOT consume the strong-count share the popped slot owns —
+/// the caller releases it via `drop_with_kind`. Returns `None` for a null
+/// pointer (treated as the empty string by the index path). Mirrors
+/// `typed_access::read_string_operand`; kept local to avoid a cross-module
+/// pub of that file-private helper.
+///
+/// SAFETY: when `kind` is a string carrier, `bits` is the raw pointer the
+/// matching producer stamped (`Arc::into_raw::<String>` for the Arc
+/// carriers, `*const StringObj` for `StringV2`).
+#[inline]
+fn borrow_string_for_index(bits: u64, kind: NativeKind) -> Option<String> {
+    if bits == 0 {
+        return None;
+    }
+    match kind {
+        NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
+            let s = unsafe { &*(bits as *const String) };
+            Some(s.clone())
+        }
+        NativeKind::StringV2 => {
+            let s = unsafe {
+                shape_value::v2::string_obj::StringObj::as_str(
+                    bits as *const shape_value::v2::string_obj::StringObj,
+                )
+            };
+            Some(s.to_string())
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -834,5 +937,83 @@ mod tests {
 
         let err = vm.op_set_prop().unwrap_err();
         assert!(matches!(err, VMError::TypeError { .. }));
+    }
+
+    /// Helper: drive `op_get_prop` for `string[index]` and return the
+    /// resulting 1-char `String` (asserting the result kind is
+    /// `NativeKind::String`, retiring its share). The receiver is pushed
+    /// first, the index second (the stack order `op_get_prop` pops).
+    fn string_index_via_get_prop(
+        vm: &mut VirtualMachine,
+        s: &str,
+        index_bits: u64,
+        index_kind: NativeKind,
+    ) -> String {
+        let recv: Arc<String> = Arc::new(s.to_string());
+        let recv_bits = Arc::into_raw(recv) as u64;
+        vm.push_kinded(recv_bits, NativeKind::String).unwrap();
+        vm.push_kinded(index_bits, index_kind).unwrap();
+        vm.op_get_prop(None).unwrap();
+        let (out_bits, out_kind) = vm.pop_kinded().unwrap();
+        assert_eq!(
+            out_kind,
+            NativeKind::String,
+            "s[i] must yield a 1-char NativeKind::String (STAGE-S4 char model), got {:?}",
+            out_kind
+        );
+        // SAFETY: kind == String means out_bits is Arc::into_raw::<String>
+        // with one share owned by the popped slot.
+        let arc: Arc<String> = unsafe { Arc::from_raw(out_bits as *const String) };
+        let result = (*arc).clone();
+        drop(arc);
+        result
+    }
+
+    /// `s[i]` (string GetProp index) returns the i-th character as a real
+    /// 1-char `string` — exact parity with `s.charAt(i)` (STAGE-S4 char
+    /// model: Shape has no first-class `char` type; book
+    /// `fundamentals/strings.mdx` llm_summary "Index chars via `s[i]`" +
+    /// operators.mdx §Indexing). Covers in-range ASCII, multi-byte Unicode
+    /// (codepoint indexing, NOT byte indexing), and the out-of-range +
+    /// negative neutral (empty string, NOT an `IndexOutOfBounds` error).
+    #[test]
+    fn get_prop_string_index_returns_one_char_string() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        // In-range ASCII: "hello"[1] == "e", "hello"[0] == "h".
+        assert_eq!(
+            string_index_via_get_prop(&mut vm, "hello", 1, NativeKind::Int64),
+            "e"
+        );
+        assert_eq!(
+            string_index_via_get_prop(&mut vm, "hello", 0, NativeKind::Int64),
+            "h"
+        );
+
+        // Multi-byte Unicode is indexed by codepoint: "世界"[0] == "世",
+        // "世界"[1] == "界" (each is a 3-byte UTF-8 sequence).
+        assert_eq!(
+            string_index_via_get_prop(&mut vm, "世界", 0, NativeKind::Int64),
+            "世"
+        );
+        assert_eq!(
+            string_index_via_get_prop(&mut vm, "世界", 1, NativeKind::Int64),
+            "界"
+        );
+
+        // Past-the-end → empty string (string-model neutral, charAt parity).
+        assert_eq!(
+            string_index_via_get_prop(&mut vm, "hi", 5, NativeKind::Int64),
+            ""
+        );
+
+        // Negative index (sign-preserved as i64) → empty string, NOT an
+        // array-style IndexOutOfBounds. -1 in two's complement is a huge
+        // u64; string_index_from_kinded recovers the signed -1 and the
+        // index path maps idx < 0 to the empty neutral.
+        assert_eq!(
+            string_index_via_get_prop(&mut vm, "hi", (-1i64) as u64, NativeKind::Int64),
+            ""
+        );
     }
 }

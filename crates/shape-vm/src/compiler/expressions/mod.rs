@@ -1726,6 +1726,21 @@ impl BytecodeCompiler {
             ..
         } = expr
         {
+            // String index `s[i]` — the i-th character is a 1-char `string`
+            // (STAGE-S4 char model: Shape has no first-class `char` type; the
+            // VM `dispatch_get_prop` String arm + `s.charAt(i)` both produce a
+            // real 1-char `NativeKind::String`). Prove the receiver is a
+            // `string` from its own resolved type — reading the receiver's
+            // proof, not fabricating — so a downstream strict-typed use
+            // (`acc + s[i]`, `s[i] == "x"`) sees `string`, not `unknown`. Must
+            // precede the array-element recovery below (string is not array-
+            // shaped, so those would return None → `unknown`).
+            if matches!(
+                self.infer_expr_type(object),
+                Ok(Type::Concrete(TypeAnnotation::Basic(ref n))) if n == "string"
+            ) {
+                return Ok(Type::Concrete(TypeAnnotation::Basic("string".to_string())));
+            }
             if let Some(elem) = self.tracked_array_element_type(object) {
                 return Ok(elem);
             }

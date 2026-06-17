@@ -550,6 +550,20 @@ impl TypeInferenceEngine {
                 self.push_numeric_index_constraint(index_type);
                 Ok(args[0].clone())
             }
+            // String index `s[i]` — the i-th character (book
+            // `fundamentals/strings.mdx` llm_summary + operators.mdx
+            // §Indexing). Shape has NO first-class `char` type (STAGE-S4): a
+            // single character is a real 1-char `string`, so `s[i]: string`
+            // (exact parity with `s.charAt(i)`). The index is `Numeric`-bound
+            // like array indexing — `int` and `number` both satisfy it without
+            // forcing `int -> number` promotion. Must precede the generic
+            // `Basic(name)` record-schema arm below (a "string" Basic would
+            // otherwise fall to a fresh indexable var → `unknown`, breaking
+            // strict-typed downstream uses like `acc + s[i]`).
+            Type::Concrete(TypeAnnotation::Basic(name)) if name.as_str() == "string" => {
+                self.push_numeric_index_constraint(index_type);
+                Ok(Type::Concrete(TypeAnnotation::Basic("string".into())))
+            }
             Type::Concrete(TypeAnnotation::Basic(name)) => {
                 // Check if this is a registered record schema (e.g., "rows" returns "row")
                 if self.env.lookup_record_schema(name).is_some() {
