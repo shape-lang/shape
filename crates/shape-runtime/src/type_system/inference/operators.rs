@@ -433,6 +433,49 @@ impl TypeInferenceEngine {
         Some(Type::Concrete(TypeAnnotation::Intersection(members)))
     }
 
+    /// Extract the single element `Type` from an array/Vec-shaped `Type`, in any
+    /// of the three representations the inference engine produces
+    /// (`Concrete(Array)`, `Concrete(Generic{"Array"|"Vec"})`, or
+    /// `Generic{base: Array|Vec, args}`). Returns `None` for non-array shapes.
+    fn array_element_type(ty: &Type) -> Option<Type> {
+        match ty {
+            Type::Concrete(TypeAnnotation::Array(inner)) => Some(Type::Concrete((**inner).clone())),
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if (name == "Array" || name == "Vec") && args.len() == 1 =>
+            {
+                Some(Type::Concrete(args[0].clone()))
+            }
+            Type::Generic { base, args }
+                if args.len() == 1
+                    && matches!(
+                        base.as_ref(),
+                        Type::Concrete(ann)
+                            if matches!(ann.as_type_name_str(), Some("Array") | Some("Vec"))
+                    ) =>
+            {
+                Some(args[0].clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// `Array<T> + Array<T> -> Array<T>` concatenation (the book idiom
+    /// `weekdays = weekdays + [elem]`, datetime.mdx §Date Range Iteration). The
+    /// VM already concatenates arrays; the type checker must accept it without
+    /// routing into `infer_numeric_arithmetic_op` (which rejects `Array<int>`
+    /// as non-Numeric). Strict: both sides must be arrays and their element
+    /// types are unified via a same-type constraint — `Array<int> +
+    /// Array<number>` is rejected, no silent element coercion. Returns `None`
+    /// when either operand is not an array shape, so genuine numeric/string add
+    /// is unaffected.
+    fn infer_array_add_type(&mut self, left: &Type, right: &Type, span: Span) -> Option<Type> {
+        let left_elem = Self::array_element_type(left)?;
+        let right_elem = Self::array_element_type(right)?;
+        // Strict element-type agreement; no coercion (int != number).
+        self.push_constraint_with_origin(left_elem.clone(), right_elem, span);
+        Some(BuiltinTypes::array(left_elem))
+    }
+
     /// Shared numeric arithmetic inference for `+`, `-`, `*`, `/`, `%`.
     fn infer_numeric_arithmetic_op(
         &mut self,
@@ -542,6 +585,13 @@ impl TypeInferenceEngine {
             BinaryOp::Add => {
                 if let Some(merged) = Self::infer_object_add_type(left, right) {
                     return Ok(merged);
+                }
+                // `Array<T> + Array<T>` is concatenation (book idiom
+                // `weekdays = weekdays + [elem]`). Must be handled before the
+                // numeric fallback below, which would reject `Array<int>` as
+                // non-Numeric.
+                if let Some(concatenated) = self.infer_array_add_type(left, right, span) {
+                    return Ok(concatenated);
                 }
                 // String concatenation is allowed in Shape and should not force
                 // numeric constraints on the opposite operand.

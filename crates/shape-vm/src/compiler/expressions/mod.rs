@@ -1389,6 +1389,21 @@ impl BytecodeCompiler {
                 {
                     return Ok(Type::Concrete(TypeAnnotation::Basic(type_name)));
                 }
+                // Array-shaped tracker names (`T[]` from `type_display_name`,
+                // or a bare `Array`/`Vec`). The runtime inference engine returns
+                // a `Variable` (→ `unknown`) for function-body
+                // `let xs: Array<T>` locals because it never saw the body
+                // declaration; the tracker did. Reconstruct the array `Type` so
+                // a downstream `xs + [..]` resolves to the array shape and
+                // routes to `ArrayConcat` instead of erroring as
+                // `unknown + T[]`. Element-type preserved from the `T[]` name
+                // (no fabrication — `Array`/`Vec` with no element keeps an
+                // unresolved element var, which still type-names as an array).
+                if let Some(elem) = type_name.strip_suffix("[]") {
+                    return Ok(Type::Concrete(TypeAnnotation::Array(Box::new(
+                        TypeAnnotation::Basic(elem.to_string()),
+                    ))));
+                }
             }
             // R3-elemerasure (strict-flip): a `let x = a.first()` (scalar
             // element-returning builtin method) records the result
@@ -1411,6 +1426,26 @@ impl BytecodeCompiler {
                         .and_then(|idx| self.module_binding_concrete_types.get(idx))
                 });
             if let Some(ct) = recorded_ct {
+                // An array-typed local (`let xs: Array<T>`) reads back as
+                // `Array<T>` in value position. The recorded element
+                // ConcreteType IS the compile-time proof (ADR-006 §2.7.5); the
+                // runtime inference engine returns `unknown` for body-local
+                // array declarations it never saw. Surfacing the array shape
+                // here lets a downstream `xs + [..]` route to `ArrayConcat`
+                // (book idiom `weekdays = weekdays + [elem]`,
+                // datetime.mdx §Date Range Iteration) instead of erroring as
+                // `unknown + T[]`. Use the canonical `Array(_)` annotation
+                // (not the `Vec<_>` generic render) so `type_display_name`
+                // produces the `T[]` form that the ArrayConcat dispatch keys on.
+                if let shape_value::v2::ConcreteType::Array(inner_ct) = ct {
+                    if let Some(inner_ann) =
+                        crate::compiler::expressions::closures::concrete_type_to_type_annotation(
+                            inner_ct,
+                        )
+                    {
+                        return Ok(Type::Concrete(TypeAnnotation::Array(Box::new(inner_ann))));
+                    }
+                }
                 if let Some(ann) =
                     crate::compiler::expressions::closures::concrete_type_to_type_annotation(ct)
                 {
@@ -1721,6 +1756,32 @@ impl BytecodeCompiler {
             {
                 if let Some(ann) = crate::compiler::expressions::closures::concrete_type_to_type_annotation(&result_ct) {
                     return Ok(Type::Concrete(ann));
+                }
+            }
+        }
+
+        // Array literal: resolve the element type from the literal's own
+        // elements via the compiler's structural `concrete_type_for_expr`
+        // (which sees function-body locals + for-loop variables + f-string
+        // elements the module-scope runtime engine cannot). Without this, a
+        // `[f"day-{i}"]` / `[i]` literal inside a loop body infers `unknown`
+        // and a `xs + [..]` ArrayConcat operand check rejects it as
+        // `string[] + unknown`. Per ADR-006 §2.7.5 the resolved element
+        // ConcreteType IS the proof; an unresolvable / heterogeneous literal
+        // yields `None` and falls through to the engine (no fabrication —
+        // genuinely-untyped literals stay a clean compile error downstream).
+        if let Expr::Array(..) = expr {
+            if let Some(shape_value::v2::ConcreteType::Array(inner_ct)) =
+                crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                    self, expr,
+                )
+            {
+                if let Some(inner_ann) =
+                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(
+                        &inner_ct,
+                    )
+                {
+                    return Ok(Type::Concrete(TypeAnnotation::Array(Box::new(inner_ann))));
                 }
             }
         }

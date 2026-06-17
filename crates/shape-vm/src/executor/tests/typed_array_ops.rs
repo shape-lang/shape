@@ -994,3 +994,75 @@ fn ws9b_property_access_resolves_when_type_declared_after_function() {
     );
     assert_eq!(result.as_bool(), Some(true));
 }
+
+/// STAGE B3 (strict-flip collection-dispatch): array-literal element-type
+/// propagation through `Array<T> + Array<T>` concatenation — the book idiom
+/// `weekdays = weekdays + [elem]` (fundamentals/datetime.mdx §Date Range
+/// Iteration). Before the fix, an array literal built from a loop variable / an
+/// f-string interpolating a loop variable, and a body-local `let xs: Array<T>`
+/// read in value position, both inferred `unknown` element type — so the
+/// ArrayConcat operand check rejected `xs + [..]` as `T[] + unknown`
+/// (bytecode compiler) or `<elem> is not compatible with Vec<T>` (runtime
+/// inference engine). The fix propagates the element type from (a) the
+/// declared `Array<T>` annotation via the recorded ConcreteType, and (b) the
+/// literal's homogeneous proven elements (loop var, f-string, struct
+/// constructor).
+///
+/// String and struct element types are exercised here — the book's actual `+`
+/// examples. The numeric `Array<int> + Array<int>` shape is deliberately NOT
+/// covered: `Vec<int>+Vec<int>` is claimed by the (incomplete) element-wise
+/// SIMD `IntrinsicVecAddI64` path, a distinct semantics from concatenation —
+/// SURFACED as an architecture decision, not forced into concat.
+#[test]
+fn test_b3_array_literal_element_type_propagates_through_concat() {
+    // (a) loop-built string array via the book `+` idiom, including an
+    //     f-string element interpolating the loop variable.
+    let result = eval(
+        "let mut weekdays: Array<string> = []\n\
+         for i in 0..5 {\n\
+             weekdays = weekdays + [f\"day-{i}\"]\n\
+         }\n\
+         weekdays.length()",
+    );
+    assert_eq!(result.as_i64(), Some(5));
+
+    // (b) declared-annotation element type pushed into a bare literal operand.
+    let result = eval(
+        "let a: Array<string> = [\"x\"]\n\
+         let b = a + [\"y\", \"z\"]\n\
+         b.length()",
+    );
+    assert_eq!(result.as_i64(), Some(3));
+
+    // (c) struct-typed elements: `Array<P> + Array<P>` concatenation.
+    let result = eval(
+        "type P { x: int }\n\
+         let a: Array<P> = [P{x:1}]\n\
+         let b: Array<P> = [P{x:2}, P{x:3}]\n\
+         let c = a + b\n\
+         c.length()",
+    );
+    assert_eq!(result.as_i64(), Some(3));
+}
+
+/// The type checker must accept `Array<T> + Array<T>` (concatenation) without
+/// routing it into the numeric-arithmetic path, which rejects an array operand
+/// as non-`Numeric`. Pins the `infer_array_add_type` seam in
+/// `inference/operators.rs`: a homogeneous `Array<string> + Array<string>`
+/// type-checks (the runtime-engine layer no longer raises "Array does not
+/// implement trait Numeric").
+#[test]
+fn test_b3_array_add_type_checks_without_numeric_rejection() {
+    use super::test_utils::eval_result;
+    let result = eval_result(
+        "let a: Array<string> = [\"x\"]\n\
+         let b: Array<string> = [\"y\"]\n\
+         let c = a + b\n\
+         c.length()",
+    );
+    assert!(
+        result.is_ok(),
+        "Array<string> + Array<string> should type-check as concat, got: {:?}",
+        result.err()
+    );
+}
