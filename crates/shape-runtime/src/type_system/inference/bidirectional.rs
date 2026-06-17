@@ -637,11 +637,19 @@ impl TypeInferenceEngine {
         Ok(BuiltinTypes::array(elem_type.clone()))
     }
 
-    /// Check a bracket literal `[v1, v2, ...]` against an expected tuple type
-    /// `[T1, T2, ...]` (book `fundamentals/variables` §Tuple Types). The arity
-    /// must match exactly (a tuple fixes its length at compile time) and each
-    /// element is checked AGAINST its positional element type — no widening, no
-    /// coercion; `int` and `number` positions stay distinct.
+    /// Check a bracket literal `[v1, v2, ...]` against an expected bracket type
+    /// `[T1, T2, ...]`.
+    ///
+    /// USER RULING 2026-06-17 — bracket `[T, T, ...]` is a fixed-length
+    /// HOMOGENEOUS group, not a heterogeneous tuple. There is NO heterogeneous
+    /// carrier in the runtime (homogeneous-only), so a bracket annotation whose
+    /// element types are NOT a single homogeneous element type is a clean
+    /// COMPILE-ERROR that points the user at a struct. The arity must also match
+    /// exactly. Element types are homogeneous when they are all structurally
+    /// equal (`[int, int]`) or all in the fixed-width lossless numeric lattice
+    /// (`[int, number]` — the `int` literals losslessly adopt `number`). A
+    /// non-numeric type mixed with any different type (`[int, string]`) has no
+    /// homogeneous element carrier and is rejected here.
     fn check_tuple_against(
         &mut self,
         elements: &[Expr],
@@ -653,10 +661,70 @@ impl TypeInferenceEngine {
                 format!("bracket literal with {} elements", elements.len()),
             ));
         }
+        // Homogeneous-only enforcement (USER RULING 2026-06-17). Reject a
+        // heterogeneous bracket annotation with a struct hint BEFORE per-element
+        // checking, so the user sees the design-level guidance rather than a
+        // downstream array-element-inference message at lowering.
+        if !Self::bracket_elem_types_are_homogeneous(elem_types) {
+            let rendered = TypeAnnotation::Tuple(elem_types.to_vec()).to_type_string();
+            let struct_fields: Vec<String> = elem_types
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let name = (b'a' + (i as u8 % 26)) as char;
+                    format!("{}: {}", name, t.to_type_string())
+                })
+                .collect();
+            return Err(TypeError::ConstraintViolation(format!(
+                "heterogeneous tuple `{rendered}` is not supported; \
+                 bracket types `[T, T, ...]` are homogeneous-only. \
+                 Use a struct instead: `type T {{ {} }}`",
+                struct_fields.join(", ")
+            )));
+        }
         for (elem, ty) in elements.iter().zip(elem_types.iter()) {
             self.check_against(elem, &Type::Concrete(ty.clone()))?;
         }
         Ok(Type::Concrete(TypeAnnotation::Tuple(elem_types.to_vec())))
+    }
+
+    /// A bracket annotation `[T1, T2, ...]` is HOMOGENEOUS (USER RULING
+    /// 2026-06-17, homogeneous-only) when every element type is the same
+    /// element type. Two forms qualify:
+    ///
+    /// - all element annotations are structurally equal (`[int, int]`,
+    ///   `[string, string]`), or
+    /// - all element annotations are in the fixed-width lossless numeric lattice
+    ///   (`int` / `number` / `i8` / `f32` / ...), so the differing-but-numeric
+    ///   positions (`[int, number]`) collapse to a single numeric element type
+    ///   by lossless adoption.
+    ///
+    /// `decimal` / `bigint` are arbitrary-precision heap numerics, NOT in the
+    /// fixed-width lossless lattice — they only count as homogeneous via the
+    /// structural-equality form, never via the all-numeric form.
+    fn bracket_elem_types_are_homogeneous(elem_types: &[TypeAnnotation]) -> bool {
+        let Some(first) = elem_types.first() else {
+            // Empty `[]` annotation has no heterogeneity to reject.
+            return true;
+        };
+        // Form 1: all structurally equal.
+        if elem_types
+            .iter()
+            .all(|t| crate::type_system::unification::structural_equality::annotations_equal(first, t))
+        {
+            return true;
+        }
+        // Form 2: all in the fixed-width lossless numeric lattice.
+        let lossless_numeric = |t: &TypeAnnotation| -> bool {
+            let name = match t {
+                TypeAnnotation::Basic(n) => Some(n.as_str()),
+                TypeAnnotation::Reference(p) => Some(p.as_str()),
+                _ => None,
+            };
+            name.map(|n| BuiltinTypes::canonical_numeric_runtime_name(n).is_some())
+                .unwrap_or(false)
+        };
+        elem_types.iter().all(lossless_numeric)
     }
 
     /// Check object entries against expected field types
@@ -801,6 +869,89 @@ mod tests {
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].name, "x");
         assert_eq!(fields[1].name, "y");
+    }
+
+    // USER RULING 2026-06-17 — bracket `[T, T, ...]` is HOMOGENEOUS-ONLY; a
+    // heterogeneous bracket annotation (`[int, string]`) is a clean compile
+    // error pointing the user at a struct.
+    #[test]
+    fn homogeneous_bracket_tuple_classification() {
+        let basic = |n: &str| TypeAnnotation::Basic(n.to_string());
+        // Structurally-equal element types: homogeneous.
+        assert!(TypeInferenceEngine::bracket_elem_types_are_homogeneous(&[
+            basic("int"),
+            basic("int"),
+        ]));
+        assert!(TypeInferenceEngine::bracket_elem_types_are_homogeneous(&[
+            basic("string"),
+            basic("string"),
+        ]));
+        // Differing but all in the fixed-width lossless numeric lattice:
+        // homogeneous by lossless adoption (`[int, number]`).
+        assert!(TypeInferenceEngine::bracket_elem_types_are_homogeneous(&[
+            basic("int"),
+            basic("number"),
+        ]));
+        // Heterogeneous: a non-numeric type mixed with a different type.
+        assert!(!TypeInferenceEngine::bracket_elem_types_are_homogeneous(&[
+            basic("int"),
+            basic("string"),
+        ]));
+        assert!(!TypeInferenceEngine::bracket_elem_types_are_homogeneous(&[
+            basic("string"),
+            basic("int"),
+        ]));
+        // `decimal` is arbitrary-precision, NOT in the lossless lattice — only
+        // homogeneous via structural equality, never the all-numeric form.
+        assert!(!TypeInferenceEngine::bracket_elem_types_are_homogeneous(&[
+            basic("int"),
+            basic("decimal"),
+        ]));
+    }
+
+    #[test]
+    fn check_tuple_against_rejects_heterogeneous_with_struct_hint() {
+        let mut engine = super::super::TypeInferenceEngine::new();
+        let elements = vec![
+            Expr::Literal(shape_ast::ast::Literal::Int(7), Default::default()),
+            Expr::Literal(
+                shape_ast::ast::Literal::String("x".to_string()),
+                Default::default(),
+            ),
+        ];
+        let elem_types = vec![
+            TypeAnnotation::Basic("int".to_string()),
+            TypeAnnotation::Basic("string".to_string()),
+        ];
+        let err = engine
+            .check_tuple_against(&elements, &elem_types)
+            .expect_err("heterogeneous `[int, string]` must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("heterogeneous tuple") && msg.contains("Use a struct"),
+            "expected struct-hint message, got: {msg}"
+        );
+        assert!(
+            msg.contains("[int, string]"),
+            "message should render the offending tuple type, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn check_tuple_against_accepts_homogeneous_int_pair() {
+        let mut engine = super::super::TypeInferenceEngine::new();
+        let elements = vec![
+            Expr::Literal(shape_ast::ast::Literal::Int(3), Default::default()),
+            Expr::Literal(shape_ast::ast::Literal::Int(4), Default::default()),
+        ];
+        let elem_types = vec![
+            TypeAnnotation::Basic("int".to_string()),
+            TypeAnnotation::Basic("int".to_string()),
+        ];
+        assert!(
+            engine.check_tuple_against(&elements, &elem_types).is_ok(),
+            "homogeneous `[int, int]` must type-check"
+        );
     }
 
     #[test]
