@@ -3099,7 +3099,10 @@ impl VirtualMachine {
     /// Read the projected slot of a `RefTarget` as `(bits, kind)` —
     /// borrows the place's share (the place retains ownership). Caller
     /// is responsible for `clone_with_kind` if pushing onto the stack.
-    fn read_ref_target(&self, rt: &shape_value::RefTarget) -> Result<(u64, NativeKind), VMError> {
+    pub(in crate::executor) fn read_ref_target(
+        &self,
+        rt: &shape_value::RefTarget,
+    ) -> Result<(u64, NativeKind), VMError> {
         match rt {
             shape_value::RefTarget::Local {
                 frame_index,

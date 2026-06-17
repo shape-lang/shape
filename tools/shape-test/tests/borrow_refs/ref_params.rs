@@ -903,6 +903,139 @@ fn w14_2_g4_derefstore_drift_preserves_explicit_number_annotation() {
     .expect_number(2.0);
 }
 
+// =============================================================================
+// STAGE C1 (2026-06-17) — push/pop/index-set through a `&mut Array<T>` param
+// =============================================================================
+//
+// references-borrowing.mdx documents `fn append(&mut arr, value) {
+// arr.push(value) }` then `append(&mut data, 4)` as "the most common use" of
+// references. Prior to this fix `op_array_push_local` saw the param slot's
+// `Ptr(HeapKind::Reference)` kind (an `Arc<RefTarget>`, not a `*mut
+// TypedArray<T>`) and surfaced `ArrayPushLocal: SURFACE — V3-S5 ckpt-5`. The
+// fix adds a `Ptr(Reference)` arm that resolves the `RefTarget` to the
+// underlying v2-raw `TypedArray<T>` carrier (mirror of `op_set_index_ref` /
+// `op_deref_load`, ADR-006 §2.7.13) and pushes into the SHARED array so the
+// CALLER sees the growth. `TypedArray::push` reallocates only the interior
+// `data` buffer on grow — the struct pointer in the caller's slot is stable,
+// so no pointer writeback is needed. V3-S5 Seam #2 element-carrier discipline.
+
+#[test]
+fn c1_push_int_through_mut_array_ref_param() {
+    ShapeTest::new(
+        r#"
+        fn add(xs: &mut Array<int>, v: int) { xs.push(v) }
+        let mut data = [1, 2, 3]
+        add(&mut data, 4)
+        data.len()
+    "#,
+    )
+    .expect_number(4.0);
+}
+
+#[test]
+fn c1_push_int_value_read_back_after_call() {
+    // (binding named `nums` not `data` — `data[...]` is a DataSchema-magic
+    // identifier in the compiler's data_access path, unrelated to refs.)
+    ShapeTest::new(
+        r#"
+        fn add(xs: &mut Array<int>, v: int) { xs.push(v) }
+        let mut nums = [10, 20]
+        add(&mut nums, 30)
+        nums[2]
+    "#,
+    )
+    .expect_number(30.0);
+}
+
+#[test]
+fn c1_push_grows_past_capacity_through_ref_param() {
+    // Several pushes force a `grow` reallocation of the interior buffer; the
+    // caller's `*mut TypedArray<T>` slot is stable across it.
+    ShapeTest::new(
+        r#"
+        fn add(xs: &mut Array<int>, v: int) { xs.push(v) }
+        let mut nums = [1]
+        add(&mut nums, 2)
+        add(&mut nums, 3)
+        add(&mut nums, 4)
+        add(&mut nums, 5)
+        nums[0] + nums[1] + nums[2] + nums[3] + nums[4]
+    "#,
+    )
+    .expect_number(15.0);
+}
+
+#[test]
+fn c1_push_number_through_mut_array_ref_param() {
+    ShapeTest::new(
+        r#"
+        fn add(xs: &mut Array<number>, v: number) { xs.push(v) }
+        let mut nums = [1.0, 2.0]
+        add(&mut nums, 3.5)
+        nums[2]
+    "#,
+    )
+    .expect_number(3.5);
+}
+
+#[test]
+fn c1_push_struct_through_mut_array_ref_param() {
+    ShapeTest::new(
+        r#"
+        type Point { x: int, y: int }
+        fn addp(xs: &mut Array<Point>, p: Point) { xs.push(p) }
+        let mut pts = [Point { x: 1, y: 2 }]
+        addp(&mut pts, Point { x: 3, y: 4 })
+        let p1: Point = pts[1]
+        p1.x
+    "#,
+    )
+    .expect_number(3.0);
+}
+
+#[test]
+fn c1_index_set_through_mut_array_ref_param() {
+    ShapeTest::new(
+        r#"
+        fn setit(xs: &mut Array<int>, i: int, v: int) { xs[i] = v }
+        let mut nums = [1, 2, 3]
+        setit(&mut nums, 0, 99)
+        nums[0]
+    "#,
+    )
+    .expect_number(99.0);
+}
+
+#[test]
+fn c1_pop_through_mut_array_ref_param() {
+    ShapeTest::new(
+        r#"
+        fn popit(xs: &mut Array<int>) { xs.pop() }
+        let mut nums = [1, 2, 3]
+        popit(&mut nums)
+        nums.len()
+    "#,
+    )
+    .expect_number(2.0);
+}
+
+#[test]
+fn c1_push_index_set_pop_combined_through_ref_params() {
+    ShapeTest::new(
+        r#"
+        fn add(xs: &mut Array<int>, v: int) { xs.push(v) }
+        fn setit(xs: &mut Array<int>, i: int, v: int) { xs[i] = v }
+        fn popit(xs: &mut Array<int>) { xs.pop() }
+        let mut nums = [1, 2, 3]
+        add(&mut nums, 4)
+        setit(&mut nums, 0, 99)
+        popit(&mut nums)
+        nums[0]
+    "#,
+    )
+    .expect_number(99.0); // nums == [99, 2, 3]
+}
+
 #[test]
 fn w14_2_g4_derefstore_drift_single_function_int_unaffected() {
     // Negative test: the single-call case (no forwarding) was always

@@ -154,6 +154,63 @@ impl VirtualMachine {
                     }
                 }
             }
+            // STAGE C1 (2026-06-17): `xs.push(v)` where `xs: &mut Array<T>` is
+            // a reference PARAMETER. The receiver slot holds an
+            // `Arc::into_raw(Arc<RefTarget>)` (kind `Ptr(HeapKind::Reference)`)
+            // — not a `*mut TypedArray<T>` directly. Resolve the RefTarget to
+            // the underlying array pointer (mirror of `op_set_index_ref` /
+            // `op_deref_load`, ADR-006 §2.7.13) and push into the SHARED v2-raw
+            // `TypedArray<T>` carrier. `TypedArray::push` reallocates only the
+            // interior `data` buffer on grow; the `*mut TypedArray<T>` struct
+            // pointer the caller's slot stores is STABLE, so the in-place push
+            // grows the CALLER's array with no pointer writeback (the documented
+            // `fn append(&mut arr, value) { arr.push(value) }` contract in
+            // references-borrowing.mdx). V3-S5 Seam #2 element-carrier discipline.
+            NativeKind::Ptr(HeapKind::Reference) => {
+                let (ref_bits, _) = self.read_receiver_loc(&receiver_loc);
+                // SAFETY: kind == Ptr(HeapKind::Reference) — `ref_bits` is an
+                // `Arc::into_raw::<RefTarget>` pointer; the receiver slot keeps
+                // one share live for us (we only borrow, never consume it).
+                let rt: &shape_value::reference::RefTarget =
+                    unsafe { &*(ref_bits as *const shape_value::reference::RefTarget) };
+                let (arr_bits, arr_kind) = match self.read_ref_target(rt) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        drop_with_kind(value_bits, value_kind);
+                        return Err(e);
+                    }
+                };
+                if arr_kind != NativeKind::Ptr(HeapKind::TypedArray) {
+                    drop_with_kind(value_bits, value_kind);
+                    return Err(VMError::RuntimeError(format!(
+                        "ArrayPushLocal: &mut ref base must reference a \
+                         TypedArray; got {:?}",
+                        arr_kind
+                    )));
+                }
+                match v2_array_detect::as_v2_typed_array(arr_bits, arr_kind) {
+                    Some(view) => match v2_array_detect::push_element(&view, value_bits, value_kind)
+                    {
+                        Ok(()) => Ok(()),
+                        Err(msg) => {
+                            drop_with_kind(value_bits, value_kind);
+                            Err(VMError::TypeError {
+                                expected: "v2 typed-array element",
+                                got: msg,
+                            })
+                        }
+                    },
+                    None => {
+                        drop_with_kind(value_bits, value_kind);
+                        Err(VMError::NotImplemented(
+                            "ArrayPushLocal: &mut ref base did not resolve to \
+                             a v2 typed-array pointer (HEAP_KIND_V2_TYPED_ARRAY \
+                             header missing). ADR-006 §2.7.6 / §2.7.7."
+                                .to_string(),
+                        ))
+                    }
+                }
+            }
             _ => {
                 drop_with_kind(value_bits, value_kind);
                 Err(ckpt5_typed_array_surface("ArrayPushLocal", array_kind))
