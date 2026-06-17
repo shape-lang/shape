@@ -1354,3 +1354,107 @@ test()"#,
     )
     .expect_string("");
 }
+
+// ========================================================================
+// charAt — string model (single char = 1-char string, NOT a char scalar)
+//
+// STAGE-S4 regression suite. The book (`fundamentals/strings.mdx` +
+// `operators.mdx`) gives Shape NO first-class `char` type: a single
+// character is a 1-char `string`; char *literals* `'a'` are an int-codepoint
+// interop escape hatch. `charAt` is declared `-> string`, so it MUST yield a
+// real 1-char string. The pre-fix implementation returned a `NativeKind::Char`
+// scalar typed as `string`, which corrupted `Array<string>` collection (the
+// codepoint bits were stored where a `*const StringObj` was expected, then
+// read back as a pointer → SIGSEGV exit 139). A ShapeTest runs the program
+// in-process, so a SIGSEGV would abort the whole test binary — these tests
+// double as no-segfault assertions.
+// ========================================================================
+
+/// Scalar `charAt` returns a real 1-char string.
+#[test]
+fn test_char_at_scalar_returns_string() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let w: string = "alpha"
+            w.charAt(0)
+        }
+test()"#,
+    )
+    .expect_string("a");
+}
+
+/// `charAt` mid-string.
+#[test]
+fn test_char_at_mid() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let w: string = "hello"
+            w.charAt(2)
+        }
+test()"#,
+    )
+    .expect_string("l");
+}
+
+/// Out-of-range `charAt` returns the empty string (string-model neutral).
+#[test]
+fn test_char_at_out_of_range() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let w: string = "hi"
+            w.charAt(5)
+        }
+test()"#,
+    )
+    .expect_string("");
+}
+
+/// Negative-index `charAt` returns the empty string.
+#[test]
+fn test_char_at_negative_index() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let w: string = "hi"
+            w.charAt(-1)
+        }
+test()"#,
+    )
+    .expect_string("");
+}
+
+/// CATASTROPHIC SEGFAULT REGRESSION (exit 139, both modes): collect
+/// `charAt` results into an `Array<string>` via `map`, then index-read.
+/// Pre-fix this stored codepoint bits as a string element and derefed them
+/// as a `*const StringObj` on read → SIGSEGV. A correct value (or a clean
+/// compile error) is required; a segfault aborts this test binary.
+#[test]
+fn test_char_at_map_collect_into_array_string_no_segfault() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let ws: Array<string> = ["alpha", "beta", "gamma"]
+            let firsts: Array<string> = ws.map(|w| w.charAt(0))
+            firsts[2]
+        }
+test()"#,
+    )
+    .expect_string("g");
+}
+
+/// `charAt` inside a for-loop over a range yields each character as a string;
+/// f-string interpolation accumulates them. Exercises the loop-variable index
+/// path (distinct from the constant-index fast-path) without a SIGSEGV.
+#[test]
+fn test_char_at_for_loop() {
+    ShapeTest::new(
+        r#"fn test() -> string {
+            let w: string = "abc"
+            let mut acc: string = ""
+            for i in 0..3 {
+                acc = f"{acc}{w.charAt(i)}"
+            }
+            acc
+        }
+test()"#,
+    )
+    .expect_string("abc");
+}

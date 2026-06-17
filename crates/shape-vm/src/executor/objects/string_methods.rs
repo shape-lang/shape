@@ -260,14 +260,24 @@ pub fn v2_string_repeat(
 
 /// charAt / char_at
 ///
-/// Wave-δ MR-string-misc: the §2.7.10 / Q11 kinded `MethodFnV2` ABI
-/// carries the result kind on the returned `KindedSlot`, so
-/// `NativeKind::Ptr(HeapKind::Char)` results are first-class.
-/// Out-of-range indices return `Char('\0')` — the language semantics
-/// model `char_at` as total (the pre-§2.7.10 implementation returned
-/// `Option<char>` but the kind-blind ABI couldn't represent `None`
-/// either). Callers using `string.len()` to bound the index get the
-/// expected behavior.
+/// String model (book `fundamentals/strings.mdx` + `operators.mdx`):
+/// Shape has NO first-class `char` type — a single character is a
+/// 1-char `string`. (Char *literals* `'a'` are an interop escape hatch
+/// that evaluate to `int` code points; `codePointAt` returns `int`.)
+/// `charAt` is declared `-> string` in the method table, so it MUST
+/// produce a real 1-char `string` value, NOT a `NativeKind::Char`
+/// scalar. Returning a `Char` scalar typed as `string` corrupts
+/// `Array<string>` collection (the codepoint bits get stored where a
+/// `*const StringObj` is expected, then read back as a pointer →
+/// SIGSEGV). The materialized 1-char `NativeKind::String(Arc<String>)`
+/// flows correctly through the typed-array String carrier
+/// (`push_element` / `read_element` String arm) — NO bit-reinterpret.
+///
+/// Out-of-range indices (including negative) return the empty string
+/// `""`. `char_at` is modeled as total (the kinded `MethodFnV2` ABI
+/// cannot represent `Option`); callers bound the index with
+/// `string.len()`. The empty string is the natural string-model
+/// neutral (vs. the previous spurious `Char('\0')`).
 pub fn v2_string_char_at(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -276,10 +286,12 @@ pub fn v2_string_char_at(
     let s = receiver_str(args)?;
     let i = int_arg(args, 1)?;
     if i < 0 {
-        return Ok(KindedSlot::from_char('\0'));
+        return Ok(string_result(String::new()));
     }
-    let c = s.chars().nth(i as usize).unwrap_or('\0');
-    Ok(KindedSlot::from_char(c))
+    match s.chars().nth(i as usize) {
+        Some(c) => Ok(string_result(c.to_string())),
+        None => Ok(string_result(String::new())),
+    }
 }
 
 /// reverse

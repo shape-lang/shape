@@ -385,27 +385,27 @@ impl VirtualMachine {
         drop_with_kind(index_bits, index_kind);
 
         let s = self.borrow_string_slot(slot_idx)?;
-        if let Some(ch) = s.chars().nth(index) {
-            // Push as scalar `NativeKind::Char` slot — the codepoint is an
-            // inline 4-byte scalar (UTF-32), NOT an `Arc<HeapValue>` pointer.
-            // ADR-006 §2.7.5 producer-side stamp-at-compile-time: the prior
-            // `Ptr(HeapKind::Char)` label mislabeled a scalar codepoint as a
-            // heap pointer; consumers without a Char arm (e.g.
-            // `wire_conversion::heap_to_wire`) would cast the codepoint bits
-            // to `*const HeapValue` and dereference → misaligned-pointer
-            // abort. `NativeKind::Char` is the canonical post-amendment
-            // scalar kind (mirror of `v2_string_char_at` / `KindedSlot::from_char`).
-            self.push_kinded(ch as u64, NativeKind::Char)
-        } else {
-            // Out-of-bounds index pushes the NUL char, mirroring the
-            // `v2_string_char_at` handler contract (string_methods.rs:271):
-            // both negative and past-end indices return '\0'. (A negative
-            // `index: int` wraps to a huge `usize` above via `as usize`, so
-            // it also lands here.) This keeps the typed StringCharAt fast-path
-            // semantically identical to the PHF-dispatched form rather than
-            // raising IndexOutOfBounds for what the language defines as run-ok.
-            self.push_kinded('\0' as u64, NativeKind::Char)
-        }
+        // String model: `charAt` is declared `-> string` (method_table.rs)
+        // and Shape has no first-class `char` type — a single character is a
+        // 1-char `string` (book `fundamentals/strings.mdx` + `operators.mdx`:
+        // char *literals* `'a'` are an int-codepoint interop escape hatch,
+        // but `charAt` is string-typed). Producing a `NativeKind::Char`
+        // scalar here typed as `string` corrupts `Array<string>` collection:
+        // the codepoint bits land where a `*const StringObj` is expected and
+        // are read back as a pointer → SIGSEGV. Materialize a real 1-char
+        // `NativeKind::String(Arc<String>)` so the value is a correct string
+        // everywhere (scalar use, concat, and typed-array String carrier).
+        // This MUST stay in lockstep with `v2_string_char_at`
+        // (string_methods.rs) — the PHF-dispatched form for param receivers.
+        let result = match s.chars().nth(index) {
+            Some(ch) => ch.to_string(),
+            // Out-of-bounds (negative `index: int` wraps to a huge `usize`
+            // above and also lands here) returns the empty string — the
+            // string-model neutral, identical to `v2_string_char_at`.
+            None => String::new(),
+        };
+        let bits = Arc::into_raw(Arc::new(result)) as u64;
+        self.push_kinded(bits, NativeKind::String)
     }
 
     /// StringConcatTyped: concatenate two strings from the stack. Pushes result string.
@@ -695,52 +695,65 @@ mod tests {
     // Those construction shapes are forbidden post-§2.7.7 and were stood down.
     //
     // The tests below are kind-API-clean bytecode-level coverage for
-    // `op_string_char_at` (β-fix CKPT-A char-carrier): they assert the
-    // operation stamps the canonical scalar `NativeKind::Char` on its result
-    // slot — NOT `NativeKind::Ptr(HeapKind::Char)`, which mislabeled a scalar
-    // codepoint as an `Arc<HeapValue>` pointer and aborted the process when
-    // the slot reached `wire_conversion::heap_to_wire` as a program return
-    // value (misaligned-pointer non-unwinding panic).
+    // `op_string_char_at` (STAGE-S4 string-model fix): they assert the
+    // operation produces a REAL 1-char `string` (`NativeKind::String`,
+    // `Arc<String>` carrier) — NOT a `NativeKind::Char` scalar. Shape has no
+    // first-class `char` type (book `fundamentals/strings.mdx` +
+    // `operators.mdx`); `charAt` is declared `-> string`, so a `Char` scalar
+    // typed as `string` was a carrier/type mismatch that corrupted
+    // `Array<string>` collection (codepoint bits stored where a
+    // `*const StringObj` was expected → SIGSEGV on index-read). A real 1-char
+    // string flows correctly through every consumer (scalar use, concat, and
+    // the typed-array String carrier) with NO bit-reinterpret.
 
     use crate::executor::tests::test_utils::eval_with_prelude;
     use shape_value::NativeKind;
 
-    /// `charAt` result slot carries the scalar `NativeKind::Char` kind,
-    /// not the pre-fix `Ptr(HeapKind::Char)` heap-pointer mislabel.
+    /// `charAt` result slot carries a real 1-char `string`
+    /// (`NativeKind::String`), not a `NativeKind::Char` scalar.
     #[test]
-    fn char_at_result_slot_is_scalar_char_kind() {
+    fn char_at_result_slot_is_string_kind() {
         let slot = eval_with_prelude(r#""abc".charAt(0)"#);
         assert_eq!(
             slot.kind,
-            NativeKind::Char,
-            "charAt must stamp scalar NativeKind::Char, got {:?}",
+            NativeKind::String,
+            "charAt must produce a 1-char NativeKind::String, got {:?}",
             slot.kind
         );
-        assert_eq!(slot.as_char(), Some('a'));
+        assert_eq!(slot.as_str(), Some("a"));
     }
 
     /// `reverse().charAt(0)` — the exact SIGABRT reproducer chain. The
     /// reversed string is "cba", so char 0 is 'c'. The result slot must
-    /// carry the scalar `NativeKind::Char` kind.
+    /// carry a real 1-char `string`.
     #[test]
-    fn reverse_then_char_at_result_slot_is_scalar_char_kind() {
+    fn reverse_then_char_at_result_slot_is_string_kind() {
         let slot = eval_with_prelude(r#""abc".reverse().charAt(0)"#);
         assert_eq!(
             slot.kind,
-            NativeKind::Char,
-            "reverse().charAt must stamp scalar NativeKind::Char, got {:?}",
+            NativeKind::String,
+            "reverse().charAt must produce a 1-char NativeKind::String, got {:?}",
             slot.kind
         );
-        assert_eq!(slot.as_char(), Some('c'));
+        assert_eq!(slot.as_str(), Some("c"));
     }
 
-    /// Non-ASCII multi-byte codepoint flows through `charAt` as a scalar
-    /// `NativeKind::Char` slot with its codepoint intact.
+    /// Non-ASCII multi-byte codepoint flows through `charAt` as a real
+    /// 1-char `string` with its codepoint intact.
     #[test]
-    fn char_at_unicode_codepoint_is_scalar_char_kind() {
+    fn char_at_unicode_codepoint_is_string_kind() {
         let slot = eval_with_prelude(r#""λxy".charAt(0)"#);
-        assert_eq!(slot.kind, NativeKind::Char);
-        assert_eq!(slot.as_char(), Some('λ'));
+        assert_eq!(slot.kind, NativeKind::String);
+        assert_eq!(slot.as_str(), Some("λ"));
+    }
+
+    /// Out-of-range `charAt` produces the empty `string` (string-model
+    /// neutral), not a `Char('\0')` scalar.
+    #[test]
+    fn char_at_out_of_range_is_empty_string() {
+        let slot = eval_with_prelude(r#""hi".charAt(5)"#);
+        assert_eq!(slot.kind, NativeKind::String);
+        assert_eq!(slot.as_str(), Some(""));
     }
 
     // ── R4-stringiter: StringV2 carrier through StringConcatTyped ────────
