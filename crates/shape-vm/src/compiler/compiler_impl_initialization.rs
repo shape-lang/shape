@@ -347,26 +347,67 @@ impl BytecodeCompiler {
             // hash, which makes A's reference to B stale. We iterate until no hashes
             // change (i.e., the dependency graph reaches a fixed point).
             //
-            // Mutual recursion (A calls B, B calls A) can never converge because
-            // each function's hash depends on the other. We detect mutual-recursion
-            // edges and treat them the same as self-recursion: use ZERO sentinel.
-            // The linker resolves ZERO+callee_name to the correct function ID.
+            // Cyclic recursion can never converge because each function's hash
+            // depends (transitively) on the others in the cycle. We detect every
+            // edge that participates in a call cycle and treat it the same as
+            // self-recursion: use the ZERO sentinel. The linker resolves
+            // ZERO+callee_name to the correct function ID.
+            //
+            // A direct 2-cycle (A↔B) is the special case; the general case is any
+            // edge (A→B) where B can reach A back through the call graph — i.e.
+            // A and B share a strongly-connected component of size ≥ 2. The old
+            // detector only caught the literal `call_edges.contains((B,A))`
+            // 2-cycle and so missed ≥3-member cycles (A→B→C→A), leaving their
+            // forward-reference deps to chase non-convergent hashes; after the
+            // iteration cap one blob's dep pointed at a hash that had been
+            // re-finalized out of `function_store`, producing the linker's
+            // "Missing function blob" failure.
 
-            // Build mutual-recursion edge set from callee_names.
-            let mut call_edges: std::collections::HashSet<(String, String)> =
-                std::collections::HashSet::new();
+            // Build the call-graph adjacency from callee_names (self-edges excluded).
+            let mut call_adj: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
             for blob in function_store.values() {
                 for callee in &blob.callee_names {
                     if callee != &blob.name {
-                        call_edges.insert((blob.name.clone(), callee.clone()));
+                        let succs = call_adj.entry(blob.name.clone()).or_default();
+                        if !succs.contains(callee) {
+                            succs.push(callee.clone());
+                        }
                     }
                 }
             }
+
+            // `reaches(from, target)` — can `target` be reached from `from` by
+            // following call edges? Used as `reaches(B, A)` to test whether the
+            // edge A→B closes a cycle back to A.
+            let reaches = |from: &str, target: &str| -> bool {
+                let mut stack: Vec<&str> = vec![from];
+                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                while let Some(node) = stack.pop() {
+                    if node == target {
+                        return true;
+                    }
+                    if !seen.insert(node) {
+                        continue;
+                    }
+                    if let Some(succs) = call_adj.get(node) {
+                        for s in succs {
+                            stack.push(s.as_str());
+                        }
+                    }
+                }
+                false
+            };
+
+            // An edge A→B is a cycle edge iff B reaches A. This subsumes the
+            // old 2-cycle case (B→A direct) and covers ≥3-member cycles.
             let mut mutual_edges: std::collections::HashSet<(String, String)> =
                 std::collections::HashSet::new();
-            for (a, b) in &call_edges {
-                if call_edges.contains(&(b.clone(), a.clone())) {
-                    mutual_edges.insert((a.clone(), b.clone()));
+            for (a, succs) in &call_adj {
+                for b in succs {
+                    if reaches(b, a) {
+                        mutual_edges.insert((a.clone(), b.clone()));
+                    }
                 }
             }
 
