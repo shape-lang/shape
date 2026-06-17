@@ -515,7 +515,14 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
         );
     }
 
-    // Case 3: `Vec<number> + Vec<number>` → IntrinsicVecAdd.
+    // Case 3: `Vec<number> + Vec<number>` → ArrayConcat.
+    // USER RULING 2026-06-17: numeric-array `+` is CONCATENATION, uniform
+    // with string/struct arrays and the book spec — NOT the element-wise
+    // SIMD `IntrinsicVecAdd` (a non-working v0.4 stub). `+` routes to the
+    // same `ArrayConcat` opcode every other array element kind uses. The
+    // `IntrinsicVecAdd` builtin stays defined for a future `Vec`-type /
+    // method form; only `+` stops routing to it. Sub/Mul/Div (Cases 4-6)
+    // are unchanged.
     {
         let program = compile(
             r#"
@@ -524,9 +531,15 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
         );
         let ops = all_opcodes(&program);
         assert!(
-            has_builtin_call(&program, BuiltinFunction::IntrinsicVecAdd),
-            "R5.4E retarget: Vec<number>+Vec<number> must emit \
-             BuiltinCall(IntrinsicVecAdd). Ops emitted: {:?}",
+            ops.contains(&OpCode::ArrayConcat),
+            "numeric-array `+` is concat: Vec<number>+Vec<number> must emit \
+             ArrayConcat. Ops emitted: {:?}",
+            ops
+        );
+        assert!(
+            !has_builtin_call(&program, BuiltinFunction::IntrinsicVecAdd),
+            "numeric-array `+` must NOT route to the SIMD IntrinsicVecAdd stub. \
+             Ops emitted: {:?}",
             ops
         );
     }
@@ -582,10 +595,13 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
         );
     }
 
-    // Case 7: `Vec<int> + Vec<int>` → IntrinsicVecAddI64.
-    // Overflow semantics (`simd_vec_add_i64`) are preserved by the
-    // intrinsic — see `intrinsic_vec_add_i64` at
-    // `shape-runtime::intrinsics::vector`.
+    // Case 7: `Vec<int> + Vec<int>` → ArrayConcat.
+    // USER RULING 2026-06-17: numeric-array `+` is CONCATENATION. The former
+    // `IntrinsicVecAddI64` retarget pointed at a non-working v0.4 runtime
+    // stub; `+` now concatenates uniformly via `ArrayConcat`. The
+    // `IntrinsicVecAddI64` builtin + its overflow-preserving kernel
+    // (`simd_vec_add_i64`) stay defined for a future `Vec`-type / method
+    // form; only `+` stops routing to them.
     {
         let program = compile(
             r#"
@@ -594,11 +610,79 @@ fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
         );
         let ops = all_opcodes(&program);
         assert!(
-            has_builtin_call(&program, BuiltinFunction::IntrinsicVecAddI64),
-            "R5.4E retarget: Vec<int>+Vec<int> must emit \
-             BuiltinCall(IntrinsicVecAddI64). Ops emitted: {:?}",
+            ops.contains(&OpCode::ArrayConcat),
+            "numeric-array `+` is concat: Vec<int>+Vec<int> must emit \
+             ArrayConcat. Ops emitted: {:?}",
             ops
         );
+        assert!(
+            !has_builtin_call(&program, BuiltinFunction::IntrinsicVecAddI64),
+            "numeric-array `+` must NOT route to the SIMD IntrinsicVecAddI64 \
+             stub. Ops emitted: {:?}",
+            ops
+        );
+    }
+}
+
+/// USER RULING 2026-06-17 runtime pin: numeric-array `+` concatenates (it does
+/// NOT element-wise add). Covers `Array<int>` and `Array<number>`, the
+/// loop-accumulator idiom over a numeric array (the numeric analog of
+/// fundamentals/datetime.mdx §Date Range Iteration `weekdays = weekdays +
+/// [elem]`), and confirms strict element-family agreement still rejects
+/// `Array<int> + Array<number>`.
+#[test]
+fn test_numeric_array_plus_concatenates_user_ruling_2026_06_17() {
+    // Array<int> concat preserves element kind (no bit-reinterpret).
+    {
+        let result = eval(
+            r#"
+            let a = [1, 2]
+            let b = [3, 4, 5]
+            let c = a + b
+            c[0] + c[4]
+            "#,
+        );
+        let n = result
+            .as_int()
+            .expect("Array<int> concat result indexes to int");
+        assert_eq!(n, 6, "[1,2]+[3,4,5] => [1,2,3,4,5]; c[0]+c[4] = 1+5 = 6");
+    }
+
+    // Array<number> concat, mismatched lengths.
+    {
+        let result = eval(
+            r#"
+            let d = [1.0, 2.0] + [3.0]
+            d[0] + d[2]
+            "#,
+        );
+        let n = result
+            .as_number_coerce()
+            .expect("Array<number> concat result indexes to number");
+        assert!(
+            (n - 4.0).abs() < 1e-10,
+            "[1.0,2.0]+[3.0] => [1.0,2.0,3.0]; d[0]+d[2] = 1.0+3.0 = 4.0, got {}",
+            n
+        );
+    }
+
+    // Loop-accumulator idiom over a numeric array (datetime.mdx idiom shape).
+    {
+        let result = eval(
+            r#"
+            let mut nums = [0]
+            let mut i = 1
+            while i < 4 {
+                nums = nums + [i * 10]
+                i = i + 1
+            }
+            nums.length()
+            "#,
+        );
+        let n = result
+            .as_int()
+            .expect("numeric-array accumulation result has an int length");
+        assert_eq!(n, 4, "nums starts [0], appends 3 elems => length 4");
     }
 }
 

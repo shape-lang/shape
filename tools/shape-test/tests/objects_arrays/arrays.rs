@@ -465,14 +465,19 @@ print(nums[-5])"#;
 
 // Strict typing: `+` requires the `Numeric` trait, which `Array` does not
 // implement. Concatenating arrays with `+` is a compile-time rejection;
-// `.concat()` is the supported form (see `array_length_after_concat`).
+// USER RULING 2026-06-17: numeric-array `+` is CONCATENATION, uniform with
+// string/struct arrays and the book spec — NOT element-wise add. (Previously
+// this asserted a "Numeric" run error because `+` routed to a non-working SIMD
+// vector-add stub; that classification no longer claims `+`.)
 #[test]
 fn array_concatenation_with_plus() {
     let code = r#"let a = [1, 2]
 let b = [3, 4]
 let c = a + b
 print(c)"#;
-    ShapeTest::new(code).expect_run_err_contains("Numeric");
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("[1, 2, 3, 4]");
 }
 
 // =====================================================================

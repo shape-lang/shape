@@ -1609,13 +1609,15 @@ impl BytecodeCompiler {
                         ));
                     }
 
-                    // Array concat: both operands proven to be arrays. We
-                    // intentionally only fire for the generic `Array<T>` shape,
-                    // not for `Vec<number>`-style FloatArray/IntArray/BoolArray
-                    // (which use element-wise SIMD broadcast for `+`, not concat).
-                    // Display name comes from `type_display_name`: a generic
-                    // `Array<T>` formats as "Array", and a legacy `T[]` formats
-                    // as "T[]".
+                    // Array concat: both operands proven to be arrays. Fires
+                    // for every array element kind — numeric (`int[]` /
+                    // `number[]`), string, and struct arrays all concatenate
+                    // uniformly (USER RULING 2026-06-17: numeric-array `+` is
+                    // CONCATENATION, not element-wise add). The element-wise
+                    // SIMD `IntrinsicVec*` path no longer claims `+`; it is
+                    // reserved for a future `Vec`-type / method form. Display
+                    // name comes from `type_display_name`: a generic `Array<T>`
+                    // formats as "Array", and a legacy `T[]` formats as "T[]".
                     let is_arrayish = |n: &Option<String>| match n.as_deref() {
                         Some("Array") => true,
                         Some(s) if s.ends_with("[]") => true,

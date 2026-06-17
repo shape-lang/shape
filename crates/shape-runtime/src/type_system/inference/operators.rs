@@ -471,9 +471,42 @@ impl TypeInferenceEngine {
     fn infer_array_add_type(&mut self, left: &Type, right: &Type, span: Span) -> Option<Type> {
         let left_elem = Self::array_element_type(left)?;
         let right_elem = Self::array_element_type(right)?;
-        // Strict element-type agreement; no coercion (int != number).
-        self.push_constraint_with_origin(left_elem.clone(), right_elem, span);
-        Some(BuiltinTypes::array(left_elem))
+
+        // Element-type resolution. One side may carry an *unresolved* element —
+        // either a live type var or the `"unknown"` sentinel that
+        // `Type::to_annotation()` lowers a lost TypeVar to (known constraint,
+        // core.rs:218). This is exactly the loop-accumulator idiom `nums = nums
+        // + [x]`, where the accumulator's element annotation is not yet pinned
+        // when the loop body is inferred. Pushing a strict same-type constraint
+        // there would assert `unknown == int` and fail. Instead, when one side
+        // is unresolved, adopt the other (concrete) side's element as the
+        // result and skip the constraint — no coercion is introduced because
+        // the concrete side is the only carrier of a real type. When BOTH sides
+        // are concrete we keep the strict agreement constraint (`int !=
+        // number`, no silent element coercion).
+        let left_unresolved = Self::is_unresolved_array_elem(&left_elem);
+        let right_unresolved = Self::is_unresolved_array_elem(&right_elem);
+        match (left_unresolved, right_unresolved) {
+            (false, false) => {
+                // Strict element-type agreement; no coercion (int != number).
+                self.push_constraint_with_origin(left_elem.clone(), right_elem, span);
+                Some(BuiltinTypes::array(left_elem))
+            }
+            (true, false) => Some(BuiltinTypes::array(right_elem)),
+            (false, true) => Some(BuiltinTypes::array(left_elem)),
+            (true, true) => Some(BuiltinTypes::array(left_elem)),
+        }
+    }
+
+    /// An array element type that carries no committed information: a live type
+    /// var, a `Constrained` var, or the `"unknown"` sentinel that
+    /// `Type::to_annotation()` lowers a lost TypeVar to (core.rs:218).
+    fn is_unresolved_array_elem(ty: &Type) -> bool {
+        Self::is_unresolved_var(ty)
+            || matches!(
+                ty,
+                Type::Concrete(ann) if ann.as_type_name_str() == Some("unknown")
+            )
     }
 
     /// Shared numeric arithmetic inference for `+`, `-`, `*`, `/`, `%`.
