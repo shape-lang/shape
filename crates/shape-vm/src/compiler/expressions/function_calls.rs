@@ -3910,7 +3910,20 @@ impl BytecodeCompiler {
         // call sites / nested module scopes).
         let canonical_scoped_name = format!("{}::{}", canonical_module, method);
         let local_scoped_name = format!("{}::{}", namespace_name, method);
-        if !self.is_native_module_export(namespace_name, method) {
+        // PRIVACY GATE: the compiled function table is name-keyed and holds
+        // every dep function — public AND private. Routing on `find_function`
+        // alone would expose a non-`pub` function through a namespace call
+        // (`util::secret(..)`). Only route when `method` is a public export of
+        // the resolved module. `Some(false)` => module is known but `method`
+        // is private/absent: do NOT route (fall through to the standard
+        // "module namespace not typed / undefined" diagnostic, matching the
+        // named-import path which is gated on `Item::Export` membership).
+        // `None` => module not in the graph (legacy inlining / native): keep
+        // prior behavior.
+        let member_exported = self.module_member_is_exported(&canonical_module, method);
+        if !self.is_native_module_export(namespace_name, method)
+            && member_exported != Some(false)
+        {
             if self.find_function(&canonical_scoped_name).is_some() {
                 return self.compile_expr_function_call(
                     &canonical_scoped_name,

@@ -3958,6 +3958,34 @@ impl BytecodeCompiler {
             .cloned()
     }
 
+    /// Privacy gate for namespace-qualified calls (`module::member(..)`).
+    ///
+    /// A namespace call may only reach a Shape-source dependency function when
+    /// `member` is in that module's PUBLIC interface (`pub fn` / `pub`
+    /// re-export). The compiled function table (`find_function`) is name-keyed
+    /// and contains every dep function — public AND private — under its
+    /// canonical path, so routing on `find_function` alone over-exposes
+    /// non-`pub` functions (e.g. `util::secret(..)`). The module graph's
+    /// `interface.exports` is built from `collect_exported_symbols`, which only
+    /// walks `Item::Export`, so it is the authoritative privacy boundary.
+    ///
+    /// Returns:
+    ///   * `Some(true)`  — `member` is a public export of `canonical_module`.
+    ///   * `Some(false)` — the module is known to the graph but `member` is NOT
+    ///     a public export (private fn / type / nonexistent) → caller must NOT
+    ///     route through the compiled function table.
+    ///   * `None`        — the module is not in the graph (legacy AST-inlining
+    ///     path or native module); caller preserves prior resolution behavior.
+    pub(crate) fn module_member_is_exported(
+        &self,
+        canonical_module: &str,
+        member: &str,
+    ) -> Option<bool> {
+        let graph = self.module_graph.as_ref()?;
+        let id = graph.id_for_path(canonical_module)?;
+        Some(graph.node(id).interface.exports.contains_key(member))
+    }
+
     pub fn type_tracker(&self) -> &TypeTracker {
         &self.type_tracker
     }
