@@ -1,0 +1,11 @@
+// A-2 (2026-06-17) ?? JIT-residual regression fixture.
+//
+// The `??` LHS is a LET-BOUND Option-typed local (`x: int?`), NOT an inline
+// `Some(..)` constructor. The VM `CoalesceProbe` unwraps `Some(1) -> 1`; the
+// JIT MIR `lower_null_coalesce` models `??` as `Eq None` with no
+// `Arc<OptionData>` unwrap and would leak the `Some(1)` wrapper (printing
+// `Some(1)`). The static-type Option-carrier detection
+// (`null_coalesce_lhs_is_option_carrier`) sets `has_null_coalesce_residual`
+// so the whole program deopts to the interpreter — VM == JIT, both print `1`.
+let x: int? = Some(1)
+print(x ?? 9)

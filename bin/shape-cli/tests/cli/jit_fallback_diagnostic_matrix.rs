@@ -373,3 +373,76 @@ fn fallback_negative_pin_clean_jit_does_not_emit_diagnostic() {
         stderr
     );
 }
+
+/// A-2 (2026-06-17) `??` JIT-residual on a LET-BOUND Option LHS.
+///
+/// Residual in the prior 47ced8d7 `??` fix: the Option-carrier detection
+/// consulted only `infer_expr_type` → `type_is_option_carrier`, which catches
+/// an inline `Some(..)` constructor but MISSES a let-bound Option-typed local
+/// (`let x: int?`). `int?` is tracked as the lowercased wrapper name
+/// `"option"`, so the runtime inference engine — which never sees the
+/// function-body `let` — returned `Type::Variable` and the carrier was never
+/// flagged: VM printed `1` (CoalesceProbe unwrap), JIT printed `Some(1)`
+/// (leaked `Arc<OptionData>` wrapper).
+///
+/// `null_coalesce_lhs_is_option_carrier` widens the gate to the declared
+/// `ConcreteType::Option` / `"option"` tracker name (plus `T?`-returning fns
+/// and `T?` fields), so `has_null_coalesce_residual` fires and the program
+/// whole-program deopts to the interpreter. Both modes now print `1`, and JIT
+/// mode emits exactly one `[jit-fallback]` line mentioning the null-coalesce
+/// class.
+#[test]
+fn fallback_f5_null_coalesce_let_bound_option_falls_through_to_vm() {
+    let vm = run_shape("vm", "f5-null-coalesce-let-option.shape");
+    let jit = run_shape("jit", "f5-null-coalesce-let-option.shape");
+
+    assert_eq!(
+        vm.exit_code,
+        Some(0),
+        "f5 VM mode should exit 0; stderr={}",
+        vm.stderr
+    );
+    assert_eq!(
+        jit.exit_code,
+        Some(0),
+        "f5 JIT mode should fall through to VM cleanly; stderr={}",
+        jit.stderr
+    );
+    // VM == JIT on the printed value: the CoalesceProbe unwrap yields `1`,
+    // NOT the leaked `Some(1)` wrapper.
+    assert!(
+        vm.stdout.contains('1') && !vm.stdout.contains("Some"),
+        "f5 VM stdout should print unwrapped `1`, not `Some(1)`; stdout={}",
+        vm.stdout
+    );
+    assert!(
+        jit.stdout.contains('1') && !jit.stdout.contains("Some"),
+        "f5 JIT stdout should print unwrapped `1` via VM fall-through, not \
+         `Some(1)`; stdout={}",
+        jit.stdout
+    );
+    assert_eq!(
+        count_fallback_lines(&jit.stderr),
+        1,
+        "f5 JIT mode should emit exactly one [jit-fallback] line; stderr={}",
+        jit.stderr
+    );
+    assert_eq!(
+        count_fallback_lines(&vm.stderr),
+        0,
+        "f5 VM mode must not emit [jit-fallback]; stderr={}",
+        vm.stderr
+    );
+    let fallback_line: String = jit
+        .stderr
+        .lines()
+        .find(|l| l.starts_with("[jit-fallback]"))
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        fallback_line.contains("null-coalesce") || fallback_line.contains("??"),
+        "f5 fallback diagnostic should mention the null-coalesce class; \
+         got: {}",
+        fallback_line
+    );
+}

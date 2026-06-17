@@ -1110,6 +1110,110 @@ impl BytecodeCompiler {
         }
     }
 
+    /// True iff a `TypeAnnotation` is an `Option<T>` / `T?` carrier shape.
+    /// `T?` desugars to `TypeAnnotation::Generic { name: "Option", .. }`
+    /// (`TypeAnnotation::option`), so a single arm covers both surface forms.
+    fn annotation_is_option_carrier(ann: &shape_ast::ast::TypeAnnotation) -> bool {
+        ann.is_option()
+    }
+
+    /// A-2 `??` JIT-residual detection. Returns `true` when the STATIC type of
+    /// a `??` left operand is an `Option<T>` carrier (`Arc<OptionData>` at
+    /// runtime — `Some(v)` / `None`), so the JIT must whole-program deopt to
+    /// the interpreter (the JIT MIR `lower_null_coalesce` `Eq None` path leaks
+    /// the `Some(v)` wrapper that the VM `CoalesceProbe` unwraps).
+    ///
+    /// The prior detection consulted only `infer_expr_type(left)` →
+    /// `type_is_option_carrier`, which catches an inline `Some(..)` constructor
+    /// but MISSES a let-bound Option-typed local (`let x: int?`): `int?` is
+    /// tracked as the lowercased wrapper name `"option"` (an
+    /// `is_integer/number/...`-miss in `infer_expr_type`'s identifier branch),
+    /// so the runtime inference engine — which never sees the function-body
+    /// `let` — returns `Type::Variable` and the carrier is never recognised.
+    ///
+    /// This widens the gate to the additional static sources that genuinely
+    /// prove an Option carrier WITHOUT weakening the plain-nullable `??`
+    /// (non-Option `T?`-as-null-sentinel) JIT path — every source below
+    /// requires a declared/recorded `Option<T>` shape, never a bare nullable
+    /// scalar:
+    ///   1. `infer_expr_type` → `type_is_option_carrier` (inline `Some(..)`,
+    ///      Option-returning expressions the engine resolves).
+    ///   2. Identifier: the recorded `ConcreteType::Option(_)` from a declared
+    ///      `let x: int?` (local or module binding), or the tracker type-name
+    ///      `"option"` stamped by `tracked_type_name_from_annotation`.
+    ///   3. `FunctionCall`: the callee's declared return annotation is
+    ///      `Option<T>` / `T?` (a `T?`-returning fn then `?? d`).
+    ///   4. `PropertyAccess`: the receiver-schema field type is
+    ///      `FieldType::Option(_)` (a `T?` field then `?? d`).
+    ///
+    /// Deopt is always correctness-preserving; conservative over-detection of a
+    /// carrier only loses the JIT path for that one program, never diverges.
+    fn null_coalesce_lhs_is_option_carrier(&mut self, left: &Expr) -> bool {
+        // Source 1: inference engine (inline `Some(..)`, resolvable exprs).
+        if self
+            .infer_expr_type(left)
+            .ok()
+            .as_ref()
+            .is_some_and(Self::type_is_option_carrier)
+        {
+            return true;
+        }
+
+        match left {
+            // Source 2: a let-bound Option-typed local / module binding.
+            Expr::Identifier(name, _) => {
+                use shape_value::v2::ConcreteType;
+                // Recorded ConcreteType from the declared annotation
+                // (`let x: int?` → `ConcreteType::Option(_)`).
+                let recorded_option = self
+                    .resolve_local(name)
+                    .and_then(|idx| self.current_function_local_concrete_types.get(&idx))
+                    .or_else(|| {
+                        self.module_bindings
+                            .get(name)
+                            .and_then(|idx| self.module_binding_concrete_types.get(idx))
+                    })
+                    .is_some_and(|ct| matches!(ct, ConcreteType::Option(_)));
+                if recorded_option {
+                    return true;
+                }
+                // Tracker type-name wrapper: `tracked_type_name_from_annotation`
+                // stamps a declared `T?` local as the lowercased `"option"`.
+                if self
+                    .tracker_type_name_for_identifier(name)
+                    .as_deref()
+                    == Some("option")
+                {
+                    return true;
+                }
+                false
+            }
+            // Source 3: a `T?`-returning function then `?? d`.
+            Expr::FunctionCall { name, .. } => self
+                .function_defs
+                .get(name)
+                .and_then(|def| def.return_type.as_ref())
+                .is_some_and(Self::annotation_is_option_carrier),
+            // Source 4: a `T?`-typed schema field then `?? d`.
+            Expr::PropertyAccess {
+                object,
+                property,
+                optional,
+                ..
+            } => {
+                if *optional {
+                    return false;
+                }
+                use shape_runtime::type_schema::FieldType;
+                self.tracker_schema_id_for_expr(object)
+                    .and_then(|sid| self.type_tracker.schema_registry().get_by_id(sid))
+                    .and_then(|schema| schema.get_field(property))
+                    .is_some_and(|field| matches!(field.field_type, FieldType::Option(_)))
+            }
+            _ => false,
+        }
+    }
+
     /// Compile a binary operation expression.
     ///
     /// `op_span` is the source span of the parent `Expr::BinaryOp` node
@@ -1238,11 +1342,13 @@ impl BytecodeCompiler {
                 // needed — gating on the Option-carrier case avoids a
                 // blanket JIT regression for every `??` (e.g. the stdlib's
                 // `ctx[...] ?? default` nullable-index pattern).
-                let lhs_is_option_carrier = self
-                    .infer_expr_type(left)
-                    .ok()
-                    .as_ref()
-                    .is_some_and(Self::type_is_option_carrier);
+                // A-2 (2026-06-17): the residual flag must fire whenever the
+                // `??` LHS STATIC type is an Option carrier — not only the
+                // inline `Some(..)` shape the prior `infer_expr_type` check
+                // caught, but also a let-bound `x: int?` local, a
+                // `T?`-returning function call, and a `T?`-typed field. See
+                // `null_coalesce_lhs_is_option_carrier`.
+                let lhs_is_option_carrier = self.null_coalesce_lhs_is_option_carrier(left);
                 self.compile_expr(left)?;
                 self.emit(Instruction::simple(OpCode::CoalesceProbe));
                 if lhs_is_option_carrier {
