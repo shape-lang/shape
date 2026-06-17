@@ -33,6 +33,53 @@ impl BytecodeCompiler {
         // Compile the inner fallible expression.
         self.compile_expr(inner)?;
 
+        // Resource-management-chapter L12 (v0.3.3): when `?` short-circuits
+        // (early-returns the Err / propagates None) it must run the pending
+        // `Drop` for in-scope Drop-bearing locals — exactly like an explicit
+        // `return` does via `emit_drops_for_early_exit`. The `?` early-return
+        // happens INSIDE `op_try_unwrap` (it calls `return_value_inner`), so
+        // the pending-Drop sequence is guarded by a non-consuming
+        // `IsTryFailure` probe and only runs on the failure branch:
+        //
+        //     <carrier>
+        //     Dup ; IsTryFailure          ; [carrier, would_short_circuit]
+        //     JumpIfFalse SUCCESS         ; [carrier]   (skip drops on Ok/Some)
+        //       <DropCall for each OTHER in-scope Drop local>
+        //     SUCCESS:
+        //     TryUnwrap                   ; unwrap (success) | early-return (failure)
+        //
+        // `Dup` clones the carrier's heap share (`clone_with_kind`) so the
+        // probe's popped copy and the `TryUnwrap` consumer each own a share —
+        // refcount-balanced. The drop sequence (`LoadLocal; DropCall` pairs)
+        // is stack-neutral, leaving `[carrier]` for `TryUnwrap`.
+        //
+        // ADR-006 §2.7.30 double-drop coordination (mirrors commit 47ced8d7):
+        // when `inner` is a bare identifier naming a Drop-bearing local, that
+        // local's value is the one being PROPAGATED via `?` — its `Drop`
+        // ownership moves to the caller (the returned Err carrier holds it),
+        // so we must NOT emit a `DropCall` for it here. `emit_drops_for_early_exit`
+        // already honours `return_escape_drop_skip_local`; we set it to that
+        // local so only the OTHER in-scope Drop locals are released.
+        let skip_local = match inner {
+            Expr::Identifier(name, _) => self
+                .resolve_local(name)
+                .filter(|&idx| self.local_drop_kind(idx).is_some()),
+            _ => None,
+        };
+        if self.has_failure_drop_locals(skip_local) {
+            self.emit(Instruction::simple(OpCode::Dup));
+            self.emit(Instruction::simple(OpCode::IsTryFailure));
+            let jump_success = self.emit_jump(OpCode::JumpIfFalse, 0);
+            // Failure branch: release every OTHER in-scope Drop local across
+            // ALL active drop scopes (the `?` short-circuit returns from the
+            // whole function frame, same as `return`).
+            let total_scopes = self.drop_locals.len();
+            self.return_escape_drop_skip_local = skip_local;
+            self.emit_drops_for_early_exit(total_scopes)?;
+            self.return_escape_drop_skip_local = None;
+            self.patch_jump(jump_success);
+        }
+
         // Emit TryUnwrap opcode which handles:
         // 1. Result propagation (Ok/Err)
         // 2. Option propagation (Some/None)

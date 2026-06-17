@@ -232,6 +232,7 @@ impl VirtualMachine {
             PopHandler => self.op_pop_handler()?,
             Throw => self.op_throw()?,
             TryUnwrap => self.op_try_unwrap()?,
+            IsTryFailure => self.op_is_try_failure()?,
             UnwrapOption => self.op_unwrap_option()?,
             CoalesceProbe => self.op_coalesce_probe()?,
             ErrorContext => self.op_error_context()?,
@@ -763,6 +764,37 @@ impl VirtualMachine {
             std::mem::forget(value);
             self.push_kinded(bits, kind)
         }
+    }
+
+    /// `IsTryFailure`: non-consuming classifier for the `?` lowering's
+    /// pending-Drop branch. Pops one carrier (retiring its share via the
+    /// kinded `KindedSlot::Drop`), pushes a `Bool`:
+    ///   - `true`  when `op_try_unwrap` WOULD short-circuit:
+    ///       Err(e) / None / null-coded-None
+    ///   - `false` when `op_try_unwrap` would unwrap-and-continue:
+    ///       Ok(v) / Some(v) / bare non-null value
+    ///
+    /// The compiler emits `Dup; IsTryFailure; JumpIfFalse SUCCESS;
+    /// <DropCall for each other in-scope Drop local>; SUCCESS: TryUnwrap`.
+    /// `Dup` bumps the carrier's refcount so this classifier's popped copy
+    /// and the `TryUnwrap` consumer each own an independent share — no
+    /// over/under-count. Classification routes through the SAME
+    /// `read_result` / `read_option` / `is_null_sentinel` helpers as
+    /// `op_try_unwrap`, so the branch the compiler takes can never diverge
+    /// from the branch the opcode takes (single source of truth).
+    pub(in crate::executor) fn op_is_try_failure(&mut self) -> Result<(), VMError> {
+        let (bits, kind) = self.pop_kinded()?;
+        let value = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let is_failure = if let Some(rd) = read_result(&value)? {
+            !rd.is_ok
+        } else if let Some(od) = read_option(&value)? {
+            !od.is_some
+        } else {
+            // null-coded None => failure; bare non-null value => success.
+            is_null_sentinel(&value)
+        };
+        drop(value);
+        self.push_kinded_slot(KindedSlot::from_bool(is_failure))
     }
 
     /// PB1 Wave-1-extension (audit 14a + 14b, 2026-05-29): shared

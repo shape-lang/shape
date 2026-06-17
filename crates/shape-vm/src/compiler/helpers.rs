@@ -5420,6 +5420,22 @@ impl BytecodeCompiler {
 
     /// Emit drops for all scopes being exited (used by return/break/continue).
     /// `scopes_to_exit` is the number of drop scopes to emit drops for.
+    /// True when at least one in-scope `DropCall`-tracked local (any active
+    /// drop scope) is a Drop-bearing local OTHER than `skip_local`. Drives
+    /// the `?` lowering's failure-path drop branch: if there is nothing to
+    /// release on the Err/None short-circuit, we skip the
+    /// `Dup; IsTryFailure; JumpIfFalse; ...` guard entirely and emit a bare
+    /// `TryUnwrap` (byte-identical to the pre-fix lowering).
+    ///
+    /// `self.drop_locals` holds exactly the user-`impl Drop` slots that
+    /// `emit_drops_for_early_exit` would emit a `DropCall` for (the
+    /// `track_drop_local` push happens only for Drop-bearing bindings).
+    pub(super) fn has_failure_drop_locals(&self, skip_local: Option<u16>) -> bool {
+        self.drop_locals.iter().flatten().any(|&(local_idx, _)| {
+            Some(local_idx) != skip_local
+        })
+    }
+
     pub(super) fn emit_drops_for_early_exit(&mut self, scopes_to_exit: usize) -> Result<()> {
         let total = self.drop_locals.len();
         if scopes_to_exit > total {

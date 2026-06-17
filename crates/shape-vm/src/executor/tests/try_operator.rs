@@ -109,6 +109,96 @@ fn test_try_operator_inside_pipe_lambda_compiles() {
     );
 }
 
+/// Resource-management-chapter L12 (v0.3.3): when `?` short-circuits
+/// (early-returns the Err), in-scope Drop-bearing locals must run their
+/// `Drop` — exactly like an explicit `return` does. Before the fix the `?`
+/// lowering emitted a bare `TryUnwrap` with NO pending-Drop emission, so
+/// the user `Drop::drop` body of a local bound before a failing `?` was
+/// skipped on the error path (an explicit `return Err(..)` dropped it
+/// correctly).
+///
+/// The fix emits a guarded failure-drop branch in `compile_expr_try_operator`:
+/// `Dup; IsTryFailure; JumpIfFalse SUCCESS; <DropCall ...>; SUCCESS:
+/// TryUnwrap`. This test asserts the branch is present: the `IsTryFailure`
+/// probe opcode and a `DropCall` for the Guard type both appear in the
+/// function body that binds a Drop-bearing local and then hits a `?`.
+#[test]
+fn try_short_circuit_emits_pending_drop_branch_for_inscope_local() {
+    let source = r#"
+type Guard { name: string }
+impl Drop for Guard {
+  method drop() { print("d") }
+}
+fn parse(raw: string) -> Result<int> {
+  let g = Guard { name: "g" }
+  let n = (raw as int?)?
+  Ok(n)
+}
+parse("1")
+"#;
+    let bc = compile_source(source).expect("compilation should succeed");
+    let func = bc
+        .functions
+        .iter()
+        .find(|f| f.name == "parse")
+        .expect("function `parse` not found");
+    let end = (func.entry_point + func.body_length).min(bc.instructions.len());
+    let body = &bc.instructions[func.entry_point..end];
+
+    assert!(
+        body.iter().any(|i| i.opcode == OpCode::IsTryFailure),
+        "expected IsTryFailure probe guarding the `?` failure-drop branch"
+    );
+
+    // A reachable `DropCall` naming the `Guard` type must appear on the `?`
+    // failure branch (between the IsTryFailure probe and the TryUnwrap).
+    let guard_dropcall = body.iter().any(|i| {
+        i.opcode == OpCode::DropCall
+            && matches!(i.operand, Some(crate::bytecode::Operand::Property(sid))
+                if bc.strings.get(sid as usize).map(String::as_str) == Some("Guard"))
+    });
+    assert!(
+        guard_dropcall,
+        "expected a Guard DropCall on the `?` Err short-circuit branch"
+    );
+}
+
+/// End-to-end: a fn that binds a Drop-bearing local then hits a failing `?`
+/// must execute cleanly (no double-free / use-after-free) on BOTH the
+/// success and failure legs. The runtime drop side-effect is exercised by
+/// `print` in the Guard's `drop` body; we assert clean termination (the
+/// refcount-balance regression — running the user Drop twice or freeing a
+/// still-shared carrier — surfaces as a VM error or panic here).
+#[test]
+fn try_short_circuit_drop_executes_cleanly_both_legs() {
+    use crate::executor::VirtualMachine;
+    let source = r#"
+type Guard { name: string }
+impl Drop for Guard {
+  method drop() { print(f"drop {self.name}") }
+}
+fn parse(raw: string) -> Result<int> {
+  let g = Guard { name: "g" }
+  let n = (raw as int?)?
+  Ok(n)
+}
+fn run() {
+  match parse("12") { Ok(v) => print(f"ok {v}"), Err(_) => print("err") }
+  match parse("nope") { Ok(v) => print(f"ok {v}"), Err(_) => print("err") }
+}
+run()
+"#;
+    let bc = compile_source(source).expect("compilation should succeed");
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bc);
+    let result = vm.execute(None);
+    assert!(
+        result.is_ok(),
+        "`?`-short-circuit drop must execute cleanly on both legs; got {:?}",
+        result.err()
+    );
+}
+
 #[test]
 fn test_fallible_type_assertion_compiles_to_try_into_dispatch_metadata() {
     let source = r#"

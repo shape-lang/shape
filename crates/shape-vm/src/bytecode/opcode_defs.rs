@@ -349,6 +349,16 @@ define_opcodes! {
     Throw = 0xA2, Exception, pops: 1, pushes: 0;
     /// Try operator: unified Result/Option propagation with early return on Err/None
     TryUnwrap = 0xA3, Exception, pops: 1, pushes: 1;
+    /// Non-consuming `?`-failure classifier. Pops one carrier (retiring its
+    /// share), pushes a `Bool`: `true` when `TryUnwrap` WOULD short-circuit
+    /// (Err / None / null-coded-None), `false` when it would unwrap
+    /// (Ok / Some / bare-value). Drives the compiler-emitted pending-Drop
+    /// branch in the `?` lowering so in-scope Drop-bearing locals are
+    /// released on the Err/None early-return path (resource-management
+    /// chapter L12). Classification routes through the SAME `read_result`
+    /// / `read_option` / `is_null_sentinel` helpers as `op_try_unwrap` —
+    /// single source of truth, no divergence.
+    IsTryFailure = 0x18, Exception, pops: 1, pushes: 1;
     /// Unwrap Option: extract inner value from Some, panic on None
     UnwrapOption = 0xA4, Exception, pops: 1, pushes: 1;
     /// Add context to Result/Option failures and lift success into Result
