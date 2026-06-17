@@ -10,6 +10,35 @@ use super::MirToIR;
 use shape_vm::mir::types::*;
 
 impl<'a, 'b> MirToIR<'a, 'b> {
+    /// Resolve a bare (un-qualified) imported call name to a program function
+    /// index via an UNAMBIGUOUS `*::name` suffix match against the function
+    /// table, mirroring the bytecode compiler's `resolve_scoped_function_name`
+    /// (`shape-vm compiler/helpers.rs`). MIR lowering carries the bare AST
+    /// name on `MirConstant::Function` (`mir/lowering/expr.rs:2367`) while
+    /// `function_indices` is keyed on the module-qualified stored name. Returns
+    /// `None` when there is no match OR more than one candidate (ambiguous —
+    /// the caller surfaces-and-stops so the interpreter, which has the real
+    /// import context, decides). Names that already contain `::` are skipped
+    /// (they were exact-matched by the caller already).
+    fn resolve_scoped_function_index(&self, name: &str) -> Option<u16> {
+        if name.contains("::") {
+            return None;
+        }
+        let suffix = format!("::{}", name);
+        let mut found: Option<u16> = None;
+        for (full_name, idx) in self.function_indices.iter() {
+            if full_name.ends_with(&suffix) {
+                if found.is_some() {
+                    // Ambiguous — two modules export `name`. Cannot match the
+                    // VM's resolution import-blind; surface-and-stop.
+                    return None;
+                }
+                found = Some(*idx);
+            }
+        }
+        found
+    }
+
     /// Compile a MIR terminator.
     pub(crate) fn compile_terminator(&mut self, terminator: &Terminator) -> Result<(), String> {
         match &terminator.kind {
@@ -1284,12 +1313,60 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Direct calls use MirConstant::Function(name) → look up index.
                 // Indirect calls (closures/first-class functions) fall back to
                 // jit_call_value which reads the callee from the stack.
+                //
+                // Imported cross-module functions: MIR lowering carries the
+                // BARE source name (`imax`) on the `MirConstant::Function`
+                // operand (`mir/lowering/expr.rs:2367`), but `function_indices`
+                // is keyed on the program's stored — module-qualified — name
+                // (`mathx::stats::imax`). The bytecode VM resolved the call
+                // through `imported_names` + `module_scope_stack` and emitted a
+                // working `Call`; the JIT, lowering independently from the AST,
+                // does not see that import context. Mirror the bytecode
+                // compiler's `resolve_scoped_function_name` here: an exact-name
+                // miss falls back to an UNAMBIGUOUS `*::name` suffix match
+                // against the program function table. If the suffix match is
+                // ambiguous (two modules export the same name) the JIT cannot
+                // pick the same target the VM did — it must surface-and-stop
+                // (deopt below), never guess.
                 let func_id: Option<u16> = match func {
-                    Operand::Constant(MirConstant::Function(name)) => {
-                        self.function_indices.get(name.as_str()).copied()
-                    }
+                    Operand::Constant(MirConstant::Function(name)) => self
+                        .function_indices
+                        .get(name.as_str())
+                        .copied()
+                        .or_else(|| self.resolve_scoped_function_index(name.as_str())),
                     _ => None,
                 };
+
+                // Surface-and-stop guard (ADR-006 §2.7.5 / CLAUDE.md
+                // "surface-and-stop not force"): a `MirConstant::Function`
+                // operand is ONLY emitted for what the AST treated as a NAMED
+                // function call (`mir/lowering/expr.rs:2367`); a genuine
+                // first-class/closure callee is lowered as
+                // `Operand::Copy(Place::Local(..))`, never as a Function
+                // constant. So an unresolved `MirConstant::Function` is NOT an
+                // indirect callable — falling into the `jit_call_value` indirect
+                // path below would push the unresolved name bits onto the stack
+                // as a bogus callee value and silently produce a garbage result
+                // (the imported-call BRANCH-DROP bug: VM prints, JIT silently
+                // drops). Return `Err` so `JITExecutor` abandons the JIT compile
+                // of the WHOLE function and runs it under the bytecode
+                // interpreter (whose import resolution is correct) — VM == JIT,
+                // never silently divergent.
+                if func_id.is_none() {
+                    if let Operand::Constant(MirConstant::Function(name)) = func {
+                        return Err(format!(
+                            "Route A surface-and-stop: SURFACE — direct call to \
+                             `{}` could not be resolved to a program function \
+                             index (imported cross-module function not visible to \
+                             the JIT's import-blind `function_indices`, or an \
+                             ambiguous `*::{}` suffix). Whole-function JIT bail so \
+                             the W12 fall-through runs under the bytecode \
+                             interpreter, whose import resolution matches the VM \
+                             (VM == JIT). ADR-006 §2.7.5.",
+                            name, name
+                        ));
+                    }
+                }
 
                 // ── Session 2: STACK-CLOSURE DIRECT-DISPATCH FAST PATH ──
                 // When the callee operand loads from a slot that was
@@ -1403,6 +1480,28 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                 // Check if we have a direct FuncRef for the callee.
                 let func_ref = func_id.and_then(|fid| self.user_func_refs.get(&fid).copied());
+
+                // Surface-and-stop guard, part 2: a `MirConstant::Function`
+                // resolved to a `func_id` but with no `user_func_ref`
+                // (declaration race / function not in the JIT-compiled set)
+                // would otherwise fall into the indirect `jit_call_value` path,
+                // which reads a bogus callee value from the stack and silently
+                // returns garbage — the same BRANCH-DROP failure as an
+                // unresolved name. A Function constant is never an indirect
+                // callable, so bail the whole-function JIT to the interpreter.
+                if func_ref.is_none() {
+                    if let Operand::Constant(MirConstant::Function(name)) = func {
+                        return Err(format!(
+                            "Route A surface-and-stop: SURFACE — direct call to \
+                             `{}` resolved to a function index but has no JIT \
+                             FuncRef (callee not in the compiled set). Whole- \
+                             function JIT bail so the W12 fall-through runs under \
+                             the bytecode interpreter (VM == JIT). ADR-006 \
+                             §2.7.5.",
+                            name
+                        ));
+                    }
+                }
 
                 let result = if let Some(func_ref) = func_ref {
                     // ── DIRECT CALL PATH ──────────────────────────────────
