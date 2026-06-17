@@ -358,6 +358,59 @@ pub fn v2_is_weekend(
 
 // ===== Formatting =====
 
+/// Timezone *name* for a fixed-offset DateTime.
+///
+/// A Shape `DateTime` carries only a `FixedOffset` (book: "Every DateTime
+/// carries a fixed UTC offset"), so chrono's own `%Z` renders the numeric
+/// offset (`+00:00`) — there is no IANA name to recover. The book specifies
+/// `%Z` as the timezone *name* (`UTC` for a UTC datetime), matching the
+/// `timezone()` method. This produces that name from the offset.
+fn tz_name_for_offset(offset_secs: i32) -> String {
+    if offset_secs == 0 {
+        "UTC".to_string()
+    } else {
+        let h = offset_secs / 3600;
+        let m = (offset_secs.abs() % 3600) / 60;
+        if m == 0 {
+            format!("UTC{:+}", h)
+        } else {
+            format!("UTC{:+}:{:02}", h, m)
+        }
+    }
+}
+
+/// Rewrite `%Z` in a strftime format string to the fixed-offset timezone name.
+///
+/// Only the exact `%Z` specifier is substituted. `%%` (escaped percent) is
+/// passed through untouched, and `%z` (lowercase numeric offset) is left for
+/// chrono to render. The rewritten name is escaped (`%` -> `%%`) so chrono
+/// treats it as a literal.
+fn rewrite_tz_name(fmt: &str, tz_name: &str) -> String {
+    let escaped = tz_name.replace('%', "%%");
+    let mut out = String::with_capacity(fmt.len());
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.peek() {
+                Some('Z') => {
+                    chars.next();
+                    out.push_str(&escaped);
+                }
+                Some(&next) => {
+                    // Preserve the spec verbatim (incl. `%%` and `%z`).
+                    out.push('%');
+                    out.push(next);
+                    chars.next();
+                }
+                None => out.push('%'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 pub fn v2_format(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -365,7 +418,9 @@ pub fn v2_format(
 ) -> Result<KindedSlot, VMError> {
     let dt = recv_dt(args)?;
     let fmt = arg_string(args, 1, "DateTime.format")?;
-    let formatted = dt.format(fmt).to_string();
+    let tz_name = tz_name_for_offset(dt.offset().local_minus_utc());
+    let rewritten = rewrite_tz_name(fmt, &tz_name);
+    let formatted = dt.format(&rewritten).to_string();
     Ok(KindedSlot::from_string_arc(Arc::new(formatted)))
 }
 
@@ -897,6 +952,49 @@ mod tests {
         ];
         let r = v2_format(&mut vm, &args, None).unwrap();
         assert_eq!(r.as_str(), Some("2024-01-15"));
+    }
+
+    #[test]
+    fn test_format_tz_name_utc() {
+        // Book datetime.mdx: `%Z` renders the timezone *name* — `UTC` for a
+        // UTC datetime (NOT the numeric offset `+00:00` chrono gives a
+        // FixedOffset). `%z` stays the numeric offset.
+        let mut vm = create_test_vm();
+        let args = [
+            dt_arg(utc_dt(2024, 1, 15, 10, 0, 0)),
+            KindedSlot::from_string("%Z"),
+        ];
+        let r = v2_format(&mut vm, &args, None).unwrap();
+        assert_eq!(r.as_str(), Some("UTC"));
+
+        let args_z = [
+            dt_arg(utc_dt(2024, 1, 15, 10, 0, 0)),
+            KindedSlot::from_string("%z"),
+        ];
+        let rz = v2_format(&mut vm, &args_z, None).unwrap();
+        assert_eq!(rz.as_str(), Some("+0000"));
+    }
+
+    #[test]
+    fn test_format_tz_name_offset() {
+        // Non-UTC fixed offset: `%Z` follows the `timezone()` naming (`UTC+5:30`).
+        let off = FixedOffset::east_opt(5 * 3600 + 30 * 60).unwrap();
+        let dt = off.with_ymd_and_hms(2024, 1, 15, 10, 0, 0).unwrap();
+        let mut vm = create_test_vm();
+        let args = [dt_arg(dt), KindedSlot::from_string("%H:%M %Z")];
+        let r = v2_format(&mut vm, &args, None).unwrap();
+        assert_eq!(r.as_str(), Some("10:00 UTC+5:30"));
+    }
+
+    #[test]
+    fn test_rewrite_tz_name_escapes() {
+        // `%%Z` is an escaped percent then literal `Z` — must NOT be rewritten.
+        assert_eq!(rewrite_tz_name("%%Z", "UTC"), "%%Z");
+        // `%z` (lowercase) is left for chrono.
+        assert_eq!(rewrite_tz_name("%z", "UTC"), "%z");
+        // Bare `%Z` is rewritten and the substituted name is `%`-escaped.
+        assert_eq!(rewrite_tz_name("%Z", "UTC+5:30"), "UTC+5:30");
+        assert_eq!(rewrite_tz_name("a%Zb", "UTC"), "aUTCb");
     }
 
     #[test]
