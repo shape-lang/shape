@@ -272,6 +272,17 @@ impl TypeInferenceEngine {
                     // For range indexing, return the same array type
                     Ok(object_type)
                 } else {
+                    // Tuple element access (book `fundamentals/variables`
+                    // §Tuple Types): `pair[0]` / `pair[1]` on a `[T0, T1]`-typed
+                    // value resolves to the per-POSITION element type. The index
+                    // must be a compile-time constant non-negative integer so the
+                    // position is statically known; a tuple has no single
+                    // element type, so a non-constant index is a compile error.
+                    if let Type::Concrete(shape_ast::ast::TypeAnnotation::Tuple(elem_types)) =
+                        &object_type
+                    {
+                        return self.infer_tuple_index(elem_types, index);
+                    }
                     self.infer_index_access(&object_type, &index_type)
                 }
             }

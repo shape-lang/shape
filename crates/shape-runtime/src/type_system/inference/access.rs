@@ -554,6 +554,39 @@ impl TypeInferenceEngine {
         }
     }
 
+    /// Resolve a tuple element access `tup[k]` to its positional element type
+    /// (book `fundamentals/variables` §Tuple Types). A tuple fixes both its
+    /// length and the per-position element type at compile time, so the index
+    /// MUST be a compile-time-constant non-negative integer literal — a tuple
+    /// has no single uniform element type, so a runtime/variable index cannot
+    /// be resolved and is a compile error (surface, do not fabricate a type).
+    pub(crate) fn infer_tuple_index(
+        &mut self,
+        elem_types: &[TypeAnnotation],
+        index: &shape_ast::ast::Expr,
+    ) -> TypeResult<Type> {
+        use shape_ast::ast::{Expr, Literal};
+        let k: i64 = match index {
+            Expr::Literal(Literal::Int(i), _) => *i,
+            Expr::Literal(Literal::TypedInt(i, _), _) => *i,
+            _ => {
+                return Err(TypeError::TypeMismatch(
+                    "constant integer index into a tuple".to_string(),
+                    "non-constant tuple index (tuple element types are \
+                     position-specific; index with a literal like tup[0])"
+                        .to_string(),
+                ));
+            }
+        };
+        if k < 0 || (k as usize) >= elem_types.len() {
+            return Err(TypeError::TypeMismatch(
+                format!("tuple index in 0..{}", elem_types.len()),
+                format!("out-of-range tuple index {}", k),
+            ));
+        }
+        Ok(Type::Concrete(elem_types[k as usize].clone()))
+    }
+
     /// Push a `Numeric`-bound constraint on an array/record index type. Both
     /// `int` and `number` (and any numeric width) satisfy `Numeric`, so this
     /// accepts either-family indices without forcing the index to `number`

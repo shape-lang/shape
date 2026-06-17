@@ -1641,6 +1641,50 @@ impl BytecodeCompiler {
         // a kind: if inference could not prove the parameter is an array the
         // tracker name is absent and this returns `None`, so the operand
         // stays unproven and the binop emitter raises a loud compile error.
+        // Tuple element access (book `fundamentals/variables` §Tuple Types):
+        // a `[T0, T1, ...]`-annotated binding records a `ConcreteType::Tuple`
+        // (via `declared_annotation_concrete_type`). `pair[k]` at a CONSTANT
+        // integer index `k` resolves to the proven per-position element type so
+        // a downstream binop (`pair[0] + pair[1]`) sees concrete operands. The
+        // recorded ConcreteType IS the proof (ADR-006 §2.7.5); a non-constant
+        // index or out-of-range `k` falls through (and the tuple-index type
+        // checker in shape-runtime already rejects those at the inference pass).
+        if let Expr::IndexAccess {
+            object,
+            index,
+            end_index: None,
+            ..
+        } = expr
+        {
+            if let Expr::Identifier(obj_name, _) = object.as_ref() {
+                let recorded_ct = self
+                    .resolve_local(obj_name)
+                    .and_then(|idx| self.current_function_local_concrete_types.get(&idx))
+                    .or_else(|| {
+                        self.module_bindings
+                            .get(obj_name)
+                            .and_then(|idx| self.module_binding_concrete_types.get(idx))
+                    });
+                if let Some(shape_value::v2::ConcreteType::Tuple(elems)) = recorded_ct {
+                    let k = match index.as_ref() {
+                        Expr::Literal(shape_ast::ast::Literal::Int(i), _) => Some(*i),
+                        Expr::Literal(shape_ast::ast::Literal::TypedInt(i, _), _) => Some(*i),
+                        _ => None,
+                    };
+                    if let Some(k) = k {
+                        if k >= 0 && (k as usize) < elems.len() {
+                            let elem_ct = elems[k as usize].clone();
+                            if let Some(ann) =
+                                crate::compiler::expressions::closures::concrete_type_to_type_annotation(&elem_ct)
+                            {
+                                return Ok(Type::Concrete(ann));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if let Expr::IndexAccess {
             object,
             end_index: None,

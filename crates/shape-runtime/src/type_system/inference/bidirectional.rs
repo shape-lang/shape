@@ -82,13 +82,27 @@ impl TypeInferenceEngine {
 
             // Array: propagate element type to elements
             Expr::Array(elements, _) => {
-                if let Type::Concrete(TypeAnnotation::Array(elem_ty)) = expected {
-                    self.check_array_against(elements, &Type::Concrete(*elem_ty.clone()))
-                } else {
-                    // Expected isn't an array type, infer and unify
-                    let inferred = self.infer_expr(expr)?;
-                    self.constraints.push((inferred.clone(), expected.clone()));
-                    Ok(inferred)
+                match expected {
+                    Type::Concrete(TypeAnnotation::Array(elem_ty)) => {
+                        self.check_array_against(elements, &Type::Concrete(*elem_ty.clone()))
+                    }
+                    // Tuple type (book `fundamentals/variables` §Tuple Types):
+                    // `[T1, T2, ...]` is the bracket-syntax tuple type, and a
+                    // bracket literal `[v1, v2, ...]` is its value form. There is
+                    // no `(a, b)` paren tuple literal — the literal IS an
+                    // `Expr::Array`. Check each element AGAINST its positional
+                    // element type (so heterogeneous tuples like `[int, string]`
+                    // type-check per position) and verify the arity. No coercion:
+                    // each element must satisfy its declared position type.
+                    Type::Concrete(TypeAnnotation::Tuple(elem_types)) => {
+                        self.check_tuple_against(elements, elem_types)
+                    }
+                    _ => {
+                        // Expected isn't an array/tuple type, infer and unify
+                        let inferred = self.infer_expr(expr)?;
+                        self.constraints.push((inferred.clone(), expected.clone()));
+                        Ok(inferred)
+                    }
                 }
             }
 
@@ -621,6 +635,28 @@ impl TypeInferenceEngine {
             self.check_against(elem, elem_type)?;
         }
         Ok(BuiltinTypes::array(elem_type.clone()))
+    }
+
+    /// Check a bracket literal `[v1, v2, ...]` against an expected tuple type
+    /// `[T1, T2, ...]` (book `fundamentals/variables` §Tuple Types). The arity
+    /// must match exactly (a tuple fixes its length at compile time) and each
+    /// element is checked AGAINST its positional element type — no widening, no
+    /// coercion; `int` and `number` positions stay distinct.
+    fn check_tuple_against(
+        &mut self,
+        elements: &[Expr],
+        elem_types: &[TypeAnnotation],
+    ) -> TypeResult<Type> {
+        if elements.len() != elem_types.len() {
+            return Err(TypeError::TypeMismatch(
+                format!("tuple of {} elements", elem_types.len()),
+                format!("bracket literal with {} elements", elements.len()),
+            ));
+        }
+        for (elem, ty) in elements.iter().zip(elem_types.iter()) {
+            self.check_against(elem, &Type::Concrete(ty.clone()))?;
+        }
+        Ok(Type::Concrete(TypeAnnotation::Tuple(elem_types.to_vec())))
     }
 
     /// Check object entries against expected field types

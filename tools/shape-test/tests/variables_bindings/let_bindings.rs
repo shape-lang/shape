@@ -145,3 +145,52 @@ fn let_immutable_cannot_reassign() {
     )
     .expect_run_err_contains("immutable");
 }
+
+// Tuple types (book `fundamentals/variables` §Tuple Types): `[T1, T2, ...]`
+// is the bracket-syntax tuple TYPE and a bracket literal `[v1, v2, ...]` is
+// its value form. Elements are read by index, exactly as the chapter's
+// runnable example shows.
+#[test]
+fn tuple_annotated_binding_indexes_by_position_first() {
+    ShapeTest::new(
+        r#"
+        let pair: [int, int] = [3, 4]
+        pair[0]
+    "#,
+    )
+    .expect_number(3.0);
+}
+
+#[test]
+fn tuple_annotated_binding_indexes_by_position_second() {
+    ShapeTest::new(
+        r#"
+        let pair: [int, int] = [3, 4]
+        pair[1]
+    "#,
+    )
+    .expect_number(4.0);
+}
+
+#[test]
+fn tuple_annotated_binding_sum_of_elements() {
+    ShapeTest::new(
+        r#"
+        let pair: [int, int] = [3, 4]
+        pair[0] + pair[1]
+    "#,
+    )
+    .expect_number(7.0);
+}
+
+// Arity is fixed at compile time: a literal with the wrong count is rejected.
+#[test]
+fn tuple_annotated_binding_arity_mismatch_is_error() {
+    ShapeTest::new(
+        r#"
+        let pair: [int, int] = [1, 2, 3]
+        pair[0]
+    "#,
+    )
+    .expect_run_err_contains("tuple");
+}
