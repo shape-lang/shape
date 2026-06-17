@@ -7,7 +7,7 @@
 
 use crate::ast::{
     Annotation, BuiltinFunctionDecl, ForeignFunctionDef, FunctionDef, FunctionParameter,
-    NativeAbiBinding,
+    NativeAbiBinding, TypeAnnotation,
 };
 use crate::error::Result;
 use pest::iterators::Pair;
@@ -107,6 +107,25 @@ pub fn parse_function_param(pair: Pair<Rule>) -> Result<FunctionParameter> {
         message: "expected pattern in function parameter".to_string(),
         location: None,
     })?;
+
+    // Typed reference-parameter normalization (v0.3.3 B4, references slice D2):
+    // the book documents BOTH ref-param forms — the sigil form `fn f(&p)` (which
+    // sets `is_reference` above) and the typed form `fn f(p: &Point)` (which
+    // carries the `&` in a `Borrow` type_annotation). Normalize the typed form
+    // to the SAME shape the rest of the compiler relies on: lift the reference
+    // mode onto the `is_reference` / `is_mut_reference` flags and unwrap the
+    // annotation to its referent (`&Point` -> `Point`). Without this the param
+    // pass-mode derivation sees `ByValue` and a `&pt` argument rejects with
+    // B0004, and the inner referent type never reaches field-access inference.
+    // The reference-ness/mutability is carried by the flags, not the annotation
+    // — exactly the contract the inference-side `Borrow` unwrap mirrors. NOT a
+    // coercion: the referent annotation is forwarded verbatim. A param that BOTH
+    // wears the sigil and annotates a `Borrow` keeps the more-permissive `&mut`.
+    if let Some(TypeAnnotation::Borrow { mutable, inner }) = type_annotation {
+        is_reference = true;
+        is_mut_reference = is_mut_reference || mutable;
+        type_annotation = Some(*inner);
+    }
 
     Ok(FunctionParameter {
         pattern,

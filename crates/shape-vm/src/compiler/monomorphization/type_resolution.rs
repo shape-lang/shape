@@ -1584,6 +1584,29 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
             concrete_type_for_expr(compiler, operand)
         }
 
+        // Nested-index element recovery (v0.3.3 B4, references slice D2):
+        // a single `arr[i]` or a nested `m[r][c]` recovers its element
+        // ConcreteType by descending into the object's array ConcreteType
+        // and unwrapping ONE `Array` layer per index op. For `m[r][c]` the
+        // recursion resolves the object `m[r]` to `Array<int>` (one unwrap
+        // off `Array<Array<int>>`), then this arm unwraps the second layer to
+        // `int`. The object's ConcreteType IS the proof (ADR-006 §2.7.5):
+        // an `Array<Array<int>>`-annotated `m` records
+        // `ConcreteType::Array(Array(I64))` via `identifier_concrete_type`;
+        // an object that does not resolve to an array ConcreteType yields
+        // `None` here, so the operand stays unproven and the binop emitter
+        // raises a clean compile error (no fabrication, no `Any` fallback).
+        // Slice access (`end_index: Some(_)`) keeps the array shape, not the
+        // element, so it is excluded.
+        Expr::IndexAccess {
+            object,
+            end_index: None,
+            ..
+        } => match concrete_type_for_expr(compiler, object) {
+            Some(ConcreteType::Array(elem)) => Some(*elem),
+            _ => None,
+        },
+
         // Construction strict-typing close (2026-06-05): a binary-op element
         // (`[x, x * 10]`, `[a + b, c - d]`) has a statically-known result
         // ConcreteType when both operands resolve to the SAME concrete type
@@ -3158,6 +3181,90 @@ mod tests {
         assert!(
             msg.contains("cannot infer type argument"),
             "expected the 'cannot infer type argument' diagnostic, got: {msg}"
+        );
+    }
+
+    // v0.3.3 B4 (references slice D2): nested-index `m[r][c]` arithmetic +
+    // typed-reference-parameter object-field arithmetic.
+
+    #[test]
+    fn b4_nested_index_arithmetic_recovers_element_type() {
+        // `m[r][c]` recovers the element type through TWO index ops:
+        // Array<Array<int>> -> Array<int> -> int, so `m[1][0] + 10` (= 13)
+        // type-checks and runs under strict typing.
+        assert_eq!(
+            crate::test_utils::eval_typed_i64(
+                "let m: Array<Array<int>> = [[1,2],[3,4]]\nm[1][0] + 10",
+            ),
+            13
+        );
+    }
+
+    #[test]
+    fn b4_ref_param_number_field_arithmetic() {
+        // `fn shift(p: &Point) { p.x + 1.0 }` — field access through a `&`
+        // reference parameter recovers the `number` field type and dispatches
+        // the arithmetic on the proven kind. `2.5 + 1.0` = 3.5.
+        assert_eq!(
+            crate::test_utils::eval_typed_f64(
+                "type Point { x: number, y: int }\n\
+                 fn shift(p: &Point) -> number { return p.x + 1.0 }\n\
+                 let pt = Point { x: 2.5, y: 7 }\n\
+                 shift(&pt)",
+            ),
+            3.5
+        );
+    }
+
+    #[test]
+    fn b4_ref_param_int_field_arithmetic() {
+        // The `int`-field sibling: `p.y + 1` on a `&Point` param. `7 + 1` = 8.
+        assert_eq!(
+            crate::test_utils::eval_typed_i64(
+                "type Point { x: number, y: int }\n\
+                 fn gety(p: &Point) -> int { return p.y + 1 }\n\
+                 let pt = Point { x: 2.5, y: 7 }\n\
+                 gety(&pt)",
+            ),
+            8
+        );
+    }
+
+    #[test]
+    fn b4_mut_ref_param_field_mutate_then_read() {
+        // `&mut` field mutate-then-read: `bump(&mut pt)` writes `pt.y` then the
+        // caller reads it back. 7 + 2 = 9.
+        assert_eq!(
+            crate::test_utils::eval_typed_i64(
+                "type Point { x: number, y: int }\n\
+                 fn bump(p: &mut Point) { p.y = p.y + 2 }\n\
+                 let mut pt = Point { x: 2.5, y: 7 }\n\
+                 bump(&mut pt)\n\
+                 pt.y",
+            ),
+            9
+        );
+    }
+
+    #[test]
+    fn b4_by_value_param_still_rejects_ref_arg() {
+        // Non-regression: passing `&pt` to a genuine by-value parameter is
+        // still a B0004 compile error (the typed-ref normalization must not
+        // make every `&arg` accepted).
+        let result = crate::test_utils::compile_with_prelude(
+            "type Point { x: number }\n\
+             fn byval(p: Point) -> number { return p.x }\n\
+             let pt = Point { x: 1.0 }\n\
+             byval(&pt)",
+        );
+        assert!(
+            result.is_err(),
+            "passing &pt to a by-value parameter must stay a B0004 error"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("B0004"),
+            "expected the B0004 diagnostic, got: {msg}"
         );
     }
 }

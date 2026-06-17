@@ -1729,6 +1729,26 @@ impl BytecodeCompiler {
             if let Some(elem) = self.tracked_array_element_type(object) {
                 return Ok(elem);
             }
+            // Nested-index element recovery (v0.3.3 B4, references slice D2):
+            // `m[r][c]` has an `object` that is itself an `IndexAccess`, so the
+            // identifier-only `tracked_array_element_type` above returns None.
+            // Fall to the structural `concrete_type_for_expr`, which unwraps one
+            // `Array` layer per index op (here: `m[r]` resolves to
+            // `Array<int>`, this access unwraps to `int`). The recovered
+            // ConcreteType IS the proof (ADR-006 §2.7.5); a non-array object
+            // ConcreteType yields None and the operand stays unproven (clean
+            // compile error, no fabrication).
+            if let Some(ct) =
+                crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                    self, expr,
+                )
+            {
+                if let Some(ann) =
+                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
+                {
+                    return Ok(Type::Concrete(ann));
+                }
+            }
         }
 
         // R3-elemerasure (strict-flip): the builtin (PHF) array methods that

@@ -34,6 +34,22 @@ impl TypeInferenceEngine {
         property: &str,
         assignment_target: bool,
     ) -> TypeResult<Type> {
+        // Field access through a reference (v0.3.3 B4, references slice D2):
+        // `p.x` on a `p: &Point` / `&mut Point` parameter reads the field
+        // THROUGH the reference. Deref the `Borrow { inner }` to its referent
+        // and recurse so the field resolves on `Point` (the
+        // references-borrowing.mdx ref-param field-access form). Mirrors the
+        // value-position auto-deref already wired for `-> &T` call results; the
+        // referent annotation is forwarded verbatim (no coercion). Without this
+        // the `Borrow` type falls through to the `HasField` fallback and rejects
+        // with "Borrow(..) cannot have fields".
+        if let Type::Concrete(TypeAnnotation::Borrow { inner, .. }) = object_type {
+            return self.infer_property_access_internal(
+                &Type::Concrete((**inner).clone()),
+                property,
+                assignment_target,
+            );
+        }
         if let Type::Concrete(TypeAnnotation::Reference(name)) = object_type {
             // Check struct type definitions FIRST (includes comptime fields),
             // before type aliases (which only contain runtime fields).
@@ -906,6 +922,42 @@ impl TypeInferenceEngine {
                 (params, returns)
             }
             _ => unreachable!("non-function callees are handled above"),
+        };
+
+        // GAP-2 param-side normalization (v0.3.3 B4, references slice D2): an
+        // explicitly `&T`-annotated parameter (`fn shift(p: &Point)`) carries a
+        // `Borrow { inner: T }` annotation in the callee's signature, but the
+        // by-reference ARGUMENT flow above (the GAP-2 boundary unwrap at the
+        // `Expr::Reference { .. }` arg) reduces the matching `&pt` argument to its
+        // REFERENT type `T`. Without unwrapping the param side too, the call-shape
+        // constraint compares `(&Point) -> R` (declared) against `(Point) -> R`
+        // (call) and rejects with "(&Point) is not compatible with (Point)". The
+        // sigil form `fn shift(&p)` records the param as bare `T` + an
+        // `is_reference` flag and already matches; this makes the typed form
+        // `fn shift(p: &Point)` produce the SAME `(Point) -> R` signature so both
+        // book-documented ref-param forms type-check identically. The
+        // reference-ness/mutability is tracked by the param flags, not the param
+        // type — same contract the arg-side unwrap relies on. NOT a coercion: the
+        // inner referent annotation is forwarded verbatim (`&Point` -> `Point`,
+        // `&int` -> `int`); `int` and `number` never meet here.
+        let had_borrow_param = params.iter().any(|p| {
+            matches!(p, Type::Concrete(TypeAnnotation::Borrow { .. }))
+        });
+        let params: Vec<Type> = params
+            .into_iter()
+            .map(|p| match p {
+                Type::Concrete(TypeAnnotation::Borrow { inner, .. }) => Type::Concrete(*inner),
+                other => other,
+            })
+            .collect();
+        // Rebuild the callee's function type from the referent-normalized params
+        // so the LHS of the call-shape constraint pushed below is `(Point) -> R`,
+        // matching the referent-normalized RHS. Without this the LHS keeps the
+        // `&Point` param and the constraint rejects (`(&Point) !~ (Point)`).
+        let func_type = if had_borrow_param {
+            BuiltinTypes::function(params.clone(), returns.clone())
+        } else {
+            func_type
         };
 
         let total_arity = params.len();
