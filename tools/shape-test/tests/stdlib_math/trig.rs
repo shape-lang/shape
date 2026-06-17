@@ -135,17 +135,75 @@ fn sin_squared_plus_cos_squared() {
     .expect_number(1.0);
 }
 
-// TDD: atan2 is not yet a builtin function
+// ===== MA1: atan2 + hyperbolic trig (std::core::math) =====
+
 #[test]
 fn atan2_quadrant_one() {
-    // TDD: atan2(y, x) not yet implemented as builtin
-    // Approximating with atan(y/x) for positive x
+    // atan2(1, 1) = pi/4.
     ShapeTest::new(
         r#"
-        atan(1.0 / 1.0)
+        from std::core::math use { atan2 }
+        atan2(1.0, 1.0)
     "#,
     )
     .expect_number(std::f64::consts::FRAC_PI_4);
+}
+
+#[test]
+fn atan2_quadrant_two() {
+    // atan2(1, -1) = 3*pi/4.
+    ShapeTest::new(
+        r#"
+        from std::core::math use { atan2 }
+        atan2(1.0, -1.0)
+    "#,
+    )
+    .expect_number(3.0 * std::f64::consts::FRAC_PI_4);
+}
+
+#[test]
+fn sinh_zero() {
+    ShapeTest::new(
+        r#"
+        from std::core::math use { sinh }
+        sinh(0.0)
+    "#,
+    )
+    .expect_number(0.0);
+}
+
+#[test]
+fn cosh_zero() {
+    ShapeTest::new(
+        r#"
+        from std::core::math use { cosh }
+        cosh(0.0)
+    "#,
+    )
+    .expect_number(1.0);
+}
+
+#[test]
+fn tanh_zero() {
+    ShapeTest::new(
+        r#"
+        from std::core::math use { tanh }
+        tanh(0.0)
+    "#,
+    )
+    .expect_number(0.0);
+}
+
+#[test]
+fn sinh_one() {
+    // sinh(1) = (e - 1/e) / 2 ≈ 1.1752011936438014
+    ShapeTest::new(
+        r#"
+        from std::core::math use { sinh }
+        sinh(1.0)
+    "#,
+    )
+    .expect_number(1.0_f64.sinh());
 }
 
 // TDD: PI constant is not yet a global

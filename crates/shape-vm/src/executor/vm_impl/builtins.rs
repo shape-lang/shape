@@ -521,12 +521,49 @@ impl VirtualMachine {
                 // `pub fn sum(series) { series.sum() }` now routes through
                 // the PHF `.sum()` method dispatch — single discriminator
                 // per ADR-005 §1, `MethodFnV2` ABI per ADR-006 §2.7.10/Q11.
+                // ── MA1: aggregate statistics + scalar hyperbolic/atan2.
+                // Documented at stdlib/core/math (sum/mean/std/variance) and
+                // stdlib/native/math (atan2/sinh/cosh/tanh). Bodies read the
+                // numeric typed-array argument through the kind-generic v2
+                // view (ADR-005 §1 single discriminator; ADR-006 §2.7.6). ──
+                BuiltinFunction::IntrinsicMean => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_mean(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicStd => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_std(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicVariance => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_variance(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicAtan2 => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_atan2(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicSinh => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_sinh(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicCosh => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_cosh(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicTanh => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::math::builtin_tanh(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
                 BuiltinFunction::IntrinsicBspline2_3dBatch
-                | BuiltinFunction::IntrinsicMean
                 | BuiltinFunction::IntrinsicMin
                 | BuiltinFunction::IntrinsicMax
-                | BuiltinFunction::IntrinsicStd
-                | BuiltinFunction::IntrinsicVariance
                 | BuiltinFunction::IntrinsicRandom
                 | BuiltinFunction::IntrinsicRandomInt
                 | BuiltinFunction::IntrinsicRandomSeed
@@ -559,10 +596,6 @@ impl VirtualMachine {
                 | BuiltinFunction::IntrinsicCovariance
                 | BuiltinFunction::IntrinsicPercentile
                 | BuiltinFunction::IntrinsicMedian
-                | BuiltinFunction::IntrinsicAtan2
-                | BuiltinFunction::IntrinsicSinh
-                | BuiltinFunction::IntrinsicCosh
-                | BuiltinFunction::IntrinsicTanh
                 | BuiltinFunction::IntrinsicCharCode
                 | BuiltinFunction::IntrinsicFromCharCode
                 | BuiltinFunction::IntrinsicSeries => {

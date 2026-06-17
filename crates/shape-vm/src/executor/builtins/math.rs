@@ -12,7 +12,7 @@
 //! builtin call form (`abs(x)`, `sqrt(x)`, ...).
 
 use super::kind_coerce::coerce_to_f64;
-use shape_value::{KindedSlot, NativeKind, VMError};
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 
 /// Construct a runtime type-error `VMError` with a builtin-specific message.
 #[inline]
@@ -292,27 +292,135 @@ pub(in crate::executor) fn builtin_is_finite(args: &[KindedSlot]) -> Result<Kind
     Ok(KindedSlot::from_bool(result))
 }
 
+// ── Array-statistics helpers (MA1: sum/mean/std/variance documented at
+// stdlib/core/math) ────────────────────────────────────────────────────────
+//
+// The aggregate-statistics intrinsics (`__intrinsic_mean` / `__intrinsic_std`
+// / `__intrinsic_variance`) take a `Vec<number>` / `Vec<int>` typed array as
+// their single argument. The argument arrives as a single `KindedSlot` with
+// kind `Ptr(HeapKind::TypedArray)`; we read its elements through the
+// kind-generic v2 typed-array view (`as_v2_typed_array` + `read_element`),
+// decoding each numeric element to `f64`. No `ValueWord`, no tag decode —
+// the receiver kind is the single discriminator (ADR-005 §1 / ADR-006 §2.7.6).
+
+use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, read_element};
+
+/// Collect a numeric (`Vec<number>` / `Vec<int>`) typed-array argument into a
+/// `Vec<f64>`. Each element pair `(bits, kind)` from the v2 typed-array view is
+/// decoded to `f64` via a fresh `KindedSlot` + `coerce_to_f64`. Returns a
+/// runtime error if the argument is not a numeric typed array, or if any
+/// element is non-numeric.
+fn collect_number_series(name: &str, slot: &KindedSlot) -> Result<Vec<f64>, VMError> {
+    if slot.kind != NativeKind::Ptr(shape_value::HeapKind::TypedArray) {
+        return Err(type_error(format!("{name}() argument must be an array")));
+    }
+    let view = as_v2_typed_array(slot.slot.raw(), slot.kind).ok_or_else(|| {
+        type_error(format!(
+            "{name}(): argument bits failed v2 TypedArray detection (kind {:?})",
+            slot.kind
+        ))
+    })?;
+    let mut out: Vec<f64> = Vec::with_capacity(view.len as usize);
+    for i in 0..view.len {
+        let (bits, kind) = read_element(&view, i).ok_or_else(|| {
+            type_error(format!("{name}(): failed to read array element {i}"))
+        })?;
+        let elem = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let v = coerce_to_f64(&elem).ok_or_else(|| {
+            type_error(format!(
+                "{name}(): array element {i} is not a number (kind {:?})",
+                kind
+            ))
+        })?;
+        out.push(v);
+    }
+    Ok(out)
+}
+
+/// Population variance of `data`. Empty input ⇒ NaN (mirrors the documented
+/// intrinsic contract). Numerically straightforward two-pass formula.
+#[inline]
+fn population_variance(data: &[f64]) -> f64 {
+    if data.is_empty() {
+        return f64::NAN;
+    }
+    let mean = data.iter().sum::<f64>() / data.len() as f64;
+    data.iter().map(|&x| (x - mean) * (x - mean)).sum::<f64>() / data.len() as f64
+}
+
+/// `__intrinsic_mean(series)` — arithmetic mean of a numeric typed array.
+/// Returns a `number` (`Float64`); empty input ⇒ NaN.
+pub(in crate::executor) fn builtin_mean(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "mean")?;
+    let data = collect_number_series("mean", &args[0])?;
+    if data.is_empty() {
+        return Ok(KindedSlot::from_number(f64::NAN));
+    }
+    Ok(KindedSlot::from_number(
+        data.iter().sum::<f64>() / data.len() as f64,
+    ))
+}
+
+/// `__intrinsic_variance(series)` — population variance of a numeric typed
+/// array. Returns a `number` (`Float64`); empty input ⇒ NaN.
+pub(in crate::executor) fn builtin_variance(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "variance")?;
+    let data = collect_number_series("variance", &args[0])?;
+    Ok(KindedSlot::from_number(population_variance(&data)))
+}
+
+/// `__intrinsic_std(series)` — population standard deviation of a numeric
+/// typed array: `sqrt(variance)`. Returns a `number` (`Float64`); empty
+/// input ⇒ NaN.
+pub(in crate::executor) fn builtin_std(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "std")?;
+    let data = collect_number_series("std", &args[0])?;
+    Ok(KindedSlot::from_number(population_variance(&data).sqrt()))
+}
+
+// ── Scalar trig intrinsics (MA1: atan2/sinh/cosh/tanh) ──────────────────────
+
+/// `__intrinsic_atan2(y, x)` — two-argument arc tangent (libm semantics).
+pub(in crate::executor) fn builtin_atan2(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 2, "atan2")?;
+    let y =
+        coerce_to_f64(&args[0]).ok_or_else(|| type_error("atan2() argument must be a number"))?;
+    let x =
+        coerce_to_f64(&args[1]).ok_or_else(|| type_error("atan2() argument must be a number"))?;
+    Ok(KindedSlot::from_number(y.atan2(x)))
+}
+
+/// `__intrinsic_sinh(x)` — hyperbolic sine.
+pub(in crate::executor) fn builtin_sinh(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "sinh")?;
+    let x =
+        coerce_to_f64(&args[0]).ok_or_else(|| type_error("sinh() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.sinh()))
+}
+
+/// `__intrinsic_cosh(x)` — hyperbolic cosine.
+pub(in crate::executor) fn builtin_cosh(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "cosh")?;
+    let x =
+        coerce_to_f64(&args[0]).ok_or_else(|| type_error("cosh() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.cosh()))
+}
+
+/// `__intrinsic_tanh(x)` — hyperbolic tangent.
+pub(in crate::executor) fn builtin_tanh(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+    check_arity(args, 1, "tanh")?;
+    let x =
+        coerce_to_f64(&args[0]).ok_or_else(|| type_error("tanh() argument must be a number"))?;
+    Ok(KindedSlot::from_number(x.tanh()))
+}
+
 /// `stddev(arr)` — population standard deviation over a `Vec<number>` /
-/// `Vec<int>` typed array. Single-array form. Per ADR-005 §1, heap dispatch
-/// routes through `slot.as_heap_value()` + `HeapValue` match.
+/// `Vec<int>` typed array. Bare-builtin alias for the `std` aggregate;
+/// shares the v2 typed-array reader.
 pub(in crate::executor) fn builtin_stddev(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     check_arity(args, 1, "stddev")?;
-    match args[0].kind {
-        NativeKind::Ptr(shape_value::HeapKind::TypedArray) => {
-            // V3-S5 ckpt-5: TypedArrayData numeric arms (F64/I64/I32/F32)
-            // deleted at ckpt-1..ckpt-4 per W12 audit §3.5. Rebuild at
-            // ckpt-6 STRICT close per per-T v2-raw `TypedArray<T>`
-            // direct-access target. Refusal #1.
-            Err(VMError::NotImplemented(
-                "stddev: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3. \
-                 `Arc<TypedArrayData>` numeric-arm dispatch DELETED at \
-                 ckpt-1..ckpt-4. Rebuild at ckpt-6 STRICT close per v2-raw \
-                 `TypedArray<T>` direct-access. Refusal #1."
-                    .to_string(),
-            ))
-        }
-        _ => Err(type_error("stddev() argument must be an array")),
-    }
+    let data = collect_number_series("stddev", &args[0])?;
+    Ok(KindedSlot::from_number(population_variance(&data).sqrt()))
 }
 
 #[cfg(test)]

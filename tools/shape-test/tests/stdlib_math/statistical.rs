@@ -95,3 +95,56 @@ fn array_sum_manual() {
     )
     .expect_number(6.0);
 }
+
+// ===== MA1: aggregate statistics over Array<number> =====
+//
+// std::core::math {sum, mean, std, variance} take an Array<number> and
+// return a number. The VM bodies read the numeric typed array through the
+// kind-generic v2 typed-array view (ADR-005 §1 / ADR-006 §2.7.6). Hand-
+// checked values per the MA1 verification matrix.
+
+#[test]
+fn math_sum_three_floats() {
+    ShapeTest::new(
+        r#"
+        from std::core::math use { sum }
+        sum([1.0, 2.0, 3.0])
+    "#,
+    )
+    .expect_number(6.0);
+}
+
+#[test]
+fn math_mean_four_floats() {
+    ShapeTest::new(
+        r#"
+        from std::core::math use { mean }
+        mean([1.0, 2.0, 3.0, 4.0])
+    "#,
+    )
+    .expect_number(2.5);
+}
+
+#[test]
+fn math_std_population() {
+    // Population standard deviation of [2,4,4,4,5,5,7,9] = 2.0.
+    ShapeTest::new(
+        r#"
+        from std::core::math use { std }
+        std([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])
+    "#,
+    )
+    .expect_number(2.0);
+}
+
+#[test]
+fn math_variance_population() {
+    // Population variance of [2,4,4,4,5,5,7,9] = 4.0 (std^2).
+    ShapeTest::new(
+        r#"
+        from std::core::math use { variance }
+        variance([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])
+    "#,
+    )
+    .expect_number(4.0);
+}
