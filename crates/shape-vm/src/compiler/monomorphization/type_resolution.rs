@@ -1723,6 +1723,53 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
                     return Some(ConcreteType::DateTime);
                 }
             }
+            // DateTime INSTANCE methods on a receiver already proven to be a
+            // `DateTime` (datetime book chapter "Method Reference"). The
+            // namespace-constructor arm above proves `let dt =
+            // DateTime.parse(..)` is a `DateTime`; this arm lets a downstream
+            // `dt.year()` / `dt.format(..)` / `dt.add_days(1)` surface its
+            // documented return `ConcreteType` so element-type-sensitive
+            // contexts (a `[dt.format("%Y-%m-%d")]` array-literal element, an
+            // `Array<string>` accumulation `acc + [..]`) can prove a homogeneous
+            // element kind instead of falling to "cannot infer element type".
+            //
+            // The receiver's proven `DateTime` ConcreteType IS the proof
+            // (ADR-006 §2.7.5) — recovered structurally via the recursive
+            // `concrete_type_for_expr`, never a runtime probe. The
+            // (method -> return) table mirrors the strict checker's
+            // `register_datetime_methods` (`method_table.rs`) verbatim; an
+            // unlisted method yields `None` and falls through unchanged (no
+            // fabrication, no Bool-default — a method whose return kind is not
+            // documented here is simply opaque to this resolver).
+            if matches!(
+                concrete_type_for_expr(compiler, receiver),
+                Some(ConcreteType::DateTime)
+            ) {
+                match method.as_str() {
+                    // Component / day-info / timestamp accessors — `-> int`.
+                    "year" | "month" | "day" | "hour" | "minute" | "second"
+                    | "millisecond" | "microsecond" | "day_of_week" | "day_of_year"
+                    | "week_of_year" | "unix_timestamp" | "to_unix_millis" => {
+                        return Some(ConcreteType::I64);
+                    }
+                    // Day-info / comparison predicates — `-> bool`.
+                    "is_weekday" | "is_weekend" | "is_before" | "is_after"
+                    | "is_same_day" => {
+                        return Some(ConcreteType::Bool);
+                    }
+                    // Formatting / timezone-name / offset — `-> string`.
+                    "format" | "iso8601" | "rfc2822" | "timezone" | "offset" => {
+                        return Some(ConcreteType::String);
+                    }
+                    // Timezone conversions + arithmetic — `-> DateTime`.
+                    "to_utc" | "to_local" | "to_timezone" | "add_days" | "add_hours"
+                    | "add_minutes" | "add_seconds" | "add_months" | "add" | "sub" => {
+                        return Some(ConcreteType::DateTime);
+                    }
+                    // Any other method is opaque to this resolver — fall through.
+                    _ => {}
+                }
+            }
             // First: a monomorphized stdlib method call records its substituted
             // return annotation at the call site (the `.map`/`.filter` chain
             // path). When present, that IS the proof — use it verbatim.
@@ -1813,6 +1860,16 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
             payload,
             ..
         } => enum_constructor_concrete_type(compiler, enum_name.name(), variant, payload),
+
+        // `@"..."` DateTime literal (`Expr::DateTime`) / time reference
+        // (`Expr::TimeRef`). A datetime literal IS a `DateTime` value (datetime
+        // book chapter §DateTime Literals) — the literal form is the proof
+        // (ADR-006 §2.7.5), no runtime probe. This lets `let dt = @"..."` record
+        // `ConcreteType::DateTime` in the tracker so a downstream `dt.year()` /
+        // `dt.format(..)` receiver resolves to DateTime (parity with the
+        // `DateTime.parse(..)` constructor binding) and its method result type
+        // surfaces for element-type-sensitive contexts.
+        Expr::DateTime(_, _) | Expr::TimeRef(_, _) => Some(ConcreteType::DateTime),
 
         // Anything else (member accesses, closures, …) is opaque until we
         // have richer side-tables. Returning None lets the resolver fall back
