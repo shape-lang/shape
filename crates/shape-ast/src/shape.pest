@@ -1404,12 +1404,15 @@ datetime_arithmetic = {
 
 datetime_op = { "+" | "-" }
 
+// A datetime literal is just the quoted ISO-8601 string. The timezone is
+// always encoded *inside* the string (e.g. `+00:00`, `Z`), per the DateTime
+// book chapter. An earlier `timezone?` (a bare trailing `ident`) was never
+// read by the AST builder and — because whitespace/newlines are skipped — it
+// greedily swallowed the identifier on the *next* statement line
+// (`let d = @"2024-01-15"\nprint(d)` parsed as `@"2024-01-15" print` then a
+// `(d)` call), so the `let` binding never took. Drop it.
 datetime_literal = {
-    string ~ timezone?
-}
-
-timezone = {
-    ident  // Like EST, PST, UTC
+    string
 }
 
 duration = @{

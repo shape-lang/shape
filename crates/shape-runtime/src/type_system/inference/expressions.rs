@@ -1706,9 +1706,20 @@ impl TypeInferenceEngine {
                 Ok(Type::Concrete(TypeAnnotation::Basic("object".to_string())))
             }
 
-            // Time references
+            // Time references / `@"..."` datetime literals.
+            //
+            // Infer the canonical `DateTime` reference type (NOT a lowercase
+            // `Basic("datetime")`). The strict method-checker's `MethodTable`
+            // registers the 30 DateTime instance methods under the key
+            // `"DateTime"` (`checking/method_table.rs::register_datetime_methods`),
+            // and `MethodTable::lookup` keys off the receiver type name. A
+            // lowercase `Basic("datetime")` produced a `("datetime", "year")`
+            // key that misses every seeded signature, so `let d = @"..."` then
+            // `d.year()` reported "Method 'year' not found on type 'datetime'".
+            // The downstream concrete-conversion / compiler arithmetic sites
+            // already accept both `"DateTime"` and `"datetime"`.
             Expr::TimeRef(_, _) | Expr::DateTime(_, _) => Ok(Type::Concrete(
-                TypeAnnotation::Basic("datetime".to_string()),
+                TypeAnnotation::Reference("DateTime".into()),
             )),
 
             // Duration
