@@ -798,6 +798,27 @@ impl TypeInferenceEngine {
                         (None, None) => (left.clone(), right.clone(), false),
                     };
 
+                // Operator trait fallback: a user type that `impl Ord` lowers
+                // `<`/`<=`/`>`/`>=` to a `cmp(other) -> int` call followed by an
+                // integer comparison against 0 (the bytecode compiler emits this
+                // via `operator_trait_for_op`/`emit_cmp_result_comparison`). The
+                // strict `Comparable` constraint below only admits built-in
+                // scalars, so route the user-type case through `Ord` first.
+                // `cmp`'s argument is `other: Self`, so the operands must still
+                // be the same type — push that constraint, then yield `bool`.
+                if self.check_operator_trait(&effective_left, "Ord").is_some() {
+                    self.push_constraint_with_origin(
+                        effective_left.clone(),
+                        effective_right.clone(),
+                        span,
+                    );
+                    return if is_optional {
+                        Ok(Self::wrap_in_option(BuiltinTypes::boolean()))
+                    } else {
+                        Ok(BuiltinTypes::boolean())
+                    };
+                }
+
                 self.push_constraint_with_origin(effective_left.clone(), effective_right, span);
                 // Add constraint that types must be comparable
                 let var = self.fresh_var();
@@ -840,6 +861,26 @@ impl TypeInferenceEngine {
             | BinaryOp::BitXor
             | BinaryOp::BitShl
             | BinaryOp::BitShr => {
+                // Operator trait fallback: a user type that `impl BitAnd`
+                // (`BitOr`/`BitXor`/`Shl`/`Shr`) lowers the corresponding bitwise
+                // operator to a `bitand(other) -> Self` (etc.) call (the bytecode
+                // compiler emits this via `operator_trait_for_op`). The strict
+                // `int` constraint below only admits integer scalars, so route a
+                // user-type operand through its bitwise trait first. The method
+                // takes `other: Self`, so the operands must be the same type;
+                // the result is `Self` (the left type).
+                let trait_name = match op {
+                    BinaryOp::BitAnd => "BitAnd",
+                    BinaryOp::BitOr => "BitOr",
+                    BinaryOp::BitXor => "BitXor",
+                    BinaryOp::BitShl => "Shl",
+                    BinaryOp::BitShr => "Shr",
+                    _ => unreachable!(),
+                };
+                if let Some(result_type) = self.check_operator_trait(left, trait_name) {
+                    self.push_constraint_with_origin(left.clone(), right.clone(), span);
+                    return Ok(result_type);
+                }
                 // Bitwise operations require integer operands
                 self.push_constraint_with_origin(left.clone(), BuiltinTypes::integer(), span);
                 self.push_constraint_with_origin(right.clone(), BuiltinTypes::integer(), span);
