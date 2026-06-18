@@ -2144,6 +2144,24 @@ impl BytecodeCompiler {
         if let Some(ct) = concrete_type_for_expr(self, &ident) {
             return ct;
         }
+        // CaptureCarrier (ADR-006 §2.7.8 / Q10, 2026-06-18): a bare
+        // collection-constructor binding (`let mut m = HashMap()`) records no
+        // ConcreteType in the inference side-tables, so `concrete_type_for_expr`
+        // returns `None` and the capture would fall to the `Pointer(Void)`
+        // "unknown" sentinel → `Ptr(HeapKind::NativeView)`, a wrong-carrier
+        // kind that mis-dispatches the closure-block heap-capture-mask drop
+        // (decrementing `Arc<NativeViewData>` over a live `Arc<HashMapKindedRef>`
+        // → SIGSEGV). Recover the OUTER carrier from the capture-only
+        // side-table populated at the let-binding site. The element types stay
+        // genuinely unknown (`Void` placeholders) — `native_kind_from_concrete_type`
+        // reads only the outer discriminator.
+        if let Some(ct) =
+            crate::compiler::monomorphization::type_resolution::binding_collection_ctor_capture_type(
+                self, name,
+            )
+        {
+            return ct;
+        }
         // Carrier-stamp fix (C2 Bucket-3): a capture invoked as a callee
         // (`g(...)`) inside the closure body is a closure/function value.
         // Stamp it `ConcreteType::Function` so the capture (and the

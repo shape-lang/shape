@@ -1666,6 +1666,21 @@ pub struct BytecodeCompiler {
     /// fully-annotated shapes.
     pub(crate) module_binding_concrete_types: HashMap<u16, shape_value::v2::ConcreteType>,
 
+    /// CaptureCarrier (ADR-006 §2.7.8 / Q10, 2026-06-18): per-binding-NAME
+    /// collection-carrier `ConcreteType` for closure-capture kind resolution
+    /// ONLY. Populated at the let-binding site when the initializer is a bare
+    /// collection constructor (`let mut m = HashMap()`), keyed by binding
+    /// name (works for both local and module-binding slots). Consumed solely
+    /// by `resolve_capture_concrete_type` →
+    /// `binding_collection_ctor_capture_type` to stamp the §2.7.8
+    /// closure-block capture `NativeKind` (V-erased outer discriminator).
+    /// Deliberately SEPARATE from `module_binding_concrete_types` /
+    /// `set_module_binding_type_info`: those feed the type-inference engine,
+    /// where a `HashMap<…>` tracker name trips the `HasField` constraint on a
+    /// subsequent method call (`m.remove(..)` → "HashMap cannot have fields").
+    pub(crate) binding_collection_carrier_kinds:
+        HashMap<String, shape_value::v2::ConcreteType>,
+
     /// Monomorphization cache for generic function specialization.
     pub(crate) monomorphization_cache: monomorphization::cache::MonomorphizationCache,
 

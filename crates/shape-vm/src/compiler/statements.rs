@@ -4941,6 +4941,25 @@ impl BytecodeCompiler {
                 // compile_typed_object_literal uses self to include hoisted fields in the schema.
                 self.pending_variable_name =
                     var_decl.pattern.as_identifier().map(|s| s.to_string());
+                // CaptureCarrier (ADR-006 §2.7.8 / Q10, 2026-06-18): record a
+                // bare collection-constructor initializer (`let mut m =
+                // HashMap()`) into the capture-only carrier-kind side-table so
+                // a later closure capture of this binding resolves the correct
+                // §2.7.8 heap-carrier `NativeKind` (instead of the
+                // `Pointer(Void)` "unknown" sentinel → `Ptr(NativeView)`
+                // wrong-carrier drop → SIGSEGV). Scoped to this dedicated table
+                // — NOT `module_binding_concrete_types` / the type-tracker — so
+                // it never reaches the inference engine's `HasField` check
+                // (which would reject `m.remove(..)` as "HashMap cannot have
+                // fields").
+                if let Some(name) = var_decl.pattern.as_identifier()
+                    && let Some(init) = var_decl.value.as_ref()
+                    && let Some(ct) =
+                        crate::compiler::monomorphization::type_resolution::collection_ctor_init_capture_type(init)
+                {
+                    self.binding_collection_carrier_kinds
+                        .insert(name.to_string(), ct);
+                }
                 // v2 Phase 3.1 (Agent 3): when the binding has an explicit
                 // `Array<T>` annotation whose element type maps to a
                 // typed-array kind, signal it to `compile_expr_array` so

@@ -215,6 +215,7 @@ impl BytecodeCompiler {
             current_function_local_concrete_types: HashMap::new(),
             current_closure_callee_captures: std::collections::BTreeSet::new(),
             module_binding_concrete_types: HashMap::new(),
+            binding_collection_carrier_kinds: HashMap::new(),
             monomorphization_cache:
                 crate::compiler::monomorphization::cache::MonomorphizationCache::new(),
             monomorphization_in_progress: std::collections::HashSet::new(),

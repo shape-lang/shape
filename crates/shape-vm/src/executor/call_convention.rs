@@ -889,6 +889,51 @@ impl VirtualMachine {
     /// `HeapValue::HostClosure` variant referenced in pre-Wave-7 docs
     /// has been deleted; only `ClosureRaw` survives in the
     /// closure-dispatch path.
+    /// Error-unwind frame cleanup (ADR-006 §2.7.8 / Q10, 2026-06-18).
+    ///
+    /// When a nested value-call aborts with a `VMError`, every frame the
+    /// callee pushed beyond `target_depth` is still on `self.call_stack`
+    /// — `op_return` / `op_return_value` never ran for them, so the
+    /// per-frame teardown (data-stack truncate + `closure_heap_bits`
+    /// keep-alive release) was skipped. This pops those frames in
+    /// reverse, performing the SAME teardown `return_value_inner` does on
+    /// the happy path: truncate the data stack to each frame's base
+    /// pointer (releasing live slot shares via the §2.7.7 parallel-kind
+    /// track) and release the closure-self keep-alive via
+    /// `drop_with_kind(bits, kind)` on the lockstep
+    /// `closure_heap_bits` / `closure_heap_kind` companion. Inline-scalar
+    /// keep-alive kinds are no-op drops; heap-bearing kinds retire exactly
+    /// the one share the matching `clone_with_kind` installed at frame
+    /// setup. No bare `vw_drop` (§2.7.7 #8), no `is_heap()` probe
+    /// (§2.7.7 #7), no Bool-default fallback (§2.7.8 #4).
+    fn unwind_call_frames_to(&mut self, target_depth: usize) {
+        while self.call_stack.len() > target_depth {
+            let Some(frame) = self.call_stack.pop() else {
+                break;
+            };
+            let bp = frame.base_pointer;
+            if bp <= self.sp {
+                self.truncate_stack(bp);
+            }
+            match (frame.closure_heap_bits, frame.closure_heap_kind) {
+                (Some(bits), Some(kind)) => {
+                    crate::executor::vm_impl::stack::drop_with_kind(bits, kind);
+                }
+                (None, None) => {}
+                (bits, kind) => {
+                    debug_assert!(
+                        false,
+                        "ADR-006 §2.7.8 / Q10: CallFrame.closure_heap_bits / \
+                         closure_heap_kind lockstep violated during error unwind: \
+                         bits={:?}, kind={:?}",
+                        bits.is_some(),
+                        kind.is_some(),
+                    );
+                }
+            }
+        }
+    }
+
     pub fn call_value_immediate_nb(
         &mut self,
         callee: &KindedSlot,
@@ -1007,7 +1052,28 @@ impl VirtualMachine {
                 // The return value is left on the value stack by
                 // `op_return_value`; pop it via the kinded API so the
                 // share transfers cleanly into the result `KindedSlot`.
-                self.execute_until_call_depth(saved_call_depth, ctx)?;
+                //
+                // CaptureCarrier error-unwind fix (ADR-006 §2.7.8 / Q10,
+                // 2026-06-18): if the callee aborts with a `VMError`
+                // (e.g. a runtime division-by-zero inside the closure body,
+                // or a `StoreSharedCapturePtr` mid-life kind-change SURFACE),
+                // `op_return` / `op_return_value` never runs for the in-flight
+                // frame(s), so the closure-self keep-alive share installed in
+                // `closure_heap_bits` above (the `clone_with_kind` at the
+                // `call_closure_with_nb_args_keepalive` site) is never
+                // released — leaking the `Arc<HeapValue::ClosureRaw>` block
+                // (valgrind "40 bytes definitely lost" on ANY runtime error
+                // inside a `forEach`/`map` closure). Unwind every frame the
+                // callee pushed beyond `saved_call_depth`, releasing each
+                // frame's `closure_heap_bits` companion via `drop_with_kind`
+                // (the same teardown `return_value_inner` performs on the
+                // happy path) and truncating the data stack to the frame's
+                // base pointer. No bare `vw_drop`, no Bool-default — the kind
+                // is the lockstep `closure_heap_kind` companion.
+                if let Err(e) = self.execute_until_call_depth(saved_call_depth, ctx) {
+                    self.unwind_call_frames_to(saved_call_depth);
+                    return Err(e);
+                }
                 let (bits, kind) = self.pop_kinded()?;
                 Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
             }

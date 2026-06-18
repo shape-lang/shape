@@ -1543,6 +1543,62 @@ pub fn extract_arg_concrete_types(
 }
 
 /// Best-effort `ConcreteType` for a single argument expression.
+/// CaptureCarrier (ADR-006 §2.7.8 / Q10, 2026-06-18): map a bare collection
+/// constructor identifier (`HashMap` / `Map` / `HashSet` / `Set` / `Deque` /
+/// `PriorityQueue`) to its OUTER-carrier `ConcreteType` with `Void` element
+/// placeholders.
+///
+/// This is a **capture-kind-only** resolver — used solely by
+/// `resolve_capture_concrete_type` to stamp the §2.7.8 closure-capture
+/// `NativeKind` (which reads ONLY the outer discriminator via
+/// `native_kind_from_concrete_type`, V-erased per §2.7.15). It is
+/// deliberately NOT folded into `concrete_type_for_expr` /
+/// `identifier_concrete_type`: the statement-binding type-recording path
+/// (`statements.rs`) feeds those into the type-inference engine's
+/// `set_module_binding_type_info`, and a `HashMap<…>` tracker name there
+/// trips the engine's `HasField` constraint check on a subsequent method
+/// call (`m.remove(..)` → "HashMap cannot have fields"). The capture-kind
+/// fix needs only the heap-carrier discriminator, so it stays scoped to the
+/// capture-layout resolver. No tag decode, no Bool-default (§2.7.8 #4).
+fn collection_ctor_capture_concrete_type(name: &str) -> Option<ConcreteType> {
+    match name {
+        "HashMap" | "Map" => Some(ConcreteType::HashMap(
+            Box::new(ConcreteType::Void),
+            Box::new(ConcreteType::Void),
+        )),
+        "HashSet" | "Set" => Some(ConcreteType::HashSet(Box::new(ConcreteType::Void))),
+        "Deque" => Some(ConcreteType::Deque(Box::new(ConcreteType::Void))),
+        "PriorityQueue" => Some(ConcreteType::PriorityQueue),
+        _ => None,
+    }
+}
+
+/// Resolve a binding `name`'s collection-carrier capture `ConcreteType` from
+/// the compiler's dedicated capture-only side-table
+/// (`binding_collection_carrier_kinds`), populated at the let-binding site
+/// when the initializer is a bare collection constructor. Used by
+/// `resolve_capture_concrete_type` only. Returns `None` when the binding was
+/// not a bare collection constructor.
+pub fn binding_collection_ctor_capture_type(
+    compiler: &BytecodeCompiler,
+    name: &str,
+) -> Option<ConcreteType> {
+    compiler.binding_collection_carrier_kinds.get(name).cloned()
+}
+
+/// Classify a let-binding initializer expression as a bare collection
+/// constructor and return its capture-carrier `ConcreteType`. Called at the
+/// statement-compile site to populate `binding_collection_carrier_kinds`.
+pub fn collection_ctor_init_capture_type(init: &Expr) -> Option<ConcreteType> {
+    if let Expr::FunctionCall {
+        name: ctor_name, ..
+    } = init
+    {
+        return collection_ctor_capture_concrete_type(ctor_name.as_str());
+    }
+    None
+}
+
 pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Option<ConcreteType> {
     match expr {
         Expr::Literal(literal, _) => literal_concrete_type(literal),

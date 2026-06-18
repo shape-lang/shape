@@ -633,3 +633,170 @@ fn capture_carrier_array_push_in_loop_no_leak() {
     )
     .expect_output("1000");
 }
+
+// =========================================================================
+// STAGE CaptureExhaustive (ADR-006 §2.7.8 / Q10, 2026-06-18) — exhaustive
+// per-carrier mutating-capture sweep through the HOF value-call path. Each
+// carrier is EITHER correct (right value, refcount balanced, valgrind-clean)
+// OR a clean compile-/runtime-error SURFACE (never SIGSEGV / leak / silent
+// garbage).
+//
+// Roots fixed this stage:
+//   1. HASHMAP SEGFAULT — a bare `let mut m = HashMap()` recorded NO
+//      ConcreteType for the module/local binding, so a closure capture of
+//      `m` resolved to the `Pointer(Void)` "unknown" sentinel →
+//      `Ptr(HeapKind::NativeView)` in `native_kind_from_concrete_type`. The
+//      closure-block heap-capture-mask drop (`release_typed_closure`)
+//      decremented an `Arc<NativeViewData>` over a live
+//      `Arc<HashMapKindedRef>` → SIGSEGV. Fix: `concrete_type_for_expr`
+//      recognises the collection constructors `HashMap()` / `HashSet()` /
+//      `Deque()` / `PriorityQueue()` and stamps the matching outer
+//      ConcreteType (V-erased `Void` placeholders — the kind mapping reads
+//      only the outer carrier). With the correct carrier the capture is
+//      promoted to a Shared cell and the `.set()` writeback lands.
+//   2. ARRAY<string> LEAK — `format_v2_typed_array` (the `print(arr)` path)
+//      called `read_element` (which RETAINS heap-element shares) then
+//      `std::mem::forget`-ed the transient slot, leaking one StringObj /
+//      DecimalObj / TypedObject share per printed heap element. Fix: drop
+//      the transient slot so its retained share is released.
+//   3. ERROR-UNWIND CLOSURE LEAK — any VMError raised inside a HOF closure
+//      body (div-by-zero, a `StoreSharedCapturePtr` kind-change SURFACE)
+//      aborted the callee before `op_return`, leaking the closure-self
+//      keep-alive share installed in `closure_heap_bits`. Fix:
+//      `unwind_call_frames_to` releases each in-flight frame's keep-alive on
+//      the error path.
+// =========================================================================
+
+#[test]
+fn capture_carrier_hashmap_set_writeback() {
+    // Pre-fix: SIGSEGV (wrong-carrier Arc decrement on the closure-block
+    // capture drop). Post-fix: the captured HashMap is promoted to a Shared
+    // cell and the `.set()` writeback persists past the closure.
+    ShapeTest::new(
+        r#"
+        let mut m = HashMap()
+        ["k1", "k2"].forEach(|k| { m.set(k, 1) })
+        print(m.get("k1"))
+        print(m.get("k2"))
+    "#,
+    )
+    .expect_output("1\n1");
+}
+
+#[test]
+fn capture_carrier_hashmap_set_single() {
+    ShapeTest::new(
+        r#"
+        let mut m = HashMap()
+        ["only"].forEach(|k| { m.set(k, 42) })
+        print(m.get("only"))
+    "#,
+    )
+    .expect_output("42");
+}
+
+#[test]
+fn capture_carrier_array_string_no_leak() {
+    // Pre-fix: correct output but a StringObj leak per printed element
+    // (format path forgot the retained share). Post-fix: clean.
+    ShapeTest::new(
+        r#"
+        let mut acc: Array<string> = []
+        ["x", "y"].forEach(|s| { acc = acc + [s] })
+        print(acc)
+    "#,
+    )
+    .expect_output(r#"["x", "y"]"#);
+}
+
+#[test]
+fn capture_carrier_array_number() {
+    ShapeTest::new(
+        r#"
+        let mut acc: Array<number> = []
+        [1.0, 2.0].forEach(|x| { acc = acc + [x] })
+        print(acc)
+    "#,
+    )
+    .expect_output("[1.0, 2.0]");
+}
+
+#[test]
+fn capture_carrier_array_struct() {
+    ShapeTest::new(
+        r#"
+        type P { n: int }
+        let mut acc: Array<P> = []
+        [1, 2].forEach(|x| { acc = acc + [P { n: x }] })
+        print(acc)
+    "#,
+    )
+    .expect_output("[{n: 1}, {n: 2}]");
+}
+
+#[test]
+fn capture_carrier_bool() {
+    ShapeTest::new(
+        r#"
+        let mut flag = false
+        [true, false, true].forEach(|b| { flag = flag || b })
+        print(flag)
+    "#,
+    )
+    .expect_output("true");
+}
+
+#[test]
+fn capture_carrier_number_scalar() {
+    ShapeTest::new(
+        r#"
+        let mut acc = 0.0
+        [1.0, 2.0, 3.0].forEach(|x| { acc = acc + x })
+        print(acc)
+    "#,
+    )
+    .expect_output("6.0");
+}
+
+#[test]
+fn capture_carrier_enum_reassign() {
+    ShapeTest::new(
+        r#"
+        enum Color { Red, Green, Blue }
+        let mut c = Color::Red
+        [1, 2].forEach(|x| { c = Color::Green })
+        print(c)
+    "#,
+    )
+    .expect_output("Green");
+}
+
+#[test]
+fn capture_carrier_option_none_promotion_surfaces_clean() {
+    // SURFACE (not corruption): a `None`-initialised cell has kind `Null`;
+    // assigning `Some(x)` (kind `Ptr(Option)`) is a §2.7.8 mid-life
+    // kind-change, refused at `StoreSharedCapturePtr`. Must be a clean
+    // runtime error — never a SIGSEGV / leak.
+    ShapeTest::new(
+        r#"
+        let mut o: Option<int> = None
+        [5].forEach(|x| { o = Some(x) })
+        print(o)
+    "#,
+    )
+    .expect_run_err();
+}
+
+#[test]
+fn capture_carrier_runtime_error_in_closure_no_leak() {
+    // A runtime error inside the HOF closure body must abort cleanly with
+    // no leaked closure-self keep-alive share (the error-unwind path).
+    ShapeTest::new(
+        r#"
+        let mut acc = 0
+        [1, 2, 0, 4].forEach(|x| { acc = acc + (10 / x) })
+        print(acc)
+    "#,
+    )
+    .expect_run_err();
+}

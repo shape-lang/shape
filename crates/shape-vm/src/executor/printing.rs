@@ -672,7 +672,23 @@ impl<'a> ValueFormatter<'a> {
             if let Some((bits, kind)) = read_element(view, i) {
                 let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
                 out.push_str(&self.format_kinded_inner(&elem_slot, 0, true));
-                std::mem::forget(elem_slot);
+                // CaptureCarrier Array<string>-leak fix (ADR-006 §2.7.7,
+                // 2026-06-18): `read_element` RETAINS one share for the
+                // heap-element kinds (`StringV2` / `DecimalV2` /
+                // `Ptr(TypedObject)` / `Ptr(TypedArray)` — it calls
+                // `v2_retain` on the element header per the §4.1.B.4
+                // migration recipe). `format_kinded_inner` only BORROWS the
+                // slot, so the retained share must be released when the
+                // transient `elem_slot` is done. The previous
+                // `std::mem::forget(elem_slot)` leaked that share for every
+                // heap element (valgrind "N bytes definitely lost" on
+                // `print(arr_of_strings)`). Letting `elem_slot` drop here
+                // routes through `KindedSlot::Drop` → `drop_with_kind`,
+                // which retires exactly the share `read_element` acquired
+                // (a no-op for inline-scalar element kinds). No bare
+                // `vw_drop`, no Bool-default — the kind on the slot is the
+                // one `read_element` stamped.
+                drop(elem_slot);
             } else {
                 out.push_str("?");
             }
