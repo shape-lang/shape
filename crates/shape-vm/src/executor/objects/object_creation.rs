@@ -488,7 +488,29 @@ fn kinded_to_slot(
     // heap_mask bit makes the new TypedObjectStorage's Drop retire the
     // share through the matching `field_kinds[i]` arm. The popped kind
     // is the source of truth for heap slots — return it verbatim.
-    let is_heap = matches!(kind, NativeKind::String | NativeKind::Ptr(_));
+    // R3 StringV2/DecimalV2-field heap-mask fix (strict-flip,
+    // content/large.shape SIGABRT): `StringV2` / `DecimalV2` are v2-raw
+    // heap-pointer carriers (manually-allocated `StringObj` / `DecimalObj`
+    // with a `HeapHeader` refcount at offset 0; retain/release via
+    // `v2_retain` / `v2_release`, see `vm_impl/stack.rs::clone_with_kind`).
+    // They own a refcount share exactly like `String` / `Ptr(_)` and MUST
+    // be flagged heap-backed so (a) `heap_mask` bit `i` is set →
+    // `TypedObjectStorage::drop_fields` releases the share via
+    // `field_kinds[i]`, and (b) the read path treats the slot as heap so it
+    // retains through the StringV2/DecimalV2 carrier rather than the scalar
+    // surface-error branch. Pre-fix a `String` field built from a
+    // `StringV2` value (e.g. `Type { s: <Array<string> loop var> }`) was
+    // stored with heap_mask=0 but field_kinds=StringV2 — Drop never released
+    // it and the field read mis-handled the carrier, driving the
+    // use-after-free observed as SIGABRT in `content/large.shape`'s
+    // struct-array → row build.
+    let is_heap = matches!(
+        kind,
+        NativeKind::String
+            | NativeKind::StringV2
+            | NativeKind::DecimalV2
+            | NativeKind::Ptr(_)
+    );
     if is_heap {
         return (ValueSlot::from_raw(bits), true, kind);
     }

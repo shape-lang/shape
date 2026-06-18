@@ -456,9 +456,17 @@ impl TypedObjectOps for super::VirtualMachine {
                 let src_idx = hit.field_idx as usize;
                 if src_idx < field_count {
                     let is_heap = (storage.heap_mask & (1u64 << src_idx)) != 0;
-                    // W17-comptime-vm-dispatch (ADR-006 §2.7.26): FIELD_TAG_ANY
-                    // sources kind from the storage's parallel field_kinds track.
-                    let result = if hit.field_type_tag == FIELD_TAG_ANY
+                    // R3 carrier-authoritative read (strict-flip): for any
+                    // heap-backed field, source the read-back kind from the
+                    // storage's parallel `field_kinds` track — the
+                    // producer-stamped carrier (ADR-006 §2.7.7), authoritative
+                    // over the schema tag. A `String`-typed field may store a
+                    // `StringV2` (`*const StringObj`) carrier; reading it back
+                    // as the tag-derived `NativeKind::String` would retain the
+                    // wrong carrier (`Arc::increment_strong_count::<String>` on
+                    // a `StringObj` pointer) → heap corruption. FIELD_TAG_ANY
+                    // (inline-scalar dynamic) keeps its existing kinded read.
+                    let result = if (hit.field_type_tag == FIELD_TAG_ANY || is_heap)
                         && src_idx < storage.field_kinds.len()
                     {
                         push_field_value_with_kind(
@@ -513,9 +521,10 @@ impl TypedObjectOps for super::VirtualMachine {
                     let src_idx = hit.field_idx as usize;
                     if src_idx < field_count {
                         let is_heap = (storage.heap_mask & (1u64 << src_idx)) != 0;
-                        // W17-comptime-vm-dispatch (ADR-006 §2.7.26): FIELD_TAG_ANY
-                        // sources kind from the storage's parallel field_kinds track.
-                        let result = if hit.field_type_tag == FIELD_TAG_ANY
+                        // R3 carrier-authoritative read (strict-flip): heap-backed
+                        // fields source kind from `field_kinds` — see the
+                        // monomorphic-IC site above.
+                        let result = if (hit.field_type_tag == FIELD_TAG_ANY || is_heap)
                             && src_idx < storage.field_kinds.len()
                         {
                             push_field_value_with_kind(
@@ -562,9 +571,12 @@ impl TypedObjectOps for super::VirtualMachine {
                         src_field_idx,
                         tag,
                     );
-                    // W17-comptime-vm-dispatch (ADR-006 §2.7.26): FIELD_TAG_ANY
-                    // sources kind from the storage's parallel field_kinds track.
-                    let result = if tag == FIELD_TAG_ANY && src_idx < storage.field_kinds.len() {
+                    // R3 carrier-authoritative read (strict-flip): heap-backed
+                    // fields source kind from `field_kinds` — see the
+                    // monomorphic-IC site above.
+                    let result = if (tag == FIELD_TAG_ANY || is_heap)
+                        && src_idx < storage.field_kinds.len()
+                    {
                         push_field_value_with_kind(
                             self,
                             &storage.slots[src_idx],
@@ -605,16 +617,24 @@ impl TypedObjectOps for super::VirtualMachine {
             // `populate_module_objects` chain: `__comptime__` schema
             // fields are `FieldType::Any` but storage carries
             // `Ptr(HeapKind::ModuleFn)` kinds.
-            let result =
-                if *field_type_tag == FIELD_TAG_ANY && field_index < storage.field_kinds.len() {
-                    push_field_value_with_kind(
-                        self,
-                        &storage.slots[field_index],
-                        storage.field_kinds[field_index],
-                    )
-                } else {
-                    push_field_value(self, &storage.slots[field_index], is_heap, *field_type_tag)
-                };
+            // R3 carrier-authoritative read (strict-flip): heap-backed fields
+            // source kind from `field_kinds` — the producer-stamped carrier
+            // (ADR-006 §2.7.7), authoritative over the schema tag. A `String`
+            // field may store a `StringV2` (`*const StringObj`) carrier; the
+            // tag-derived `NativeKind::String` read would retain the wrong
+            // carrier and corrupt the heap (the `content/large.shape`
+            // struct-array → row SIGABRT). FIELD_TAG_ANY keeps its kinded read.
+            let result = if (*field_type_tag == FIELD_TAG_ANY || is_heap)
+                && field_index < storage.field_kinds.len()
+            {
+                push_field_value_with_kind(
+                    self,
+                    &storage.slots[field_index],
+                    storage.field_kinds[field_index],
+                )
+            } else {
+                push_field_value(self, &storage.slots[field_index], is_heap, *field_type_tag)
+            };
             return result;
         }
 
@@ -914,10 +934,23 @@ fn write_field_at_idx(
             ),
             FIELD_TAG_F64 => value_kind == NativeKind::Float64,
             FIELD_TAG_BOOL => value_kind == NativeKind::Bool,
-            FIELD_TAG_STRING => matches!(
-                value_kind,
-                NativeKind::String | NativeKind::Ptr(HeapKind::String)
-            ),
+            // The stored carrier kind is recorded per-instance in
+            // `field_kinds[idx]` at construction (`kinded_to_slot`). An
+            // in-place field assignment writes new bits but does NOT update
+            // `field_kinds`, so the written carrier MUST equal the stored
+            // carrier (`value_kind == stored_kind`, checked by the outer
+            // guard) — a String field constructed with a `StringV2` carrier
+            // must be assigned a `StringV2`, and vice-versa. The `stored_kind`
+            // equality below (via the default `_` arm reached when none of the
+            // scalar tags match) enforces that. The explicit `String` /
+            // `Ptr(HeapKind::String)` arm covers the legacy-`Arc<String>`
+            // carrier instances.
+            FIELD_TAG_STRING => {
+                matches!(
+                    value_kind,
+                    NativeKind::String | NativeKind::Ptr(HeapKind::String)
+                ) || value_kind == stored_kind
+            }
             // W17.3-4.3 — HASHMAP/SET tags accept the corresponding
             // heap-pointer kinds. Slot bits at write time carry an
             // `Arc::into_raw(Arc<HashMapKindedRef>) as u64` /

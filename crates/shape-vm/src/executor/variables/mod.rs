@@ -2549,7 +2549,19 @@ impl VirtualMachine {
         // field_type_tag — playbook §2 kind-sourcing rules. Surface (no
         // fabrication, no Bool-default fallback per §2.7.7 #9) when the
         // tag is FIELD_TAG_ANY / FIELD_TAG_UNKNOWN.
-        let projected_kind =
+        //
+        // R3 carrier-authoritative ref kind (strict-flip): the tag only
+        // identifies the FieldType (`String`), not the runtime carrier. A
+        // `String`-typed field may store a `StringV2` (`*const StringObj`)
+        // carrier; capturing the tag-derived `NativeKind::String` into the
+        // `RefTarget::TypedField.kind` makes `read_ref_target` later hand a
+        // `StringObj` pointer to `clone_with_kind` as if it were an
+        // `Arc<String>` — `Arc::increment_strong_count::<String>` then reads
+        // the (non-existent) ArcInner header 16 bytes before the `StringObj`
+        // block, corrupting the heap. Below (after the receiver is resolved)
+        // we override the heap-field kind with the receiver's authoritative
+        // `field_kinds[field_idx]` (ADR-006 §2.7.7).
+        let tag_kind =
             crate::executor::typed_object_ops::field_tag_to_native_kind(field_type_tag)
                 .ok_or_else(|| {
                     VMError::NotImplemented(format!(
@@ -2607,6 +2619,21 @@ impl VirtualMachine {
                 receiver.slots.len()
             )));
         }
+        // R3 carrier-authoritative ref kind: for a heap-backed field, the
+        // receiver's `field_kinds[field_idx]` records the EXACT stored carrier
+        // (`String` vs `StringV2`, `Decimal` vs `DecimalV2`, etc.) — the
+        // producer-side proof per ADR-006 §2.7.7. Prefer it over the
+        // tag-derived kind so the projected reference retains/releases the
+        // right carrier. Inline-scalar fields (heap_mask bit clear) keep the
+        // tag kind, which already matches their slot representation.
+        let field_is_heap = (receiver.heap_mask & (1u64 << field_idx)) != 0;
+        let projected_kind = if field_is_heap
+            && (field_idx as usize) < receiver.field_kinds.len()
+        {
+            receiver.field_kinds[field_idx as usize]
+        } else {
+            tag_kind
+        };
         let rt = shape_value::RefTarget::TypedField {
             receiver,
             field_offset: field_idx as u32,

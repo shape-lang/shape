@@ -304,6 +304,24 @@ impl BytecodeCompiler {
         // un-annotated, un-inferable literal compiled by THIS call sets it;
         // the enclosing `VariableDecl` reads it immediately after.
         self.pending_empty_array_alloc_idx = None;
+        // R3 sibling-leak fix (strict-flip, content/large.shape SIGABRT):
+        // `pending_variable_typed_array_kind` is an INPUT hand-off from the
+        // enclosing `let arr: Array<T> = [...]` annotation (read at the
+        // `typed_kind` resolution below). The inference branches there ALSO
+        // write it back as a side-channel so the bare-`let x = [...]` binding
+        // capture can record the element kind. That write must NOT leak into a
+        // SIBLING array literal compiled later in the same initializer — e.g.
+        // `Content.table(headers, [row])` compiles `headers` (element kind
+        // String, stamping pending=Some(String)) and then `[row]` (element
+        // `Array<string>`), which mis-read the stale `Some(String)` and emitted
+        // `TypedArrayPushString` against a `Ptr(TypedArray)` element → heap
+        // corruption / SIGABRT. Snapshot the entry value and restore it on
+        // success so each array literal resolves its kind independently. The
+        // binding capture re-derives the bare-let kind authoritatively via
+        // `reconcile_binding_typed_array_kind` (Statement path) or reads the
+        // restored annotation value (Item path already restores pending itself),
+        // so dropping the leaked write changes no correct capture.
+        let entry_pending_typed_array_kind = self.pending_variable_typed_array_kind;
         let literal_numeric = infer_array_literal_numeric_type(elements);
         let is_bool = is_homogeneous_bool_array(elements);
 
@@ -547,6 +565,7 @@ impl BytecodeCompiler {
                      annotate the binding (`let a: Array<T> = ...`).",
                 )
             };
+            self.pending_variable_typed_array_kind = entry_pending_typed_array_kind;
             return Err(ShapeError::SemanticError {
                 message: format!(
                     "cannot infer the element type of this array literal. \
@@ -631,6 +650,10 @@ impl BytecodeCompiler {
             self.record_array_element_type(span, elem_ct);
         }
         self.last_expr_numeric_type = None;
+        // R3 sibling-leak fix: restore the entry hand-off value so this
+        // literal's inferred element kind does not leak into a sibling array
+        // literal compiled later in the same initializer expression.
+        self.pending_variable_typed_array_kind = entry_pending_typed_array_kind;
         Ok(())
     }
 

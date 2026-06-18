@@ -603,3 +603,71 @@ fn object_deeply_nested_three_levels() {
     )
     .expect_number(42.0);
 }
+
+// =========================================================================
+// R3 regression: string fields read out of array-resident TypedObjects
+// (strict-flip, content/large.shape SIGABRT/SIGILL heap corruption).
+//
+// A `String`-typed struct field built from a `StringV2` value (e.g. an
+// `Array<string>` loop variable) was stored with `heap_mask` bit clear
+// (`kinded_to_slot` did not recognize `StringV2` as heap), while reads
+// (`op_get_field_typed`) and field-reference projection (`MakeFieldRef`)
+// sourced the carrier from the schema tag (`NativeKind::String`) instead of
+// the storage's authoritative `field_kinds[idx]` (`StringV2`). Reading the
+// `StringObj` pointer as an `Arc<String>` ran
+// `Arc::increment_strong_count::<String>` against the wrong control block,
+// corrupting the heap (SIGABRT "corrupted size vs. prev_size"). These tests
+// pin the construct-via-push → index-out → multi-read string-field shape
+// that reproduced it; under the bug they crashed nondeterministically.
+// =========================================================================
+
+#[test]
+fn struct_array_push_index_string_field_multiread_no_corruption() {
+    ShapeTest::new(
+        r#"
+        type SuiteStat { suite: string, passed: int, total_ms: int }
+        fn aggregate(suite: string) -> SuiteStat {
+            return SuiteStat { suite: suite, passed: 2, total_ms: 52 }
+        }
+        fn stat_row(st: SuiteStat) -> Array<string> {
+            let a: string = st.suite
+            let b: string = st.suite
+            let c: string = f"{st.passed}"
+            let row: Array<string> = [a, b, c]
+            return row
+        }
+        let suites: Array<string> = ["auth", "db", "api"]
+        let mut stats: Array<SuiteStat> = []
+        for s in suites { stats.push(aggregate(s)) }
+        let x = stats[0]
+        let y = stats[1]
+        let z = stats[2]
+        let r0: Array<string> = stat_row(x)
+        let r1: Array<string> = stat_row(y)
+        let r2: Array<string> = stat_row(z)
+        f"{r0[0]}/{r1[0]}/{r2[0]}"
+    "#,
+    )
+    .expect_string("auth/db/api");
+}
+
+#[test]
+fn struct_array_string_field_into_content_table_no_corruption() {
+    // The `[row]` array-literal argument must resolve its element kind
+    // independently — pre-fix the sibling `headers` literal leaked
+    // `pending_variable_typed_array_kind = Some(String)` onto `[row]`,
+    // emitting `TypedArrayPushString` against a `Ptr(TypedArray)` element.
+    ShapeTest::new(
+        r#"
+        type SuiteStat { suite: string, passed: int }
+        fn agg(s: string) -> SuiteStat { return SuiteStat { suite: s, passed: 2 } }
+        let mut stats: Array<SuiteStat> = []
+        stats.push(agg("auth"))
+        let st = stats[0]
+        let row: Array<string> = [st.suite, f"{st.passed}"]
+        let t = Content.table(["s", "p"], [row]).border(Border.rounded).to_string()
+        t.contains("auth")
+    "#,
+    )
+    .expect_bool(true);
+}
