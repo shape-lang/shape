@@ -856,42 +856,31 @@ pub unsafe fn drop_shared_capture(layout: &ClosureLayout, base: *mut u8, i: usiz
         return;
     }
 
-    // For Ptr payloads we must release the heap refcount share encoded in
-    // the cell's 8-byte payload before reclaiming the cell allocation
-    // itself. Other interior kinds are scalar bytes — no refcount.
-    let inner_kind = layout.capture_inner_kind(i);
-    if inner_kind == FieldKind::Ptr {
-        // SAFETY: cell_ptr is non-null and was produced by Arc::into_raw,
-        // so reborrowing it as `&SharedCell` is sound while the strong
-        // count is still ≥ 1 (it is — we still hold the share we are
-        // about to reclaim).
-        let cell_ref = unsafe { &*cell_ptr };
-        let bits = {
-            let _g = cell_ref.lock();
-            // SAFETY: payload offset is 8, payload is 8 bytes wide.
-            unsafe { std::ptr::read(shared_cell_payload_ptr(cell_ptr) as *const u64) }
-        };
-        // ADR-006 §2.7.8 / Q10: route the Ptr-payload share retire through
-        // the per-capture `NativeKind` carried by the layout's
-        // `capture_native_kinds[i]` track. Same canonical
-        // `KindedSlot::Drop` dispatch as the Immutable-Ptr branch in
-        // `release_typed_closure`. The `SharedCell` itself also carries a
-        // single-slot `kind` companion (set at construction per §2.7.8 /
-        // Q10 — see `closure_layout::SharedCell::new`); the layout's
-        // per-capture kind and the cell's per-slot kind are required to
-        // agree by the §2.7.8 lockstep invariant. Reading from the layout
-        // keeps this single-sourced — the layout is the storage-tier
-        // descriptor for the closure block.
-        let kind = layout.capture_native_kind(i);
-        // SAFETY: `inner_kind == FieldKind::Ptr` confirms the cell payload
-        // is an `Arc<T>` share owned by this slot for the `T` matching
-        // `kind` (per the construction-side contract).
-        unsafe { drop_with_kind(bits, kind) };
-    }
+    // CaptureCarrier F1 (ADR-006 §2.7.8 / Q10, 2026-06-18): the cell's
+    // 8-byte PAYLOAD heap-refcount share is owned by the `SharedCell`
+    // itself, NOT by each closure that captures it. A `SharedCell` is
+    // shared (`Arc<SharedCell>`) across the module-binding / outer-local
+    // slot AND every closure that captured it; the payload share is
+    // retired exactly once by `SharedCell::Drop` when the cell's LAST Arc
+    // strong-count share retires. Releasing the payload here — on every
+    // capturing closure's drop, regardless of whether this is the last
+    // cell share — double-releases the payload `Arc<T>` for every heap
+    // interior kind (String / Ptr(TypedArray) / Ptr(TypedObject) / …),
+    // freeing the live value out from under the still-alive outer binding
+    // (UAF: string corrupts, array segfaults, struct mis-reads). The
+    // closure slot owns exactly ONE thing: one `Arc<SharedCell>` strong-
+    // count share. Reclaim only that — `SharedCell::Drop` owns the payload.
+    //
+    // `layout.capture_inner_kind(i)` / `capture_native_kind(i)` are no
+    // longer read here; the cell's own `kind` companion (set at
+    // `SharedCell::new`) drives the payload retire inside `SharedCell::Drop`.
+    let _ = layout;
+    let _ = i;
 
     // Reclaim the Arc strong-count share. If we held the last share the
-    // SharedCell is freed here; otherwise the strong count just drops by
-    // one.
+    // SharedCell is freed here (and `SharedCell::Drop` retires the payload
+    // share exactly once); otherwise the strong count just drops by one
+    // and the payload stays live for the remaining holders.
     // SAFETY: cell_ptr came from `Arc::into_raw(Arc::new(SharedCell::new(...)))`
     // (per the Shared-capture construction contract) and represents
     // exactly one strong-count share owned by this slot.

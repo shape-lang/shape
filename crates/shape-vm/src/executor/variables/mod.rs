@@ -1432,6 +1432,23 @@ impl VirtualMachine {
             return Err(VMError::InvalidOperand);
         };
         let (value_bits, value_kind) = self.pop_kinded()?;
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        // CaptureCarrier F1 idempotency (ADR-006 §2.7.8 / Q10, 2026-06-18):
+        // mirror of `op_alloc_shared_module_binding`. When the closure
+        // literal that promotes this local sits inside a loop body, the
+        // `LoadLocal; AllocSharedLocal; LoadLocal` promotion sequence
+        // re-runs every iteration. On the second+ iteration the slot
+        // already holds a `*const SharedCell` (kind `Ptr(SharedCell)`),
+        // pushed-and-cloned by the preceding `LoadLocal`. Re-wrapping it
+        // double-promotes (a new cell whose payload is the OLD cell
+        // pointer), so the closure body reads the cell pointer as the value
+        // (`got bool` / corruption). Keep the existing cell: release the
+        // redundant cloned share and leave the slot untouched.
+        if matches!(value_kind, NativeKind::Ptr(HeapKind::SharedCell)) {
+            crate::executor::vm_impl::stack::drop_with_kind(value_bits, value_kind);
+            return Ok(());
+        }
         // SAFETY: `SharedCell::new(bits, kind)` records the kind
         // companion in lockstep with the value bits per §2.7.8 / Q10.
         // `pop_kinded` transferred the share ownership out of the
@@ -1441,8 +1458,6 @@ impl VirtualMachine {
         // when the last `Arc<SharedCell>` share retires.
         let cell = StdArc::new(SharedCell::new(value_bits, value_kind));
         let cell_bits = StdArc::into_raw(cell) as u64;
-        let bp = self.current_locals_base();
-        let slot = bp + idx as usize;
         if slot >= self.stack.len() {
             // Reclaim the share we were about to install. Use the same
             // `Arc::from_raw` shape `op_drop_shared_local` uses.
@@ -1616,13 +1631,42 @@ impl VirtualMachine {
             return Err(VMError::InvalidOperand);
         };
         let (value_bits, value_kind) = self.pop_kinded()?;
+        let index = idx as usize;
+        // CaptureCarrier F1 idempotency (ADR-006 §2.7.8 / Q10, 2026-06-18):
+        // the promotion sequence `LoadModuleBinding; AllocSharedModuleBinding;
+        // LoadModuleBinding` is emitted at the closure literal's lowering
+        // site (`compiler/expressions/closures.rs`). When that closure
+        // literal sits inside a loop body, the sequence RE-RUNS every
+        // iteration. On the second+ iteration the module-binding slot
+        // already holds a `*const SharedCell` (kind `Ptr(SharedCell)`), and
+        // `LoadModuleBinding` pushes that cell pointer (cloned via
+        // `clone_with_kind`). Re-wrapping it in a fresh `SharedCell::new`
+        // would double-promote: a new cell whose payload is the OLD cell
+        // pointer with kind `Ptr(SharedCell)`, so the closure body reads the
+        // inner cell pointer as the value (`got shared_cell` / non-TypedArray
+        // / corruption). Detect the already-promoted case and keep the
+        // existing cell: drop the redundant cloned cell share that
+        // `LoadModuleBinding` produced (balancing its retain) and leave the
+        // slot untouched. `shared_module_bindings` already contains `index`.
+        if matches!(value_kind, NativeKind::Ptr(HeapKind::SharedCell)) {
+            debug_assert!(
+                self.shared_module_bindings.contains(&index),
+                "AllocSharedModuleBinding: slot {} carries Ptr(SharedCell) but is not \
+                 registered as a shared module binding",
+                index
+            );
+            // The popped bits are the existing cell pointer, retained by the
+            // preceding `LoadModuleBinding`. Release that extra share; the
+            // module-binding slot keeps its own share unchanged.
+            crate::executor::vm_impl::stack::drop_with_kind(value_bits, value_kind);
+            return Ok(());
+        }
         // SAFETY: same construction-side contract as
         // `op_alloc_shared_local`. The popped slot's share transfers
         // into the cell's `value` field; `SharedCell::Drop` retires it
         // via `drop_with_kind` at refcount=0.
         let cell = StdArc::new(SharedCell::new(value_bits, value_kind));
         let cell_bits = StdArc::into_raw(cell) as u64;
-        let index = idx as usize;
         // `module_binding_write_kinded` grows the parallel tracks if
         // `index` is past the current end (via `module_binding_pad_to_kinded`),
         // releases the previous occupant via `drop_with_kind`, and

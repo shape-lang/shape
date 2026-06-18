@@ -525,3 +525,111 @@ fn f1_foreach_non_mutating_capture_still_works() {
     )
     .expect_output("1\n2\n3");
 }
+
+// =========================================================================
+// CaptureCarrier F1 (ADR-006 §2.7.8 / Q10, 2026-06-18) — HEAP-carrier
+// mutable-capture through the HOF value-call path.
+//
+// F1 (7c471095) fixed the int/number SCALAR capture cell, but the closure
+// mutable-capture cell store/read mishandled HEAP carriers (String /
+// Ptr(TypedArray) / Ptr(TypedObject)) on the value-call path:
+//   - STRING accumulation returned garbage (Arc<String> double-released by
+//     `drop_shared_capture` releasing the cell payload on EVERY capturing
+//     closure's drop, not only the cell's last share — `SharedCell::Drop`
+//     already owns that release → UAF).
+//   - ARRAY accumulation SEGFAULTed (same payload double-release).
+//   - STRUCT field-read `b.n` read the captured cell pointer as a Bool-
+//     default base ("MakeFieldRef base must reference a TypedObject; got
+//     Bool") because `try_resolve_typed_field_place` resolved the capture
+//     name to its raw cell slot and emitted `MakeRef(Local)` on the cell
+//     pointer.
+//   - In a LOOP body the promotion sequence re-ran every iteration,
+//     double-promoting the cell (a new cell whose payload is the OLD cell
+//     pointer) → `got shared_cell` / non-TypedArray on the 2nd iteration.
+// Fixes: drop only the cell Arc share in `drop_shared_capture`; decline the
+// field-place fast-path for closure captures; make
+// `AllocSharedModuleBinding` / `AllocSharedLocal` idempotent on an
+// already-promoted slot.
+// =========================================================================
+
+#[test]
+fn capture_carrier_foreach_string_accumulation() {
+    ShapeTest::new(
+        r#"
+        let mut s = ""
+        ["a", "b", "c"].forEach(|c| { s = s + c })
+        print(s)
+    "#,
+    )
+    .expect_output("abc");
+}
+
+#[test]
+fn capture_carrier_foreach_array_accumulation() {
+    ShapeTest::new(
+        r#"
+        let mut acc: Array<int> = []
+        [1, 2, 3].forEach(|x| { acc = acc + [x * 2] })
+        print(acc)
+    "#,
+    )
+    .expect_output("[2, 4, 6]");
+}
+
+#[test]
+fn capture_carrier_foreach_struct_field_read() {
+    ShapeTest::new(
+        r#"
+        type Box { n: int }
+        let mut b = Box { n: 0 }
+        [1, 2, 3].forEach(|x| { b = Box { n: b.n + x } })
+        print(b.n)
+    "#,
+    )
+    .expect_output("6");
+}
+
+#[test]
+fn capture_carrier_string_and_int_two_cells() {
+    ShapeTest::new(
+        r#"
+        let mut s = ""
+        let mut n = 0
+        ["a", "b", "c"].forEach(|c| { s = s + c; n = n + 1 })
+        print(s)
+        print(n)
+    "#,
+    )
+    .expect_output("abc\n3");
+}
+
+#[test]
+fn capture_carrier_map_string_side_effect() {
+    ShapeTest::new(
+        r#"
+        let mut s = ""
+        [1, 2, 3].map(|x| { s = s + "x"; x * 2 })
+        print(s)
+    "#,
+    )
+    .expect_output("xxx");
+}
+
+#[test]
+fn capture_carrier_array_push_in_loop_no_leak() {
+    // 1000 iterations of a captured-array append through the HOF value-call
+    // path. Pre-fix this SIGSEGV'd (payload double-release) or mis-promoted
+    // the cell across iterations; the carrier must stay RSS-flat and sound.
+    ShapeTest::new(
+        r#"
+        let mut acc: Array<int> = []
+        let mut i = 0
+        while i < 1000 {
+            [1].forEach(|x| { acc = acc + [x] })
+            i = i + 1
+        }
+        print(acc.length)
+    "#,
+    )
+    .expect_output("1000");
+}

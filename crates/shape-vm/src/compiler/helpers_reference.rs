@@ -77,6 +77,26 @@ impl BytecodeCompiler {
     ) -> Option<TypedFieldPlace> {
         let (root_name, is_local, slot, type_info) = match object {
             Expr::Identifier(name, _) => {
+                // CaptureCarrier F1 (ADR-006 §2.7.8 / Q10, 2026-06-18): a
+                // mutably-captured outer binding read inside a closure body
+                // does NOT live directly in its resolved local slot — the
+                // slot holds a `*const SharedCell` / `*mut cell` pointer, and
+                // the value is reached through `Load{Shared,OwnedMutable}Capture`.
+                // The MakeRef-on-the-slot field fast-path below would emit
+                // `MakeRef(Local(slot))` against the raw cell pointer and
+                // mis-project the field (read as a Bool-default base →
+                // "MakeFieldRef base must reference a TypedObject; got Bool",
+                // or a corrupted/segfaulting base for String/Array carriers).
+                // Decline so `b.n` falls through to the
+                // `compile_expr(object) + GetFieldTyped` path, which reads the
+                // base via the correct capture-load opcode (kind from the
+                // cell's `SharedCell::kind()` / cell inner kind).
+                if self.mutable_closure_captures.contains_key(name.as_str())
+                    || self.shared_closure_captures.contains_key(name.as_str())
+                    || self.owned_mutable_closure_captures.contains_key(name.as_str())
+                {
+                    return None;
+                }
                 if let Some(local_idx) = self.resolve_local(name) {
                     if self.ref_locals.contains(&local_idx)
                         || self.reference_value_locals.contains(&local_idx)
