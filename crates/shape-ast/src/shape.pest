@@ -938,13 +938,13 @@ bitwise_or_expr_no_range = { bitwise_xor_expr_no_range ~ ("|" ~ !"|" ~ !">" ~ bi
 bitwise_xor_expr_no_range = { bitwise_and_expr_no_range ~ ("^" ~ !"=" ~ bitwise_and_expr_no_range)* }
 bitwise_and_expr_no_range = { comparison_expr_no_range ~ ("&" ~ !"&" ~ comparison_expr_no_range)* }
 
-comparison_expr_no_range = { additive_expr ~ comparison_tail_no_range* }
+comparison_expr_no_range = { shift_expr ~ comparison_tail_no_range* }
 comparison_tail_no_range = {
     fuzzy_comparison_tail_no_range
-    | comparison_op ~ additive_expr
+    | comparison_op ~ shift_expr
     | "instanceof" ~ type_annotation
 }
-fuzzy_comparison_tail_no_range = { fuzzy_op ~ additive_expr ~ within_clause? }
+fuzzy_comparison_tail_no_range = { fuzzy_op ~ shift_expr ~ within_clause? }
 
 null_coalesce_expr = { context_expr ~ ("??" ~ context_expr)* }
 context_expr = { or_expr ~ ("!!" ~ or_expr)* }
@@ -972,15 +972,15 @@ tolerance_spec = { number ~ "%"? }
 // Supports: start..end, start..=end, ..end, ..=end, start.., ..
 range_expr = {
     // Full bounded range: start..end or start..=end (must try before range_from)
-    additive_expr ~ range_op ~ additive_expr
+    shift_expr ~ range_op ~ shift_expr
     // Half-open from start: start..
-    | additive_expr ~ ".."
+    | shift_expr ~ ".."
     // Range to end: ..end or ..=end
-    | range_op ~ additive_expr
+    | range_op ~ shift_expr
     // Full range: ..
     | ".."
     // Not a range - just an expression
-    | additive_expr
+    | shift_expr
 }
 
 // Range operator: ..= (inclusive) must come before .. (exclusive)
@@ -991,8 +991,8 @@ comparison_op = {
     "approaching"    // For trend analysis
 }
 
-additive_expr = { shift_expr ~ (("+"|"-") ~ shift_expr)* }
-shift_expr = { multiplicative_expr ~ (("<<" | ">>") ~ multiplicative_expr)* }
+shift_expr = { additive_expr ~ (("<<" | ">>") ~ additive_expr)* }
+additive_expr = { multiplicative_expr ~ (("+"|"-") ~ multiplicative_expr)* }
 multiplicative_expr = { exponential_expr ~ (("*"|"/"|"%") ~ exponential_expr)* }
 exponential_expr = { unary_expr ~ ("**" ~ unary_expr)* }
 

@@ -116,12 +116,15 @@ fn parse_positional_op_chain(
 /// The precedence chain is:
 ///
 ///   null_coalesce -> context -> or -> and -> bitwise_or -> bitwise_xor
-///     -> bitwise_and -> comparison -> [range ->] additive -> shift
+///     -> bitwise_and -> comparison -> [range ->] shift -> additive
 ///     -> multiplicative -> exponential -> unary
+///
+/// (additive binds tighter than shift, matching the book's precedence table
+/// and standard C/Rust order — see fundamentals/operators.mdx.)
 ///
 /// The only difference between the range and no-range chains is that
 /// comparison delegates to `parse_range_expr` (which then delegates to
-/// additive) when ranges are allowed, and directly to `parse_additive_expr`
+/// shift) when ranges are allowed, and directly to `parse_shift_expr`
 /// when they are not.
 
 fn select_null_coalesce(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
@@ -184,7 +187,7 @@ fn child_of_comparison(allow_range: bool) -> fn(Pair<Rule>) -> Result<Expr> {
     if allow_range {
         parse_range_expr
     } else {
-        parse_additive_expr
+        parse_shift_expr
     }
 }
 
@@ -718,7 +721,7 @@ pub fn parse_range_expr(pair: Pair<Rule>) -> Result<Expr> {
         Rule::range_op => {
             let kind = parse_range_op(&first);
             if let Some(end_pair) = inner.next() {
-                let end = parse_additive_expr(end_pair)?;
+                let end = parse_shift_expr(end_pair)?;
                 Ok(Expr::Range {
                     start: None,
                     end: Some(Box::new(end)),
@@ -734,14 +737,14 @@ pub fn parse_range_expr(pair: Pair<Rule>) -> Result<Expr> {
                 })
             }
         }
-        Rule::additive_expr => {
-            let start = parse_additive_expr(first)?;
+        Rule::shift_expr => {
+            let start = parse_shift_expr(first)?;
             if let Some(next) = inner.next() {
                 match next.as_rule() {
                     Rule::range_op => {
                         let kind = parse_range_op(&next);
                         if let Some(end_pair) = inner.next() {
-                            let end = parse_additive_expr(end_pair)?;
+                            let end = parse_shift_expr(end_pair)?;
                             Ok(Expr::Range {
                                 start: Some(Box::new(start)),
                                 end: Some(Box::new(end)),
@@ -769,7 +772,7 @@ pub fn parse_range_expr(pair: Pair<Rule>) -> Result<Expr> {
                 Ok(start)
             }
         }
-        _ => parse_additive_expr(first),
+        _ => parse_shift_expr(first),
     }
 }
 
@@ -819,14 +822,19 @@ fn resolve_multiplicative_op(op_str: &str) -> Result<BinaryOp> {
     }
 }
 
-/// Parse additive expression (a + b, a - b)
-pub fn parse_additive_expr(pair: Pair<Rule>) -> Result<Expr> {
-    parse_positional_op_chain(pair, "additive", parse_shift_expr, resolve_additive_op)
-}
-
 /// Parse shift expression (a << b, a >> b)
 pub fn parse_shift_expr(pair: Pair<Rule>) -> Result<Expr> {
-    parse_positional_op_chain(pair, "shift", parse_multiplicative_expr, resolve_shift_op)
+    parse_positional_op_chain(pair, "shift", parse_additive_expr, resolve_shift_op)
+}
+
+/// Parse additive expression (a + b, a - b)
+pub fn parse_additive_expr(pair: Pair<Rule>) -> Result<Expr> {
+    parse_positional_op_chain(
+        pair,
+        "additive",
+        parse_multiplicative_expr,
+        resolve_additive_op,
+    )
 }
 
 /// Parse multiplicative expression (a * b, a / b, a % b)
