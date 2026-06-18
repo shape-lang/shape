@@ -176,6 +176,32 @@ fn hashmap_set_returns_new_map() {
 }
 
 // =========================================================================
+// StringV2-carrier keys (for-in element used as a HashMap key)
+// =========================================================================
+
+#[test]
+fn hashmap_set_with_for_in_stringv2_key() {
+    // R5 finding 7-hashmap (strict-flip): a for-in element over
+    // `Array<string>` reads as `NativeKind::StringV2` (the v2-raw
+    // `*const StringObj` carrier). Pre-fix `as_string_key` rejected it
+    // with "key must be a string (got StringV2)". The fix adds a StringV2
+    // arm that borrows the StringObj's UTF-8 bytes. Verify set + get + has
+    // round-trip through the StringV2 key carrier.
+    ShapeTest::new(
+        r#"
+        let mut m = HashMap()
+        for k in ["a", "b", "c"] { m = m.set(k, 1) }
+        print(m.get("a"))
+        print(m.get("c"))
+        print(m.has("b"))
+        print(m.has("z"))
+    "#,
+    )
+    .expect_run_ok()
+    .expect_output("1\n1\ntrue\nfalse");
+}
+
+// =========================================================================
 // Overwrite
 // =========================================================================
 

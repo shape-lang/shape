@@ -482,6 +482,23 @@ fn as_string_key(slot: &KindedSlot) -> Result<&str, VMError> {
                 "HashMap key kind=Ptr(String) but heap arm mismatched",
             )),
         },
+        // R5 finding 7-hashmap (strict-flip, 2026-06-18): a for-in element
+        // over `Array<string>` reads as `NativeKind::StringV2` (the v2-raw
+        // `*const StringObj` carrier; `loops/mod.rs:518`). When such an
+        // element is used as a HashMap key it must be accepted. Recognize
+        // the proven StringV2 carrier and borrow the StringObj's UTF-8 bytes
+        // — mirrors the C3 / typed_access StringV2 borrow. The slot retains
+        // its share; the borrow is bounded by the carrier's lifetime.
+        // SAFETY: kind == StringV2 means bits = `*const StringObj` (the
+        // producer-stamped v2-raw carrier), pointing at a live StringObj.
+        NativeKind::StringV2 => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(type_error("HashMap key kind=StringV2 but slot bits null"));
+            }
+            let ptr = bits as *const shape_value::v2::string_obj::StringObj;
+            Ok(unsafe { shape_value::v2::string_obj::StringObj::as_str(ptr) })
+        }
         _ => Err(type_error(format!(
             "HashMap key must be a string (got kind {:?})",
             slot.kind
