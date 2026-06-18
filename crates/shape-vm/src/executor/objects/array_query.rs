@@ -138,13 +138,22 @@ fn slot_truthy(slot: &KindedSlot) -> bool {
 /// surfaced before any element read.
 #[inline]
 fn require_closure(op: &str, arg: &KindedSlot) -> Result<(), VMError> {
-    if arg.kind != NativeKind::Ptr(HeapKind::Closure) {
+    // A predicate may be either a closure value
+    // (`Ptr(HeapKind::Closure)`) or a *named-function value* carried as a
+    // bare function-id (`NativeKind::UInt64` — see
+    // `PushConst(Constant::Function)` in `stack_ops/mod.rs`). Both are
+    // dispatched by `vm.call_value_immediate_nb` (the per-element call
+    // path below): the `UInt64` arm value-calls the function-id directly.
+    // Accepting `UInt64` here is what lets `xs.map(square)` / `xs.filter(
+    // is_even)` work with a named fn (R1 named-fn-as-value fix). Anything
+    // else is a genuine non-callable and is rejected cleanly.
+    if arg.kind == NativeKind::Ptr(HeapKind::Closure) || arg.kind == NativeKind::UInt64 {
+        Ok(())
+    } else {
         Err(VMError::RuntimeError(format!(
-            "Array.{}: predicate must be a closure, got kind {:?}",
+            "Array.{}: predicate must be a closure or function reference, got kind {:?}",
             op, arg.kind
         )))
-    } else {
-        Ok(())
     }
 }
 

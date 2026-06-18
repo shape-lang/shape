@@ -2463,12 +2463,30 @@ fn collect_callee_names_in_expr(
         Expr::FunctionCall { name, args, .. } => {
             out.insert(name.clone());
             for a in args {
+                // R1 named-fn-as-value capture fix: an identifier passed
+                // directly as a call argument may be a function value
+                // forwarded onward (`apply(g, y)` where `g` is an
+                // unannotated capture holding a named-fn-id). Classify it
+                // as a callable candidate so `resolve_capture_concrete_type`
+                // stamps the capture slot `Ptr(HeapKind::Closure)` and the
+                // `op_make_closure` carrier reconciliation can materialize a
+                // real closure carrier. Captures with a known non-function
+                // concrete type resolve via `concrete_type_for_expr` first
+                // (it is consulted before this set), so this does not
+                // mis-classify typed captures; a residual mismatch is caught
+                // by `op_make_closure`'s runtime guard as a clean error.
+                if let Expr::Identifier(arg_name, _) = a {
+                    out.insert(arg_name.clone());
+                }
                 collect_callee_names_in_expr(a, out);
             }
         }
         Expr::MethodCall { receiver, args, .. } => {
             collect_callee_names_in_expr(receiver, out);
             for a in args {
+                if let Expr::Identifier(arg_name, _) = a {
+                    out.insert(arg_name.clone());
+                }
                 collect_callee_names_in_expr(a, out);
             }
         }

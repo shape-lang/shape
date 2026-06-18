@@ -34,6 +34,10 @@ mod jit_abi_tests;
 // Bool-default slot-fabrication pattern (ADR-006 §2.7.7 forbidden),
 // mirroring scripts/check-no-dynamic.sh at the Rust-test layer.
 mod matrix_ops;
+// R1 named-fn-as-value carrier tests — a named function referenced as a
+// value (captured into an escaping closure, forwarded as a call arg, or
+// passed to an array HOF) must dispatch correctly and NEVER SIGSEGV.
+mod named_fn_value;
 mod no_dynamic;
 // ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback, 2026-05-12):
 // source-level smoke tests for `&mut self` method writeback semantics.
