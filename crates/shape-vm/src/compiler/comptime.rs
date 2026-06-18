@@ -1099,6 +1099,17 @@ pub(crate) fn nb_to_literal(nb: &KindedSlot) -> shape_ast::ast::Literal {
             }
             return Literal::None;
         }
+        // R2 (2026-06-18): TypedObject is NOT routable through
+        // `as_heap_value()` — its bits are `*const TypedObjectStorage`, not
+        // `Arc::into_raw(Arc<HeapValue>)`, so the deref would reinterpret
+        // `schema_id` as a HeapValue discriminator and segfault. A
+        // TypedObject has no single-literal representation; the
+        // expression-form path (`nb_to_expr` / `typed_object_to_object_expr`)
+        // is the only valid materialization. Returning `None` here keeps the
+        // last-resort literal path sound (callers prefer `nb_to_expr` first).
+        NativeKind::Ptr(HeapKind::TypedObject) => {
+            return Literal::None;
+        }
         _ => {}
     }
 
@@ -1180,6 +1191,36 @@ fn nb_to_expr(nb: &KindedSlot, span: Span) -> std::result::Result<Expr, String> 
             }
             return Ok(Expr::Literal(shape_ast::ast::Literal::None, span));
         }
+        // R2 (2026-06-18): TypedObject readback via direct typed-pointer
+        // recovery — NOT `slot.as_heap_value()`. A `Ptr(HeapKind::TypedObject)`
+        // slot's bits are `*const TypedObjectStorage` (the v2-raw
+        // `from_typed_object_raw` carrier per ADR-006 §2.3 amendment Wave 2
+        // Round 4 D4), never `Arc::into_raw(Arc<HeapValue>)`. Routing through
+        // `as_heap_value()` reinterprets the storage's first 8 bytes
+        // (`schema_id: u64`) as a `HeapValue` discriminator and segfaults
+        // (§2.7.16 receiver-recovery soundness rule). This was the
+        // `comptime { build_config() }` SIGSEGV.
+        //
+        // Per-field kinds come from the storage's own
+        // `field_kinds: Arc<[NativeKind]>` (stamped at construction by
+        // `typed_object_from_pairs`), NOT the schema's `FieldType` — the
+        // comptime predeclared schemas register every field as
+        // `FieldType::Any`, which has no kinded projection, but the storage
+        // carries the proven per-slot kind.
+        NativeKind::Ptr(HeapKind::TypedObject) => {
+            let bits = nb.slot().raw();
+            if bits == 0 {
+                return Ok(Expr::Literal(shape_ast::ast::Literal::None, span));
+            }
+            // SAFETY: `NativeKind::Ptr(HeapKind::TypedObject)` is the kind
+            // table's witness that these bits point to a live
+            // `TypedObjectStorage`. `nb` owns one strong-count share on the
+            // HeapHeader-at-offset-0 refcount for the duration of this call,
+            // so the storage cannot be deallocated under us.
+            let storage: &shape_value::TypedObjectStorage =
+                unsafe { &*(bits as *const shape_value::TypedObjectStorage) };
+            return typed_object_to_object_expr(storage, span);
+        }
         _ => {}
     }
 
@@ -1204,46 +1245,10 @@ fn nb_to_expr(nb: &KindedSlot, span: Span) -> std::result::Result<Expr, String> 
         // layer per W12 audit §3.6. Comptime materialization of v2-raw
         // `TypedArray<T>` arrays lands at ckpt-6 STRICT close.
         //   HeapValue::TypedArray(arr) => { ... }
-        HeapValue::TypedObject(storage) => {
-            // Read fields back via the schema's `FieldType`. The schema
-            // is looked up by id from the ambient registry. Field
-            // ordering follows the schema's declared order.
-            let schema_id = storage.schema_id as u32;
-            let schema = shape_runtime::type_schema::lookup_schema_by_id_public(schema_id)
-                .ok_or_else(|| {
-                    format!(
-                        "TypedObject schema id {} not found while materializing \
-                         comptime literal — playbook §7 surface, ADR-006 §2.7.4 \
-                         (schema rebind deferred)",
-                        schema_id
-                    )
-                })?;
-            let mut entries = Vec::with_capacity(schema.fields.len());
-            for field_def in schema.fields.iter() {
-                let idx = field_def.index as usize;
-                if idx >= storage.slots.len() {
-                    return Err(format!(
-                        "TypedObject slot index {} out of bounds (len={}) — \
-                         schema/storage mismatch",
-                        idx,
-                        storage.slots.len()
-                    ));
-                }
-                let slot = storage.slots[idx];
-                let kind = field_kind_for_readback(&field_def.field_type)?;
-                let kinded_slot = read_typed_object_field(slot, kind, storage.heap_mask, idx);
-                let value_expr = nb_to_expr(&kinded_slot, span)?;
-                // `kinded_slot` Drop runs at scope exit and retires its
-                // share (heap arms used `Arc::increment_strong_count` in
-                // the readback — see `read_typed_object_field`).
-                entries.push(ObjectEntry::Field {
-                    key: field_def.name.clone(),
-                    value: value_expr,
-                    type_annotation: None,
-                });
-            }
-            Ok(Expr::Object(entries, span))
-        }
+        // TypedObject is handled earlier by the `Ptr(HeapKind::TypedObject)`
+        // kind-arm (direct typed-pointer recovery, NOT `as_heap_value()`),
+        // so it can never reach this `HeapValue` match. The compiler keeps
+        // the arm absent — any TypedObject-kinded slot returns before here.
         // Cold fallthrough — closures, futures, data tables, etc. are
         // not valid comptime literals.
         other => Err(format!(
@@ -1253,33 +1258,97 @@ fn nb_to_expr(nb: &KindedSlot, span: Span) -> std::result::Result<Expr, String> 
     }
 }
 
+/// Materialize a comptime `TypedObject` into an `Expr::Object` literal.
+///
+/// R2 (2026-06-18). Reads each field through the storage's own
+/// `field_kinds: Arc<[NativeKind]>` (stamped at construction in
+/// `typed_object_from_pairs`), NOT the schema's `FieldType`. The comptime
+/// predeclared schemas register every field as `FieldType::Any` (which has
+/// no kinded projection), so the prior schema-driven readback would have
+/// errored even after the segfault fix; the storage's proven per-slot kind
+/// is the authoritative source per ADR-006 §2.7.5.
+///
+/// Field ordering follows the schema's declared order so the emitted object
+/// literal is stable across runs. `read_typed_object_field` bumps one
+/// independent share per heap-kinded slot; the returned `KindedSlot`'s Drop
+/// retires it at scope exit.
+fn typed_object_to_object_expr(
+    storage: &shape_value::TypedObjectStorage,
+    span: Span,
+) -> std::result::Result<Expr, String> {
+    let schema_id = storage.schema_id as u32;
+    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(schema_id).ok_or_else(
+        || {
+            format!(
+                "TypedObject schema id {} not found while materializing \
+                 comptime literal — playbook §7 surface, ADR-006 §2.7.4 \
+                 (schema rebind deferred)",
+                schema_id
+            )
+        },
+    )?;
+    if storage.slots.len() != storage.field_kinds.len() {
+        return Err(format!(
+            "TypedObject storage slots/field_kinds length mismatch \
+             (slots={}, field_kinds={}) — corrupt carrier",
+            storage.slots.len(),
+            storage.field_kinds.len()
+        ));
+    }
+    let mut entries = Vec::with_capacity(schema.fields.len());
+    for field_def in schema.fields.iter() {
+        let idx = field_def.index as usize;
+        if idx >= storage.slots.len() {
+            return Err(format!(
+                "TypedObject slot index {} out of bounds (len={}) — \
+                 schema/storage mismatch",
+                idx,
+                storage.slots.len()
+            ));
+        }
+        let slot = storage.slots[idx];
+        // Authoritative per-slot kind from the storage carrier (§2.7.5),
+        // not the predeclared schema's `FieldType::Any`.
+        let kind = storage.field_kinds[idx];
+        let kinded_slot = read_typed_object_field(slot, kind, storage.heap_mask, idx);
+        // A genuine `Bool` field must materialize as a Bool literal even when
+        // its value is `false`. `nb_to_expr`'s scalar arm treats Bool-kinded
+        // zero bits as the `KindedSlot::none()` sentinel (it cannot tell
+        // `false` from none without the surrounding kind context), so a
+        // `false` field (e.g. `debug` in a release build) would otherwise bake
+        // as `None` — silent data loss. The storage's `field_kinds` proves the
+        // field IS a Bool here, so project it directly. Other kinds keep the
+        // shared `nb_to_expr` path.
+        let value_expr = if matches!(kind, NativeKind::Bool) {
+            Expr::Literal(
+                shape_ast::ast::Literal::Bool(kinded_slot.raw() != 0),
+                span,
+            )
+        } else {
+            nb_to_expr(&kinded_slot, span)?
+        };
+        entries.push(ObjectEntry::Field {
+            key: field_def.name.clone(),
+            value: value_expr,
+            type_annotation: None,
+        });
+    }
+    Ok(Expr::Object(entries, span))
+}
+
 // V3-S5 ckpt-5 (2026-05-15): `typed_array_len` + `typed_array_element_kinded`
 // helpers DELETED. Both consumed `&TypedArrayData` (deleted at ckpt-1) for
 // the deleted `HeapValue::TypedArray` arm in `nb_to_expr` (lines 924-931
 // above). Comptime materialization of v2-raw `TypedArray<T>` arrays lands
 // at ckpt-6 STRICT close per W12-typed-array-data-deletion audit §B.
 
-/// Project a `FieldType` to the `NativeKind` used to interpret slot bits
-/// at TypedObject readback.
-///
-/// `FieldType::Any` is rejected — comptime predeclared schemas use Any,
-/// and slot bits without kind metadata cannot be safely re-typed at the
-/// literal-readback layer. The caller surfaces this as a structured
-/// error so the comptime substitution fails fast rather than emitting
-/// a placeholder.
-fn field_kind_for_readback(
-    field_type: &shape_runtime::type_schema::FieldType,
-) -> std::result::Result<NativeKind, String> {
-    field_type.to_native_kind().map_err(|_| {
-        format!(
-            "comptime literal: field type {:?} has no kinded projection \
-             (FieldType::Any cannot be read back without kind metadata — \
-             ADR-006 §2.7.4 follow-up to land schema rebind / predeclared \
-             schema kind-narrowing for comptime objects)",
-            field_type
-        )
-    })
-}
+// R2 (2026-06-18): `field_kind_for_readback` (schema `FieldType` →
+// `NativeKind`) DELETED. TypedObject readback now sources per-slot kinds
+// from the storage's own `field_kinds: Arc<[NativeKind]>` carrier
+// (`typed_object_to_object_expr`) — the comptime predeclared schemas use
+// `FieldType::Any`, which has no kinded projection, so the schema was never
+// a usable kind source. The storage's stamped kind is authoritative
+// (ADR-006 §2.7.5).
 
 /// Read a `TypedObjectStorage` slot at index `idx` as an owned
 /// `KindedSlot`, bumping the heap refcount when applicable so the
@@ -1454,6 +1523,99 @@ mod tests {
                 // what this test asserts.
             }
         }
+    }
+
+    /// STAGE R2 (2026-06-18) regression: `comptime { build_config() }`
+    /// SIGSEGV'd because `nb_to_expr` routed the `TypedObject` result through
+    /// `slot.as_heap_value()`. A `Ptr(HeapKind::TypedObject)` slot's bits are
+    /// `*const TypedObjectStorage` (whose first 8 bytes are `schema_id`), NOT
+    /// `Arc::into_raw(Arc<HeapValue>)`; `as_heap_value()` reinterprets them as
+    /// a `HeapValue` discriminator and dereferences — heap corruption /
+    /// segfault (forbidden per ADR-006 §2.7.16 receiver-recovery soundness
+    /// rule). The fix recovers the storage via a direct typed-pointer cast and
+    /// reads each field through the storage's own `field_kinds` carrier.
+    ///
+    /// This test drives the exact crash locus: it runs `build_config()` via
+    /// `execute_comptime` and feeds the result `KindedSlot` to
+    /// `nb_to_expr_public`. Pre-fix this segfaulted the test process; post-fix
+    /// it returns an `Expr::Object` whose string fields carry real values.
+    #[test]
+    fn r2_build_config_nb_to_expr_no_segfault() {
+        let stmts = vec![Statement::Return(
+            Some(Expr::FunctionCall {
+                name: "build_config".to_string(),
+                args: Vec::new(),
+                named_args: Vec::new(),
+                span: Span::DUMMY,
+            }),
+            Span::DUMMY,
+        )];
+        let exec = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .expect("build_config() comptime evaluation should succeed");
+
+        // The crash site: materialize the comptime result into an AST literal.
+        // Pre-fix `as_heap_value()` segfaulted here; post-fix it must return
+        // a structured object literal.
+        let expr = super::nb_to_expr_public(&exec.value, Span::DUMMY)
+            .expect("TypedObject result must materialize into an object literal");
+
+        let entries = match expr {
+            Expr::Object(entries, _) => entries,
+            other => panic!("expected Expr::Object from build_config(), got {:?}", other),
+        };
+
+        // Collect (field name -> string literal value) for the string fields.
+        let mut os_val: Option<String> = None;
+        let mut arch_val: Option<String> = None;
+        let mut version_val: Option<String> = None;
+        let mut saw_debug_bool = false;
+        for entry in &entries {
+            if let shape_ast::ast::ObjectEntry::Field { key, value, .. } = entry {
+                match (key.as_str(), value) {
+                    ("target_os", Expr::Literal(Literal::String(s), _)) => {
+                        os_val = Some(s.clone())
+                    }
+                    ("target_arch", Expr::Literal(Literal::String(s), _)) => {
+                        arch_val = Some(s.clone())
+                    }
+                    ("version", Expr::Literal(Literal::String(s), _)) => {
+                        version_val = Some(s.clone())
+                    }
+                    ("debug", Expr::Literal(Literal::Bool(_), _)) => saw_debug_bool = true,
+                    _ => {}
+                }
+            }
+        }
+
+        // String fields must round-trip their real (non-empty) values rather
+        // than baking `None` (the silent-data-loss symptom in the prior bug).
+        assert_eq!(
+            os_val.as_deref(),
+            Some(std::env::consts::OS),
+            "target_os must read back the real platform string"
+        );
+        assert_eq!(
+            arch_val.as_deref(),
+            Some(std::env::consts::ARCH),
+            "target_arch must read back the real architecture string"
+        );
+        assert_eq!(
+            version_val.as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "version must read back the real package version"
+        );
+        assert!(
+            saw_debug_bool,
+            "debug must read back as a typed Bool literal (from the storage's \
+             field_kinds carrier), not Any/None"
+        );
     }
 
     /// `comptime { implements("int", "Add") }` dispatches end-to-end —

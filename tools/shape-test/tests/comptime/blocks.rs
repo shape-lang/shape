@@ -456,3 +456,11 @@ print(f"OS: {OS}")
         .expect_run_ok()
         .expect_output_contains("OS:");
 }
+
+// STAGE R2 (2026-06-18) regression for the `comptime { build_config() }`
+// SIGSEGV lives as a unit test at
+// `crates/shape-vm/src/compiler/comptime.rs`
+// (`r2_build_config_nb_to_expr_no_segfault`). It drives the actual
+// `execute_comptime` + `nb_to_expr` readback path (the segfault locus); the
+// in-process `ShapeTest` harness here does not wire the `__comptime__`
+// builtins extension, so it cannot exercise `build_config()` directly.

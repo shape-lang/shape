@@ -343,13 +343,19 @@ pub(crate) fn create_comptime_builtins_module(
 
     // build_config() -> Object with build configuration
     // Returns a structured object: { debug, version, target_os, target_arch }
-    // Pre-register the schema so the comptime compiler can resolve field access.
-    let _build_config_schema = shape_runtime::type_schema::register_predeclared_any_schema(&[
-        "debug".to_string(),
-        "target_arch".to_string(),
-        "target_os".to_string(),
-        "version".to_string(),
-    ]);
+    //
+    // R2 (2026-06-18): do NOT pre-register an all-`FieldType::Any` predeclared
+    // schema here. `lookup_schema_for_fields` consults the predeclared cache
+    // FIRST (`mod.rs::lookup_schema_for_fields`), so an Any registration would
+    // shadow the concrete `__ComptimeBuildConfig` named schema
+    // (`builtin_schemas.rs` — `bool debug` + `string version/target_os/
+    // target_arch`). With the Any schema in front, the constructed
+    // `TypedObjectStorage.schema_id` pointed at all-Any fields, and field
+    // access on the bool `debug` surfaced `MakeFieldRef ... FIELD_TAG_ANY`
+    // (ADR-006 §2.7.13 / Q14 forbids fabricating a NativeKind from Any).
+    // Omitting it lets `typed_object_from_pairs` resolve the concrete named
+    // schema (order-insensitive field-set match), so every field carries a
+    // statically-sourceable tag.
     register_typed_function(
         &mut module,
         "build_config",
