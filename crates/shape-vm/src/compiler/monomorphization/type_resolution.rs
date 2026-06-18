@@ -2121,28 +2121,61 @@ pub fn method_call_receiver_derived_concrete_type(
     method: &str,
 ) -> Option<ConcreteType> {
     use shape_runtime::type_system::checking::TypeParamExpr;
+    use shape_ast::ast::TypeAnnotation;
+    use shape_runtime::type_system::Type;
 
-    // The receiver's element type must be proven; only `Array<T>` receivers
-    // carry an element/Self return that we can reconstruct here.
+    // The receiver's type must be proven.
     let receiver_ct = concrete_type_for_expr(compiler, receiver)?;
-    let elem_ct = match &receiver_ct {
-        ConcreteType::Array(elem) => elem.as_ref().clone(),
-        _ => return None,
-    };
 
-    // Drive off the method's REGISTERED return shape — never a hardcoded list.
-    // Builtin array methods register under the `"Vec"` receiver name (same key
-    // the inference engine resolves against).
-    let sig = compiler
-        .method_table
-        .lookup_generic_signature("Vec", method)?;
-    match &sig.return_type {
-        // `Self` → the receiver array type unchanged (sort/reverse/take/…).
-        TypeParamExpr::SelfType => Some(receiver_ct),
-        // `ReceiverParam(0)` → the element type (first/last/pop/find).
-        TypeParamExpr::ReceiverParam(0) => Some(elem_ct),
-        _ => None,
+    // --- Array<T> receivers: generic-signature-driven element/Self return ---
+    if let ConcreteType::Array(elem) = &receiver_ct {
+        let elem_ct = elem.as_ref().clone();
+        // Drive off the method's REGISTERED return shape — never a hardcoded
+        // list. Builtin array methods register under the `"Vec"` receiver name
+        // (same key the inference engine resolves against).
+        if let Some(sig) = compiler.method_table.lookup_generic_signature("Vec", method) {
+            return match &sig.return_type {
+                // `Self` → the receiver array type unchanged (sort/reverse/take/…).
+                TypeParamExpr::SelfType => Some(receiver_ct),
+                // `ReceiverParam(0)` → the element type (first/last/pop/find).
+                TypeParamExpr::ReceiverParam(0) => Some(elem_ct),
+                _ => None,
+            };
+        }
+        return None;
     }
+
+    // --- ROOT-1 (F2): scalar receiver with a MONOMORPHIC method whose
+    // registered return annotation is a fully-concrete shape. The canonical
+    // case is `"a,b,c".split(",")` → `Array<string>`: the string `split`
+    // method is registered (`method_table.rs` `str_methods`) with a CONCRETE
+    // `Array<string>` return, but it is NOT a `"Vec"` generic signature and
+    // NOT a monomorphized stdlib function, so neither the Array-receiver path
+    // above nor `specialized_call_return_concrete_type` recovered it. The
+    // result `ConcreteType` was lost, so `let parts = "..".split(",")` recorded
+    // nothing and a downstream `parts[0] + parts[1]` saw `unknown + unknown`.
+    //
+    // Recover it from the method's REGISTERED concrete return Type (ADR-006
+    // §2.7.5 — the registered signature IS the proof). Bounded to scalar
+    // receivers whose method-table receiver name is statically known
+    // (`string`); the return annotation must convert to a FULLY-concrete
+    // `ConcreteType` (no type variable). A method with a generic/var return,
+    // an unregistered method, or an unresolvable receiver yields `None` — clean
+    // fall-through, no fabrication, no Bool-default. Composes for the chained /
+    // nested forms (`m.split(",")[0].toUpperCase()`): `split` → `Array<string>`,
+    // index-read unwraps to `string`, `toUpperCase` resolves via the same
+    // monomorphic lookup.
+    let receiver_type_name = match &receiver_ct {
+        ConcreteType::String => Some("string"),
+        _ => None,
+    }?;
+    let recv_type = Type::Concrete(TypeAnnotation::Basic(receiver_type_name.to_string()));
+    let sig = compiler.method_table.lookup(&recv_type, method)?;
+    if let Type::Concrete(ann) = &sig.return_type {
+        // Only a fully-concrete annotation converts (no type-var leaks).
+        return concrete_type_from_annotation(ann, &HashMap::new());
+    }
+    None
 }
 
 fn literal_concrete_type(literal: &shape_ast::ast::Literal) -> Option<ConcreteType> {

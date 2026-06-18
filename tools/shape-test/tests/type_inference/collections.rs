@@ -399,3 +399,85 @@ fn test_hashmap_in_function() {
     )
     .expect_string("localhost");
 }
+
+// =========================================================================
+// ROOT-1 (F2, strict-flip 2026-06-18): arr[i] INDEX-READ element-type
+// erasure for a method-returned array (split) and a nested-array loop var.
+// Pre-fix, `let parts = "a,b,c".split(","); parts[0] + parts[1]` and
+// `for p in [[1,2],[3,4]] { p[0]*10 + p[1] }` surfaced "Cannot infer ... :
+// operand types are `unknown` and ..." because the binding never recorded
+// the array element ConcreteType (split's monomorphic Array<string> return
+// was lost; the nested-array literal recorded a phantom placeholder element).
+// =========================================================================
+
+#[test]
+fn test_index_read_split_returned_array_element_concat() {
+    // finding 2: a `.split()`-returned `Array<string>` keeps its element
+    // type at the index read, so `parts[0] + parts[1]` is `string` concat.
+    ShapeTest::new(
+        r#"
+        let parts = "a,b,c".split(",")
+        parts[0] + parts[1]
+    "#,
+    )
+    .expect_string("ab");
+}
+
+#[test]
+fn test_index_read_split_chain_method_on_element() {
+    // `m.split(",")[0].toUpperCase()` — split -> Array<string>, index-read
+    // unwraps to string, the method resolves on the recovered element.
+    ShapeTest::new(
+        r#"
+        let m = "hello,world"
+        m.split(",")[0].toUpperCase()
+    "#,
+    )
+    .expect_string("HELLO");
+}
+
+#[test]
+fn test_index_read_nested_int_array_loop_var_arithmetic() {
+    // finding 4: a nested-array literal's loop var binds the inner
+    // `Array<int>`; `p[0]` / `p[1]` index-reads recover `int`, so the
+    // arithmetic `p[0]*10 + p[1]` is well-typed.
+    ShapeTest::new(
+        r#"
+        let pairs = [[1, 2], [3, 4]]
+        let mut total = 0
+        for p in pairs {
+            total = total + (p[0] * 10 + p[1])
+        }
+        total
+    "#,
+    )
+    .expect_number(46.0);
+}
+
+#[test]
+fn test_index_read_map_returned_array_element_concat() {
+    // A `.map()`-returned array keeps its element type at the index read.
+    ShapeTest::new(
+        r#"
+        let xs = [1, 2, 3].map(|x| x * 2)
+        xs[0] + xs[1]
+    "#,
+    )
+    .expect_number(6.0);
+}
+
+#[test]
+fn test_index_read_nested_number_array_no_int_coercion() {
+    // int != number must not unify: a nested `number` array stays `number`.
+    ShapeTest::new(
+        r#"
+        let pairs = [[1.0, 2.0], [3.0, 4.0]]
+        let mut total = 0.0
+        for p in pairs {
+            total = total + (p[0] + p[1])
+        }
+        total
+    "#,
+    )
+    .expect_number(10.0);
+}

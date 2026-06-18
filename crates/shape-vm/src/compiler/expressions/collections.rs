@@ -453,6 +453,37 @@ impl BytecodeCompiler {
                     .unwrap_or_else(|| {
                         super::super::v2_typed_emission::concrete_type_for_typed_array_kind(kind)
                     })
+            } else if matches!(kind, TypedArrayKind::TypedArray) {
+                // ROOT-1 (F2, strict-flip 2026-06-18): a NESTED-array literal
+                // (`[[1,2],[3,4]]`) lowers to the kind-erased `TypedArray`
+                // carrier, whose `kind -> ConcreteType` round-trip collapses to
+                // a phantom `Array<Array<placeholder_struct>>` (the carrier
+                // slot-bits kind is uniformly `Ptr(HeapKind::TypedArray)` — the
+                // inner element type is unrecoverable from the kind alone).
+                // Recording THAT placeholder into the span side-table erased the
+                // real inner element type, so a downstream `for p in pairs {
+                // p[0] * 10 }` (loop var bound to the inner `Array<int>`) saw
+                // `p[0]` as a nameless struct and the binop emitter surfaced
+                // `unknown * int`. Recover the element's REAL `ConcreteType`
+                // structurally from the first inner-array element via
+                // `concrete_type_for_expr` (each element IS an `Expr::Array`,
+                // so this resolves `[1,2]` -> `Array<int>`). That element IS the
+                // proof (ADR-006 §2.7.5 — producer-site structural proof, no
+                // runtime bit inspection, no Bool-default). A heterogeneous /
+                // unresolvable inner element falls back to the kind placeholder
+                // (the existing surface-clean-error contract for genuinely
+                // ambiguous element types is preserved). Mirrors the
+                // `TypedObject` named-struct recovery above.
+                elements
+                    .first()
+                    .and_then(|first| {
+                        crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                            self, first,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        super::super::v2_typed_emission::concrete_type_for_typed_array_kind(kind)
+                    })
             } else {
                 super::super::v2_typed_emission::concrete_type_for_typed_array_kind(kind)
             };
