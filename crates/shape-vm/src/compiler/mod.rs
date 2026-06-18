@@ -74,7 +74,7 @@ pub(crate) mod literal_widen;
 mod loops;
 pub(crate) mod mir_schema_threading;
 pub(crate) mod monomorphization;
-mod patterns;
+pub(crate) mod patterns;
 pub(crate) mod post_inference_verify;
 mod statements;
 pub mod string_interpolation;

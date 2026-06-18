@@ -407,8 +407,9 @@ impl BytecodeCompiler {
                 // recover them when needed.
                 if let Some(var_name) = pattern.as_identifier() {
                     if let Some(local_idx) = self.resolve_local(var_name) {
-                        if let Some(elem_type) = self.iter_element_type_name(iter) {
-                            self.set_local_type_info(local_idx, &elem_type);
+                        let name_from_string_path = self.iter_element_type_name(iter);
+                        if let Some(ref elem_type) = name_from_string_path {
+                            self.set_local_type_info(local_idx, elem_type);
                         }
                         // R3-subcase struct-array HOF (strict-flip, 2026-06-15):
                         // carry the element's full ConcreteType (struct/enum
@@ -418,6 +419,26 @@ impl BytecodeCompiler {
                         // `Vec.filter` body — resolves `u`/`item` to the named
                         // struct rather than `unknown`.
                         if let Some(elem_ct) = self.iter_element_concrete_type(iter) {
+                            // ROOT-1 (strict-flip, 2026-06-18): the string-name
+                            // path (`iter_element_type_name`) only resolves
+                            // primitive-element literals + name-tracked bindings;
+                            // an inline struct-array literal (`for p in [R{..}]`)
+                            // or an inferred struct-array binding fell to the
+                            // ConcreteType side-table ONLY, leaving the tracker
+                            // NAME `unknown` so `p.age` failed to infer. Derive
+                            // the tracker NAME from the proven element ConcreteType
+                            // when the string path missed. ConcreteType IS the
+                            // proof (ADR-006 §2.7.5); a no-stable-name shape stamps
+                            // nothing (surface-and-stop preserved).
+                            if name_from_string_path.is_none() {
+                                if let Some(tn) =
+                                    crate::compiler::patterns::binding::concrete_type_tracker_name(
+                                        &elem_ct,
+                                    )
+                                {
+                                    self.set_local_type_info(local_idx, &tn);
+                                }
+                            }
                             self.current_function_local_concrete_types
                                 .insert(local_idx, elem_ct);
                         }
@@ -778,15 +799,53 @@ impl BytecodeCompiler {
         // declares `x` with tracker type `int` so `sum + x` emits
         // `AddInt` rather than falling into trait dispatch.
         if let shape_ast::ast::Pattern::Identifier(_) = &for_expr.pattern {
-            if let Some(elem_type) = self.iter_element_type_name(&for_expr.iterable) {
-                self.set_local_type_info(elem_local, &elem_type);
+            let name_from_string_path = self.iter_element_type_name(&for_expr.iterable);
+            if let Some(ref elem_type) = name_from_string_path {
+                self.set_local_type_info(elem_local, elem_type);
             }
             // R3-subcase struct-array HOF (strict-flip, 2026-06-15): see the
             // matching site in `compile_for_loop` — carry the struct/enum
             // element identity to the loop variable's ConcreteType.
             if let Some(elem_ct) = self.iter_element_concrete_type(&for_expr.iterable) {
+                // ROOT-1 (strict-flip, 2026-06-18): an inline struct-array
+                // literal (`for p in [R{..}]`) leaves the string-name path
+                // empty; derive the tracker NAME from the proven element
+                // ConcreteType so `p.age` is field-accessible (the read sites
+                // consult the tracker NAME, not the ConcreteType side-table).
+                // ConcreteType IS the proof (ADR-006 §2.7.5). Mirror of the
+                // `compile_for_loop` site.
+                if name_from_string_path.is_none() {
+                    if let Some(tn) =
+                        crate::compiler::patterns::binding::concrete_type_tracker_name(&elem_ct)
+                    {
+                        self.set_local_type_info(elem_local, &tn);
+                    }
+                }
                 self.current_function_local_concrete_types
                     .insert(elem_local, elem_ct);
+            }
+        }
+        // ROOT-1 (strict-flip, 2026-06-18): destructuring for-in
+        // (`for {x, y} in [P{..}]` / `for [a, b] in [[1,2]]`) previously left
+        // EVERY bound field/element untyped — the prior code stamped only the
+        // single-identifier loop var. Recover the element's named struct
+        // ConcreteType and stamp each destructured field's tracker type from
+        // the struct schema field types (object form) so `x + y` infers. The
+        // element ConcreteType IS the proof (ADR-006 §2.7.5); a non-struct or
+        // unresolvable element stamps nothing (surface-and-stop preserved).
+        if is_object_destructure {
+            if let Some(shape_value::v2::ConcreteType::Struct(layout)) =
+                self.iter_element_concrete_type(&for_expr.iterable)
+            {
+                if let Some(struct_name) = layout.name.as_ref().map(|n| n.to_string()) {
+                    for (key, local) in &destructure_fields {
+                        if let Some(tn) =
+                            self.struct_field_tracker_type_name(&struct_name, key)
+                        {
+                            self.set_local_type_info(*local, &tn);
+                        }
+                    }
+                }
             }
         }
 
@@ -1599,6 +1658,43 @@ impl BytecodeCompiler {
         Ok(())
     }
 
+    /// ROOT-1 (strict-flip, 2026-06-18): the type-tracker NAME for a named
+    /// struct's field, used to type a destructuring for-in binding
+    /// (`for {x, y} in [P{..}]`). Reads the field's `FieldType` off the
+    /// registered struct schema and maps it to the tracker name the
+    /// strict-typing binop emitter recognises. Returns `None` for an unknown
+    /// struct / field or a field type with no stable scalar tracker name
+    /// (surface-and-stop preserved — the binder then stays untyped). The
+    /// schema field type IS the proof (ADR-006 §2.7.5).
+    pub(super) fn struct_field_tracker_type_name(
+        &self,
+        struct_name: &str,
+        field_name: &str,
+    ) -> Option<String> {
+        use shape_runtime::type_schema::FieldType;
+        let schema = self.type_tracker.schema_registry().get(struct_name)?;
+        let field = schema.get_field(field_name)?;
+        let name = match &field.field_type {
+            FieldType::I64 => "int",
+            FieldType::F64 => "number",
+            FieldType::Bool => "bool",
+            FieldType::String => "string",
+            FieldType::Decimal => "decimal",
+            FieldType::I8 => "i8",
+            FieldType::U8 => "u8",
+            FieldType::I16 => "i16",
+            FieldType::U16 => "u16",
+            FieldType::I32 => "i32",
+            FieldType::U32 => "u32",
+            FieldType::U64 => "u64",
+            FieldType::Object(name) => name.as_str(),
+            // Array / Option / HashMap / Any / Timestamp / enum payloads:
+            // no stable scalar tracker name — leave the binder untyped.
+            _ => return None,
+        };
+        Some(name.to_string())
+    }
+
     /// Phase 3e helper: infer the element type name of a `for x in ITER`
     /// iterator expression.
     ///
@@ -1897,5 +1993,74 @@ mod tests {
             "fn t() { let mut s = 0; for x in [10, 20, 30] { s = s + x }; s } t()",
         );
         assert_eq!(result, 60);
+    }
+
+    // ROOT-1 (strict-flip, 2026-06-18): the derived-read element-type flow.
+
+    #[test]
+    fn root1_for_in_let_bound_struct_array_field_add() {
+        // `let ps = [R{..}]` (no annotation) must type the loop var as `R` so
+        // `p.age + 10` infers under strict typing (pre-fix: `unknown + int`).
+        let result = compile_and_run_i64(
+            "type R { age: int } \
+             fn t() { let ps = [R{age:1}, R{age:2}]; let mut s = 0; \
+                      for p in ps { s = s + p.age + 10 }; s } t()",
+        );
+        assert_eq!(result, 23);
+    }
+
+    #[test]
+    fn root1_for_in_inline_struct_array_literal_field_add() {
+        // Inline struct-array literal in for-in: the element ConcreteType is
+        // recovered from the literal and stamped onto the loop var's tracker.
+        let result = compile_and_run_i64(
+            "type R { age: int } \
+             fn t() { let mut s = 0; for p in [R{age:5}] { s = s + p.age }; s } t()",
+        );
+        assert_eq!(result, 5);
+    }
+
+    #[test]
+    fn root1_for_in_object_destructure_struct_fields() {
+        // `for {x, y} in [P{..}]` must type each destructured field from the
+        // struct schema so `x + y` infers (pre-fix: `unknown + unknown`).
+        let result = compile_and_run_i64(
+            "type P { x: int, y: int } \
+             fn t() { let mut s = 0; for {x, y} in [P{x:3, y:4}] { s = s + x + y }; s } t()",
+        );
+        assert_eq!(result, 7);
+    }
+
+    #[test]
+    fn root1_derived_index_read_struct_field_add() {
+        // `let p = ps[0]` (derived read) must carry the struct identity so
+        // `p.age + 10` infers.
+        let result = compile_and_run_i64(
+            "type R { age: int } \
+             fn t() { let ps = [R{age:8}, R{age:9}]; let p = ps[0]; p.age + 10 } t()",
+        );
+        assert_eq!(result, 18);
+    }
+
+    // ROOT-2 (strict-flip, 2026-06-18): inline method-call return-type stamp.
+
+    #[test]
+    fn root2_inline_datetime_method_int_return_in_binop() {
+        // `d.hour() + 1` inline must resolve `d.hour()` to `int` (parity with
+        // the `let h = d.hour(); h + 1` form) — pre-fix: `unknown + int`.
+        let result = compile_and_run_i64(
+            "fn t() { let d = DateTime.parse(\"2024-01-15T08:30:00Z\"); d.hour() + 1 } t()",
+        );
+        assert_eq!(result, 9);
+    }
+
+    #[test]
+    fn root2_inline_user_fn_inferred_return_in_binop() {
+        // An unannotated user function's inferred return type flows into an
+        // inline binop operand (`dbl(n) + 1`) without an intervening `let`.
+        let result = compile_and_run_i64(
+            "fn dbl(x: int) { x * 2 } fn t() { let n = 5; dbl(n) + 1 } t()",
+        );
+        assert_eq!(result, 11);
     }
 }

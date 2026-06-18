@@ -1389,6 +1389,22 @@ impl TypeInferenceEngine {
                     args: args.clone(),
                 }))
             }
+            // ROOT-1: array-literal + map/split/collect outputs carry the
+            // inference-tier `Type::Generic { base: Array/Vec, args: [elem] }`
+            // carrier (var-preserving), distinct from the
+            // `Concrete(TypeAnnotation::Array)` carrier handled above. Mirror
+            // the Concrete arm: iterating an `Array<T>`/`Vec<T>` yields `T`.
+            // PER-SITE-ARM (no carrier unification — see ADR-006).
+            Type::Generic { base, args } if !args.is_empty() => {
+                let base_name = match base.as_ref() {
+                    Type::Concrete(ann) => ann.as_type_name_str().map(str::to_string),
+                    _ => None,
+                };
+                match base_name.as_deref() {
+                    Some("Array") | Some("Vec") => Ok(args[0].clone()),
+                    _ => Ok(self.fresh_type_var()),
+                }
+            }
             Type::Concrete(TypeAnnotation::Basic(name)) => {
                 // Special case: "rows" iterates to produce "row" elements
                 if name == "rows" {

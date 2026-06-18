@@ -5319,6 +5319,23 @@ impl BytecodeCompiler {
                             // and `id(n)` stays a clean compile error.
                             if let Some(init_expr) = var_decl.value.as_ref() {
                                 if let Some(ct) = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, init_expr) {
+                                    // ROOT-1 (strict-flip, 2026-06-18): a derived-read
+                                    // element type must also reach the type_tracker NAME,
+                                    // not only the `*_concrete_types` side-table. Field
+                                    // access (`p.age`) and `iter_element_type_name`
+                                    // (`for p in ps`) read the tracker NAME, not the
+                                    // ConcreteType table — so an inferred
+                                    // `let ps = [R{..}]` (struct/array-of-struct, no
+                                    // annotation) previously left `ps` named `unknown`
+                                    // and `p.age + 10` failed to infer. Stamp the
+                                    // tracker name from the proven ConcreteType (the
+                                    // ConcreteType IS the proof, ADR-006 §2.7.5 — no
+                                    // fabrication; a shape with no stable tracker name
+                                    // records nothing). Mirror of the annotated path's
+                                    // `set_module_binding_type_info`.
+                                    if let Some(tn) = crate::compiler::patterns::binding::concrete_type_tracker_name(&ct) {
+                                        self.set_module_binding_type_info(binding_idx, &tn);
+                                    }
                                     self.module_binding_concrete_types.insert(binding_idx, ct);
                                 }
                             }
@@ -5700,6 +5717,17 @@ impl BytecodeCompiler {
                             // clean-compile-error contract is preserved.
                             if let Some(init_expr) = var_decl.value.as_ref() {
                                 if let Some(ct) = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, init_expr) {
+                                    // ROOT-1 (strict-flip, 2026-06-18): mirror of the
+                                    // module-binding path above — stamp the type_tracker
+                                    // NAME from the proven ConcreteType so a derived-read
+                                    // struct/array-of-struct local (`let p = ps[0]`,
+                                    // `let ps = [R{..}]`) is field-accessible and
+                                    // for-iterable. The tracker NAME (not the ConcreteType
+                                    // side-table) is what `p.age` / `iter_element_type_name`
+                                    // consult. ConcreteType IS the proof (ADR-006 §2.7.5).
+                                    if let Some(tn) = crate::compiler::patterns::binding::concrete_type_tracker_name(&ct) {
+                                        self.set_local_type_info(local_idx, &tn);
+                                    }
                                     self.current_function_local_concrete_types.insert(local_idx, ct);
                                 }
                             }

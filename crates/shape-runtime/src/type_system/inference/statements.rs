@@ -122,6 +122,40 @@ impl TypeInferenceEngine {
         }
     }
 
+    /// ROOT-1 (strict-flip, 2026-06-18): bind a statement-form for-in
+    /// (`DestructurePattern`) loop's binders, typing an OBJECT destructure's
+    /// fields from the element struct's declared field annotations. Mirror of
+    /// the `Expr::For` arm's object-destructure handling (which operates on the
+    /// expression-form `Pattern`). A non-object pattern, or a field with no
+    /// resolvable type, binds the WHOLE element type (parity preserved).
+    fn bind_for_in_destructure_pattern(
+        &mut self,
+        pattern: &shape_ast::ast::DestructurePattern,
+        element_type: &Type,
+    ) {
+        if let shape_ast::ast::DestructurePattern::Object(fields) = pattern {
+            let resolved_elem = self.unifier.apply_substitutions(element_type);
+            if let Some(struct_name) = self
+                .struct_name_of_type(&resolved_elem)
+                .or_else(|| self.struct_name_of_type(element_type))
+            {
+                for field in fields {
+                    let binder = field.pattern.as_identifier().unwrap_or(&field.key);
+                    let field_ty = self
+                        .struct_field_annotation(&struct_name, &field.key)
+                        .map(|ann| self.resolve_type_annotation(&ann))
+                        .unwrap_or_else(|| element_type.clone());
+                    self.env.define(binder, TypeScheme::mono(field_ty));
+                }
+                return;
+            }
+        }
+        for name in pattern.get_identifiers() {
+            self.env
+                .define(&name, TypeScheme::mono(element_type.clone()));
+        }
+    }
+
     /// Infer type of statements
     pub(crate) fn infer_statements(&mut self, stmts: &[Statement]) -> TypeResult<Type> {
         let mut last_type = BuiltinTypes::void();
@@ -640,11 +674,15 @@ impl TypeInferenceEngine {
 
                         // Infer element type from iterator
                         let element_type = self.infer_iterator_element_type(&iter_type)?;
-                        // Define all variables from the pattern
-                        for name in pattern.get_identifiers() {
-                            self.env
-                                .define(&name, TypeScheme::mono(element_type.clone()));
-                        }
+                        // ROOT-1 (strict-flip, 2026-06-18): an OBJECT-destructuring
+                        // for-in (`for {x, y} in [P{..}]`) must type each binder
+                        // from the element struct's declared FIELD annotation, not
+                        // from the whole element struct, else `x + y` rejects with
+                        // "P does not implement Numeric". (Mirror of the
+                        // `Expr::For` arm in `inference/expressions.rs`.) A field
+                        // whose type is unresolvable, and every non-object pattern,
+                        // falls back to the element type (parity preserved).
+                        self.bind_for_in_destructure_pattern(pattern, &element_type);
                     }
                     shape_ast::ast::ForInit::ForC {
                         init,

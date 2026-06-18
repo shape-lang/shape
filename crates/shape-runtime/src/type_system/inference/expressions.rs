@@ -1433,11 +1433,48 @@ impl TypeInferenceEngine {
                         Constructor { .. } | Literal(_) | Wildcard => {}
                     }
                 }
-                let mut pattern_names = Vec::new();
-                collect_pattern_names(&for_expr.pattern, &mut pattern_names);
-                for name in pattern_names {
-                    self.env
-                        .define(&name, TypeScheme::mono(element_type.clone()));
+                // ROOT-1 (strict-flip, 2026-06-18): an OBJECT-destructuring
+                // for-in (`for {x, y} in [P{..}]`) must type each binder from
+                // the element struct's declared FIELD annotation, not the whole
+                // element struct — else the body's `x + y` rejects with "P does
+                // not implement Numeric" (the engine's trait-bound check on
+                // `+`). Resolve the element's struct name and bind each field by
+                // its declared field type. A non-object pattern, or a field with
+                // no resolvable type, falls back to the WHOLE element type
+                // (parity with the prior bind-all behavior — no fabrication).
+                let bound_via_fields = if let shape_ast::ast::Pattern::Object(fields) =
+                    &for_expr.pattern
+                {
+                    let resolved_elem = self.unifier.apply_substitutions(&element_type);
+                    if let Some(struct_name) = self
+                        .struct_name_of_type(&resolved_elem)
+                        .or_else(|| self.struct_name_of_type(&element_type))
+                    {
+                        for (key, sub) in fields {
+                            let binder = match sub {
+                                shape_ast::ast::Pattern::Identifier(n) => n.as_str(),
+                                _ => key.as_str(),
+                            };
+                            let field_ty = self
+                                .struct_field_annotation(&struct_name, key)
+                                .map(|ann| self.resolve_type_annotation(&ann))
+                                .unwrap_or_else(|| element_type.clone());
+                            self.env.define(binder, TypeScheme::mono(field_ty));
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !bound_via_fields {
+                    let mut pattern_names = Vec::new();
+                    collect_pattern_names(&for_expr.pattern, &mut pattern_names);
+                    for name in pattern_names {
+                        self.env
+                            .define(&name, TypeScheme::mono(element_type.clone()));
+                    }
                 }
 
                 // Barrier scope: catches `break <value>` so it does not leak

@@ -15,7 +15,7 @@ use crate::compiler::BytecodeCompiler;
 /// named struct/enum types to their name. Returns `None` for shapes with no
 /// stable tracker name (tuple/function/etc.) — the caller then leaves the
 /// element/map side-table stamp it already recorded in place.
-fn concrete_type_tracker_name(ct: &shape_value::v2::ConcreteType) -> Option<String> {
+pub(crate) fn concrete_type_tracker_name(ct: &shape_value::v2::ConcreteType) -> Option<String> {
     use shape_value::v2::ConcreteType;
     match ct {
         ConcreteType::I64 => Some("int".to_string()),

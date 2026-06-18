@@ -1846,6 +1846,63 @@ impl BytecodeCompiler {
             }
         }
 
+        // ROOT-2 (strict-flip, 2026-06-18): an INLINE method-call result
+        // (`d.hour() + 1`, `dt.is_weekday() && ...`) must surface its declared
+        // return type to the strict-typing binop operand check WITHOUT an
+        // intervening `let` reconciliation. The `let h = d.hour()` form already
+        // works because the let-binding records the result `ConcreteType` (via
+        // `concrete_type_for_expr`) and reconciles a 2nd inference pass; the
+        // inline operand never gets that pass. `concrete_type_for_expr`'s
+        // `Expr::MethodCall` arm carries the receiver-derived return tables
+        // (DateTime instance methods -> int/bool/string/DateTime; monomorphized
+        // stdlib-call substituted return; PHF first/last/sort/... ) — the SAME
+        // proof source the let path consumes. Consult it here so the inline and
+        // let forms resolve identically. The receiver's proven ConcreteType IS
+        // the proof (ADR-006 §2.7.5); an opaque method falls through to the
+        // engine (no fabrication). int and number do NOT unify — `d.hour()`
+        // resolves to `int`, `sin(x)` to `number`; neither is coerced.
+        if let Expr::MethodCall { .. } = expr {
+            if let Some(ct) =
+                crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                    self, expr,
+                )
+            {
+                if let Some(ann) =
+                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
+                {
+                    return Ok(Type::Concrete(ann));
+                }
+            }
+        }
+
+        // ROOT-2 (strict-flip, 2026-06-18): an INLINE free-function-call result
+        // (`sin(x) + 1.0`, `abs(n) - 1`) must surface its declared return type
+        // to the strict-typing binop operand check, exactly like the inline
+        // method-call arm above. The let form (`let s = sin(x); s + 1.0`) works
+        // via the let-binding's recorded ConcreteType + reconciliation 2nd pass;
+        // the inline operand lacks that pass. `concrete_type_for_expr`'s
+        // `Expr::FunctionCall` arm reduces the callee's declared return
+        // annotation (substituting generic args from the call-site argument
+        // types) — the SAME proof the let path consumes. The callee's declared
+        // return annotation IS the proof (ADR-006 §2.7.5); an opaque/foreign
+        // callee falls through to the engine (no fabrication). int and number
+        // stay strict (`sin` -> number; an `int`-returning callee -> int).
+        // Runs AFTER the `function_return_types` / callable-binding lookups
+        // above so a tracker-recorded return name still takes precedence.
+        if let Expr::FunctionCall { .. } = expr {
+            if let Some(ct) =
+                crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                    self, expr,
+                )
+            {
+                if let Some(ann) =
+                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
+                {
+                    return Ok(Type::Concrete(ann));
+                }
+            }
+        }
+
         // Array literal: resolve the element type from the literal's own
         // elements via the compiler's structural `concrete_type_for_expr`
         // (which sees function-body locals + for-loop variables + f-string
