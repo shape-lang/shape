@@ -420,3 +420,108 @@ fn closure_mutable_capture_accumulator() {
     )
     .expect_number(42.0);
 }
+
+// =========================================================================
+// F1 regression (2026-06-18): a MUTATING-CAPTURE closure passed into a
+// higher-order Array method (forEach / map / reduce / filter) used to
+// SIGSEGV. The closure-aware monomorphization path inlined the closure body
+// outside the capture context, lowering `total = total + x` to a plain
+// `StoreModuleBinding` that clobbered the `Arc<SharedCell>` slot; the later
+// `LoadSharedModuleBinding` then dereferenced the scalar as a pointer.
+// Fix: refuse the inline specialization for closures that mutate a captured
+// outer binding and fall back to the value-call path (which sets up the
+// capture environment correctly). See
+// `compiler/expressions/function_calls.rs::any_closure_arg_mutates_outer_binding`.
+// =========================================================================
+
+#[test]
+fn f1_foreach_mutating_capture_accumulates() {
+    ShapeTest::new(
+        r#"
+        let mut total = 0
+        [1, 2, 3].forEach(|x| { total = total + x })
+        print(total)
+    "#,
+    )
+    .expect_output("6");
+}
+
+#[test]
+fn f1_foreach_mutating_capture_with_expr() {
+    ShapeTest::new(
+        r#"
+        let mut sum = 0
+        let xs = [1, 2, 3, 4]
+        xs.forEach(|x| { sum = sum + x * 2 })
+        print(sum)
+    "#,
+    )
+    .expect_output("20");
+}
+
+#[test]
+fn f1_foreach_mutating_two_captured_cells() {
+    ShapeTest::new(
+        r#"
+        let mut a = 0
+        let mut b = 100
+        [1, 2, 3].forEach(|x| {
+            a = a + x
+            b = b - x
+        })
+        print(a)
+        print(b)
+    "#,
+    )
+    .expect_output("6\n94");
+}
+
+#[test]
+fn f1_map_mutating_capture_side_effect() {
+    ShapeTest::new(
+        r#"
+        let mut c = 0
+        let r = [1, 2, 3].map(|x| { c = c + 1; x * 10 })
+        print(r)
+        print(c)
+    "#,
+    )
+    .expect_output("[10, 20, 30]\n3");
+}
+
+#[test]
+fn f1_reduce_mutating_capture_side_effect() {
+    ShapeTest::new(
+        r#"
+        let mut calls = 0
+        let s = [1, 2, 3, 4].reduce(|acc, x| { calls = calls + 1; acc + x }, 0)
+        print(s)
+        print(calls)
+    "#,
+    )
+    .expect_output("10\n4");
+}
+
+#[test]
+fn f1_filter_mutating_capture_side_effect() {
+    ShapeTest::new(
+        r#"
+        let mut seen = 0
+        let r = [1, 2, 3, 4, 5].filter(|x| { seen = seen + 1; x > 2 })
+        print(r)
+        print(seen)
+    "#,
+    )
+    .expect_output("[3, 4, 5]\n5");
+}
+
+// Non-mutating forEach still works (inline fast path preserved).
+#[test]
+fn f1_foreach_non_mutating_capture_still_works() {
+    ShapeTest::new(
+        r#"
+        [1, 2, 3].forEach(|x| print(x))
+    "#,
+    )
+    .expect_output("1\n2\n3");
+}

@@ -4573,6 +4573,32 @@ impl BytecodeCompiler {
         // aware specialization's success branch with the same shape.
         call_site_span: Span,
     ) -> Option<usize> {
+        // SOUNDNESS GUARD (F1 mutating-capture-closure HOF segfault, 2026-06-18):
+        // The closure-aware specialization INLINES the closure body into the
+        // monomorphized stdlib template (`ensure_monomorphic_function_with_closures`
+        // → `compile_function` on the substituted body). That inline pass
+        // compiles the closure body OUTSIDE the closure-capture context
+        // (`mutable_closure_captures` / `shared_closure_captures` are empty),
+        // so a body assignment `total = total + x` to a mutably-captured
+        // outer binding lowers to a plain `StoreModuleBinding` / `StoreLocal`
+        // — clobbering the binding slot (overwriting the `Arc<SharedCell>`
+        // pointer with the raw scalar) instead of routing through
+        // `StoreSharedCapture`. The later `LoadSharedModuleBinding` then
+        // dereferences the scalar-as-pointer → SIGSEGV (misaligned deref).
+        //
+        // Inlining cannot be done soundly here without reconstructing the
+        // full capture environment inside the specialized template. Until
+        // that lands, refuse the inline specialization for any closure arg
+        // that MUTATES a captured outer binding and fall back to the
+        // type-only / value-call path (which sets up the capture environment
+        // correctly via `op_make_closure` + `call_value_immediate_nb` — the
+        // same path a direct closure call takes, proven correct). The
+        // read-only-capture closures (`map`/`filter`/`forEach` with no outer
+        // mutation) keep the inline fast path.
+        if self.any_closure_arg_mutates_outer_binding(combined_args) {
+            return None;
+        }
+
         // Only type-kind generics participate in call-site annotation
         // unification. Const-kind generics (B.3) are bound separately via
         // declaration defaults.
@@ -4662,6 +4688,45 @@ impl BytecodeCompiler {
             }
             _ => None,
         }
+    }
+
+    /// F1 soundness guard: true if ANY `Expr::FunctionExpr` argument mutates
+    /// a captured outer binding (i.e. its `EnvironmentAnalyzer`
+    /// `mutated_captures` set is non-empty). Such closures cannot be inlined
+    /// by the closure-aware monomorphization path soundly — the inline pass
+    /// loses the mutable-capture environment and lowers the body's write to a
+    /// plain binding store, clobbering the `Arc<SharedCell>` slot. The caller
+    /// falls back to the value-call path, which sets up the capture
+    /// environment correctly.
+    fn any_closure_arg_mutates_outer_binding(&self, args: &[Expr]) -> bool {
+        let outer_vars = self.collect_outer_scope_vars();
+        args.iter().any(|a| {
+            let Expr::FunctionExpr { params, body, .. } = a else {
+                return false;
+            };
+            let proto_def = shape_ast::ast::FunctionDef {
+                name: "__mutcheck_closure__".to_string(),
+                name_span: Span::DUMMY,
+                declaring_module_path: None,
+                doc_comment: None,
+                type_params: None,
+                params: params.clone(),
+                return_type: None,
+                body: body.clone(),
+                annotations: vec![],
+                where_clause: None,
+                is_async: false,
+                is_comptime: false,
+            };
+            let (_captured, mutated) =
+                EnvironmentAnalyzer::analyze_function_with_mutability(&proto_def, &outer_vars);
+            // A capture name in `mutated` that is NOT a closure param is an
+            // outer-binding mutation. (`analyze_function_with_mutability`
+            // already restricts `mutated` to captured — non-local — names.)
+            let param_names: BTreeSet<String> =
+                params.iter().flat_map(|p| p.get_identifiers()).collect();
+            mutated.iter().any(|n| !param_names.contains(n))
+        })
     }
 
     /// Phase C — peek a closure literal's params/body/captures without
