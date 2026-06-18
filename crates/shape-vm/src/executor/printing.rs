@@ -206,7 +206,9 @@ impl<'a> ValueFormatter<'a> {
                 // `DecimalObj` with bumped refcount.
                 let ptr = bits as *const shape_value::v2::decimal_obj::DecimalObj;
                 let value = unsafe { shape_value::v2::decimal_obj::DecimalObj::value(ptr) };
-                value.to_string()
+                // Render with the same `D` suffix as the `Ptr(HeapKind::Decimal)`
+                // carrier (printing.rs:245) — both carriers are `decimal` values.
+                format!("{}D", value)
             }
             // ── Heap-pointer kinds: dispatch via HeapKind ───────────────
             NativeKind::Ptr(hk) => self.format_heap_kind(bits, hk, depth, quote_strings),

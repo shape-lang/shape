@@ -74,12 +74,45 @@ fn coerce_to_f64_kinded(bits: u64, kind: NativeKind) -> Option<f64> {
 /// operand. The slot's `bits` are `Arc::into_raw(Arc<rust_decimal::Decimal>)`
 /// per `KindedSlot::from_decimal`.
 #[inline]
+/// Borrow the inner `rust_decimal::Decimal` from either decimal carrier.
+///
+/// Shape has two statically-distinct, proven decimal carriers (ADR-006
+/// §2.3 / §2.7.5; both kinds are stamped at compile time — never fabricated
+/// from raw bits):
+///
+///   - `NativeKind::Ptr(HeapKind::Decimal)` — `Arc<Decimal>`; the `Decimal`
+///     payload lives at offset 0 (produced by `push_decimal`, decimal
+///     literals via `LoadConst`, `decimal()` builtin).
+///   - `NativeKind::DecimalV2` — `*const DecimalObj`; a `#[repr(C)]`
+///     refcounted carrier with `HeapHeader` at offset 0 and the `Decimal`
+///     payload inline at offset 8 (`DecimalObj::OFFSET_VALUE`). Produced by
+///     `TypedArray<*const DecimalObj>` element reads (`arr[i]`, `for x in`,
+///     `forEach`/`map`/`reduce` element loads, `pop`).
+///
+/// Both carriers are valid decimal operands for the decimal-family typed
+/// opcodes; recognizing both here keeps decimal arithmetic correct when an
+/// operand originates from a typed-array element (was silently coerced to
+/// `Decimal::default()` == 0 — the captured-decimal-operand corruption).
+/// This recognizes the proven carrier by its stamped kind; it does NOT
+/// reinterpret scalar bits as a pointer.
 fn decimal_ref<'a>(bits: u64, kind: NativeKind) -> Option<&'a rust_decimal::Decimal> {
-    if !matches!(kind, NativeKind::Ptr(HeapKind::Decimal)) || bits == 0 {
+    if bits == 0 {
         return None;
     }
-    let ptr = bits as *const rust_decimal::Decimal;
-    Some(unsafe { &*ptr })
+    match kind {
+        NativeKind::Ptr(HeapKind::Decimal) => {
+            let ptr = bits as *const rust_decimal::Decimal;
+            Some(unsafe { &*ptr })
+        }
+        NativeKind::DecimalV2 => {
+            // `Decimal` payload is inline at `DecimalObj::OFFSET_VALUE` (8).
+            let value_ptr = (bits as *const u8)
+                .wrapping_add(shape_value::v2::decimal_obj::DecimalObj::OFFSET_VALUE)
+                as *const rust_decimal::Decimal;
+            Some(unsafe { &*value_ptr })
+        }
+        _ => None,
+    }
 }
 
 /// Push a freshly-constructed `Arc<Decimal>` as a `Ptr(HeapKind::Decimal)`

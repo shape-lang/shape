@@ -800,3 +800,42 @@ fn capture_carrier_runtime_error_in_closure_no_leak() {
     )
     .expect_run_err();
 }
+
+#[test]
+fn capture_carrier_decimal() {
+    // REGRESSION (rc=0 silent-garbage): decimal arithmetic where one operand
+    // is a typed-array element (`x` here is a `TypedArray<*const DecimalObj>`
+    // read, carrier `NativeKind::DecimalV2`) used to silently coerce to
+    // `Decimal::default()` (== 0) inside `binop_decimal_kinded` — the
+    // `decimal_ref` operand reader only recognized the `Ptr(HeapKind::Decimal)`
+    // (`Arc<Decimal>`) carrier and returned `None` for `DecimalV2`. Result:
+    // `acc + x` printed `0D` instead of `7.0D`, rc=0, no error.
+    //
+    // Fix (arithmetic/comparison `decimal_ref`): recognize BOTH proven decimal
+    // carriers by their compile-time-stamped kind. ADR-006 §2.3 / §2.7.5.
+    ShapeTest::new(
+        r#"
+        let mut acc = 0.0D
+        [1.5D, 2.5D, 3.0D].forEach(|x| { acc = acc + x })
+        print(acc)
+    "#,
+    )
+    .expect_output("7.0D");
+}
+
+#[test]
+fn capture_carrier_decimal_direct_assign_surfaces_clean() {
+    // SURFACE (not corruption): assigning a typed-array decimal element
+    // (carrier `DecimalV2`) directly into a `let mut acc = 0.0D` cell (carrier
+    // `Ptr(Decimal)`, fixed at construction) is a §2.7.8 mid-life kind-change.
+    // Refused cleanly at `StoreSharedCapturePtr` — a runtime error, never a
+    // silent zero / SIGSEGV / leak.
+    ShapeTest::new(
+        r#"
+        let mut acc = 0.0D
+        [1.5D, 2.5D].forEach(|x| { acc = x })
+        print(acc)
+    "#,
+    )
+    .expect_run_err();
+}

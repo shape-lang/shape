@@ -394,21 +394,38 @@ fn numeric_as_f64(bits: u64, kind: NativeKind) -> Option<f64> {
     }
 }
 
-/// Read a `KindedSlot`-style operand as a borrowed `&Decimal` if the kind
-/// is `Ptr(HeapKind::Decimal)`. Dispatches via `HeapValue` per ADR-005 §1
-/// (no per-heap-variant accessor on the carrier).
+/// Read a `KindedSlot`-style operand as a borrowed `&Decimal` from either
+/// decimal carrier. Mirrors `arithmetic::decimal_ref` — see that function's
+/// doc for the two statically-distinct, compile-time-stamped carriers:
+///
+///   - `NativeKind::Ptr(HeapKind::Decimal)` — `Arc<Decimal>`, `Decimal` at
+///     offset 0 (the stack stores the `Arc::into_raw` pointer directly;
+///     matches `KindedSlot::from_decimal`). NOT a `*const HeapValue` —
+///     slots store `Arc::into_raw(Arc<rust_decimal::Decimal>)`.
+///   - `NativeKind::DecimalV2` — `*const DecimalObj`, `Decimal` inline at
+///     `DecimalObj::OFFSET_VALUE` (8). Produced by typed-array element reads.
+///
+/// Recognizing both keeps decimal comparison correct when an operand comes
+/// from a typed-array element. Recognizes the proven carrier by its stamped
+/// kind; does NOT reinterpret scalar bits as a pointer.
 #[inline]
 fn decimal_ref<'a>(bits: u64, kind: NativeKind) -> Option<&'a rust_decimal::Decimal> {
-    if !matches!(kind, NativeKind::Ptr(HeapKind::Decimal)) || bits == 0 {
+    if bits == 0 {
         return None;
     }
-    // The Wave-6 stack stores the `Arc::into_raw` pointer for `Decimal`
-    // directly (matching `KindedSlot::from_decimal`'s `Arc::into_raw`
-    // bits). This is NOT a `*const HeapValue` on the Decimal arm —
-    // `Decimal` slots store `Arc::into_raw(Arc<rust_decimal::Decimal>)`,
-    // not a `Box<HeapValue>` carrier.
-    let ptr = bits as *const rust_decimal::Decimal;
-    Some(unsafe { &*ptr })
+    match kind {
+        NativeKind::Ptr(HeapKind::Decimal) => {
+            let ptr = bits as *const rust_decimal::Decimal;
+            Some(unsafe { &*ptr })
+        }
+        NativeKind::DecimalV2 => {
+            let value_ptr = (bits as *const u8)
+                .wrapping_add(shape_value::v2::decimal_obj::DecimalObj::OFFSET_VALUE)
+                as *const rust_decimal::Decimal;
+            Some(unsafe { &*value_ptr })
+        }
+        _ => None,
+    }
 }
 
 /// Borrowed-decimal helper consumed by `nb_compare_numeric_kinded`.
