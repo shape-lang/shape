@@ -129,3 +129,69 @@ fn sign_negative_int() {
     )
     .expect_number(-1.0);
 }
+
+// ===== OP0 (embedded-stdlib let-bind of a genuinely UNANNOTATED fn) =====
+//
+// `pub fn sum(series) { series.sum() }` and `pub fn mean(series) {
+// __intrinsic_mean(series) }` in `std::core::math` have NO return annotation.
+// Before the OP0 fix, `build_imported_analysis_items` SKIPPED these, so the
+// name resolved only in the tolerated statement-expression position
+// (`print(sum(xs))`) and failed in a let-initializer with
+// "Undefined function: 'sum'". The book's core/math runnable example uses
+// `let total = sum([1.0, 2.0, 3.0])`.
+//
+// Fix: an unannotated-return imported fn is registered as a signature with a
+// FRESH return type PARAMETER (`fn sum<__ret_sum>(series) -> __ret_sum`),
+// routed through the existing generic-quantification path. No fabricated
+// concrete type (would violate `int != number` / no-coercion); the real
+// return type is still pinned at the bytecode layer.
+
+#[test]
+fn sum_let_bound() {
+    ShapeTest::new(
+        r#"
+        from std::core::math use { sum }
+        let total = sum([1.0, 2.0, 3.0])
+        total
+    "#,
+    )
+    .expect_number(6.0);
+}
+
+#[test]
+fn mean_let_bound() {
+    ShapeTest::new(
+        r#"
+        from std::core::math use { mean }
+        let m = mean([1.0, 2.0, 3.0])
+        m
+    "#,
+    )
+    .expect_number(2.0);
+}
+
+// Stdlib fn let-bound then used in arithmetic (anchored by a concrete literal
+// operand). The let-binding's slot kind resolves so `total + 1.0` type-checks.
+#[test]
+fn sum_let_bound_then_arithmetic() {
+    ShapeTest::new(
+        r#"
+        from std::core::math use { sum }
+        let total = sum([1.0, 2.0, 3.0])
+        total + 1.0
+    "#,
+    )
+    .expect_number(7.0);
+}
+
+// The call-expression form (statement-expression position) still works.
+#[test]
+fn sum_call_form_still_resolves() {
+    ShapeTest::new(
+        r#"
+        from std::core::math use { sum }
+        sum([1.0, 2.0, 3.0])
+    "#,
+    )
+    .expect_number(6.0);
+}
