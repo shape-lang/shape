@@ -429,3 +429,63 @@ test()?
         .expect_no_semantic_diagnostics()
         .expect_run_err_contains("yes, something went wrong");
 }
+
+// =========================================================================
+// finding 5 (R3): `(expr !! ctx)?` must thread the success type even when
+// `expr` is a not-yet-resolved function call. Previously the `!!` arm wrapped
+// the bare unresolved var (`Result<Variable>`) and the following `?` unwrapped
+// to a still-unconstrained var, so the binding typed `unknown` and a
+// downstream `v + 1` failed with "Cannot infer types for binary operation
+// Add: operand types are `unknown` and `int`". Both the inference engine
+// (`operators.rs` ErrorContext unresolved-var arm) and the compiler's
+// concrete-type resolver (`type_resolution.rs` ErrorContext + TryOperator
+// arms) now thread the success type `T`.
+// =========================================================================
+
+#[test]
+fn context_op_then_try_threads_success_type_for_arithmetic() {
+    // The repro from finding 5: `(g() !! ctx)?` then `v + 1`.
+    let code = r#"
+fn g() -> Result<int, string> { Ok(5) }
+let v = (g() !! "ctx")?
+print(v + 1)
+"#;
+    ShapeTest::new(code)
+        .expect_no_semantic_diagnostics()
+        .expect_run_ok()
+        .expect_output_contains("6");
+}
+
+#[test]
+fn context_op_then_try_threads_option_success_type() {
+    // Same threading for an `Option<T>` left operand.
+    let code = r#"
+fn h() -> Option<int> { Some(7) }
+let v = (h() !! "ctx")?
+print(v + 1)
+"#;
+    ShapeTest::new(code)
+        .expect_no_semantic_diagnostics()
+        .expect_run_ok()
+        .expect_output_contains("8");
+}
+
+#[test]
+fn context_op_then_try_still_attaches_context_on_err_path() {
+    // The success-type threading must not lose the `!!` error-context on the
+    // Err path: `g()` returns Err, `(g() !! ctx)?` early-returns the wrapped
+    // context.
+    let code = r#"
+fn g() -> Result<int, string> { Err("boom") }
+fn run() -> Result<int, string> {
+  let v = (g() !! "ctx")?
+  return Ok(v + 1)
+}
+print(run())
+"#;
+    ShapeTest::new(code)
+        .expect_no_semantic_diagnostics()
+        .expect_run_ok()
+        .expect_output_contains("ctx")
+        .expect_output_contains("boom");
+}

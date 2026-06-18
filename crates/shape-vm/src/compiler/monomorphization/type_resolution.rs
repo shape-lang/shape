@@ -1661,9 +1661,32 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
                     let rt = concrete_type_for_expr(compiler, right)?;
                     Some(rt)
                 }
-                // Pipe / ErrorContext are opaque here (callee-dependent /
-                // Result-unwrapping); fall back to None.
-                BinaryOp::Pipe | BinaryOp::ErrorContext => None,
+                // ErrorContext (`expr !! ctx`) always yields a `Result<T, E>`:
+                //   - `Result<T, E> !! ctx` → `Result<T, E>` (success + error
+                //     preserved)
+                //   - `Option<T> !! ctx` / `T !! ctx` → `Result<T, Void>`
+                // Resolving the success ConcreteType here (rather than falling
+                // back to None) lets a `let v = (g() !! ctx)?` binding record
+                // `v`'s success type, so a downstream `v + 1` sees the operand
+                // type instead of `unknown` (finding 5). The success type is
+                // the proof (ADR-006 §2.7.5) — an unresolved left operand
+                // yields None and a clean compile error downstream, no
+                // fabrication.
+                BinaryOp::ErrorContext => {
+                    let lt = concrete_type_for_expr(compiler, left)?;
+                    match lt {
+                        ConcreteType::Result(ok, err) => Some(ConcreteType::Result(ok, err)),
+                        ConcreteType::Option(inner) => {
+                            Some(ConcreteType::Result(inner, Box::new(ConcreteType::Void)))
+                        }
+                        other => Some(ConcreteType::Result(
+                            Box::new(other),
+                            Box::new(ConcreteType::Void),
+                        )),
+                    }
+                }
+                // Pipe is opaque here (callee-dependent); fall back to None.
+                BinaryOp::Pipe => None,
             }
         }
 
@@ -1870,6 +1893,18 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
         // `DateTime.parse(..)` constructor binding) and its method result type
         // surfaces for element-type-sensitive contexts.
         Expr::DateTime(_, _) | Expr::TimeRef(_, _) => Some(ConcreteType::DateTime),
+
+        // `expr?` propagates the error/none and yields the success type. The
+        // inner expression's ConcreteType is `Result<T, E>` or `Option<T>`;
+        // unwrap to `T` so a `let v = (g() !! ctx)?` binding records `v: T`
+        // and a downstream `v + 1` resolves the operand (finding 5). An inner
+        // type that is neither Result nor Option (or unresolved) yields None —
+        // the `?` would be a compile error there anyway, no fabrication.
+        Expr::TryOperator(inner, _) => match concrete_type_for_expr(compiler, inner)? {
+            ConcreteType::Result(ok, _) => Some(*ok),
+            ConcreteType::Option(inner_ct) => Some(*inner_ct),
+            _ => None,
+        },
 
         // Anything else (member accesses, closures, …) is opaque until we
         // have richer side-tables. Returning None lets the resolver fall back

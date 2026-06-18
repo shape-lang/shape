@@ -933,8 +933,26 @@ impl TypeInferenceEngine {
                 // - Result<T> !! ctx -> Result<T>
                 // - Option<T>/T? !! ctx -> Result<T>
                 // - T !! ctx -> Result<T>
-                let success =
-                    Self::unwrap_result_or_option_type(left).unwrap_or_else(|| left.clone());
+                let success = if let Some(inner) = Self::unwrap_result_or_option_type(left) {
+                    inner
+                } else if Self::is_unresolved_var(left) {
+                    // The left operand is still an unresolved inference variable
+                    // (e.g. `g() !! ctx` where `g`'s return type has not been
+                    // resolved yet). Wrapping the bare var as `Result<Variable>`
+                    // and then unwrapping it via a following `?` would yield the
+                    // still-unconstrained var, dropping the success type entirely
+                    // (finding 5). Instead, link the operand to `Result<T>` by
+                    // pushing a constraint `left = Result<T, AnyError>` with a
+                    // fresh success var `T`, and thread `T` through. Once `g`'s
+                    // return type resolves, `T` resolves with it — so
+                    // `(g() !! ctx)?` yields `g`'s success type.
+                    let success_var = self.fresh_type_var();
+                    let constrained = self.wrap_in_result(success_var.clone());
+                    self.push_constraint_with_origin(left.clone(), constrained, span);
+                    success_var
+                } else {
+                    left.clone()
+                };
                 Ok(self.wrap_in_result(success))
             }
 
