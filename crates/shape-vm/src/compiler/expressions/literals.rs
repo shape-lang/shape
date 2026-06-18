@@ -19,12 +19,14 @@ impl BytecodeCompiler {
         self.last_expr_type_info = match lit {
             Literal::String(_) => Some(VariableTypeInfo::named("string".to_string())),
             Literal::Bool(_) => Some(VariableTypeInfo::named("bool".to_string())),
-            Literal::Char(_) => Some(VariableTypeInfo::named("char".to_string())),
             _ => None,
         };
-        // Track numeric type for typed opcode emission
+        // Track numeric type for typed opcode emission. A char literal IS its
+        // integer code point (operators.mdx "Character Literals") — track it as
+        // a plain `int` so `'A' + 1`, `let c: int = 'A'`, and `arr['A' - 'A']`
+        // all flow through int typed-opcode dispatch. No distinct char type.
         self.last_expr_numeric_type = match lit {
-            Literal::Int(_) => Some(NumericType::Int),
+            Literal::Int(_) | Literal::Char(_) => Some(NumericType::Int),
             Literal::UInt(_) => Some(NumericType::IntWidth(shape_ast::IntWidth::U64)),
             Literal::TypedInt(_, w) => Some(NumericType::IntWidth(*w)),
             Literal::Number(_) => Some(NumericType::Number),

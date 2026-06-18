@@ -2028,7 +2028,8 @@ impl BytecodeCompiler {
                 Literal::Number(_) => "a number",
                 Literal::Decimal(_) => "a decimal",
                 Literal::String(_) | Literal::FormattedString { .. } => "a string",
-                Literal::Char(_) => "a char",
+                // A char literal IS an int code point (operators.mdx).
+                Literal::Char(_) => "an int",
                 Literal::Bool(_) => "a bool",
                 // `None`, `Unit`, `Timeframe` — non-callable values.
                 _ => "a literal value",

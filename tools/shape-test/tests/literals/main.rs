@@ -1,4 +1,5 @@
 mod bool_none;
+mod char_codepoint;
 mod datetime_literals;
 mod numbers;
 mod special;

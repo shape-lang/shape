@@ -38,7 +38,11 @@ impl TypeInferenceEngine {
             Literal::Number(_) => BuiltinTypes::number(),
             Literal::Decimal(_) => Type::Concrete(TypeAnnotation::Basic("decimal".to_string())),
             Literal::String(_) => BuiltinTypes::string(),
-            Literal::Char(_) => Type::Concrete(TypeAnnotation::Basic("char".to_string())),
+            // Character literals evaluate to their integer code point
+            // (operators.mdx "Character Literals" — the interop escape hatch).
+            // There is NO distinct `char` type: `'A'` IS the int 65, usable
+            // anywhere an `int` is. No char<->string coercion exists.
+            Literal::Char(_) => Type::Concrete(TypeAnnotation::Basic("int".to_string())),
             Literal::FormattedString { .. } => BuiltinTypes::string(),
             Literal::Bool(_) => BuiltinTypes::boolean(),
             // `None` is polymorphic: Option<T> for fresh T.

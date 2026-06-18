@@ -2129,7 +2129,9 @@ fn literal_concrete_type(literal: &shape_ast::ast::Literal) -> Option<ConcreteTy
         Literal::Number(_) => Some(ConcreteType::F64),
         Literal::Decimal(_) => Some(ConcreteType::Decimal),
         Literal::String(_) => Some(ConcreteType::String),
-        Literal::Char(_) => Some(ConcreteType::I8),
+        // A char literal IS its integer code point (operators.mdx). Code points
+        // range up to U+10FFFF, so they are `int` (i64), not i8.
+        Literal::Char(_) => Some(ConcreteType::I64),
         Literal::FormattedString { .. } => Some(ConcreteType::String),
         Literal::Bool(_) => Some(ConcreteType::Bool),
         Literal::None => None,

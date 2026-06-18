@@ -1905,16 +1905,13 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
                 // `NewDecimalV2` and prints correctly). VM == JIT.
                 Literal::Decimal(d) => MirConstant::Decimal(d.to_string()),
                 Literal::String(s) => MirConstant::Str(s.clone()),
-                // Phase 3 cluster-2 Round 4 cw-D-fam12 follow-up (instance 57,
-                // 2026-05-16). ADR-006 §2.7.5 amendment Round 19 S1.5: preserve
-                // the Char kind through MIR lowering so the JIT's
-                // `operand_slot_kind` / `infer_constant_kind` classifiers stamp
-                // `NativeKind::Char` and the `print` dispatch routes to
-                // `print_char(codepoint)` instead of `print_i64(codepoint)`.
-                // Pre-fix divergence: `print('A')` → JIT prints "65", VM prints
-                // "A". The pre-fix `MirConstant::Int(*c as i64)` was a
-                // §2.7.5-violating producer-site kind-source loss.
-                Literal::Char(c) => MirConstant::Char(*c),
+                // A char literal evaluates to its integer code point
+                // (operators.mdx "Character Literals" — the interop escape
+                // hatch). `'A'` IS the int 65; there is NO distinct char type.
+                // Lower to a plain int constant so VM and JIT both treat it as
+                // int (`print('A')` → "65" on BOTH paths). To get a 1-char
+                // STRING use a string literal "a" or `s[i]` instead.
+                Literal::Char(c) => MirConstant::Int(*c as i64),
                 Literal::FormattedString { .. } => unreachable!("handled above"),
                 Literal::Bool(v) => MirConstant::Bool(*v),
                 Literal::None => MirConstant::None,

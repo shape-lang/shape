@@ -26,7 +26,10 @@ impl BytecodeCompiler {
             Literal::Number(n) => Some(Constant::Number(*n)),
             Literal::Decimal(d) => Some(Constant::Decimal(*d)),
             Literal::String(s) => Some(Constant::String(s.clone())),
-            Literal::Char(c) => Some(Constant::Char(*c)),
+            // A char literal evaluates to its integer code point (operators.mdx
+            // "Character Literals"). `'A'` IS the int 65 — emit a plain int
+            // constant, not a distinct Char carrier. No char<->string coercion.
+            Literal::Char(c) => Some(Constant::Int(*c as i64)),
             Literal::FormattedString { .. } => unreachable!("handled above"),
             Literal::Bool(b) => Some(Constant::Bool(*b)),
             Literal::None => None,
