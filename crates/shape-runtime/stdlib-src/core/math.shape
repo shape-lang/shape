@@ -127,53 +127,66 @@ pub fn TAU() -> number {
 
 // ===== Trigonometry =====
 
+// STRICT-FLIP (v0.3.3, STAGE-F3 finding-8): these wrappers had NO return
+// annotation, so `build_imported_analysis_items`
+// (compiler_impl_reference_model.rs:1833) SKIPPED them from the inference env
+// (the OP0 soundness rule: an unannotated imported fn must not be modeled as an
+// unconstrained `any`-return). The skip erased the inline return type of every
+// expression-position call — `sin(x) + 1.0` failed the checker ("no method add
+// on the erased operand") and `1.0 * sin(x)` reached the VM with an untyped
+// receiver ("no method mul on Float64"). The concrete `(number) -> number`
+// signatures are verbatim the book spec (stdlib/native/math.mdx:75-84). Each is
+// backed by an `__intrinsic_*` that returns f64. int LITERAL args adopt the
+// `number` context losslessly (§4); an int VARIABLE arg needs an explicit `as`
+// cast (int != number never unify) — strict-correct.
+
 /// Return the sine of `x` in radians.
-pub fn sin(x) {
+pub fn sin(x: number) -> number {
     __intrinsic_sin(x)
 }
 
 /// Return the cosine of `x` in radians.
-pub fn cos(x) {
+pub fn cos(x: number) -> number {
     __intrinsic_cos(x)
 }
 
 /// Return the tangent of `x` in radians.
-pub fn tan(x) {
+pub fn tan(x: number) -> number {
     __intrinsic_tan(x)
 }
 
 /// Return the inverse sine of `x` in radians.
-pub fn asin(x) {
+pub fn asin(x: number) -> number {
     __intrinsic_asin(x)
 }
 
 /// Return the inverse cosine of `x` in radians.
-pub fn acos(x) {
+pub fn acos(x: number) -> number {
     __intrinsic_acos(x)
 }
 
 /// Return the inverse tangent of `x` in radians.
-pub fn atan(x) {
+pub fn atan(x: number) -> number {
     __intrinsic_atan(x)
 }
 
 /// Return the quadrant-aware inverse tangent of `y / x` in radians.
-pub fn atan2(y, x) {
+pub fn atan2(y: number, x: number) -> number {
     __intrinsic_atan2(y, x)
 }
 
 /// Return the hyperbolic sine of `x`.
-pub fn sinh(x) {
+pub fn sinh(x: number) -> number {
     __intrinsic_sinh(x)
 }
 
 /// Return the hyperbolic cosine of `x`.
-pub fn cosh(x) {
+pub fn cosh(x: number) -> number {
     __intrinsic_cosh(x)
 }
 
 /// Return the hyperbolic tangent of `x`.
-pub fn tanh(x) {
+pub fn tanh(x: number) -> number {
     __intrinsic_tanh(x)
 }
 

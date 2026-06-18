@@ -206,6 +206,83 @@ fn sinh_one() {
     .expect_number(1.0_f64.sinh());
 }
 
+// ===== STAGE-F3 finding-8: imported-wrapper inline return-type resolution =====
+//
+// Before the F3 fix the `std::core::math` trig wrappers (`sin`/`cos`/`atan2`/
+// `sinh`/…) carried NO return annotation, so `build_imported_analysis_items`
+// SKIPPED them from the inference env (OP0 soundness: no unconstrained
+// `any`-return). The skip erased the inline return type of every
+// expression-position call: `sin(x) + 1.0` failed the checker and
+// `1.0 * sin(x)` reached the VM with an untyped receiver ("no method mul on
+// Float64"). Annotating each wrapper `(number) -> number` (verbatim the book
+// spec) makes the inline return type resolve — both the compile-error and the
+// CallMethod-fallback runtime crash are gone. These cases put the imported
+// wrapper call in non-statement positions (binary-op operand, nested arg).
+
+#[test]
+fn f3_sin_wrapper_inline_add() {
+    // `sin(x) + 1.0` — wrapper result on the LHS of `+` must type as `number`.
+    ShapeTest::new(
+        r#"
+        from std::core::math use { sin }
+        let x = 0.5
+        sin(x) + 1.0
+    "#,
+    )
+    .expect_number(0.5_f64.sin() + 1.0);
+}
+
+#[test]
+fn f3_sin_wrapper_inline_mul() {
+    // `1.0 * sin(x)` — pre-fix this compiled then crashed "no method mul on
+    // Float64" because the wrapper return erased. Must now compute.
+    ShapeTest::new(
+        r#"
+        from std::core::math use { sin }
+        let x = 0.5
+        1.0 * sin(x)
+    "#,
+    )
+    .expect_number(1.0 * 0.5_f64.sin());
+}
+
+#[test]
+fn f3_atan2_wrapper_inline_mul() {
+    // `atan2(1.0, 1.0) * 2.0` = (pi/4) * 2 = pi/2.
+    ShapeTest::new(
+        r#"
+        from std::core::math use { atan2 }
+        atan2(1.0, 1.0) * 2.0
+    "#,
+    )
+    .expect_number(std::f64::consts::FRAC_PI_2);
+}
+
+#[test]
+fn f3_sinh_wrapper_inline_chain() {
+    // hyperbolic wrappers in an arithmetic chain.
+    ShapeTest::new(
+        r#"
+        from std::core::math use { sinh, cosh, tanh }
+        sinh(1.0) + cosh(1.0) - tanh(0.0)
+    "#,
+    )
+    .expect_number(1.0_f64.sinh() + 1.0_f64.cosh() - 0.0_f64.tanh());
+}
+
+#[test]
+fn f3_sin_wrapper_int_literal_adopts() {
+    // `sin(2)` — the int LITERAL adopts the wrapper's `number` param losslessly
+    // (§4 literal adoption); int != number is still preserved for variables.
+    ShapeTest::new(
+        r#"
+        from std::core::math use { sin }
+        sin(2)
+    "#,
+    )
+    .expect_number(2.0_f64.sin());
+}
+
 // TDD: PI constant is not yet a global
 #[test]
 fn pi_constant_approximation() {
