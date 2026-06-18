@@ -678,6 +678,29 @@ impl TypeInferenceEngine {
         }
     }
 
+    /// Auto-deref a reference operand for operator inference (finding 9,
+    /// ADR-006 §2.7.30). A `Borrow { inner }` operand (`&int`) is read THROUGH
+    /// the reference: the referent annotation is forwarded verbatim so
+    /// `let r = &x; r + 1` typechecks on `int`, mirroring the already
+    /// auto-derefing method dispatch (`r.len()`) and the
+    /// `advanced/ownership-deep-dive.mdx` "First-Class References" example
+    /// (`let val = r + 1` "reads through r via DerefLoad"). No coercion —
+    /// `int`/`number` separation untouched. This relaxes the engine's premature
+    /// "Borrow does not implement Numeric" pre-rejection so `r + 1` reaches the
+    /// bytecode layer, where the binding-vs-typed-param distinction is decided
+    /// from the operand EXPRESSION: a reference-BOUND identifier (`let r = &n`)
+    /// auto-derefs via its recorded referent type (`compiler/expressions/mod.rs`
+    /// `reference_referent_type_name`); a reference-MODE param (`&p`) already had
+    /// a correct deref path. The reference-TYPED-operand R4 rule
+    /// (`reference_typed_operand_span`, a separate pre-existing surface) is
+    /// orthogonal to this engine helper and unchanged by it.
+    fn deref_operand_for_operator(operand: &Type) -> Type {
+        if let Type::Concrete(TypeAnnotation::Borrow { inner, .. }) = operand {
+            return Self::deref_operand_for_operator(&Type::Concrete((**inner).clone()));
+        }
+        operand.clone()
+    }
+
     /// Infer type of binary operation
     ///
     /// Supports Option propagation: if either operand is Option<T>, the result is Option<T>.
@@ -688,6 +711,8 @@ impl TypeInferenceEngine {
         right: &Type,
         span: Span,
     ) -> TypeResult<Type> {
+        let left = &Self::deref_operand_for_operator(left);
+        let right = &Self::deref_operand_for_operator(right);
         match op {
             BinaryOp::Add => {
                 if let Some(merged) = Self::infer_object_add_type(left, right) {
@@ -988,6 +1013,7 @@ impl TypeInferenceEngine {
     ///
     /// Supports Option propagation: if operand is Option<T>, result is Option<ResultType>.
     pub(crate) fn infer_unary_op(&mut self, op: &UnaryOp, operand: &Type) -> TypeResult<Type> {
+        let operand = &Self::deref_operand_for_operator(operand);
         let inner = Self::unwrap_option_type(operand);
         let (effective_operand, is_optional) = match &inner {
             Some(t) => (t.clone(), true),

@@ -623,9 +623,83 @@ impl BytecodeCompiler {
             } else {
                 self.bind_reference_value_slot(slot, is_local, name, is_exclusive, borrow_id);
             }
+            // Record the referent's scalar type name so value-position reads of
+            // this reference binding (`r + 1`, `-r`) can auto-deref to the
+            // referent type for the strict-typing operand check and typed-opcode
+            // numeric stamping — mirroring the `r.len()` method auto-deref. The
+            // init expr is `&inner` / `&mut inner`; the referent type is
+            // `infer_expr_type(inner)`. Scalar referent names only (the operand
+            // arms that need this are numeric/bool/string/decimal). Forwarded
+            // verbatim — `&int` records `int`, no coercion.
+            self.record_reference_referent_type(slot, is_local, expr);
         } else {
             self.update_reference_binding_from_expr(slot, is_local, expr);
         }
+    }
+
+    /// Records the referent scalar type name for a first-class reference
+    /// binding (`let r = &n`). See `finish_reference_binding_from_expr` and
+    /// `reference_referent_type_name`.
+    fn record_reference_referent_type(
+        &mut self,
+        slot: u16,
+        is_local: bool,
+        expr: &shape_ast::ast::Expr,
+    ) {
+        if is_local {
+            self.reference_value_local_referent_type.remove(&slot);
+        } else {
+            self.reference_value_module_binding_referent_type
+                .remove(&slot);
+        }
+        let shape_ast::ast::Expr::Reference { expr: inner, .. } = expr else {
+            return;
+        };
+        let Ok(inner_ty) = self.infer_expr_type(inner) else {
+            return;
+        };
+        if let shape_runtime::type_system::Type::Concrete(
+            shape_ast::ast::TypeAnnotation::Basic(name),
+        ) = inner_ty
+        {
+            if is_local {
+                self.reference_value_local_referent_type.insert(slot, name);
+            } else {
+                self.reference_value_module_binding_referent_type
+                    .insert(slot, name);
+            }
+        }
+    }
+
+    /// Returns the recorded referent scalar type name for an identifier bound to
+    /// a first-class reference (`let r = &n` -> `int`), if any. Consulted by the
+    /// value-position auto-deref in `infer_expr_type` and the typed-opcode
+    /// numeric stamping in the identifier-load path.
+    pub(super) fn reference_referent_type_name(&self, name: &str) -> Option<String> {
+        if let Some(local_idx) = self.resolve_local(name) {
+            if let Some(tn) = self.reference_value_local_referent_type.get(&local_idx) {
+                return Some(tn.clone());
+            }
+        }
+        if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
+            if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+                if let Some(tn) = self
+                    .reference_value_module_binding_referent_type
+                    .get(&binding_idx)
+                {
+                    return Some(tn.clone());
+                }
+            }
+        }
+        if let Some(&binding_idx) = self.module_bindings.get(name) {
+            if let Some(tn) = self
+                .reference_value_module_binding_referent_type
+                .get(&binding_idx)
+            {
+                return Some(tn.clone());
+            }
+        }
+        None
     }
 
     pub(super) fn callable_pass_modes_from_expr(

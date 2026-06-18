@@ -1303,6 +1303,8 @@ impl BytecodeCompiler {
         let saved_reference_value_locals = std::mem::take(&mut self.reference_value_locals);
         let saved_exclusive_reference_value_locals =
             std::mem::take(&mut self.exclusive_reference_value_locals);
+        let saved_reference_value_local_referent_type =
+            std::mem::take(&mut self.reference_value_local_referent_type);
         let saved_reference_value_module_bindings = self.reference_value_module_bindings.clone();
         let saved_exclusive_reference_value_module_bindings =
             self.exclusive_reference_value_module_bindings.clone();
@@ -1403,6 +1405,7 @@ impl BytecodeCompiler {
         self.local_callable_closure_bodies.clear();
         self.reference_value_locals.clear();
         self.exclusive_reference_value_locals.clear();
+        self.reference_value_local_referent_type.clear();
         self.immutable_locals.clear();
         self.param_locals.clear();
         // v0.3 WS-6: per-function local ConcreteType table — local slot
@@ -1873,6 +1876,8 @@ impl BytecodeCompiler {
                         self.reference_value_locals = saved_reference_value_locals;
                         self.exclusive_reference_value_locals =
                             saved_exclusive_reference_value_locals;
+                        self.reference_value_local_referent_type =
+                            saved_reference_value_local_referent_type;
                         self.reference_value_module_bindings =
                             saved_reference_value_module_bindings;
                         self.exclusive_reference_value_module_bindings =
@@ -1997,6 +2002,7 @@ impl BytecodeCompiler {
         self.local_callable_closure_bodies = saved_local_callable_closure_bodies;
         self.reference_value_locals = saved_reference_value_locals;
         self.exclusive_reference_value_locals = saved_exclusive_reference_value_locals;
+        self.reference_value_local_referent_type = saved_reference_value_local_referent_type;
         self.reference_value_module_bindings = saved_reference_value_module_bindings;
         self.exclusive_reference_value_module_bindings =
             saved_exclusive_reference_value_module_bindings;

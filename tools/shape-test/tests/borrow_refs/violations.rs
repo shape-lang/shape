@@ -138,10 +138,16 @@ fn violation_ref_on_binary_expression() {
     .expect_run_err_contains("place expression");
 }
 
-// GAP-2 (ADR-006 §2.7.30 R1): `&a` in a value/operand position is a distinct
-// Borrow type (`&int`) that does NOT implement `Numeric`, so `f(&a) + &a` is
-// rejected (the `+ &a` operand is a reference, not a number). Was `expect_run_
-// err_contains("Cannot apply")` before `&expr` carried a Borrow type.
+// GAP-2 (ADR-006 §2.7.30 R1): a bare `&a` in operand position is a distinct
+// Borrow type (`&int`) — a fresh borrow, NOT a value read THROUGH a reference
+// binding — so `f(&a) + &a` is rejected (the `+ &a` operand is a reference, not
+// a number). The operator-level auto-deref (finding 9, `operator_deref.rs`) is
+// scoped to reference-BOUND identifiers read via `DerefLoad` (`let r = &a; r +
+// 1`); a bare `&a` operand carries no such read and is caught by the bytecode
+// `reference_operand_span` guard (`compiler/expressions/binary_ops.rs`) with the
+// "reference operand" diagnostic. The rejection (GAP-2) is preserved; only the
+// message moved from the inference-engine "Numeric" form to the more specific
+// bytecode guard form suggesting `*ref`.
 #[test]
 fn violation_ref_in_nested_expression() {
     ShapeTest::new(
@@ -151,7 +157,7 @@ fn violation_ref_in_nested_expression() {
         let b = f(&a) + &a
     "#,
     )
-    .expect_run_err_contains("Numeric");
+    .expect_run_err_contains("reference operand");
 }
 
 // GAP-2 (ADR-006 §2.7.30 R1): `&x` is a distinct Borrow type (`&bool`), NOT the

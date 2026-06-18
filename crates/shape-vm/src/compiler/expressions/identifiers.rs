@@ -109,6 +109,31 @@ impl BytecodeCompiler {
         }
     }
 
+    /// Map a referent scalar type name (`int` / `number` / `i8` / `decimal` …)
+    /// to the typed-opcode `NumericType`, for stamping `last_expr_numeric_type`
+    /// when a reference value binding (`let r = &n`) is read via `DerefLoad`.
+    /// Width-aware: `i8`/`u32`/… map to the matching `IntWidth`. Non-numeric
+    /// referent names (`bool`/`string`) return `None` — they carry no numeric
+    /// opcode kind (the strict-typing operand check resolves them via
+    /// `infer_expr_type` instead).
+    pub(in crate::compiler) fn referent_type_name_to_numeric_type(
+        name: &str,
+    ) -> Option<NumericType> {
+        if let Some(width) = shape_ast::IntWidth::from_name(name) {
+            return Some(NumericType::IntWidth(width));
+        }
+        if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(name) {
+            return Some(NumericType::Int);
+        }
+        if shape_runtime::type_system::BuiltinTypes::is_number_type_name(name) {
+            return Some(NumericType::Number);
+        }
+        match name {
+            "decimal" | "Decimal" => Some(NumericType::Decimal),
+            _ => None,
+        }
+    }
+
     /// Compile an identifier (variable or function reference)
     pub(in crate::compiler) fn compile_expr_identifier(
         &mut self,
@@ -247,6 +272,22 @@ impl BytecodeCompiler {
                     OpCode::DerefLoad,
                     Some(Operand::Local(local_idx)),
                 ));
+                // ADR-006 §2.7.30 (GapA) — JIT deopt for first-class reference
+                // value locals (`let r = &n`) read in value position (`r + 1`,
+                // `-r`). The VM `DerefLoad` reads the referent through the
+                // reference's stack-cell carrier; the JIT models such a borrow
+                // as a throwaway-stack-cell snapshot and, fed into a typed
+                // numeric opcode, reads the raw reference pointer instead of the
+                // referent (VM=6, JIT=<stack-pointer> observed). The ref-PARAM
+                // deref path has a dedicated JIT lowering (`ref_param_slots`
+                // short-circuit in `mir_compiler/rvalues.rs`) and is correct, so
+                // this is scoped to `reference_value_locals` only. Whole-program
+                // deopt to the interpreter preserves VM == JIT semantics —
+                // identical shape + flag as the `-> &T` escape-promote deopt at
+                // `function_calls.rs` (`has_reference_escape_promotion`). JIT
+                // stack-cell-reference deref lowering is the root-cause v0.4
+                // JIT-lowering followup.
+                self.program.has_reference_escape_promotion = true;
             } else {
                 let source_loc = self.span_to_source_location(span);
                 self.check_read_allowed_in_current_context(
@@ -365,6 +406,22 @@ impl BytecodeCompiler {
                 .get_local_type(local_idx)
                 .and_then(|info| info.storage_hint)
                 .and_then(Self::storage_hint_to_numeric_type);
+            // Reference value local read via `DerefLoad` (`r` for `let r = &n`):
+            // the loaded value IS the referent, so stamp the referent's numeric
+            // type for typed-opcode emission. The reference binding's own
+            // tracker slot carries no numeric storage hint, so without this a
+            // downstream `r + 1` falls to the strict-typing `unknown` operand
+            // error. Mirrors the value-position auto-deref already wired for
+            // method dispatch. Forwarded verbatim — `&int` stamps Int.
+            if (self.ref_locals.contains(&local_idx)
+                || self.reference_value_locals.contains(&local_idx))
+                && self.last_expr_numeric_type.is_none()
+            {
+                if let Some(referent) = self.reference_referent_type_name(name) {
+                    self.last_expr_numeric_type =
+                        Self::referent_type_name_to_numeric_type(&referent);
+                }
+            }
         } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
             let binding_idx = *self.module_bindings.get(&scoped_name).ok_or_else(|| {
                 ShapeError::RuntimeError {
@@ -442,6 +499,19 @@ impl BytecodeCompiler {
                 .get_binding_type(binding_idx)
                 .and_then(|info| info.storage_hint)
                 .and_then(Self::storage_hint_to_numeric_type);
+            // Reference value module binding read via `DerefLoad` (script-mode
+            // top-level `let r = &n`): stamp the referent's numeric type. See
+            // the sibling local-read path above.
+            if self
+                .reference_value_module_bindings
+                .contains(&binding_idx)
+                && self.last_expr_numeric_type.is_none()
+            {
+                if let Some(referent) = self.reference_referent_type_name(name) {
+                    self.last_expr_numeric_type =
+                        Self::referent_type_name_to_numeric_type(&referent);
+                }
+            }
         } else if let Some(func_idx) = self.find_function(name) {
             let resolved_name = self.program.functions[func_idx].name.clone();
 

@@ -1369,6 +1369,27 @@ impl BytecodeCompiler {
         use shape_runtime::type_system::Type;
 
         if let Expr::Identifier(name, _) = expr {
+            // ADR-006 §2.7.30 (GapA, sibling of the `-> &T` call deref below):
+            // an identifier bound to a reference value (`let r = &n`, or a
+            // `&mut` of a local) is read THROUGH the reference in value position
+            // — the bytecode loads it via `DerefLoad`. The reference binding's
+            // tracker entry carries no scalar type_name, so the strict-typing
+            // operand check (`r + 1`) would otherwise see `unknown`. Consult the
+            // referent type recorded at bind time (`reference_referent_type_name`,
+            // populated in `finish_reference_binding_from_expr`) and forward it
+            // verbatim, mirroring the already-auto-derefing method dispatch
+            // (`r.len()`). Scoped to reference-BOUND identifiers (`let r = &n`):
+            // a reference-TYPED param (`x: &int`) records no referent here and
+            // stays a clean R4 compile-reject (`reference_typed_operand_span` in
+            // `binary_ops.rs`). NOT a numeric coercion: `&int` -> `int`.
+            if let Some(referent) = self.reference_referent_type_name(name) {
+                if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(&referent)
+                    || shape_runtime::type_system::BuiltinTypes::is_number_type_name(&referent)
+                    || matches!(referent.as_str(), "bool" | "string" | "decimal" | "bigint")
+                {
+                    return Ok(Type::Concrete(TypeAnnotation::Basic(referent)));
+                }
+            }
             if let Some(type_name) = self.tracker_type_name_for_identifier(name) {
                 if matches!(type_name.as_str(), "DateTime" | "Duration" | "TimeSpan") {
                     return Ok(Type::Concrete(TypeAnnotation::Basic(type_name)));

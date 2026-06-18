@@ -3,6 +3,7 @@ mod borrow_scoping;
 mod complex;
 mod drop;
 mod infer;
+mod operator_deref;
 mod ref_params;
 mod soundness_guards;
 mod violations;

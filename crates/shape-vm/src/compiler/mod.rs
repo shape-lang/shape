@@ -1291,6 +1291,15 @@ pub struct BytecodeCompiler {
     pub(crate) reference_value_locals: HashSet<u16>,
     /// Subset of reference_value_locals that hold exclusive (`&mut`) references.
     pub(crate) exclusive_reference_value_locals: HashSet<u16>,
+    /// Referent scalar type name for a first-class reference binding
+    /// (`let r = &n` where `n: int` records `int`). Lets value-position reads
+    /// (`r + 1`, `-r`) auto-deref the reference to its referent type for the
+    /// strict-typing operand check and typed-opcode numeric stamping, mirroring
+    /// the `r.len()` method-dispatch auto-deref. Keyed by local slot.
+    pub(crate) reference_value_local_referent_type: HashMap<u16, String>,
+    /// As `reference_value_local_referent_type`, keyed by module-binding index
+    /// (script-mode top-level `let r = &n`).
+    pub(crate) reference_value_module_binding_referent_type: HashMap<u16, String>,
     /// Local variable indices declared as `const` (immutable binding).
     pub(crate) const_locals: HashSet<u16>,
     /// Module binding indices declared as `const` (immutable binding).
