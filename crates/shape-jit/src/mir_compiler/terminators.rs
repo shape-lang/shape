@@ -2098,6 +2098,41 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         extra_args: &[shape_vm::mir::types::Operand],
         destination: &shape_vm::mir::types::Place,
     ) -> Result<(), String> {
+        self.emit_user_trait_method_call_with_result_op(
+            method_name,
+            receiver_operands,
+            extra_args,
+            destination,
+            None,
+        )
+    }
+
+    /// As `emit_user_trait_method_call`, but applies a post-call transform to
+    /// the raw method result before writing the destination, so the JIT path
+    /// matches the VM bytecode path (`emit_cmp_result_comparison` /
+    /// `compile_typed_equality`'s `!=` negation in
+    /// `crates/shape-vm/src/compiler/expressions/binary_ops.rs`).
+    ///
+    /// `result_op`:
+    /// - `Some(BinOp::Lt|Le|Gt|Ge)` — the dispatched method is `Ord::cmp`
+    ///   returning a signed `int`; the operator lowers to `cmp(other) <op> 0`.
+    ///   We emit `icmp(<cc>, result, 0) -> bool` to mirror the VM's
+    ///   `LtInt`/`LteInt`/`GtInt`/`GteInt` against the pushed `0` constant.
+    /// - `Some(BinOp::Ne)` — the dispatched method is `Eq::eq` returning
+    ///   `bool`; `!=` lowers to `!eq(other)`. We emit `icmp(Equal, result, 0)`
+    ///   (result is the `eq` bool 0/1) to mirror the VM's post-dispatch
+    ///   negation.
+    /// - `None` (and `Some(BinOp::Eq)` / non-comparison ops) — write the raw
+    ///   method result unchanged (`==`, `Add`, `Sub`, `Mul`, ... return
+    ///   `Self`/`bool` directly).
+    pub(crate) fn emit_user_trait_method_call_with_result_op(
+        &mut self,
+        method_name: &str,
+        receiver_operands: &[shape_vm::mir::types::Operand],
+        extra_args: &[shape_vm::mir::types::Operand],
+        destination: &shape_vm::mir::types::Place,
+        result_op: Option<BinOp>,
+    ) -> Result<(), String> {
         let stack_base_offset = crate::context::STACK_OFFSET as i32;
         let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
 
@@ -2228,6 +2263,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
         self.builder.switch_to_block(err_continue_block);
         self.builder.seal_block(err_continue_block);
+
+        // VM-parity post-call transform. The bytecode path emits the raw
+        // `cmp`/`eq` method result and then applies a comparison-against-0
+        // (Ord) or a negation (`!=`). Mirror it here on `result` (an I64
+        // holding the signed `cmp` int for Ord, or the `eq` bool 0/1 for
+        // `!=`) so the JIT does not write the raw int/bool into the Bool
+        // destination. ADR-006: no coercion, no new opcode — this is the
+        // same `icmp(<cc>, x, 0)` the VM does via `LtInt`/`GteInt`/etc.
+        let result = match result_op {
+            Some(BinOp::Lt) | Some(BinOp::Le) | Some(BinOp::Gt) | Some(BinOp::Ge) => {
+                let cc = match result_op {
+                    Some(BinOp::Lt) => IntCC::SignedLessThan,
+                    Some(BinOp::Le) => IntCC::SignedLessThanOrEqual,
+                    Some(BinOp::Gt) => IntCC::SignedGreaterThan,
+                    Some(BinOp::Ge) => IntCC::SignedGreaterThanOrEqual,
+                    _ => unreachable!(),
+                };
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                // icmp yields an I8 native bool, matching the rvalues
+                // comparison lowering and the Bool slot ABI.
+                self.builder.ins().icmp(cc, result, zero)
+            }
+            Some(BinOp::Ne) => {
+                // `!=` == `!eq`. `result` is the `eq` bool (0/1) as I64;
+                // `result == 0` is the negation.
+                let zero = self.builder.ins().iconst(types::I64, 0);
+                self.builder.ins().icmp(IntCC::Equal, result, zero)
+            }
+            _ => result,
+        };
 
         // Write result to destination + reload referenced locals (per
         // the standard Call-terminator wind-down).

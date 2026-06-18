@@ -90,15 +90,29 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // a method-call equivalent (writing the destination place
                 // directly) and return early. Otherwise fall through to
                 // the standard `compile_rvalue` path.
-                if let Rvalue::BinaryOp(_, lhs, rhs) = rvalue {
+                if let Rvalue::BinaryOp(binop, lhs, rhs) = rvalue {
                     if let Some((method_name, _arg_count)) =
                         self.operator_trait_dispatch_sites.get(&stmt.span).cloned()
                     {
-                        self.emit_user_trait_method_call(
+                        // VM-parity: Ord comparisons dispatch `cmp` then
+                        // compare-against-0; `!=` dispatches `eq` then
+                        // negates. Thread the op so the JIT applies the
+                        // same post-transform (see
+                        // `emit_user_trait_method_call_with_result_op`).
+                        // `==`/`Add`/`Sub`/bitwise/... return their value
+                        // directly (result_op = None).
+                        let result_op = match binop {
+                            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Ne => {
+                                Some(*binop)
+                            }
+                            _ => None,
+                        };
+                        self.emit_user_trait_method_call_with_result_op(
                             &method_name,
                             std::slice::from_ref(lhs),
                             std::slice::from_ref(rhs),
                             place,
+                            result_op,
                         )?;
                         return Ok(());
                     }
