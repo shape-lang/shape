@@ -1705,6 +1705,26 @@ impl Default for BytecodeCompiler {
 mod compiler_impl_initialization;
 mod compiler_impl_reference_model;
 
+/// True when `program`'s top-level (module-scope) code contains a
+/// `comptime { ... }` block / `comptime for` in value or statement position.
+/// Functions are NOT descended into — a comptime block inside a `fn` body
+/// lowers to that function's own MIR, not the `top_level_mir` the JIT
+/// top-level strategy consumes.
+///
+/// The JIT executor calls this on the raw `Program` AST (before any bytecode
+/// compilation) so it can deopt a top-level-comptime program straight to the
+/// bytecode interpreter. That avoids compiling the program twice — once on the
+/// JIT path's `compile_program_for_inspection`, once on the `[jit-fallback]`
+/// re-compile — which would re-run a side-effecting comptime body's
+/// observable effects (`comptime { print(...) }`) a second time, diverging
+/// from `--mode vm` (exactly-once). See ADR-006 §2.7.14.
+pub fn program_has_top_level_comptime(program: &Program) -> bool {
+    program
+        .items
+        .iter()
+        .any(compiler_impl_reference_model::top_level_item_contains_comptime)
+}
+
 /// Infer effective reference parameters and mutation behavior without compiling bytecode.
 ///
 /// Returns `(inferred_ref_params, inferred_ref_mutates)` keyed by function name.

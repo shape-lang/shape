@@ -56,6 +56,92 @@ fn jit_preflight_accepts_all_builtins() {
     );
 }
 
+// -- R6 top-level comptime exactly-once (VM == JIT) ---------------------------
+
+/// R6: a side-effecting top-level `comptime { ... }` block must execute its
+/// observable side-effects EXACTLY ONCE under `--mode jit`, matching the VM
+/// (the oracle). Before the fix, the JIT path compiled the program twice —
+/// once at `compile_program_for_inspection` (firing `comptime { print(..) }`),
+/// then again on the `[jit-fallback]` re-compile after `compile_strategy`
+/// SURFACE-deopts the top-level comptime — so the comptime side-effect fired
+/// TWICE (`comptime { print("SIDE") } print("main")` printed "SIDE" twice).
+///
+/// The fix detects a top-level comptime in the raw `Program` AST in
+/// `JITExecutor::execute_program` and deopts to the bytecode interpreter
+/// BEFORE the first compile, so the program (and its comptime body) is
+/// compiled exactly once. These tests assert the load-bearing predicate
+/// (`shape_vm::compiler::program_has_top_level_comptime`) that drives that
+/// early deopt, plus VM==JIT result agreement.
+#[test]
+fn jit_r6_top_level_comptime_detected_for_early_deopt() {
+    // Side-effecting top-level comptime: must be detected so the JIT deopts
+    // BEFORE the (first) compile — otherwise the comptime body runs twice.
+    let src = "comptime { print(\"SIDE\") }\nprint(\"main\")\n";
+    let program = shape_ast::parse_program(src).expect("parse failed");
+    assert!(
+        shape_vm::compiler::program_has_top_level_comptime(&program),
+        "top-level side-effecting comptime must be detected for early deopt \
+         (else the comptime body's side-effects fire twice under --mode jit)"
+    );
+
+    // Pure (side-effect-free) top-level comptime is also detected — same
+    // early-deopt path; the difference is only that its double-run was
+    // previously invisible.
+    let pure = shape_ast::parse_program("let x = comptime { 3 + 4 }\nprint(x)\n")
+        .expect("parse failed");
+    assert!(
+        shape_vm::compiler::program_has_top_level_comptime(&pure),
+        "pure top-level comptime must take the same early-deopt path"
+    );
+
+    // A comptime block INSIDE a fn body lowers to that fn's own MIR, not the
+    // top-level MIR — it must NOT trigger the top-level early deopt (the JIT
+    // can still compile such programs).
+    let in_fn = shape_ast::parse_program("fn f() -> int { comptime { 1 + 1 } }\nprint(f())\n")
+        .expect("parse failed");
+    assert!(
+        !shape_vm::compiler::program_has_top_level_comptime(&in_fn),
+        "comptime inside a fn body is NOT top-level — must not force the \
+         top-level early deopt"
+    );
+
+    // A program with no comptime at all must not deopt on this account.
+    let none = shape_ast::parse_program("print(\"hi\")\n").expect("parse failed");
+    assert!(!shape_vm::compiler::program_has_top_level_comptime(&none));
+}
+
+/// R6: the JIT result of a side-effecting top-level comptime program agrees
+/// with the VM (no divergence in the program-return value either). The
+/// side-effect count itself is verified end-to-end by the CLI smoke
+/// (`comptime { print("SIDE") } print("main")` → `grep -c SIDE == 1` in both
+/// `--mode vm` and `--mode jit`).
+#[test]
+fn jit_r6_top_level_comptime_result_matches_vm() {
+    use shape_runtime::engine::ProgramExecutor as _;
+
+    let src = "comptime { print(\"SIDE\") }\nprint(\"main\")\nlet y = comptime { 40 + 2 }\ny\n";
+    let _ = initialize_shared_runtime();
+
+    // VM (oracle).
+    let vm_val = {
+        let mut engine = ShapeEngine::new().expect("engine creation failed");
+        let program = shape_ast::parse_program(src).expect("parse failed");
+        let mut vm = shape_vm::BytecodeExecutor::new();
+        vm.execute_program(&mut engine, &program)
+            .expect("VM execution failed")
+            .wire_value
+    };
+
+    // JIT (deopts to interpreter on the top-level comptime).
+    let jit_val = jit_eval(src);
+
+    assert_eq!(
+        format!("{:?}", vm_val),
+        format!("{:?}", jit_val),
+        "JIT result of a top-level-comptime program must match the VM oracle"
+    );
+}
+
 // -- Basic arithmetic ---------------------------------------------------------
 
 #[test]

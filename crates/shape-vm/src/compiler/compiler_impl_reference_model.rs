@@ -3087,7 +3087,7 @@ impl BytecodeCompiler {
 /// inside a `fn` body compiles to that function's own MIR, not the
 /// `top_level_mir` the JIT top-level strategy consumes. See
 /// `BytecodeProgram::top_level_has_comptime`.
-fn top_level_item_contains_comptime(item: &shape_ast::ast::Item) -> bool {
+pub fn top_level_item_contains_comptime(item: &shape_ast::ast::Item) -> bool {
     use shape_ast::ast::Item;
     match item {
         Item::Comptime(_, _) => true,

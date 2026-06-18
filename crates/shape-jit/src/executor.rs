@@ -73,6 +73,40 @@ impl ProgramExecutor for JITExecutor {
             return self.bytecode_executor.execute_program(engine, program);
         }
 
+        // R6 top-level-comptime exactly-once (ADR-006 §2.7.14): a top-level
+        // `comptime { ... }` block is executed for its side-effects at COMPILE
+        // time (`Item::Comptime` in `compiler/statements.rs`), emitting no
+        // runtime bytecode. The JIT path otherwise compiles the program TWICE:
+        // once at `compile_program_for_inspection` below (firing the comptime
+        // body's observable side-effects, e.g. `comptime { print("X") }`),
+        // then — because `compile_strategy` SURFACE-deopts any top-level
+        // comptime — a second time on the `[jit-fallback]` re-compile via
+        // `bytecode_executor.execute_program(engine, program)` (firing the same
+        // side-effects AGAIN). `--mode vm` compiles once, so the observable
+        // effect fired twice under `--mode jit` — a VM != JIT divergence
+        // (`comptime { print("SIDE") } print("main")` → JIT printed "SIDE"
+        // twice). The interpreter (VM) is the oracle: exactly-once.
+        //
+        // Deopt to the bytecode interpreter BEFORE the JIT path compiles the
+        // program at all. The interpreter compiles+runs the program exactly
+        // once (comptime side-effects fire once), matching `--mode vm`. This
+        // detection mirrors `compile_strategy`'s `top_level_has_comptime`
+        // surface-and-stop, hoisted ahead of the first compile so the comptime
+        // body is never re-evaluated. Pure (side-effect-free) comptime
+        // (`let x = comptime { 3 + 4 }`) took the same SURFACE-deopt before;
+        // the result is identical (interpreter runs the baked literal), only
+        // now without the wasted double-compile.
+        if shape_vm::compiler::program_has_top_level_comptime(program) {
+            tracing::info!(
+                target: "shape_jit::fallback",
+                function = "main",
+                reason = "top-level comptime block: deopt before compile to keep \
+                          comptime side-effects exactly-once (VM == JIT)",
+                "jit-fallback: top-level comptime, running under interpreter",
+            );
+            return self.bytecode_executor.execute_program(engine, program);
+        }
+
         // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
         // `tracing::enabled!` compiles away under `release_max_level_off`
         // (the default when the `jit-trace` Cargo feature is OFF), so this
