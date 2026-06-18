@@ -1796,47 +1796,48 @@ impl BytecodeCompiler {
                         //
                         // OP0 (embedded-stdlib let-bind): an imported function
                         // WITHOUT a return annotation (`pub fn sum(series) {
-                        // series.sum() }` in `std::core::math`) was previously
-                        // SKIPPED here. That left the name unresolved in the
-                        // inference env, so it only type-checked in the tolerated
-                        // statement-expression position (`print(sum(xs))`) and
-                        // failed in a let-initializer / nested arg (`let t =
-                        // sum(xs)` -> "Undefined function: 'sum'").
+                        // series.sum() }` in `std::core::math`) is registered so
+                        // its name resolves in EVERY use position (let-initializer,
+                        // nested arg), not only the tolerated statement-expression
+                        // position (`print(sum(xs))` previously worked while
+                        // `let t = sum(xs)` failed "Undefined function: 'sum'").
                         //
-                        // We must NOT fabricate a concrete return type (would
-                        // break `int != number` and the no-coercion rule, and we
-                        // can't infer the dep body here — its intrinsics aren't
-                        // visible). Instead, model the unknown return HM-style: a
-                        // FRESH type PARAMETER. The signature becomes
-                        // `fn sum<__ret>(series) -> __ret`, routed through the
-                        // existing generic-quantification path so EACH call site
-                        // instantiates a fresh, unconstrained return var. This
-                        // resolves the name in every use position without
-                        // asserting any concrete type. (The real return type is
-                        // still pinned at the bytecode-compiler layer.)
-                        let mut type_params = func.type_params.clone();
-                        let return_type = match func.return_type.clone() {
-                            Some(ret) => ret,
-                            None => {
-                                // Unique synthetic name (per imported symbol) so
-                                // multiple unannotated imports don't collide.
-                                let ret_param = format!("__ret_{}", sym.local_name);
-                                let tp = shape_ast::ast::TypeParam::Type {
-                                    name: ret_param.clone(),
-                                    span: shape_ast::ast::Span::DUMMY,
-                                    doc_comment: None,
-                                    default_type: None,
-                                    trait_bounds: Vec::new(),
-                                };
-                                type_params.get_or_insert_with(Vec::new).push(tp);
-                                shape_ast::ast::TypeAnnotation::Basic(ret_param)
-                            }
+                        // SOUNDNESS: we must NOT model the unknown return as an
+                        // unconstrained universally-quantified `__ret` parameter.
+                        // That is unsound — a `fn sum<__ret>(series) -> __ret`
+                        // signature lets the return unify with ANY annotation /
+                        // arithmetic context (`let s: string = sum(xs)`,
+                        // `int_val + sum(xs)`) with no error, then mis-runs /
+                        // traps at runtime. It behaves as an `any` sink and
+                        // breaks strict typing (`int != number`, no coercion).
+                        //
+                        // Nor can we inject the renamed FULL body to let the
+                        // checker infer the real return type: the analysis program
+                        // is the ROOT module's, where the dep body's gated
+                        // intrinsics (`__intrinsic_mean`) and sibling helpers are
+                        // not visible, so the body mis-fires "Undefined function".
+                        //
+                        // Resolving the genuine return type requires inferring the
+                        // dep body in the DEP module's own context (it has no
+                        // declared annotation to copy). That is a larger change;
+                        // until it lands, a function with no return annotation is
+                        // SKIPPED from the inference env (it still resolves at the
+                        // bytecode-compiler layer via `imported_names`, and the
+                        // checker tolerates an undefined call in the
+                        // statement-expression position). The let-initializer form
+                        // `let t = sum(xs)` is SURFACED as "Undefined function"
+                        // rather than silently admitted with an unsound `any`
+                        // return — strict typing takes priority over the
+                        // convenience form. Tracked: OP0 dep-context return-type
+                        // inference follow-up.
+                        let Some(return_type) = func.return_type.clone() else {
+                            continue;
                         };
                         let decl = shape_ast::ast::BuiltinFunctionDecl {
                             name: sym.local_name.clone(),
                             name_span: shape_ast::ast::Span::DUMMY,
                             doc_comment: None,
-                            type_params,
+                            type_params: func.type_params.clone(),
                             params: func.params.clone(),
                             return_type,
                         };

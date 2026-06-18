@@ -130,21 +130,23 @@ fn sign_negative_int() {
     .expect_number(-1.0);
 }
 
-// ===== OP0 (embedded-stdlib let-bind of a genuinely UNANNOTATED fn) =====
+// ===== OP0 (embedded-stdlib let-bind of a math helper) =====
 //
-// `pub fn sum(series) { series.sum() }` and `pub fn mean(series) {
-// __intrinsic_mean(series) }` in `std::core::math` have NO return annotation.
-// Before the OP0 fix, `build_imported_analysis_items` SKIPPED these, so the
-// name resolved only in the tolerated statement-expression position
-// (`print(sum(xs))`) and failed in a let-initializer with
-// "Undefined function: 'sum'". The book's core/math runnable example uses
-// `let total = sum([1.0, 2.0, 3.0])`.
+// The book (`stdlib/core/math.mdx`) documents `sum`/`mean`/`std`/`variance`/
+// `correlation`/`covariance`/`percentile`/`median`/`spread` as
+// `(Array<number>) -> number`. The stdlib source carries those exact
+// book-documented `(series: Array<number>) -> number` annotations, so the
+// imported signature resolves at EVERY use position (let-initializer, nested
+// arg) with the genuine `number` return type.
 //
-// Fix: an unannotated-return imported fn is registered as a signature with a
-// FRESH return type PARAMETER (`fn sum<__ret_sum>(series) -> __ret_sum`),
-// routed through the existing generic-quantification path. No fabricated
-// concrete type (would violate `int != number` / no-coercion); the real
-// return type is still pinned at the bytecode layer.
+// SOUNDNESS NOTE: a prior OP0 attempt left the helpers unannotated and
+// registered the import with a FRESH unconstrained return type PARAMETER
+// (`fn sum<__ret>(series) -> __ret`) to make the let-form resolve. That was
+// UNSOUND — the universally-quantified return unified with ANY context
+// (`let s: string = sum(xs)` and `int_val + sum(xs)` both compiled, then
+// mis-ran / trapped at runtime). It behaved as an `any` sink and broke strict
+// typing. The fix instead annotates the helpers per the book, giving a CONCRETE
+// `number` return — no `any`, `int != number` preserved, no coercion.
 
 #[test]
 fn sum_let_bound() {
@@ -170,8 +172,6 @@ fn mean_let_bound() {
     .expect_number(2.0);
 }
 
-// Stdlib fn let-bound then used in arithmetic (anchored by a concrete literal
-// operand). The let-binding's slot kind resolves so `total + 1.0` type-checks.
 #[test]
 fn sum_let_bound_then_arithmetic() {
     ShapeTest::new(
@@ -184,7 +184,6 @@ fn sum_let_bound_then_arithmetic() {
     .expect_number(7.0);
 }
 
-// The call-expression form (statement-expression position) still works.
 #[test]
 fn sum_call_form_still_resolves() {
     ShapeTest::new(
@@ -194,4 +193,32 @@ fn sum_call_form_still_resolves() {
     "#,
     )
     .expect_number(6.0);
+}
+
+// Adversarial: the helper's `number` return must NOT act as an `any` sink.
+// Assigning it to a `string` binding is a strict-typing error, not a silent
+// number-into-string-slot run (the old unsound `__ret` behavior).
+#[test]
+fn sum_result_not_an_any_sink_for_string() {
+    ShapeTest::new(
+        r#"
+        from std::core::math use { sum }
+        let bad: string = sum([1.0, 2.0, 3.0])
+        bad
+    "#,
+    )
+    .expect_run_err_contains("not compatible with string");
+}
+
+// Adversarial: `int + sum(xs)` must reject — `int != number`, no coercion.
+#[test]
+fn sum_result_does_not_coerce_int_to_number() {
+    ShapeTest::new(
+        r#"
+        from std::core::math use { sum }
+        let x: int = 1
+        x + sum([1.0, 2.0, 3.0])
+    "#,
+    )
+    .expect_run_err_contains("int is not compatible with number");
 }
