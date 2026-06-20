@@ -1,0 +1,19 @@
+// F2 (clone-keyword stage) — JIT struct move-then-read divergence fixture.
+//
+// `let q = p` whole-value-binds a struct (TypedObject); the MIR lowers it as
+// `Use(Move(Local(p)))`, which the JIT `compile_operand` NULLS to prevent a
+// double-drop. The VM ownership model keeps `p` live (Clone — `p` is read
+// again), so the SUBSEQUENT `print(p.x)` read of `p` reads the JIT-nulled
+// slot and dereferences a null/corrupted TypedObject pointer -> SIGSEGV under
+// `--mode jit`, while `--mode vm` prints `1`.
+//
+// Pre-fix the JIT move-then-read divergence detector
+// (`mir_has_move_then_read_divergence`) only tracked reads keyed on a bare
+// `Place::Local`, so the field-projection later read `Copy(Field(Local(p),0))`
+// was missed and no whole-function deopt fired. The detector now keys reads on
+// the place ROOT local, so this program deopts to the interpreter — VM == JIT,
+// both print `1`.
+type P { x: int, name: string }
+let p = P { x: 1, name: "a" }
+let q = p
+print(p.x)

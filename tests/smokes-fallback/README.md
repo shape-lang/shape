@@ -41,6 +41,7 @@ JIT matches VM, AND the `[jit-fallback]` diagnostic emits exactly once.
 | `f2-preflight-shared-binding.shape` | Preflight rejection — `AllocSharedModuleBinding` / `LoadSharedModuleBinding` opcodes | `(<pre-existing VM err>, 1, 0)` | `(<same VM err>, 1, 1)` |
 | `f3-preflight-closure-capture.shape` | Preflight rejection — ClosureCapture missing function_id (MirToIR top-level preflight) | `(100, 0, 0)` | `(100, 0, 1)` |
 | `f4-kind-source-gap-print.shape` | Kind-source gap on `print` operand (Route A — distinct producer site from f1) | `(<VM output>, 0, 0)` | `(<VM output>, 0, 1)` |
+| `f6-struct-move-then-read.shape` | Move-then-read divergence — struct `let q = p` `Move`-sources `p`, projected later read `p.x` reads the JIT-nulled slot (ADR-006 §2.7.14) | `(1, 0, 0)` | `(1, 0, 1)` |
 
 `f1` is the canonical baseline preserved verbatim from the W12 close
 (`docs/cluster-audits/v0.3-w12-jit-mode-semantics-close.md` §3.2) — its

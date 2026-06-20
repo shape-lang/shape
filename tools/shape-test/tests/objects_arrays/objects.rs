@@ -94,6 +94,55 @@ print(b)"#;
 }
 
 // =====================================================================
+// Struct (TypedObject) move-then-read independence
+//
+// `let q = p` whole-value-binds a struct; reading `p` AFTER the bind must
+// still yield `p`'s original value (the VM ownership model keeps `p` live —
+// the bind is a Clone, not a destructive move). These regress the JIT
+// move-then-read divergence that SIGSEGV'd under `--mode jit`
+// (`mir_has_move_then_read_divergence` missed the field-projection later read
+// of `p`; now keyed on the place root local -> whole-function deopt).
+// =====================================================================
+
+#[test]
+fn struct_read_original_after_whole_value_bind() {
+    let code = r#"type P { x: int }
+let p = P { x: 1 }
+let q = p
+print(p.x)"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("1");
+}
+
+#[test]
+fn struct_read_original_after_bind_heap_field() {
+    let code = r#"type P { x: int, name: string }
+let p = P { x: 1, name: "a" }
+let q = p
+print(p.x)"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("1");
+}
+
+#[test]
+fn struct_read_both_alias_and_original() {
+    let code = r#"type P { x: int }
+let p = P { x: 7 }
+let q = p
+print(q.x)
+print(p.x)"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("7\n7");
+}
+
+#[test]
+fn struct_two_binds_then_read() {
+    let code = r#"type P { x: int }
+let p = P { x: 3 }
+let q = p
+let r = p
+print(r.x)"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("3");
+}
+
+// =====================================================================
 // Destructuring
 // =====================================================================
 

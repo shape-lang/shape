@@ -287,7 +287,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// bytecode interpreter (which honours the VM ownership model) runs the
     /// program and VM == JIT is preserved. Mirrors `mir_has_prior_move_of_slot`.
     pub(crate) fn mir_has_move_then_read_divergence(&self) -> bool {
-        use shape_vm::mir::types::{Operand, Rvalue, StatementKind, TerminatorKind};
+        use shape_vm::mir::types::{Operand, Place, Rvalue, StatementKind, TerminatorKind};
 
         // (block_idx, stmt_idx) of every Move/MoveExplicit source occurrence,
         // keyed by the moved slot. stmt_idx == usize::MAX marks a move that
@@ -308,13 +308,27 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                               si: usize,
                               moves: &mut HashMap<SlotId, Vec<(usize, usize)>>,
                               reads: &mut HashMap<SlotId, Vec<(usize, usize)>>| {
+            // v0.3.3 move-then-read divergence: a `let q = p` whole-value
+            // bind lowers as `Use(Move(Local(p)))`, which `compile_operand`
+            // nulls. A SUBSEQUENT read of `p` — including a field/element
+            // projection such as `print(p.x)` lowered as
+            // `Copy(Field(Local(p), 0))` — then reads the nulled slot and
+            // (for a struct) dereferences a null/corrupted pointer → SIGSEGV
+            // under JIT (VM keeps `p` live and prints correctly). The read
+            // tracking MUST therefore key on the place's ROOT local, not
+            // only on a bare `Place::Local`, or a projected later read is
+            // missed and the whole-function deopt never fires. (Pre-fix this
+            // arm only matched `Place::Local`, so `let q = p; print(p.x)`
+            // segfaulted instead of deopting.)
             match op {
-                Operand::Move(Place::Local(s)) | Operand::MoveExplicit(Place::Local(s)) => {
-                    moves.entry(*s).or_default().push((bi, si));
-                    reads.entry(*s).or_default().push((bi, si));
+                Operand::Move(place) | Operand::MoveExplicit(place) => {
+                    if let Place::Local(s) = place {
+                        moves.entry(*s).or_default().push((bi, si));
+                    }
+                    reads.entry(place.root_local()).or_default().push((bi, si));
                 }
-                Operand::Copy(Place::Local(s)) => {
-                    reads.entry(*s).or_default().push((bi, si));
+                Operand::Copy(place) => {
+                    reads.entry(place.root_local()).or_default().push((bi, si));
                 }
                 _ => {}
             }
@@ -338,11 +352,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         record_operand(op, bi, si, moves, reads);
                     }
                 }
-                // A borrow reads the slot's value (the JIT loads it).
-                Rvalue::Borrow(_, Place::Local(s)) => {
-                    reads.entry(*s).or_default().push((bi, si));
+                // A borrow reads the slot's value (the JIT loads it). Key on
+                // the root local so a projected borrow (`&p.x`) still counts
+                // as a later read of `p`.
+                Rvalue::Borrow(_, place) => {
+                    reads.entry(place.root_local()).or_default().push((bi, si));
                 }
-                Rvalue::Borrow(_, _) => {}
                 Rvalue::EnumTest { operand, .. }
                 | Rvalue::EnumPayload { operand, .. }
                 | Rvalue::TypePatternTest { operand, .. }
@@ -403,16 +418,22 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             let empty = Vec::new();
             let slot_reinits = reinits.get(slot).unwrap_or(&empty);
             for &(rb, rs) in slot_reads {
-                // The move site reads the value before nulling — that's not a
-                // "later read"; skip exact-location matches.
-                if move_sites.contains(&(rb, rs)) {
-                    continue;
-                }
                 // Is there a move that this read can observe the null of?
                 // Conservative: any move in a DIFFERENT block, or an earlier
                 // move in the SAME block, is a divergence unless a same-block
                 // reinit sits strictly between the move and the read.
                 for &(mb, ms) in move_sites {
+                    // A move site reads the value before nulling — it is not a
+                    // "later read" of ITSELF. Exclude only the move at this
+                    // exact location; a move at a DIFFERENT location is still a
+                    // later read that can observe a prior move's null. (Pre-fix
+                    // this skipped the read against ALL moves when the read sat
+                    // on any move site, so `let q = p; let r = p` — two
+                    // consecutive whole-value moves of `p` — was missed and the
+                    // second move read the JIT-nulled `p` → SIGSEGV.)
+                    if (mb, ms) == (rb, rs) {
+                        continue;
+                    }
                     let observable = if mb != rb {
                         // Cross-block: the read may execute after the move on
                         // some CFG path (including loop back-edges). Deopt.
