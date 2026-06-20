@@ -2942,6 +2942,52 @@ impl BytecodeCompiler {
         args: &[shape_ast::ast::Expr],
         expected_param_modes: Option<&[ParamPassMode]>,
     ) -> Result<Vec<(u16, u16)>> {
+        self.compile_call_args_with_param_types(args, expected_param_modes, None)
+    }
+
+    /// STAGE F4: is this annotation an `Array<T>` / `T[]` shape (the only param
+    /// shape for which a bare `[]` argument is type-correct)? Used to decide
+    /// whether an unprovable-element bare-`[]` arg gets a clean array-construction
+    /// compile-error vs. falls through to the generic empty-array handling.
+    fn annotation_is_array_shaped(ann: &TypeAnnotation) -> bool {
+        matches!(
+            ann,
+            TypeAnnotation::Array(_)
+        ) || matches!(
+            ann,
+            TypeAnnotation::Generic { name, args }
+                if name.as_str() == "Array" && args.len() == 1
+        )
+    }
+
+    /// STAGE F4 (strict-flip, 2026-06-20): variant of [`Self::compile_call_args`]
+    /// that ALSO threads the callee's declared parameter type-annotations so a
+    /// bare empty-array argument (`[]`) in CALL-ARGUMENT position can construct a
+    /// valid typed empty `TypedArray<T>` for the param's declared `Array<T>`
+    /// element type.
+    ///
+    /// Background: a bare `[]` literal carries no element type of its own. In a
+    /// `let arr: Array<int> = []` binding the element kind is threaded from the
+    /// annotation via `pending_variable_typed_array_kind`, which the empty-array
+    /// branch of `compile_expr_array` consumes (collections.rs typed_kind path)
+    /// to emit the typed allocator (`NewTypedArrayI64(0)`). In CALL-ARGUMENT
+    /// position there was no such hand-off, so `compile_expr([])` fell through to
+    /// the placeholder `NewArray(0)` which SURFACEs `op_new_array(0)`
+    /// NotImplemented at runtime. Here we set the same producer-side stamp
+    /// (`pending_variable_typed_array_kind`, ADR-006 §2.7.5) from the param's
+    /// `Array<T>` annotation for exactly the bare-`[]` arg, restoring it after
+    /// the arg compiles. When the param element type is unprovable
+    /// (`resolve_typed_array_kind_from_annotation` returns `None`, e.g. a generic
+    /// type var, `Array<string>` non-typed-scalar carrier, etc.) the bare `[]`
+    /// falls through to the empty-array branch, which surface-and-stops with a
+    /// CLEAN compile-error — never a mid-program `op_new_array` SURFACE. No
+    /// bit-reinterpret, no TypedArrayData, no Bool-default.
+    pub(super) fn compile_call_args_with_param_types(
+        &mut self,
+        args: &[shape_ast::ast::Expr],
+        expected_param_modes: Option<&[ParamPassMode]>,
+        expected_param_annotations: Option<&[Option<TypeAnnotation>]>,
+    ) -> Result<Vec<(u16, u16)>> {
         self.call_arg_module_binding_ref_writebacks.push(Vec::new());
 
         let mut first_error: Option<ShapeError> = None;
@@ -2979,7 +3025,62 @@ impl BytecodeCompiler {
                         })
                     } else {
                         self.plan_flexible_binding_escape_from_expr(arg);
-                        self.compile_expr(arg)
+                        // STAGE F4: a bare empty-array arg (`[]`) gets its element
+                        // kind from the callee's declared `Array<T>` param
+                        // annotation (producer-side stamp, ADR-006 §2.7.5). Save /
+                        // restore so the hand-off does not leak into a sibling arg.
+                        let is_bare_empty_array = matches!(
+                            arg,
+                            shape_ast::ast::Expr::Array(elements, _) if elements.is_empty()
+                        );
+                        if is_bare_empty_array {
+                            let param_ann = expected_param_annotations
+                                .and_then(|anns| anns.get(idx))
+                                .and_then(|ann| ann.as_ref());
+                            let param_kind = param_ann.and_then(|ann| {
+                                self.resolve_typed_array_kind_from_annotation(ann)
+                            });
+                            if let Some(kind) = param_kind {
+                                let saved = self.pending_variable_typed_array_kind;
+                                self.pending_variable_typed_array_kind = Some(kind);
+                                let r = self.compile_expr(arg);
+                                self.pending_variable_typed_array_kind = saved;
+                                r
+                            } else if param_ann
+                                .map(Self::annotation_is_array_shaped)
+                                .unwrap_or(false)
+                            {
+                                // The param IS `Array<T>` (so the bare `[]` is
+                                // type-correct) but the element kind has no
+                                // typed-array carrier the compiler can construct
+                                // here (e.g. `Array<Array<int>>`, an
+                                // unregistered element type). The empty-array
+                                // branch of `compile_expr` would otherwise emit a
+                                // placeholder `NewArray(0)` that SURFACEs
+                                // `op_new_array(0)` mid-program. Surface-and-stop
+                                // with a CLEAN compile-error instead (binders:
+                                // never a runtime SURFACE, never a Bool-default).
+                                Err(ShapeError::SemanticError {
+                                    message: format!(
+                                        "cannot construct an empty array for parameter #{} \
+                                         (`{}`): its element type has no typed-array carrier \
+                                         the compiler can construct from a bare `[]`. Bind the \
+                                         argument to an annotated local first \
+                                         (`let xs: Array<T> = []`) and pass `xs`, or pass a \
+                                         non-empty literal.",
+                                        idx + 1,
+                                        param_ann
+                                            .map(|a| a.to_type_string())
+                                            .unwrap_or_default(),
+                                    ),
+                                    location: Some(self.span_to_source_location(arg.span())),
+                                })
+                            } else {
+                                self.compile_expr(arg)
+                            }
+                        } else {
+                            self.compile_expr(arg)
+                        }
                     }
                 }
             };

@@ -239,6 +239,62 @@ fn parse_error_on_completely_broken_code() {
     ShapeTest::new("let = ;").expect_parse_err();
 }
 
+// =========================================================================
+// STAGE F4 (strict-flip, 2026-06-20): a bare empty-array argument (`[]`) in
+// CALL-ARGUMENT position whose param is `Array<T>` constructs a valid typed
+// empty `TypedArray<T>` from the callee's declared param element type, rather
+// than SURFACEing `op_new_array(0)` NotImplemented at runtime. When the element
+// type has no constructible typed-array carrier the bare `[]` surface-and-stops
+// with a CLEAN compile-error (never a mid-program runtime SURFACE).
+// =========================================================================
+
+#[test]
+fn empty_array_call_arg_scalar_param_constructs_typed_empty() {
+    let code = r#"
+fn g(xs: Array<int>) -> int { xs.length }
+print(g([]))
+"#;
+    ShapeTest::new(code)
+        .expect_no_semantic_diagnostics()
+        .expect_output("0");
+}
+
+#[test]
+fn nonempty_array_call_arg_still_works_after_f4() {
+    let code = r#"
+fn g(xs: Array<int>) -> int { xs.length }
+print(g([1, 2, 3]))
+"#;
+    ShapeTest::new(code)
+        .expect_no_semantic_diagnostics()
+        .expect_output("3");
+}
+
+#[test]
+fn empty_array_call_arg_struct_element_param_constructs_typed_empty() {
+    let code = r#"
+type Token { value: int }
+fn expect_err(label: string, toks: Array<Token>) -> int { toks.length }
+print(expect_err("empty", []))
+"#;
+    ShapeTest::new(code)
+        .expect_no_semantic_diagnostics()
+        .expect_output("0");
+}
+
+#[test]
+fn empty_array_call_arg_unconstructible_element_is_clean_compile_error() {
+    // `Array<Array<int>>` has no bare-`[]`-constructible typed-array carrier.
+    // The arg must surface a CLEAN compile error — NOT a runtime
+    // `op_new_array(0)` NotImplemented SURFACE.
+    let code = r#"
+fn nested(xs: Array<Array<int>>) -> int { xs.length }
+print(nested([]))
+"#;
+    ShapeTest::new(code)
+        .expect_semantic_diagnostic_contains("cannot construct an empty array for parameter");
+}
+
 #[test]
 fn inlay_hints_disabled_when_no_recoverable_ast() {
     // Invalid import syntax with no recoverable AST should not emit inlay hints.

@@ -1353,7 +1353,27 @@ impl BytecodeCompiler {
                 self.install_pending_closure_param_types_for_any_param_hof(&call_name, args);
             }
 
-            let writebacks = self.compile_call_args(args, Some(&pass_modes))?;
+            // STAGE F4 (strict-flip, 2026-06-20): thread the callee's declared
+            // param type-annotations so a bare empty-array argument (`[]`) whose
+            // param is `Array<T>` constructs a valid typed empty `TypedArray<T>`
+            // rather than SURFACEing `op_new_array(0)`. Looked up by the resolved
+            // `call_name` first (covers monomorphized / const-specialized
+            // callees), falling back to the surface `name`.
+            let param_annotations: Option<Vec<Option<shape_ast::ast::TypeAnnotation>>> = self
+                .function_defs
+                .get(&call_name)
+                .or_else(|| self.function_defs.get(name))
+                .map(|def| {
+                    def.params
+                        .iter()
+                        .map(|p| p.type_annotation.clone())
+                        .collect()
+                });
+            let writebacks = self.compile_call_args_with_param_types(
+                args,
+                Some(&pass_modes),
+                param_annotations.as_deref(),
+            )?;
             // The closure compile path takes() the hint, but if the closure
             // arg failed early (or there's no closure arg), clear any
             // residual hint to avoid leaking it into a later unrelated call.
