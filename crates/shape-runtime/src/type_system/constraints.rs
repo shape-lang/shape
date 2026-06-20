@@ -1021,10 +1021,47 @@ impl ConstraintSolver {
                                                 )))
                                             }
                                         } else {
-                                            // Expected type is a type variable —
-                                            // accept any field type (the field
-                                            // exists; the binder takes its type).
-                                            Ok(())
+                                            // STAGE F1 (strict-flip, 2026-06-20):
+                                            // the field RESULT is an unresolved type
+                                            // variable. This arm is reached ONLY by a
+                                            // field read on a value whose element type
+                                            // was back-propagated to a bare named
+                                            // struct `Reference` — i.e. the unannotated
+                                            // empty-`[]` accumulator grown by `push`
+                                            // (`let mut rs = []; rs = rs.push(Run{..})`,
+                                            // then `rs[0].field` / `for r in rs { r.field }`).
+                                            // The annotated (`let rs: Array<Run> = …`)
+                                            // and non-empty-literal (`let rs = [Run{..}]`)
+                                            // paths resolve the element STRUCTURALLY
+                                            // (`Object(..)`) and validate + carry the
+                                            // field type directly in `infer_property_access`,
+                                            // never reaching this arm. Accepting "any
+                                            // field type" here makes the field result an
+                                            // UNCONSTRAINED `any`: an ill-typed program
+                                            // (`let x: bool = rs[0].n` where `n: int`, or
+                                            // `rs[0].n + y` with `y: number`) is wrongly
+                                            // accepted, and `int`/`number` would silently
+                                            // unify (CLAUDE.md §Type-System-Rules / no
+                                            // `any` type / int != number). Per the
+                                            // no-untyped-array rule, an unannotated
+                                            // empty-`[]` accumulator has no DECLARED
+                                            // element type, so a field read off its
+                                            // element is unprovable WITHOUT annotation —
+                                            // surface the existing "annotate the array"
+                                            // guidance as a CLEAN compile-error rather
+                                            // than sink to `any`.
+                                            Err(TypeError::ConstraintViolation(format!(
+                                                "cannot infer the type of field '{}' read \
+                                                 off an element of `{}`: its element type \
+                                                 is only known from a `push` into an \
+                                                 unannotated empty array (`[]`), which has \
+                                                 no declared element type. Strict typing \
+                                                 requires a known element type — annotate \
+                                                 the array (`let rs: Array<{}> = []`).",
+                                                field,
+                                                path.name(),
+                                                path.name()
+                                            )))
                                         }
                                     }
                                     None => Err(TypeError::ConstraintViolation(format!(

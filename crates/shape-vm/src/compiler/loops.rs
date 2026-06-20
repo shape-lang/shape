@@ -2226,14 +2226,45 @@ mod tests {
 
     // T1 (strict-flip, 2026-06-20): type-erasure residuals (a)+(c)+(d).
 
+    fn compile_expect_err(code: &str) -> String {
+        let program = parse_program(code).unwrap();
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        match compiler.compile(&program) {
+            Ok(_) => panic!("expected compile error, but compilation succeeded"),
+            Err(e) => format!("{e:?}"),
+        }
+    }
+
     #[test]
-    fn t1a_struct_array_push_then_element_field_arith() {
-        // (a) `let mut rs = []; rs = rs.push(Run{..})` then `rs[0].len + 1` —
-        // the empty-then-push accumulator records its element struct identity so
-        // the indexed-element field read resolves in arithmetic position.
-        let result = compile_and_run_i64(
+    fn stage_f1_unannotated_empty_push_accumulator_field_read_rejected() {
+        // STAGE F1 (strict-flip, 2026-06-20): re-tighten the T1 any-sink.
+        // `let mut rs = []; rs = rs.push(Run{..})` then `rs[0].len` reads a
+        // field off an element whose type is known ONLY from the push into an
+        // UNANNOTATED empty array. Per the no-untyped-array / no-`any` rule the
+        // element field type is unprovable WITHOUT an annotation, so the field
+        // read is a CLEAN compile-error (NOT an `any`-typed result that would
+        // wrongly accept an ill-typed program). Previously this any-sinked:
+        // `rs[0].len + 1` compiled and `let x: bool = rs[0].len` was accepted.
+        let err = compile_expect_err(
             "type Run { value: int, len: int } \
              fn t() { let mut rs = []; rs = rs.push(Run { value: 0, len: 4 }); \
+                      rs[0].len + 1 } t()",
+        );
+        assert!(
+            err.contains("annotate the array") || err.contains("cannot infer the type of field"),
+            "expected the annotate-the-array compile error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn stage_f1_annotated_empty_push_accumulator_field_read_works() {
+        // STAGE F1: the SAME accumulator with a DECLARED `Array<Run>`
+        // annotation has a proven element type — the field read resolves and
+        // arithmetic works.
+        let result = compile_and_run_i64(
+            "type Run { value: int, len: int } \
+             fn t() { let mut rs: Array<Run> = []; rs = rs.push(Run { value: 0, len: 4 }); \
                       rs[0].len + 1 } t()",
         );
         assert_eq!(result, 5);
@@ -2241,7 +2272,9 @@ mod tests {
 
     #[test]
     fn t1a_struct_array_literal_element_field_arith() {
-        // (a) the literal-element form: `rs[0].len + 1` over `[Run{..}]`.
+        // (a) the literal-element form: `rs[0].len + 1` over `[Run{..}]` — the
+        // element type is PROVEN by the non-empty literal (structural Object
+        // path), so it stays accepted under STAGE F1.
         let result = compile_and_run_i64(
             "type Run { value: int, len: int } \
              fn t() { let rs = [Run { value: 0, len: 4 }]; rs[0].len + 1 } t()",
