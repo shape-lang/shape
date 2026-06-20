@@ -1242,6 +1242,17 @@ fn concrete_type_from_annotation(
                     Box::new(concrete_type_from_annotation(&args[0], bindings)?),
                     Box::new(concrete_type_from_annotation(&args[1], bindings)?),
                 )),
+                // T1 sub-case (b) (strict-flip, 2026-06-20): the `Result<T>`
+                // shorthand (implicit `AnyError`) is a single-arg `Result`.
+                // Without this arm a fn `-> Result<int>` resolved to `None`, so
+                // a `let v = (find_user(id) !! "ctx")?` binding (and its `v + 1`
+                // downstream) erased to `unknown`. The error type is the implicit
+                // AnyError; `?` discards it and the `!!` arm already maps it, so a
+                // `Void` err placeholder is sound (mirrors the `!!`/Option arms).
+                "Result" if args.len() == 1 => Some(ConcreteType::Result(
+                    Box::new(concrete_type_from_annotation(&args[0], bindings)?),
+                    Box::new(ConcreteType::Void),
+                )),
                 _ => None,
             }
         }
@@ -1303,6 +1314,14 @@ pub fn declared_annotation_concrete_type(
                 "Result" if args.len() == 2 => Some(ConcreteType::Result(
                     Box::new(declared_annotation_concrete_type(compiler, &args[0])?),
                     Box::new(declared_annotation_concrete_type(compiler, &args[1])?),
+                )),
+                // T1 sub-case (b) (strict-flip, 2026-06-20): `Result<T>` shorthand
+                // (implicit AnyError) — see the matching arm in
+                // `concrete_type_from_annotation`. Void err placeholder is sound
+                // (`?` discards the err type; the `!!` arm maps it).
+                "Result" if args.len() == 1 => Some(ConcreteType::Result(
+                    Box::new(declared_annotation_concrete_type(compiler, &args[0])?),
+                    Box::new(ConcreteType::Void),
                 )),
                 _ => None,
             }
@@ -1962,6 +1981,28 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
             _ => None,
         },
 
+        // T1 sub-case (a) (strict-flip, 2026-06-20): a field read whose object
+        // resolves to a NAMED struct `ConcreteType::Struct` (the load-bearing
+        // shape being `rs[0].len` where `rs: Vec<Run>` — the `IndexAccess` arm
+        // above already unwraps `Array<Run>` -> `Struct(Run)`). Without this arm
+        // the field-result `ConcreteType` was lost, so `rs[0].len + 1` saw the
+        // operand as `unknown` and the binop emitter rejected it. Resolve the
+        // struct's schema field type and map it to a `ConcreteType`. The struct
+        // name + schema field type ARE the proof (ADR-006 §2.7.5); an unnamed /
+        // unregistered struct, or a field with no statically-mappable kind,
+        // yields `None` (clean fall-through, no fabrication).
+        Expr::PropertyAccess {
+            object, property, ..
+        } => match concrete_type_for_expr(compiler, object)? {
+            ConcreteType::Struct(layout) => {
+                let struct_name = layout.name.as_ref()?;
+                let schema = compiler.type_tracker.schema_registry().get(struct_name)?;
+                let field = schema.get_field(property)?;
+                field_type_to_concrete(&field.field_type)
+            }
+            _ => None,
+        },
+
         // Anything else (member accesses, closures, …) is opaque until we
         // have richer side-tables. Returning None lets the resolver fall back
         // to the generic template.
@@ -2332,6 +2373,42 @@ fn identifier_concrete_type(compiler: &BytecodeCompiler, name: &str) -> Option<C
     None
 }
 
+/// T1 sub-case (a) (strict-flip, 2026-06-20): map a schema `FieldType` to its
+/// `ConcreteType` for the `PropertyAccess` field-result arm of
+/// `concrete_type_for_expr`. Scalars + arrays + named-object fields map; a
+/// field with no statically-mappable kind (`Any` / `HashMap` / `Set` / `Option`
+/// — slot bits are an `Arc<_>` pointer per ADR-006 §2.7.5) yields `None` so the
+/// caller falls through cleanly (no fabrication, no `Any` projection).
+fn field_type_to_concrete(ft: &shape_runtime::type_schema::FieldType) -> Option<ConcreteType> {
+    use shape_runtime::type_schema::FieldType;
+    Some(match ft {
+        FieldType::I64 => ConcreteType::I64,
+        FieldType::F64 => ConcreteType::F64,
+        FieldType::Bool => ConcreteType::Bool,
+        FieldType::String => ConcreteType::String,
+        FieldType::Decimal => ConcreteType::Decimal,
+        FieldType::I8 => ConcreteType::I8,
+        FieldType::I16 => ConcreteType::I16,
+        FieldType::I32 => ConcreteType::I32,
+        FieldType::U8 => ConcreteType::U8,
+        FieldType::U16 => ConcreteType::U16,
+        FieldType::U32 => ConcreteType::U32,
+        FieldType::U64 => ConcreteType::U64,
+        FieldType::Timestamp => ConcreteType::DateTime,
+        FieldType::Array(inner) => ConcreteType::Array(Box::new(field_type_to_concrete(inner)?)),
+        FieldType::Object(name) => {
+            use shape_value::v2::concrete_type::StructLayoutId;
+            ConcreteType::named_struct(name.as_str(), StructLayoutId(0))
+        }
+        // Pointer-backed / dynamic field kinds have no static scalar
+        // projection (ADR-006 §2.7.5) — fall through.
+        FieldType::Any
+        | FieldType::Option(_)
+        | FieldType::HashMap { .. }
+        | FieldType::Set(_) => return None,
+    })
+}
+
 /// Extract a `ConcreteType` from a type tracker type name string.
 ///
 /// Recognises patterns like `"Vec<int>"`, `"Vec<number>"`, `"Vec<string>"`,
@@ -2361,6 +2438,14 @@ fn concrete_type_from_type_name(type_name: Option<&str>) -> Option<ConcreteType>
         "string" => Some(ConcreteType::String),
         "bool" => Some(ConcreteType::Bool),
         "decimal" => Some(ConcreteType::Decimal),
+        // T1 sub-case (c) (strict-flip, 2026-06-20): a `DateTime`-typed binding
+        // (notably a fn PARAMETER `d1: DateTime`) records the tracker type-name
+        // "DateTime". Recognising it here lets `identifier_concrete_type` prove
+        // the receiver of `d1.unix_timestamp()` is a `DateTime`, so the
+        // `concrete_type_for_expr` DateTime instance-method arm stamps the
+        // method's `-> int` return — the ROOT-2 inline-method fix extended to a
+        // param receiver. The tracker name IS the proof (ADR-006 §2.7.5).
+        "DateTime" => Some(ConcreteType::DateTime),
         _ => None,
     }
 }

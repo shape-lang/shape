@@ -10,6 +10,20 @@ use std::sync::OnceLock;
 
 use super::{BuiltinNameResolution, BytecodeCompiler, DropKind, ParamPassMode, ResolutionScope};
 
+/// T1 sub-case (a) helper: a `ConcreteType` carries a source-level NAME (so a
+/// field read can resolve the struct/enum schema) when it is a named
+/// `Struct`/`Enum`. A placeholder (`name: None`) does not. Used by
+/// `record_pushed_element_concrete_type` to prefer a named element over a
+/// name-less placeholder previously stamped by the empty-accumulator finalizer.
+fn elem_ct_carries_name(ct: &shape_value::v2::ConcreteType) -> bool {
+    use shape_value::v2::ConcreteType;
+    match ct {
+        ConcreteType::Struct(layout) => layout.name.is_some(),
+        ConcreteType::Enum(layout) => layout.name.is_some(),
+        _ => false,
+    }
+}
+
 /// Phase V1.1D: default-on ownership-aware local opcodes.
 ///
 /// When `true`, the compiler emits the ownership-aware `MoveLocal` /
@@ -3946,7 +3960,151 @@ impl BytecodeCompiler {
         self.propagate_assignment_type_to_slot(binding_idx, false, true);
     }
 
-    /// Get the type tracker (for external configuration)
+    /// T1 sub-case (a) (strict-flip, 2026-06-20): record the ELEMENT
+    /// `ConcreteType` of an array accumulator `name` from the value pushed into
+    /// it (`name = name.push(value)`), so a later `name[i].field + 1`
+    /// (struct-array element field read in arithmetic) can prove the element —
+    /// and hence the field — type. The unannotated `let mut rs = []` records no
+    /// element type at the let site; this fills it in from the FIRST pushed
+    /// value's producer-side proof (`concrete_type_for_expr`), the same proof
+    /// the annotated `let mut rs: Array<Run> = []` path already records via
+    /// `declared_annotation_concrete_type`. The element side-table + the
+    /// `Vec<elem>` tracker name are what `identifier_concrete_type` and
+    /// `tracker_schema_id_for_expr` consult.
+    ///
+    /// Best-effort: an unprovable pushed value records nothing (surface-and-stop
+    /// preserved). Never overwrites an existing recorded element type (the
+    /// annotated path already won; a subsequent push of the same kind is a
+    /// no-op, and we do NOT let a differently-typed push silently re-stamp).
+    /// PER-SITE-ARM, int != number preserved (the element kind is the pushed
+    /// value's own proven kind, never widened).
+    pub(super) fn record_pushed_element_concrete_type(
+        &mut self,
+        name: &str,
+        pushed: &shape_ast::ast::Expr,
+    ) {
+        let elem_ct = match crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+            self, pushed,
+        ) {
+            Some(ct) => ct,
+            None => return,
+        };
+        let tracker_name = crate::compiler::patterns::binding::concrete_type_tracker_name(&elem_ct)
+            .map(|inner| format!("Vec<{inner}>"));
+        // The empty-array accumulator finalizer may already have stamped a
+        // NAME-LESS placeholder struct element (`Struct(name: None)`) from the
+        // first-push lowering. A placeholder erases the source-level struct
+        // identity, so a `rs[0].len` field read can't resolve. Overwrite with
+        // our NAMED element ConcreteType — strictly more informative — rather
+        // than leaving the placeholder in place (the named struct IS the proof,
+        // ADR-006 §2.7.5). For a non-named element we keep the existing entry.
+        use shape_value::v2::ConcreteType;
+        let more_informative = elem_ct_carries_name(&elem_ct);
+        // Whether an existing `Array(_)` whole-binding ConcreteType should be
+        // upgraded: it is a name-LESS placeholder struct/enum array and our
+        // element carries a name. `identifier_concrete_type` consults the
+        // whole-binding `*_concrete_types` table FIRST (before the element
+        // side-table), so a stale placeholder array there shadows our named
+        // element unless we upgrade it in lockstep.
+        let array_needs_upgrade = |existing: &ConcreteType| -> bool {
+            more_informative
+                && matches!(existing, ConcreteType::Array(inner) if !elem_ct_carries_name(inner))
+        };
+        if let Some(local_idx) = self.resolve_local(name) {
+            match self.local_array_element_types.get(&local_idx) {
+                Some(existing) if !more_informative || elem_ct_carries_name(existing) => {}
+                _ => {
+                    self.local_array_element_types.insert(local_idx, elem_ct.clone());
+                }
+            }
+            if self
+                .current_function_local_concrete_types
+                .get(&local_idx)
+                .is_some_and(array_needs_upgrade)
+            {
+                self.current_function_local_concrete_types
+                    .insert(local_idx, ConcreteType::Array(Box::new(elem_ct.clone())));
+            }
+            if let Some(ref tn) = tracker_name {
+                self.set_local_type_info(local_idx, tn);
+            }
+            return;
+        }
+        let scoped_name = self
+            .resolve_scoped_module_binding_name(name)
+            .unwrap_or_else(|| name.to_string());
+        if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+            match self.module_binding_array_element_types.get(&binding_idx) {
+                Some(existing) if !more_informative || elem_ct_carries_name(existing) => {}
+                _ => {
+                    self.module_binding_array_element_types
+                        .insert(binding_idx, elem_ct.clone());
+                }
+            }
+            if self
+                .module_binding_concrete_types
+                .get(&binding_idx)
+                .is_some_and(array_needs_upgrade)
+            {
+                self.module_binding_concrete_types
+                    .insert(binding_idx, ConcreteType::Array(Box::new(elem_ct.clone())));
+            }
+            if let Some(ref tn) = tracker_name {
+                self.set_module_binding_type_info(binding_idx, tn);
+            }
+        }
+    }
+
+    /// T1 sub-case (d) (strict-flip, 2026-06-20): record the element OBJECT
+    /// field annotations for a binding `name` whose initializer is an ARRAY of
+    /// anonymous object LITERALS (`let points = [{x: 1, y: 2}, ...]`). Each
+    /// field's value-expression ConcreteType is the proof (ADR-006 §2.7.5);
+    /// resolved structurally from the first element object literal. Consumed by
+    /// `anonymous_object_element_fields` for a destructuring for-in over `name`.
+    /// A non-array / non-object-element / unprovable-field initializer records
+    /// nothing (surface-and-stop). int != number preserved (the field's own
+    /// proven scalar kind).
+    pub(super) fn record_binding_object_element_fields(
+        &mut self,
+        name: &str,
+        init: &shape_ast::ast::Expr,
+    ) {
+        use shape_ast::ast::{Expr, ObjectEntry, ObjectTypeField, TypeAnnotation};
+        let Expr::Array(elements, _) = init else {
+            return;
+        };
+        let Some(Expr::Object(entries, _)) = elements.first() else {
+            return;
+        };
+        let mut fields: Vec<ObjectTypeField> = Vec::new();
+        for entry in entries {
+            let ObjectEntry::Field { key, value, .. } = entry else {
+                // A spread makes the element shape non-uniform — bail entirely
+                // (no partial record).
+                return;
+            };
+            let ann = match crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                self, value,
+            )
+            .and_then(|ct| {
+                crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
+            }) {
+                Some(a) => a,
+                None => TypeAnnotation::Basic("unknown".to_string()),
+            };
+            fields.push(ObjectTypeField {
+                name: key.clone(),
+                optional: false,
+                type_annotation: ann,
+                annotations: vec![],
+            });
+        }
+        if !fields.is_empty() {
+            self.binding_object_element_fields
+                .insert(name.to_string(), fields);
+        }
+    }
+
     /// Resolve a local namespace name to its canonical module path.
     ///
     /// Checks `graph_namespace_map` first (populated by graph-driven compilation),

@@ -1727,6 +1727,29 @@ impl BytecodeCompiler {
                         return Ok(Type::Concrete(contract));
                     }
                 }
+                // T1 sub-case (a) (strict-flip, 2026-06-20): the schema-id path
+                // above only resolves an OBJECT that is an identifier with a
+                // tracked schema. A field read off a derived object —
+                // `rs[0].len` where `rs: Vec<Run>` — has an `IndexAccess`
+                // object, for which `tracker_schema_id_for_expr` returns None,
+                // so the field-result type erased and `rs[0].len + 1` rejected
+                // as `unknown + int`. Fall to the structural
+                // `concrete_type_for_expr`, whose `PropertyAccess` arm unwraps
+                // the object's `ConcreteType::Struct(Run)` and maps the schema
+                // field type. The recovered ConcreteType IS the proof (ADR-006
+                // §2.7.5); a non-struct object / unmappable field yields None
+                // and falls through to the engine (no fabrication).
+                if let Some(ct) =
+                    crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                        self, expr,
+                    )
+                {
+                    if let Some(ann) =
+                        crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
+                    {
+                        return Ok(Type::Concrete(ann));
+                    }
+                }
             }
         }
 

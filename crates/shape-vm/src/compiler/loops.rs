@@ -481,6 +481,62 @@ impl BytecodeCompiler {
                 // Destructure value into loop variable(s)
                 self.compile_destructure_pattern(pattern)?;
 
+                // T1 sub-case (d) (strict-flip, 2026-06-20): the STATEMENT-form
+                // for-in (`for {x, y} in points`) destructure-binds each field
+                // via `compile_destructure_pattern` but — unlike the expression-
+                // form `compile_for_expr` — never stamped the bound field
+                // locals' tracker types, so a body `total + x + y` rejected the
+                // destructured operands as `unknown`. Stamp each field from the
+                // element's type: a NAMED struct via the schema field type, or an
+                // ANONYMOUS object-literal element via its inferred field
+                // annotation (the shared inference engine resolved it). The
+                // element type IS the proof (ADR-006 §2.7.5); a field with no
+                // scalar tracker name stamps nothing (surface-and-stop).
+                if let shape_ast::ast::DestructurePattern::Object(fields) = pattern {
+                    let mut named_done = false;
+                    if let Some(shape_value::v2::ConcreteType::Struct(layout)) =
+                        self.iter_element_concrete_type(iter)
+                    {
+                        if let Some(struct_name) = layout.name.as_ref().map(|n| n.to_string()) {
+                            for f in fields {
+                                let binder =
+                                    f.pattern.as_identifier().unwrap_or(f.key.as_str()).to_string();
+                                if let Some(local_idx) = self.resolve_local(&binder) {
+                                    if let Some(tn) =
+                                        self.struct_field_tracker_type_name(&struct_name, &f.key)
+                                    {
+                                        self.set_local_type_info(local_idx, &tn);
+                                    }
+                                }
+                            }
+                            named_done = true;
+                        }
+                    }
+                    if !named_done {
+                        if let Some(elem_fields) =
+                            self.anonymous_object_element_fields(iter)
+                        {
+                            for f in fields {
+                                let binder =
+                                    f.pattern.as_identifier().unwrap_or(f.key.as_str()).to_string();
+                                if let Some(local_idx) = self.resolve_local(&binder) {
+                                    if let Some(tn) = elem_fields
+                                        .iter()
+                                        .find(|ef| ef.name == f.key)
+                                        .and_then(|ef| {
+                                            crate::compiler::loops::type_annotation_scalar_tracker_name(
+                                                &ef.type_annotation,
+                                            )
+                                        })
+                                    {
+                                        self.set_local_type_info(local_idx, &tn);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Increment index before body so continue jumps advance correctly
                 self.emit(Instruction::new(
                     OpCode::LoadLocal,
@@ -834,6 +890,7 @@ impl BytecodeCompiler {
         // element ConcreteType IS the proof (ADR-006 §2.7.5); a non-struct or
         // unresolvable element stamps nothing (surface-and-stop preserved).
         if is_object_destructure {
+            let mut stamped_via_named = false;
             if let Some(shape_value::v2::ConcreteType::Struct(layout)) =
                 self.iter_element_concrete_type(&for_expr.iterable)
             {
@@ -842,6 +899,32 @@ impl BytecodeCompiler {
                         if let Some(tn) =
                             self.struct_field_tracker_type_name(&struct_name, key)
                         {
+                            self.set_local_type_info(*local, &tn);
+                        }
+                    }
+                    stamped_via_named = true;
+                }
+            }
+            // T1 sub-case (d) (strict-flip, 2026-06-20): an ANONYMOUS
+            // object-literal element (`for {x, y} in [{x: 1, y: 2}]` /
+            // `for {x, y} in points` where `points = [{x:1,y:2}]`) has no
+            // registered struct NAME, so the named path above misses and the
+            // destructured fields erased — `x + y` rejected as
+            // `unknown + unknown`. Recover each field's tracker type from a
+            // representative element OBJECT LITERAL: the field-value expression's
+            // proven ConcreteType IS the proof (ADR-006 §2.7.5). A field with no
+            // statically-mappable kind stamps nothing (surface-and-stop). PER-
+            // SITE-ARM, int != number preserved (the field value's own kind).
+            if !stamped_via_named {
+                let af = self.anonymous_object_element_fields(&for_expr.iterable);
+                if let Some(elem_fields) = af
+                {
+                    for (key, local) in &destructure_fields {
+                        if let Some(tn) = elem_fields.iter().find(|f| f.name == *key).and_then(|f| {
+                            crate::compiler::loops::type_annotation_scalar_tracker_name(
+                                &f.type_annotation,
+                            )
+                        }) {
                             self.set_local_type_info(*local, &tn);
                         }
                     }
@@ -1695,6 +1778,58 @@ impl BytecodeCompiler {
         Some(name.to_string())
     }
 
+    /// T1 sub-case (d) (strict-flip, 2026-06-20): resolve the iterable of a
+    /// `for {x, y} in ITER` to its element's ANONYMOUS object field list, when
+    /// the element is a structural object (object-literal array) rather than a
+    /// named struct. Reads the SHARED inference engine's resolved iterable type
+    /// (the same engine that ran the full program pass, so `points`'s element
+    /// type `Object([{x:int},{y:int}])` is already solved) and unwraps one
+    /// array layer. Returns `None` for a non-array / non-object-element iterable
+    /// (the named-struct path handled those, or the binder stays untyped —
+    /// surface-and-stop). The resolved element annotation IS the proof
+    /// (ADR-006 §2.7.5); no fabrication.
+    pub(super) fn anonymous_object_element_fields(
+        &mut self,
+        iterable: &Expr,
+    ) -> Option<Vec<shape_ast::ast::ObjectTypeField>> {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+        // Resolve the iterable's type. `infer_expr_type` handles an inline array
+        // LITERAL iterable (`for {x,y} in [{x:1,y:2}]`). For an IDENTIFIER
+        // iterable bound at module scope (`let points = [...]; for {x,y} in
+        // points`) the compiler's shared inference engine env has no per-binding
+        // entry for a fresh `infer_expr` (it re-runs from an empty env and
+        // errors `UndefinedVariable`), so consult the engine env's already-
+        // solved scheme for the name and apply the pass's substitutions. Both
+        // are reading inference's own output, not fabricating.
+        // An identifier iterable bound to an anonymous object-literal array
+        // recorded its element field annotations at let-binding compile time
+        // (the inference engine env has no per-binding entry here). Consult that
+        // side-table first.
+        if let Expr::Identifier(name, _) = iterable {
+            if let Some(fields) = self.binding_object_element_fields.get(name) {
+                return Some(fields.clone());
+            }
+        }
+        let iter_ty = self.infer_expr_type(iterable).ok()?;
+        let elem_ann = match &iter_ty {
+            Type::Concrete(TypeAnnotation::Array(inner)) => (**inner).clone(),
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if args.len() == 1 && matches!(name.name(), "Array" | "Vec") =>
+            {
+                args[0].clone()
+            }
+            _ => return None,
+        };
+        // The element may still carry an unresolved structural object whose
+        // field annotations are concrete — return it. A non-object element
+        // (named struct handled elsewhere, or unresolved) yields None.
+        match elem_ann {
+            TypeAnnotation::Object(fields) => Some(fields),
+            _ => None,
+        }
+    }
+
     /// Phase 3e helper: infer the element type name of a `for x in ITER`
     /// iterator expression.
     ///
@@ -1883,6 +2018,31 @@ impl BytecodeCompiler {
     }
 }
 
+/// T1 sub-case (d) (strict-flip, 2026-06-20): map a scalar `TypeAnnotation`
+/// (an anonymous object field's declared/inferred type) to the type-tracker
+/// name the strict-typing binop emitter recognises. Returns `None` for a
+/// non-scalar annotation (array / object / unknown / type-var) — the
+/// destructured binder then stays untyped (surface-and-stop). Mirrors the
+/// scalar arms of `struct_field_tracker_type_name`; int != number preserved.
+pub(crate) fn type_annotation_scalar_tracker_name(
+    ann: &shape_ast::ast::TypeAnnotation,
+) -> Option<String> {
+    use shape_ast::ast::TypeAnnotation;
+    let name = match ann {
+        TypeAnnotation::Basic(n) => match n.as_str() {
+            "int" | "number" | "bool" | "string" | "decimal" | "bigint" | "i8" | "u8" | "i16"
+            | "u16" | "i32" | "u32" | "u64" | "DateTime" => n.as_str(),
+            _ => return None,
+        },
+        TypeAnnotation::Reference(path) if !path.is_qualified() => match path.name() {
+            "int" | "number" | "bool" | "string" | "decimal" | "bigint" => path.name(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(name.to_string())
+}
+
 // ADR-006 §2.7.4 — Phase 2c rebuild (R8 C1-temporal-lowering, 2026-05-23).
 //
 // The original suite asserted via `shape_value::ValueWordExt::as_i64`
@@ -2062,5 +2222,65 @@ mod tests {
             "fn dbl(x: int) { x * 2 } fn t() { let n = 5; dbl(n) + 1 } t()",
         );
         assert_eq!(result, 11);
+    }
+
+    // T1 (strict-flip, 2026-06-20): type-erasure residuals (a)+(c)+(d).
+
+    #[test]
+    fn t1a_struct_array_push_then_element_field_arith() {
+        // (a) `let mut rs = []; rs = rs.push(Run{..})` then `rs[0].len + 1` —
+        // the empty-then-push accumulator records its element struct identity so
+        // the indexed-element field read resolves in arithmetic position.
+        let result = compile_and_run_i64(
+            "type Run { value: int, len: int } \
+             fn t() { let mut rs = []; rs = rs.push(Run { value: 0, len: 4 }); \
+                      rs[0].len + 1 } t()",
+        );
+        assert_eq!(result, 5);
+    }
+
+    #[test]
+    fn t1a_struct_array_literal_element_field_arith() {
+        // (a) the literal-element form: `rs[0].len + 1` over `[Run{..}]`.
+        let result = compile_and_run_i64(
+            "type Run { value: int, len: int } \
+             fn t() { let rs = [Run { value: 0, len: 4 }]; rs[0].len + 1 } t()",
+        );
+        assert_eq!(result, 5);
+    }
+
+    #[test]
+    fn t1c_datetime_param_method_int_into_let_arith() {
+        // (c) an int-returning DateTime method on a DateTime PARAMETER flows
+        // into a let then arithmetic (ROOT-2 extended to a param receiver).
+        let result = compile_and_run_i64(
+            "fn days(d1: DateTime, d2: DateTime) { \
+                let s1 = d1.unix_timestamp(); let s2 = d2.unix_timestamp(); \
+                let diff = s2 - s1; diff / 86400 } \
+             fn t() { let a = DateTime.parse(\"2024-06-10T00:00:00Z\"); \
+                      let b = DateTime.parse(\"2024-06-15T00:00:00Z\"); days(a, b) } t()",
+        );
+        assert_eq!(result, 5);
+    }
+
+    #[test]
+    fn t1d_object_literal_array_destructure_field_arith() {
+        // (d) `for {x, y} in [{x:1, y:2}]` (ANONYMOUS object element) types each
+        // destructured field so `x + y` infers (pre-fix: `unknown + unknown`).
+        let result = compile_and_run_i64(
+            "fn t() { let mut s = 0; for {x, y} in [{x: 1, y: 2}, {x: 3, y: 4}] \
+                      { s = s + x + y }; s } t()",
+        );
+        assert_eq!(result, 10);
+    }
+
+    #[test]
+    fn t1d_object_literal_array_binding_destructure_field_arith() {
+        // (d) the identifier-bound form: `let pts = [{..}]; for {x,y} in pts`.
+        let result = compile_and_run_i64(
+            "fn t() { let pts = [{x: 1, y: 2}, {x: 3, y: 4}]; let mut s = 0; \
+                      for {x, y} in pts { s = s + x + y }; s } t()",
+        );
+        assert_eq!(result, 10);
     }
 }

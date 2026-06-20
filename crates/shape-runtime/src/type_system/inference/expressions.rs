@@ -1462,6 +1462,35 @@ impl TypeInferenceEngine {
                             self.env.define(binder, TypeScheme::mono(field_ty));
                         }
                         true
+                    } else if let Type::Concrete(TypeAnnotation::Object(elem_fields)) =
+                        &resolved_elem
+                    {
+                        // T1 sub-case (d) (strict-flip, 2026-06-20): an ANONYMOUS
+                        // object-literal element (`for {x, y} in [{x: 1, y: 2}]`)
+                        // has no registered struct name, so the struct-name path
+                        // above misses and the prior code bound the WHOLE object
+                        // type to each field — making `x + y` reject (`int` field
+                        // vs whole-object operand) / collapse the field to a
+                        // number-vs-int unification clash. Bind each destructured
+                        // field from the element's own recorded field annotation
+                        // (the object-literal inference at `Expr::Object` already
+                        // froze `1` -> `int`, ADR-006 §2.7.5). A field absent from
+                        // the element type, or a destructure key with no matching
+                        // field, falls back to the whole element type (parity,
+                        // no fabrication). PER-SITE-ARM, int != number preserved.
+                        for (key, sub) in fields {
+                            let binder = match sub {
+                                shape_ast::ast::Pattern::Identifier(n) => n.as_str(),
+                                _ => key.as_str(),
+                            };
+                            let field_ty = elem_fields
+                                .iter()
+                                .find(|f| &f.name == key)
+                                .map(|f| self.resolve_type_annotation(&f.type_annotation))
+                                .unwrap_or_else(|| element_type.clone());
+                            self.env.define(binder, TypeScheme::mono(field_ty));
+                        }
+                        true
                     } else {
                         false
                     }

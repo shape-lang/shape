@@ -987,6 +987,57 @@ impl ConstraintSolver {
                         // Now schema validation happens in TypeInferenceEngine::infer_property_access.
                         Ok(())
                     }
+                    // T1 sub-case (a) (strict-flip, 2026-06-20): a field access on
+                    // a value whose type resolved to a NAMED struct `Reference`
+                    // (e.g. `rs[0].len` where `rs: Vec<Run>` flows through the
+                    // `let mut rs = []; rs = rs.push(Run{..})` element-type
+                    // back-propagation, leaving the element type as
+                    // `Concrete(Reference(Run))` rather than the structural
+                    // `Object(..)` form). Resolve the struct's declared fields and
+                    // validate the named field — same registry the structural
+                    // `Object(..)` arm consults, mirroring the `Basic(name)`
+                    // tentative-accept for an unregistered name. A registered
+                    // struct missing the field is a real error; an unregistered
+                    // reference is accepted tentatively (runtime validates).
+                    Type::Concrete(TypeAnnotation::Reference(path)) => {
+                        match self.struct_fields(path.name()) {
+                            Some(struct_fields) => {
+                                match struct_fields.iter().find(|f| f.name == *field) {
+                                    Some(found_field) => {
+                                        if let Some(expected_ann) =
+                                            expected_field_type.to_annotation()
+                                        {
+                                            if self.unify_annotations(
+                                                &found_field.type_annotation,
+                                                &expected_ann,
+                                            )? {
+                                                Ok(())
+                                            } else {
+                                                Err(TypeError::ConstraintViolation(format!(
+                                                    "field '{}' has type {:?}, expected {:?}",
+                                                    field,
+                                                    found_field.type_annotation,
+                                                    expected_ann
+                                                )))
+                                            }
+                                        } else {
+                                            // Expected type is a type variable —
+                                            // accept any field type (the field
+                                            // exists; the binder takes its type).
+                                            Ok(())
+                                        }
+                                    }
+                                    None => Err(TypeError::ConstraintViolation(format!(
+                                        "{:?} does not have field '{}'",
+                                        ty, field
+                                    ))),
+                                }
+                            }
+                            // Not a registered struct (enum / alias / builtin) —
+                            // accept tentatively, parity with the Basic(name) arm.
+                            None => Ok(()),
+                        }
+                    }
                     _ => Err(TypeError::ConstraintViolation(format!(
                         "{:?} cannot have fields",
                         ty

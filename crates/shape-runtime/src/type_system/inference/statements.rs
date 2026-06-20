@@ -149,6 +149,23 @@ impl TypeInferenceEngine {
                 }
                 return;
             }
+            // T1 sub-case (d) (strict-flip, 2026-06-20): anonymous object-literal
+            // element (`for {x, y} in [{x: 1, y: 2}]`) has no registered struct
+            // name. Bind each destructured field from the element's own recorded
+            // field annotation (object-literal inference already froze the field
+            // types). Mirror of the `Expr::For` arm. PER-SITE-ARM, no fabrication.
+            if let Type::Concrete(TypeAnnotation::Object(elem_fields)) = &resolved_elem {
+                for field in fields {
+                    let binder = field.pattern.as_identifier().unwrap_or(&field.key);
+                    let field_ty = elem_fields
+                        .iter()
+                        .find(|f| f.name == field.key)
+                        .map(|f| self.resolve_type_annotation(&f.type_annotation))
+                        .unwrap_or_else(|| element_type.clone());
+                    self.env.define(binder, TypeScheme::mono(field_ty));
+                }
+                return;
+            }
         }
         for name in pattern.get_identifiers() {
             self.env

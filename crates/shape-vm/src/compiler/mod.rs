@@ -1209,6 +1209,18 @@ pub struct BytecodeCompiler {
 
     /// v2 Phase 3.2: per-module-binding array element type table.
     pub(crate) module_binding_array_element_types: HashMap<u16, shape_value::v2::ConcreteType>,
+
+    /// T1 sub-case (d) (strict-flip, 2026-06-20): per-binding-NAME element
+    /// OBJECT field annotations for an array bound to an ANONYMOUS object
+    /// literal (`let points = [{x: 1, y: 2}]`). Keyed by binding name (local or
+    /// module). Consumed by `anonymous_object_element_fields` so a destructuring
+    /// for-in over the binding (`for {x, y} in points`) can type each field —
+    /// the compiler's shared inference engine env has no per-binding entry at
+    /// compile time (popped scope), so this records the element field types at
+    /// let-binding compile time instead. The recorded annotation IS the proof
+    /// (ADR-006 §2.7.5); object-literal field inference already froze them.
+    pub(crate) binding_object_element_fields:
+        HashMap<String, Vec<shape_ast::ast::ObjectTypeField>>,
     /// Lexical names that will later need their binding value to remain a raw reference.
     /// This is only used to choose `Value` vs `PreserveRef` lowering for bindings; MIR
     /// remains the sole authority for borrow legality.

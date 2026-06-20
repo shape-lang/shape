@@ -471,6 +471,34 @@ print(v + 1)
 }
 
 #[test]
+fn t1b_context_op_then_try_result_shorthand_success_type() {
+    // T1 sub-case (b) (strict-flip, 2026-06-20): the `Result<T>` SHORTHAND
+    // (implicit AnyError, single type arg) `(find_user(id) !! ctx)?` must thread
+    // its success type so `user_id + 1` infers (pre-fix: `unknown + int` — the
+    // shorthand never resolved a ConcreteType). End-to-end fn-body shape from
+    // the gate repro.
+    let code = r#"
+fn find_user(id: int) -> Result<int> {
+  if id == 0 { return Err("no such user") }
+  return Ok(id * 10)
+}
+fn lookup_arith(id: int) -> Result<int> {
+  let user_id = (find_user(id) !! "User not found")?
+  return Ok(user_id + 1)
+}
+let r = lookup_arith(5)
+match r {
+  Ok(v) => print(f"ok {v}"),
+  Err(e) => print("err"),
+}
+"#;
+    ShapeTest::new(code)
+        .expect_no_semantic_diagnostics()
+        .expect_run_ok()
+        .expect_output_contains("ok 51");
+}
+
+#[test]
 fn context_op_then_try_still_attaches_context_on_err_path() {
     // The success-type threading must not lose the `!!` error-context on the
     // Err path: `g()` returns Err, `(g() !! ctx)?` early-returns the wrapped

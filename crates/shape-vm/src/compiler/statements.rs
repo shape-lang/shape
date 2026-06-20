@@ -5226,6 +5226,15 @@ impl BytecodeCompiler {
                         }
                         let binding_idx = self.get_or_create_module_binding(name);
 
+                        // T1 sub-case (d) (strict-flip, 2026-06-20): record the
+                        // element OBJECT field annotations for `let points =
+                        // [{x:1,y:2}]` so a downstream `for {x,y} in points`
+                        // destructure can type each field (the inference engine
+                        // env has no per-binding entry at compile time).
+                        if let Some(init_expr) = var_decl.value.as_ref() {
+                            self.record_binding_object_element_fields(name, init_expr);
+                        }
+
                         // Emit StoreModuleBindingTyped for width-typed bindings,
                         // otherwise emit regular StoreModuleBinding.
                         let used_typed_store = if let Some(TypeAnnotation::Basic(type_name)) =
@@ -5775,6 +5784,13 @@ impl BytecodeCompiler {
                                 var_decl.value.as_ref().map(|v| v.span()),
                             );
                         }
+                        // T1 sub-case (d) (strict-flip, 2026-06-20): local
+                        // `let pts = [{x:1,y:2}]` — record element object field
+                        // annotations for a downstream `for {x,y} in pts`
+                        // destructure (local equivalent of the module path).
+                        if let Some(init_expr) = var_decl.value.as_ref() {
+                            self.record_binding_object_element_fields(name, init_expr);
+                        }
                     }
                     // v0.3 WS-6b GAP B: record v2 typed-map kind for the
                     // local. The module-binding path above stamps
@@ -6084,6 +6100,24 @@ impl BytecodeCompiler {
                                         &args[0],
                                         Some(source_loc),
                                     )? {
+                                        // T1 sub-case (a) (strict-flip,
+                                        // 2026-06-20): record the accumulator's
+                                        // ELEMENT ConcreteType from the pushed
+                                        // value's producer-side proof. The
+                                        // unannotated `let mut rs = []` recorded
+                                        // no element type, so a later
+                                        // `rs[0].len + 1` (a struct-array element
+                                        // FIELD read in arithmetic) saw the
+                                        // element as `unknown` and rejected. The
+                                        // pushed `args[0]` ConcreteType IS the
+                                        // proof (ADR-006 §2.7.5); an unprovable
+                                        // element records nothing (surface-and-
+                                        // stop). PER-SITE-ARM, int != number
+                                        // preserved (the element kind is the
+                                        // value's own proven kind).
+                                        self.record_pushed_element_concrete_type(
+                                            name, &args[0],
+                                        );
                                         // The typed push left the (now-typed)
                                         // array on the stack; store it back into
                                         // the binding slot.
@@ -6116,6 +6150,10 @@ impl BytecodeCompiler {
                                                 numeric_type,
                                             );
                                         }
+                                        // T1 sub-case (a): see the first-push arm.
+                                        self.record_pushed_element_concrete_type(
+                                            name, &args[0],
+                                        );
                                         self.plan_flexible_binding_storage_from_expr(
                                             local_idx,
                                             true,
@@ -6137,6 +6175,10 @@ impl BytecodeCompiler {
                                                 numeric_type,
                                             );
                                         }
+                                        // T1 sub-case (a): see the first-push arm.
+                                        self.record_pushed_element_concrete_type(
+                                            name, &args[0],
+                                        );
                                         self.plan_flexible_binding_storage_from_expr(
                                             binding_idx,
                                             false,

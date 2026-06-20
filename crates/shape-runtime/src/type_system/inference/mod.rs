@@ -346,6 +346,20 @@ impl TypeInferenceEngine {
         self.type_var_gen.fresh_type()
     }
 
+    /// T1 sub-case (d) (strict-flip, 2026-06-20): the already-SOLVED type of a
+    /// binding `name`, as resolved by the completed inference pass. Reads the
+    /// env's stored scheme (the full-program pass left it bound) and applies the
+    /// pass's substitutions so any element/field type variables collapse to
+    /// their concrete forms. Used by the bytecode compiler to recover an
+    /// object-literal array's element field types for a destructuring for-in
+    /// over a module-scope binding — a fresh `infer_expr` on the bare name would
+    /// error `UndefinedVariable` (empty re-run env). Returns `None` when the
+    /// name is not bound (no fabrication).
+    pub fn resolved_binding_type(&self, name: &str) -> Option<Type> {
+        let scheme = self.env.lookup(name)?;
+        Some(self.unifier.apply_substitutions(&scheme.ty))
+    }
+
     /// Push a new function scope for fallibility tracking
     pub(crate) fn push_fallible_scope(&mut self) {
         self.fallible_scopes.push(false);

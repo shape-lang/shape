@@ -138,6 +138,7 @@ impl BytecodeCompiler {
             array_element_types: HashMap::new(),
             local_array_element_types: HashMap::new(),
             module_binding_array_element_types: HashMap::new(),
+            binding_object_element_fields: HashMap::new(),
             future_reference_use_name_scopes: Vec::new(),
             known_traits: std::collections::HashSet::new(),
             trait_defs: HashMap::new(),
