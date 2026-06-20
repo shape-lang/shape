@@ -491,6 +491,66 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         ));
                     }
 
+                    // ── STAGE-StringJIT jit-string-scalar-method-deopt ───────
+                    // CARRIER-SHAPE MISMATCH (CONFIRMED silent-wrong, rc=0).
+                    // The companion of the STAGE-M1 string-RETURNING-method
+                    // deopt above, for the SCALAR-returning string methods
+                    // (`length`/`len`/`indexOf`/`lastIndexOf`/`charCodeAt`/
+                    // `toNumber` → `box_number(.. as f64)`;
+                    // `contains`/`startsWith`/`endsWith`/`includes`/`isEmpty`/
+                    // `toBool` → `TAG_BOOL_*`). The M1 doc-comment's claim
+                    // that these scalar methods "keep JITing because the
+                    // trampoline's `box_number`/`TAG_BOOL` result matches the
+                    // destination's scalar kind" is WRONG: `box_number(n)` is
+                    // `f64::to_bits(n)` (a NaN-boxed f64, value_ffi.rs:287) and
+                    // `TAG_BOOL_*` is a tagged sentinel — NEITHER is a RAW
+                    // native scalar. The proven destination slot of an
+                    // `int`-returning method (`fn f(s) -> int { s.indexOf("l") }`)
+                    // is `NativeKind::Int64`, and `write_place` stores the raw
+                    // NaN-box bits into the int slot verbatim — no unbox. Result:
+                    // `s.indexOf("l")` → VM 2, JIT -4616189618054758400
+                    // (`f64::to_bits(2.0)` reinterpreted as i64), rc=0
+                    // silent-wrong (CONFIRMED W11b-F3 surfaced).
+                    //
+                    // Unboxing the trampoline result here (`bitcast f64`+
+                    // `fcvt_to_sint` for the int case, an `unbox_number`
+                    // followed by a width-narrowing conversion) would be a
+                    // Convert<X>To<Y> / IntToNumber carrier conversion — a
+                    // CLAUDE.md Forbidden pattern (the trampoline's f64
+                    // carrier and the slot's `Int64` carrier do not unify;
+                    // int != number never unify). Per "surface-and-stop, not
+                    // force": fail JIT compilation for EVERY method call on a
+                    // proven `string` receiver (the trampoline never produces
+                    // a raw native scalar / raw-Arc carrier for a string —
+                    // every `call_string_method` arm boxes), → whole-function
+                    // deopt to the bytecode interpreter, whose String-arm PHF
+                    // dispatch is correct (`--mode vm` returns the right
+                    // value). NO bit-reinterpret, NO Convert-opcode, NO
+                    // carrier rename, NO Bool-default. The proven receiver
+                    // `NativeKind::String` is the fabrication-free signal.
+                    if receiver_is_string {
+                        return Err(format!(
+                            "MirToIR: scalar-returning string method `.{}(...)` \
+                             on a proven `NativeKind::String` receiver has no \
+                             sound JIT codegen — the `jit_call_method` VM \
+                             trampoline boxes the scalar result via \
+                             `box_number(.. as f64)` (a NaN-boxed f64) or a \
+                             `TAG_BOOL_*` sentinel, NEITHER of which is the raw \
+                             native scalar the proven destination slot expects. \
+                             `write_place` stores the NaN-box bits verbatim into \
+                             the (e.g. `Int64`) slot → garbage (`s.indexOf(..)` \
+                             → VM 2, JIT -4616189618054758400, rc=0 \
+                             silent-wrong). Unboxing here would be a forbidden \
+                             Convert/IntToNumber carrier conversion (int != \
+                             number never unify); surface-and-stop per CLAUDE.md \
+                             \"surface-and-stop, not force\" → whole-function \
+                             deopt to the bytecode interpreter (correct \
+                             String-arm dispatch). STAGE-StringJIT \
+                             jit-string-scalar-method-deopt.",
+                            method_name
+                        ));
+                    }
+
                     // ── STAGE-F3 jit-vm-only-heap-receiver deopt ─────────────
                     // CARRIER-SHAPE MISMATCH (CONFIRMED machine-killer — the
                     // `fn f(d: DateTime) -> int { d.unix_timestamp() + 1 }` SIGSEGV

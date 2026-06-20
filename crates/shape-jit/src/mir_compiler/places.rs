@@ -1003,6 +1003,58 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(self.builder.use_var(*var))
             }
             Place::Field(base, field_idx) => {
+                // ── STAGE-StringJIT jit-string-property-deopt ────────────
+                // CARRIER-SHAPE MISMATCH (CONFIRMED silent-wrong, rc=0). A
+                // property read on a proven `string` receiver — the only
+                // shape today is `s.length` (MIR-lowered to
+                // `Copy(Place::Field(s, "length"))` at
+                // `mir/lowering/expr.rs:31`, NOT a method call). The JIT
+                // `Place::Field` arms below model ONLY TypedObject /
+                // typed-struct field reads: `try_resolve_field_byte_offset`
+                // has no entry for "length" on a string, so the read falls
+                // through to the schema-less `get_prop` FFI, which
+                // reinterprets the `Arc<String>` heap pointer as a
+                // TypedObject property map and returns garbage bits
+                // (`s.length` → VM 5, JIT 4816285147948504576). There is no
+                // JIT string-length field producer wired at this Field-read
+                // site (the only string-length codegen, `v2_string::
+                // jit_string_len`, is reachable only through the typed-array
+                // `.length()` fast path, which a string base does not take).
+                // Adding a bit-reinterpret / Convert-style string-length
+                // load here would be a CLAUDE.md Forbidden carrier fudge.
+                // Per "surface-and-stop, not force": fail JIT compilation
+                // (whole-function `Err` → bytecode-interpreter fall-through,
+                // whose String-arm `GetProp` dispatch is correct — verified
+                // `--mode vm` returns the right value). Same surface-and-stop
+                // shape as the `Place::Index` string-base deopt below + the
+                // STAGE-M1/F3 method-receiver deopts. The proven receiver
+                // `ConcreteType::String` is the fabrication-free signal
+                // (`index_base_is_string`, read from the threaded
+                // §2.7.5 `concrete_types`, not synthesized from bits). NO
+                // bit-reinterpret, NO carrier rename, NO Bool-default.
+                if self.index_base_is_string(base) {
+                    return Err(format!(
+                        "MirToIR: property read `.{}` on a proven `string` \
+                         receiver has no sound JIT codegen — the `Place::Field` \
+                         arms model TypedObject/typed-struct field reads only, \
+                         and a string base falls through to the schema-less \
+                         `get_prop` FFI which reinterprets the `Arc<String>` \
+                         pointer as a property map and returns garbage \
+                         (`s.length` → VM 5, JIT garbage, rc=0 silent-wrong). \
+                         No JIT string-property producer is wired at this \
+                         Field-read site; surface-and-stop per CLAUDE.md \
+                         \"surface-and-stop, not force\" → whole-function deopt \
+                         to the bytecode interpreter (correct String-arm \
+                         `GetProp` dispatch). STAGE-StringJIT \
+                         jit-string-property-deopt.",
+                        self.mir
+                            .field_name_table
+                            .get(field_idx)
+                            .map(|s| s.as_str())
+                            .unwrap_or("<field>"),
+                    ));
+                }
+
                 // v2 fast path: `arr.length` on a typed-array slot — emit a
                 // single inline `v2_array_len` load and sign-extend to i64.
                 if self.v2_typed_array_elem_kind(base).is_some() {

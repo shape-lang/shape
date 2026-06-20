@@ -986,3 +986,160 @@ acc
         }
     }
 }
+
+/// STAGE-StringJIT: string-receiver SCALAR results under JIT must equal the VM
+/// (never garbage). Two confirmed silent-wrong (rc=0) repros, both pre-existing:
+///   (1) `s.length` property read — MIR-lowered to `Copy(Field(s, "length"))`,
+///       which falls through to the schema-less `get_prop` FFI and returns
+///       garbage (`VM 5, JIT 4816285147948504576`). Fixed by the
+///       `read_place` Place::Field string-base deopt (`places.rs`).
+///   (2) `s.indexOf("l")` scalar method — the `jit_call_method` trampoline
+///       returns `box_number(2.0)` (a NaN-boxed f64) written verbatim into a
+///       proven-`Int64` slot (`VM 2, JIT -4616189618054758400`). Fixed by the
+///       STAGE-StringJIT scalar-method deopt (`terminators.rs`).
+/// Both deopt the WHOLE function to the bytecode interpreter, whose String-arm
+/// dispatch is correct — so the JIT-mode result equals the VM value.
+#[test]
+fn jit_string_length_property_deopts_to_correct_value() {
+    // Hot fn returning `s.length` directly (>= 100 calls → tier-up).
+    let result = jit_eval(
+        r#"
+fn slen(s: string) -> int { return s.length }
+let s = "hello"
+let mut acc = 0
+let mut i = 0
+while i < 200 { acc = slen(s); i = i + 1 }
+acc
+"#,
+    );
+    match result {
+        WireValue::Integer(n) | WireValue::I64(n) => assert_eq!(n, 5),
+        WireValue::Number(n) => assert!((n - 5.0).abs() < 1e-6, "got {n}"),
+        other => panic!("Expected Integer(5), got {other:?}"),
+    }
+}
+
+#[test]
+fn jit_string_indexof_scalar_method_deopts_to_correct_value() {
+    // indexOf with a found needle (-> 2) and a missing needle (-> -1).
+    let cases: &[(&str, i64)] = &[
+        (r#"s.indexOf("l")"#, 2),
+        (r#"s.indexOf("z")"#, -1),
+        ("s.length", 5),
+    ];
+    for (body, expected) in cases {
+        let src = format!(
+            r#"
+fn f(s: string) -> int {{ return {body} }}
+let s = "hello"
+let mut acc = 0
+let mut i = 0
+while i < 200 {{ acc = f(s); i = i + 1 }}
+acc
+"#,
+        );
+        match jit_eval(&src) {
+            WireValue::Integer(n) | WireValue::I64(n) => {
+                assert_eq!(n, *expected, "string scalar body `{body}` JIT mismatch")
+            }
+            WireValue::Number(n) => {
+                assert!((n - *expected as f64).abs() < 1e-6, "`{body}`: got {n}")
+            }
+            other => panic!("`{body}`: expected Integer({expected}), got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn jit_string_hot_loop_length_matches_vm() {
+    // A hot inner loop reading `s.length` each iteration (the property read is
+    // hit > 100 times inside `hotsum`); the whole fn deopts and the JIT-mode
+    // result equals the VM value. 50 iterations * 5 = 250.
+    let result = jit_eval(
+        r#"
+fn hotsum(s: string) -> int {
+    let mut a = 0
+    let mut j = 0
+    while j < 50 { a = a + s.length; j = j + 1 }
+    return a
+}
+let s = "hello"
+let mut acc = 0
+let mut i = 0
+while i < 200 { acc = hotsum(s); i = i + 1 }
+acc
+"#,
+    );
+    match result {
+        WireValue::Integer(n) | WireValue::I64(n) => assert_eq!(n, 250),
+        WireValue::Number(n) => assert!((n - 250.0).abs() < 1e-6, "got {n}"),
+        other => panic!("Expected Integer(250), got {other:?}"),
+    }
+}
+
+#[test]
+fn jit_string_method_string_and_bool_results_match_vm() {
+    // String-returning (charAt / slice) + bool-returning (contains) string
+    // methods on a hot fn also deopt cleanly and match the VM. `charAt(1)` of
+    // "hello" -> "e"; `slice(1,3)` -> "el"; `contains("ll")` -> true.
+    let str_cases: &[(&str, &str)] = &[
+        (r#"s.charAt(1)"#, "e"),
+        (r#"s.slice(1, 3)"#, "el"),
+    ];
+    for (body, expected) in str_cases {
+        let src = format!(
+            r#"
+fn f(s: string) -> string {{ return {body} }}
+let s = "hello"
+let mut acc = ""
+let mut i = 0
+while i < 200 {{ acc = f(s); i = i + 1 }}
+acc
+"#,
+        );
+        match jit_eval(&src) {
+            WireValue::String(v) => {
+                assert_eq!(v, *expected, "string method body `{body}` JIT mismatch")
+            }
+            other => panic!("`{body}`: expected String({expected:?}), got {other:?}"),
+        }
+    }
+
+    let result = jit_eval(
+        r#"
+fn f(s: string) -> bool { return s.contains("ll") }
+let s = "hello"
+let mut acc = false
+let mut i = 0
+while i < 200 { acc = f(s); i = i + 1 }
+acc
+"#,
+    );
+    match result {
+        WireValue::Bool(b) => assert!(b, "contains should be true"),
+        other => panic!("Expected Bool(true), got {other:?}"),
+    }
+}
+
+/// Guard against OVER-deopt: a pure-numeric hot fn (no string receiver) must
+/// still JIT-compile and produce the correct value. The string-receiver deopt
+/// gates are keyed on the proven `NativeKind::String` / `ConcreteType::String`
+/// receiver, so a numeric fn is unaffected.
+#[test]
+fn jit_numeric_fn_still_jits_after_string_deopt_gate() {
+    let result = jit_eval(
+        r#"
+fn addmul(x: int, y: int) -> int { return x * y + x - y }
+let mut r = 0
+let mut i = 0
+while i < 300 { r = addmul(i, 7); i = i + 1 }
+r
+"#,
+    );
+    match result {
+        // addmul(299, 7) = 299*7 + 299 - 7 = 2093 + 292 = 2385
+        WireValue::Integer(n) | WireValue::I64(n) => assert_eq!(n, 2385),
+        WireValue::Number(n) => assert!((n - 2385.0).abs() < 1e-6, "got {n}"),
+        other => panic!("Expected Integer(2385), got {other:?}"),
+    }
+}
