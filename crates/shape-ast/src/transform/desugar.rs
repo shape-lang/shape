@@ -5,7 +5,7 @@
 
 use crate::ast::{
     DestructurePattern, Expr, FromQueryExpr, FunctionParameter, Item, Literal, ObjectEntry,
-    Program, QueryClause, Span, Statement,
+    OwnershipModifier, Program, QueryClause, Span, Spanned, Statement, VariableDecl,
 };
 
 /// Desugar all high-level syntax in a program.
@@ -24,6 +24,7 @@ fn desugar_item(item: &mut Item) {
             }
         }
         Item::VariableDecl(decl, _) => {
+            desugar_clone_ownership(decl);
             if let Some(value) = &mut decl.value {
                 desugar_expr(value);
             }
@@ -106,6 +107,7 @@ fn desugar_statement(stmt: &mut Statement) {
     match stmt {
         Statement::Return(Some(expr), _) => desugar_expr(expr),
         Statement::VariableDecl(decl, _) => {
+            desugar_clone_ownership(decl);
             if let Some(value) = &mut decl.value {
                 desugar_expr(value);
             }
@@ -622,6 +624,30 @@ fn desugar_from_query(from_query: &FromQueryExpr, span: Span) -> Expr {
 }
 
 /// Create a method call expression
+/// Desugar the `clone` ownership keyword (`let b = clone a`) into the
+/// equivalent `.clone()` method call (`let b = a.clone()`), then reset the
+/// ownership modifier to `Inferred` so downstream lowering treats the binding
+/// as an ordinary initializer.
+///
+/// The `clone` KEYWORD form previously fell through every lowering path that
+/// consults `OwnershipModifier` only in the MIR/JIT tier, while the live
+/// bytecode-interpreter `Statement::VariableDecl` path ignored ownership
+/// entirely — so `let b = clone a` produced a shallow Arc alias instead of an
+/// independent value (mutating `b` mutated `a`). The book documents `clone a`
+/// and `a.clone()` as identical; routing through the proven `.clone()` method
+/// dispatch (deep-copy for arrays via `clone_array`) makes them so for both VM
+/// and JIT, with no new opcode and no carrier hand-rolling.
+fn desugar_clone_ownership(decl: &mut VariableDecl) {
+    if decl.ownership != OwnershipModifier::Clone {
+        return;
+    }
+    if let Some(init) = decl.value.take() {
+        let span = init.span();
+        decl.value = Some(method_call(init, "clone", vec![], span));
+    }
+    decl.ownership = OwnershipModifier::Inferred;
+}
+
 fn method_call(receiver: Expr, method: &str, args: Vec<Expr>, span: Span) -> Expr {
     Expr::MethodCall {
         receiver: Box::new(receiver),

@@ -605,3 +605,41 @@ fn array_destructuring_in_function_param() {
 print(sum_pair([10, 20]))"#;
     ShapeTest::new(code).expect_run_ok().expect_output("30");
 }
+
+// =====================================================================
+// `clone` keyword (ownership modifier) — deep copy, not alias
+// =====================================================================
+// Regression: `let b = clone a` previously fell through every lowering
+// path that consults `OwnershipModifier` only in the MIR/JIT tier while
+// the live bytecode-interpreter `Statement::VariableDecl` path ignored
+// ownership entirely, so it produced a shallow Arc alias — mutating `b`
+// mutated `a`. The book documents `clone a` and `a.clone()` as identical.
+
+#[test]
+fn clone_keyword_array_is_independent_copy() {
+    // Mutating the clone must NOT affect the source.
+    let code = "let mut a = [1, 2, 3]\nlet mut b = clone a\nb.push(4)\nprint(a.len())\nprint(b.len())";
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output_contains("3")
+        .expect_output_contains("4");
+}
+
+#[test]
+fn clone_keyword_array_matches_clone_method() {
+    // `clone a` and `a.clone()` must produce the same independent-copy
+    // semantics.
+    let code = "let mut a = [10, 20]\nlet mut b = clone a\nlet mut c = a.clone()\nb.push(30)\nc.push(40)\nprint(a.len())\nprint(b.len())\nprint(c.len())";
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output_contains("2")
+        .expect_output_contains("3");
+}
+
+#[test]
+fn clone_keyword_string_produces_value() {
+    let code = "let s = \"hello\"\nlet s2 = clone s\nprint(s2)";
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output_contains("hello");
+}

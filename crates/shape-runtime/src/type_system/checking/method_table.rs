@@ -546,6 +546,10 @@ impl MethodTable {
             // PHF registry has len+length (method_registry.rs:901-902); both
             // -> v2_string_len. Checker seed dropped one of the pair. A-final ROOT D.
             ("length", vec![], BuiltinTypes::integer()),
+            // `s.clone()` — strings are immutable `Arc<String>`, so clone is an
+            // independent-handle copy (observationally a deep copy). Backs the
+            // `clone` keyword desugar (`let s2 = clone s` → `s.clone()`).
+            ("clone", vec![], BuiltinTypes::string()),
             ("isEmpty", vec![], BuiltinTypes::boolean()),
             ("toLowerCase", vec![], BuiltinTypes::string()),
             ("toUpperCase", vec![], BuiltinTypes::string()),

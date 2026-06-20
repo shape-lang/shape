@@ -124,6 +124,20 @@ pub fn v2_string_len(
     Ok(KindedSlot::from_int(s.chars().count() as i64))
 }
 
+/// clone — returns an independent copy of the string. Strings are immutable
+/// `Arc<String>`, so a fresh allocation is observationally identical to (and
+/// no cheaper to reason about than) sharing the handle; we allocate a new
+/// string to give the `clone` keyword unambiguous deep-copy semantics that
+/// match the `.clone()` array method.
+pub fn v2_string_clone(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let s = receiver_str(args)?;
+    Ok(string_result(s.to_string()))
+}
+
 /// toUpperCase / to_upper_case
 pub fn v2_string_to_upper(
     _vm: &mut VirtualMachine,

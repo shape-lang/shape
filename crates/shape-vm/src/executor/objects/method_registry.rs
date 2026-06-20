@@ -906,6 +906,9 @@ pub static STRING_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "len" => crate::executor::objects::string_methods::v2_string_len,
     "length" => crate::executor::objects::string_methods::v2_string_len,
 
+    // Clone (backs the `clone` keyword desugar for strings)
+    "clone" => crate::executor::objects::string_methods::v2_string_clone,
+
     // Case
     "toUpperCase" => crate::executor::objects::string_methods::v2_string_to_upper,
     "to_upper_case" => crate::executor::objects::string_methods::v2_string_to_upper,
