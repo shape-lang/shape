@@ -491,6 +491,95 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         ));
                     }
 
+                    // ── STAGE-F3 jit-vm-only-heap-receiver deopt ─────────────
+                    // CARRIER-SHAPE MISMATCH (CONFIRMED machine-killer — the
+                    // `fn f(d: DateTime) -> int { d.unix_timestamp() + 1 }` SIGSEGV
+                    // under `--mode jit`, rc=139; correct under `--mode vm`).
+                    //
+                    // When the receiver's PROVEN `NativeKind` is a VM-allocated
+                    // typed-Arc heap carrier whose builtin methods live ONLY in
+                    // the VM's PHF registry (DateTime/Temporal, Instant, Decimal,
+                    // BigInt, DataTable, TableView, Content) the method call has
+                    // NO sound JIT dispatch:
+                    //   - The `jit_call_method` dispatch shell's `delegated`
+                    //     match (`ffi/call_method/mod.rs` ~601) routes these
+                    //     `Ptr(_)` kinds to the legacy JIT-format cascade (the
+                    //     `Ptr(_) => false` arm), NOT the VM trampoline.
+                    //   - The JIT-format builtin cascade only resolves these
+                    //     methods through the `UInt64`-carrier `read_heap_kind`
+                    //     prefix path (`HK_TIME => call_time_method`, …). A
+                    //     `Ptr(HeapKind::Temporal)` typed-Arc receiver hits the
+                    //     silent `Ptr(_) => TAG_NULL` builtin arm
+                    //     (`ffi/call_method/mod.rs` ~979) — it never reaches
+                    //     `call_time_method`, and no `pending_call_error` is set.
+                    //   - `try_call_user_method` then builds the UFCS name
+                    //     `"Temporal::unix_timestamp"`, which is not in the JIT
+                    //     function table → `None`.
+                    // The silent `TAG_NULL` placeholder is written into the
+                    // proven-`Int64` destination slot, and the live VM
+                    // `Arc<HeapValue::Temporal>` receiver carried on the JIT
+                    // stack with kind `Ptr(Temporal)` is dropped at frame
+                    // teardown via the wrong carrier path → SIGSEGV (the
+                    // machine-killer). The bytecode VM dispatches these methods
+                    // correctly through its PHF registry (`--mode vm` returns the
+                    // right value).
+                    //
+                    // There is no JIT-format builtin registry for the typed-Arc
+                    // heap carriers and no sound NaN-box↔Arc carrier bridge at
+                    // this trampoline site (adding a bit-reinterpret /
+                    // Convert<X>To<Y> / carrier rename is a CLAUDE.md Forbidden
+                    // pattern). Per "surface-and-stop, not force": fail JIT
+                    // compilation (whole-function `Err` → bytecode-interpreter
+                    // fall-through, whose VM-registry dispatch is correct). Same
+                    // surface-and-stop shape as the STAGE-M1 string-return deopt
+                    // above + the c4-4B TryUnwrap / W17-marshal deopts. NO
+                    // bit-reinterpret, NO carrier rename, NO Bool-default. The
+                    // proven receiver `NativeKind` is the fabrication-free signal
+                    // (read from the §2.7.5 slot-kind track, not synthesized from
+                    // bits).
+                    let receiver_is_vm_only_heap = args
+                        .first()
+                        .map(|recv| {
+                            use shape_value::heap_value::HeapKind;
+                            use shape_value::NativeKind;
+                            matches!(
+                                self.operand_slot_kind(recv),
+                                Some(NativeKind::Ptr(
+                                    HeapKind::Temporal
+                                        | HeapKind::Instant
+                                        | HeapKind::Decimal
+                                        | HeapKind::BigInt
+                                        | HeapKind::DataTable
+                                        | HeapKind::TableView
+                                        | HeapKind::Content
+                                ))
+                            )
+                        })
+                        .unwrap_or(false);
+                    if receiver_is_vm_only_heap {
+                        return Err(format!(
+                            "MirToIR: method `.{}(...)` on a proven VM-only \
+                             typed-Arc heap receiver (DateTime/Temporal, Instant, \
+                             Decimal, BigInt, DataTable, TableView, or Content) has \
+                             no sound JIT dispatch: the `jit_call_method` shell \
+                             routes the `Ptr(_)` carrier to the legacy JIT-format \
+                             cascade (not the VM trampoline), where the builtin \
+                             registry only resolves these methods through the \
+                             `UInt64`-carrier `read_heap_kind` prefix — a typed-Arc \
+                             receiver hits the silent `Ptr(_) => TAG_NULL` arm. The \
+                             `TAG_NULL` placeholder feeds a proven-`Int64` slot \
+                             while the live VM `Arc<HeapValue>` receiver is dropped \
+                             via the wrong carrier at frame teardown → SIGSEGV \
+                             (`fn f(d: DateTime) -> int {{ d.unix_timestamp() + 1 }}` \
+                             rc=139). No NaN-box↔Arc carrier bridge is wired here; \
+                             surface-and-stop per CLAUDE.md \"surface-and-stop, not \
+                             force\" → whole-function deopt to the bytecode \
+                             interpreter (correct VM-PHF-registry dispatch). \
+                             STAGE-F3 jit-vm-only-heap-receiver.",
+                            method_name
+                        ));
+                    }
+
                     let stack_base_offset = crate::context::STACK_OFFSET as i32;
                     let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
 

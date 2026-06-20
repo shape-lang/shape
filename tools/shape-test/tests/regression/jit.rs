@@ -897,3 +897,92 @@ acc
         other => panic!("Expected Integer(39799), got {other:?}"),
     }
 }
+
+/// STAGE-F3 jit-vm-only-heap-receiver: a function that returns a scalar
+/// method-call result on a VM-allocated typed-Arc heap receiver
+/// (DateTime/Temporal — also Instant/Decimal/BigInt/DataTable/TableView/
+/// Content) used to CORE-DUMP under `--mode jit` (rc=139) while running
+/// correct under `--mode vm`.
+///
+/// Root cause: a `Ptr(HeapKind::Temporal)` receiver does not delegate to
+/// the VM trampoline (`jit_call_method`'s `delegated` match `Ptr(_) =>
+/// false`) and has no JIT-format builtin registry for the typed-Arc
+/// carrier (the legacy `call_time_method` path only resolves a
+/// `UInt64`-carrier `read_heap_kind` prefix). The method dispatch hit the
+/// silent `Ptr(_) => TAG_NULL` builtin arm with no `pending_call_error`;
+/// the `TAG_NULL` placeholder fed a proven-`Int64` destination slot while
+/// the live VM `Arc<HeapValue::Temporal>` receiver was dropped via the
+/// wrong carrier at frame teardown → SIGSEGV.
+///
+/// The fix (terminators.rs `receiver_is_vm_only_heap` gate, sibling to the
+/// STAGE-M1 string-return deopt) makes the JIT surface-and-stop: the
+/// function deopts to the bytecode interpreter, whose VM-PHF-registry
+/// dispatch is correct. The deopt is transparent through `JITExecutor`, so
+/// these programs must return the byte-identical interpreter result with NO
+/// core-dump.
+#[test]
+fn jit_scalar_method_on_vm_heap_receiver_deopts_no_coredump() {
+    // The confirmed repro shape (W11 T1): a fn returning a scalar DateTime
+    // method result directly, called hot (>= 100 calls → tier-up). Uses the
+    // deterministic `DateTime.parse` (not `now()`) so VM == JIT is a fixed
+    // value, not a wall-clock race. unix_timestamp("2021-01-01T00:00:00Z")
+    // = 1_609_459_200, so the body yields 1_609_459_201.
+    let result = jit_eval(
+        r#"
+fn f(d: DateTime) -> int { return d.unix_timestamp() + 1 }
+let d = DateTime.parse("2021-01-01T00:00:00Z")
+let mut acc = 0
+let mut i = 0
+while i < 200 { acc = f(d); i = i + 1 }
+acc
+"#,
+    );
+    match result {
+        WireValue::Integer(n) | WireValue::I64(n) => assert_eq!(n, 1_609_459_201),
+        WireValue::Number(n) => {
+            assert!((n - 1_609_459_201.0).abs() < 1e-6, "got {n}")
+        }
+        other => panic!("Expected Integer(1609459201), got {other:?}"),
+    }
+}
+
+#[test]
+fn jit_scalar_method_on_vm_heap_receiver_siblings_deopt_cleanly() {
+    // Sibling scalar-returning DateTime methods on the VM-allocated heap
+    // receiver in the same hot-fn shape — each must deopt cleanly and
+    // produce the correct value (VM == JIT), not core-dump. The receiver is
+    // a fixed `2021-01-01T00:00:00Z` parse so every result is deterministic.
+    let cases: &[(&str, i64)] = &[
+        // unix_timestamp + 1 -> 1_609_459_201
+        ("d.unix_timestamp() + 1", 1_609_459_201),
+        // direct return of the scalar method result (no arithmetic wrapper)
+        ("d.unix_timestamp()", 1_609_459_200),
+        // -> int component accessors
+        ("d.year()", 2021),
+        ("d.month()", 1),
+        ("d.day()", 1),
+    ];
+    for (body, expected) in cases {
+        let src = format!(
+            r#"
+fn f(d: DateTime) -> int {{ return {body} }}
+let d = DateTime.parse("2021-01-01T00:00:00Z")
+let mut acc = 0
+let mut i = 0
+while i < 200 {{ acc = f(d); i = i + 1 }}
+acc
+"#,
+        );
+        match jit_eval(&src) {
+            WireValue::Integer(n) | WireValue::I64(n) => assert_eq!(
+                n, *expected,
+                "DateTime method body `{body}` JIT result mismatch"
+            ),
+            WireValue::Number(n) => assert!(
+                (n - *expected as f64).abs() < 1e-6,
+                "`{body}`: got {n}"
+            ),
+            other => panic!("`{body}`: expected Integer({expected}), got {other:?}"),
+        }
+    }
+}
