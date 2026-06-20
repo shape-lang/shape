@@ -1057,6 +1057,28 @@ pub struct BytecodeCompiler {
     #[allow(dead_code)]
     pub(crate) nested_array_literal_depth: u32,
 
+    /// Depth counter: > 0 while compiling an interpolated-string inner
+    /// expression (`f"...{expr}..."`).
+    ///
+    /// The inner `expr` is re-parsed at bytecode-compile time via
+    /// `parse_expression_str`, which assigns it PARSER-LOCAL spans
+    /// (offsets within the `{...}` fragment, e.g. `Span { 0..7 }`) that
+    /// bear no relation to the original source offsets. The MIR borrow
+    /// analysis keys its per-statement ownership decisions
+    /// (`OwnershipDecision::Move`/`Clone`/`Copy`) by ORIGINAL-SOURCE span;
+    /// a fragment-local span can COLLIDE with an unrelated real statement's
+    /// span and make `query_ownership_decision` return that statement's
+    /// `Move` for the f-string's identifier read. Emitting `LoadLocalMove`
+    /// for such a read moves the value OUT of the slot — fatal when the
+    /// identifier is a live loop counter (the slot zeroes and the loop
+    /// never advances → non-termination). While this counter is > 0,
+    /// `emit_load_local_owned` skips the span-keyed ownership query and
+    /// emits the safe non-consuming load (plain / typed `LoadLocal`).
+    /// An f-string read is value-producing for the format call and never
+    /// the semantic last-use of the binding, so suppressing Move here is
+    /// always correct.
+    pub(crate) in_interpolation_expr_depth: u32,
+
     /// v2 Phase 3.1: per-local-slot record of which locals hold a v2
     /// typed array (allocated via `NewTypedArrayF64/I64/I32/Bool` rather
     /// than the legacy v1 `NewTypedArray`/`NewArray`). Populated by the

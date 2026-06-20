@@ -406,3 +406,129 @@ run()
         );
     }
 }
+
+// =============================================================================
+// Regression: Drop-in-loop break-pattern non-termination with f-string call
+// args (strict-flip, 2026-06-20).
+//
+// `f"...{ident}..."` re-parses its inner expression with parser-LOCAL spans
+// (offsets within the `{...}` fragment). Those spans could COLLIDE with an
+// unrelated real statement's span in the MIR borrow analysis, making
+// `query_ownership_decision` return that statement's `Move` for the
+// f-string's identifier read. The compiler then emitted `LoadLocalMove`,
+// consuming the live range-counter loop variable — the slot zeroed and the
+// loop never advanced (ec=124 hang in both VM and JIT). The book
+// resource-management slice (`scenario_retry`) hit this directly.
+//
+// Fix: while compiling an interpolated-string inner expression, skip the
+// span-keyed ownership-move query (`in_interpolation_expr_depth`), so the
+// load is a safe non-consuming `LoadLocal` / typed load.
+// =============================================================================
+
+/// The loop-counter read inside the break-branch f-string AND the
+/// fall-through f-string must NOT compile to `LoadLocalMove` — that opcode
+/// moves the counter out of its slot and the loop never terminates.
+#[test]
+fn fstring_arg_in_loop_break_does_not_move_loop_counter() {
+    let bc = compile(
+        r#"
+let mut LOG: Array<string> = []
+fn emit(ev: string) { LOG.push(ev) }
+fn scenario() {
+  for attempt in 0..5 {
+    if attempt == 2 {
+      emit(f"success:{attempt}")
+      break
+    }
+    emit(f"fail:{attempt}")
+  }
+}
+scenario()
+"#,
+    );
+    let scenario = bc
+        .functions
+        .iter()
+        .find(|f| f.name.contains("scenario"))
+        .expect("scenario function present");
+    let any_move = bc.instructions
+        [scenario.entry_point..scenario.entry_point + scenario.body_length]
+        .iter()
+        .any(|i| i.opcode == OpCode::LoadLocalMove);
+    assert!(
+        !any_move,
+        "f-string read of the range-counter loop variable must not emit \
+         LoadLocalMove (would consume the live counter → infinite loop)"
+    );
+}
+
+/// End-to-end: the Drop-in-loop break pattern terminates and produces the
+/// correct event sequence (correct interpolated values + per-iteration Drop,
+/// including the break iteration). If the move-bug regressed, the loop would
+/// not terminate and this test would HANG — the assertion on the count is a
+/// secondary guard once it does terminate.
+#[test]
+fn fstring_arg_in_loop_break_terminates_with_correct_drops() {
+    // Returns LOG.len(): fail:0, drop:0, fail:1, drop:1, success:2, drop:2,
+    // done = 7 events. A consumed counter would loop forever (never reaching
+    // `attempt == 2`) and never return.
+    let n = crate::test_utils::eval_typed_i64(
+        r#"
+let mut LOG: Array<string> = []
+fn emit(ev: string) { LOG.push(ev) }
+type Guard { id: int }
+impl Drop for Guard {
+  method drop() { emit(f"drop:{self.id}") }
+}
+fn scenario() {
+  for attempt in 0..5 {
+    let conn: Guard = Guard { id: attempt }
+    if attempt == 2 {
+      emit(f"body:success:{attempt}")
+      break
+    }
+    emit(f"body:fail:{attempt}")
+  }
+  emit("body:done")
+}
+scenario()
+let n: int = LOG.len()
+n
+"#,
+    );
+    assert_eq!(
+        n, 7,
+        "Drop-in-loop break with f-string args must terminate after 3 \
+         iterations (fail:0/drop:0, fail:1/drop:1, success:2/drop:2, done)"
+    );
+}
+
+/// A plain break carrying an f-string call arg (no Drop, no fall-through
+/// f-string) must also terminate — the move-suppression is unconditional for
+/// interpolation inner reads.
+#[test]
+fn plain_break_with_fstring_arg_terminates() {
+    let n = crate::test_utils::eval_typed_i64(
+        r#"
+let mut LOG: Array<string> = []
+fn emit(ev: string) { LOG.push(ev) }
+fn scenario() {
+  for attempt in 0..5 {
+    emit(f"iter:{attempt}")
+    if attempt == 2 {
+      emit(f"stop:{attempt}")
+      break
+    }
+  }
+}
+scenario()
+let n: int = LOG.len()
+n
+"#,
+    );
+    // iter:0, iter:1, iter:2, stop:2 = 4 events.
+    assert_eq!(
+        n, 4,
+        "plain break with f-string arg must terminate at attempt==2"
+    );
+}

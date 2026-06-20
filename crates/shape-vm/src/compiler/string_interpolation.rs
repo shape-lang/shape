@@ -284,8 +284,15 @@ impl BytecodeCompiler {
                         }
                     })?;
 
-                    // Compile the expression
-                    self.compile_expr(&expr)?;
+                    // Compile the expression. The re-parsed `expr` carries
+                    // parser-local spans; guard the ownership-move query so a
+                    // fragment-local span collision cannot emit a spurious
+                    // `LoadLocalMove` on a live binding (e.g. a loop counter).
+                    // See `in_interpolation_expr_depth`.
+                    self.in_interpolation_expr_depth += 1;
+                    let r = self.compile_expr(&expr);
+                    self.in_interpolation_expr_depth -= 1;
+                    r?;
 
                     // Format value using typed interpolation spec.
                     self.emit_interpolation_format_call(format_spec.as_ref())?;
@@ -352,7 +359,13 @@ impl BytecodeCompiler {
                                 location: None,
                             }
                         })?;
-                    self.compile_expr(&parsed_expr)?;
+                    // Parser-local spans on the re-parsed inner expression —
+                    // guard the ownership-move query (see the string-concat
+                    // path above and `in_interpolation_expr_depth`).
+                    self.in_interpolation_expr_depth += 1;
+                    let r = self.compile_expr(&parsed_expr);
+                    self.in_interpolation_expr_depth -= 1;
+                    r?;
 
                     match format_spec {
                         Some(InterpolationFormatSpec::ContentStyle(spec)) => {

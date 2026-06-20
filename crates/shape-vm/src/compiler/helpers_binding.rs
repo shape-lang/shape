@@ -267,7 +267,21 @@ impl BytecodeCompiler {
             return;
         }
 
-        let decision = self.query_ownership_decision(span);
+        // While compiling an interpolated-string inner expression, the
+        // `span` is parser-local (a fragment offset from
+        // `parse_expression_str`) and can collide with an unrelated real
+        // statement's span in the MIR borrow analysis — yielding a spurious
+        // `Move` that would `LoadLocalMove` (consume) a live binding such as
+        // a loop counter, causing non-termination. Skip the span-keyed
+        // ownership query here; the safe non-consuming load below is always
+        // correct for an f-string read (it is value-producing for the format
+        // call, never the binding's semantic last-use). See
+        // `in_interpolation_expr_depth`.
+        let decision = if self.in_interpolation_expr_depth > 0 {
+            None
+        } else {
+            self.query_ownership_decision(span)
+        };
 
         let opcode = match decision {
             Some(OwnershipDecision::Move) => Some(OpCode::LoadLocalMove),
