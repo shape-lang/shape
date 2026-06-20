@@ -1910,6 +1910,43 @@ mod compile_integration_tests {
     }
 
     #[test]
+    fn empty_array_reassign_to_typed_local_emits_typed_array() {
+        // STAGE T4 (V3-S5 empty-array reassign, 2026-06-20): reassigning a
+        // bare empty literal (`a = []`) to a binding whose proven element type
+        // is `Array<int>` must recover that element type from the type tracker
+        // and lower the empty literal to the typed `NewTypedArrayI64`
+        // allocator (count 0) — NOT the generic `NewArray(0)` that SURFACEd
+        // `op_new_array(0)` at runtime mid-program. Mirrors the var-decl
+        // annotation hand-off (statements.rs:967).
+        let prog = compile("let mut a: Array<int> = [1,2,3]\na = []\na.len()\n");
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayI64),
+            "empty-array reassign to Array<int> must allocate via NewTypedArrayI64"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "empty-array reassign must NOT emit the generic NewArray op_new_array(0) placeholder"
+        );
+    }
+
+    #[test]
+    fn empty_array_reassign_to_module_string_binding_emits_typed_array() {
+        // Module-binding string variant (the resource-mgmt gate's
+        // `let mut LOG: Array<string> = []` cleared via `LOG = []`).
+        let prog = compile(
+            "let mut LOG: Array<string> = []\nfn clear() { LOG = [] }\nLOG.push(\"x\")\nclear()\nLOG.len()\n",
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayString),
+            "empty-array reassign to module Array<string> must allocate via NewTypedArrayString"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "module-binding empty-array reassign must NOT emit the generic NewArray placeholder"
+        );
+    }
+
+    #[test]
     fn ws1b_bare_accumulator_complex_push_arg_emits_typed_array() {
         // `out.push(i * i)` — a non-literal scalar push argument. The first
         // push resolves the kind via the post-compile numeric proof (Tier 2).

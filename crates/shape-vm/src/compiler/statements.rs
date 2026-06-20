@@ -6196,7 +6196,40 @@ impl BytecodeCompiler {
                 let saved_pending_variable_name = self.pending_variable_name.clone();
                 self.pending_variable_name =
                     assign.pattern.as_identifier().map(|name| name.to_string());
+                // V3-S5 empty-array reassign (STAGE T4, 2026-06-20): an empty
+                // array literal RHS (`a = []`) carries no element type of its
+                // own — the var-decl path proves it from the `Array<T>`
+                // annotation and hands it to `compile_expr_array` via
+                // `pending_variable_typed_array_kind` (statements.rs:967),
+                // which makes the empty literal lower to the typed
+                // `NewTypedArray*` allocator (count 0). A reassignment has no
+                // annotation, so without the symmetric hand-off the empty
+                // literal fell through to the generic `NewArray(0)` and
+                // SURFACEd `op_new_array(0)` at runtime mid-program. Recover
+                // the LHS binding's PROVEN element type from the type tracker
+                // (the binding's declared `Array<T>` — ADR-006 §2.7.5
+                // producer-side proof, no runtime inspection) and re-key it
+                // through the same `pending_variable_typed_array_kind`
+                // hand-off. NO TypedArrayData: the typed allocator the kind
+                // selects is the existing per-T v2-raw `TypedArray<T>`
+                // monomorphization which already handles the count-0 case.
+                let saved_pending_typed_array_kind =
+                    self.pending_variable_typed_array_kind;
+                if matches!(&assign.value, Expr::Array(elements, _) if elements.is_empty()) {
+                    if let Some(name) = assign.pattern.as_identifier() {
+                        if let Some(shape_value::v2::ConcreteType::Array(elem)) =
+                            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                                self,
+                                &Expr::Identifier(name.to_string(), Span::DUMMY),
+                            )
+                        {
+                            self.pending_variable_typed_array_kind =
+                                crate::compiler::v2_typed_emission::should_use_typed_array(&elem);
+                        }
+                    }
+                }
                 let compile_result = self.compile_expr_for_reference_binding(&assign.value);
+                self.pending_variable_typed_array_kind = saved_pending_typed_array_kind;
                 self.pending_variable_name = saved_pending_variable_name;
                 let ref_borrow = compile_result?;
                 let assigned_ident = assign.pattern.as_identifier().map(str::to_string);
