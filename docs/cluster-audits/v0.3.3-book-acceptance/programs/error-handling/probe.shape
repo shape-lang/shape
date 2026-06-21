@@ -1,0 +1,44 @@
+from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
+
+// !! context operator on Err
+fn fail() -> Result<int> {
+    return Err("low");
+}
+
+fn ctx() -> Result<int> {
+    let v = (fail() !! "high")?;
+    return Ok(v);
+}
+
+let r = ctx();
+match r {
+    Ok(v) => print(f"ok {v}"),
+    Err(e) => print("got err"),
+}
+
+// Option + ??
+fn find(k: int) -> Option<int> {
+    if k == 1 {
+        return Some(100);
+    }
+    return None;
+}
+
+let x = find(1) ?? 0;
+let y = find(2) ?? 0;
+print(f"x={x} y={y}");
+
+// ? on Option inside Option-returning fn
+fn chain(k: int) -> Option<int> {
+    let v = find(k)?;
+    return Some(v + 1);
+}
+
+match chain(1) {
+    Some(v) => print(f"some {v}"),
+    None => print("none"),
+}
+match chain(2) {
+    Some(v) => print(f"some {v}"),
+    None => print("none"),
+}

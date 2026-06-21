@@ -1,0 +1,5 @@
+from geom use { Point, origin, dist }
+let p = Point { x: 3.0, y: 4.0 }
+let o = origin()
+let d = dist(p, o)
+print(f"d={d}")

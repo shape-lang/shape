@@ -1,0 +1,7 @@
+pub type Bounds {
+  lo: int,
+  hi: int
+}
+pub fn make(lo: int, hi: int) -> Bounds {
+  Bounds { lo: lo, hi: hi }
+}

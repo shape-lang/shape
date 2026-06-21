@@ -1,0 +1,5 @@
+from mylib::ann use { @traced }
+@traced("x")
+fn process(data: int) -> int { data }
+let r = process(5)
+print(f"ann={r}")

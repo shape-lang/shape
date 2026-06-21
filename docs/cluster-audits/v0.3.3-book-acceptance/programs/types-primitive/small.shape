@@ -1,0 +1,75 @@
+// small.shape — types-primitive slice
+// Exercises the core of fundamentals/builtin-types.mdx + integer-types.mdx:
+//   scalar int/number/bool/string, width-typed integers, literal suffixes,
+//   hex/bin/oct + suffix combos, `as` bit-level casts, width fields in structs.
+// Self-checking: every assertion derived from BOOK SEMANTICS. Prints
+// ALL_CHECKS_PASSED iff every check passes.
+
+let mut failures = 0
+
+fn check(name: string, cond: bool) {
+  if !cond {
+    failures = failures + 1
+    print(f"CHECK_FAILED: {name}")
+  }
+}
+
+// --- Scalars (builtin-types.mdx "Scalar Types") ---
+let x: int = 42                    // signed 64-bit
+let y: int = -1000
+let big: int = 9000000000000000000 // within i64 range
+check("int_x", x == 42)
+check("int_y", y == -1000)
+check("int_big", big == 9000000000000000000)
+
+let n: number = 3.5                // f64
+check("number_add", n + 0.5 == 4.0)
+
+let b: bool = true
+check("bool_t", b == true)
+check("bool_not", (!b) == false)
+
+let s: string = "shape"
+check("string_eq", s == "shape")
+
+// --- Literal suffixes (integer-types.mdx "Literal Suffixes") ---
+let a = 42i8
+let u = 255u8
+let c = 1000i16
+let d = 50000u16
+let e = 100i32
+let f = 3000000u32
+let size = 1048576u64
+check("suffix_i8", a == 42i8)
+check("suffix_u8", u == 255u8)
+check("suffix_i16", c == 1000i16)
+check("suffix_u16", d == 50000u16)
+check("suffix_i32", e == 100i32)
+check("suffix_u32", f == 3000000u32)
+check("suffix_u64", size == 1048576u64)
+
+// --- Hex / binary / octal + suffix combos (integer-types.mdx) ---
+check("hex_u8", 0xFFu8 == 255u8)
+check("bin_i16", 0b1010i16 == 10i16)
+check("oct_u32", 0o77u32 == 63u32)
+
+// --- Explicit `as` casts (integer-types.mdx "Explicit Casting") ---
+// Book: "300 as i8 is 44" (narrowing keeps low 8 bits)
+let wide: int = 300
+let narrow = wide as i8
+check("cast_narrow", narrow == 44i8)
+// Book: "-1 as u8 is 255" (signed/unsigned reinterprets bits)
+let signed: int = -1
+let unsigned = signed as u8
+check("cast_reinterpret", unsigned == 255u8)
+
+// --- Width types as struct fields (integer-types.mdx "In Type Definitions") ---
+type Pixel { r: u8, g: u8, b: u8, a: u8 }
+let px = Pixel { r: 255u8, g: 128u8, b: 0u8, a: 255u8 }
+check("field_r", px.r == 255u8)
+check("field_g", px.g == 128u8)
+check("field_b", px.b == 0u8)
+
+if failures == 0 {
+  print("ALL_CHECKS_PASSED")
+}

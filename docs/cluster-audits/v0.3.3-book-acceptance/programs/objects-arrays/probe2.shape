@@ -1,0 +1,27 @@
+let m = HashMap().set("a", 1).set("b", 2).set("c", 3)
+print(m.get("b"))
+print(m.has("a"))
+print(m.len())
+print(m.isEmpty())
+let m2 = m.delete("a")
+print(m2.len())
+print(m2.has("a"))
+
+let user = { id: 1, name: "Ada" }
+print(user.name)
+print(user.id)
+
+let cfg = { server: { host: "localhost", port: 9091 } }
+print(cfg.server.host)
+print(cfg.server.port)
+
+let a = { x: 1, y: 2 }
+let b = { z: 3 }
+let c = a + b
+print(c)
+
+type Point { x: int, y: int }
+let p = Point { x: 3, y: 4 }
+print(p.x)
+print(p.y)
+print(p.x + p.y)

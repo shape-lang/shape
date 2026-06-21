@@ -1,0 +1,682 @@
+// large.shape — Traits slice (book PRIMARY: fundamentals/traits.mdx)
+// =====================================================================
+// A deterministic INVOICE / LEDGER RENDERING ENGINE rooted entirely in
+// the trait machinery taught by the chapter. Non-interactive, fixed
+// fixtures, machine-proofable: every result is asserted against a value
+// derived from book semantics and the hand-computed fixture block (§0),
+// written BEFORE the first run.
+//
+// Trait surface exercised (all from fundamentals/traits.mdx, runnable parts):
+//   - Defining a trait (required signatures)                  "Defining a Trait"
+//   - Implementing a trait, method/self dispatch              "Implementing a Trait"
+//   - Multiple traits on one type                             (composition)
+//   - Supertrait `Ledgerable : Renderable + Priced`           "Supertraits"
+//   - Extend blocks on a concrete type                        "Extend Blocks"
+//   - Enum implementing a trait via `match self`              (impl on enum)
+//   - dyn Trait objects over homogeneous Vec<dyn T>           "Trait Objects (dyn Trait)"
+//   - Primitive conversion trait Into (`as`)                  "Into / TryInto"
+//   - Fallible conversion trait TryInto (`as?`) via parse     "Into / TryInto"
+//   - Generic trait DECLARATION (Container<T>)                "Generic Traits"
+//   - Associated-type DECLARATION with bound (Sequence)       "Associated Types"
+//
+// DISCIPLINE notes (from this slice's REPORT.md book_gaps):
+//   - book_gap #1: a trait/extend method result MUST be bound through an
+//     explicit `let x: T = recv.method()` annotation to keep its declared
+//     type at the call site (or interpolated via f"{...}"). Every method
+//     result below is annotation-bound. (Book is SILENT on this.)
+//   - book_gap #2: a function-returning concrete Vec<Struct> does not
+//     coerce to a Vec<dyn Trait> param. Every dyn collection below is a
+//     direct array-literal local (the exact book idiom).
+
+// =====================================================================
+// §0  FIXTURE + EXPECTED-VALUE LEDGER (hand-computed, pre-run)
+// =====================================================================
+// Line items (sku, qty, unit-cents):
+//   widget  qty=3   unit=250  -> cents = 3*250  = 750
+//   gadget  qty=12  unit=100  -> cents = 12*100 = 1200
+//   bolt    qty=4   unit=25   -> cents = 4*25   = 100
+//   subtotal = 750 + 1200 + 100 = 2050
+// Discount (reason, amount-cents): "promo" amount=300
+//   Discount.cents() = 0 - amount = -300   (sign-flip declared in impl)
+// Shipping (carrier, fee-cents): "rail" fee=650
+//   Shipping.cents() = fee = 650
+// GRAND TOTAL = subtotal + discount + shipping = 2050 + (-300) + 650 = 2400
+//
+// render() strings (exact f-string templates in each impl body):
+//   LineItem.render() = "<sku> x<qty> @<unit>c = <cents>c"
+//     widget -> "widget x3 @250c = 750c"
+//     gadget -> "gadget x12 @100c = 1200c"
+//     bolt   -> "bolt x4 @25c = 100c"
+//   Discount.render() = "discount(<reason>) -<amount>c"
+//     promo  -> "discount(promo) -300c"
+//   Shipping.render() = "ship via <carrier> +<fee>c"
+//     rail   -> "ship via rail +650c"
+//
+// supertrait Ledgerable.tag():
+//   LineItem -> "ITEM:<sku>"   widget -> "ITEM:widget"
+//   Discount -> "DISC:<reason>" promo  -> "DISC:promo"
+//   Shipping -> "SHIP:<carrier>" rail  -> "SHIP:rail"
+//
+// extend LineItem:
+//   gross_cents() = qty*unit (== cents)             widget -> 750
+//   is_bulk()     = qty >= 10                        widget(3)->false gadget(12)->true
+// extend Discount:
+//   is_large()    = amount >= 500                    promo(300)->false
+//
+// enum Cell render (impl Renderable for Cell via match):
+//   Label(s) -> s ;  Money(c) -> "<c>c" ;  Blank -> "-"
+//
+// Conversions:
+//   true  as number == 1.0 ;  false as number == 0.0
+//   parse_cents("2050") == Ok(2050) ; parse_cents("650") == Ok(650)
+//   parse_cents("xyz")  == Err
+//
+// Sweeps (closed form):
+//   sum over i in 1..=N of LineItem{qty=i,unit=100}.cents() = 100 * N*(N+1)/2
+//     N=10 -> 100 * 55 = 5500
+//   sum over i in 0..N of Cell::Money(i).render().len():
+//     i 0..9 -> 2 each (10*2=20); 10..99 -> 3 each (90*3=270); 100..N-1 ...
+//     N=100 -> 20 + 270 = 290 ; N=200 -> 20+270+400 = 690
+
+// =====================================================================
+// §1  TRAIT DECLARATIONS
+// =====================================================================
+trait Priced {
+  fn cents() -> int;
+}
+
+trait Renderable {
+  fn render() -> string;
+}
+
+// Supertrait: a Ledgerable is also Renderable + Priced ("Supertraits").
+trait Ledgerable : Renderable + Priced {
+  fn tag() -> string;
+}
+
+// Generic trait DECLARATION ("Generic Traits" — declaration is runnable).
+trait Container<T> {
+  fn get(i: int) -> T;
+  fn count() -> int;
+}
+
+// Associated-type DECLARATION with a trait bound ("Associated Types").
+trait Sequence {
+  type Element : Renderable;
+  fn describe() -> string;
+}
+
+// =====================================================================
+// §2  CONCRETE IMPLEMENTORS
+// =====================================================================
+type LineItem { sku: string, qty: int, unit: int }
+
+impl Priced for LineItem {
+  method cents() -> int { self.qty * self.unit }
+}
+impl Renderable for LineItem {
+  method render() -> string {
+    let c: int = self.qty * self.unit
+    f"{self.sku} x{self.qty} @{self.unit}c = {c}c"
+  }
+}
+impl Ledgerable for LineItem {
+  method tag() -> string { f"ITEM:{self.sku}" }
+}
+
+type Discount { reason: string, amount: int }
+
+impl Priced for Discount {
+  method cents() -> int { 0 - self.amount }
+}
+impl Renderable for Discount {
+  method render() -> string { f"discount({self.reason}) -{self.amount}c" }
+}
+impl Ledgerable for Discount {
+  method tag() -> string { f"DISC:{self.reason}" }
+}
+
+type Shipping { carrier: string, fee: int }
+
+impl Priced for Shipping {
+  method cents() -> int { self.fee }
+}
+impl Renderable for Shipping {
+  method render() -> string { f"ship via {self.carrier} +{self.fee}c" }
+}
+impl Ledgerable for Shipping {
+  method tag() -> string { f"SHIP:{self.carrier}" }
+}
+
+// Tax: cents() = floor(base * rate_bp / 10000)  (rate in basis-points)
+type Tax { label: string, base: int, rate_bp: int }
+
+impl Priced for Tax {
+  method cents() -> int { (self.base * self.rate_bp) / 10000 }
+}
+impl Renderable for Tax {
+  method render() -> string {
+    let c: int = (self.base * self.rate_bp) / 10000
+    f"tax {self.label} {self.rate_bp}bp on {self.base}c = {c}c"
+  }
+}
+impl Ledgerable for Tax {
+  method tag() -> string { f"TAX:{self.label}" }
+}
+
+// Tip: cents() = amount (already absolute)
+type Tip { who: string, amount: int }
+
+impl Priced for Tip {
+  method cents() -> int { self.amount }
+}
+impl Renderable for Tip {
+  method render() -> string { f"tip for {self.who} +{self.amount}c" }
+}
+impl Ledgerable for Tip {
+  method tag() -> string { f"TIP:{self.who}" }
+}
+
+// =====================================================================
+// §3  EXTEND BLOCKS ("Extend Blocks")
+// =====================================================================
+extend LineItem {
+  method gross_cents() -> int { self.qty * self.unit }
+  method is_bulk() -> bool { self.qty >= 10 }
+}
+
+extend Discount {
+  method is_large() -> bool { self.amount >= 500 }
+}
+
+extend Tax {
+  // half-rate cents helper: floor(base * rate_bp / 20000)
+  method half_cents() -> int { (self.base * self.rate_bp) / 20000 }
+  method is_high() -> bool { self.rate_bp >= 1000 }
+}
+
+extend Tip {
+  method doubled() -> int { self.amount * 2 }
+}
+
+// =====================================================================
+// §4  ENUM IMPLEMENTING A TRAIT (impl on enum via `match self`)
+// =====================================================================
+enum Cell {
+  Label(string),
+  Money(int),
+  Blank,
+}
+
+impl Renderable for Cell {
+  method render() -> string {
+    match self {
+      Cell::Label(s) => s,
+      Cell::Money(c) => f"{c}c",
+      Cell::Blank => "-",
+    }
+  }
+}
+
+// A second enum with a struct-payload variant, implementing Renderable.
+enum Status {
+  Open,
+  Paid(int),
+  Refunded { amount: int, reason: string },
+}
+
+impl Renderable for Status {
+  method render() -> string {
+    match self {
+      Status::Open => "OPEN",
+      Status::Paid(c) => f"PAID:{c}c",
+      Status::Refunded { amount, reason } => f"REFUND:{amount}c({reason})",
+    }
+  }
+}
+
+impl Priced for Status {
+  method cents() -> int {
+    match self {
+      Status::Open => 0,
+      Status::Paid(c) => c,
+      Status::Refunded { amount, reason } => 0 - amount,
+    }
+  }
+}
+
+// =====================================================================
+// §5  CONVERSION TRAITS ("Into / TryInto")
+// =====================================================================
+fn parse_cents(s: string) -> Result<int, AnyError> {
+  let n = (s as int?)?
+  Ok(n)
+}
+
+// =====================================================================
+// §6  dyn-DISPATCH AGGREGATORS (homogeneous Vec<dyn T> — book idiom)
+// =====================================================================
+fn sum_priced(items: Vec<dyn Priced>) -> int {
+  let mut sum: int = 0
+  for it in items {
+    let c: int = it.cents()
+    sum = sum + c
+  }
+  sum
+}
+
+fn render_count(items: Vec<dyn Renderable>) -> int {
+  let mut n: int = 0
+  for it in items {
+    let _r: string = it.render()
+    n = n + 1
+  }
+  n
+}
+
+// =====================================================================
+// §7  CHECK HELPERS
+// =====================================================================
+fn ck_int(label: string, got: int, want: int) -> bool {
+  if got == want { true } else { print(f"CHECK_FAILED: {label} expected={want} got={got}"); false }
+}
+fn ck_str(label: string, got: string, want: string) -> bool {
+  if got == want { true } else { print(f"CHECK_FAILED: {label} expected={want} got={got}"); false }
+}
+fn ck_bool(label: string, got: bool, want: bool) -> bool {
+  if got == want { true } else { print(f"CHECK_FAILED: {label} expected={want} got={got}"); false }
+}
+
+// =====================================================================
+// §8  MAIN — drive every behavior, assert every result
+// =====================================================================
+fn main() {
+  let mut ok = true
+
+  // --- fixtures ---
+  let widget = LineItem { sku: "widget", qty: 3, unit: 250 }
+  let gadget = LineItem { sku: "gadget", qty: 12, unit: 100 }
+  let bolt   = LineItem { sku: "bolt",   qty: 4,  unit: 25 }
+  let promo  = Discount { reason: "promo", amount: 300 }
+  let rail   = Shipping { carrier: "rail", fee: 650 }
+
+  // ---------------------------------------------------------------
+  // §8a  Priced.cents() per implementor (trait method dispatch)
+  // ---------------------------------------------------------------
+  let cw: int = widget.cents()
+  ok = ck_int("widget.cents", cw, 750) && ok
+  let cg: int = gadget.cents()
+  ok = ck_int("gadget.cents", cg, 1200) && ok
+  let cb: int = bolt.cents()
+  ok = ck_int("bolt.cents", cb, 100) && ok
+  let cd: int = promo.cents()
+  ok = ck_int("promo.cents", cd, 0 - 300) && ok
+  let cs: int = rail.cents()
+  ok = ck_int("rail.cents", cs, 650) && ok
+
+  // subtotal of line items computed scalar (not via accumulation loop)
+  let subtotal: int = cw + cg + cb
+  ok = ck_int("subtotal", subtotal, 2050) && ok
+
+  // ---------------------------------------------------------------
+  // §8b  Renderable.render() per implementor
+  // ---------------------------------------------------------------
+  let rw: string = widget.render()
+  ok = ck_str("widget.render", rw, "widget x3 @250c = 750c") && ok
+  let rg: string = gadget.render()
+  ok = ck_str("gadget.render", rg, "gadget x12 @100c = 1200c") && ok
+  let rb: string = bolt.render()
+  ok = ck_str("bolt.render", rb, "bolt x4 @25c = 100c") && ok
+  let rd: string = promo.render()
+  ok = ck_str("promo.render", rd, "discount(promo) -300c") && ok
+  let rs: string = rail.render()
+  ok = ck_str("rail.render", rs, "ship via rail +650c") && ok
+
+  // ---------------------------------------------------------------
+  // §8c  Supertrait Ledgerable.tag() (Ledgerable : Renderable + Priced)
+  // ---------------------------------------------------------------
+  let tw: string = widget.tag()
+  ok = ck_str("widget.tag", tw, "ITEM:widget") && ok
+  let td: string = promo.tag()
+  ok = ck_str("promo.tag", td, "DISC:promo") && ok
+  let ts: string = rail.tag()
+  ok = ck_str("rail.tag", ts, "SHIP:rail") && ok
+
+  // a Ledgerable value can also use its supertrait methods (render + cents)
+  let lw_r: string = widget.render()
+  ok = ck_str("ledgerable.render", lw_r, "widget x3 @250c = 750c") && ok
+  let lw_c: int = widget.cents()
+  ok = ck_int("ledgerable.cents", lw_c, 750) && ok
+
+  // ---------------------------------------------------------------
+  // §8d  extend blocks
+  // ---------------------------------------------------------------
+  let gw: int = widget.gross_cents()
+  ok = ck_int("widget.gross_cents", gw, 750) && ok
+  let bw: bool = widget.is_bulk()
+  ok = ck_bool("widget.is_bulk", bw, false) && ok
+  let bg: bool = gadget.is_bulk()
+  ok = ck_bool("gadget.is_bulk", bg, true) && ok
+  let dlg: bool = promo.is_large()
+  ok = ck_bool("promo.is_large", dlg, false) && ok
+
+  // ---------------------------------------------------------------
+  // §8e  enum Cell : Renderable via match
+  // ---------------------------------------------------------------
+  let cell_l = Cell::Label("HEADER")
+  let cell_m = Cell::Money(250)
+  let cell_b = Cell::Blank
+  let cl: string = cell_l.render()
+  ok = ck_str("cell.label", cl, "HEADER") && ok
+  let cm: string = cell_m.render()
+  ok = ck_str("cell.money", cm, "250c") && ok
+  let cbk: string = cell_b.render()
+  ok = ck_str("cell.blank", cbk, "-") && ok
+
+  // ---------------------------------------------------------------
+  // §8f  dyn Priced aggregation over homogeneous array literal
+  //      (line items only -> subtotal 2050)
+  // ---------------------------------------------------------------
+  let priced_items = [
+    LineItem { sku: "widget", qty: 3, unit: 250 },
+    LineItem { sku: "gadget", qty: 12, unit: 100 },
+    LineItem { sku: "bolt", qty: 4, unit: 25 },
+  ]
+  let sp: int = sum_priced(priced_items)
+  ok = ck_int("sum_priced.lineitems", sp, 2050) && ok
+
+  // dyn Priced over discounts only
+  let discounts = [
+    Discount { reason: "promo", amount: 300 },
+    Discount { reason: "loyal", amount: 150 },
+  ]
+  let sd: int = sum_priced(discounts)
+  ok = ck_int("sum_priced.discounts", sd, (0 - 300) + (0 - 150)) && ok
+
+  // dyn Priced over shippings only
+  let ships = [
+    Shipping { carrier: "rail", fee: 650 },
+    Shipping { carrier: "air", fee: 1200 },
+  ]
+  let ss: int = sum_priced(ships)
+  ok = ck_int("sum_priced.ships", ss, 650 + 1200) && ok
+
+  // ---------------------------------------------------------------
+  // §8g  dyn Renderable count over homogeneous array literal
+  // ---------------------------------------------------------------
+  let renders = [
+    LineItem { sku: "a", qty: 1, unit: 10 },
+    LineItem { sku: "b", qty: 2, unit: 20 },
+    LineItem { sku: "c", qty: 3, unit: 30 },
+    LineItem { sku: "d", qty: 4, unit: 40 },
+  ]
+  let rc: int = render_count(renders)
+  ok = ck_int("render_count", rc, 4) && ok
+
+  // ---------------------------------------------------------------
+  // §8h  conversion traits
+  // ---------------------------------------------------------------
+  let t_num: number = true as number
+  if t_num == 1.0 { ok = ok && true } else { print("CHECK_FAILED: true_as_number"); ok = false }
+  let f_num: number = false as number
+  if f_num == 0.0 { ok = ok && true } else { print("CHECK_FAILED: false_as_number"); ok = false }
+
+  let p1 = parse_cents("2050")
+  match p1 {
+    Ok(v) => { ok = ck_int("parse.2050", v, 2050) && ok }
+    Err(e) => { print("CHECK_FAILED: parse.2050 errored"); ok = false }
+  }
+  let p2 = parse_cents("650")
+  match p2 {
+    Ok(v) => { ok = ck_int("parse.650", v, 650) && ok }
+    Err(e) => { print("CHECK_FAILED: parse.650 errored"); ok = false }
+  }
+  let p3 = parse_cents("not-a-number")
+  match p3 {
+    Ok(v) => { print(f"CHECK_FAILED: parse.bad expected Err got Ok({v})"); ok = false }
+    Err(e) => { ok = ok && true }
+  }
+
+  // ---------------------------------------------------------------
+  // §8i  GRAND TOTAL via scalar trait-dispatch sum
+  // ---------------------------------------------------------------
+  let grand: int = cw + cg + cb + cd + cs
+  ok = ck_int("grand_total", grand, 2400) && ok
+
+  // ---------------------------------------------------------------
+  // §8j  Sweep 1 — closed-form Priced sum (qty=i, unit=100, i=1..=10)
+  // ---------------------------------------------------------------
+  let mut sweep1: int = 0
+  let mut i: int = 1
+  while i <= 10 {
+    let item = LineItem { sku: "s", qty: i, unit: 100 }
+    let ci: int = item.cents()
+    sweep1 = sweep1 + ci
+    i = i + 1
+  }
+  ok = ck_int("sweep1.priced_sum", sweep1, 5500) && ok
+
+  // ---------------------------------------------------------------
+  // §8k  Sweep 2 — enum Cell render length sum (i=0..99)
+  // ---------------------------------------------------------------
+  let mut sweep2: int = 0
+  let mut j: int = 0
+  while j < 100 {
+    let cell = Cell::Money(j)
+    let r: string = cell.render()
+    let rl: int = r.len()
+    sweep2 = sweep2 + rl
+    j = j + 1
+  }
+  ok = ck_int("sweep2.render_len_sum", sweep2, 290) && ok
+
+  // ---------------------------------------------------------------
+  // §8l  Sweep 3 — extend is_bulk threshold sweep (qty=8..12)
+  // ---------------------------------------------------------------
+  let mut bulk_count: int = 0
+  let mut q: int = 8
+  while q <= 12 {
+    let item = LineItem { sku: "x", qty: q, unit: 10 }
+    let isb: bool = item.is_bulk()
+    if isb { bulk_count = bulk_count + 1 }
+    q = q + 1
+  }
+  // qty 8,9 -> false ; 10,11,12 -> true => 3
+  ok = ck_int("sweep3.bulk_count", bulk_count, 3) && ok
+
+  // ---------------------------------------------------------------
+  // §8m  Sweep 4 — discount sign-flip sweep (amount=100..500 step 100)
+  // ---------------------------------------------------------------
+  let mut disc_sum: int = 0
+  let mut a: int = 100
+  while a <= 500 {
+    let d = Discount { reason: "r", amount: a }
+    let dc: int = d.cents()
+    disc_sum = disc_sum + dc
+    a = a + 100
+  }
+  // -(100+200+300+400+500) = -1500
+  ok = ck_int("sweep4.disc_sum", disc_sum, 0 - 1500) && ok
+
+  // ---------------------------------------------------------------
+  // §8n  mixed-render ledger string assembly (per-implementor render)
+  // ---------------------------------------------------------------
+  let ledger_line: string = f"{widget.tag()}|{promo.tag()}|{rail.tag()}"
+  ok = ck_str("ledger_line", ledger_line, "ITEM:widget|DISC:promo|SHIP:rail") && ok
+
+  // ---------------------------------------------------------------
+  // §8o  Tax implementor — Priced / Renderable / Ledgerable + extend
+  //   base=2050, rate_bp=825 -> floor(2050*825/10000) = floor(169.125) = 169
+  // ---------------------------------------------------------------
+  let tax = Tax { label: "vat", base: 2050, rate_bp: 825 }
+  let txc: int = tax.cents()
+  ok = ck_int("tax.cents", txc, 169) && ok
+  let txr: string = tax.render()
+  ok = ck_str("tax.render", txr, "tax vat 825bp on 2050c = 169c") && ok
+  let txt: string = tax.tag()
+  ok = ck_str("tax.tag", txt, "TAX:vat") && ok
+  let txh: int = tax.half_cents()
+  // floor(2050*825/20000) = floor(84.5625) = 84
+  ok = ck_int("tax.half_cents", txh, 84) && ok
+  let txhi: bool = tax.is_high()
+  // rate_bp 825 < 1000 -> false
+  ok = ck_bool("tax.is_high", txhi, false) && ok
+
+  let tax2 = Tax { label: "lux", base: 1000, rate_bp: 1500 }
+  let tx2hi: bool = tax2.is_high()
+  ok = ck_bool("tax2.is_high", tx2hi, true) && ok
+  let tx2c: int = tax2.cents()
+  // floor(1000*1500/10000) = 150
+  ok = ck_int("tax2.cents", tx2c, 150) && ok
+
+  // ---------------------------------------------------------------
+  // §8p  Tip implementor — Priced / Renderable / Ledgerable + extend
+  // ---------------------------------------------------------------
+  let tip = Tip { who: "server", amount: 500 }
+  let tpc: int = tip.cents()
+  ok = ck_int("tip.cents", tpc, 500) && ok
+  let tpr: string = tip.render()
+  ok = ck_str("tip.render", tpr, "tip for server +500c") && ok
+  let tpt: string = tip.tag()
+  ok = ck_str("tip.tag", tpt, "TIP:server") && ok
+  let tpd: int = tip.doubled()
+  ok = ck_int("tip.doubled", tpd, 1000) && ok
+
+  // ---------------------------------------------------------------
+  // §8q  Status enum — Renderable + Priced via match (3 variants incl. struct)
+  // ---------------------------------------------------------------
+  let st_open = Status::Open
+  let st_paid = Status::Paid(2400)
+  let st_ref  = Status::Refunded { amount: 300, reason: "damaged" }
+
+  let sor: string = st_open.render()
+  ok = ck_str("status.open.render", sor, "OPEN") && ok
+  let spr: string = st_paid.render()
+  ok = ck_str("status.paid.render", spr, "PAID:2400c") && ok
+  let srr: string = st_ref.render()
+  ok = ck_str("status.refund.render", srr, "REFUND:300c(damaged)") && ok
+
+  let soc: int = st_open.cents()
+  ok = ck_int("status.open.cents", soc, 0) && ok
+  let spc: int = st_paid.cents()
+  ok = ck_int("status.paid.cents", spc, 2400) && ok
+  let src: int = st_ref.cents()
+  ok = ck_int("status.refund.cents", src, 0 - 300) && ok
+
+  // ---------------------------------------------------------------
+  // §8r  dyn Priced over a homogeneous Tax array
+  //   Tax{base=1000,rate_bp=500}=50 ; Tax{base=2000,rate_bp=500}=100 -> 150
+  // ---------------------------------------------------------------
+  let taxes = [
+    Tax { label: "a", base: 1000, rate_bp: 500 },
+    Tax { label: "b", base: 2000, rate_bp: 500 },
+  ]
+  let txsum: int = sum_priced(taxes)
+  ok = ck_int("sum_priced.taxes", txsum, 150) && ok
+
+  // dyn Priced over a homogeneous Tip array
+  let tips = [
+    Tip { who: "x", amount: 100 },
+    Tip { who: "y", amount: 250 },
+    Tip { who: "z", amount: 50 },
+  ]
+  let tipsum: int = sum_priced(tips)
+  ok = ck_int("sum_priced.tips", tipsum, 400) && ok
+
+  // dyn Priced over a homogeneous Status array
+  //   Open=0, Paid(2400)=2400, Refunded{300}=-300 -> 2100
+  let statuses: Array<Status> = [
+    Status::Open,
+    Status::Paid(2400),
+    Status::Refunded { amount: 300, reason: "r" },
+  ]
+  let stsum: int = sum_priced(statuses)
+  ok = ck_int("sum_priced.statuses", stsum, 2100) && ok
+
+  // ---------------------------------------------------------------
+  // §8s  dyn Renderable count over a homogeneous Status array
+  // ---------------------------------------------------------------
+  let st_renders: Array<Status> = [
+    Status::Open,
+    Status::Paid(10),
+    Status::Open,
+    Status::Refunded { amount: 5, reason: "q" },
+  ]
+  let strc: int = render_count(st_renders)
+  ok = ck_int("render_count.statuses", strc, 4) && ok
+
+  // dyn Renderable count over a homogeneous Cell array
+  let cell_renders: Array<Cell> = [
+    Cell::Label("a"),
+    Cell::Money(1),
+    Cell::Blank,
+    Cell::Money(2),
+    Cell::Label("b"),
+  ]
+  let crc: int = render_count(cell_renders)
+  ok = ck_int("render_count.cells", crc, 5) && ok
+
+  // ---------------------------------------------------------------
+  // §8t  Full-invoice GRAND TOTAL incorporating tax + tip
+  //   subtotal 2050 + discount -300 + shipping 650 + tax 169 + tip 500
+  //   = 3069
+  // ---------------------------------------------------------------
+  let full_total: int = cw + cg + cb + cd + cs + txc + tpc
+  ok = ck_int("full_total", full_total, 3069) && ok
+
+  // ---------------------------------------------------------------
+  // §8u  Sweep 5 — Tax basis-point sweep (rate=100..1000 step 100, base=10000)
+  //   floor(10000*r/10000) = r ; sum = 100+200+...+1000 = 5500
+  // ---------------------------------------------------------------
+  let mut sweep5: int = 0
+  let mut r5: int = 100
+  while r5 <= 1000 {
+    let tx = Tax { label: "s", base: 10000, rate_bp: r5 }
+    let cc: int = tx.cents()
+    sweep5 = sweep5 + cc
+    r5 = r5 + 100
+  }
+  ok = ck_int("sweep5.tax_sum", sweep5, 5500) && ok
+
+  // ---------------------------------------------------------------
+  // §8v  Sweep 6 — Status render length sum over Paid(i), i=0..49
+  //   render = "PAID:<i>c" ; len = 5 (prefix "PAID:") + digits(i) + 1 ("c")
+  //   i 0..9  : 10 * (5+1+1) = 10*7 = 70
+  //   i 10..49: 40 * (5+2+1) = 40*8 = 320
+  //   total = 390
+  // ---------------------------------------------------------------
+  let mut sweep6: int = 0
+  let mut k6: int = 0
+  while k6 < 50 {
+    let stp = Status::Paid(k6)
+    let rr: string = stp.render()
+    let rl6: int = rr.len()
+    sweep6 = sweep6 + rl6
+    k6 = k6 + 1
+  }
+  ok = ck_int("sweep6.status_len_sum", sweep6, 390) && ok
+
+  // ---------------------------------------------------------------
+  // §8w  Sweep 7 — Tip.doubled() sweep (amount=1..20) = 2 * sum(1..20)
+  //   sum(1..20) = 210 ; doubled-sum = 420
+  // ---------------------------------------------------------------
+  let mut sweep7: int = 0
+  let mut tA: int = 1
+  while tA <= 20 {
+    let tp = Tip { who: "w", amount: tA }
+    let dd: int = tp.doubled()
+    sweep7 = sweep7 + dd
+    tA = tA + 1
+  }
+  ok = ck_int("sweep7.tip_doubled_sum", sweep7, 420) && ok
+
+  // ---------------------------------------------------------------
+  // §8x  full ledger tag line across all five implementor kinds
+  // ---------------------------------------------------------------
+  let full_tags: string = f"{widget.tag()}|{promo.tag()}|{rail.tag()}|{tax.tag()}|{tip.tag()}"
+  ok = ck_str("full_tags", full_tags, "ITEM:widget|DISC:promo|SHIP:rail|TAX:vat|TIP:server") && ok
+
+  if ok { print("ALL_CHECKS_PASSED") }
+}
+
+main()

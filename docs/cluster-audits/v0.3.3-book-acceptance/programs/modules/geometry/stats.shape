@@ -1,0 +1,20 @@
+// geometry/stats.shape  -> importable as "geometry::stats"
+// Exercises: pub fn, pub type, filesystem-to-module-path mapping (book "Module File Layout").
+
+pub type Bounds {
+  lo: int,
+  hi: int
+}
+
+pub fn mean(v: Array<number>) -> number {
+  v.sum() / v.length
+}
+
+pub fn variance(v: Array<number>) -> number {
+  let mu = mean(v)
+  v.map(|x| (x - mu) * (x - mu)).sum() / v.length
+}
+
+pub fn clamp(x: int, lo: int, hi: int) -> int {
+  if x < lo { lo } else if x > hi { hi } else { x }
+}

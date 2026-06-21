@@ -1,0 +1,50 @@
+// rpnvm/ops.shape -- importable as rpnvm::ops
+//
+// Pure arithmetic primitives for the RPN machine.  Kept in their own module so
+// the evaluator (rpnvm::machine) imports them by name and the machine logic
+// stays free of inline arithmetic special-casing.  All functions are total
+// over i64 except where a guard is documented; the machine checks guards
+// (div/mod by zero) before calling.
+
+pub fn add(a: int, b: int) -> int { a + b }
+pub fn sub(a: int, b: int) -> int { a - b }
+pub fn mul(a: int, b: int) -> int { a * b }
+
+// Integer division / modulo.  Caller guarantees b != 0.
+pub fn idiv(a: int, b: int) -> int { a / b }
+pub fn imod(a: int, b: int) -> int { a % b }
+
+pub fn neg(a: int) -> int { 0 - a }
+
+pub fn absx(a: int) -> int {
+    if a < 0 { 0 - a } else { a }
+}
+
+pub fn minx(a: int, b: int) -> int {
+    if a < b { a } else { b }
+}
+
+pub fn maxx(a: int, b: int) -> int {
+    if a > b { a } else { b }
+}
+
+// Integer power with non-negative exponent.  pow(a, 0) = 1.
+pub fn powx(base: int, exp: int) -> int {
+    let mut result = 1
+    let mut e = exp
+    let mut b = base
+    while e > 0 {
+        if e % 2 == 1 { result = result * b }
+        e = e / 2
+        // only square `b` if another bit remains, so we never compute a
+        // square larger than the final answer (avoids spurious i64 overflow)
+        if e > 0 { b = b * b }
+    }
+    result
+}
+
+pub fn signx(a: int) -> int {
+    if a > 0 { 1 } else if a < 0 { 0 - 1 } else { 0 }
+}
+
+pub fn is_even(a: int) -> bool { a % 2 == 0 }

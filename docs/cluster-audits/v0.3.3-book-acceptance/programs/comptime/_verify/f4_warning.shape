@@ -1,0 +1,4 @@
+comptime {
+  warning("hello-warning")
+}
+print("done")

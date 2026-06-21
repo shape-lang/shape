@@ -1,0 +1,19 @@
+// sigil modes + index + snake aliases + multiline f
+let user_name = "Ada"
+let user_id = 42
+let json = f$"""{"name": ${user_name}, "id": ${user_id}}"""
+print(json)
+let shell = f#"echo #{user_name}"
+print(shell)
+print("  PaD  ".trim_start())
+print("  PaD  ".trim_end())
+print("MiXeD".to_upper_case())
+print("MiXeD".to_lower_case())
+let s = "hello"
+print(s[1])     // e
+print(s[4])     // o
+let multi = f"""
+    name={user_name}
+    id={user_id}
+    """
+print(multi)

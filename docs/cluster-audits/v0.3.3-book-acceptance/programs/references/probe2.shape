@@ -1,0 +1,4 @@
+let mut nums = [1, 2, 3]
+nums.push(4)
+print(nums[3])
+print("DONE")

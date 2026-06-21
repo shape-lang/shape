@@ -1,0 +1,2 @@
+let v = [1.0, 2.0, 3.0]
+print(f"{v.length}")

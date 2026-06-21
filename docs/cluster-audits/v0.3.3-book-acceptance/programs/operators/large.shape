@@ -1,0 +1,720 @@
+// ============================================================================
+// large.shape  —  Operators slice  (fundamentals/operators.mdx)
+//
+// A self-contained, non-interactive, deterministic expression engine that
+// exercises EVERY operator family the book teaches and asserts each result
+// against an EXPECTED VALUE derived purely from BOOK SEMANTICS (no back-fill).
+//
+// Components:
+//   1. Operator semantics tables       (arithmetic / bitwise / comparison)
+//   2. RPN stack evaluator             (integer-coded ops, parallel arrays)
+//   3. Shunting-yard infix->RPN        (book precedence table, lines 532-554)
+//   4. Fixed-point money arithmetic    (int cents; %, /, *, + via book rules)
+//   5. Percent-literal pricing model   (book lines 522-530)
+//   6. Bitwise flag toolkit            (book lines 179-217)
+//   7. Boolean short-circuit ledger    (book lines 239-263)
+//   8. Pipe / ternary / range mini-DSL (book lines 349-401)
+//
+// All assertions use a manual checker; on the first failure we print
+// CHECK_FAILED and set a global failure flag. ALL_CHECKS_PASSED prints only
+// when every check held.
+//
+// NOTE on omitted book features (each is a defect documented in REPORT.md and
+// therefore deliberately NOT exercised here):
+//   * user-type Ord `<`/`>`        -> compiler "not comparable"
+//   * user-type BitAnd `&`         -> "Flags is not compatible with int"
+//   * object-merge `+`             -> hijacked by any in-scope user `impl Add`
+//   * char literals as int codes   -> `char` type, not int (`'A' as int` fails)
+//   * `as number` result `== f`    -> "no method 'eq' on receiver kind Float64"
+//   * `Array<enum>` empty+push     -> "never pushed to" inference defect
+//   * string indexing `s[i]`       -> SURFACE not-implemented
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Operator-code constants (integer-coded so the evaluator is operator-driven).
+//   0=+  1=-  2=*  3=/  4=%  5=**  6=&  7=|  8=^  9=<<  10=>>
+// ----------------------------------------------------------------------------
+fn OP_ADD() -> int { 0 }
+fn OP_SUB() -> int { 1 }
+fn OP_MUL() -> int { 2 }
+fn OP_DIV() -> int { 3 }
+fn OP_MOD() -> int { 4 }
+fn OP_POW() -> int { 5 }
+fn OP_AND() -> int { 6 }
+fn OP_OR()  -> int { 7 }
+fn OP_XOR() -> int { 8 }
+fn OP_SHL() -> int { 9 }
+fn OP_SHR() -> int { 10 }
+
+// Apply one binary operator. Pure arithmetic/bitwise per the book tables.
+fn apply_op(code: int, a: int, b: int) -> int {
+  if code == 0  { return a + b }
+  if code == 1  { return a - b }
+  if code == 2  { return a * b }
+  if code == 3  { return a / b }     // integer division truncates (book 40)
+  if code == 4  { return a % b }
+  if code == 5  { return a ** b }    // exponentiation (book 31, 42)
+  if code == 6  { return a & b }
+  if code == 7  { return a | b }
+  if code == 8  { return a ^ b }
+  if code == 9  { return a << b }
+  return a >> b
+}
+
+// Operator precedence per book lines 532-554 (higher = binds tighter).
+//   **  -> 9     (book rank 4, but ** is tightest binary here)
+//   * / % -> 8   (book rank 5)
+//   + -   -> 7   (book rank 6)
+//   << >> -> 6   (book rank 7)
+//   &     -> 5   (book rank 8)
+//   ^     -> 4   (book rank 9)
+//   |     -> 3   (book rank 10)
+fn precedence(code: int) -> int {
+  if code == 5 { return 9 }                  // **
+  if code == 2 { return 8 }                  // *
+  if code == 3 { return 8 }                  // /
+  if code == 4 { return 8 }                  // %
+  if code == 0 { return 7 }                  // +
+  if code == 1 { return 7 }                  // -
+  if code == 9 { return 6 }                  // <<
+  if code == 10 { return 6 }                 // >>
+  if code == 6 { return 5 }                  // &
+  if code == 8 { return 4 }                  // ^
+  return 3                                   // |
+}
+
+// ** is right-associative (book line 539); everything else is left.
+fn is_right_assoc(code: int) -> bool {
+  code == 5
+}
+
+// ----------------------------------------------------------------------------
+// 2. RPN evaluator. Tokens are two parallel Array<int>:
+//      kinds[i] == 0  -> operand, value in vals[i]
+//      kinds[i] == 1  -> operator, op-code in vals[i]
+// ----------------------------------------------------------------------------
+fn eval_rpn(kinds: Array<int>, vals: Array<int>) -> int {
+  let mut stack: Array<int> = []
+  let mut i = 0
+  while i < kinds.len() {
+    let k = kinds[i]
+    let v = vals[i]
+    if k == 0 {
+      stack.push(v)
+    } else {
+      let b = stack.pop()
+      let a = stack.pop()
+      stack.push(apply_op(v, a, b))
+    }
+    i += 1
+  }
+  stack.pop()
+}
+
+// ----------------------------------------------------------------------------
+// 3. Shunting-yard: infix (parallel kind/val arrays, no parens for brevity)
+//    -> RPN (also parallel arrays). Implements the book precedence + assoc.
+//    Returns nothing observable directly; we eval the produced RPN.
+// ----------------------------------------------------------------------------
+// out_* are filled by reference-free return via a packed scheme: we return the
+// evaluated result of the infix expression. (We keep the two stages explicit
+// inside this function so the algorithm — not just the answer — is exercised.)
+fn eval_infix(kinds: Array<int>, vals: Array<int>) -> int {
+  let mut out_kinds: Array<int> = []
+  let mut out_vals: Array<int> = []
+  let mut op_stack: Array<int> = []      // holds op-codes
+  let mut i = 0
+  while i < kinds.len() {
+    let k = kinds[i]
+    let v = vals[i]
+    let mut dummy = 0      // void-uniform sink (see REPORT.md if-branch defect)
+    if k == 0 {
+      // operand -> output
+      out_kinds.push(0)
+      out_vals.push(v)
+      dummy = 0
+    } else {
+      // operator: pop while top has higher prec, or equal prec & left-assoc
+      let mut keep_going = true
+      while keep_going {
+        if op_stack.len() == 0 {
+          keep_going = false
+        } else {
+          let top = op_stack[op_stack.len() - 1]
+          let pt = precedence(top)
+          let pv = precedence(v)
+          let pop_it = pt > pv || (pt == pv && !is_right_assoc(v))
+          if pop_it {
+            op_stack.pop()
+            out_kinds.push(1)
+            out_vals.push(top)
+            keep_going = keep_going    // void-uniform branch tail
+          } else {
+            keep_going = false
+          }
+        }
+      }
+      op_stack.push(v)
+      dummy = 0
+    }
+    i += 1
+  }
+  // drain remaining operators
+  while op_stack.len() > 0 {
+    let top = op_stack.pop()
+    out_kinds.push(1)
+    out_vals.push(top)
+  }
+  eval_rpn(out_kinds, out_vals)
+}
+
+// ----------------------------------------------------------------------------
+// 4. Fixed-point money. Amounts are integer CENTS. Demonstrates int division
+//    truncation, %, *, +, - exactly as the book's arithmetic table specifies.
+// ----------------------------------------------------------------------------
+// Add two cent-amounts.
+fn money_add(a: int, b: int) -> int { a + b }
+// Subtract.
+fn money_sub(a: int, b: int) -> int { a - b }
+// Multiply a cent-amount by an integer quantity.
+fn money_scale(cents: int, qty: int) -> int { cents * qty }
+// Split `cents` into `n` parts, returning the per-part floor amount.
+fn money_split_floor(cents: int, n: int) -> int { cents / n }
+// Remainder cents left over after an n-way floor split.
+fn money_split_rem(cents: int, n: int) -> int { cents % n }
+// Apply a basis-point rate (bps = hundredths of a percent) to cents, floor.
+//   amount * bps / 10000
+fn money_apply_bps(cents: int, bps: int) -> int { (cents * bps) / 10000 }
+
+// ----------------------------------------------------------------------------
+// 6. Bitwise flag toolkit (book lines 179-217). Flags are bit positions.
+// ----------------------------------------------------------------------------
+fn flag_set(bits: int, mask: int) -> int { bits | mask }
+fn flag_clear(bits: int, mask: int) -> int { bits & (~mask) }
+fn flag_toggle(bits: int, mask: int) -> int { bits ^ mask }
+fn flag_has(bits: int, mask: int) -> bool { (bits & mask) == mask }
+fn flag_count_low8(bits: int) -> int {
+  // popcount over the low 8 bits using shifts + AND
+  let mut n = 0
+  let mut b = bits
+  let mut i = 0
+  while i < 8 {
+    n += b & 1
+    b >>= 1
+    i += 1
+  }
+  n
+}
+
+// ----------------------------------------------------------------------------
+// 7. Boolean short-circuit ledger. We prove `&&`/`||` short-circuit by routing
+//    side effects through a counter cell modeled as a length-1 Array<int>.
+// ----------------------------------------------------------------------------
+// Returns `v` and records that the guard body ran by appending to log.
+fn note(log: Array<int>, tag: int, v: bool) -> bool {
+  log.push(tag)
+  v
+}
+
+// ----------------------------------------------------------------------------
+// 8. Pipe / ternary helpers.
+// ----------------------------------------------------------------------------
+fn double(x: int) -> int { x * 2 }
+fn inc(x: int) -> int { x + 1 }
+fn square(x: int) -> int { x * x }
+fn classify_parity(n: int) -> string { n % 2 == 0 ? "even" : "odd" }
+fn clamp_nonneg(n: int) -> int { n < 0 ? 0 : n }
+
+// ----------------------------------------------------------------------------
+// Range helpers (book lines 392-406).
+// ----------------------------------------------------------------------------
+fn sum_exclusive(lo: int, hi: int) -> int {
+  let mut s = 0
+  for i in lo..hi { s += i }
+  s
+}
+fn sum_inclusive(lo: int, hi: int) -> int {
+  let mut s = 0
+  for i in lo..=hi { s += i }
+  s
+}
+
+// ----------------------------------------------------------------------------
+// Manual check harness.
+// ----------------------------------------------------------------------------
+fn check_eq_int(got: int, expected: int, label: string, fails: Array<int>) {
+  if got != expected {
+    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    fails.push(1)
+  }
+}
+fn check_true(cond: bool, label: string, fails: Array<int>) {
+  if !cond {
+    print(f"CHECK_FAILED: {label} expected=true got=false")
+    fails.push(1)
+  }
+}
+fn check_eq_str(got: string, expected: string, label: string, fails: Array<int>) {
+  if got != expected {
+    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    fails.push(1)
+  }
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+fn main() {
+  let mut fails: Array<int> = []
+
+  // ------------------------------------------------------------------
+  // SECTION A — Arithmetic operator table (book 33-50).
+  // ------------------------------------------------------------------
+  check_eq_int(apply_op(OP_ADD(), 10, 3), 13, "A.add", fails)
+  check_eq_int(apply_op(OP_SUB(), 10, 3), 7, "A.sub", fails)
+  check_eq_int(apply_op(OP_MUL(), 10, 3), 30, "A.mul", fails)
+  check_eq_int(apply_op(OP_DIV(), 10, 3), 3, "A.div_trunc", fails)  // book 40
+  check_eq_int(apply_op(OP_MOD(), 10, 3), 1, "A.mod", fails)
+  check_eq_int(apply_op(OP_POW(), 10, 3), 1000, "A.pow", fails)      // book 42
+  check_eq_int(apply_op(OP_POW(), 2, 10), 1024, "A.pow2_10", fails)  // book 48
+  // negative-dividend truncation: -7 / 2 truncates toward zero -> -3
+  check_eq_int(apply_op(OP_DIV(), 0 - 7, 2), 0 - 3, "A.div_neg", fails)
+  check_eq_int(apply_op(OP_MOD(), 0 - 7, 2), 0 - 1, "A.mod_neg", fails)
+  check_eq_int(apply_op(OP_POW(), 5, 0), 1, "A.pow_zero", fails)
+  check_eq_int(apply_op(OP_POW(), 3, 1), 3, "A.pow_one", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION B — Bitwise operator table (book 195-205).
+  // a = 0b1100 (12), b = 0b1010 (10)
+  // ------------------------------------------------------------------
+  let ba = 0b1100
+  let bb = 0b1010
+  check_eq_int(apply_op(OP_AND(), ba, bb), 8, "B.and", fails)        // book 199
+  check_eq_int(apply_op(OP_OR(), ba, bb), 14, "B.or", fails)         // book 200
+  check_eq_int(apply_op(OP_XOR(), ba, bb), 6, "B.xor", fails)        // book 201
+  check_eq_int(~ba, 0 - 13, "B.not", fails)                          // book 202
+  check_eq_int(apply_op(OP_SHL(), ba, 2), 48, "B.shl", fails)        // book 204
+  check_eq_int(apply_op(OP_SHR(), ba, 1), 6, "B.shr", fails)         // book 205
+  // hex literal recognition + full compound chain (book 209-216 -> 225)
+  let mut hx = 0xF0
+  hx &= 0xFF
+  hx |= 0x01
+  hx ^= 0x10
+  hx <<= 1
+  hx >>= 1
+  check_eq_int(hx, 225, "B.compound_chain", fails)
+  // binary + hex literal equivalence
+  check_eq_int(0b1111, 15, "B.bin_lit", fails)
+  check_eq_int(0xFF, 255, "B.hex_lit", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION C — Comparison operators (book 106-119).
+  // ------------------------------------------------------------------
+  check_true(5 > 3, "C.gt", fails)
+  check_true(5 >= 5, "C.ge", fails)
+  check_true(!(2 < 1), "C.lt_false", fails)
+  check_true(3 <= 3, "C.le", fails)
+  check_true(2 == 2, "C.eq", fails)
+  check_true(2 != 3, "C.ne", fails)
+  // string lexicographic ordering (book 116-119)
+  check_true("apple" < "banana", "C.str_lt", fails)
+  check_true("apple" == "apple", "C.str_eq", fails)
+  check_true("z" > "a", "C.str_gt", fails)
+  check_true("abc" < "abd", "C.str_lt2", fails)
+  check_true("abc" < "abcd", "C.str_prefix", fails)
+  check_true(!("banana" < "apple"), "C.str_gt2", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION D — Unary operators (book 275-286).
+  // ------------------------------------------------------------------
+  check_eq_int(0 - 10, 0 - 10, "D.neg_lit", fails)
+  check_true(!true == false, "D.not_lit", fails)
+  check_true(!false == true, "D.not_false", fails)
+  check_eq_int(~0b1010, 0 - 11, "D.bitnot_lit", fails)               // book 278
+  let dv = 10
+  check_eq_int(0 - dv, 0 - 10, "D.neg_var", fails)
+  // double negation
+  let dw = 7
+  check_eq_int(0 - (0 - dw), 7, "D.double_neg", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION E — Logical operators + short-circuit (book 239-263).
+  // ------------------------------------------------------------------
+  let ok = true
+  let ready = false
+  check_true(ok && !ready, "E.and", fails)
+  check_true(ok || ready, "E.or", fails)
+  // keyword spellings (book 257)
+  check_true((ok and (ok)) == true, "E.kw_and", fails)
+  check_true((ready or ok) == true, "E.kw_or", fails)
+  // De Morgan identities
+  check_true((!(true && false)) == (!true || !false), "E.demorgan1", fails)
+  check_true((!(true || false)) == (!true && !false), "E.demorgan2", fails)
+  // Short-circuit proof: in `false && note(...)`, note must NOT run.
+  let log1: Array<int> = []
+  let r1 = false && note(log1, 1, true)
+  check_true(r1 == false, "E.sc_and_result", fails)
+  check_eq_int(log1.len(), 0, "E.sc_and_noeval", fails)   // RHS skipped
+  // In `true || note(...)`, note must NOT run.
+  let log2: Array<int> = []
+  let r2 = true || note(log2, 2, false)
+  check_true(r2 == true, "E.sc_or_result", fails)
+  check_eq_int(log2.len(), 0, "E.sc_or_noeval", fails)
+  // In `true && note(...)`, note MUST run (LHS doesn't decide).
+  let log3: Array<int> = []
+  let r3 = true && note(log3, 3, true)
+  check_true(r3 == true, "E.sc_and_eval_result", fails)
+  check_eq_int(log3.len(), 1, "E.sc_and_eval", fails)
+  // In `false || note(...)`, note MUST run.
+  let log4: Array<int> = []
+  let r4 = false || note(log4, 4, true)
+  check_true(r4 == true, "E.sc_or_eval_result", fails)
+  check_eq_int(log4.len(), 1, "E.sc_or_eval", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION F — Precedence sanity (book 532-554), via raw expressions.
+  // ------------------------------------------------------------------
+  // * binds tighter than +  (rank 5 vs 6)
+  check_eq_int(2 + 3 * 4, 14, "F.mul_over_add", fails)
+  // ** tighter than * and right-assoc: 2 * 2 ** 3 = 2 * 8 = 16
+  check_eq_int(2 * 2 ** 3, 16, "F.pow_over_mul", fails)
+  // ** right-assoc: 2 ** 2 ** 3 = 2 ** (2**3) = 2 ** 8 = 256
+  check_eq_int(2 ** 2 ** 3, 256, "F.pow_right_assoc", fails)
+  // unary - tighter than ** ? Book rank: unary(3) tighter than **(4).
+  // -2 ** 2  parses as (-2) ** 2 = 4
+  check_eq_int((0 - 2) ** 2, 4, "F.neg_pow", fails)
+  // BOOK-WRONG witness: the book precedence table (lines 542-543) ranks
+  // `+`/`-` (rank 6) TIGHTER than `<<`/`>>` (rank 7), so book semantics give
+  // `1 + 1 << 2` == `(1+1) << 2` == 8. The LANGUAGE instead binds `<<`
+  // tighter than `+`, yielding `1 + (1<<2)` == 5. We record the book's
+  // expected value (8) as the witness; the language disagrees (5).
+  // This is reported on a SEPARATE channel so it does not mask the
+  // language-correct assertions in `fails`.
+  let book_shift_expected = 8
+  let lang_shift_actual = 1 + 1 << 2
+  if lang_shift_actual != book_shift_expected {
+    print(f"BOOK_WRONG: precedence shift-vs-add book_expected={book_shift_expected} lang_actual={lang_shift_actual}")
+  }
+  // For the pass-set we assert the LANGUAGE's actual, parenthesized behavior:
+  check_eq_int(1 + (1 << 2), 5, "F.add_shift_lang", fails)
+  check_eq_int((1 + 1) << 2, 8, "F.add_shift_paren", fails)
+  // & looser than <<: 3 << 1 & 4 = (3<<1) & 4 = 6 & 4 = 4
+  check_eq_int(3 << 1 & 4, 4, "F.shift_over_and", fails)
+  // | looser than ^ looser than &:  1 | 2 ^ 3 & 3
+  //   & first: 3 & 3 = 3 ; ^ next: 2 ^ 3 = 1 ; | last: 1 | 1 = 1
+  check_eq_int(1 | 2 ^ 3 & 3, 1, "F.bit_prec_chain", fails)
+  // comparison looser than arithmetic: 1 + 1 == 2  -> true
+  check_true(1 + 1 == 2, "F.arith_over_cmp", fails)
+  // && looser than == : true == true && false  -> (true==true) && false = false
+  check_true((true == true && false) == false, "F.cmp_over_and", fails)
+  // || looser than && : false && false || true -> (false&&false)||true = true
+  check_true(false && false || true, "F.and_over_or", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION G — RPN evaluator end-to-end.
+  // ------------------------------------------------------------------
+  // (3 + 4) * 2 = 14   RPN: 3 4 + 2 *
+  let g1k: Array<int> = [0, 0, 1, 0, 1]
+  let g1v: Array<int> = [3, 4, 0, 2, 2]
+  check_eq_int(eval_rpn(g1k, g1v), 14, "G.rpn1", fails)
+  // 5 1 2 + 4 * + 3 -  = 5 + ((1+2)*4) - 3 = 5 + 12 - 3 = 14
+  let g2k: Array<int> = [0, 0, 0, 1, 0, 1, 1, 0, 1]
+  let g2v: Array<int> = [5, 1, 2, 0, 4, 2, 0, 3, 1]
+  check_eq_int(eval_rpn(g2k, g2v), 14, "G.rpn2", fails)
+  // 2 3 ** = 8 ; then 8 1 - = 7   ->  RPN: 2 3 ** 1 -
+  let g3k: Array<int> = [0, 0, 1, 0, 1]
+  let g3v: Array<int> = [2, 3, 5, 1, 1]
+  check_eq_int(eval_rpn(g3k, g3v), 7, "G.rpn_pow", fails)
+  // bitwise RPN: 12 10 & = 8  -> 12 10 &
+  let g4k: Array<int> = [0, 0, 1]
+  let g4v: Array<int> = [12, 10, 6]
+  check_eq_int(eval_rpn(g4k, g4v), 8, "G.rpn_and", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION H — Shunting-yard infix evaluation (precedence + assoc).
+  // ------------------------------------------------------------------
+  // 2 + 3 * 4  -> 14
+  let h1k: Array<int> = [0, 1, 0, 1, 0]
+  let h1v: Array<int> = [2, 0, 3, 2, 4]
+  check_eq_int(eval_infix(h1k, h1v), 14, "H.infix_prec", fails)
+  // 2 * 3 + 4 -> 10
+  let h2k: Array<int> = [0, 1, 0, 1, 0]
+  let h2v: Array<int> = [2, 2, 3, 0, 4]
+  check_eq_int(eval_infix(h2k, h2v), 10, "H.infix_left", fails)
+  // 2 ** 3 ** 2 -> right-assoc -> 2 ** 9 = 512
+  let h3k: Array<int> = [0, 1, 0, 1, 0]
+  let h3v: Array<int> = [2, 5, 3, 5, 2]
+  check_eq_int(eval_infix(h3k, h3v), 512, "H.infix_pow_rassoc", fails)
+  // 100 - 20 - 5 -> left-assoc -> (100-20)-5 = 75
+  let h4k: Array<int> = [0, 1, 0, 1, 0]
+  let h4v: Array<int> = [100, 1, 20, 1, 5]
+  check_eq_int(eval_infix(h4k, h4v), 75, "H.infix_sub_left", fails)
+  // 1 + 2 * 3 - 4 / 2 -> 1 + 6 - 2 = 5
+  let h5k: Array<int> = [0, 1, 0, 1, 0, 1, 0, 1, 0]
+  let h5v: Array<int> = [1, 0, 2, 2, 3, 1, 4, 3, 2]
+  check_eq_int(eval_infix(h5k, h5v), 5, "H.infix_mixed", fails)
+  // 2 + 12 & 6  -> shift/add tighter than & : (2+12) & 6 = 14 & 6 = 6
+  let h6k: Array<int> = [0, 1, 0, 1, 0]
+  let h6v: Array<int> = [2, 0, 12, 6, 6]
+  check_eq_int(eval_infix(h6k, h6v), 6, "H.infix_and_loose", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION I — Fixed-point money arithmetic.
+  // ------------------------------------------------------------------
+  // $19.99 + $5.01 = $25.00 -> 2500 cents
+  check_eq_int(money_add(1999, 501), 2500, "I.add", fails)
+  // $50.00 - $12.34 = $37.66 -> 3766
+  check_eq_int(money_sub(5000, 1234), 3766, "I.sub", fails)
+  // $3.50 * 4 = $14.00 -> 1400
+  check_eq_int(money_scale(350, 4), 1400, "I.scale", fails)
+  // split $10.00 (1000c) 3 ways: floor 333, remainder 1
+  check_eq_int(money_split_floor(1000, 3), 333, "I.split_floor", fails)
+  check_eq_int(money_split_rem(1000, 3), 1, "I.split_rem", fails)
+  // floor*n + rem == total (invariant)
+  check_eq_int(money_split_floor(1000, 3) * 3 + money_split_rem(1000, 3), 1000,
+               "I.split_invariant", fails)
+  // 7.5% tax on $200.00 (20000c): bps=750 -> 20000*750/10000 = 1500
+  check_eq_int(money_apply_bps(20000, 750), 1500, "I.tax", fails)
+  // 0.1% fee on $999.99 (99999c): bps=10 -> 99999*10/10000 = 999990/10000 = 99
+  check_eq_int(money_apply_bps(99999, 10), 99, "I.fee_floor", fails)
+  // shopping-cart total: 3 @ $4.99 + 2 @ $1.25, then 8.25% tax, floored.
+  let cart = money_scale(499, 3) + money_scale(125, 2)   // 1497 + 250 = 1747
+  check_eq_int(cart, 1747, "I.cart_subtotal", fails)
+  let cart_tax = money_apply_bps(cart, 825)              // 1747*825/10000 = 1441275/10000 = 144
+  check_eq_int(cart_tax, 144, "I.cart_tax", fails)
+  check_eq_int(cart + cart_tax, 1891, "I.cart_total", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION J — Bitwise flag toolkit.
+  // ------------------------------------------------------------------
+  let READ = 0b0001
+  let WRITE = 0b0010
+  let EXEC = 0b0100
+  let mut perms = 0
+  perms = flag_set(perms, READ)            // 0b0001 = 1
+  perms = flag_set(perms, WRITE)           // 0b0011 = 3
+  check_eq_int(perms, 3, "J.set_two", fails)
+  check_true(flag_has(perms, READ), "J.has_read", fails)
+  check_true(flag_has(perms, WRITE), "J.has_write", fails)
+  check_true(!flag_has(perms, EXEC), "J.no_exec", fails)
+  perms = flag_set(perms, EXEC)            // 0b0111 = 7
+  check_eq_int(perms, 7, "J.set_exec", fails)
+  perms = flag_clear(perms, WRITE)         // 0b0101 = 5
+  check_eq_int(perms, 5, "J.clear_write", fails)
+  check_true(!flag_has(perms, WRITE), "J.cleared", fails)
+  perms = flag_toggle(perms, READ)         // 0b0100 = 4
+  check_eq_int(perms, 4, "J.toggle_off", fails)
+  perms = flag_toggle(perms, READ)         // 0b0101 = 5
+  check_eq_int(perms, 5, "J.toggle_on", fails)
+  // popcount over low 8 bits
+  check_eq_int(flag_count_low8(0b10110101), 5, "J.popcount", fails)
+  check_eq_int(flag_count_low8(0xFF), 8, "J.popcount_full", fails)
+  check_eq_int(flag_count_low8(0), 0, "J.popcount_zero", fails)
+  // ~ then & masks back to a byte: ~0 & 0xFF == 255
+  check_eq_int((~0) & 0xFF, 255, "J.not_mask_byte", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION K — Pipe / ternary / range mini-DSL.
+  // ------------------------------------------------------------------
+  // pipe: 5 |> double |> inc = inc(double(5)) = 11  (book 358)
+  check_eq_int(5 |> double |> inc, 11, "K.pipe1", fails)
+  // pipe chain: 3 |> square |> double |> inc = inc(double(9)) = 19
+  check_eq_int(3 |> square |> double |> inc, 19, "K.pipe2", fails)
+  // ternary parity
+  check_eq_str(classify_parity(7), "odd", "K.ternary_odd", fails)
+  check_eq_str(classify_parity(8), "even", "K.ternary_even", fails)
+  check_eq_int(clamp_nonneg(0 - 5), 0, "K.clamp_neg", fails)
+  check_eq_int(clamp_nonneg(5), 5, "K.clamp_pos", fails)
+  // nested ternary: sign of n -> -1 / 0 / 1
+  let sn = 0 - 4
+  let sign = sn < 0 ? (0 - 1) : (sn == 0 ? 0 : 1)
+  check_eq_int(sign, 0 - 1, "K.ternary_sign", fails)
+  // ranges: sum 0..5 = 0+1+2+3+4 = 10 (exclusive)
+  check_eq_int(sum_exclusive(0, 5), 10, "K.range_excl", fails)
+  // sum 0..=5 = 15 (inclusive)
+  check_eq_int(sum_inclusive(0, 5), 15, "K.range_incl", fails)
+  // sum 1..=100 = 5050
+  check_eq_int(sum_inclusive(1, 100), 5050, "K.gauss", fails)
+  // exclusive vs inclusive differ by hi
+  check_eq_int(sum_inclusive(3, 7) - sum_exclusive(3, 7), 7, "K.range_diff", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION L — Percent literals (book 522-530). These are `number` (f64).
+  // We compare f64 magnitudes via arithmetic round-trip (the `== float`
+  // dispatch defect is avoided by subtracting and bounding the residual).
+  // ------------------------------------------------------------------
+  let half = 50%        // 0.5
+  let tax = 7.5%        // 0.075
+  let quarter = 25%     // 0.25
+  // residual = (half - 0.5); prove |residual| < 1e-9 via the fuzzy operator,
+  // which the book documents for float comparison (lines 170-177).
+  check_true(half ~= 0.5 within 0.000000001, "L.percent_half", fails)
+  check_true(tax ~= 0.075 within 0.000000001, "L.percent_tax", fails)
+  check_true(quarter ~= 0.25 within 0.000000001, "L.percent_quarter", fails)
+  // percent arithmetic: half + quarter = 0.75
+  check_true((half + quarter) ~= 0.75 within 0.000000001, "L.percent_sum", fails)
+  // 100% = 1.0
+  check_true(100% ~= 1.0 within 0.000000001, "L.percent_full", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION M — Coalesce + None (book 447-455).
+  // ------------------------------------------------------------------
+  let maybe1: Option<string> = None
+  let resolved1 = maybe1 ?? "fallback"
+  check_eq_str(resolved1, "fallback", "M.coalesce_none", fails)
+  let maybe2: Option<int> = None
+  let resolved2 = maybe2 ?? 99
+  check_eq_int(resolved2, 99, "M.coalesce_int", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION N — Try `?` operator (book 416-430).
+  // ------------------------------------------------------------------
+  // parse_signed returns Err for the sentinel -999, else Ok(n).
+  check_eq_int(run_chain(3, 4), 7, "N.try_ok", fails)
+  check_eq_int(run_chain(0 - 999, 4), 0 - 1, "N.try_err", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION O — Comprehensive expression battery (precedence + mixing).
+  // Each expected value computed by hand from the book precedence table.
+  // ------------------------------------------------------------------
+  // (a) 10 - 2 * 3 + 4 = 10 - 6 + 4 = 8
+  check_eq_int(10 - 2 * 3 + 4, 8, "O.b1", fails)
+  // (b) 2 ** 3 + 2 ** 2 = 8 + 4 = 12
+  check_eq_int(2 ** 3 + 2 ** 2, 12, "O.b2", fails)
+  // (c) 100 / 7 * 7 = 14*7 = 98  (int trunc then mul)
+  check_eq_int(100 / 7 * 7, 98, "O.b3", fails)
+  // (d) 100 % 7 = 2 ; 100 / 7 = 14 ; 14*7 + 2 = 100  (division identity)
+  check_eq_int((100 / 7) * 7 + (100 % 7), 100, "O.b4", fails)
+  // (e) (5 > 3) && (2 < 4) || false = true
+  check_true((5 > 3) && (2 < 4) || false, "O.b5", fails)
+  // (f) 1 << 4 | 1 = 16 | 1 = 17
+  check_eq_int(1 << 4 | 1, 17, "O.b6", fails)
+  // (g) 0xFF ^ 0x0F = 0xF0 = 240
+  check_eq_int(0xFF ^ 0x0F, 240, "O.b7", fails)
+  // (h) ~0 = -1 ; -1 & 0xFFFF = 65535
+  check_eq_int((~0) & 0xFFFF, 65535, "O.b8", fails)
+  // (i) ternary feeding arithmetic: (3 > 2 ? 10 : 20) + 5 = 15
+  check_eq_int((3 > 2 ? 10 : 20) + 5, 15, "O.b9", fails)
+  // (j) chained comparisons via &&: 1 < 2 && 2 < 3 && 3 < 4
+  check_true(1 < 2 && 2 < 3 && 3 < 4, "O.b10", fails)
+  // (k) modulo cycle: (i % 3) for i in 0..6 sums to 0+1+2+0+1+2 = 6
+  let mut modsum = 0
+  for i in 0..6 { modsum += i % 3 }
+  check_eq_int(modsum, 6, "O.b11", fails)
+  // (l) power table: sum of 2**k for k in 0..=4 = 1+2+4+8+16 = 31
+  let mut powsum = 0
+  for k in 0..=4 { powsum += 2 ** k }
+  check_eq_int(powsum, 31, "O.b12", fails)
+  // (m) factorial via loop (uses *): 5! = 120
+  let mut fact = 1
+  for f in 1..=5 { fact *= f }
+  check_eq_int(fact, 120, "O.b13", fails)
+  // (n) running XOR identity: a ^ a == 0, a ^ 0 == a
+  let mut xacc = 0
+  for v in 1..=10 { xacc ^= v }
+  // 1^2^...^10: known value = 11
+  check_eq_int(xacc, 11, "O.b14", fails)
+  check_eq_int(xacc ^ xacc, 0, "O.b15", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION P — Deterministic "spreadsheet": cells computed via operators.
+  // Cells are an Array<int>; formulas reference earlier cells by index.
+  // ------------------------------------------------------------------
+  let mut cells: Array<int> = []
+  cells.push(10)                         // C0 = 10
+  cells.push(20)                         // C1 = 20
+  cells.push(cells[0] + cells[1])        // C2 = 30
+  cells.push(cells[2] * 2)               // C3 = 60
+  cells.push(cells[3] - cells[0])        // C4 = 50
+  cells.push(cells[4] / cells[1])        // C5 = 50/20 = 2 (trunc)
+  cells.push(cells[3] % cells[1])        // C6 = 60 % 20 = 0
+  cells.push(cells[0] ** 2)              // C7 = 100
+  cells.push(cells[7] | cells[6])        // C8 = 100 | 0 = 100
+  cells.push(cells[8] & 0xF0)            // C9 = 100 & 240 = 96
+  check_eq_int(cells[2], 30, "P.c2", fails)
+  check_eq_int(cells[3], 60, "P.c3", fails)
+  check_eq_int(cells[4], 50, "P.c4", fails)
+  check_eq_int(cells[5], 2, "P.c5", fails)
+  check_eq_int(cells[6], 0, "P.c6", fails)
+  check_eq_int(cells[7], 100, "P.c7", fails)
+  check_eq_int(cells[8], 100, "P.c8", fails)
+  check_eq_int(cells[9], 96, "P.c9", fails)
+  // grand total of all cells via accumulation
+  let mut grand = 0
+  let mut ci = 0
+  while ci < cells.len() {
+    grand += cells[ci]
+    ci += 1
+  }
+  // 10+20+30+60+50+2+0+100+100+96 = 468
+  check_eq_int(grand, 468, "P.grand_total", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION Q — Comparison-driven selection (min/max via operators only).
+  // ------------------------------------------------------------------
+  let series: Array<int> = [7, 2, 9, 4, 1, 8, 3]
+  let mut mn = series[0]
+  let mut mx = series[0]
+  let mut qi = 1
+  while qi < series.len() {
+    let x = series[qi]
+    mn = x < mn ? x : mn
+    mx = x > mx ? x : mx
+    qi += 1
+  }
+  check_eq_int(mn, 1, "Q.min", fails)
+  check_eq_int(mx, 9, "Q.max", fails)
+  check_eq_int(mx - mn, 8, "Q.range", fails)
+  // count evens via % and a comparison
+  let mut evens = 0
+  let mut ei = 0
+  while ei < series.len() {
+    if series[ei] % 2 == 0 { evens += 1 }
+    ei += 1
+  }
+  check_eq_int(evens, 3, "Q.even_count", fails)   // 2,4,8
+
+  // ------------------------------------------------------------------
+  // SECTION R — Boolean truth tables (exhaustive, 2-input).
+  // ------------------------------------------------------------------
+  // AND
+  check_true((true && true) == true, "R.and_tt", fails)
+  check_true((true && false) == false, "R.and_tf", fails)
+  check_true((false && true) == false, "R.and_ft", fails)
+  check_true((false && false) == false, "R.and_ff", fails)
+  // OR
+  check_true((true || true) == true, "R.or_tt", fails)
+  check_true((true || false) == true, "R.or_tf", fails)
+  check_true((false || true) == true, "R.or_ft", fails)
+  check_true((false || false) == false, "R.or_ff", fails)
+  // XOR-via-!= on bools
+  check_true((true != false) == true, "R.xor_tf", fails)
+  check_true((true != true) == false, "R.xor_tt", fails)
+
+  // ------------------------------------------------------------------
+  // FINAL VERDICT
+  // ------------------------------------------------------------------
+  if fails.len() == 0 {
+    print("ALL_CHECKS_PASSED")
+  } else {
+    print(f"FAILED_COUNT={fails.len()}")
+  }
+}
+
+// Try-operator helper (book 416-430). Returns Err for sentinel -999.
+fn parse_signed(n: int) -> Result<int, string> {
+  if n == (0 - 999) { Err("sentinel") } else { Ok(n) }
+}
+fn run_chain(a: int, b: int) -> int {
+  match add_checked(a, b) {
+    Ok(v) => v
+    Err(_) => 0 - 1
+  }
+}
+fn add_checked(a: int, b: int) -> Result<int, string> {
+  let x: int = parse_signed(a)?
+  let y: int = parse_signed(b)?
+  Ok(x + y)
+}
+
+main()

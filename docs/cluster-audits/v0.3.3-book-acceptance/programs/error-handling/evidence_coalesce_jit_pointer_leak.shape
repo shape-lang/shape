@@ -1,0 +1,8 @@
+fn pick(a: Option<int>, dflt: int) -> int {
+    return a ?? dflt;
+}
+fn main() {
+    print(f"{pick(Some(1), 9)}");
+    print(f"{pick(None, 9)}");
+}
+main();

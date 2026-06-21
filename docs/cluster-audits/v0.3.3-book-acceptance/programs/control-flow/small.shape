@@ -1,0 +1,129 @@
+// control-flow slice — small self-checking program.
+// Exercises: if-expression, block-as-value, for over exclusive/inclusive
+// ranges, destructuring loop bindings, while, break/continue, loop,
+// loop with break-value, match expression.
+// Every result is asserted against a value derived from book semantics.
+// NOTE: `assert` is NOT a prelude builtin in strict Shape and the book never
+// teaches it; self-checks use the book-taught if/print form instead.
+
+// --- if as an expression (book: "If Expressions") ---
+let score = 84
+let grade = if score >= 90 {
+  "A"
+} else if score >= 80 {
+  "B"
+} else {
+  "C"
+}
+if grade != "B" {
+  print(f"CHECK_FAILED: grade expected=B got={grade}")
+}
+
+// --- block returns last expression (book: "Blocks Return Values") ---
+let value = {
+  let base = 10
+  base * 2
+}
+if value != 20 {
+  print(f"CHECK_FAILED: block_value expected=20 got={value}")
+}
+
+// --- block with trailing semicolon yields () (book: "Blocks Return Values") ---
+let unit = {
+  1;
+}
+
+// --- for over exclusive range 0..5 sums 0+1+2+3+4 = 10 ---
+var sum_excl = 0
+for i in 0..5 {
+  sum_excl = sum_excl + i
+}
+if sum_excl != 10 {
+  print(f"CHECK_FAILED: sum_excl expected=10 got={sum_excl}")
+}
+
+// --- for over inclusive range 0..=5 sums 0+1+2+3+4+5 = 15 ---
+var sum_incl = 0
+for i in 0..=5 {
+  sum_incl = sum_incl + i
+}
+if sum_incl != 15 {
+  print(f"CHECK_FAILED: sum_incl expected=15 got={sum_incl}")
+}
+
+// --- destructuring in for-loop bindings (book: "For Loops") ---
+// Book teaches `for {x, y} in points`. Sum of all coords = 1+2+3+4 = 10.
+let points = [{x: 1, y: 2}, {x: 3, y: 4}]
+var coord_sum = 0
+for {x, y} in points {
+  coord_sum = coord_sum + x + y
+}
+if coord_sum != 10 {
+  print(f"CHECK_FAILED: coord_sum expected=10 got={coord_sum}")
+}
+
+// --- while loop counts down (book: "While Loops") ---
+var n = 3
+var iters = 0
+while n > 0 {
+  iters = iters + 1
+  n = n - 1
+}
+if iters != 3 {
+  print(f"CHECK_FAILED: iters expected=3 got={iters}")
+}
+
+// --- break/continue (book: "Break and Continue") ---
+// skip i==2, stop at i==6: visits 0,1,3,4,5 → sum 13
+var bc_sum = 0
+for i in 0..10 {
+  if i == 2 {
+    continue
+  }
+  if i == 6 {
+    break
+  }
+  bc_sum = bc_sum + i
+}
+if bc_sum != 13 {
+  print(f"CHECK_FAILED: bc_sum expected=13 got={bc_sum}")
+}
+
+// --- loop with break (book: "Loop") ---
+var k = 0
+loop {
+  if k >= 5 {
+    break
+  }
+  k = k + 1
+}
+if k != 5 {
+  print(f"CHECK_FAILED: loop_k expected=5 got={k}")
+}
+
+// --- loop with break carrying a value (book: "Break with Value") ---
+// loop is an expression; n increments, x=n*4, first x>10 at n=3 -> break 12*2=24
+var m = 0
+let result = loop {
+  m = m + 1
+  let x = m * 4
+  if x > 10 {
+    break x * 2
+  }
+}
+if result != 24 {
+  print(f"CHECK_FAILED: break_value expected=24 got={result}")
+}
+
+// --- match as an expression (book: "Match" -> Pattern Matching) ---
+let mv = 2
+let label = match mv {
+  1 => "one",
+  2 => "two",
+  _ => "other"
+}
+if label != "two" {
+  print(f"CHECK_FAILED: match_label expected=two got={label}")
+}
+
+print("ALL_CHECKS_PASSED")

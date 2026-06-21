@@ -1,0 +1,767 @@
+// ============================================================================
+// large.shape  —  control-flow slice, v0.3.3 book-acceptance
+//
+// A deterministic, non-interactive, machine-proofable expression-evaluation
+// engine, built entirely from the control-flow chapter's vocabulary:
+//   - if / else-if / else as expressions (chapter "If Expressions")
+//   - blocks returning their last expression  (chapter "Blocks Return Values")
+//   - for over exclusive 0..n and inclusive 0..=n ranges (chapter "For Loops")
+//   - while loops (chapter "While Loops")
+//   - break / continue (chapter "Break and Continue")
+//   - loop with plain break (chapter "Loop")
+//   - match as an expression (chapter "Match")
+//
+// Supporting data: integer arrays used as stacks/queues. To stay rooted in the
+// control-flow slice (and to avoid orthogonal string-method defects), the input
+// is a *pre-tokenized* integer token stream rather than raw source text:
+//   token >= 0            : an operand (the literal integer value)
+//   token  = OP_ADD (-1)  : binary '+'
+//   token  = OP_SUB (-2)  : binary '-'
+//   token  = OP_MUL (-3)  : binary '*'
+//   token  = OP_DIV (-4)  : binary '/' (integer division, truncating)
+//   token  = OP_LPAR (-5) : '('
+//   token  = OP_RPAR (-6) : ')'
+//
+// The engine:
+//   1. shunting-yard: infix token stream -> RPN (Reverse Polish) token stream
+//   2. rpn_eval: evaluate an RPN stream on an operand stack
+//   3. a tiny register state-machine that runs a fixed micro-program
+//
+// EVERY expected value below was computed BY HAND from arithmetic / book
+// semantics BEFORE the first run, and asserted. On all-pass the program prints
+// "ALL_CHECKS_PASSED"; any mismatch prints "CHECK_FAILED: <which> ...".
+// ============================================================================
+
+// ---- operator token codes ----
+let OP_ADD: int = -1
+let OP_SUB: int = -2
+let OP_MUL: int = -3
+let OP_DIV: int = -4
+let OP_LPAR: int = -5
+let OP_RPAR: int = -6
+
+// ---------------------------------------------------------------------------
+// classification helpers (if/else-if/else expressions + match)
+// ---------------------------------------------------------------------------
+
+// Is this token an operand (a non-negative literal)?
+fn is_operand(tok: int) -> bool {
+  if tok >= 0 { true } else { false }
+}
+
+// Is this token one of the four binary operators?
+fn is_binop(tok: int) -> bool {
+  if tok == OP_ADD { true }
+  else if tok == OP_SUB { true }
+  else if tok == OP_MUL { true }
+  else if tok == OP_DIV { true }
+  else { false }
+}
+
+// Operator precedence: * and / bind tighter (2) than + and - (1).
+// Non-operators get 0.
+fn precedence(tok: int) -> int {
+  if tok == OP_MUL { 2 }
+  else if tok == OP_DIV { 2 }
+  else if tok == OP_ADD { 1 }
+  else if tok == OP_SUB { 1 }
+  else { 0 }
+}
+
+// A human-readable name, exercising `match` as an expression (chapter "Match").
+fn op_name(tok: int) -> string {
+  match tok {
+    -1 => "ADD",
+    -2 => "SUB",
+    -3 => "MUL",
+    -4 => "DIV",
+    -5 => "LPAR",
+    -6 => "RPAR",
+    _ => "NUM",
+  }
+}
+
+// Apply a binary operator to two operands. Integer arithmetic only.
+fn apply_op(op: int, a: int, b: int) -> int {
+  if op == OP_ADD { a + b }
+  else if op == OP_SUB { a - b }
+  else if op == OP_MUL { a * b }
+  else if op == OP_DIV { a / b }
+  else { 0 }
+}
+
+// ---------------------------------------------------------------------------
+// Shunting-yard: infix integer-token stream -> RPN integer-token stream.
+//
+// Classic Dijkstra algorithm, expressed with while/for/if/break/continue.
+// All operators here are left-associative, so an incoming operator pops
+// operators of >= precedence from the op-stack to the output.
+// ---------------------------------------------------------------------------
+fn to_rpn(tokens: Array<int>) -> Array<int> {
+  var output: Array<int> = []
+  var ops: Array<int> = []
+  var nop = 0          // void-typed sentinel; see branch-unification note below
+  let n = tokens.len()
+  var i = 0
+  while i < n {
+    let tok = tokens[i]
+    // NOTE on the trailing `nop = 0` in each branch: `.push()` returns the
+    // array (Array<int>), so a push at a branch tail makes that branch's value
+    // type Array<int>. In an if/else-if chain in statement position, sibling
+    // branches (especially the `loop`/`break` branch, typed Void) then fail to
+    // unify ("Vec<int> is not compatible with void"). The book's documented fix
+    // — a trailing `;` to discard the value and yield `()` — DOES resolve this
+    // (verified in REPORT.md); a Void-typed statement like `nop = 0` is an
+    // equivalent alternate. We keep `nop = 0` here for uniformity across the
+    // file, but the book-taught `;` mechanism is the canonical fix.
+    if is_operand(tok) {
+      output.push(tok)
+      nop = 0
+    } else if is_binop(tok) {
+      // pop while top-of-ops is an operator of >= precedence
+      let myprec = precedence(tok)
+      loop {
+        if ops.len() == 0 { break }
+        let topv = ops[ops.len() - 1]
+        if topv == OP_LPAR { break }
+        if precedence(topv) < myprec { break }
+        let popped = ops.pop()
+        output.push(popped)
+        nop = 0
+      }
+      ops.push(tok)
+      nop = 0
+    } else if tok == OP_LPAR {
+      ops.push(tok)
+      nop = 0
+    } else if tok == OP_RPAR {
+      // pop until matching '('
+      loop {
+        if ops.len() == 0 { break }
+        let topv = ops[ops.len() - 1]
+        if topv == OP_LPAR {
+          let discard = ops.pop()
+          break
+        }
+        let popped = ops.pop()
+        output.push(popped)
+        nop = 0
+      }
+    } else {
+      nop = 0
+    }
+    i = i + 1
+  }
+  // drain remaining operators
+  while ops.len() > 0 {
+    let popped = ops.pop()
+    output.push(popped)
+  }
+  output
+}
+
+// ---------------------------------------------------------------------------
+// RPN evaluator: evaluate an RPN integer-token stream on an operand stack.
+// ---------------------------------------------------------------------------
+fn rpn_eval(rpn: Array<int>) -> int {
+  var stack: Array<int> = []
+  let n = rpn.len()
+  var i = 0
+  while i < n {
+    let tok = rpn[i]
+    if is_operand(tok) {
+      stack.push(tok)
+    } else {
+      // binary operator: pop b then a, push apply_op(op, a, b)
+      let b = stack.pop()
+      let a = stack.pop()
+      let r = apply_op(tok, a, b)
+      stack.push(r)
+    }
+    i = i + 1
+  }
+  if stack.len() == 0 { return 0 }
+  stack[stack.len() - 1]
+}
+
+// Convenience: full infix -> value pipeline.
+fn evaluate(tokens: Array<int>) -> int {
+  let rpn = to_rpn(tokens)
+  rpn_eval(rpn)
+}
+
+// ---------------------------------------------------------------------------
+// Sum of an int array (helper used in assertions over RPN token streams).
+// ---------------------------------------------------------------------------
+fn arr_sum(xs: Array<int>) -> int {
+  var s = 0
+  for x in xs { s = s + x }
+  s
+}
+
+// Count operands (>=0 tokens) in a stream.
+fn count_operands(xs: Array<int>) -> int {
+  var c = 0
+  for x in xs {
+    if is_operand(x) { c = c + 1 }
+  }
+  c
+}
+
+// ---------------------------------------------------------------------------
+// A tiny deterministic register state-machine.  Opcodes:
+//   0 NOP    1 SET r,v    2 ADD r,s    3 MUL r,s    4 JNZ r,target
+// Program is a flat int array; pc walks it with a `loop` + manual stepping,
+// using break to halt.  Demonstrates loop/break/match-style dispatch.
+// We model 4 registers R0..R3 in a small int array.
+// ---------------------------------------------------------------------------
+fn run_machine(prog: Array<int>) -> int {
+  // registers
+  var regs: Array<int> = []
+  regs.push(0)
+  regs.push(0)
+  regs.push(0)
+  regs.push(0)
+  var pc = 0
+  var steps = 0
+  let n = prog.len()
+  loop {
+    if pc >= n { break }
+    if steps > 1000 { break } // safety bound (deterministic)
+    steps = steps + 1
+    let opcode = prog[pc]
+    if opcode == 0 {
+      // NOP
+      pc = pc + 1
+    } else if opcode == 1 {
+      // SET r, v
+      let r = prog[pc + 1]
+      let v = prog[pc + 2]
+      regs[r] = v
+      pc = pc + 3
+    } else if opcode == 2 {
+      // ADD r, s :  regs[r] += regs[s]
+      let r = prog[pc + 1]
+      let s = prog[pc + 2]
+      regs[r] = regs[r] + regs[s]
+      pc = pc + 3
+    } else if opcode == 3 {
+      // MUL r, s :  regs[r] *= regs[s]
+      let r = prog[pc + 1]
+      let s = prog[pc + 2]
+      regs[r] = regs[r] * regs[s]
+      pc = pc + 3
+    } else if opcode == 4 {
+      // JNZ r, target : if regs[r] != 0 jump to target else fall through
+      let r = prog[pc + 1]
+      let target = prog[pc + 2]
+      if regs[r] != 0 {
+        pc = target
+      } else {
+        pc = pc + 3
+      }
+    } else {
+      // unknown opcode halts
+      break
+    }
+  }
+  // return R0
+  regs[0]
+}
+
+// ---------------------------------------------------------------------------
+// Number-theory mini-suite (pure control flow over ranges).
+// ---------------------------------------------------------------------------
+fn is_prime(n: int) -> bool {
+  if n < 2 { return false }
+  var d = 2
+  while d * d <= n {
+    if n % d == 0 { return false }
+    d = d + 1
+  }
+  true
+}
+
+fn count_primes_below(limit: int) -> int {
+  var c = 0
+  for k in 0..limit {
+    if is_prime(k) { c = c + 1 }
+  }
+  c
+}
+
+fn factorial(n: int) -> int {
+  var f = 1
+  for k in 1..=n { f = f * k }
+  f
+}
+
+fn fib(n: int) -> int {
+  if n < 2 { return n }
+  var a = 0
+  var b = 1
+  var i = 2
+  while i <= n {
+    let next = a + b
+    a = b
+    b = next
+    i = i + 1
+  }
+  b
+}
+
+fn gcd(a: int, b: int) -> int {
+  var x = a
+  var y = b
+  while y != 0 {
+    let t = y
+    y = x % y
+    x = t
+  }
+  x
+}
+
+// Collatz step count (uses while + if branching).
+fn collatz_steps(start: int) -> int {
+  var v = start
+  var steps = 0
+  while v != 1 {
+    if v % 2 == 0 {
+      v = v / 2
+    } else {
+      v = 3 * v + 1
+    }
+    steps = steps + 1
+  }
+  steps
+}
+
+// Sum of digits of a non-negative integer (while + modulo).
+fn digit_sum(n: int) -> int {
+  var v = n
+  var s = 0
+  if v == 0 { return 0 }
+  while v > 0 {
+    s = s + (v % 10)
+    v = v / 10
+  }
+  s
+}
+
+// Reverse an int array into a new array (for over reversed indices).
+fn reverse_ints(xs: Array<int>) -> Array<int> {
+  var out: Array<int> = []
+  let n = xs.len()
+  var i = n - 1
+  while i >= 0 {
+    out.push(xs[i])
+    i = i - 1
+  }
+  out
+}
+
+// Bubble sort an int array (nested loops + swap via temp).
+fn bubble_sort(xs: Array<int>) -> Array<int> {
+  var a: Array<int> = []
+  for x in xs { a.push(x) }
+  let n = a.len()
+  var pass = 0
+  while pass < n {
+    var j = 0
+    while j + 1 < n {
+      if a[j] > a[j + 1] {
+        let tmp = a[j]
+        a[j] = a[j + 1]
+        a[j + 1] = tmp
+      }
+      j = j + 1
+    }
+    pass = pass + 1
+  }
+  a
+}
+
+// Linear search returning index or explicit -1 (early return discipline).
+fn index_of(xs: Array<int>, target: int) -> int {
+  var i = 0
+  let n = xs.len()
+  while i < n {
+    if xs[i] == target { return i }
+    i = i + 1
+  }
+  return -1
+}
+
+// Clamp via if/else-if/else expression.
+fn clamp(v: int, lo: int, hi: int) -> int {
+  if v < lo { lo } else if v > hi { hi } else { v }
+}
+
+// ---------------------------------------------------------------------------
+// Assertion plumbing.  We track a global failure count via a mutable var
+// captured-by-reference would not be book-taught here, so instead each check
+// appends to a results array and we tally at the end.
+// ---------------------------------------------------------------------------
+var failures = 0
+
+fn check_int(label: string, got: int, expected: int) {
+  if got != expected {
+    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    failures = failures + 1
+  }
+}
+
+fn check_bool(label: string, got: bool, expected: bool) {
+  if got != expected {
+    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    failures = failures + 1
+  }
+}
+
+fn check_str(label: string, got: string, expected: string) {
+  if got != expected {
+    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    failures = failures + 1
+  }
+}
+
+// ===========================================================================
+// SECTION 1 — token classification
+// ===========================================================================
+check_bool("is_operand_5", is_operand(5), true)
+check_bool("is_operand_0", is_operand(0), true)
+check_bool("is_operand_add", is_operand(OP_ADD), false)
+check_bool("is_binop_add", is_binop(OP_ADD), true)
+check_bool("is_binop_mul", is_binop(OP_MUL), true)
+check_bool("is_binop_lpar", is_binop(OP_LPAR), false)
+check_bool("is_binop_num", is_binop(7), false)
+check_int("prec_mul", precedence(OP_MUL), 2)
+check_int("prec_div", precedence(OP_DIV), 2)
+check_int("prec_add", precedence(OP_ADD), 1)
+check_int("prec_sub", precedence(OP_SUB), 1)
+check_int("prec_num", precedence(9), 0)
+check_int("prec_lpar", precedence(OP_LPAR), 0)
+check_str("name_add", op_name(OP_ADD), "ADD")
+check_str("name_sub", op_name(OP_SUB), "SUB")
+check_str("name_mul", op_name(OP_MUL), "MUL")
+check_str("name_div", op_name(OP_DIV), "DIV")
+check_str("name_lpar", op_name(OP_LPAR), "LPAR")
+check_str("name_rpar", op_name(OP_RPAR), "RPAR")
+check_str("name_num", op_name(42), "NUM")
+
+// ===========================================================================
+// SECTION 2 — apply_op direct arithmetic
+// ===========================================================================
+check_int("apply_add", apply_op(OP_ADD, 3, 4), 7)
+check_int("apply_sub", apply_op(OP_SUB, 10, 4), 6)
+check_int("apply_mul", apply_op(OP_MUL, 6, 7), 42)
+check_int("apply_div", apply_op(OP_DIV, 20, 6), 3)   // truncating: 20/6 = 3
+check_int("apply_div_exact", apply_op(OP_DIV, 21, 7), 3)
+check_int("apply_sub_neg", apply_op(OP_SUB, 4, 9), -5)
+
+// ===========================================================================
+// SECTION 3 — shunting-yard RPN conversion
+//
+// Infix:  3 + 4 * 2      tokens: [3, +, 4, *, 2]
+// Expected RPN:  3 4 2 * +   tokens: [3, 4, 2, MUL, ADD]
+// (hand-derived from precedence: * binds tighter than +)
+// ===========================================================================
+let infix1 = [3, OP_ADD, 4, OP_MUL, 2]
+let rpn1 = to_rpn(infix1)
+check_int("rpn1_len", rpn1.len(), 5)
+check_int("rpn1_0", rpn1[0], 3)
+check_int("rpn1_1", rpn1[1], 4)
+check_int("rpn1_2", rpn1[2], 2)
+check_int("rpn1_3", rpn1[3], OP_MUL)
+check_int("rpn1_4", rpn1[4], OP_ADD)
+// operand count preserved through conversion
+check_int("rpn1_operands", count_operands(rpn1), 3)
+
+// Infix:  ( 3 + 4 ) * 2     -> RPN: 3 4 + 2 *
+let infix2 = [OP_LPAR, 3, OP_ADD, 4, OP_RPAR, OP_MUL, 2]
+let rpn2 = to_rpn(infix2)
+check_int("rpn2_len", rpn2.len(), 5)
+check_int("rpn2_0", rpn2[0], 3)
+check_int("rpn2_1", rpn2[1], 4)
+check_int("rpn2_2", rpn2[2], OP_ADD)
+check_int("rpn2_3", rpn2[3], 2)
+check_int("rpn2_4", rpn2[4], OP_MUL)
+
+// Infix:  10 - 2 - 3   (left-assoc) -> RPN: 10 2 - 3 -
+let infix3 = [10, OP_SUB, 2, OP_SUB, 3]
+let rpn3 = to_rpn(infix3)
+check_int("rpn3_len", rpn3.len(), 5)
+check_int("rpn3_0", rpn3[0], 10)
+check_int("rpn3_1", rpn3[1], 2)
+check_int("rpn3_2", rpn3[2], OP_SUB)
+check_int("rpn3_3", rpn3[3], 3)
+check_int("rpn3_4", rpn3[4], OP_SUB)
+
+// ===========================================================================
+// SECTION 4 — RPN evaluation (and full pipeline)
+//
+// 3 + 4 * 2          = 3 + 8        = 11
+// ( 3 + 4 ) * 2      = 7 * 2        = 14
+// 10 - 2 - 3         = 8 - 3        = 5
+// 2 * 3 + 4 * 5      = 6 + 20       = 26
+// 100 / 5 / 2        = 20 / 2       = 10
+// ( 8 + 2 ) * ( 7 - 3 ) = 10 * 4    = 40
+// 7                  = 7  (single operand)
+// 2 + 3 * 4 - 5      = 2 + 12 - 5   = 9
+// ===========================================================================
+check_int("eval1", evaluate([3, OP_ADD, 4, OP_MUL, 2]), 11)
+check_int("eval2", evaluate([OP_LPAR, 3, OP_ADD, 4, OP_RPAR, OP_MUL, 2]), 14)
+check_int("eval3", evaluate([10, OP_SUB, 2, OP_SUB, 3]), 5)
+check_int("eval4", evaluate([2, OP_MUL, 3, OP_ADD, 4, OP_MUL, 5]), 26)
+check_int("eval5", evaluate([100, OP_DIV, 5, OP_DIV, 2]), 10)
+check_int("eval6", evaluate([OP_LPAR, 8, OP_ADD, 2, OP_RPAR, OP_MUL, OP_LPAR, 7, OP_SUB, 3, OP_RPAR]), 40)
+check_int("eval7", evaluate([7]), 7)
+check_int("eval8", evaluate([2, OP_ADD, 3, OP_MUL, 4, OP_SUB, 5]), 9)
+// direct rpn_eval on hand-written RPN: 5 1 2 + 4 * + 3 -  = 5 + (1+2)*4 - 3 = 5+12-3 = 14
+check_int("rpn_direct", rpn_eval([5, 1, 2, OP_ADD, 4, OP_MUL, OP_ADD, 3, OP_SUB]), 14)
+
+// ===========================================================================
+// SECTION 5 — register state-machine
+//
+// Program A:  R0 = 6;  R1 = 7;  R0 = R0 * R1   -> R0 = 42
+//   SET 0 6 | SET 1 7 | MUL 0 1
+//   encoded: [1,0,6, 1,1,7, 3,0,1]
+//
+// Program B (countdown loop using JNZ):
+//   R0 = 1 ; R1 = 5 ; R2 = 0
+//   LOOP: R0 = R0 * R1   (multiply accumulator)
+//         R1 = R1 + Rneg? -> we lack subtract-immediate, so instead:
+//   Simpler deterministic loop: accumulate R0 += R1 five times via JNZ counter.
+//   We use R3 as a counter initialised to a "remaining" flag pattern.
+//
+//   Program B: compute 4 * 5 by repeated addition:
+//     R0=0 ; R1=5 ; R2=4   (R2 = remaining count, R3 = step "1")
+//     R3=1
+//   LOOP (pc=12): R0 = R0 + R1     ; ADD 0 1
+//                 R2 = R2 + Rneg1  -> need decrement. Encode a "-1" register.
+//   Since SET takes a literal, set R3 = -1 and ADD R2 += R3 to decrement.
+//     SET 3 -1 (decrement step)
+//   Full encoding below; expected R0 = 5*4 = 20.
+// ===========================================================================
+let progA = [1, 0, 6, 1, 1, 7, 3, 0, 1]
+check_int("machineA", run_machine(progA), 42)
+
+// Program B layout (indices):
+//  0: SET 0 0      -> [1,0,0]
+//  3: SET 1 5      -> [1,1,5]
+//  6: SET 2 4      -> [1,2,4]    (counter)
+//  9: SET 3 -1     -> [1,3,-1]   (decrement step)
+// 12: ADD 0 1      -> [2,0,1]    (R0 += R1)            LOOP
+// 15: ADD 2 3      -> [2,2,3]    (R2 += -1)
+// 18: JNZ 2 12     -> [4,2,12]   (if R2 != 0 goto 12)
+// 21: (end)
+// Iterations: R2 = 4 -> after add 3, R2=3 (jnz), ... until R2=0.
+//   R0 += 5 happens once per iteration; R2 goes 4->3->2->1->0, JNZ stops at 0.
+//   That is 4 iterations -> R0 = 5 * 4 = 20.
+let progB = [1,0,0, 1,1,5, 1,2,4, 1,3,-1, 2,0,1, 2,2,3, 4,2,12]
+check_int("machineB", run_machine(progB), 20)
+
+// Program C: just a NOP then SET R0 = 99
+let progC = [0, 1, 0, 99]
+check_int("machineC", run_machine(progC), 99)
+
+// ===========================================================================
+// SECTION 6 — number theory over ranges
+// ===========================================================================
+check_bool("prime_2", is_prime(2), true)
+check_bool("prime_3", is_prime(3), true)
+check_bool("prime_4", is_prime(4), false)
+check_bool("prime_17", is_prime(17), true)
+check_bool("prime_1", is_prime(1), false)
+check_bool("prime_0", is_prime(0), false)
+check_bool("prime_25", is_prime(25), false)
+check_bool("prime_97", is_prime(97), true)
+// primes below 20: 2,3,5,7,11,13,17,19 -> 8
+check_int("primes_below_20", count_primes_below(20), 8)
+// primes below 2: none -> 0
+check_int("primes_below_2", count_primes_below(2), 0)
+// primes below 30: above 8 plus 23,29 -> 10
+check_int("primes_below_30", count_primes_below(30), 10)
+
+check_int("fact_0", factorial(0), 1)
+check_int("fact_1", factorial(1), 1)
+check_int("fact_5", factorial(5), 120)
+check_int("fact_6", factorial(6), 720)
+
+check_int("fib_0", fib(0), 0)
+check_int("fib_1", fib(1), 1)
+check_int("fib_2", fib(2), 1)
+check_int("fib_7", fib(7), 13)
+check_int("fib_10", fib(10), 55)
+
+check_int("gcd_12_8", gcd(12, 8), 4)
+check_int("gcd_17_5", gcd(17, 5), 1)
+check_int("gcd_100_60", gcd(100, 60), 20)
+check_int("gcd_0_9", gcd(0, 9), 9)
+
+// Collatz: 6 -> 3 -> 10 -> 5 -> 16 -> 8 -> 4 -> 2 -> 1 : 8 steps
+check_int("collatz_6", collatz_steps(6), 8)
+// 1 -> already 1 : 0 steps
+check_int("collatz_1", collatz_steps(1), 0)
+// 7 -> 22,11,34,17,52,26,13,40,20,10,5,16,8,4,2,1 : 16 steps
+check_int("collatz_7", collatz_steps(7), 16)
+
+check_int("digsum_0", digit_sum(0), 0)
+check_int("digsum_305", digit_sum(305), 8)
+check_int("digsum_9999", digit_sum(9999), 36)
+check_int("digsum_1000", digit_sum(1000), 1)
+
+// ===========================================================================
+// SECTION 7 — array transforms (loops + indexing)
+// ===========================================================================
+let src = [4, 1, 3, 2, 5]
+let rev = reverse_ints(src)
+check_int("rev_len", rev.len(), 5)
+check_int("rev_0", rev[0], 5)
+check_int("rev_4", rev[4], 4)
+check_int("rev_sum", arr_sum(rev), 15)
+
+let sorted = bubble_sort(src)
+check_int("sorted_0", sorted[0], 1)
+check_int("sorted_1", sorted[1], 2)
+check_int("sorted_2", sorted[2], 3)
+check_int("sorted_3", sorted[3], 4)
+check_int("sorted_4", sorted[4], 5)
+check_int("sorted_sum", arr_sum(sorted), 15)
+// original unchanged (bubble_sort copies)
+check_int("src_unchanged_0", src[0], 4)
+
+check_int("index_of_3", index_of(src, 3), 2)
+check_int("index_of_4", index_of(src, 4), 0)
+check_int("index_of_missing", index_of(src, 99), -1)
+
+check_int("clamp_lo", clamp(-5, 0, 10), 0)
+check_int("clamp_hi", clamp(15, 0, 10), 10)
+check_int("clamp_mid", clamp(7, 0, 10), 7)
+
+// ===========================================================================
+// SECTION 8 — nested loops with break/continue (combinatorial counts)
+//
+// Count ordered pairs (i, j), 0<=i<5, 0<=j<5, with i != j and i+j < 5.
+// Enumerate by hand:
+//   i=0: j in {1,2,3,4} with 0+j<5 -> j=1,2,3,4 (j!=0) -> 4
+//   i=1: j!=1, 1+j<5 -> j<4 -> j=0,2,3 -> 3
+//   i=2: j!=2, 2+j<5 -> j<3 -> j=0,1 -> 2
+//   i=3: j!=3, 3+j<5 -> j<2 -> j=0,1 -> 2
+//   i=4: j!=4, 4+j<5 -> j<1 -> j=0   -> 1
+//   total = 4+3+2+2+1 = 12
+// ===========================================================================
+fn count_pairs(n: int) -> int {
+  var c = 0
+  for i in 0..n {
+    for j in 0..n {
+      if i == j { continue }
+      if i + j >= n { break }
+      c = c + 1
+    }
+  }
+  c
+}
+check_int("count_pairs_5", count_pairs(5), 12)
+
+// Triangle number via inclusive range: sum 1..=10 = 55
+fn triangle(n: int) -> int {
+  var s = 0
+  for k in 1..=n { s = s + k }
+  s
+}
+check_int("triangle_10", triangle(10), 55)
+check_int("triangle_1", triangle(1), 1)
+check_int("triangle_0", triangle(0), 0)
+
+// Sum of even numbers in 0..20 using continue: 0+2+...+18 = 90
+fn sum_evens(limit: int) -> int {
+  var s = 0
+  for k in 0..limit {
+    if k % 2 != 0 { continue }
+    s = s + k
+  }
+  s
+}
+check_int("sum_evens_20", sum_evens(20), 90)
+
+// First k>=1 whose square exceeds 50, via loop+break (plain break + captured var)
+fn first_square_over(threshold: int) -> int {
+  var k = 1
+  var found = 0
+  loop {
+    if k * k > threshold {
+      found = k
+      break
+    }
+    k = k + 1
+  }
+  found
+}
+// 7*7=49 (not >50), 8*8=64 (>50) -> 8
+check_int("first_sq_over_50", first_square_over(50), 8)
+// 1*1=1 (not>0)? 1>0 true -> k=1 -> 1
+check_int("first_sq_over_0", first_square_over(0), 1)
+
+// while-driven Newton-ish integer sqrt (floor): repeated until convergence.
+fn isqrt(n: int) -> int {
+  if n < 2 { return n }
+  var x = n
+  var y = (x + 1) / 2
+  while y < x {
+    x = y
+    y = (x + n / x) / 2
+  }
+  x
+}
+check_int("isqrt_0", isqrt(0), 0)
+check_int("isqrt_1", isqrt(1), 1)
+check_int("isqrt_16", isqrt(16), 4)
+check_int("isqrt_17", isqrt(17), 4)
+check_int("isqrt_99", isqrt(99), 9)
+check_int("isqrt_100", isqrt(100), 10)
+
+// ===========================================================================
+// SECTION 9 — running totals combining many features
+// Build [1,4,9,16,25] (squares), reverse, sort, evaluate an expression that
+// uses the sum as an operand.
+// ===========================================================================
+fn squares(n: int) -> Array<int> {
+  var out: Array<int> = []
+  for k in 1..=n { out.push(k * k) }
+  out
+}
+let sq = squares(5)
+check_int("sq_len", sq.len(), 5)
+check_int("sq_sum", arr_sum(sq), 55)   // 1+4+9+16+25
+check_int("sq_last", sq[sq.len() - 1], 25)
+
+// Expression using sq_sum: ( 55 - 5 ) / ( 2 + 3 ) = 50 / 5 = 10
+let combined = evaluate([OP_LPAR, 55, OP_SUB, 5, OP_RPAR, OP_DIV, OP_LPAR, 2, OP_ADD, 3, OP_RPAR])
+check_int("combined_expr", combined, 10)
+
+// Accumulate a deterministic "checksum" by walking many evaluations.
+// For e in 1..=6: value = evaluate([e, *, e]) = e*e ; checksum = sum of e*e = 91
+fn checksum() -> int {
+  var total = 0
+  for e in 1..=6 {
+    // NOTE: an inline array literal built from a `for` loop variable
+    // (`evaluate([e, OP_MUL, e])`) infers element type Vec<unknown>, not
+    // Vec<int>, and fails to match the Array<int> parameter. Annotating the
+    // intermediate binding threads the element type. (Defect in REPORT.md.)
+    let expr: Array<int> = [e, OP_MUL, e]
+    let v = evaluate(expr)
+    total = total + v
+  }
+  total
+}
+check_int("checksum_squares", checksum(), 91)   // 1+4+9+16+25+36
+
+// ===========================================================================
+// FINAL TALLY
+// ===========================================================================
+if failures == 0 {
+  print("ALL_CHECKS_PASSED")
+} else {
+  print(f"FAILED_TOTAL: {failures}")
+}

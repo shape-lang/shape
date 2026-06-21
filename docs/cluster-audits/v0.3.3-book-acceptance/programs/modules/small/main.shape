@@ -1,0 +1,69 @@
+// small/main.shape -- exercises Shape's module system end to end.
+// Book source: fundamentals/modules.mdx.
+//
+// Import forms exercised (book "Import Forms" + "Module Paths" sections):
+//   * named import:      from mathx::stats use { clamp, gcd }
+//   * named alias:       from mathx::stats use { sum_to as triangular }
+//   * type import:       from mathx::geom  use { Rect, area, perimeter }
+//   * namespace import:  use mathx::stats   -> stats::clamp(...) call site
+//   * cross-module:      mathx::derived imports from mathx::stats internally
+//
+// Driven from TOP-LEVEL statements, mirroring the book's main.shape example
+// in "Module File Layout".
+//
+// Every expected value is derived from the imported function definitions
+// (book "Exports" section) and written BEFORE the first run.
+
+from mathx::stats use { clamp, gcd }
+from mathx::stats use { sum_to as triangular }
+from mathx::geom use { Rect, area, perimeter }
+from mathx::derived use { double_triangular }
+use mathx::stats
+
+let mut ok = true
+
+// --- named import: clamp ---
+// clamp(15,0,10)=10 (above hi); clamp(-3,0,10)=0 (below lo); clamp(5,0,10)=5 (in range)
+let c_hi = clamp(15, 0, 10)
+if c_hi != 10 { print(f"CHECK_FAILED: clamp_high expected=10 got={c_hi}") ok = false }
+let c_lo = clamp(-3, 0, 10)
+if c_lo != 0 { print(f"CHECK_FAILED: clamp_low expected=0 got={c_lo}") ok = false }
+let c_mid = clamp(5, 0, 10)
+if c_mid != 5 { print(f"CHECK_FAILED: clamp_mid expected=5 got={c_mid}") ok = false }
+
+// --- named import: gcd (Euclid) ---
+// gcd(48,18)=6 ; gcd(17,5)=1 (coprime)
+let g1 = gcd(48, 18)
+if g1 != 6 { print(f"CHECK_FAILED: gcd_48_18 expected=6 got={g1}") ok = false }
+let g2 = gcd(17, 5)
+if g2 != 1 { print(f"CHECK_FAILED: gcd_17_5 expected=1 got={g2}") ok = false }
+
+// --- named alias: sum_to imported as `triangular` ---
+// sum_to(n) = n(n+1)/2 ; triangular(10)=55 ; triangular(1)=1
+let t10 = triangular(10)
+if t10 != 55 { print(f"CHECK_FAILED: triangular_10 expected=55 got={t10}") ok = false }
+let t1 = triangular(1)
+if t1 != 1 { print(f"CHECK_FAILED: triangular_1 expected=1 got={t1}") ok = false }
+
+// --- namespace import: `use mathx::stats` -> stats::member call site ---
+// Same gcd, reached through the namespace form. stats::gcd(100,75)=25.
+let g3 = stats::gcd(100, 75)
+if g3 != 25 { print(f"CHECK_FAILED: ns_gcd expected=25 got={g3}") ok = false }
+
+// --- cross-module: derived imports stats internally ---
+// double_triangular(10) = sum_to(10)*2 = 55*2 = 110
+let d10 = double_triangular(10)
+if d10 != 110 { print(f"CHECK_FAILED: double_triangular expected=110 got={d10}") ok = false }
+
+// --- type import: Rect + functions over it ---
+let r = Rect { w: 4, h: 6 }
+let ar = area(r)        // 4*6 = 24
+if ar != 24 { print(f"CHECK_FAILED: area expected=24 got={ar}") ok = false }
+let pr = perimeter(r)   // 2*(4+6) = 20
+if pr != 20 { print(f"CHECK_FAILED: perimeter expected=20 got={pr}") ok = false }
+
+let sq = Rect { w: 5, h: 5 }
+let asq = area(sq)      // 25
+if asq != 25 { print(f"CHECK_FAILED: area_sq expected=25 got={asq}") ok = false }
+
+if ok { print("ALL_CHECKS_PASSED") }

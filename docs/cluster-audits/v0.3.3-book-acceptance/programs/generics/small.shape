@@ -1,0 +1,71 @@
+// small.shape — generics slice (book: fundamentals/functions.mdx + traits.mdx)
+//
+// Exercises the chapter core that the book marks runnable=true: generics as a
+// thread via traits, supertraits, extend blocks, lambdas, closure inference
+// from context, higher-order functions, and default parameters. The book marks
+// `fn first<T>(...) -> T` runtime instantiation runnable=false (Known
+// Constraints), so we use the book's recommended concrete-element shape plus
+// the trait/extend surface that IS runnable.
+
+fn check(cond: bool, label: string) {
+  if !cond { print(f"CHECK_FAILED: {label}") }
+}
+
+trait Describable { fn describe() -> string; }
+trait Measurable  { fn measure() -> int; }
+trait Ranked : Describable + Measurable { fn rank() -> int; }
+
+type Score { value: int, label: string }
+impl Describable for Score { method describe() -> string { self.label } }
+impl Measurable  for Score { method measure() -> int { self.value } }
+impl Ranked      for Score { method rank() -> int { self.value } }
+
+type Vec2 { x: int, y: int }
+extend Vec2 {
+  method add(other: Vec2) -> Vec2 { Vec2 { x: self.x + other.x, y: self.y + other.y } }
+  method dot(other: Vec2) -> int { self.x * other.x + self.y * other.y }
+}
+
+fn rect(width: int = 10, height: int = 20) -> int { width * height }
+fn apply(f, x) { f(x) }
+fn adder(a) { |b| a + b }
+
+fn main() {
+  let s = Score { value: 90, label: "A" }
+  check(s.describe() == "A", "describe")
+  check(s.measure() == 90, "measure")
+  check(s.rank() == 90, "rank")
+
+  let a = Vec2 { x: 1, y: 2 }
+  let b = Vec2 { x: 3, y: 4 }
+  let c = a.add(b)
+  check(c.x == 4, "vec2_add_x")
+  check(c.y == 6, "vec2_add_y")
+  check(a.dot(b) == 11, "vec2_dot")
+
+  check(rect() == 200, "rect_default")
+  check(rect(5) == 100, "rect_one")
+  check(rect(5, 6) == 30, "rect_both")
+
+  let nums: Vec<int> = [1, 2, 3, 4, 5]
+  let evens = nums.filter(|x| x % 2 == 0)
+  check(evens.len() == 2, "filter_len")
+  let squares = nums.map(|x| x * x)
+  check(squares.len() == 5, "map_len")
+  let total = nums.reduce(|acc, x| acc + x, 0)
+  check(total == 15, "reduce_sum")
+
+  let dbl = |x| x * 2
+  check(apply(dbl, 21) == 42, "apply_lambda")
+
+  let plus10 = adder(10)
+  check(plus10(5) == 15, "adder")
+
+  let base = 100
+  let shift = |x| x + base
+  check(shift(7) == 107, "capture")
+
+  print("ALL_CHECKS_PASSED")
+}
+
+main()

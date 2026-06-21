@@ -1,0 +1,8 @@
+fn check(name: string, ok: bool) {
+  if !ok {
+    print(f"CHECK_FAILED: {name}")
+  }
+}
+check("one", 1 == 1)
+check("two", 2 == 3)
+print("done")

@@ -1,0 +1,12 @@
+pub type Point {
+  x: number,
+  y: number
+}
+pub fn origin() -> Point {
+  Point { x: 0.0, y: 0.0 }
+}
+pub fn dist(a: Point, b: Point) -> number {
+  let dx = a.x - b.x
+  let dy = a.y - b.y
+  (dx * dx + dy * dy).sqrt()
+}

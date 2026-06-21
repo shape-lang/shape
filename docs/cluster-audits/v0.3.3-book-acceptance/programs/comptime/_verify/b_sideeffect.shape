@@ -1,0 +1,4 @@
+comptime {
+  warning("Compiling with generated query helpers")
+}
+print("ok")

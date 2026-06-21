@@ -1,0 +1,50 @@
+// small.shape — exercises the Module System chapter's core import forms.
+//
+// Module layout in this slice dir:
+//   mathlib/stats.shape       -> mathlib::stats      (pub mean, pub variance)
+//   mathlib/transforms.shape  -> mathlib::transforms (pub normalize; imports mathlib::stats)
+//
+// Book sections exercised:
+//   - "Named import"       : from mathlib::stats use { mean }
+//   - "Named alias"        : from mathlib::stats use { variance as vari }
+//   - "Namespace import"   : use mathlib::stats  +  stats::mean(...)
+//   - "Namespace alias"    : use mathlib::transforms as t  +  t::normalize(...)
+//   - "Module File Layout" : filesystem path math/x.shape -> mathlib::x
+//   - transitive import    : transforms imports stats (Two-File Library Example)
+
+from mathlib::stats use { mean }
+from mathlib::stats use { variance as vari }
+use mathlib::stats
+use mathlib::transforms as t
+
+fn check(name: string, ok: bool) {
+  if !ok { print(f"CHECK_FAILED: {name}") }
+}
+
+let data = [10.0, 12.0, 11.5, 13.0, 9.5]
+
+// mean = (10 + 12 + 11.5 + 13 + 9.5) / 5 = 56 / 5 = 11.2  (book: pub mean)
+let m = mean(data)
+check("named-import mean", m == 11.2)
+
+// variance = mean of squared deviations from 11.2
+//   devs^2: 1.44, 0.64, 0.09, 3.24, 2.89  -> sum = 8.30 ; /5 = 1.66
+let vr = vari(data)
+check("named-alias variance", vr == 1.66)
+
+// namespace-qualified call resolves to the same function as the named import.
+let m2 = stats::mean(data)
+check("namespace-call mean equals named-import mean", m2 == m)
+
+// normalize subtracts the mean from each element (transitive import inside transforms).
+//   data - 11.2 = [-1.2, 0.8, 0.3, 1.8, -1.7]
+let n = t::normalize(data)
+check("namespace-alias normalize[0]", n[0] == -1.2)
+check("namespace-alias normalize[1]", n[1] == 0.8)
+check("normalize length preserved", n.length() == 5)
+
+// A normalized vector has (approximately) zero mean; here it is exact.
+let nm = stats::mean(n)
+check("normalized mean is zero", nm == 0.0)
+
+print("ALL_CHECKS_PASSED")

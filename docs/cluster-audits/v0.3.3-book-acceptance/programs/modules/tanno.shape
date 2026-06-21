@@ -1,0 +1,6 @@
+from anno use { @traced }
+
+@traced("hello")
+fn process(data: int) -> int { data + 1 }
+
+print(f"{process(41)}")

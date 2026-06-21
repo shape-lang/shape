@@ -1,0 +1,8 @@
+---
+name = "probe2"
+
+[native-dependencies]
+libm = "libm.so.6"
+---
+extern C fn cos(x: number) -> number from "libm" as "cos";
+print(cos(0.0))

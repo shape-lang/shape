@@ -1,0 +1,25 @@
+// mathx/stats.shape -- importable as mathx::stats
+pub fn clamp(x: int, lo: int, hi: int) -> int {
+    if x < lo { lo } else if x > hi { hi } else { x }
+}
+
+pub fn gcd(a: int, b: int) -> int {
+    let mut x = a
+    let mut y = b
+    while y != 0 {
+        let t = y
+        y = x % y
+        x = t
+    }
+    x
+}
+
+pub fn sum_to(n: int) -> int {
+    let mut acc = 0
+    let mut i = 1
+    while i <= n {
+        acc = acc + i
+        i = i + 1
+    }
+    acc
+}

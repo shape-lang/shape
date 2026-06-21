@@ -1,0 +1,157 @@
+// large.shape - Nelder-Mead optimization benchmark suite (math::optimize)
+// Book source: stdlib/math/optimize.mdx
+// Determinism: every objective is a fixed deterministic function. Each run
+// asserts the recovered optimum (x and fun) against the analytic optimum
+// within tolerance. NON-INTERACTIVE, MACHINE-PROOFABLE.
+//
+// Expected values are derived from the closed-form minima of each objective
+// BEFORE any run:
+//   - sphere:        min at (0,...,0), f=0
+//   - shifted-quad:  min at (a_i), f=0
+//   - rosenbrock-2d: min at (1,1), f=0
+//   - booth:         min at (1,3), f=0
+//   - matyas:        min at (0,0), f=0
+//   - bounded-line:  unconstrained min outside box => binds to nearest corner
+//   - paraboloid+lin: vertex shifted by linear term
+use std::math::optimize
+
+// ---- Objective functions -------------------------------------------------
+
+fn sphere(x: Array<number>) -> number {
+    let mut s: number = 0.0
+    let mut i: int = 0
+    while i < x.length {
+        s = s + x[i] * x[i]
+        i = i + 1
+    }
+    s
+}
+
+fn shifted_quad(x: Array<number>, a: Array<number>) -> number {
+    let mut s: number = 0.0
+    let mut i: int = 0
+    while i < x.length {
+        let d: number = x[i] - a[i]
+        s = s + d * d
+        i = i + 1
+    }
+    s
+}
+
+fn rosenbrock2(x: Array<number>) -> number {
+    let a: number = 1.0
+    let b: number = 100.0
+    let t1: number = a - x[0]
+    let t2: number = x[1] - x[0] * x[0]
+    t1 * t1 + b * t2 * t2
+}
+
+fn booth(x: Array<number>) -> number {
+    let t1: number = x[0] + 2.0 * x[1] - 7.0
+    let t2: number = 2.0 * x[0] + x[1] - 5.0
+    t1 * t1 + t2 * t2
+}
+
+fn matyas(x: Array<number>) -> number {
+    0.26 * (x[0] * x[0] + x[1] * x[1]) - 0.48 * x[0] * x[1]
+}
+
+// ---- Assertion helpers ---------------------------------------------------
+
+fn check_close(label: string, got: number, expected: number, tol: number) -> bool {
+    let d: number = if got - expected < 0.0 { expected - got } else { got - expected }
+    if d < tol {
+        true
+    } else {
+        print("CHECK_FAILED: " + label)
+        false
+    }
+}
+
+fn opts(tol: number, max_iter: int) -> OptimizeOptions {
+    OptimizeOptions { tol: tol, max_iter: max_iter, bounds: None }
+}
+
+// ---- Driver --------------------------------------------------------------
+
+fn main() {
+    let mut ok: bool = true
+
+    // 1. Sphere in 2D, optimum (0,0), f=0.
+    let r1 = optimize::minimize(|x| sphere(x), [3.0, -4.0], opts(0.000001, 2000))
+    ok = check_close("sphere2.fun", r1.fun, 0.0, 0.0001) && ok
+    ok = check_close("sphere2.x0", r1.x[0], 0.0, 0.01) && ok
+    ok = check_close("sphere2.x1", r1.x[1], 0.0, 0.01) && ok
+    if !r1.converged { print("CHECK_FAILED: sphere2.converged"); ok = false }
+
+    // 2. Sphere in 3D.
+    let r2 = optimize::minimize(|x| sphere(x), [1.0, 2.0, -2.0], opts(0.000001, 3000))
+    ok = check_close("sphere3.fun", r2.fun, 0.0, 0.0001) && ok
+
+    // 3. Shifted quadratic, optimum at (2.5, -1.5), f=0.
+    let target: Array<number> = [2.5, -1.5]
+    let r3 = optimize::minimize(|x| shifted_quad(x, target), [0.0, 0.0], opts(0.000001, 2000))
+    ok = check_close("shifted.fun", r3.fun, 0.0, 0.0001) && ok
+    ok = check_close("shifted.x0", r3.x[0], 2.5, 0.01) && ok
+    ok = check_close("shifted.x1", r3.x[1], -1.5, 0.01) && ok
+
+    // 4. Rosenbrock 2D, optimum (1,1), f=0.
+    let r4 = optimize::minimize(|x| rosenbrock2(x), [-1.2, 1.0], opts(0.0000001, 5000))
+    ok = check_close("rosen.fun", r4.fun, 0.0, 0.01) && ok
+    ok = check_close("rosen.x0", r4.x[0], 1.0, 0.1) && ok
+    ok = check_close("rosen.x1", r4.x[1], 1.0, 0.1) && ok
+
+    // 5. Booth function, optimum (1,3), f=0.
+    let r5 = optimize::minimize(|x| booth(x), [0.0, 0.0], opts(0.000001, 3000))
+    ok = check_close("booth.fun", r5.fun, 0.0, 0.001) && ok
+    ok = check_close("booth.x0", r5.x[0], 1.0, 0.02) && ok
+    ok = check_close("booth.x1", r5.x[1], 3.0, 0.02) && ok
+
+    // 6. Matyas function, optimum (0,0), f=0.
+    let r6 = optimize::minimize(|x| matyas(x), [5.0, 5.0], opts(0.000001, 3000))
+    ok = check_close("matyas.fun", r6.fun, 0.0, 0.0001) && ok
+
+    // 7. Bounded: minimize (x-2)^2 with x in [0,1] => binds to x=1, f=1.
+    let r7 = optimize::minimize(
+        |x| (x[0] - 2.0) * (x[0] - 2.0),
+        [0.0],
+        OptimizeOptions { tol: 0.000001, max_iter: 500, bounds: [[0.0, 1.0]] }
+    )
+    ok = check_close("bound.x0", r7.x[0], 1.0, 0.01) && ok
+    ok = check_close("bound.fun", r7.fun, 1.0, 0.01) && ok
+
+    // 8. Bounded box on sphere: min (0,0) lies inside [-1,1]x[-1,1] => f=0.
+    let r8 = optimize::minimize(
+        |x| sphere(x),
+        [0.8, -0.9],
+        OptimizeOptions { tol: 0.000001, max_iter: 2000, bounds: [[-1.0, 1.0], [-1.0, 1.0]] }
+    )
+    ok = check_close("box-in.fun", r8.fun, 0.0, 0.0001) && ok
+
+    // 9. Bounded box where min is outside: minimize (x+3)^2 with x in [0,2]
+    //    => binds to x=0, f=9.
+    let r9 = optimize::minimize(
+        |x| (x[0] + 3.0) * (x[0] + 3.0),
+        [1.0],
+        OptimizeOptions { tol: 0.000001, max_iter: 500, bounds: [[0.0, 2.0]] }
+    )
+    ok = check_close("box-out.x0", r9.x[0], 0.0, 0.01) && ok
+    ok = check_close("box-out.fun", r9.fun, 9.0, 0.05) && ok
+
+    // 10. Many starts on shifted-quad converge to same optimum.
+    let mut s: int = 0
+    while s < 5 {
+        let sx: number = (s as number) * 2.0 - 4.0
+        let rr = optimize::minimize(|x| shifted_quad(x, target), [sx, sx], opts(0.000001, 2000))
+        ok = check_close("multistart.fun", rr.fun, 0.0, 0.0001) && ok
+        s = s + 1
+    }
+
+    if ok {
+        print("ALL_CHECKS_PASSED")
+    } else {
+        print("SOME_CHECKS_FAILED")
+    }
+}
+
+main()

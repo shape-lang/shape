@@ -1,0 +1,653 @@
+// large.shape — Content slice (fundamentals/content.mdx)
+//
+// REAL-WORLD APP: a deterministic CI "Build Report" renderer.
+//
+// It ingests fixed, local test-suite fixtures (no stdin / network / clock),
+// computes per-suite and overall summary statistics, and renders them as
+// structured Content using the chapter's BUILDER API:
+//   - Content.text(...) + style chaining (.fg/.bg/.bold/.italic/.underline/.dim)
+//   - Content.table(headers, rows) + .border(...) + .max_rows(n)
+//   - the Color / Border / ChartType namespaces
+//   - the Content trait (.render() called directly)
+//
+// MACHINE-PROOFABLE: every rendered string is asserted. Expected values are
+// derived from BOOK SEMANTICS:
+//   * Exact full-table strings for the four bordered fixtures are taken VERBATIM
+//     from the book's §Border Styles visual-reference blocks (rounded / sharp /
+//     heavy / double), so those assertions cannot be satisfied by a rendering
+//     bug — they are pinned to the documentation.
+//   * Structural assertions (header present, cell present, correct corner glyph,
+//     truncation message, ANSI-wrapping grows the string) are each tied to a
+//     specific documented behaviour and noted inline.
+//
+// NB on the shipped binary (recorded in REPORT.md book_wrong / book_gap):
+//   * c"..." Content strings (§Content Strings) do NOT parse — builder API only.
+//   * Content.table takes (headers, rows), not the (records) form in §Tables.
+//   * print(value) does NOT auto-dispatch the Content trait (§Content Trait) —
+//     we call .render() explicitly.
+//   * Under strict typing, an array literal element built from a loop/closure
+//     field access must be bound to an explicitly `: string`-annotated local
+//     before it is placed in a row literal (BOOK-GAP: strict array inference).
+//
+// No `assert` builtin exists; checks use an `expect` helper that prints
+// CHECK_FAILED on mismatch and returns 1.
+
+// ===========================================================================
+// 0. Check harness
+// ===========================================================================
+
+let mut failures = 0
+
+fn expect_str(name: string, got: string, want: string) -> int {
+    if got != want {
+        print(f"CHECK_FAILED: {name} expected={want} got={got}")
+        return 1
+    }
+    return 0
+}
+
+fn expect_int(name: string, got: int, want: int) -> int {
+    if got != want {
+        print(f"CHECK_FAILED: {name} expected={want} got={got}")
+        return 1
+    }
+    return 0
+}
+
+fn expect_bool(name: string, got: bool) -> int {
+    if !got {
+        print(f"CHECK_FAILED: {name} expected=true got=false")
+        return 1
+    }
+    return 0
+}
+
+// String-length predicates. Binding `.len()` to an `: int` local first keeps
+// strict typing happy (a bare `s.len() > n` leaves the operand `unknown`).
+fn longer_than(s: string, n: int) -> bool {
+    let len: int = s.len()
+    return len > n
+}
+
+// Count newline-separated segments in a rendered block. `split("\n")` returns
+// (number of newlines + 1) segments, matching the trailing-newline-terminated
+// blocks `.to_string()` produces (a trailing "\n" yields one extra, empty,
+// segment).
+fn line_count(s: string) -> int {
+    let parts: Array<string> = s.split("\n")
+    let n: int = parts.len()
+    return n
+}
+
+// ===========================================================================
+// 1. Domain model + deterministic fixtures
+// ===========================================================================
+
+enum Outcome {
+    Pass,
+    Fail,
+    Skip,
+}
+
+type TestCase {
+    suite: string,
+    name: string,
+    outcome: Outcome,
+    duration_ms: int,
+}
+
+type SuiteStat {
+    suite: string,
+    passed: int,
+    failed: int,
+    skipped: int,
+    total: int,
+    total_ms: int,
+}
+
+// Fixed fixture set — fully deterministic, no clock / rng / io.
+let cases: Array<TestCase> = [
+    TestCase { suite: "auth", name: "login_ok",       outcome: Outcome::Pass, duration_ms: 12 },
+    TestCase { suite: "auth", name: "login_bad_pw",   outcome: Outcome::Pass, duration_ms: 9  },
+    TestCase { suite: "auth", name: "token_expiry",   outcome: Outcome::Fail, duration_ms: 31 },
+    TestCase { suite: "db",   name: "insert_row",     outcome: Outcome::Pass, duration_ms: 44 },
+    TestCase { suite: "db",   name: "migration_v3",   outcome: Outcome::Skip, duration_ms: 0  },
+    TestCase { suite: "db",   name: "rollback",       outcome: Outcome::Pass, duration_ms: 27 },
+    TestCase { suite: "api",  name: "get_user",       outcome: Outcome::Pass, duration_ms: 18 },
+    TestCase { suite: "api",  name: "post_order",     outcome: Outcome::Fail, duration_ms: 52 },
+    TestCase { suite: "api",  name: "rate_limit",     outcome: Outcome::Pass, duration_ms: 21 },
+    TestCase { suite: "api",  name: "websocket_echo", outcome: Outcome::Skip, duration_ms: 0  },
+]
+
+// ===========================================================================
+// 2. Aggregation (pure computation — expected values hand-derived below)
+// ===========================================================================
+
+fn outcome_label(o: Outcome) -> string {
+    return match o {
+        Outcome::Pass => "PASS",
+        Outcome::Fail => "FAIL",
+        Outcome::Skip => "SKIP",
+    }
+}
+
+fn aggregate(suite: string, all: Array<TestCase>) -> SuiteStat {
+    let mut passed = 0
+    let mut failed = 0
+    let mut skipped = 0
+    let mut total = 0
+    let mut total_ms = 0
+    for c in all {
+        if c.suite == suite {
+            total = total + 1
+            total_ms = total_ms + c.duration_ms
+            match c.outcome {
+                Outcome::Pass => { passed = passed + 1 }
+                Outcome::Fail => { failed = failed + 1 }
+                Outcome::Skip => { skipped = skipped + 1 }
+            }
+        }
+    }
+    return SuiteStat {
+        suite: suite,
+        passed: passed,
+        failed: failed,
+        skipped: skipped,
+        total: total,
+        total_ms: total_ms,
+    }
+}
+
+let suites: Array<string> = ["auth", "db", "api"]
+
+let mut stats: Array<SuiteStat> = []
+for s in suites {
+    stats.push(aggregate(s, cases))
+}
+
+// --- Expected aggregates, derived BY HAND from the fixture above ---
+// auth: login_ok(P,12) login_bad_pw(P,9) token_expiry(F,31)
+//   -> passed 2, failed 1, skipped 0, total 3, ms 52
+// db:   insert_row(P,44) migration_v3(S,0) rollback(P,27)
+//   -> passed 2, failed 0, skipped 1, total 3, ms 71
+// api:  get_user(P,18) post_order(F,52) rate_limit(P,21) websocket_echo(S,0)
+//   -> passed 3, failed 1, skipped 0, total 4, ms 91  (wait: skip present -> skipped 1)
+//   recount: get_user P, post_order F, rate_limit P, websocket_echo S
+//   -> passed 2, failed 1, skipped 1, total 4, ms 91
+let auth = stats[0]
+let db = stats[1]
+let api = stats[2]
+
+failures = failures + expect_int("auth.passed", auth.passed, 2)
+failures = failures + expect_int("auth.failed", auth.failed, 1)
+failures = failures + expect_int("auth.skipped", auth.skipped, 0)
+failures = failures + expect_int("auth.total", auth.total, 3)
+failures = failures + expect_int("auth.total_ms", auth.total_ms, 52)
+
+failures = failures + expect_int("db.passed", db.passed, 2)
+failures = failures + expect_int("db.failed", db.failed, 0)
+failures = failures + expect_int("db.skipped", db.skipped, 1)
+failures = failures + expect_int("db.total", db.total, 3)
+failures = failures + expect_int("db.total_ms", db.total_ms, 71)
+
+failures = failures + expect_int("api.passed", api.passed, 2)
+failures = failures + expect_int("api.failed", api.failed, 1)
+failures = failures + expect_int("api.skipped", api.skipped, 1)
+failures = failures + expect_int("api.total", api.total, 4)
+failures = failures + expect_int("api.total_ms", api.total_ms, 91)
+
+// Overall totals
+let mut g_passed = 0
+let mut g_failed = 0
+let mut g_skipped = 0
+let mut g_total = 0
+let mut g_ms = 0
+for st in stats {
+    g_passed = g_passed + st.passed
+    g_failed = g_failed + st.failed
+    g_skipped = g_skipped + st.skipped
+    g_total = g_total + st.total
+    g_ms = g_ms + st.total_ms
+}
+// passed 6, failed 2, skipped 2, total 10, ms 52+71+91 = 214
+failures = failures + expect_int("g.passed", g_passed, 6)
+failures = failures + expect_int("g.failed", g_failed, 2)
+failures = failures + expect_int("g.skipped", g_skipped, 2)
+failures = failures + expect_int("g.total", g_total, 10)
+failures = failures + expect_int("g.total_ms", g_ms, 214)
+
+// ===========================================================================
+// 3. Book-pinned border fixtures
+//    These four assertions render EXACTLY the table whose visual reference the
+//    book prints verbatim in §Border Styles. Data: name/value, test/prod.
+// ===========================================================================
+
+let bp_headers: Array<string> = ["name", "value"]
+let bp_r1: Array<string> = ["test", "142.5"]
+let bp_r2: Array<string> = ["prod", "378.2"]
+let bp_rows: Array<Array<string>> = [bp_r1, bp_r2]
+
+// `.to_string()` terminates the block with a trailing newline (standard text
+// convention — the book's fenced reference blocks likewise end on a newline),
+// so each expected string ends with "\n" after the bottom border.
+let rounded = Content.table(bp_headers, bp_rows).border(Border.rounded).to_string()
+let rounded_book = "╭──────┬───────╮\n│ name │ value │\n├──────┼───────┤\n│ test │ 142.5 │\n│ prod │ 378.2 │\n╰──────┴───────╯\n"
+failures = failures + expect_str("book_border_rounded", rounded, rounded_book)
+
+let sharp = Content.table(bp_headers, bp_rows).border(Border.sharp).to_string()
+let sharp_book = "┌──────┬───────┐\n│ name │ value │\n├──────┼───────┤\n│ test │ 142.5 │\n│ prod │ 378.2 │\n└──────┴───────┘\n"
+failures = failures + expect_str("book_border_sharp", sharp, sharp_book)
+
+let heavy = Content.table(bp_headers, bp_rows).border(Border.heavy).to_string()
+let heavy_book = "┏━━━━━━┳━━━━━━━┓\n┃ name ┃ value ┃\n┣━━━━━━╋━━━━━━━┫\n┃ test ┃ 142.5 ┃\n┃ prod ┃ 378.2 ┃\n┗━━━━━━┻━━━━━━━┛\n"
+failures = failures + expect_str("book_border_heavy", heavy, heavy_book)
+
+let double = Content.table(bp_headers, bp_rows).border(Border.double).to_string()
+let double_book = "╔══════╦═══════╗\n║ name ║ value ║\n╠══════╬═══════╣\n║ test ║ 142.5 ║\n║ prod ║ 378.2 ║\n╚══════╩═══════╝\n"
+failures = failures + expect_str("book_border_double", double, double_book)
+
+// ===========================================================================
+// 4. Summary table built from the live aggregates
+//    Structural assertions (book §Tables: "Each field becomes a column").
+// ===========================================================================
+
+let summary_headers: Array<string> = ["suite", "passed", "failed", "skipped", "total", "ms"]
+
+// Build one row per suite. Strict typing requires each cell to be a proven
+// `: string` value; a value indexed out of `stats` (auth/db/api) has a proven
+// concrete type, so the row literal type-checks (see header note / REPORT
+// book_gap: a loop/closure field access does NOT prove, but an index does).
+fn stat_row(st: SuiteStat) -> Array<string> {
+    let c_suite: string = st.suite
+    let c_passed: string = f"{st.passed}"
+    let c_failed: string = f"{st.failed}"
+    let c_skipped: string = f"{st.skipped}"
+    let c_total: string = f"{st.total}"
+    let c_ms: string = f"{st.total_ms}"
+    let row: Array<string> = [c_suite, c_passed, c_failed, c_skipped, c_total, c_ms]
+    return row
+}
+
+let sr0: Array<string> = stat_row(auth)
+let sr1: Array<string> = stat_row(db)
+let sr2: Array<string> = stat_row(api)
+let summary_rows: Array<Array<string>> = [sr0, sr1, sr2]
+
+let summary_tbl = Content.table(summary_headers, summary_rows)
+    .border(Border.rounded)
+    .to_string()
+
+// Header row present (each field is a column).
+failures = failures + expect_bool("summary_has_suite_col", summary_tbl.contains("suite"))
+failures = failures + expect_bool("summary_has_passed_col", summary_tbl.contains("passed"))
+failures = failures + expect_bool("summary_has_skipped_col", summary_tbl.contains("skipped"))
+// Live data cells present.
+failures = failures + expect_bool("summary_has_auth_row", summary_tbl.contains("auth"))
+failures = failures + expect_bool("summary_has_db_row", summary_tbl.contains("db"))
+failures = failures + expect_bool("summary_has_api_row", summary_tbl.contains("api"))
+// Rounded border uses the ╭ corner (book §Border Styles).
+failures = failures + expect_bool("summary_rounded_corner", summary_tbl.contains("╭"))
+// Line structure: 3 separators (top, header-sep, bottom) + 1 header row + 3 body
+// rows = 7 content lines, plus the trailing newline `.to_string()` appends, so
+// `line_count` (newlines + 1) reports 8.
+let summary_lc: int = line_count(summary_tbl)
+failures = failures + expect_int("summary_line_count", summary_lc, 8)
+
+// ===========================================================================
+// 5. Detail table per suite with max_rows truncation
+//    Book §Table Methods: .max_rows(n) truncates display after n rows.
+// ===========================================================================
+
+// Flatten all cases into rows via a helper whose param type is proven.
+fn case_row(c: TestCase) -> Array<string> {
+    let d_suite: string = c.suite
+    let d_name: string = c.name
+    let d_status: string = outcome_label(c.outcome)
+    let d_ms: string = f"{c.duration_ms}"
+    let row: Array<string> = [d_suite, d_name, d_status, d_ms]
+    return row
+}
+
+let dr0: Array<string> = case_row(cases[0])
+let dr1: Array<string> = case_row(cases[1])
+let dr2: Array<string> = case_row(cases[2])
+let dr3: Array<string> = case_row(cases[3])
+let dr4: Array<string> = case_row(cases[4])
+let dr5: Array<string> = case_row(cases[5])
+let dr6: Array<string> = case_row(cases[6])
+let dr7: Array<string> = case_row(cases[7])
+let dr8: Array<string> = case_row(cases[8])
+let dr9: Array<string> = case_row(cases[9])
+let detail_rows: Array<Array<string>> = [dr0, dr1, dr2, dr3, dr4, dr5, dr6, dr7, dr8, dr9]
+let detail_count: int = detail_rows.len()
+failures = failures + expect_int("detail_rows_count", detail_count, 10)
+
+let detail_full = Content.table(["suite", "name", "status", "ms"], detail_rows)
+    .border(Border.sharp)
+    .to_string()
+// All 10 cases rendered: 3 borders + 1 header + 10 body = 14 content lines,
+// plus the trailing newline -> line_count reports 15.
+let detail_full_lc: int = line_count(detail_full)
+failures = failures + expect_int("detail_full_line_count", detail_full_lc, 15)
+// A skipped case is labelled SKIP (book §Content Trait: status text).
+failures = failures + expect_bool("detail_has_skip", detail_full.contains("SKIP"))
+failures = failures + expect_bool("detail_has_fail", detail_full.contains("FAIL"))
+
+let detail_capped = Content.table(["suite", "name", "status", "ms"], detail_rows)
+    .border(Border.sharp)
+    .max_rows(4)
+    .to_string()
+// Truncated: shows 4 rows + a "... N more rows" line.
+failures = failures + expect_bool("capped_truncation_msg", detail_capped.contains("more rows"))
+// Truncation must drop lines vs the full table.
+failures = failures + expect_bool("capped_shorter_than_full",
+    line_count(detail_capped) < line_count(detail_full))
+
+// ===========================================================================
+// 6. Styled status badges (§Styled Text)
+//    Colors are distinct; styling wraps but preserves payload.
+// ===========================================================================
+
+let badge_pass = Content.text("PASS").fg(Color.green).bold().to_string()
+let badge_fail = Content.text("FAIL").fg(Color.red).bold().to_string()
+let badge_skip = Content.text("SKIP").fg(Color.yellow).dim().to_string()
+
+// Payload preserved through styling.
+failures = failures + expect_bool("badge_pass_payload", badge_pass.contains("PASS"))
+failures = failures + expect_bool("badge_fail_payload", badge_fail.contains("FAIL"))
+failures = failures + expect_bool("badge_skip_payload", badge_skip.contains("SKIP"))
+// ANSI wrapping makes each badge strictly longer than its 4-char payload.
+failures = failures + expect_bool("badge_pass_wrapped", longer_than(badge_pass, 4))
+failures = failures + expect_bool("badge_fail_wrapped", longer_than(badge_fail, 4))
+// Different colors produce different escape sequences for the same text.
+let plain_pass = Content.text("PASS").fg(Color.green).to_string()
+let plain_fail = Content.text("PASS").fg(Color.red).to_string()
+failures = failures + expect_bool("colors_distinct", plain_pass != plain_fail)
+
+// Plain (unstyled) text renders to exactly its content.
+let plain_text = Content.text("Build Report").to_string()
+failures = failures + expect_str("plain_text_exact", plain_text, "Build Report")
+
+// All decoration methods chain without error (book §Style Methods).
+let deco = Content.text("x").italic().underline().dim().bg(Color.rgb(40, 0, 0)).to_string()
+failures = failures + expect_bool("deco_chain_payload", deco.contains("x"))
+
+// ===========================================================================
+// 7. Color namespace + RGB (§Colors)
+// ===========================================================================
+
+failures = failures + expect_str("color_red_name", f"{Color.red}", "red")
+failures = failures + expect_str("color_green_name", f"{Color.green}", "green")
+failures = failures + expect_str("color_blue_name", f"{Color.blue}", "blue")
+failures = failures + expect_str("color_yellow_name", f"{Color.yellow}", "yellow")
+failures = failures + expect_str("color_cyan_name", f"{Color.cyan}", "cyan")
+failures = failures + expect_str("color_magenta_name", f"{Color.magenta}", "magenta")
+failures = failures + expect_str("color_rgb_name", f"{Color.rgb(40, 0, 0)}", "rgb(40,0,0)")
+
+// ===========================================================================
+// 8. Border namespace names (§Border Styles)
+// ===========================================================================
+
+failures = failures + expect_str("border_rounded_name", f"{Border.rounded}", "rounded")
+failures = failures + expect_str("border_sharp_name", f"{Border.sharp}", "sharp")
+failures = failures + expect_str("border_heavy_name", f"{Border.heavy}", "heavy")
+failures = failures + expect_str("border_double_name", f"{Border.double}", "double")
+failures = failures + expect_str("border_minimal_name", f"{Border.minimal}", "minimal")
+failures = failures + expect_str("border_none_name", f"{Border.none}", "none")
+
+// ===========================================================================
+// 9. ChartType namespace + chart rendering (§Charts)
+// ===========================================================================
+
+failures = failures + expect_str("chart_line_name", f"{ChartType.line}", "line")
+failures = failures + expect_str("chart_bar_name", f"{ChartType.bar}", "bar")
+failures = failures + expect_str("chart_scatter_name", f"{ChartType.scatter}", "scatter")
+
+// A line chart of per-suite total_ms renders to a non-empty terminal block.
+// Book §Charts: Content.chart(type).add(label, [[x,y],...]).title(...).
+let chart = Content.chart("line")
+    .add("ms per suite", [[1, 52], [2, 71], [3, 91]])
+    .title("Suite durations")
+    .x_label("suite")
+    .y_label("ms")
+    .to_string()
+failures = failures + expect_bool("chart_nonempty", longer_than(chart, 0))
+// Title text appears in the rendered chart (book §Chart Methods: .title).
+failures = failures + expect_bool("chart_has_title", chart.contains("Suite durations"))
+
+// Chart accepts the namespace form too (book §Chart Types).
+let chart2 = Content.chart(ChartType.bar)
+    .add("passed", [[1, 2], [2, 2], [3, 2]])
+    .title("Passed per suite")
+    .to_string()
+failures = failures + expect_bool("chart_namespace_form", longer_than(chart2, 0))
+
+// ===========================================================================
+// 10. Content trait implemented and rendered directly (§Content Trait)
+//     NB: print(value) does NOT auto-dispatch the trait (book_wrong); we call
+//     .render() ourselves and render the resulting node.
+// ===========================================================================
+
+type Verdict {
+    suite: string,
+    pass_rate: int,
+}
+
+impl Content for Verdict {
+    method render() {
+        let body = f"{self.suite}: {self.pass_rate}% pass"
+        if self.pass_rate == 100 {
+            Content.text(body).fg(Color.green).bold()
+        } else {
+            Content.text(body).fg(Color.red)
+        }
+    }
+}
+
+// auth: 2/3 passed -> 66; db: 2/3 -> 66; api: 2/4 -> 50
+fn pass_rate(st: SuiteStat) -> int {
+    if st.total == 0 {
+        return 0
+    }
+    return (st.passed * 100) / st.total
+}
+
+let v_auth = Verdict { suite: "auth", pass_rate: pass_rate(auth) }
+let v_db = Verdict { suite: "db", pass_rate: pass_rate(db) }
+let v_api = Verdict { suite: "api", pass_rate: pass_rate(api) }
+
+failures = failures + expect_int("auth_rate", v_auth.pass_rate, 66)
+failures = failures + expect_int("db_rate", v_db.pass_rate, 66)
+failures = failures + expect_int("api_rate", v_api.pass_rate, 50)
+
+let rendered_auth = v_auth.render().to_string()
+let rendered_api = v_api.render().to_string()
+failures = failures + expect_bool("verdict_auth_payload", rendered_auth.contains("auth: 66% pass"))
+failures = failures + expect_bool("verdict_api_payload", rendered_api.contains("api: 50% pass"))
+// Both verdicts are styled (red, since neither is 100%), so wrapped > payload.
+failures = failures + expect_bool("verdict_auth_styled", longer_than(rendered_auth, 14))
+
+// A 100% verdict takes the green/bold branch and still carries its payload.
+let v_perfect = Verdict { suite: "smoke", pass_rate: 100 }
+let rendered_perfect = v_perfect.render().to_string()
+failures = failures + expect_bool("verdict_perfect_payload", rendered_perfect.contains("smoke: 100% pass"))
+
+// ===========================================================================
+// 11. Full ChartType namespace coverage (§Chart Types table)
+//     Each documented chart type resolves to its name.
+// ===========================================================================
+
+failures = failures + expect_str("ct_line", f"{ChartType.line}", "line")
+failures = failures + expect_str("ct_bar", f"{ChartType.bar}", "bar")
+failures = failures + expect_str("ct_scatter", f"{ChartType.scatter}", "scatter")
+failures = failures + expect_str("ct_area", f"{ChartType.area}", "area")
+failures = failures + expect_str("ct_histogram", f"{ChartType.histogram}", "histogram")
+failures = failures + expect_str("ct_candlestick", f"{ChartType.candlestick}", "candlestick")
+failures = failures + expect_str("ct_boxplot", f"{ChartType.boxplot}", "boxplot")
+failures = failures + expect_str("ct_heatmap", f"{ChartType.heatmap}", "heatmap")
+failures = failures + expect_str("ct_bubble", f"{ChartType.bubble}", "bubble")
+
+// ===========================================================================
+// 12. All six border styles render the per-suite duration table
+//     Book §Border Styles: each style has a documented distinguishing glyph.
+//     We assert the distinguishing corner/line glyph appears (or, for the
+//     border-less styles, that the border glyphs are ABSENT) and that the data
+//     survives in every rendering.
+// ===========================================================================
+
+let dur_headers: Array<string> = ["suite", "ms"]
+let du0: Array<string> = [auth.suite, f"{auth.total_ms}"]
+let du1: Array<string> = [db.suite, f"{db.total_ms}"]
+let du2: Array<string> = [api.suite, f"{api.total_ms}"]
+let dur_rows: Array<Array<string>> = [du0, du1, du2]
+
+let b_rounded = Content.table(dur_headers, dur_rows).border(Border.rounded).to_string()
+let b_sharp = Content.table(dur_headers, dur_rows).border(Border.sharp).to_string()
+let b_heavy = Content.table(dur_headers, dur_rows).border(Border.heavy).to_string()
+let b_double = Content.table(dur_headers, dur_rows).border(Border.double).to_string()
+let b_minimal = Content.table(dur_headers, dur_rows).border(Border.minimal).to_string()
+let b_none = Content.table(dur_headers, dur_rows).border(Border.none).to_string()
+
+// Distinguishing glyphs (book §Border Styles examples).
+failures = failures + expect_bool("b_rounded_glyph", b_rounded.contains("╭"))
+failures = failures + expect_bool("b_sharp_glyph", b_sharp.contains("┌"))
+failures = failures + expect_bool("b_heavy_glyph", b_heavy.contains("┏"))
+failures = failures + expect_bool("b_double_glyph", b_double.contains("╔"))
+// minimal: "No outer border, ─ row separators only" -> has ─ but no ╭/┌/┏/╔.
+failures = failures + expect_bool("b_minimal_has_sep", b_minimal.contains("-"))
+failures = failures + expect_bool("b_minimal_no_round", !b_minimal.contains("╭"))
+// none: "No borders at all".
+failures = failures + expect_bool("b_none_no_round", !b_none.contains("╭"))
+failures = failures + expect_bool("b_none_no_sharp", !b_none.contains("┌"))
+
+// Data survives every border style.
+failures = failures + expect_bool("b_rounded_data", b_rounded.contains("auth"))
+failures = failures + expect_bool("b_sharp_data", b_sharp.contains("52"))
+failures = failures + expect_bool("b_heavy_data", b_heavy.contains("db"))
+failures = failures + expect_bool("b_double_data", b_double.contains("71"))
+failures = failures + expect_bool("b_minimal_data", b_minimal.contains("api"))
+failures = failures + expect_bool("b_none_data", b_none.contains("91"))
+
+// ===========================================================================
+// 13. Style-method matrix (§Style Methods)
+//     Every documented decoration method chains on a ContentNode, preserves
+//     its payload, and (for the visible-effect methods) grows the string.
+// ===========================================================================
+
+let sm_fg = Content.text("m").fg(Color.cyan).to_string()
+let sm_bg = Content.text("m").bg(Color.magenta).to_string()
+let sm_bold = Content.text("m").bold().to_string()
+let sm_italic = Content.text("m").italic().to_string()
+let sm_under = Content.text("m").underline().to_string()
+let sm_dim = Content.text("m").dim().to_string()
+
+failures = failures + expect_bool("sm_fg_payload", sm_fg.contains("m"))
+failures = failures + expect_bool("sm_bg_payload", sm_bg.contains("m"))
+failures = failures + expect_bool("sm_bold_payload", sm_bold.contains("m"))
+failures = failures + expect_bool("sm_italic_payload", sm_italic.contains("m"))
+failures = failures + expect_bool("sm_under_payload", sm_under.contains("m"))
+failures = failures + expect_bool("sm_dim_payload", sm_dim.contains("m"))
+
+// Each decoration wraps the 1-char payload in escape codes -> length > 1.
+failures = failures + expect_bool("sm_fg_grows", longer_than(sm_fg, 1))
+failures = failures + expect_bool("sm_bold_grows", longer_than(sm_bold, 1))
+failures = failures + expect_bool("sm_italic_grows", longer_than(sm_italic, 1))
+failures = failures + expect_bool("sm_under_grows", longer_than(sm_under, 1))
+
+// A full chain applies all decorations at once (book §Style Methods example).
+let sm_all = Content.text("X")
+    .fg(Color.red)
+    .bg(Color.rgb(40, 0, 0))
+    .bold()
+    .underline()
+    .to_string()
+failures = failures + expect_bool("sm_all_payload", sm_all.contains("X"))
+failures = failures + expect_bool("sm_all_longest", longer_than(sm_all, sm_fg.len()))
+
+// ===========================================================================
+// 14. RGB color channel coverage (§Colors: Color.rgb(r,g,b), 0-255)
+//     Distinct channel values produce distinct rgb(...) names.
+// ===========================================================================
+
+failures = failures + expect_str("rgb_black", f"{Color.rgb(0, 0, 0)}", "rgb(0,0,0)")
+failures = failures + expect_str("rgb_white", f"{Color.rgb(255, 255, 255)}", "rgb(255,255,255)")
+failures = failures + expect_str("rgb_red", f"{Color.rgb(255, 0, 0)}", "rgb(255,0,0)")
+failures = failures + expect_str("rgb_green", f"{Color.rgb(0, 255, 0)}", "rgb(0,255,0)")
+failures = failures + expect_str("rgb_blue", f"{Color.rgb(0, 0, 255)}", "rgb(0,0,255)")
+failures = failures + expect_str("rgb_mid", f"{Color.rgb(128, 64, 32)}", "rgb(128,64,32)")
+
+// ===========================================================================
+// 15. Multi-series chart (§Charts: multiple .add channels)
+//     A line chart with two series renders both labels in its legend/body.
+// ===========================================================================
+
+let dual = Content.chart("line")
+    .add("passed", [[1, 2], [2, 2], [3, 2]])
+    .add("failed", [[1, 1], [2, 0], [3, 1]])
+    .title("Pass/Fail by suite")
+    .x_label("suite")
+    .y_label("count")
+    .width(60)
+    .height(12)
+    .to_string()
+failures = failures + expect_bool("dual_nonempty", longer_than(dual, 0))
+failures = failures + expect_bool("dual_title", dual.contains("Pass/Fail by suite"))
+
+// Bar chart of total durations (book §Channel-Based Data Model: bar needs y).
+let bar = Content.chart(ChartType.bar)
+    .add("ms", [[1, 52], [2, 71], [3, 91]])
+    .title("Durations")
+    .to_string()
+failures = failures + expect_bool("bar_nonempty", longer_than(bar, 0))
+failures = failures + expect_bool("bar_title", bar.contains("Durations"))
+
+// ===========================================================================
+// 16. Per-case verdict labels via the Content trait (§Content Trait)
+//     Render a styled status badge for each case, asserting payload + styling.
+// ===========================================================================
+
+type CaseBadge {
+    name: string,
+    status: string,
+}
+
+impl Content for CaseBadge {
+    method render() {
+        let body = f"{self.name} [{self.status}]"
+        if self.status == "PASS" {
+            Content.text(body).fg(Color.green)
+        } else if self.status == "FAIL" {
+            Content.text(body).fg(Color.red).bold()
+        } else {
+            Content.text(body).fg(Color.yellow).dim()
+        }
+    }
+}
+
+fn badge_for(c: TestCase) -> string {
+    let nm: string = c.name
+    let st: string = outcome_label(c.outcome)
+    let b = CaseBadge { name: nm, status: st }
+    let rendered: string = b.render().to_string()
+    return rendered
+}
+
+let badge0: string = badge_for(cases[0])  // login_ok PASS
+let badge2: string = badge_for(cases[2])  // token_expiry FAIL
+let badge4: string = badge_for(cases[4])  // migration_v3 SKIP
+
+failures = failures + expect_bool("badge0_payload", badge0.contains("login_ok [PASS]"))
+failures = failures + expect_bool("badge2_payload", badge2.contains("token_expiry [FAIL]"))
+failures = failures + expect_bool("badge4_payload", badge4.contains("migration_v3 [SKIP]"))
+// FAIL badge is bold+red, so longer than the bare "token_expiry [FAIL]" (19).
+failures = failures + expect_bool("badge2_styled", longer_than(badge2, 19))
+
+// ===========================================================================
+// 17. Final tally
+// ===========================================================================
+
+if failures == 0 {
+    print("ALL_CHECKS_PASSED")
+} else {
+    print(f"CHECK_FAILURES: {failures}")
+}

@@ -1,0 +1,7 @@
+// Probe: destructured object-field bindings in a for loop, used in arithmetic.
+let points = [{x: 1, y: 2}, {x: 3, y: 4}]
+var total = 0
+for {x, y} in points {
+  total = total + x + y   // arithmetic use of destructured bindings
+}
+print(total)

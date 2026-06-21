@@ -1,0 +1,5 @@
+from math::stats use { mean }
+pub fn normalize(v: Array<number>) -> Array<number> {
+  let mu = mean(v)
+  v.map(|x| x - mu)
+}

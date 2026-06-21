@@ -1,0 +1,529 @@
+// large.shape — Objects and Vectors slice (book: fundamentals/objects-arrays.mdx)
+// ============================================================================
+// A deterministic HR / payroll analytics report. NON-INTERACTIVE,
+// MACHINE-PROOFABLE: every computed result is asserted against an expected
+// value derived by hand from BOOK SEMANTICS (cited inline), written BEFORE the
+// first run. On all-pass prints ALL_CHECKS_PASSED; on any mismatch prints
+// CHECK_FAILED: <which> expected=<e> got=<g>.
+//
+// Execution model: SCRIPT MODE (top-level statements run; `fn main` is NOT
+// auto-invoked under `shape run`). All driver code is at top level.
+//
+// Book-derived workarounds applied (each is recorded in REPORT.md as a defect):
+//   * Method-call results are LET-BOUND before use as a binary-op operand or
+//     as a multi-arg function argument, because the strict-typing inference
+//     declares `unknown` when both operands / consecutive higher-order calls
+//     are method-call results in those positions. The book's method table
+//     gives concrete return types, so these workarounds preserve book
+//     semantics; they only sidestep an inference gap.
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// Assertion harness (the book is silent on a test idiom; we build one).
+// ---------------------------------------------------------------------------
+let mut failures = 0
+
+fn fail(which: string, expected: string, got: string) {
+  print(f"CHECK_FAILED: {which} expected={expected} got={got}")
+}
+
+fn check_int(which: string, got: int, expected: int) {
+  if got != expected {
+    fail(which, f"{expected}", f"{got}")
+    failures = failures + 1
+  }
+}
+
+fn check_str(which: string, got: string, expected: string) {
+  if got != expected {
+    fail(which, expected, got)
+    failures = failures + 1
+  }
+}
+
+fn check_bool(which: string, got: bool, expected: bool) {
+  if got != expected {
+    fail(which, f"{expected}", f"{got}")
+    failures = failures + 1
+  }
+}
+
+fn check_num(which: string, got: number, expected: number) {
+  if got != expected {
+    fail(which, f"{expected}", f"{got}")
+    failures = failures + 1
+  }
+}
+
+// Element-wise int-vector equality. (Book never shows `vecA == vecB`; strict
+// typing rejects it because the operands infer as `unknown`. We compare
+// element-by-element instead, all via let-bound lengths.)
+fn veq(a: Array<int>, b: Array<int>) -> bool {
+  let la = a.len()
+  let lb = b.len()
+  if la != lb { return false }
+  let mut i = 0
+  let mut ok = true
+  while i < la {
+    let av = a[i]
+    let bv = b[i]
+    if av != bv { ok = false }
+    i = i + 1
+  }
+  return ok
+}
+
+fn check_vec(which: string, got: Array<int>, expected: Array<int>) {
+  let same = veq(got, expected)
+  if !same {
+    let gl = got.len()
+    let el = expected.len()
+    fail(which, f"len={el}", f"len={gl}")
+    failures = failures + 1
+  }
+}
+
+// String-vector equality via join (book "Vector Methods": join(sep) -> string).
+// (Indexing an `Array<string>` parameter element-wise yields `unknown` element
+// type in this build — see REPORT — so we compare the joined string forms,
+// which is itself a book-supported operation. "|" is not a value in the data.)
+fn check_svec(which: string, got: Array<string>, expected: Array<string>) {
+  let gj = got.join("|")
+  let ej = expected.join("|")
+  if gj != ej {
+    fail(which, ej, gj)
+    failures = failures + 1
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Domain types (book "Typed Objects": fixed-shape records via `type`).
+// ---------------------------------------------------------------------------
+type Employee {
+  id: int,
+  dept: string,
+  salary: int,
+  age: int
+}
+
+// ---------------------------------------------------------------------------
+// Helper functions over typed-object arrays (book "Vector Methods":
+// map/filter return Vec<U>/Vec<T>; the element type flows through the chain).
+// ---------------------------------------------------------------------------
+fn salaries_of(es: Array<Employee>) -> Array<int> {
+  return es.map(|e| e.salary)
+}
+
+fn ages_of(es: Array<Employee>) -> Array<int> {
+  return es.map(|e| e.age)
+}
+
+fn ids_of(es: Array<Employee>) -> Array<int> {
+  return es.map(|e| e.id)
+}
+
+fn depts_of(es: Array<Employee>) -> Array<string> {
+  return es.map(|e| e.dept)
+}
+
+fn names_of(es: Array<Employee>) -> Array<string> {
+  return es.map(|e| e.dept)
+}
+
+fn in_dept(es: Array<Employee>, d: string) -> Array<Employee> {
+  return es.filter(|e| e.dept == d)
+}
+
+fn salary_at_least(es: Array<Employee>, threshold: int) -> Array<Employee> {
+  return es.filter(|e| e.salary >= threshold)
+}
+
+fn younger_than(es: Array<Employee>, max_age: int) -> Array<Employee> {
+  return es.filter(|e| e.age < max_age)
+}
+
+fn count_in_dept(es: Array<Employee>, d: string) -> int {
+  let f = in_dept(es, d)
+  return f.len()
+}
+
+// NOTE: NumericVec `sum()` on a `Vec<int>` is statically typed `number`
+// in this build (xs.sum() + 1 -> 61.0), so this aggregate is `number`.
+fn total_payroll(es: Array<Employee>) -> number {
+  let sal = salaries_of(es)
+  return sal.sum()
+}
+
+// ---------------------------------------------------------------------------
+// The roster (deterministic fixture — 12 employees).
+// ---------------------------------------------------------------------------
+let emps = [
+  Employee { id: 1,  dept: "eng",   salary: 100, age: 30 },
+  Employee { id: 2,  dept: "sales", salary: 80,  age: 40 },
+  Employee { id: 3,  dept: "eng",   salary: 120, age: 35 },
+  Employee { id: 4,  dept: "sales", salary: 90,  age: 28 },
+  Employee { id: 5,  dept: "eng",   salary: 110, age: 45 },
+  Employee { id: 6,  dept: "ops",   salary: 70,  age: 50 },
+  Employee { id: 7,  dept: "ops",   salary: 75,  age: 33 },
+  Employee { id: 8,  dept: "sales", salary: 95,  age: 38 },
+  Employee { id: 9,  dept: "eng",   salary: 130, age: 41 },
+  Employee { id: 10, dept: "ops",   salary: 72,  age: 29 },
+  Employee { id: 11, dept: "sales", salary: 88,  age: 31 },
+  Employee { id: 12, dept: "eng",   salary: 105, age: 27 }
+]
+
+// ===========================================================================
+// SECTION 1 — Roster basics: len, index, first, last.
+// Book "Index Access and Bounds" / "Vectors".
+// Expected: 12 employees; first.id=1; last.id=12.
+// ===========================================================================
+let n_emps = emps.len()
+check_int("roster_len", n_emps, 12)
+
+let first_emp = emps.first()
+check_int("first_id", first_emp.id, 1)
+check_str("first_dept", first_emp.dept, "eng")
+
+let last_emp = emps.last()
+check_int("last_id", last_emp.id, 12)
+check_str("last_dept", last_emp.dept, "eng")
+
+let e3 = emps[2]                 // zero-based index 2 -> id 3
+check_int("index2_id", e3.id, 3)
+check_int("index2_salary", e3.salary, 120)
+
+// ===========================================================================
+// SECTION 2 — Projections via map (book "Vector Methods": map -> Vec<U>).
+// ids: 1..12 ; salaries and ages as listed.
+// ===========================================================================
+let ids = ids_of(emps)
+check_vec("ids", ids, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+
+let salaries = salaries_of(emps)
+check_vec("salaries", salaries, [100, 80, 120, 90, 110, 70, 75, 95, 130, 72, 88, 105])
+
+let ages = ages_of(emps)
+check_vec("ages", ages, [30, 40, 35, 28, 45, 50, 33, 38, 41, 29, 31, 27])
+
+let dept_names = depts_of(emps)
+check_svec("depts", dept_names, ["eng", "sales", "eng", "sales", "eng", "ops", "ops", "sales", "eng", "ops", "sales", "eng"])
+
+// ===========================================================================
+// SECTION 3 — Numeric aggregates (book "Vector Methods": NumericVec
+// sum/min/max/avg on Vec<int> / Vec<number>).
+// salaries: 100+80+120+90+110+70+75+95+130+72+88+105 = 1135
+// min salary = 70 ; max salary = 130 ; avg = 1135/12 = 94.5833...
+// NumericVec methods on Vec<int> are statically typed `number` in this build,
+// so each aggregate is asserted with check_num against a `.0` expected value
+// (the book is silent on the per-receiver return type; see REPORT book_gaps).
+// ages sum = 30+40+35+28+45+50+33+38+41+29+31+27 = 427 ; min 27 ; max 50
+// ===========================================================================
+let pay_total = salaries.sum()
+check_num("salary_sum", pay_total, 1135.0)
+check_num("salary_min", salaries.min(), 70.0)
+check_num("salary_max", salaries.max(), 130.0)
+
+let age_sum = ages.sum()
+check_num("age_sum", age_sum, 427.0)
+check_num("age_min", ages.min(), 27.0)
+check_num("age_max", ages.max(), 50.0)
+
+// total_payroll helper agrees with direct sum.
+let payroll = total_payroll(emps)
+check_num("total_payroll_helper", payroll, 1135.0)
+
+// ===========================================================================
+// SECTION 4 — Department filters (book "Common Operations": filter -> Vec<T>).
+// eng:   ids 1,3,5,9,12  (5) salaries 100,120,110,130,105 sum=565
+// sales: ids 2,4,8,11    (4) salaries 80,90,95,88        sum=353
+// ops:   ids 6,7,10      (3) salaries 70,75,72           sum=217
+// ===========================================================================
+let eng = in_dept(emps, "eng")
+check_int("eng_count", eng.len(), 5)
+check_vec("eng_ids", ids_of(eng), [1, 3, 5, 9, 12])
+let eng_sal = salaries_of(eng)
+check_num("eng_salary_sum", eng_sal.sum(), 565.0)
+check_num("eng_salary_max", eng_sal.max(), 130.0)
+check_num("eng_salary_min", eng_sal.min(), 100.0)
+
+let sales = in_dept(emps, "sales")
+check_int("sales_count", sales.len(), 4)
+check_vec("sales_ids", ids_of(sales), [2, 4, 8, 11])
+let sales_sal = salaries_of(sales)
+check_num("sales_salary_sum", sales_sal.sum(), 353.0)
+
+let ops = in_dept(emps, "ops")
+check_int("ops_count", ops.len(), 3)
+check_vec("ops_ids", ids_of(ops), [6, 7, 10])
+let ops_sal = salaries_of(ops)
+check_num("ops_salary_sum", ops_sal.sum(), 217.0)
+
+// counts via helper
+check_int("count_eng", count_in_dept(emps, "eng"), 5)
+check_int("count_sales", count_in_dept(emps, "sales"), 4)
+check_int("count_ops", count_in_dept(emps, "ops"), 3)
+check_int("count_missing", count_in_dept(emps, "legal"), 0)
+
+// partition completeness: 5 + 4 + 3 = 12
+let part_total = eng.len() + sales.len() + ops.len()
+check_int("partition_total", part_total, 12)
+
+// ===========================================================================
+// SECTION 5 — salary / age threshold filters.
+// salary >= 100: ids 1,3,5,9,12  (eng all >=100) -> 5 ; salaries 100,120,110,130,105
+// salary >= 110: ids 3,5,9       -> 3
+// salary < 80:   ids 6(70),7(75),10(72) -> 3 (all ops)
+// younger than 35 (age<35): ages 30,28,33,29,31,27 -> ids 1,4,7,10,11,12 -> 6
+// ===========================================================================
+let hi = salary_at_least(emps, 100)
+check_int("hi100_count", hi.len(), 5)
+check_vec("hi100_ids", ids_of(hi), [1, 3, 5, 9, 12])
+
+let hi110 = salary_at_least(emps, 110)
+check_int("hi110_count", hi110.len(), 3)
+check_vec("hi110_ids", ids_of(hi110), [3, 5, 9])
+
+let young = younger_than(emps, 35)
+check_int("young35_count", young.len(), 6)
+check_vec("young35_ids", ids_of(young), [1, 4, 7, 10, 11, 12])
+
+// ===========================================================================
+// SECTION 6 — find / findIndex (book "Vector Methods").
+// find first salary > 125 -> id 9 (salary 130). findIndex of that emp -> 8.
+// find first dept == "ops" -> id 6. findIndex -> 5.
+// ===========================================================================
+let top_emp = emps.find(|e| e.salary > 125)
+check_int("find_top_id", top_emp.id, 9)
+check_int("find_top_salary", top_emp.salary, 130)
+
+let top_idx = emps.findIndex(|e| e.salary > 125)
+check_int("findIndex_top", top_idx, 8)
+
+let first_ops = emps.find(|e| e.dept == "ops")
+check_int("find_ops_id", first_ops.id, 6)
+let first_ops_idx = emps.findIndex(|e| e.dept == "ops")
+check_int("findIndex_ops", first_ops_idx, 5)
+
+// findIndex with no match returns -1 (book method table).
+let none_idx = emps.findIndex(|e| e.salary > 1000)
+check_int("findIndex_none", none_idx, -1)
+
+// ===========================================================================
+// SECTION 7 — some / every (book "Vector Methods": existential / universal).
+// some salary > 125 -> true (id 9). some salary > 200 -> false.
+// every salary >= 60 -> true. every salary >= 100 -> false (sales/ops below).
+// every age > 0 -> true. some age > 49 -> true (id 6 age 50).
+// Each higher-order result is LET-BOUND before assertion (inference workaround).
+// ===========================================================================
+let some_gt_125 = emps.some(|e| e.salary > 125)
+check_bool("some_gt_125", some_gt_125, true)
+
+let some_gt_200 = emps.some(|e| e.salary > 200)
+check_bool("some_gt_200", some_gt_200, false)
+
+let every_ge_60 = emps.every(|e| e.salary >= 60)
+check_bool("every_ge_60", every_ge_60, true)
+
+let every_ge_100 = emps.every(|e| e.salary >= 100)
+check_bool("every_ge_100", every_ge_100, false)
+
+let every_age_pos = emps.every(|e| e.age > 0)
+check_bool("every_age_pos", every_age_pos, true)
+
+let some_age_50 = emps.some(|e| e.age > 49)
+check_bool("some_age_50", some_age_50, true)
+
+// ===========================================================================
+// SECTION 8 — includes / indexOf on int vectors (book "Vector Methods").
+// ids includes 7 -> true ; includes 99 -> false.
+// indexOf 9 in ids (1..12) -> position 8 ; indexOf 99 -> -1.
+// ===========================================================================
+let inc7 = ids.includes(7)
+check_bool("includes_7", inc7, true)
+let inc99 = ids.includes(99)
+check_bool("includes_99", inc99, false)
+check_int("indexOf_9", ids.indexOf(9), 8)
+check_int("indexOf_99", ids.indexOf(99), -1)
+
+// ===========================================================================
+// SECTION 9 — take / drop / slice / reverse / clone (book "Vector Methods").
+// ids = [1..12].
+// take 3 -> [1,2,3] ; drop 9 -> [10,11,12] ; slice(3,6) -> [4,5,6]
+// reverse -> [12,11,...,1] ; clone -> identical.
+// closed-range slice ids[2..5] -> [3,4,5].
+// ===========================================================================
+check_vec("take3", ids.take(3), [1, 2, 3])
+check_vec("drop9", ids.drop(9), [10, 11, 12])
+check_vec("slice_3_6", ids.slice(3, 6), [4, 5, 6])
+check_vec("reverse", ids.reverse(), [12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1])
+check_vec("clone", ids.clone(), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+check_vec("range_slice", ids[2..5], [3, 4, 5])
+
+// concat: eng ids ++ ops ids -> [1,3,5,9,12,6,7,10]
+let eng_ids = ids_of(eng)
+let ops_ids = ids_of(ops)
+let combined = eng_ids.concat(ops_ids)
+check_vec("concat_eng_ops", combined, [1, 3, 5, 9, 12, 6, 7, 10])
+check_int("concat_len", combined.len(), 8)
+
+// ===========================================================================
+// SECTION 10 — join (book "Vector Methods": join(sep) -> string).
+// dept names joined by "," — book table line 260.
+// ===========================================================================
+let dept_csv = dept_names.join(",")
+check_str("dept_csv", dept_csv, "eng,sales,eng,sales,eng,ops,ops,sales,eng,ops,sales,eng")
+
+// ===========================================================================
+// SECTION 11 — push / pop on a mutable vector (book method table).
+// Build [1,2,3,4,5] by pushing; pop returns 5; remaining [1,2,3,4].
+// ===========================================================================
+let mut bucket = [1]
+bucket.push(2)
+bucket.push(3)
+bucket.push(4)
+bucket.push(5)
+check_vec("push_built", bucket, [1, 2, 3, 4, 5])
+let popped = bucket.pop()
+check_int("pop_value", popped, 5)
+check_vec("pop_remaining", bucket, [1, 2, 3, 4])
+
+// accumulate a running sum into a vector via for + push.
+let src = [10, 20, 30, 40]
+let mut running = [10]
+let mut acc = 10
+let mut idx = 1
+while idx < src.len() {
+  acc = acc + src[idx]
+  running.push(acc)
+  idx = idx + 1
+}
+// prefix sums: 10, 30, 60, 100
+check_vec("prefix_sums", running, [10, 30, 60, 100])
+
+// ===========================================================================
+// SECTION 12 — Anonymous objects, nested, merge (book "Objects" sections).
+// ===========================================================================
+let summary = {
+  total: pay_total,
+  headcount: n_emps,
+  top_id: top_emp.id
+}
+check_num("summary_total", summary.total, 1135.0)
+check_int("summary_headcount", summary.headcount, 12)
+check_int("summary_top", summary.top_id, 9)
+
+// nested object
+let report = {
+  meta: { version: 1, source: "fixture" },
+  totals: { payroll: pay_total, heads: n_emps }
+}
+check_int("report_version", report.meta.version, 1)
+check_str("report_source", report.meta.source, "fixture")
+check_num("report_payroll", report.totals.payroll, 1135.0)
+check_int("report_heads", report.totals.heads, 12)
+
+// merge disjoint anonymous objects (book "Object Merge": + ; right wins,
+// but keys are disjoint here per the book's overlapping-key caveat).
+let base_obj = { eng_count: 5, sales_count: 4 }
+let more_obj = { ops_count: 3, total_count: 12 }
+let merged = base_obj + more_obj
+check_int("merge_eng", merged.eng_count, 5)
+check_int("merge_sales", merged.sales_count, 4)
+check_int("merge_ops", merged.ops_count, 3)
+check_int("merge_total", merged.total_count, 12)
+
+// ===========================================================================
+// SECTION 13 — HashMap as a department-rate lookup table.
+// Book "HashMap": immutable; chain set() on a single binding; get/has/len/
+// isEmpty/delete.
+// rates: eng->150, sales->120, ops->100.
+// ===========================================================================
+let rates = HashMap().set("eng", 150).set("sales", 120).set("ops", 100)
+check_int("rate_eng", rates.get("eng") ?? 0, 150)
+check_int("rate_sales", rates.get("sales") ?? 0, 120)
+check_int("rate_ops", rates.get("ops") ?? 0, 100)
+check_int("rate_missing", rates.get("legal") ?? -1, -1)
+check_int("rates_len", rates.len(), 3)
+check_bool("rates_has_eng", rates.has("eng"), true)
+check_bool("rates_has_legal", rates.has("legal"), false)
+check_bool("rates_empty", rates.isEmpty(), false)
+
+// NOTE: a standalone bare `HashMap()` used for isEmpty()/len() is NOT
+// demonstrated by the book and does not work here (the empty literal
+// materializes as a scalar, not a map) — see REPORT book_gaps. We assert
+// isEmpty()/len() only on the book-demonstrated non-empty + chained forms.
+
+// delete returns a NEW map (immutability): drop "ops".
+let rates2 = rates.delete("ops")
+check_int("rates2_len", rates2.len(), 2)
+check_bool("rates2_has_ops", rates2.has("ops"), false)
+check_bool("rates_still_has_ops", rates.has("ops"), true)   // original untouched
+
+// HashMap.map transforms values (book HashMap method table): double each rate.
+let doubled_rates = rates.map(|k, v| v * 2)
+check_int("dbl_eng", doubled_rates.get("eng") ?? 0, 300)
+check_int("dbl_sales", doubled_rates.get("sales") ?? 0, 240)
+check_int("dbl_ops", doubled_rates.get("ops") ?? 0, 200)
+
+// HashMap.filter keeps matching entries (book HashMap method table): rate>=120.
+let hi_rates = rates.filter(|k, v| v >= 120)
+check_int("hi_rates_len", hi_rates.len(), 2)
+check_bool("hi_rates_has_eng", hi_rates.has("eng"), true)
+check_bool("hi_rates_has_ops", hi_rates.has("ops"), false)
+
+// ===========================================================================
+// SECTION 14 — A small derived report combining all of the above.
+// "billing" = per-dept headcount * dept rate.
+//   eng:   5 * 150 = 750
+//   sales: 4 * 120 = 480
+//   ops:   3 * 100 = 300
+//   grand total = 1530
+// ===========================================================================
+let eng_n = count_in_dept(emps, "eng")
+let sales_n = count_in_dept(emps, "sales")
+let ops_n = count_in_dept(emps, "ops")
+let eng_rate = rates.get("eng") ?? 0
+let sales_rate = rates.get("sales") ?? 0
+let ops_rate = rates.get("ops") ?? 0
+let eng_bill = eng_n * eng_rate
+let sales_bill = sales_n * sales_rate
+let ops_bill = ops_n * ops_rate
+check_int("eng_bill", eng_bill, 750)
+check_int("sales_bill", sales_bill, 480)
+check_int("ops_bill", ops_bill, 300)
+let grand = eng_bill + sales_bill + ops_bill
+check_int("grand_total", grand, 1530)
+
+// build the billing vector and re-check via numeric methods.
+// (NumericVec aggregates are statically `number` -> check_num with `.0`.)
+let bills = [eng_bill, sales_bill, ops_bill]
+check_num("bills_sum", bills.sum(), 1530.0)
+check_num("bills_max", bills.max(), 750.0)
+check_num("bills_min", bills.min(), 300.0)
+
+// ===========================================================================
+// SECTION 15 — averages (number-returning numeric methods).
+// avg salary = 1135 / 12 = 94.58333333333333
+// avg age    = 427  / 12 = 35.583333333333336
+// ===========================================================================
+let avg_salary = salaries.avg()
+check_num("avg_salary", avg_salary, 1135.0 / 12.0)
+let avg_age = ages.avg()
+check_num("avg_age", avg_age, 427.0 / 12.0)
+
+// ===========================================================================
+// SECTION 16 — forEach side-effect iteration (book method table).
+// Sum salaries by mutating an outer accumulator from forEach.
+// ===========================================================================
+let mut foreach_sum = 0
+salaries.forEach(|s| foreach_sum = foreach_sum + s)
+check_int("foreach_sum", foreach_sum, 1135)
+
+// ---------------------------------------------------------------------------
+// Final verdict.
+// ---------------------------------------------------------------------------
+if failures == 0 {
+  print("ALL_CHECKS_PASSED")
+} else {
+  print(f"FAILURES: {failures}")
+}

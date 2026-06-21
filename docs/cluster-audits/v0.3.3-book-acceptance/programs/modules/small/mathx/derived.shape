@@ -1,0 +1,12 @@
+// mathx/derived.shape -- importable as mathx::derived
+// Demonstrates a helper module that IMPORTS another helper module
+// (book "Two-File Library Example": math/linalg.shape imports from math/stats.shape).
+
+from mathx::stats use { sum_to }
+
+// average of the first n triangular-sum endpoints, integer-floored.
+// sum_to(n) = n(n+1)/2 ; here we just re-export a derived helper that
+// composes the imported `sum_to`.
+pub fn double_triangular(n: int) -> int {
+    sum_to(n) * 2
+}

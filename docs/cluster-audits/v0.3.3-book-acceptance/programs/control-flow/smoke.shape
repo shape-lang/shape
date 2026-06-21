@@ -1,0 +1,48 @@
+// smoke: exercise each book feature
+let score = 84
+let grade = if score >= 90 { "A" } else if score >= 80 { "B" } else { "C" }
+print(grade)
+
+let value = {
+  let base = 10
+  base * 2
+}
+print(value)
+
+let unit = {
+  1;
+}
+
+for i in 0..5 {
+  print(i)
+}
+
+let points = [{x: 1, y: 2}, {x: 3, y: 4}]
+for {x, y} in points {
+  print(f"({x}, {y})")
+}
+
+var w = 0
+while w < 3 {
+  print(w)
+  w = w + 1
+}
+
+for i in 0..10 {
+  if i == 2 { continue }
+  if i == 6 { break }
+  print(i)
+}
+
+var li = 0
+loop {
+  if li >= 5 { break }
+  print(li)
+  li = li + 1
+}
+
+let result = loop {
+  if li > 10 { break li * 2 }
+  li = li + 1
+}
+print(result)

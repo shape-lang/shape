@@ -1,0 +1,15 @@
+from std::core::intrinsics use { DateTime }
+
+let dt = DateTime.parse("2024-06-15T14:30:45+00:00")
+print(dt.year())
+print(dt.month())
+print(dt.day())
+print(dt.hour())
+print(dt.minute())
+print(dt.second())
+print(dt.iso8601())
+print(dt.rfc2822())
+print(dt.unix_timestamp())
+print(dt.format("%Y/%m/%d %H:%M"))
+print(dt.format("%B %d, %Y"))
+print(dt.format("%A"))

@@ -1,0 +1,160 @@
+// small.shape -- enums slice, book-faithful exercise of fundamentals/enums.mdx
+// Exercises: unit variants, tuple variants, struct-style variants, exhaustive
+// match, the `_` wildcard, built-in Option<T> and Result<T,E>, the `?` operator,
+// and auto-derived Display. Self-checking: asserts every result, prints
+// ALL_CHECKS_PASSED on success.
+//
+// Self-check uses plain `if` + `print` -- the enums chapter documents no
+// assert primitive.
+
+// --- Unit variants (book "Basic Syntax" / "Unit Variants") ---
+enum Direction { North, South, East, West }
+
+fn heading(d: Direction) -> string {
+    match d {
+        Direction::North => "north",
+        Direction::South => "south",
+        Direction::East  => "east",
+        Direction::West  => "west",
+    }
+}
+
+// --- Tuple variants (book "Tuple Variants") ---
+enum Shape {
+    Circle(number),
+    Square(number),
+    Rectangle(number, number),
+}
+
+fn area(s: Shape) -> number {
+    match s {
+        Shape::Circle(r)       => 3.14159 * r * r,
+        Shape::Square(side)    => side * side,
+        Shape::Rectangle(w, h) => w * h,
+    }
+}
+
+// --- Struct-style variants (book "Struct-Style Variants") ---
+enum Message {
+    Quit,
+    Move { x: int, y: int },
+    Write(string),
+    ChangeColor { r: int, g: int, b: int },
+}
+
+fn handle(msg: Message) -> string {
+    match msg {
+        Message::Quit                    => "quit",
+        Message::Move { x, y }           => f"move to ({x}, {y})",
+        Message::Write(text)             => f"write: {text}",
+        Message::ChangeColor { r, g, b } => f"color rgb({r},{g},{b})",
+    }
+}
+
+// --- Wildcard `_` (book "The Wildcard `_`") ---
+enum Status { Active, Inactive, Pending, Banned }
+
+fn is_active(s: Status) -> string {
+    match s {
+        Status::Active => "active",
+        _              => "not active",
+    }
+}
+
+// --- Built-in Result + `?` operator (book "Result<T,E>") ---
+// The book's parse_port uses s.to_int() which does not exist in this build,
+// so we model the same Result + `?` shape with a pure int validator.
+fn checked_port(n: int) -> Result<int, string> {
+    if n < 1 or n > 65535 {
+        return Err(f"port out of range: {n}")
+    }
+    Ok(n)
+}
+
+fn double_check(n: int) -> Result<int, string> {
+    let a = checked_port(n)?   // `?` propagates Err
+    let b = checked_port(a)?
+    Ok(b)
+}
+
+// --- Built-in Option + `?` operator (book "Option<T>") ---
+fn first_even(a: Array<int>) -> Option<int> {
+    for x in a {
+        if x % 2 == 0 { return Some(x) }
+    }
+    None
+}
+
+fn sum_first_evens(a: Array<int>, b: Array<int>) -> Option<int> {
+    let x = first_even(a)?     // `?` short-circuits on None
+    let y = first_even(b)?
+    Some(x + y)
+}
+
+fn main() {
+    let mut ok = true
+
+    // Unit variants
+    if heading(Direction::North) != "north" { ok = false; print("CHECK_FAILED: north") }
+    if heading(Direction::West)  != "west"  { ok = false; print("CHECK_FAILED: west") }
+
+    // Tuple variants (book: area(Circle(5.0)) == 78.53975, Rectangle(3,4) == 12.0)
+    if area(Shape::Circle(5.0))         != 78.53975 { ok = false; print("CHECK_FAILED: circle_area") }
+    if area(Shape::Rectangle(3.0, 4.0)) != 12.0     { ok = false; print("CHECK_FAILED: rect_area") }
+    if area(Shape::Square(6.0))         != 36.0     { ok = false; print("CHECK_FAILED: square_area") }
+
+    // Struct-style variants
+    if handle(Message::Quit)                              != "quit"            { ok = false; print("CHECK_FAILED: quit") }
+    if handle(Message::Move { x: 10, y: 20 })             != "move to (10, 20)" { ok = false; print("CHECK_FAILED: move") }
+    if handle(Message::Write("hi"))                       != "write: hi"       { ok = false; print("CHECK_FAILED: write") }
+    if handle(Message::ChangeColor { r: 1, g: 2, b: 3 })  != "color rgb(1,2,3)" { ok = false; print("CHECK_FAILED: color") }
+
+    // Wildcard
+    if is_active(Status::Active)  != "active"     { ok = false; print("CHECK_FAILED: active") }
+    if is_active(Status::Pending) != "not active" { ok = false; print("CHECK_FAILED: pending") }
+    if is_active(Status::Banned)  != "not active" { ok = false; print("CHECK_FAILED: banned") }
+
+    // Result + `?`
+    // (Match arms extract a value which is compared *after* the match. A
+    //  block-arm body of the form `Some(v) => { if v != N ... }` over a value
+    //  produced by a `?`-using function mis-infers the binder as Option<int>
+    //  in this build -- see REPORT book_wrong / FN-REG defect. We use the
+    //  bare-expression arm shape the book itself uses.)
+    let ok_port = match double_check(8080) {
+        Ok(v)  => v,
+        Err(_) => -1,
+    }
+    if ok_port != 8080 { ok = false; print("CHECK_FAILED: ok_port") }
+
+    let bad_msg = match double_check(99999) {
+        Ok(_)  => "unexpected-ok",
+        Err(e) => e,
+    }
+    if bad_msg != "port out of range: 99999" { ok = false; print("CHECK_FAILED: err_msg") }
+
+    // Option + `?`
+    let some_sum = match sum_first_evens([1, 2, 3], [5, 4, 3]) {
+        Some(v) => v,
+        None    => -1,
+    }
+    if some_sum != 6 { ok = false; print("CHECK_FAILED: some_sum") }
+
+    let none_flag = match sum_first_evens([1, 3, 5], [2, 4]) {
+        Some(_) => 1,    // first array has no even -> should not reach here
+        None    => 0,
+    }
+    if none_flag != 0 { ok = false; print("CHECK_FAILED: none_was_some") }
+
+    // Auto-derived Display (book "Auto-Derived Display"):
+    //   Direction::North prints "North"; Shape::Circle(3.0) prints "Circle(3.0)"
+    print(Direction::North)
+    print(Shape::Circle(3.0))
+
+    if ok {
+        print("ALL_CHECKS_PASSED")
+    } else {
+        print("SOME_CHECKS_FAILED")
+    }
+}
+
+main()

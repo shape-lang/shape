@@ -1,0 +1,4 @@
+use mylib::stats
+pub fn midpoint2(a: int, b: int) -> int {
+    stats::zqxmean(a, b)
+}

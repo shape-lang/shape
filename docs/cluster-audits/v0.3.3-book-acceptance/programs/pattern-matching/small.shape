@@ -1,0 +1,88 @@
+// small.shape — exercises the pattern-matching chapter's core constructs.
+// Forms used (all book-documented in fundamentals/pattern-matching.mdx):
+//   - basic literal / typed-binding-with-guard match (Basic Match)
+//   - type-based matching on a union type (Type-Based Matching)
+//   - enum matching with payload binding (Enum Matching)
+//   - constructor patterns Some/None and Ok/Err (Constructor Patterns)
+//   - match as an expression assigned to a binding (Match Is an Expression)
+//   - struct-variant destructuring (reference-confirmed; see REPORT book_gaps)
+
+fn sign(n: int) -> string {
+  match n {
+    x: int where x < 0 => "negative"
+    x: int where x == 0 => "zero"
+    _ => "positive"
+  }
+}
+
+fn normalize(value: int | string) -> string {
+  match value {
+    n: int => f"int:{n}"
+    s: string => f"str:{s}"
+  }
+}
+
+enum Status {
+  Ok(int),
+  Error(string)
+}
+
+fn render(status: Status) -> string {
+  match status {
+    Status::Ok(code) => f"ok({code})"
+    Status::Error(msg) => f"error({msg})"
+  }
+}
+
+fn unwrap_or(opt: Option<int>, fallback: int) -> int {
+  match opt {
+    Some(v) => v
+    None => fallback
+  }
+}
+
+fn describe_result(result: Result<string>) -> string {
+  match result {
+    Ok(value) => f"success: {value}"
+    Err(e) => f"failed: {e}"
+  }
+}
+
+fn grade(score: int) -> string {
+  let label = match score {
+    x: int where x >= 90 => "A"
+    x: int where x >= 80 => "B"
+    x: int where x >= 70 => "C"
+    _ => "F"
+  }
+  label
+}
+
+fn check(name: string, got: string, expected: string) {
+  if got != expected {
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+check("sign-neg", sign(-3), "negative")
+check("sign-zero", sign(0), "zero")
+check("sign-pos", sign(7), "positive")
+
+check("norm-int", normalize(42), "int:42")
+check("norm-str", normalize("hi"), "str:hi")
+
+check("render-ok", render(Status::Ok(200)), "ok(200)")
+check("render-err", render(Status::Error("boom")), "error(boom)")
+
+check("unwrap-some", f"{unwrap_or(Some(5), 0)}", "5")
+check("unwrap-none", f"{unwrap_or(None, 99)}", "99")
+
+check("res-ok", describe_result(Ok("yay")), "success: yay")
+check("res-err", describe_result(Err("nope")), "failed: nope")
+
+check("grade-a", grade(95), "A")
+check("grade-b", grade(85), "B")
+check("grade-c", grade(72), "C")
+check("grade-f", grade(50), "F")
+
+print("ALL_CHECKS_PASSED")

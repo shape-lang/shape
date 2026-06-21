@@ -1,0 +1,3 @@
+pub fn mean(a: int, b: int) -> int {
+    (a + b) / 2
+}

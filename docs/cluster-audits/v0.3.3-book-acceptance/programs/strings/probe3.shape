@@ -1,0 +1,15 @@
+// edge cases
+let tri = """
+    (\d+)\n(\w+)
+    """
+print(tri)                          // literal backslashes
+print("a,,b".split(",").length)     // 3
+print("".length)                    // 0
+print("héllo".length)               // 5 unicode-safe (codepoints?)
+print("世界".length)                 // 2
+print(f"esc: \{lit\}")              // esc: {lit}
+print("hello".substring(2))         // llo  (end optional)
+print("racecar".contains("zz"))     // false
+let parts = "a:b:c".split(":")
+print(parts[0])                     // a
+print(parts[2])                     // c

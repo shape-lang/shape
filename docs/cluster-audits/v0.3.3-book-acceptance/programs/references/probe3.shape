@@ -1,0 +1,24 @@
+fn read_first(&arr) {
+    return arr[0]
+}
+fn append(&mut arr, value) {
+    arr.push(value)
+}
+fn read_val(&x) {
+    return x
+}
+
+let mut nums = [1, 2, 3]
+let first = read_first(&nums)
+print(first)
+append(&mut nums, 4)
+print(nums[3])
+
+let c = [4, 5, 6]
+let d = clone c
+print(c[0])
+print(d[0])
+
+let v = read_val(&first)
+print(v)
+print("DONE")

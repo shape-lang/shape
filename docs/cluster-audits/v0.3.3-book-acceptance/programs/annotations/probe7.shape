@@ -1,0 +1,15 @@
+// Probe: comptime pre that reads scalar target fields only (target.name)
+annotation note_name() {
+  targets: [function]
+
+  comptime pre(target, ctx) {
+    print(f"defining: {target.name}")
+  }
+}
+
+@note_name()
+fn greet() -> int {
+  7
+}
+
+print("PROBE7_OK")

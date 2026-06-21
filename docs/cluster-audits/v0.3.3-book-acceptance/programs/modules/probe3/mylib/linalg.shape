@@ -1,0 +1,5 @@
+from mylib::stats use { zqxmean }
+
+pub fn midpoint(a: int, b: int) -> int {
+    zqxmean(a, b)
+}

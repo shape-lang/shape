@@ -1,0 +1,3 @@
+pub fn mean(v: Array<number>) -> number {
+  v.sum() / (v.length() as number)
+}

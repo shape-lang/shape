@@ -1,0 +1,704 @@
+// large.shape — types-primitive slice
+// REAL-WORLD APP: a deterministic 8x8 RGBA image-processing pipeline built
+// entirely on Shape's primitive types from fundamentals/builtin-types.mdx and
+// fundamentals/integer-types.mdx. No I/O, no stdin, fully reproducible.
+//
+// Design discipline rooted in BOOK SEMANTICS:
+//   * Color channels are u8 (0..255) — book: width-typed struct fields.
+//   * ALL arithmetic is done in `int` (i64), the book's "general-purpose integer
+//     work" recommendation, because the book WARNS width-typed wrapping
+//     arithmetic is NOT portable across VM/JIT. We only touch u8 at boundaries.
+//   * `as u8` / `as i8` casts use the book's bit-level rules:
+//       narrowing keeps low 8 bits ("300 as i8 == 44"),
+//       signed<->unsigned reinterprets bits ("-1 as u8 == 255").
+//   * number (f64) used only for luminance ratios; int<->number conversions
+//     are explicit via `as`, per the book's casting rule.
+//
+// Every expected value below was hand-derived from book semantics BEFORE the
+// first run. Prints ALL_CHECKS_PASSED iff every assertion holds.
+
+let mut failures = 0
+let mut checks = 0
+
+fn check(name: string, got: int, expected: int) {
+  checks = checks + 1
+  if got != expected {
+    failures = failures + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+fn checkb(name: string, cond: bool) {
+  checks = checks + 1
+  if !cond {
+    failures = failures + 1
+    print(f"CHECK_FAILED: {name} expected=true got=false")
+  }
+}
+
+// ===========================================================================
+// SECTION 1 — Channel clamp / saturation helpers (pure int math)
+// ===========================================================================
+
+// Clamp an int into the inclusive byte range [0,255]. Stays in int domain.
+fn clampByte(v: int) -> int {
+  if v < 0 { return 0 }
+  if v > 255 { return 255 }
+  return v
+}
+
+// Saturating add of two int values, clamped to byte range.
+fn satAdd(a: int, b: int) -> int {
+  return clampByte(a + b)
+}
+
+// Saturating subtract.
+fn satSub(a: int, b: int) -> int {
+  return clampByte(a - b)
+}
+
+// Integer-scaled multiply by a percentage (0..100), rounded down.
+fn scalePct(v: int, pct: int) -> int {
+  return clampByte((v * pct) / 100)
+}
+
+// --- Section 1 checks (hand-computed) ---
+check("clamp_neg", clampByte(-7), 0)
+check("clamp_over", clampByte(300), 255)
+check("clamp_in", clampByte(128), 128)
+check("clamp_lo_edge", clampByte(0), 0)
+check("clamp_hi_edge", clampByte(255), 255)
+check("satadd_ok", satAdd(100, 50), 150)
+check("satadd_clip", satAdd(200, 100), 255)   // 300 -> 255
+check("satsub_ok", satSub(100, 30), 70)
+check("satsub_clip", satSub(20, 50), 0)        // -30 -> 0
+check("scale_50", scalePct(200, 50), 100)      // 10000/100
+check("scale_25", scalePct(255, 25), 63)       // 6375/100 = 63 (floor)
+check("scale_0", scalePct(255, 0), 0)
+check("scale_100", scalePct(123, 100), 123)
+
+// ===========================================================================
+// SECTION 2 — Color type with u8 fields; pack/unpack via bit ops (int)
+// ===========================================================================
+
+type Color { r: u8, g: u8, b: u8, a: u8 }
+
+// Pack RGBA into a single int (0xRRGGBBAA), arithmetic done in int.
+// We read u8 fields and widen them to int via `as int` (lossless), then shift.
+fn packColor(c: Color) -> int {
+  let ri = (c.r as int)
+  let gi = (c.g as int)
+  let bi = (c.b as int)
+  let ai = (c.a as int)
+  return (ri * 16777216) + (gi * 65536) + (bi * 256) + ai
+}
+
+// Unpack the red channel from a packed int.
+fn unpackR(p: int) -> int { return (p / 16777216) % 256 }
+fn unpackG(p: int) -> int { return (p / 65536) % 256 }
+fn unpackB(p: int) -> int { return (p / 256) % 256 }
+fn unpackA(p: int) -> int { return p % 256 }
+
+let white = Color { r: 255u8, g: 255u8, b: 255u8, a: 255u8 }
+let red   = Color { r: 255u8, g: 0u8,   b: 0u8,   a: 255u8 }
+let teal  = Color { r: 0u8,   g: 128u8, b: 128u8, a: 255u8 }
+let blackTrans = Color { r: 0u8, g: 0u8, b: 0u8, a: 0u8 }
+
+// Hand-derived packed values:
+//  white  = 0xFFFFFFFF = 4294967295
+//  red    = 0xFF0000FF = 255*16777216 + 0 + 0 + 255 = 4278190080 + 255 = 4278190335
+//  teal   = 0x008080FF = 128*65536 + 128*256 + 255 = 8388608 + 32768 + 255 = 8421631
+//  bTrans = 0x00000000 = 0
+check("pack_white", packColor(white), 4294967295)
+check("pack_red", packColor(red), 4278190335)
+check("pack_teal", packColor(teal), 8421631)
+check("pack_btrans", packColor(blackTrans), 0)
+
+let pteal = packColor(teal)
+check("unpack_teal_r", unpackR(pteal), 0)
+check("unpack_teal_g", unpackG(pteal), 128)
+check("unpack_teal_b", unpackB(pteal), 128)
+check("unpack_teal_a", unpackA(pteal), 255)
+
+let pred = packColor(red)
+check("unpack_red_r", unpackR(pred), 255)
+check("unpack_red_g", unpackG(pred), 0)
+check("unpack_red_a", unpackA(pred), 255)
+
+// ===========================================================================
+// SECTION 3 — Bit-level `as` cast semantics (book "Explicit Casting with as")
+// ===========================================================================
+
+// Book examples verbatim (book uses VARIABLE forms; `as` binds tighter than
+// unary minus, so a NEGATIVE value must be bound to a variable first — writing
+// `-1 as u8` parses as `-(1 as u8) == -1`, NOT `(-1) as u8`. The book's own
+// example (integer-types.mdx "Explicit Casting") uses `let signed: int = -1;
+// signed as u8`, which is the correct idiom we follow here.)
+let wide300: int = 300
+let castA = wide300 as i8   // -> 44  (low 8 bits of 300 = 0b00101100 = 44)
+let negOne: int = -1
+let castB = negOne as u8    // -> 255 (all-ones low byte)
+check("book_300_i8", (castA as int), 44)
+check("book_neg1_u8", (castB as int), 255)
+
+// Extend the book's bit rules with our own hand-derived cases.
+// Non-negative literals cast directly; negatives go through a variable.
+//   256 as u8  = 0   (low byte of 0x100)
+//   257 as u8  = 1
+//   511 as u8  = 255 (0x1FF low byte)
+//   -128 as i8 = -128 (0x80 reinterpreted signed)
+//   128 as i8  = -128 (0x80 -> signed -128)
+//   200 as i8  = -56  (0xC8 -> 200-256)
+check("cast_256_u8", (256 as u8) as int, 0)
+check("cast_257_u8", (257 as u8) as int, 1)
+check("cast_511_u8", (511 as u8) as int, 255)
+let negV128: int = -128
+check("cast_neg128_i8", (negV128 as i8) as int, -128)
+check("cast_128_i8", (128 as i8) as int, -128)
+check("cast_200_i8", (200 as i8) as int, -56)
+
+// u16 narrowing: 70000 as u16 -> 70000 - 65536 = 4464
+check("cast_70000_u16", (70000 as u16) as int, 4464)
+// i16: 40000 as i16 -> 40000 - 65536 = -25536
+check("cast_40000_i16", (40000 as i16) as int, -25536)
+
+// ===========================================================================
+// SECTION 4 — Synthetic 8x8 image, generated deterministically
+// ===========================================================================
+// Pixel value = a luminance ramp: pixel(x,y) = (x*32 + y*4) clamped to byte.
+// We store it as a flat array of ints (one luminance channel) of length 64.
+
+let W = 8
+let H = 8
+
+fn genImage() -> Vec<int> {
+  let mut img = []
+  let mut y = 0
+  while y < 8 {
+    let mut x = 0
+    while x < 8 {
+      let lum = clampByte(x * 32 + y * 4)
+      img = img.push(lum)
+      x = x + 1
+    }
+    y = y + 1
+  }
+  return img
+}
+
+let img = genImage()
+check("img_len", img.length, 64)
+
+// Hand-derived sample pixels:
+//  (0,0) -> 0
+//  (1,0) -> 32
+//  (7,0) -> 224
+//  (0,7) -> 28
+//  (7,7) -> 7*32 + 7*4 = 224 + 28 = 252
+//  (5,3) index = 3*8+5 = 29, value = 5*32 + 3*4 = 160 + 12 = 172
+check("px_0_0", img[0], 0)
+check("px_1_0", img[1], 32)
+check("px_7_0", img[7], 224)
+check("px_0_7", img[56], 28)
+check("px_7_7", img[63], 252)
+check("px_5_3", img[29], 172)
+
+// ===========================================================================
+// SECTION 5 — Histogram (16 buckets of 16 luminance values each)
+// ===========================================================================
+
+fn histogram(im: Vec<int>) -> Vec<int> {
+  let mut buckets = []
+  let mut i = 0
+  while i < 16 {
+    buckets = buckets.push(0)
+    i = i + 1
+  }
+  let mut p = 0
+  while p < im.length {
+    let v = im[p]
+    let b = v / 16        // 0..15 since v in 0..255
+    buckets[b] = buckets[b] + 1
+    p = p + 1
+  }
+  return buckets
+}
+
+let hist = histogram(img)
+check("hist_len", hist.length, 16)
+
+// Sum of histogram must equal pixel count (64).
+fn sumArr(a: Vec<int>) -> int {
+  let mut s = 0
+  let mut i = 0
+  while i < a.length {
+    s = s + a[i]
+    i = i + 1
+  }
+  return s
+}
+check("hist_sum", sumArr(hist), 64)
+
+// Bucket 0 holds luminance 0..15. Which pixels?
+// lum = x*32 + y*4. lum<16 means x=0 (since x>=1 gives >=32) and y*4<16 -> y in 0..3.
+// So x=0, y in {0,1,2,3} => 4 pixels -> bucket 0 count = 4.
+check("hist_b0", hist[0], 4)
+
+// ===========================================================================
+// SECTION 6 — Brightness / contrast adjust (saturating, int domain)
+// ===========================================================================
+
+fn brighten(im: Vec<int>, delta: int) -> Vec<int> {
+  let mut out = []
+  let mut i = 0
+  while i < im.length {
+    out = out.push(satAdd(im[i], delta))
+    i = i + 1
+  }
+  return out
+}
+
+let bright = brighten(img, 50)
+// (0,0): 0+50 = 50 ; (7,7): 252+50 = 302 -> clamp 255 ; (7,0): 224+50=274->255
+check("bright_0_0", bright[0], 50)
+check("bright_7_7", bright[63], 255)
+check("bright_7_0", bright[7], 255)
+check("bright_5_3", bright[29], 222)   // 172+50
+
+let dark = brighten(img, -40)
+// (1,0): 32-40 = -8 -> 0 ; (7,7): 252-40 = 212 ; (5,3): 172-40 = 132
+check("dark_1_0", dark[1], 0)
+check("dark_7_7", dark[63], 212)
+check("dark_5_3", dark[29], 132)
+
+// ===========================================================================
+// SECTION 7 — Box blur (3x3, edges replicate) — heavy int arithmetic
+// ===========================================================================
+
+fn at(im: Vec<int>, x: int, y: int) -> int {
+  // clamp coordinates (edge replicate)
+  let mut cx = x
+  let mut cy = y
+  if cx < 0 { cx = 0 }
+  if cx > 7 { cx = 7 }
+  if cy < 0 { cy = 0 }
+  if cy > 7 { cy = 7 }
+  return im[cy * 8 + cx]
+}
+
+fn boxBlur(im: Vec<int>) -> Vec<int> {
+  let mut out = []
+  let mut y = 0
+  while y < 8 {
+    let mut x = 0
+    while x < 8 {
+      let mut acc = 0
+      let mut dy = -1
+      while dy <= 1 {
+        let mut dx = -1
+        while dx <= 1 {
+          acc = acc + at(im, x + dx, y + dy)
+          dx = dx + 1
+        }
+        dy = dy + 1
+      }
+      out = out.push(acc / 9)
+      x = x + 1
+    }
+    y = y + 1
+  }
+  return out
+}
+
+let blurred = boxBlur(img)
+check("blur_len", blurred.length, 64)
+
+// Hand-derived center pixel (4,4): neighbors x in 3..5, y in 3..5.
+// lum(x,y) = x*32 + y*4.
+// rows y=3,4,5 ; cols x=3,4,5
+//   (3,3)=96+12=108 (4,3)=128+12=140 (5,3)=160+12=172
+//   (3,4)=96+16=112 (4,4)=128+16=144 (5,4)=160+16=176
+//   (3,5)=96+20=116 (4,5)=128+20=148 (5,5)=160+20=180
+// sum = 108+140+172 + 112+144+176 + 116+148+180 = 420 + 432 + 444 = 1296
+// 1296/9 = 144
+check("blur_4_4", blurred[4 * 8 + 4], 144)
+
+// Corner (0,0): edge replicate. Neighborhood clamps to:
+//   x in {0,0,1}, y in {0,0,1}.
+//   distinct values: (0,0)=0, (1,0)=32, (0,1)=4, (1,1)=36
+//   The 3x3 with replication:
+//     (-1,-1)->(0,0)=0  (0,-1)->(0,0)=0  (1,-1)->(1,0)=32
+//     (-1, 0)->(0,0)=0  (0, 0)=0         (1, 0)=32
+//     (-1, 1)->(0,1)=4  (0, 1)=4         (1, 1)=36
+//   sum = 0+0+32 + 0+0+32 + 4+4+36 = 64 + 44 = 108 ; 108/9 = 12
+check("blur_0_0", blurred[0], 12)
+
+// ===========================================================================
+// SECTION 8 — Luminance ratios in number (f64) domain; explicit int<->number
+// ===========================================================================
+// Average luminance of the original image as a number (f64), to 0 decimals
+// compared as an int after explicit cast.
+
+fn avgLumScaled(im: Vec<int>) -> int {
+  let total = sumArr(im)            // int
+  // total / 64, kept in int (book: int division floors). We also verify the
+  // number path agrees on the integer part.
+  let asNum = (total as number) / 64.0
+  // floor via cast back to int (book: number->int needs explicit `as`)
+  return asNum as int
+}
+
+// Total luminance: sum over all pixels of clampByte(x*32 + y*4).
+// For x in 0..7, y in 0..7: x*32 ranges 0..224, y*4 ranges 0..28.
+// max = 224+28 = 252 < 255, so NO clamping occurs anywhere. Pure sum:
+//   sum_{x,y} (x*32 + y*4)
+//   = 8 * sum_x(x*32) + 8 * sum_y(y*4)        (each term repeated 8 times)
+//   sum_x(x*32) for x=0..7 = 32*(0+1+..+7) = 32*28 = 896 ; *8 = 7168
+//   sum_y(y*4)  for y=0..7 = 4*28 = 112 ; *8 = 896
+//   total = 7168 + 896 = 8064
+//   avg = 8064 / 64 = 126.0 -> int 126
+check("total_lum", sumArr(img), 8064)
+check("avg_lum", avgLumScaled(img), 126)
+
+// number arithmetic spot-checks (book scalar `number`):
+let halfMax = 255.0 / 2.0
+check("num_half_floor", (halfMax as int), 127)   // 127.5 -> 127 (truncate toward zero)
+checkb("num_half_val", halfMax == 127.5)
+
+// ===========================================================================
+// SECTION 9 — Threshold / binarize, count foreground
+// ===========================================================================
+
+fn threshold(im: Vec<int>, t: int) -> Vec<int> {
+  let mut out = []
+  let mut i = 0
+  while i < im.length {
+    if im[i] >= t {
+      out = out.push(255)
+    } else {
+      out = out.push(0)
+    }
+    i = i + 1
+  }
+  return out
+}
+
+fn countEq(a: Vec<int>, val: int) -> int {
+  let mut n = 0
+  let mut i = 0
+  while i < a.length {
+    if a[i] == val { n = n + 1 }
+    i = i + 1
+  }
+  return n
+}
+
+let bin = threshold(img, 128)
+// Count pixels with lum >= 128. lum = x*32 + y*4.
+// x*32 >= 128 means x >= 4. For x in {4,5,6,7}: x*32 = 128,160,192,224, all >=128
+//   regardless of y (y*4 >= 0 only increases). So all 4 columns x>=4, all 8 rows
+//   => 4*8 = 32 pixels. For x < 4: max lum at x=3 is 96 + 28 = 124 < 128, none.
+//   => foreground count = 32.
+check("thresh_fg", countEq(bin, 255), 32)
+check("thresh_bg", countEq(bin, 0), 32)
+
+// ===========================================================================
+// SECTION 10 — Min / max / dynamic range over the image
+// ===========================================================================
+
+fn minOf(a: Vec<int>) -> int {
+  let mut m = a[0]
+  let mut i = 1
+  while i < a.length {
+    if a[i] < m { m = a[i] }
+    i = i + 1
+  }
+  return m
+}
+fn maxOf(a: Vec<int>) -> int {
+  let mut m = a[0]
+  let mut i = 1
+  while i < a.length {
+    if a[i] > m { m = a[i] }
+    i = i + 1
+  }
+  return m
+}
+
+check("img_min", minOf(img), 0)     // (0,0)
+check("img_max", maxOf(img), 252)   // (7,7)
+check("img_range", maxOf(img) - minOf(img), 252)
+
+// ===========================================================================
+// SECTION 11 — Round-trip: pack a palette, unpack, verify identity
+// ===========================================================================
+
+fn buildPalette() -> Vec<Color> {
+  let mut pal = []
+  pal = pal.push(white)
+  pal = pal.push(red)
+  pal = pal.push(teal)
+  pal = pal.push(blackTrans)
+  pal = pal.push(Color { r: 16u8, g: 32u8, b: 48u8, a: 64u8 })
+  return pal
+}
+
+let pal = buildPalette()
+check("pal_len", pal.length, 5)
+
+// For each palette color: pack then unpack each channel, must equal original
+// channel widened to int. This proves the u8<->int boundary round-trips.
+let mut rtFail = 0
+let mut pi = 0
+while pi < pal.length {
+  let col = pal[pi]
+  let p = packColor(col)
+  if unpackR(p) != (col.r as int) { rtFail = rtFail + 1 }
+  if unpackG(p) != (col.g as int) { rtFail = rtFail + 1 }
+  if unpackB(p) != (col.b as int) { rtFail = rtFail + 1 }
+  if unpackA(p) != (col.a as int) { rtFail = rtFail + 1 }
+  pi = pi + 1
+}
+check("palette_roundtrip_fails", rtFail, 0)
+
+// The custom color 0x10203040:
+//   r=16,g=32,b=48,a=64 -> 16*16777216 + 32*65536 + 48*256 + 64
+//   = 268435456 + 2097152 + 12288 + 64 = 270544 ... let's compute:
+//   268435456 + 2097152 = 270532608 ; + 12288 = 270544896 ; + 64 = 270544960
+check("pack_custom", packColor(pal[4]), 270544960)
+
+// ===========================================================================
+// SECTION 12 — Gamma / quantization LUT (256-entry int lookup table)
+// ===========================================================================
+// Build a posterization LUT that maps each byte value 0..255 to one of `levels`
+// evenly-spaced output bands. Classic image op, pure int arithmetic.
+
+fn buildPosterizeLUT(levels: int) -> Vec<int> {
+  // For input v in 0..255, band = (v * levels) / 256, then map band back to a
+  // representative output value: out = band * 255 / (levels - 1).
+  let mut lut = []
+  let mut v = 0
+  while v < 256 {
+    let band = (v * levels) / 256          // 0 .. levels-1
+    let out = (band * 255) / (levels - 1)
+    lut = lut.push(out)
+    v = v + 1
+  }
+  return lut
+}
+
+let lut4 = buildPosterizeLUT(4)
+check("lut4_len", lut4.length, 256)
+// Hand-derived for levels=4 (bands 0,1,2,3 -> out 0,85,170,255):
+//   v=0   -> band 0 -> 0
+//   v=63  -> band (63*4)/256 = 252/256 = 0 -> 0
+//   v=64  -> band 256/256 = 1 -> 85
+//   v=128 -> band 512/256 = 2 -> 170
+//   v=191 -> band (191*4)/256 = 764/256 = 2 -> 170
+//   v=192 -> band 768/256 = 3 -> 255
+//   v=255 -> band 1020/256 = 3 -> 255
+check("lut4_v0", lut4[0], 0)
+check("lut4_v63", lut4[63], 0)
+check("lut4_v64", lut4[64], 85)
+check("lut4_v128", lut4[128], 170)
+check("lut4_v191", lut4[191], 170)
+check("lut4_v192", lut4[192], 255)
+check("lut4_v255", lut4[255], 255)
+
+// Apply LUT to the image; spot-check a few mapped pixels.
+fn applyLUT(im: Vec<int>, lut: Vec<int>) -> Vec<int> {
+  let mut out = []
+  let mut i = 0
+  while i < im.length {
+    out = out.push(lut[im[i]])
+    i = i + 1
+  }
+  return out
+}
+
+let poster = applyLUT(img, lut4)
+// img[0]=0 -> 0 ; img[63]=252 -> band (252*4)/256=1008/256=3 -> 255 ; img[29]=172 -> band (172*4)/256=688/256=2 -> 170
+check("poster_0", poster[0], 0)
+check("poster_63", poster[63], 255)
+check("poster_29", poster[29], 170)
+
+// ===========================================================================
+// SECTION 13 — RGB -> grayscale weighted conversion (int fixed-point)
+// ===========================================================================
+// Rec. 601 luma: Y = (77*R + 150*G + 29*B) / 256  (weights sum to 256 -> /256).
+// All inputs u8 widened to int; result is an int in 0..255.
+
+fn luma601(c: Color) -> int {
+  let r = c.r as int
+  let g = c.g as int
+  let b = c.b as int
+  return (77 * r + 150 * g + 29 * b) / 256
+}
+
+// Hand-derived:
+//   white(255,255,255): (77+150+29)*255/256 = 256*255/256 = 255
+//   red(255,0,0):       77*255/256 = 19635/256 = 76 (floor)
+//   teal(0,128,128):    (150*128 + 29*128)/256 = (19200 + 3712)/256 = 22912/256 = 89.5 -> 89
+//   blackTrans(0,0,0):  0
+check("luma_white", luma601(white), 255)
+check("luma_red", luma601(red), 76)
+check("luma_teal", luma601(teal), 89)
+check("luma_black", luma601(blackTrans), 0)
+
+// Grayscale a whole palette and sum the lumas.
+fn sumLuma(p: Vec<Color>) -> int {
+  let mut s = 0
+  let mut i = 0
+  while i < p.length {
+    s = s + luma601(p[i])
+    i = i + 1
+  }
+  return s
+}
+// pal = [white,red,teal,blackTrans, custom(16,32,48,64)]
+//   custom: (77*16 + 150*32 + 29*48)/256 = (1232 + 4800 + 1392)/256 = 7424/256 = 29
+//   sum = 255 + 76 + 89 + 0 + 29 = 449
+check("sum_luma_palette", sumLuma(pal), 449)
+
+// ===========================================================================
+// SECTION 14 — Run-length encoding of the binarized image (Section 9)
+// ===========================================================================
+// Encode `bin` (values 0 or 255) as alternating run lengths. We use TWO PARALLEL
+// primitive int arrays (run-values + run-lengths) instead of an array of structs.
+// (The struct-array form `Vec<Run>` with `rs[i].len` flowing into arithmetic hits
+// a confirmed inference defect — see REPORT.md; parallel int arrays are the
+// in-chapter, primitive-typed encoding the book actually teaches.)
+//
+// A single struct holding two int arrays is returned (struct-of-arrays, no
+// struct-array indexing).
+type RLE { vals: Vec<int>, lens: Vec<int> }
+
+fn rle(a: Vec<int>) -> RLE {
+  let mut vals = []
+  let mut lens = []
+  let mut i = 0
+  while i < a.length {
+    let v = a[i]
+    let mut n = 0
+    // count the run starting at i
+    let mut j = i
+    let mut counting = true
+    while counting {
+      if j < a.length {
+        if a[j] == v {
+          n = n + 1
+          j = j + 1
+        } else {
+          counting = false
+        }
+      } else {
+        counting = false
+      }
+    }
+    vals = vals.push(v)
+    lens = lens.push(n)
+    i = j
+  }
+  return RLE { vals: vals, lens: lens }
+}
+
+let runs = rle(bin)
+// bin layout: row-major, value=255 iff x>=4. Each row of 8 = [0,0,0,0,255,255,255,255].
+//   sequence: [0000][1111][0000][1111]... -> runs of length 4 each, value alternating
+//   8 rows -> 16 runs total, each length 4. Total length = 64.
+let runVals = runs.vals
+let runLens = runs.lens
+check("rle_total_len", sumArr(runLens), 64)
+check("rle_run_count", runLens.length, 16)
+check("rle_first_val", runVals[0], 0)
+check("rle_first_len", runLens[0], 4)
+check("rle_second_val", runVals[1], 255)
+check("rle_second_len", runLens[1], 4)
+// Every run has length exactly 4 (proven structurally above).
+let mut allFour = true
+let mut ri = 0
+while ri < runLens.length {
+  let rl = runLens[ri]
+  if rl != 4 { allFour = false }
+  ri = ri + 1
+}
+checkb("rle_all_runs_len4", allFour)
+
+// ===========================================================================
+// SECTION 15 — Checksum (Fletcher-16 style, int domain, mod 255)
+// ===========================================================================
+// A deterministic content fingerprint over the original image bytes.
+
+fn fletcher16(a: Vec<int>) -> int {
+  let mut sum1 = 0
+  let mut sum2 = 0
+  let mut i = 0
+  while i < a.length {
+    sum1 = (sum1 + a[i]) % 255
+    sum2 = (sum2 + sum1) % 255
+    i = i + 1
+  }
+  return sum2 * 256 + sum1
+}
+
+// We can't easily hand-compute the full Fletcher value, but we CAN prove
+// invariants from book semantics:
+//   * both running sums stay in 0..254 (mod 255), so sum1,sum2 in [0,254].
+//   * therefore checksum = sum2*256 + sum1 is in [0, 254*256+254] = [0, 65278].
+//   * checksum is deterministic: same input -> same output (run twice, equal).
+let ck1 = fletcher16(img)
+let ck2 = fletcher16(img)
+checkb("fletcher_deterministic", ck1 == ck2)
+checkb("fletcher_in_range", ck1 >= 0)
+checkb("fletcher_upper", ck1 <= 65278)
+// Decompose and re-check the byte halves are each in 0..254.
+let f_lo = ck1 % 256
+let f_hi = ck1 / 256
+checkb("fletcher_lo_bound", f_lo <= 254)
+checkb("fletcher_hi_bound", f_hi <= 254)
+// A DIFFERENT image must (almost surely) give a different checksum; prove that
+// the brightened image differs from the original checksum.
+let ckBright = fletcher16(bright)
+checkb("fletcher_distinguishes", ckBright != ck1)
+
+// ===========================================================================
+// SECTION 16 — Full cast matrix (u8 round-trips of selected int values)
+// ===========================================================================
+// Verify (v as u8) as int == v mod 256 for a spread of NON-NEGATIVE inputs,
+// matching the book's "narrowing keeps the low bits" rule. (Negatives need a
+// variable to avoid unary-minus precedence; covered in Section 3.)
+
+fn u8mod(v: int) -> int { return (v as u8) as int }
+
+check("u8_0", u8mod(0), 0)
+check("u8_255", u8mod(255), 255)
+check("u8_256", u8mod(256), 0)
+check("u8_300", u8mod(300), 44)        // 300 - 256
+check("u8_511", u8mod(511), 255)
+check("u8_512", u8mod(512), 0)
+check("u8_1000", u8mod(1000), 232)     // 1000 - 768 = 232
+check("u8_65535", u8mod(65535), 255)   // low byte of 0xFFFF
+check("u8_65536", u8mod(65536), 0)     // 0x10000 low byte
+
+// i32 round-trips for values within range (book: i32 has typed-opcode support).
+fn i32id(v: int) -> int { return (v as i32) as int }
+check("i32_zero", i32id(0), 0)
+check("i32_max", i32id(2147483647), 2147483647)
+check("i32_small", i32id(123456), 123456)
+
+// ===========================================================================
+// SECTION 17 — Aggregate self-proof
+// ===========================================================================
+
+// We expect a fixed, hand-counted number of checks to have run.
+// (Counting every check()/checkb() call above.)
+// NOTE: the `checks` argument is evaluated at the call site BEFORE checkb runs
+// its own increment, so here `checks` is the count of all PRIOR checks (66).
+checkb("ran_enough_checks", checks >= 100)
+
+if failures == 0 {
+  print(f"checks_run={checks}")
+  print("ALL_CHECKS_PASSED")
+} else {
+  print(f"checks_run={checks} failures={failures}")
+}

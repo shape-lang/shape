@@ -1,0 +1,174 @@
+// Operators slice — small self-checking program.
+// Exercises the operator families taught in fundamentals/operators.mdx.
+// Every expected value is derived from BOOK SEMANTICS (cited by line).
+//
+// Three book-taught features are DEFECTIVE and therefore omitted from the
+// asserted core (fully documented in REPORT.md):
+//   * user-type Ord `<`/`>` (book 138-152)  -> "not comparable"
+//   * user-type BitAnd `&`  (book 221-234)  -> "Flags is not compatible with int"
+//   * object-merge `+`      (book 481-489)  -> hijacked by any in-scope user
+//                                              `impl Add` whose fields overlap
+// What IS asserted below is the subset that works AND matches the book.
+
+fn check(cond: bool, label: string) {
+  if !cond {
+    print(f"CHECK_FAILED: {label}")
+  }
+}
+
+// --- Arithmetic (book 33-43) ---
+let a = 10
+let b = 3
+check(a + b == 13, "add")
+check(a - b == 7, "sub")
+check(a * b == 30, "mul")
+check(a / b == 3, "intdiv")     // integer division truncates
+check(a % b == 1, "mod")
+check(a ** b == 1000, "pow_int")
+check(2 ** 10 == 1024, "pow_2_10")   // book 48
+
+// Compound assigns (book 55-65)
+let mut x = 1
+x = 5
+x += 2     // 7
+x -= 1     // 6
+x *= 3     // 18
+x /= 2     // 9
+x %= 4     // 1
+x **= 2    // 1
+check(x == 1, "compound_chain")
+
+// --- Comparison (book 106-119) ---
+check(5 > 3, "gt")
+check(5 >= 5, "ge")
+check(!(2 < 1), "lt_false")
+check(2 == 2, "eq")
+check(2 != 3, "ne")
+check("apple" < "banana", "str_lt")
+check("apple" == "apple", "str_eq")
+check("z" > "a", "str_gt")
+
+// --- Bitwise (book 195-216) ---
+let p = 0b1100   // 12
+let q = 0b1010   // 10
+check((p & q) == 8, "bitand")
+check((p | q) == 14, "bitor")
+check((p ^ q) == 6, "bitxor")
+check(~p == -13, "bitnot")
+check((p << 2) == 48, "shl")
+check((p >> 1) == 6, "shr")
+
+let mut y = 0xF0
+y &= 0xFF
+y |= 0x01
+y ^= 0x10
+y <<= 1
+y >>= 1
+check(y == 225, "bit_compound")   // book 209-216
+
+// --- Logical short-circuit (book 249-263) ---
+let ok = true
+let ready = false
+check(ok && !ready, "and")
+check(ok || ready, "or")
+check(ok and ready == false, "kw_and")   // `and` keyword spelling (book 257)
+check((ready or ok) == true, "kw_or")    // `or` keyword spelling
+
+// --- Unary (book 275-286) ---
+check(-10 == -10, "neg_lit")
+check(!true == false, "not_lit")
+check(~0b1010 == -11, "bitnot_lit")
+let av = 10
+check(-av == -10, "neg_var")
+
+// --- Indexing (book 324-328) ---
+let arr = [10, 20, 30]
+check(arr[0] == 10, "index0")
+check(arr[2] == 30, "index2")
+
+// --- Pipe (book 354-360) ---
+fn double(n: int) -> int { n * 2 }
+fn inc(n: int) -> int { n + 1 }
+let piped = 5 |> double |> inc   // inc(double(5)) = 11
+check(piped == 11, "pipe")
+
+// --- Ternary (book 386-390) ---
+let n = 7
+let kind = n % 2 == 0 ? "even" : "odd"
+check(kind == "odd", "ternary")
+
+// --- Coalesce (book 451-455) ---
+let maybe_name: Option<string> = None
+let name = maybe_name ?? "anonymous"
+check(name == "anonymous", "coalesce")
+
+// --- instanceof narrowing (book 162-168) ---
+let value: int | string = 42
+let is_int = if value instanceof int { true } else { false }
+check(is_int, "instanceof")
+
+// --- Fuzzy comparison (book 176) ---
+check(0.1 + 0.2 ~= 0.3 within 0.0001, "fuzzy")
+
+// --- Type assertion `as` (book 496-499) ---
+// The book's runnable snippet only prints the `as number` result; that works.
+// Comparing the result with `==` (`asnum == 42.0`) instead raises
+// "no method 'eq' on receiver kind Float64" — a defect documented in
+// REPORT.md. We round-trip through arithmetic (which restores a usable
+// native Float64) to assert the converted magnitude.
+let asnum = 42 as number
+check((asnum + 0.0) == 42.0, "as_number")
+
+// --- Percent literal (book 525-530) ---
+let half = 50%      // 0.5
+let tax = 7.5%      // 0.075
+check(half == 0.5, "percent_half")
+check(tax == 0.075, "percent_tax")
+
+// --- Try `?` operator (book 416-430) ---
+fn try_parse(s: string) -> Result<int, string> {
+  if s == "ok" { Ok(42) } else { Err("bad") }
+}
+fn run_try(s: string) -> Result<int, string> {
+  let v: int = try_parse(s)?
+  Ok(v + 1)
+}
+let try_res = match run_try("ok") { Ok(v) => v, Err(_) => -1 }
+check(try_res == 43, "try_ok")
+let try_err = match run_try("no") { Ok(v) => v, Err(_) => -1 }
+check(try_err == -1, "try_err")
+
+// --- Operator overloading: Add on user type (book 71-85) ---
+type Vec2 { x: int, y: int }
+impl Add for Vec2 {
+  method add(other: Vec2) -> Vec2 {
+    Vec2 { x: self.x + other.x, y: self.y + other.y }
+  }
+}
+let v1 = Vec2 { x: 1, y: 2 }
+let v2 = Vec2 { x: 10, y: 20 }
+let v3 = v1 + v2
+check(v3.x == 11, "vec_add_x")
+check(v3.y == 22, "vec_add_y")
+
+// --- Operator overloading: Neg on user type (book 290-303) ---
+type Vec2b { x: int, y: int }
+impl Neg for Vec2b {
+  method neg() -> Vec2b { Vec2b { x: -self.x, y: -self.y } }
+}
+let nv = -(Vec2b { x: 3, y: -4 })
+check(nv.x == -3, "neg_x")
+check(nv.y == 4, "neg_y")
+
+// --- Operator overloading: Eq on user type (book 129-152, Eq half) ---
+type Money { cents: int }
+impl Eq for Money {
+  method eq(other: Money) -> bool { self.cents == other.cents }
+}
+let m1 = Money { cents: 100 }
+let m2 = Money { cents: 250 }
+let m3 = Money { cents: 100 }
+check(m1 == m3, "money_eq")
+check(!(m1 == m2), "money_ne")
+
+print("ALL_CHECKS_PASSED")

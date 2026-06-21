@@ -1,0 +1,7 @@
+from mathlib::stats use { mean, variance }
+from mathlib::transforms use { normalize }
+let data = [10.0, 12.0, 11.5, 13.0, 9.5]
+print(f"var={variance(data)}")
+let n = normalize(data)
+print(f"n0={n[0]} n1={n[1]}")
+print(f"nm={mean(n)}")

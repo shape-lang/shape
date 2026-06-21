@@ -1,0 +1,653 @@
+// large.shape — Ownership / Borrow-Checker Simulator
+// ===================================================================
+// A non-interactive, deterministic, machine-proofable application rooted in
+// the "Ownership Deep Dive" chapter (advanced/ownership-deep-dive.mdx).
+//
+// It implements, as a pure data/algorithm pipeline, the rules the chapter
+// specifies in prose & tables:
+//   1. The `var` smart-default storage-class lattice  (book "Three Keywords")
+//   2. Copy / Clone classification                    (book "Copy Semantics")
+//   3. Smart move-vs-clone from liveness              (book "Smart Move/Clone")
+//   4. NLL loan liveness over CFG points              (book "Borrow Scoping")
+//   5. Datafrog conflict rules                        (book "Conflict Rules")
+//   6. Repair-strategy selection                      (book "Repair Engine")
+//   7. The concurrency three-rules table              (book "Concurrency Model")
+//
+// Every computed result is ASSERTED against a value derived from the book's
+// stated semantics BEFORE the first run. On all-pass it prints
+// ALL_CHECKS_PASSED; any mismatch prints CHECK_FAILED with which/expected/got.
+//
+// Ownership constructs exercised throughout: let / let mut / var bindings,
+// array .clone() for independent copies, .push / .len / index, struct field
+// mutation under let mut, owned fn params with auto-ref dispatch, enums+match.
+// ===================================================================
+
+// ----------------------------------------------------------------------
+// Test harness
+// ----------------------------------------------------------------------
+var TESTS_RUN = 0
+var TESTS_FAILED = 0
+
+fn check_int(name: string, got: int, expected: int) {
+    TESTS_RUN = TESTS_RUN + 1
+    if got != expected {
+        TESTS_FAILED = TESTS_FAILED + 1
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    }
+}
+
+fn check_str(name: string, got: string, expected: string) {
+    TESTS_RUN = TESTS_RUN + 1
+    if got != expected {
+        TESTS_FAILED = TESTS_FAILED + 1
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    }
+}
+
+fn check_bool(name: string, got: bool, expected: bool) {
+    TESTS_RUN = TESTS_RUN + 1
+    if got != expected {
+        TESTS_FAILED = TESTS_FAILED + 1
+        var g = 0
+        var e = 0
+        if got { g = 1 }
+        if expected { e = 1 }
+        print(f"CHECK_FAILED: {name} expected={e} got={g}")
+    }
+}
+
+// ======================================================================
+// SECTION 1 — The `var` smart-default storage-class lattice
+// Book "Three Keywords" + the usage->class table (lines 34-41).
+// ======================================================================
+
+enum Class {
+    DirectImm,
+    DirectMut,
+    UniqueHeap,
+    SharedCow,
+    SharedAtomic,
+    SharedAtomicMut,
+}
+
+fn class_name(c: Class) -> string {
+    return match c {
+        Class::DirectImm => "Direct(immutable)",
+        Class::DirectMut => "Direct(mutable)",
+        Class::UniqueHeap => "UniqueHeap",
+        Class::SharedCow => "SharedCow",
+        Class::SharedAtomic => "SharedAtomic",
+        Class::SharedAtomicMut => "SharedAtomicMut",
+    }
+}
+
+type Usage {
+    mutated: bool,
+    escapes: bool,
+    crosses_task: bool,
+}
+
+// Smart-default inference, faithful to the book table: lightest provably-
+// correct class for the observed usage.
+fn infer_class(u: Usage) -> Class {
+    if u.crosses_task {
+        if u.mutated {
+            return Class::SharedAtomicMut
+        }
+        return Class::SharedAtomic
+    }
+    if u.escapes {
+        if u.mutated {
+            return Class::SharedCow
+        }
+        return Class::UniqueHeap
+    }
+    if u.mutated {
+        return Class::DirectMut
+    }
+    return Class::DirectImm
+}
+
+fn class_weight(c: Class) -> int {
+    return match c {
+        Class::DirectImm => 0,
+        Class::DirectMut => 1,
+        Class::UniqueHeap => 2,
+        Class::SharedCow => 3,
+        Class::SharedAtomic => 4,
+        Class::SharedAtomicMut => 5,
+    }
+}
+
+fn run_section1() {
+    let u_counter = Usage { mutated: true, escapes: false, crosses_task: false }
+    check_str("s1.counter", class_name(infer_class(u_counter)), "Direct(mutable)")
+
+    let u_config_local = Usage { mutated: false, escapes: false, crosses_task: false }
+    check_str("s1.config_local", class_name(infer_class(u_config_local)), "Direct(immutable)")
+
+    let u_config = Usage { mutated: false, escapes: true, crosses_task: false }
+    check_str("s1.config_escape", class_name(infer_class(u_config)), "UniqueHeap")
+
+    let u_shared = Usage { mutated: true, escapes: true, crosses_task: false }
+    check_str("s1.shared_cow", class_name(infer_class(u_shared)), "SharedCow")
+
+    let u_atomic = Usage { mutated: false, escapes: true, crosses_task: true }
+    check_str("s1.shared_atomic", class_name(infer_class(u_atomic)), "SharedAtomic")
+
+    let u_queue = Usage { mutated: true, escapes: true, crosses_task: true }
+    check_str("s1.queue", class_name(infer_class(u_queue)), "SharedAtomicMut")
+
+    check_bool("s1.lattice_monotone", class_weight(infer_class(u_counter)) <= class_weight(infer_class(u_shared)), true)
+    check_bool("s1.lattice_atomic_heaviest", class_weight(infer_class(u_queue)) >= class_weight(infer_class(u_shared)), true)
+}
+
+// ======================================================================
+// SECTION 2 — Copy / Clone classification (book "Copy Semantics")
+// ======================================================================
+
+enum Ty {
+    TInt,
+    TNumber,
+    TBool,
+    TNone,
+    TString,
+    TArray,
+    TStruct,
+}
+
+fn leaf_is_copy(t: Ty) -> bool {
+    return match t {
+        Ty::TInt => true,
+        Ty::TNumber => true,
+        Ty::TBool => true,
+        Ty::TNone => true,
+        Ty::TString => false,
+        Ty::TArray => false,
+        Ty::TStruct => false,
+    }
+}
+
+// A struct is Copy iff ALL its fields are Copy (book: auto-derived).
+fn struct_is_copy(field_types: Array<Ty>) -> bool {
+    var all_copy = true
+    for ft in field_types {
+        if !leaf_is_copy(ft) {
+            all_copy = false
+        }
+    }
+    return all_copy
+}
+
+// NOTE: typed-object / enum array literals are CONSTRUCTED AT TOP-LEVEL and
+// passed in, NOT built inside helper functions. At HEAD, a NewTypedArray-
+// TypedObject opcode emitted inside a non-main function has no FrameDescriptor
+// attached -> V2 bytecode verification failure (a few = noisy warning, many =
+// hard ec=1 with no output). See REPORT.md FN-REG-CORRECTNESS. Constructing
+// the literals at top-level avoids the verifier defect.
+fn run_section2(pt_fields: Array<Ty>, person_fields: Array<Ty>, triple_fields: Array<Ty>, holder_fields: Array<Ty>) {
+    check_bool("s2.int_copy", leaf_is_copy(Ty::TInt), true)
+    check_bool("s2.number_copy", leaf_is_copy(Ty::TNumber), true)
+    check_bool("s2.bool_copy", leaf_is_copy(Ty::TBool), true)
+    check_bool("s2.none_copy", leaf_is_copy(Ty::TNone), true)
+    check_bool("s2.string_not_copy", leaf_is_copy(Ty::TString), false)
+    check_bool("s2.array_not_copy", leaf_is_copy(Ty::TArray), false)
+
+    check_bool("s2.point_copy", struct_is_copy(pt_fields), true)
+    check_bool("s2.person_not_copy", struct_is_copy(person_fields), false)
+    check_bool("s2.triple_copy", struct_is_copy(triple_fields), true)
+    check_bool("s2.holder_not_copy", struct_is_copy(holder_fields), false)
+}
+
+// ======================================================================
+// SECTION 3 — Smart Move vs Clone (book "Smart Move/Clone Inference")
+// ======================================================================
+
+enum Decision {
+    DCopy,
+    DMove,
+    DCloneNeeded,
+}
+
+fn decide(source_is_copy: bool, source_live_after: bool) -> Decision {
+    if source_is_copy {
+        return Decision::DCopy
+    }
+    if source_live_after {
+        return Decision::DCloneNeeded
+    }
+    return Decision::DMove
+}
+
+fn decision_name(d: Decision) -> string {
+    return match d {
+        Decision::DCopy => "copy",
+        Decision::DMove => "move",
+        Decision::DCloneNeeded => "clone",
+    }
+}
+
+fn run_section3() {
+    check_str("s3.int_assign", decision_name(decide(true, true)), "copy")
+    check_str("s3.int_assign_dead", decision_name(decide(true, false)), "copy")
+    check_str("s3.array_live_clone", decision_name(decide(false, true)), "clone")
+    check_str("s3.array_dead_move", decision_name(decide(false, false)), "move")
+
+    let d1 = decide(false, true)
+    let d2 = decide(false, false)
+    check_str("s3.example_first", decision_name(d1), "clone")
+    check_str("s3.example_second", decision_name(d2), "move")
+}
+
+// ======================================================================
+// SECTION 4 — NLL loan liveness over CFG points (book "Borrow Scoping")
+// ======================================================================
+
+type Loan {
+    id: int,
+    start: int,
+    last: int,
+    exclusive: bool,
+}
+
+fn loan_live_at(l: Loan, p: int) -> bool {
+    return p >= l.start && p <= l.last
+}
+
+fn region_length(l: Loan, n: int) -> int {
+    var live = 0
+    var p = 0
+    while p < n {
+        if loan_live_at(l, p) {
+            live = live + 1
+        }
+        p = p + 1
+    }
+    return live
+}
+
+fn run_section4() {
+    let l0 = Loan { id: 0, start: 1, last: 2, exclusive: false }
+    check_bool("s4.live_at_issue", loan_live_at(l0, 1), true)
+    check_bool("s4.live_at_lastuse", loan_live_at(l0, 2), true)
+    check_bool("s4.dead_after_lastuse", loan_live_at(l0, 3), false)
+    check_bool("s4.dead_before_issue", loan_live_at(l0, 0), false)
+    check_int("s4.region_len", region_length(l0, 4), 2)
+
+    let l1 = Loan { id: 1, start: 2, last: 9, exclusive: true }
+    check_int("s4.region_len_long", region_length(l1, 12), 8)
+    check_bool("s4.long_live_mid", loan_live_at(l1, 5), true)
+    check_bool("s4.long_dead_late", loan_live_at(l1, 10), false)
+}
+
+// ======================================================================
+// SECTION 5 — Datafrog conflict rules (book "Conflict Rules")
+// ======================================================================
+
+fn regions_overlap(a: Loan, b: Loan) -> bool {
+    var lo = a.start
+    if b.start > lo { lo = b.start }
+    var hi = a.last
+    if b.last < hi { hi = b.last }
+    return lo <= hi
+}
+
+fn loans_conflict(a: Loan, place_a: int, b: Loan, place_b: int) -> bool {
+    if place_a != place_b {
+        return false
+    }
+    let one_exclusive = a.exclusive || b.exclusive
+    if !one_exclusive {
+        return false
+    }
+    return regions_overlap(a, b)
+}
+
+fn run_section5() {
+    let r = Loan { id: 0, start: 1, last: 3, exclusive: false }
+    let m = Loan { id: 1, start: 2, last: 2, exclusive: true }
+    check_bool("s5.b0001_conflict", loans_conflict(r, 0, m, 0), true)
+
+    let s1 = Loan { id: 2, start: 1, last: 4, exclusive: false }
+    let s2 = Loan { id: 3, start: 2, last: 5, exclusive: false }
+    check_bool("s5.two_shared_ok", loans_conflict(s1, 0, s2, 0), false)
+
+    let ra = Loan { id: 4, start: 1, last: 3, exclusive: true }
+    let rb = Loan { id: 5, start: 1, last: 3, exclusive: true }
+    check_bool("s5.disjoint_fields_ok", loans_conflict(ra, 0, rb, 1), false)
+
+    let rn = Loan { id: 6, start: 1, last: 2, exclusive: false }
+    let mn = Loan { id: 7, start: 3, last: 3, exclusive: true }
+    check_bool("s5.nll_no_overlap_ok", loans_conflict(rn, 0, mn, 0), false)
+
+    let e1 = Loan { id: 8, start: 1, last: 4, exclusive: true }
+    let e2 = Loan { id: 9, start: 2, last: 3, exclusive: true }
+    check_bool("s5.two_mut_conflict", loans_conflict(e1, 0, e2, 0), true)
+}
+
+// ======================================================================
+// SECTION 6 — Repair-strategy selection (book "Repair Engine")
+// ======================================================================
+
+enum Repair {
+    Reorder,
+    Scope,
+    Clone,
+    Downgrade,
+    Extract,
+}
+
+fn repair_name(r: Repair) -> string {
+    return match r {
+        Repair::Reorder => "REORDER",
+        Repair::Scope => "SCOPE",
+        Repair::Clone => "CLONE",
+        Repair::Downgrade => "DOWNGRADE",
+        Repair::Extract => "EXTRACT",
+    }
+}
+
+type RepairCtx {
+    can_reorder: bool,
+    can_scope: bool,
+    t_is_clone: bool,
+    only_reads: bool,
+}
+
+fn select_repair(c: RepairCtx) -> Repair {
+    if c.can_reorder {
+        return Repair::Reorder
+    }
+    if c.can_scope {
+        return Repair::Scope
+    }
+    if c.t_is_clone {
+        return Repair::Clone
+    }
+    if c.only_reads {
+        return Repair::Downgrade
+    }
+    return Repair::Extract
+}
+
+fn run_section6() {
+    let c_reorder = RepairCtx { can_reorder: true, can_scope: true, t_is_clone: true, only_reads: false }
+    check_str("s6.reorder_first", repair_name(select_repair(c_reorder)), "REORDER")
+
+    let c_scope = RepairCtx { can_reorder: false, can_scope: true, t_is_clone: true, only_reads: false }
+    check_str("s6.scope", repair_name(select_repair(c_scope)), "SCOPE")
+
+    let c_clone = RepairCtx { can_reorder: false, can_scope: false, t_is_clone: true, only_reads: false }
+    check_str("s6.clone", repair_name(select_repair(c_clone)), "CLONE")
+
+    let c_down = RepairCtx { can_reorder: false, can_scope: false, t_is_clone: false, only_reads: true }
+    check_str("s6.downgrade", repair_name(select_repair(c_down)), "DOWNGRADE")
+
+    let c_extract = RepairCtx { can_reorder: false, can_scope: false, t_is_clone: false, only_reads: false }
+    check_str("s6.extract", repair_name(select_repair(c_extract)), "EXTRACT")
+
+    let c_prec = RepairCtx { can_reorder: true, can_scope: false, t_is_clone: false, only_reads: true }
+    check_str("s6.precedence", repair_name(select_repair(c_prec)), "REORDER")
+}
+
+// ======================================================================
+// SECTION 7 — Concurrency three-rules table (book "Concurrency Model")
+// ======================================================================
+
+enum Carried {
+    Owned,
+    SharedRef,
+    ExclusiveRef,
+}
+
+enum TaskKind {
+    Structured,
+    Detached,
+}
+
+fn may_cross(what: Carried, kind: TaskKind) -> bool {
+    return match what {
+        Carried::Owned => true,
+        Carried::ExclusiveRef => false,
+        Carried::SharedRef => match kind {
+            TaskKind::Structured => true,
+            TaskKind::Detached => false,
+        },
+    }
+}
+
+fn run_section7() {
+    check_bool("s7.owned_structured", may_cross(Carried::Owned, TaskKind::Structured), true)
+    check_bool("s7.owned_detached", may_cross(Carried::Owned, TaskKind::Detached), true)
+    check_bool("s7.shared_structured", may_cross(Carried::SharedRef, TaskKind::Structured), true)
+    check_bool("s7.shared_detached", may_cross(Carried::SharedRef, TaskKind::Detached), false)
+    check_bool("s7.mut_structured", may_cross(Carried::ExclusiveRef, TaskKind::Structured), false)
+    check_bool("s7.mut_detached", may_cross(Carried::ExclusiveRef, TaskKind::Detached), false)
+}
+
+// ======================================================================
+// SECTION 8 — Integration pipeline: liveness -> conflict -> repair
+// Models the book's NLL example (lines 138-143) and its B0001 perturbation.
+// ======================================================================
+
+fn count_conflicts(loans: Array<Loan>, place: int) -> int {
+    var conflicts = 0
+    var i = 0
+    let n = loans.len()
+    while i < n {
+        var j = i + 1
+        while j < n {
+            let a = loans[i]
+            let b = loans[j]
+            if loans_conflict(a, place, b, place) {
+                conflicts = conflicts + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return conflicts
+}
+
+// Arrays constructed at top-level and passed in (see section-2 note).
+// batch_a_full = batch_a + push_a appended; batch_a kept separate at top-level
+// to demonstrate array .clone() independence.
+fn run_section8(batch_a: Array<Loan>, batch_a_full: Array<Loan>, batch_b: Array<Loan>, batch_b2: Array<Loan>, place0: Array<Loan>) {
+    // Scenario A: book OK example. r shared [1..2], push &mut [3..3] -> NLL OK.
+    check_int("s8.scenarioA_len", batch_a_full.len(), 2)
+    check_int("s8.scenarioA_clone_intact", batch_a.len(), 1)
+    check_int("s8.scenarioA_conflicts", count_conflicts(batch_a_full, 0), 0)
+
+    // Scenario B: r used after push -> overlap -> conflict.
+    check_int("s8.scenarioB_conflicts", count_conflicts(batch_b, 0), 1)
+
+    let repair_b = RepairCtx { can_reorder: true, can_scope: true, t_is_clone: true, only_reads: false }
+    check_str("s8.scenarioB_repair", repair_name(select_repair(repair_b)), "REORDER")
+
+    // After REORDER: push shifts to [5..5] -> no overlap -> 0 conflicts.
+    check_int("s8.scenarioB_after_repair", count_conflicts(batch_b2, 0), 0)
+
+    // Scenario C: place 0 has a conflict pair.
+    check_int("s8.scenarioC_place0", count_conflicts(place0, 0), 1)
+}
+
+// ======================================================================
+// SECTION 9 — Ownership ergonomics: owned data transform, move/clone/auto-ref
+// ======================================================================
+
+type Account {
+    id: int,
+    balance: int,
+}
+
+// Build a FRESH array of FRESH Account literals (no read-mutate-writeback of
+// existing array elements). This is the defect-free idiom: at HEAD, reading a
+// struct out of an array and mutating the local binding aliases the array's
+// backing store (struct values are NOT copied on read — see REPORT.md
+// FN-REG-CORRECTNESS), so we never mutate-in-place; we construct anew.
+// Pure scalar helper (no typed-object array construction): given a balance,
+// return it grown by `pct` percent. Used to derive expected balances.
+fn grow(balance: int, pct: int) -> int {
+    return balance + balance * pct / 100
+}
+
+// Reads (never mutates) a passed-in Account array — safe (no in-place struct
+// mutation, no typed-object array construction inside the helper).
+fn total_balance(accounts: Array<Account>) -> int {
+    var sum = 0
+    for a in accounts {
+        sum = sum + a.balance
+    }
+    return sum
+}
+
+fn id_sum(accounts: Array<Account>) -> int {
+    var running = 0
+    for a in accounts {
+        running = running + a.id
+    }
+    return running
+}
+
+// ledger + updated are constructed AT TOP-LEVEL and passed in (section-2 note).
+fn run_section9(ledger: Array<Account>, updated: Array<Account>) {
+    check_int("s9.total_before", total_balance(ledger), 600)
+
+    check_int("s9.total_after", total_balance(updated), 660)
+    check_int("s9.acc0_after", updated[0].balance, 110)
+    check_int("s9.acc1_after", updated[1].balance, 220)
+    check_int("s9.acc2_after", updated[2].balance, 330)
+
+    // Original ledger intact: `updated` was built from FRESH literals, never by
+    // mutating ledger's elements in place.
+    check_int("s9.original_intact", total_balance(ledger), 600)
+    check_int("s9.original_acc0", ledger[0].balance, 100)
+
+    // Direct let-mut field mutation on a fresh struct (no array aliasing): OK.
+    let mut acc = Account { id: 9, balance: 50 }
+    acc.balance = acc.balance + 25
+    acc.balance = acc.balance * 2
+    check_int("s9.direct_field_mut", acc.balance, 150)
+
+    check_int("s9.id_sum", id_sum(updated), 6)
+
+    // Pure scalar interest derivations (the expected-value engine).
+    check_int("s9.grow_100", grow(100, 10), 110)
+    check_int("s9.grow_200", grow(200, 10), 220)
+    check_int("s9.grow_300", grow(300, 10), 330)
+}
+
+// ======================================================================
+// SECTION 10 — Aggregate: enumerate usage profiles, tally inferred classes.
+// ======================================================================
+
+fn enumerate_and_tally(reps: int) -> Array<int> {
+    var counts: Array<int> = [0, 0, 0, 0, 0, 0]
+    var r = 0
+    while r < reps {
+        var bits = 0
+        while bits < 8 {
+            let mutated = (bits / 4) % 2 == 1
+            let escapes = (bits / 2) % 2 == 1
+            let crosses = bits % 2 == 1
+            let u = Usage { mutated: mutated, escapes: escapes, crosses_task: crosses }
+            let w = class_weight(infer_class(u))
+            counts[w] = counts[w] + 1
+            bits = bits + 1
+        }
+        r = r + 1
+    }
+    return counts
+}
+
+fn run_section10() {
+    // Per-enumeration counts by weight: w0=1,w1=1,w2=1,w3=1,w4=2,w5=2 (total 8).
+    let one = enumerate_and_tally(1)
+    check_int("s10.w0", one[0], 1)
+    check_int("s10.w1", one[1], 1)
+    check_int("s10.w2", one[2], 1)
+    check_int("s10.w3", one[3], 1)
+    check_int("s10.w4", one[4], 2)
+    check_int("s10.w5", one[5], 2)
+
+    var sum = 0
+    for c in one { sum = sum + c }
+    check_int("s10.total_one", sum, 8)
+
+    let many = enumerate_and_tally(25)
+    check_int("s10.w0_x25", many[0], 25)
+    check_int("s10.w4_x25", many[4], 50)
+    check_int("s10.w5_x25", many[5], 50)
+    var sum2 = 0
+    for c in many { sum2 = sum2 + c }
+    check_int("s10.total_many", sum2, 200)
+
+    check_int("s10.atomic_count", one[4] + one[5], 4)
+    check_int("s10.stack_count", one[0] + one[1], 2)
+    check_int("s10.heap_single_count", one[2] + one[3], 2)
+}
+
+// ======================================================================
+// MAIN
+// ----------------------------------------------------------------------
+// ALL typed-object / enum array LITERALS are constructed here at top-level
+// (main) scope, then passed into the section helpers. See the section-2 note:
+// constructing a `NewTypedArrayTypedObject` opcode inside a non-main function
+// hits the FrameDescriptor verifier defect; top-level construction avoids it.
+// ======================================================================
+
+// --- Section 2 inputs: field-type lists for Copy classification ---
+let s2_pt: Array<Ty> = [Ty::TInt, Ty::TInt]
+let s2_person: Array<Ty> = [Ty::TString, Ty::TInt]
+let s2_triple: Array<Ty> = [Ty::TInt, Ty::TBool, Ty::TNumber]
+let s2_holder: Array<Ty> = [Ty::TInt, Ty::TArray]
+
+// --- Section 8 inputs: loan batches ---
+let s8_r_a = Loan { id: 11, start: 1, last: 2, exclusive: false }
+let s8_push_a = Loan { id: 10, start: 3, last: 3, exclusive: true }
+let s8_batch_a: Array<Loan> = [s8_r_a]
+// batch_a_full = batch_a + push_a; built at top-level via array .clone() to
+// prove clone independence (s8_batch_a stays length 1).
+let mut s8_batch_a_full: Array<Loan> = s8_batch_a.clone()
+s8_batch_a_full.push(s8_push_a)
+
+let s8_r_b = Loan { id: 13, start: 1, last: 4, exclusive: false }
+let s8_push_b = Loan { id: 12, start: 3, last: 3, exclusive: true }
+let s8_batch_b: Array<Loan> = [s8_r_b, s8_push_b]
+
+let s8_push_b2 = Loan { id: 14, start: 5, last: 5, exclusive: true }
+let s8_batch_b2: Array<Loan> = [s8_r_b, s8_push_b2]
+
+let s8_r0 = Loan { id: 15, start: 1, last: 5, exclusive: false }
+let s8_w0 = Loan { id: 16, start: 2, last: 2, exclusive: true }
+let s8_place0: Array<Loan> = [s8_r0, s8_w0]
+
+// --- Section 9 inputs: original ledger + the interest-applied ledger ---
+// `updated` is built from FRESH Account literals (balances grown 10%), proving
+// the original `ledger` stays intact under owned-value semantics.
+let s9_a0 = Account { id: 1, balance: 100 }
+let s9_a1 = Account { id: 2, balance: 200 }
+let s9_a2 = Account { id: 3, balance: 300 }
+let s9_ledger: Array<Account> = [s9_a0, s9_a1, s9_a2]
+
+let s9_u0 = Account { id: 1, balance: grow(100, 10) }   // 110
+let s9_u1 = Account { id: 2, balance: grow(200, 10) }   // 220
+let s9_u2 = Account { id: 3, balance: grow(300, 10) }   // 330
+let s9_updated: Array<Account> = [s9_u0, s9_u1, s9_u2]
+
+run_section1()
+run_section2(s2_pt, s2_person, s2_triple, s2_holder)
+run_section3()
+run_section4()
+run_section5()
+run_section6()
+run_section7()
+run_section8(s8_batch_a, s8_batch_a_full, s8_batch_b, s8_batch_b2, s8_place0)
+run_section9(s9_ledger, s9_updated)
+run_section10()
+
+print(f"tests_run={TESTS_RUN}")
+print(f"tests_failed={TESTS_FAILED}")
+if TESTS_FAILED == 0 {
+    print("ALL_CHECKS_PASSED")
+}

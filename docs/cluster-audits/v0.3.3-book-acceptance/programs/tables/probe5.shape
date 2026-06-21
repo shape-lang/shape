@@ -1,0 +1,22 @@
+// Probe 5: explicit impl Queryable for Table, then call methods
+from std::core::queryable use { Queryable }
+
+type Event {
+  id: int,
+  value: number,
+  tag: string
+}
+
+impl Queryable for Table {
+    method filter(predicate) { self.filter(predicate) }
+    method limit(n) { self.limit(n) }
+    method execute() { self }
+}
+
+let events: Table<Event> =
+    [1, 50.0,  "alpha"],
+    [2, 75.5,  "beta"],
+    [3, 120.0, "gamma"]
+
+let filtered = events.filter(|row| row.value > 70.0)
+print(filtered)

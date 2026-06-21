@@ -1,0 +1,886 @@
+// large.shape — "MiniVM": a deterministic, machine-proofable bytecode calculator
+// ===========================================================================
+// SLICE ROOT: fundamentals/variables.mdx + fundamentals/names-and-scope.mdx
+//
+// This program is a self-contained, non-interactive register/stack virtual
+// machine. It is rooted in the *variables* slice: it is built almost entirely
+// out of the chapter's binding forms and their stated semantics —
+//   * `const`   — compile-time constants for the opcode table (book: "const")
+//   * `let`     — immutable owned config / fixtures (book: "let")
+//   * `let mut` — single-owner mutable accumulators: the stack, the register
+//                 file, the program counter (book: "let mut — Direct mutation")
+//   * named `type`s — instruction records and VM state (book: "Named Types")
+//   * type aliases  — domain names over those types (book: "Type Aliases")
+//   * tuples        — fixed [int,int] groupings (book: "Tuple Types")
+//   * Option<T>     — absence without a null sentinel (book: "No Null Sentinel")
+//   * scope/shadowing — block-local bindings (book: "Scope" + names-and-scope)
+//   * generics      — fn id<T> and a generic max (book: "Generic Parameters")
+//
+// EVERY expected value below was derived BY HAND from book semantics and the
+// arithmetic of the opcodes BEFORE the first run. On success the program prints
+// ALL_CHECKS_PASSED; any mismatch prints CHECK_FAILED with expected/got.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Assertion harness (a `let mut` failure counter — single-owner mutation)
+// ---------------------------------------------------------------------------
+let mut FAILURES = 0
+
+fn check_int(name: string, got: int, expected: int) {
+    if got != expected {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+        FAILURES = FAILURES + 1
+    }
+}
+
+fn check_bool(name: string, got: bool, expected: bool) {
+    if got != expected {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+        FAILURES = FAILURES + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Opcode table — `const` compile-time constants (book: "const")
+// Each opcode is an int tag. Using const documents that these are fixed at
+// compile time and never reassigned.
+// ---------------------------------------------------------------------------
+const OP_PUSH  = 0    // push immediate operand onto the stack
+const OP_ADD   = 1    // pop b, pop a, push a + b
+const OP_SUB   = 2    // pop b, pop a, push a - b
+const OP_MUL   = 3    // pop b, pop a, push a * b
+const OP_DIV   = 4    // pop b, pop a, push a / b   (integer division)
+const OP_MOD   = 5    // pop b, pop a, push a % b
+const OP_NEG   = 6    // pop a, push -a
+const OP_DUP   = 7    // duplicate top of stack
+const OP_SWAP  = 8    // swap top two of stack
+const OP_LOAD  = 9    // push register[operand]
+const OP_STORE = 10   // pop a, store into register[operand]
+const OP_HALT  = 11   // stop execution
+
+// ---------------------------------------------------------------------------
+// Named types (book: "Named Types") + type aliases (book: "Type Aliases")
+// ---------------------------------------------------------------------------
+type Instr {
+    op: int,        // one of the OP_* constants
+    operand: int    // immediate / register index (ignored by some ops)
+}
+
+type AliasName = Instr   // domain alias over Instr (book: alias-as-name)
+
+// VM state record. The mutable parts live in `let mut` bindings in run(),
+// this type just packages the immutable result snapshot.
+type RunResult {
+    halted: bool,   // did we hit OP_HALT (vs. running off the end)?
+    top: int,       // value left on top of stack (0 if empty)
+    depth: int,     // stack depth at exit
+    steps: int      // instructions executed
+}
+
+// ---------------------------------------------------------------------------
+// Small generic helpers (book: "Generic Parameters")
+// ---------------------------------------------------------------------------
+fn id<T>(v: T) -> T { v }
+
+fn imax(a: int, b: int) -> int {
+    if a >= b { a } else { b }
+}
+
+fn imin(a: int, b: int) -> int {
+    if a <= b { a } else { b }
+}
+
+// ---------------------------------------------------------------------------
+// Instruction constructors (return named-type values)
+// ---------------------------------------------------------------------------
+fn ins(op: int, operand: int) -> Instr {
+    Instr { op: op, operand: operand }
+}
+
+fn ins0(op: int) -> Instr {
+    Instr { op: op, operand: 0 }
+}
+
+// ---------------------------------------------------------------------------
+// The core interpreter.
+// Storage classes used exactly as the book prescribes:
+//   * `program`   : let       (immutable — the bytecode never changes)
+//   * `stack`     : let mut   (single-owner mutable accumulator)
+//   * `registers` : let mut   (single-owner mutable accumulator)
+//   * `pc`,`steps`: let mut   (counters)
+// ---------------------------------------------------------------------------
+fn run(program: Array<Instr>, reg_count: int) -> RunResult {
+    let mut stack: Array<int> = []
+    let mut registers: Array<int> = []
+
+    // initialize the register file to zeros (book: let mut + push)
+    let mut r = 0
+    while r < reg_count {
+        registers.push(0)
+        r = r + 1
+    }
+
+    let mut pc = 0
+    let mut steps = 0
+    let mut halted = false
+    let n = program.len()
+
+    while pc < n {
+        let instr = program[pc]
+        let op = instr.op
+        let operand = instr.operand
+        steps = steps + 1
+
+        if op == OP_HALT {
+            halted = true
+            pc = n            // force loop exit
+        } else if op == OP_PUSH {
+            stack.push(operand)
+            pc = pc + 1
+        } else if op == OP_ADD {
+            // NOTE: the `: int` annotations on every pop/index inside these
+            // branches are REQUIRED in the current strict-flip build. A bare
+            // `let b = stack.pop()` inside an if/else branch infers `unknown`
+            // (see REPORT.md "pop-in-branch" finding); the annotation recovers
+            // the Array<int> element type. Book-sanctioned: annotations are a
+            // taught feature ("Type Annotations").
+            let b: int = stack.pop()
+            let a: int = stack.pop()
+            stack.push(a + b)
+            pc = pc + 1
+        } else if op == OP_SUB {
+            let b: int = stack.pop()
+            let a: int = stack.pop()
+            stack.push(a - b)
+            pc = pc + 1
+        } else if op == OP_MUL {
+            let b: int = stack.pop()
+            let a: int = stack.pop()
+            stack.push(a * b)
+            pc = pc + 1
+        } else if op == OP_DIV {
+            let b: int = stack.pop()
+            let a: int = stack.pop()
+            stack.push(a / b)
+            pc = pc + 1
+        } else if op == OP_MOD {
+            let b: int = stack.pop()
+            let a: int = stack.pop()
+            stack.push(a % b)
+            pc = pc + 1
+        } else if op == OP_NEG {
+            let a: int = stack.pop()
+            stack.push(-a)
+            pc = pc + 1
+        } else if op == OP_DUP {
+            let a: int = stack.pop()
+            stack.push(a)
+            stack.push(a)
+            pc = pc + 1
+        } else if op == OP_SWAP {
+            let b: int = stack.pop()
+            let a: int = stack.pop()
+            stack.push(b)
+            stack.push(a)
+            pc = pc + 1
+        } else if op == OP_LOAD {
+            let v: int = registers[operand]
+            stack.push(v)
+            pc = pc + 1
+        } else if op == OP_STORE {
+            let a: int = stack.pop()
+            registers[operand] = a
+            pc = pc + 1
+        } else {
+            // unknown opcode: skip (defensive)
+            pc = pc + 1
+        }
+    }
+
+    // Snapshot the top of stack without consuming it.
+    let depth = stack.len()
+    let mut top = 0
+    if depth > 0 {
+        let t: int = stack[depth - 1]   // `: int` recovers element type in-branch
+        top = t
+    }
+
+    RunResult { halted: halted, top: top, depth: depth, steps: steps }
+}
+
+// Convenience: build a program and return just the top-of-stack value.
+fn eval_top(program: Array<Instr>) -> int {
+    let res = run(program, 4)
+    res.top
+}
+
+// ===========================================================================
+// SECTION 1 — Arithmetic opcodes
+// Each program is hand-evaluated below; expected values precede the run.
+// ===========================================================================
+fn section_arithmetic() {
+    // PUSH 2; PUSH 3; ADD  =>  2 + 3 = 5
+    let p_add = [ins(OP_PUSH, 2), ins(OP_PUSH, 3), ins0(OP_ADD)]
+    check_int("add", eval_top(p_add), 5)
+
+    // PUSH 10; PUSH 4; SUB  =>  10 - 4 = 6
+    let p_sub = [ins(OP_PUSH, 10), ins(OP_PUSH, 4), ins0(OP_SUB)]
+    check_int("sub", eval_top(p_sub), 6)
+
+    // PUSH 6; PUSH 7; MUL  =>  6 * 7 = 42
+    let p_mul = [ins(OP_PUSH, 6), ins(OP_PUSH, 7), ins0(OP_MUL)]
+    check_int("mul", eval_top(p_mul), 42)
+
+    // PUSH 20; PUSH 6; DIV  =>  20 / 6 = 3  (integer division)
+    let p_div = [ins(OP_PUSH, 20), ins(OP_PUSH, 6), ins0(OP_DIV)]
+    check_int("div", eval_top(p_div), 3)
+
+    // PUSH 20; PUSH 6; MOD  =>  20 % 6 = 2
+    let p_mod = [ins(OP_PUSH, 20), ins(OP_PUSH, 6), ins0(OP_MOD)]
+    check_int("mod", eval_top(p_mod), 2)
+
+    // PUSH 9; NEG  =>  -9
+    let p_neg = [ins(OP_PUSH, 9), ins0(OP_NEG)]
+    check_int("neg", eval_top(p_neg), -9)
+
+    // Compound: (2 + 3) * (10 - 4) = 5 * 6 = 30
+    // PUSH 2; PUSH 3; ADD; PUSH 10; PUSH 4; SUB; MUL
+    let p_compound = [
+        ins(OP_PUSH, 2), ins(OP_PUSH, 3), ins0(OP_ADD),
+        ins(OP_PUSH, 10), ins(OP_PUSH, 4), ins0(OP_SUB),
+        ins0(OP_MUL)
+    ]
+    check_int("compound", eval_top(p_compound), 30)
+
+    // Left-associative chain: ((((1+2)+3)+4)+5) = 15
+    let p_chain = [
+        ins(OP_PUSH, 1), ins(OP_PUSH, 2), ins0(OP_ADD),
+        ins(OP_PUSH, 3), ins0(OP_ADD),
+        ins(OP_PUSH, 4), ins0(OP_ADD),
+        ins(OP_PUSH, 5), ins0(OP_ADD)
+    ]
+    check_int("chain", eval_top(p_chain), 15)
+}
+
+// ===========================================================================
+// SECTION 2 — Stack manipulation: DUP, SWAP
+// ===========================================================================
+fn section_stack_ops() {
+    // PUSH 5; DUP; MUL  =>  5 * 5 = 25  (square via dup)
+    let p_square = [ins(OP_PUSH, 5), ins0(OP_DUP), ins0(OP_MUL)]
+    check_int("dup-square", eval_top(p_square), 25)
+
+    // PUSH 3; PUSH 8; SWAP; SUB  =>  after swap stack is [8,3]; 8 - 3 = 5
+    let p_swap = [ins(OP_PUSH, 3), ins(OP_PUSH, 8), ins0(OP_SWAP), ins0(OP_SUB)]
+    check_int("swap-sub", eval_top(p_swap), 5)
+
+    // Without SWAP the same operands subtract the other way: 3 - 8 = -5
+    let p_noswap = [ins(OP_PUSH, 3), ins(OP_PUSH, 8), ins0(OP_SUB)]
+    check_int("noswap-sub", eval_top(p_noswap), -5)
+
+    // DUP then ADD doubles: PUSH 21; DUP; ADD => 42
+    let p_double = [ins(OP_PUSH, 21), ins0(OP_DUP), ins0(OP_ADD)]
+    check_int("dup-double", eval_top(p_double), 42)
+}
+
+// ===========================================================================
+// SECTION 3 — Registers: LOAD / STORE
+// ===========================================================================
+fn section_registers() {
+    // PUSH 7; STORE r0; PUSH 6; STORE r1; LOAD r0; LOAD r1; MUL => 7*6 = 42
+    let p = [
+        ins(OP_PUSH, 7), ins(OP_STORE, 0),
+        ins(OP_PUSH, 6), ins(OP_STORE, 1),
+        ins(OP_LOAD, 0), ins(OP_LOAD, 1), ins0(OP_MUL)
+    ]
+    check_int("reg-mul", eval_top(p), 42)
+
+    // Overwrite a register: PUSH 1; STORE r2; PUSH 99; STORE r2; LOAD r2 => 99
+    let p2 = [
+        ins(OP_PUSH, 1), ins(OP_STORE, 2),
+        ins(OP_PUSH, 99), ins(OP_STORE, 2),
+        ins(OP_LOAD, 2)
+    ]
+    check_int("reg-overwrite", eval_top(p2), 99)
+
+    // Uninitialized register reads as 0 (we zero-init the file): LOAD r3 => 0
+    let p3 = [ins(OP_LOAD, 3)]
+    check_int("reg-zero-init", eval_top(p3), 0)
+
+    // Accumulate into a register across two phases:
+    // r0 = 10; r0 = r0 + 5  => 15
+    let p4 = [
+        ins(OP_PUSH, 10), ins(OP_STORE, 0),
+        ins(OP_LOAD, 0), ins(OP_PUSH, 5), ins0(OP_ADD), ins(OP_STORE, 0),
+        ins(OP_LOAD, 0)
+    ]
+    check_int("reg-accumulate", eval_top(p4), 15)
+}
+
+// ===========================================================================
+// SECTION 4 — HALT and RunResult fields (Named Types + Option-free snapshot)
+// ===========================================================================
+fn section_halt() {
+    // PUSH 1; PUSH 2; ADD; HALT; PUSH 100 (dead code after HALT)
+    // top should be 3, halted true, the trailing PUSH 100 never runs.
+    let prog = [
+        ins(OP_PUSH, 1), ins(OP_PUSH, 2), ins0(OP_ADD),
+        ins0(OP_HALT),
+        ins(OP_PUSH, 100)
+    ]
+    let res = run(prog, 4)
+    check_int("halt-top", res.top, 3)
+    check_bool("halt-flag", res.halted, true)
+    // steps: PUSH, PUSH, ADD, HALT = 4 instructions executed
+    check_int("halt-steps", res.steps, 4)
+    // stack depth at exit: one value (3)
+    check_int("halt-depth", res.depth, 1)
+
+    // Running off the end (no HALT) leaves halted = false.
+    let prog2 = [ins(OP_PUSH, 5)]
+    let res2 = run(prog2, 4)
+    check_bool("nohalt-flag", res2.halted, false)
+    check_int("nohalt-top", res2.top, 5)
+    check_int("nohalt-steps", res2.steps, 1)
+}
+
+// ===========================================================================
+// SECTION 5 — Generics, tuples, Option, scope (direct book exercises)
+// ===========================================================================
+fn section_book_forms() {
+    // generic id<T> (book: "Generic Parameters")
+    check_int("gen-id-int", id(123), 123)
+    check_bool("gen-id-bool", id(true), true)
+
+    // imax / imin
+    check_int("imax", imax(3, 9), 9)
+    check_int("imin", imin(3, 9), 3)
+
+    // tuple type [int, int] (book: "Tuple Types")
+    let pair: [int, int] = [11, 22]
+    check_int("tuple-0", pair[0], 11)
+    check_int("tuple-1", pair[1], 22)
+    check_int("tuple-sum", pair[0] + pair[1], 33)
+
+    // Option<T> via match — no null sentinel (book: "No Null Sentinel")
+    let present: Option<int> = Some(64)
+    let absent: Option<int> = None
+    let pv = match present {
+        Some(v) => v,
+        None => -1
+    }
+    let av = match absent {
+        Some(v) => v,
+        None => -1
+    }
+    check_int("opt-some", pv, 64)
+    check_int("opt-none", av, -1)
+
+    // scope + shadowing (book: "Scope" + names-and-scope.mdx lexical scope)
+    let outer = 100
+    let shadowed = {
+        let outer = 7      // shadows in block
+        outer * 2
+    }
+    check_int("shadow-block", shadowed, 14)
+    check_int("shadow-outer-unchanged", outer, 100)
+
+    // type alias as constructor (book: "Type Aliases" — unannotated form, the
+    // exact shape the book demonstrates: `let origin = P { x: 0, y: 0 }`)
+    let aliased = AliasName { op: OP_PUSH, operand: 42 }
+    check_int("alias-ctor-op", aliased.op, OP_PUSH)
+    check_int("alias-ctor-operand", aliased.operand, 42)
+}
+
+// ===========================================================================
+// SECTION 6 — A tiny expression "compiler".
+// Compiles a fixed polynomial expression into MiniVM bytecode, then runs it.
+// We compile:  f(x) = 3*x*x + 2*x + 7   for a given x in register r0.
+// Bytecode (x is preloaded into r0 by the driver):
+//   LOAD r0; DUP; MUL; PUSH 3; MUL      ; ->  3*x*x
+//   LOAD r0; PUSH 2; MUL                ; ->  2*x
+//   ADD                                 ; ->  3*x*x + 2*x
+//   PUSH 7; ADD                         ; ->  + 7
+// ===========================================================================
+fn compile_poly() -> Array<Instr> {
+    [
+        ins(OP_LOAD, 0), ins0(OP_DUP), ins0(OP_MUL), ins(OP_PUSH, 3), ins0(OP_MUL),
+        ins(OP_LOAD, 0), ins(OP_PUSH, 2), ins0(OP_MUL),
+        ins0(OP_ADD),
+        ins(OP_PUSH, 7), ins0(OP_ADD)
+    ]
+}
+
+// run the polynomial program with x pre-stored into r0.
+fn eval_poly(x: int) -> int {
+    // Build a program that first stores x into r0, then runs the body.
+    let mut prog: Array<Instr> = [ins(OP_PUSH, x), ins(OP_STORE, 0)]
+    let body = compile_poly()
+    let mut i = 0
+    let n = body.len()
+    while i < n {
+        prog.push(body[i])
+        i = i + 1
+    }
+    eval_top(prog)
+}
+
+fn section_compiler() {
+    // f(x) = 3x^2 + 2x + 7, hand-computed:
+    //   f(0) = 0 + 0 + 7      = 7
+    //   f(1) = 3 + 2 + 7      = 12
+    //   f(2) = 12 + 4 + 7     = 23
+    //   f(3) = 27 + 6 + 7     = 40
+    //   f(4) = 48 + 8 + 7     = 63
+    //   f(5) = 75 + 10 + 7    = 92
+    //   f(10)= 300 + 20 + 7   = 327
+    check_int("poly-0", eval_poly(0), 7)
+    check_int("poly-1", eval_poly(1), 12)
+    check_int("poly-2", eval_poly(2), 23)
+    check_int("poly-3", eval_poly(3), 40)
+    check_int("poly-4", eval_poly(4), 63)
+    check_int("poly-5", eval_poly(5), 92)
+    check_int("poly-10", eval_poly(10), 327)
+
+    // Negative input: f(-1) = 3*1 + 2*(-1) + 7 = 3 - 2 + 7 = 8
+    check_int("poly-neg1", eval_poly(-1), 8)
+    // f(-2) = 3*4 + 2*(-2) + 7 = 12 - 4 + 7 = 15
+    check_int("poly-neg2", eval_poly(-2), 15)
+}
+
+// ===========================================================================
+// SECTION 7 — Iterative algorithms driven through the register machine,
+// but orchestrated by the host (let mut loops). Cross-checks VM vs. host.
+// ===========================================================================
+
+// factorial via host loop using the VM to multiply
+fn vm_mul(a: int, b: int) -> int {
+    eval_top([ins(OP_PUSH, a), ins(OP_PUSH, b), ins0(OP_MUL)])
+}
+
+fn factorial(n: int) -> int {
+    let mut acc = 1
+    let mut k = 2
+    while k <= n {
+        acc = vm_mul(acc, k)
+        k = k + 1
+    }
+    acc
+}
+
+// fibonacci via host loop using the VM to add
+fn vm_add(a: int, b: int) -> int {
+    eval_top([ins(OP_PUSH, a), ins(OP_PUSH, b), ins0(OP_ADD)])
+}
+
+fn fib(n: int) -> int {
+    if n < 2 { return n }
+    let mut a = 0
+    let mut b = 1
+    let mut i = 2
+    while i <= n {
+        let next = vm_add(a, b)
+        a = b
+        b = next
+        i = i + 1
+    }
+    b
+}
+
+// gcd via VM mod
+fn vm_mod(a: int, b: int) -> int {
+    eval_top([ins(OP_PUSH, a), ins(OP_PUSH, b), ins0(OP_MOD)])
+}
+
+fn gcd(a: int, b: int) -> int {
+    let mut x = a
+    let mut y = b
+    while y != 0 {
+        let t = vm_mod(x, y)
+        x = y
+        y = t
+    }
+    x
+}
+
+fn section_algorithms() {
+    // factorials, hand-computed:
+    //  0! = 1, 1! = 1, 5! = 120, 6! = 720, 10! = 3628800
+    check_int("fact-0", factorial(0), 1)
+    check_int("fact-1", factorial(1), 1)
+    check_int("fact-5", factorial(5), 120)
+    check_int("fact-6", factorial(6), 720)
+    check_int("fact-10", factorial(10), 3628800)
+
+    // fibonacci: fib(0)=0, fib(1)=1, fib(7)=13, fib(10)=55, fib(15)=610
+    check_int("fib-0", fib(0), 0)
+    check_int("fib-1", fib(1), 1)
+    check_int("fib-7", fib(7), 13)
+    check_int("fib-10", fib(10), 55)
+    check_int("fib-15", fib(15), 610)
+
+    // gcd: gcd(48,18)=6, gcd(54,24)=6, gcd(17,5)=1, gcd(100,80)=20
+    check_int("gcd-48-18", gcd(48, 18), 6)
+    check_int("gcd-54-24", gcd(54, 24), 6)
+    check_int("gcd-17-5", gcd(17, 5), 1)
+    check_int("gcd-100-80", gcd(100, 80), 20)
+}
+
+// ===========================================================================
+// SECTION 8 — A small register-based "running statistics" accumulator.
+// Processes a fixed fixture array, using local accumulators to hold sum/count/
+// min/max. Demonstrates let (fixture) + let mut (accumulators) + scope.
+// ===========================================================================
+type Stats {
+    sum: int,
+    count: int,
+    minimum: int,
+    maximum: int
+}
+
+fn compute_stats(data: Array<int>) -> Stats {
+    let mut sum = 0
+    let mut count = 0
+    let mut minimum = 0
+    let mut maximum = 0
+    let mut first = true
+
+    // Iterate with `for v in data` (book: "Control flow — for x in iter").
+    // NOTE: the for-each loop binds `v` with the correct Array<int> element
+    // type. The `while i < n { let v = data[i] }` form does NOT — indexing an
+    // int array inside a while loop yields an unresolved element type under the
+    // current strict-flip build (see REPORT.md "array-index-in-while" finding),
+    // so `for` is both the idiomatic and the only working iteration form here.
+    for v in data {
+        // route the addition through the VM for cross-checking
+        sum = vm_add(sum, v)
+        count = count + 1
+        if first {
+            minimum = v
+            maximum = v
+            first = false
+        } else {
+            minimum = imin(minimum, v)
+            maximum = imax(maximum, v)
+        }
+    }
+
+    Stats { sum: sum, count: count, minimum: minimum, maximum: maximum }
+}
+
+fn section_stats() {
+    // fixture (immutable `let`): [4, 8, 15, 16, 23, 42]
+    //   sum   = 4+8+15+16+23+42 = 108
+    //   count = 6
+    //   min   = 4
+    //   max   = 42
+    let data = [4, 8, 15, 16, 23, 42]
+    let st = compute_stats(data)
+    check_int("stats-sum", st.sum, 108)
+    check_int("stats-count", st.count, 6)
+    check_int("stats-min", st.minimum, 4)
+    check_int("stats-max", st.maximum, 42)
+
+    // mean via integer division: 108 / 6 = 18
+    let mean = st.sum / st.count
+    check_int("stats-mean", mean, 18)
+
+    // a second fixture with negatives: [-5, 3, -10, 7, 0]
+    //   sum = -5+3-10+7+0 = -5 ; count = 5 ; min = -10 ; max = 7
+    let data2 = [-5, 3, -10, 7, 0]
+    let st2 = compute_stats(data2)
+    check_int("stats2-sum", st2.sum, -5)
+    check_int("stats2-count", st2.count, 5)
+    check_int("stats2-min", st2.minimum, -10)
+    check_int("stats2-max", st2.maximum, 7)
+}
+
+// ===========================================================================
+// SECTION 9 — Cross-validation: the VM compound program must equal a direct
+// host computation. This catches any divergence between the modeled semantics
+// and Shape's own arithmetic.
+// ===========================================================================
+fn section_cross_validate() {
+    // For x in 0..8, MiniVM poly must equal the host-computed polynomial.
+    let mut x = 0
+    while x < 8 {
+        let host = 3 * x * x + 2 * x + 7
+        let vm = eval_poly(x)
+        check_int(f"xval-poly-{x}", vm, host)
+        x = x + 1
+    }
+
+    // Stack depth invariant: a balanced program ((a+b)*(c-d)) ends with depth 1.
+    let prog = [
+        ins(OP_PUSH, 2), ins(OP_PUSH, 3), ins0(OP_ADD),
+        ins(OP_PUSH, 9), ins(OP_PUSH, 1), ins0(OP_SUB),
+        ins0(OP_MUL)
+    ]
+    let res = run(prog, 4)
+    check_int("xval-depth", res.depth, 1)
+    check_int("xval-top", res.top, 40)   // (2+3)*(9-1) = 5*8 = 40
+}
+
+// ===========================================================================
+// SECTION 10 — An enum-tagged disassembler.
+// Demonstrates `enum` (Names-and-Scope §3 "Type and Associated Scope":
+// variants reached through the type) + match over the opcode tag. Maps each
+// opcode int back to a stable mnemonic id, exercising associated-namespace
+// access (OpName::Push etc.).
+// ===========================================================================
+enum OpName {
+    Push, Add, Sub, Mul, Div, Mod, Neg, Dup, Swap, Load, Store, Halt, Unknown
+}
+
+// map an opcode int -> mnemonic enum (book: match expression)
+fn mnemonic(op: int) -> OpName {
+    if op == OP_PUSH { OpName::Push }
+    else if op == OP_ADD { OpName::Add }
+    else if op == OP_SUB { OpName::Sub }
+    else if op == OP_MUL { OpName::Mul }
+    else if op == OP_DIV { OpName::Div }
+    else if op == OP_MOD { OpName::Mod }
+    else if op == OP_NEG { OpName::Neg }
+    else if op == OP_DUP { OpName::Dup }
+    else if op == OP_SWAP { OpName::Swap }
+    else if op == OP_LOAD { OpName::Load }
+    else if op == OP_STORE { OpName::Store }
+    else if op == OP_HALT { OpName::Halt }
+    else { OpName::Unknown }
+}
+
+// classify a mnemonic into an "arity" code:
+//   0 = nullary (Halt), 1 = unary (Neg/Dup/Push/Load/Store),
+//   2 = binary (Add/Sub/Mul/Div/Mod/Swap), -1 = unknown
+fn arity(name: OpName) -> int {
+    match name {
+        OpName::Halt => 0,
+        OpName::Neg => 1,
+        OpName::Dup => 1,
+        OpName::Push => 1,
+        OpName::Load => 1,
+        OpName::Store => 1,
+        OpName::Add => 2,
+        OpName::Sub => 2,
+        OpName::Mul => 2,
+        OpName::Div => 2,
+        OpName::Mod => 2,
+        OpName::Swap => 2,
+        OpName::Unknown => -1
+    }
+}
+
+fn section_disasm() {
+    // Round-trip: opcode int -> mnemonic -> arity, hand-derived:
+    check_int("arity-halt", arity(mnemonic(OP_HALT)), 0)
+    check_int("arity-neg", arity(mnemonic(OP_NEG)), 1)
+    check_int("arity-push", arity(mnemonic(OP_PUSH)), 1)
+    check_int("arity-load", arity(mnemonic(OP_LOAD)), 1)
+    check_int("arity-store", arity(mnemonic(OP_STORE)), 1)
+    check_int("arity-dup", arity(mnemonic(OP_DUP)), 1)
+    check_int("arity-add", arity(mnemonic(OP_ADD)), 2)
+    check_int("arity-sub", arity(mnemonic(OP_SUB)), 2)
+    check_int("arity-mul", arity(mnemonic(OP_MUL)), 2)
+    check_int("arity-div", arity(mnemonic(OP_DIV)), 2)
+    check_int("arity-mod", arity(mnemonic(OP_MOD)), 2)
+    check_int("arity-swap", arity(mnemonic(OP_SWAP)), 2)
+    check_int("arity-unknown", arity(mnemonic(999)), -1)
+
+    // Disassemble a program: count how many binary ops it contains.
+    // prog = PUSH 2; PUSH 3; ADD; PUSH 4; MUL  -> 2 binary ops (ADD, MUL)
+    let prog = [
+        ins(OP_PUSH, 2), ins(OP_PUSH, 3), ins0(OP_ADD),
+        ins(OP_PUSH, 4), ins0(OP_MUL)
+    ]
+    let mut binary_count = 0
+    for instr in prog {
+        let a = arity(mnemonic(instr.op))
+        if a == 2 {
+            binary_count = binary_count + 1
+        }
+    }
+    check_int("disasm-binary-count", binary_count, 2)
+}
+
+// ===========================================================================
+// SECTION 11 — Sieve of Eratosthenes over a LOCAL boolean array.
+// Demonstrates `let mut` array of bool + index-assign in a loop (a proven
+// pattern: local array, index-write, `for`-each read). Counts primes < N.
+// ===========================================================================
+fn count_primes(limit: int) -> int {
+    // is_composite[i] == true means i is NOT prime
+    let mut is_composite: Array<bool> = []
+    let mut k = 0
+    while k <= limit {
+        is_composite.push(false)
+        k = k + 1
+    }
+
+    let mut p = 2
+    while p * p <= limit {
+        // only sieve from a prime base
+        let base_composite: bool = is_composite[p]
+        if !base_composite {
+            let mut m = p * p
+            while m <= limit {
+                is_composite[m] = true
+                m = m + p
+            }
+        }
+        p = p + 1
+    }
+
+    // count primes in [2, limit]
+    let mut primes = 0
+    let mut i = 2
+    while i <= limit {
+        let composite: bool = is_composite[i]
+        if !composite {
+            primes = primes + 1
+        }
+        i = i + 1
+    }
+    primes
+}
+
+fn section_sieve() {
+    // primes below/at N, hand-counted:
+    //   <=10  : 2,3,5,7                      -> 4
+    //   <=20  : +11,13,17,19                 -> 8
+    //   <=30  : +23,29                       -> 10
+    //   <=50  : 2..50 primes                 -> 15
+    //   <=100 : classic                      -> 25
+    check_int("primes-10", count_primes(10), 4)
+    check_int("primes-20", count_primes(20), 8)
+    check_int("primes-30", count_primes(30), 10)
+    check_int("primes-50", count_primes(50), 15)
+    check_int("primes-100", count_primes(100), 25)
+}
+
+// ===========================================================================
+// SECTION 12 — Digit operations via the MiniVM.
+// Computes the digit-sum of an integer using the VM's MOD/DIV opcodes, and
+// reverses an integer's digits. Cross-checks against host computation.
+// ===========================================================================
+fn vm_div(a: int, b: int) -> int {
+    eval_top([ins(OP_PUSH, a), ins(OP_PUSH, b), ins0(OP_DIV)])
+}
+
+fn digit_sum(n: int) -> int {
+    let mut x = n
+    let mut total = 0
+    while x > 0 {
+        let d = vm_mod(x, 10)   // last digit via VM MOD
+        total = vm_add(total, d)
+        x = vm_div(x, 10)       // drop last digit via VM DIV
+    }
+    total
+}
+
+fn reverse_int(n: int) -> int {
+    let mut x = n
+    let mut acc = 0
+    while x > 0 {
+        let d = vm_mod(x, 10)
+        acc = vm_add(vm_mul(acc, 10), d)
+        x = vm_div(x, 10)
+    }
+    acc
+}
+
+fn section_digits() {
+    // digit sums, hand-computed:
+    //   123   -> 1+2+3       = 6
+    //   9999  -> 9*4         = 36
+    //   1000  -> 1           = 1
+    //   58219 -> 5+8+2+1+9   = 25
+    check_int("dsum-123", digit_sum(123), 6)
+    check_int("dsum-9999", digit_sum(9999), 36)
+    check_int("dsum-1000", digit_sum(1000), 1)
+    check_int("dsum-58219", digit_sum(58219), 25)
+
+    // reversals, hand-computed:
+    //   123   -> 321
+    //   1200  -> 21   (trailing zeros drop)
+    //   90    -> 9
+    //   58219 -> 91285
+    check_int("rev-123", reverse_int(123), 321)
+    check_int("rev-1200", reverse_int(1200), 21)
+    check_int("rev-90", reverse_int(90), 9)
+    check_int("rev-58219", reverse_int(58219), 91285)
+}
+
+// ===========================================================================
+// SECTION 13 — A struct-keyed "symbol table" using parallel arrays of structs.
+// Demonstrates Named Types + for-each over an Array<Struct> param (a proven
+// pattern: struct field reads in a loop). Resolves names to values, returning
+// Option<int> — the book's "No Null Sentinel" model for a missing key.
+// ===========================================================================
+type Symbol {
+    name: string,
+    value: int
+}
+
+fn lookup(table: Array<Symbol>, key: string) -> Option<int> {
+    for sym in table {
+        if sym.name == key {
+            return Some(sym.value)
+        }
+    }
+    None
+}
+
+fn lookup_or(table: Array<Symbol>, key: string, fallback: int) -> int {
+    match lookup(table, key) {
+        Some(v) => v,
+        None => fallback
+    }
+}
+
+fn section_symtab() {
+    let table = [
+        Symbol { name: "width", value: 80 },
+        Symbol { name: "height", value: 24 },
+        Symbol { name: "depth", value: 8 }
+    ]
+    check_int("sym-width", lookup_or(table, "width", -1), 80)
+    check_int("sym-height", lookup_or(table, "height", -1), 24)
+    check_int("sym-depth", lookup_or(table, "depth", -1), 8)
+    // missing key -> fallback (no null sentinel; None handled via match)
+    check_int("sym-missing", lookup_or(table, "color", -1), -1)
+
+    // present/absent directly via Option match
+    let present = match lookup(table, "height") {
+        Some(v) => v,
+        None => 0
+    }
+    let absent = match lookup(table, "nope") {
+        Some(v) => v,
+        None => 0
+    }
+    check_int("sym-present", present, 24)
+    check_int("sym-absent", absent, 0)
+}
+
+// ===========================================================================
+// DRIVER (top-level statements — fn main is NOT auto-invoked in script mode)
+// ===========================================================================
+section_arithmetic()
+section_stack_ops()
+section_registers()
+section_halt()
+section_book_forms()
+section_compiler()
+section_algorithms()
+section_stats()
+section_cross_validate()
+section_disasm()
+section_sieve()
+section_digits()
+section_symtab()
+
+if FAILURES == 0 {
+    print("ALL_CHECKS_PASSED")
+} else {
+    print(f"FAILED_CHECKS={FAILURES}")
+}

@@ -1,0 +1,9 @@
+// geometry/linalg.shape  -> importable as "geometry::linalg"
+// Exercises: a module importing ANOTHER local module (book "Two-File Library Example").
+
+from geometry::stats use { mean }
+
+pub fn normalize(v: Array<number>) -> Array<number> {
+  let mu = mean(v)
+  v.map(|x| x - mu)
+}

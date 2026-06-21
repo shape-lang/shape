@@ -1,0 +1,78 @@
+// small.shape — Functions chapter core exercise
+// Book: fundamentals/functions.mdx
+// Exercises: named fn + return type, tail expression, default params (positional),
+// lambdas, closure-inference-from-context (map/filter), higher-order fn (apply),
+// closure-returning fn bound to let (adder), read-only capture, const param.
+
+fn double(x: int) -> int {
+  x * 2
+}
+
+fn add(a: int, b: int) -> int {
+  a + b
+}
+
+fn triple(x: int) -> int {
+  let t = x * 3
+  t
+}
+
+fn rect(width: int = 10, height: int = 20) -> int {
+  width * height
+}
+
+fn no_mutate(const x: int) -> int {
+  x * 2
+}
+
+fn apply(f, x) { f(x) }
+
+fn adder(a) { |b| a + b }
+
+fn check(name: string, got: int, expected: int) {
+  if got != expected {
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+check("double", double(21), 42)
+check("add", add(2, 3), 5)
+check("triple", triple(7), 21)
+
+check("rect_defaults", rect(), 200)
+check("rect_one", rect(5), 100)
+check("rect_two", rect(5, 6), 30)
+
+check("no_mutate", no_mutate(21), 42)
+
+let inc = |x| x + 1
+check("inc", inc(10), 11)
+
+let count = 10
+let bump_by_count = |x| x + count
+check("capture1", bump_by_count(5), 15)
+check("capture2", bump_by_count(7), 17)
+
+let nums: Vec<int> = [1, 2, 3, 4]
+let evens = nums.filter(|x| x % 2 == 0)
+let big = nums.map(|x| x * 10)
+check("filter_len", evens.len(), 2)
+check("filter_0", evens[0], 2)
+check("filter_1", evens[1], 4)
+check("map_0", big[0], 10)
+check("map_3", big[3], 40)
+
+let doubled = nums.map(|x| {
+  let bumped = x + 1
+  bumped * 2
+})
+check("blocklambda_0", doubled[0], 4)
+check("blocklambda_3", doubled[3], 10)
+
+let dbl = |x| x * 2
+check("apply", apply(dbl, 21), 42)
+
+let plus10 = adder(10)
+check("adder", plus10(5), 15)
+
+print("ALL_CHECKS_PASSED")

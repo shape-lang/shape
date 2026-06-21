@@ -1,0 +1,2 @@
+from mylib::stats use { add }
+pub fn add3(a: int, b: int, c: int) -> int { add(add(a, b), c) }

@@ -1,0 +1,3 @@
+pub fn zqxmean(a: int, b: int) -> int {
+    (a + b) / 2
+}

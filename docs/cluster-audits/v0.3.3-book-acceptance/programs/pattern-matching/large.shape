@@ -1,0 +1,998 @@
+// large.shape -- pattern-matching slice, book-acceptance large program
+//
+// REAL-WORLD APP: "Calc" -- a mini expression-language interpreter.
+// Everything that branches on structure is done with `match` (the chapter's
+// core construct). The program is a recursive-descent-free AST interpreter:
+// the AST is built programmatically via enum constructors, then ALL traversal
+// (evaluation, constant folding, pretty-printing, structural analysis,
+// free-variable collection, type checking) is match-driven.
+//
+// Book sources (fundamentals/pattern-matching.mdx):
+//   - "Basic Match" (literal arms + `x: T where guard`)
+//   - "Enum Matching" (`Enum::Variant(binding)`)
+//   - "Constructor Patterns" (Some/None, Ok/Err)
+//   - "Match Is an Expression" (assign match result)
+//   - "Exhaustiveness" (cover all variants, `_` only when needed)
+//   MCP/reference fallback (recorded as BOOK-GAP in REPORT.md):
+//   - struct-variant destructuring `Enum::Variant { field, field }`
+//
+// Determinism: pure. No I/O beyond print, no time, no randomness.
+// MACHINE-PROOFABLE: every expected value is derived from the documented
+// language semantics (integer arithmetic, short-circuit, Result/Option) and
+// written BEFORE the first run. On all-pass: "ALL_CHECKS_PASSED".
+
+// ---------------------------------------------------------------------------
+// AST
+// ---------------------------------------------------------------------------
+
+// A Value is the result of evaluating an expression. We keep ints and bools
+// as distinct variants so the evaluator can do match-driven type checking
+// instead of relying on truthiness (the language forbids truthiness coercion).
+enum Value {
+  IntV(int),
+  BoolV(bool),
+}
+
+// The expression AST. Recursive enum -- the interpreter's whole job is to
+// pattern-match on these variants.
+enum Expr {
+  // Leaves
+  Num(int),
+  Bln(bool),
+  Var(string),
+  // Arithmetic (int -> int)
+  Add(Expr, Expr),
+  Sub(Expr, Expr),
+  Mul(Expr, Expr),
+  Div(Expr, Expr),
+  Neg(Expr),
+  // Comparison (int, int -> bool)
+  Lt(Expr, Expr),
+  Eq(Expr, Expr),
+  // Boolean (bool -> bool)
+  And(Expr, Expr),
+  Or(Expr, Expr),
+  Not(Expr),
+  // Binding + control. `Let { name, value, body }` uses STRUCT-VARIANT
+  // destructuring in match arms (book-gap construct).
+  Let { name: string, value: Expr, body: Expr },
+  If { cond: Expr, then_branch: Expr, else_branch: Expr },
+}
+
+// Environment as an immutable cons-list of (name, Value) bindings.
+// Lookups recurse via match -- the canonical functional-environment idiom.
+enum Env {
+  Empty,
+  Bind(string, Value, Env),
+}
+
+// ---------------------------------------------------------------------------
+// Environment operations (all match-driven)
+// ---------------------------------------------------------------------------
+
+fn env_lookup(env: Env, key: string) -> Option<Value> {
+  match env {
+    Env::Empty => None
+    Env::Bind(name, val, rest) => {
+      if name == key {
+        Some(val)
+      } else {
+        env_lookup(rest, key)
+      }
+    }
+  }
+}
+
+fn env_extend(env: Env, key: string, val: Value) -> Env {
+  Env::Bind(key, val, env)
+}
+
+// Count bindings (used as a structural assertion).
+fn env_size(env: Env) -> int {
+  match env {
+    Env::Empty => 0
+    Env::Bind(_, _, rest) => 1 + env_size(rest)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Value helpers (match-driven projection / rendering)
+// ---------------------------------------------------------------------------
+
+fn value_to_string(v: Value) -> string {
+  match v {
+    Value::IntV(n) => f"{n}"
+    Value::BoolV(b) => {
+      if b { "true" } else { "false" }
+    }
+  }
+}
+
+// Expect an int Value or fail with a typed error message.
+fn expect_int(v: Value) -> Result<int> {
+  match v {
+    Value::IntV(n) => Ok(n)
+    Value::BoolV(_) => Err("type error: expected int, got bool")
+  }
+}
+
+// Expect a bool Value or fail with a typed error message.
+fn expect_bool(v: Value) -> Result<bool> {
+  match v {
+    Value::BoolV(b) => Ok(b)
+    Value::IntV(_) => Err("type error: expected bool, got int")
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Evaluator -- the heart of the program. One big match on Expr, recursive,
+// returning Result<Value> and using `?` to propagate errors.
+// ---------------------------------------------------------------------------
+
+fn eval(e: Expr, env: Env) -> Result<Value> {
+  match e {
+    // Leaves
+    Expr::Num(n) => Ok(Value::IntV(n))
+    Expr::Bln(b) => Ok(Value::BoolV(b))
+    Expr::Var(name) => {
+      match env_lookup(env, name) {
+        Some(v) => Ok(v)
+        None => Err(f"unbound variable: {name}")
+      }
+    }
+
+    // Arithmetic
+    Expr::Add(a, b) => {
+      let x = expect_int(eval(a, env)?)?
+      let y = expect_int(eval(b, env)?)?
+      Ok(Value::IntV(x + y))
+    }
+    Expr::Sub(a, b) => {
+      let x = expect_int(eval(a, env)?)?
+      let y = expect_int(eval(b, env)?)?
+      Ok(Value::IntV(x - y))
+    }
+    Expr::Mul(a, b) => {
+      let x = expect_int(eval(a, env)?)?
+      let y = expect_int(eval(b, env)?)?
+      Ok(Value::IntV(x * y))
+    }
+    Expr::Div(a, b) => {
+      let x = expect_int(eval(a, env)?)?
+      let y = expect_int(eval(b, env)?)?
+      match y {
+        0 => Err("division by zero")
+        _ => Ok(Value::IntV(x / y))
+      }
+    }
+    Expr::Neg(x) => {
+      let v = expect_int(eval(x, env)?)?
+      Ok(Value::IntV(-v))
+    }
+
+    // Comparison
+    Expr::Lt(a, b) => {
+      let x = expect_int(eval(a, env)?)?
+      let y = expect_int(eval(b, env)?)?
+      Ok(Value::BoolV(x < y))
+    }
+    Expr::Eq(a, b) => {
+      let x = expect_int(eval(a, env)?)?
+      let y = expect_int(eval(b, env)?)?
+      Ok(Value::BoolV(x == y))
+    }
+
+    // Boolean (short-circuit)
+    Expr::And(a, b) => {
+      let x = expect_bool(eval(a, env)?)?
+      if x {
+        let y = expect_bool(eval(b, env)?)?
+        Ok(Value::BoolV(y))
+      } else {
+        Ok(Value::BoolV(false))
+      }
+    }
+    Expr::Or(a, b) => {
+      let x = expect_bool(eval(a, env)?)?
+      if x {
+        Ok(Value::BoolV(true))
+      } else {
+        let y = expect_bool(eval(b, env)?)?
+        Ok(Value::BoolV(y))
+      }
+    }
+    Expr::Not(x) => {
+      let v = expect_bool(eval(x, env)?)?
+      Ok(Value::BoolV(!v))
+    }
+
+    // Binding + control (struct-variant destructuring)
+    Expr::Let { name, value, body } => {
+      let v = eval(value, env)?
+      let env2 = env_extend(env, name, v)
+      eval(body, env2)
+    }
+    Expr::If { cond, then_branch, else_branch } => {
+      let c = expect_bool(eval(cond, env)?)?
+      if c {
+        eval(then_branch, env)
+      } else {
+        eval(else_branch, env)
+      }
+    }
+  }
+}
+
+// Evaluate with an empty environment.
+fn run(e: Expr) -> Result<Value> {
+  eval(e, Env::Empty)
+}
+
+// ---------------------------------------------------------------------------
+// Structural analyzers -- also one match per function.
+// ---------------------------------------------------------------------------
+
+// Number of AST nodes (1 + children). Exercises every variant arm.
+fn node_count(e: Expr) -> int {
+  match e {
+    Expr::Num(_) => 1
+    Expr::Bln(_) => 1
+    Expr::Var(_) => 1
+    Expr::Add(a, b) => 1 + node_count(a) + node_count(b)
+    Expr::Sub(a, b) => 1 + node_count(a) + node_count(b)
+    Expr::Mul(a, b) => 1 + node_count(a) + node_count(b)
+    Expr::Div(a, b) => 1 + node_count(a) + node_count(b)
+    Expr::Neg(x) => 1 + node_count(x)
+    Expr::Lt(a, b) => 1 + node_count(a) + node_count(b)
+    Expr::Eq(a, b) => 1 + node_count(a) + node_count(b)
+    Expr::And(a, b) => 1 + node_count(a) + node_count(b)
+    Expr::Or(a, b) => 1 + node_count(a) + node_count(b)
+    Expr::Not(x) => 1 + node_count(x)
+    Expr::Let { name: _, value, body } => 1 + node_count(value) + node_count(body)
+    Expr::If { cond, then_branch, else_branch } =>
+      1 + node_count(cond) + node_count(then_branch) + node_count(else_branch)
+  }
+}
+
+fn max2(a: int, b: int) -> int {
+  if a > b { a } else { b }
+}
+
+fn max3(a: int, b: int, c: int) -> int {
+  max2(max2(a, b), c)
+}
+
+// Tree depth (leaves = 1).
+fn depth(e: Expr) -> int {
+  match e {
+    Expr::Num(_) => 1
+    Expr::Bln(_) => 1
+    Expr::Var(_) => 1
+    Expr::Add(a, b) => 1 + max2(depth(a), depth(b))
+    Expr::Sub(a, b) => 1 + max2(depth(a), depth(b))
+    Expr::Mul(a, b) => 1 + max2(depth(a), depth(b))
+    Expr::Div(a, b) => 1 + max2(depth(a), depth(b))
+    Expr::Neg(x) => 1 + depth(x)
+    Expr::Lt(a, b) => 1 + max2(depth(a), depth(b))
+    Expr::Eq(a, b) => 1 + max2(depth(a), depth(b))
+    Expr::And(a, b) => 1 + max2(depth(a), depth(b))
+    Expr::Or(a, b) => 1 + max2(depth(a), depth(b))
+    Expr::Not(x) => 1 + depth(x)
+    Expr::Let { name: _, value, body } => 1 + max2(depth(value), depth(body))
+    Expr::If { cond, then_branch, else_branch } =>
+      1 + max3(depth(cond), depth(then_branch), depth(else_branch))
+  }
+}
+
+// Count Var references (free or bound -- pure syntactic count).
+fn var_refs(e: Expr) -> int {
+  match e {
+    Expr::Num(_) => 0
+    Expr::Bln(_) => 0
+    Expr::Var(_) => 1
+    Expr::Add(a, b) => var_refs(a) + var_refs(b)
+    Expr::Sub(a, b) => var_refs(a) + var_refs(b)
+    Expr::Mul(a, b) => var_refs(a) + var_refs(b)
+    Expr::Div(a, b) => var_refs(a) + var_refs(b)
+    Expr::Neg(x) => var_refs(x)
+    Expr::Lt(a, b) => var_refs(a) + var_refs(b)
+    Expr::Eq(a, b) => var_refs(a) + var_refs(b)
+    Expr::And(a, b) => var_refs(a) + var_refs(b)
+    Expr::Or(a, b) => var_refs(a) + var_refs(b)
+    Expr::Not(x) => var_refs(x)
+    Expr::Let { name: _, value, body } => var_refs(value) + var_refs(body)
+    Expr::If { cond, then_branch, else_branch } =>
+      var_refs(cond) + var_refs(then_branch) + var_refs(else_branch)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pretty-printer -- match-driven s-expression rendering.
+// ---------------------------------------------------------------------------
+
+fn show(e: Expr) -> string {
+  match e {
+    Expr::Num(n) => f"{n}"
+    Expr::Bln(b) => {
+      if b { "#t" } else { "#f" }
+    }
+    Expr::Var(s) => s
+    Expr::Add(a, b) => f"(+ {show(a)} {show(b)})"
+    Expr::Sub(a, b) => f"(- {show(a)} {show(b)})"
+    Expr::Mul(a, b) => f"(* {show(a)} {show(b)})"
+    Expr::Div(a, b) => f"(/ {show(a)} {show(b)})"
+    Expr::Neg(x) => f"(neg {show(x)})"
+    Expr::Lt(a, b) => f"(< {show(a)} {show(b)})"
+    Expr::Eq(a, b) => f"(= {show(a)} {show(b)})"
+    Expr::And(a, b) => f"(and {show(a)} {show(b)})"
+    Expr::Or(a, b) => f"(or {show(a)} {show(b)})"
+    Expr::Not(x) => f"(not {show(x)})"
+    Expr::Let { name, value, body } => f"(let {name} {show(value)} {show(body)})"
+    Expr::If { cond, then_branch, else_branch } =>
+      f"(if {show(cond)} {show(then_branch)} {show(else_branch)})"
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Constant-folding optimizer -- match-driven AST rewrite. Folds arithmetic
+// over literal operands; everything else is rebuilt structurally.
+// ---------------------------------------------------------------------------
+
+// Helper: is this expr a literal Num? Returns Option<int> via match.
+fn as_num(e: Expr) -> Option<int> {
+  match e {
+    Expr::Num(n) => Some(n)
+    _ => None
+  }
+}
+
+fn as_bool(e: Expr) -> Option<bool> {
+  match e {
+    Expr::Bln(b) => Some(b)
+    _ => None
+  }
+}
+
+fn fold(e: Expr) -> Expr {
+  match e {
+    Expr::Num(n) => Expr::Num(n)
+    Expr::Bln(b) => Expr::Bln(b)
+    Expr::Var(s) => Expr::Var(s)
+
+    Expr::Add(a, b) => {
+      let fa = fold(a)
+      let fb = fold(b)
+      match as_num(fa) {
+        Some(x) => {
+          match as_num(fb) {
+            Some(y) => Expr::Num(x + y)
+            None => Expr::Add(Expr::Num(x), fb)
+          }
+        }
+        None => Expr::Add(fa, fb)
+      }
+    }
+    Expr::Sub(a, b) => {
+      let fa = fold(a)
+      let fb = fold(b)
+      match as_num(fa) {
+        Some(x) => {
+          match as_num(fb) {
+            Some(y) => Expr::Num(x - y)
+            None => Expr::Sub(Expr::Num(x), fb)
+          }
+        }
+        None => Expr::Sub(fa, fb)
+      }
+    }
+    Expr::Mul(a, b) => {
+      let fa = fold(a)
+      let fb = fold(b)
+      match as_num(fa) {
+        Some(x) => {
+          match as_num(fb) {
+            Some(y) => Expr::Num(x * y)
+            None => Expr::Mul(Expr::Num(x), fb)
+          }
+        }
+        None => Expr::Mul(fa, fb)
+      }
+    }
+    Expr::Div(a, b) => {
+      let fa = fold(a)
+      let fb = fold(b)
+      match as_num(fa) {
+        Some(x) => {
+          match as_num(fb) {
+            Some(y) => {
+              match y {
+                0 => Expr::Div(Expr::Num(x), Expr::Num(0))
+                _ => Expr::Num(x / y)
+              }
+            }
+            None => Expr::Div(Expr::Num(x), fb)
+          }
+        }
+        None => Expr::Div(fa, fb)
+      }
+    }
+    Expr::Neg(x) => {
+      let fx = fold(x)
+      match as_num(fx) {
+        Some(n) => Expr::Num(-n)
+        None => Expr::Neg(fx)
+      }
+    }
+
+    Expr::Lt(a, b) => {
+      let fa = fold(a)
+      let fb = fold(b)
+      match as_num(fa) {
+        Some(x) => {
+          match as_num(fb) {
+            Some(y) => Expr::Bln(x < y)
+            None => Expr::Lt(Expr::Num(x), fb)
+          }
+        }
+        None => Expr::Lt(fa, fb)
+      }
+    }
+    Expr::Eq(a, b) => {
+      let fa = fold(a)
+      let fb = fold(b)
+      match as_num(fa) {
+        Some(x) => {
+          match as_num(fb) {
+            Some(y) => Expr::Bln(x == y)
+            None => Expr::Eq(Expr::Num(x), fb)
+          }
+        }
+        None => Expr::Eq(fa, fb)
+      }
+    }
+
+    Expr::And(a, b) => {
+      let fa = fold(a)
+      let fb = fold(b)
+      match as_bool(fa) {
+        Some(x) => {
+          if x { fb } else { Expr::Bln(false) }
+        }
+        None => Expr::And(fa, fb)
+      }
+    }
+    Expr::Or(a, b) => {
+      let fa = fold(a)
+      let fb = fold(b)
+      match as_bool(fa) {
+        Some(x) => {
+          if x { Expr::Bln(true) } else { fb }
+        }
+        None => Expr::Or(fa, fb)
+      }
+    }
+    Expr::Not(x) => {
+      let fx = fold(x)
+      match as_bool(fx) {
+        Some(b) => Expr::Bln(!b)
+        None => Expr::Not(fx)
+      }
+    }
+
+    Expr::Let { name, value, body } =>
+      Expr::Let { name: name, value: fold(value), body: fold(body) }
+    Expr::If { cond, then_branch, else_branch } => {
+      let fc = fold(cond)
+      match as_bool(fc) {
+        // Fold a constant condition away.
+        Some(c) => {
+          if c { fold(then_branch) } else { fold(else_branch) }
+        }
+        None => Expr::If {
+          cond: fc,
+          then_branch: fold(then_branch),
+          else_branch: fold(else_branch),
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Static type checker -- returns the Value's type as a string, or an error.
+// Demonstrates type-name extraction via match + guards.
+// ---------------------------------------------------------------------------
+
+enum Ty { TInt, TBool }
+
+fn ty_name(t: Ty) -> string {
+  match t {
+    Ty::TInt => "int"
+    Ty::TBool => "bool"
+  }
+}
+
+// We type-check WITHOUT an env model for variables (treat any Var as int --
+// a deliberate simplification documented here; the goal is exercising match,
+// not a full Hindley-Milner). Arithmetic requires int operands; comparisons
+// require int operands and yield bool; boolean ops require bool operands.
+fn type_of(e: Expr) -> Result<Ty> {
+  match e {
+    Expr::Num(_) => Ok(Ty::TInt)
+    Expr::Bln(_) => Ok(Ty::TBool)
+    Expr::Var(_) => Ok(Ty::TInt)
+    Expr::Add(a, b) => check_int_int_to_int(a, b)
+    Expr::Sub(a, b) => check_int_int_to_int(a, b)
+    Expr::Mul(a, b) => check_int_int_to_int(a, b)
+    Expr::Div(a, b) => check_int_int_to_int(a, b)
+    Expr::Neg(x) => {
+      match type_of(x)? {
+        Ty::TInt => Ok(Ty::TInt)
+        Ty::TBool => Err("neg expects int")
+      }
+    }
+    Expr::Lt(a, b) => check_int_int_to_bool(a, b)
+    Expr::Eq(a, b) => check_int_int_to_bool(a, b)
+    Expr::And(a, b) => check_bool_bool_to_bool(a, b)
+    Expr::Or(a, b) => check_bool_bool_to_bool(a, b)
+    Expr::Not(x) => {
+      match type_of(x)? {
+        Ty::TBool => Ok(Ty::TBool)
+        Ty::TInt => Err("not expects bool")
+      }
+    }
+    Expr::Let { name: _, value: _, body } => type_of(body)
+    Expr::If { cond, then_branch, else_branch } => {
+      match type_of(cond)? {
+        Ty::TInt => Err("if cond must be bool")
+        Ty::TBool => {
+          let tt = type_of(then_branch)?
+          let te = type_of(else_branch)?
+          // Branches must agree.
+          match tt {
+            Ty::TInt => {
+              match te {
+                Ty::TInt => Ok(Ty::TInt)
+                Ty::TBool => Err("if branches disagree")
+              }
+            }
+            Ty::TBool => {
+              match te {
+                Ty::TBool => Ok(Ty::TBool)
+                Ty::TInt => Err("if branches disagree")
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+fn check_int_int_to_int(a: Expr, b: Expr) -> Result<Ty> {
+  let ta = type_of(a)?
+  let tb = type_of(b)?
+  match ta {
+    Ty::TInt => {
+      match tb {
+        Ty::TInt => Ok(Ty::TInt)
+        Ty::TBool => Err("arith expects int operands")
+      }
+    }
+    Ty::TBool => Err("arith expects int operands")
+  }
+}
+
+fn check_int_int_to_bool(a: Expr, b: Expr) -> Result<Ty> {
+  let ta = type_of(a)?
+  let tb = type_of(b)?
+  match ta {
+    Ty::TInt => {
+      match tb {
+        Ty::TInt => Ok(Ty::TBool)
+        Ty::TBool => Err("compare expects int operands")
+      }
+    }
+    Ty::TBool => Err("compare expects int operands")
+  }
+}
+
+fn check_bool_bool_to_bool(a: Expr, b: Expr) -> Result<Ty> {
+  let ta = type_of(a)?
+  let tb = type_of(b)?
+  match ta {
+    Ty::TBool => {
+      match tb {
+        Ty::TBool => Ok(Ty::TBool)
+        Ty::TInt => Err("boolean op expects bool operands")
+      }
+    }
+    Ty::TInt => Err("boolean op expects bool operands")
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Test harness
+// ---------------------------------------------------------------------------
+
+// Mutable global pass/fail accounting threaded by hand. We avoid asserting via
+// a stdlib module (the chapter teaches no assert) and instead print a precise
+// CHECK_FAILED line on any mismatch.
+fn check_str(name: string, got: string, expected: string) -> bool {
+  if got == expected {
+    true
+  } else {
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    false
+  }
+}
+
+fn check_int(name: string, got: int, expected: int) -> bool {
+  if got == expected {
+    true
+  } else {
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+    false
+  }
+}
+
+fn check_bool(name: string, got: bool, expected: bool) -> bool {
+  if got == expected {
+    true
+  } else {
+    let g = if got { "true" } else { "false" }
+    let e = if expected { "true" } else { "false" }
+    print(f"CHECK_FAILED: {name} expected={e} got={g}")
+    false
+  }
+}
+
+// Evaluate an expr and render its result Value as a string, or "ERR:<msg>".
+fn eval_to_string(e: Expr) -> string {
+  match run(e) {
+    Ok(v) => value_to_string(v)
+    Err(m) => f"ERR:{m}"
+  }
+}
+
+// Render the type-check result as a string.
+fn type_to_string(e: Expr) -> string {
+  match type_of(e) {
+    Ok(t) => ty_name(t)
+    Err(m) => f"TYERR:{m}"
+  }
+}
+
+fn main() {
+  let mut all = true
+
+  // -- Section 1: leaf evaluation --------------------------------------------
+  // Num(7) -> 7 ; Bln(true) -> true. (book: leaf constructor match)
+  all = check_str("eval_num", eval_to_string(Expr::Num(7)), "7") && all
+  all = check_str("eval_bln", eval_to_string(Expr::Bln(true)), "true") && all
+
+  // -- Section 2: arithmetic --------------------------------------------------
+  // (+ 3 4) = 7
+  let e_add = Expr::Add(Expr::Num(3), Expr::Num(4))
+  all = check_str("eval_add", eval_to_string(e_add), "7") && all
+  // (- 10 3) = 7
+  all = check_str("eval_sub",
+    eval_to_string(Expr::Sub(Expr::Num(10), Expr::Num(3))), "7") && all
+  // (* 6 7) = 42
+  all = check_str("eval_mul",
+    eval_to_string(Expr::Mul(Expr::Num(6), Expr::Num(7))), "42") && all
+  // (/ 20 4) = 5  (integer division)
+  all = check_str("eval_div",
+    eval_to_string(Expr::Div(Expr::Num(20), Expr::Num(4))), "5") && all
+  // (/ 7 2) = 3   (integer truncation, documented int semantics)
+  all = check_str("eval_div_trunc",
+    eval_to_string(Expr::Div(Expr::Num(7), Expr::Num(2))), "3") && all
+  // (neg 5) = -5
+  all = check_str("eval_neg",
+    eval_to_string(Expr::Neg(Expr::Num(5))), "-5") && all
+  // (/ 1 0) -> error
+  all = check_str("eval_div0",
+    eval_to_string(Expr::Div(Expr::Num(1), Expr::Num(0))),
+    "ERR:division by zero") && all
+
+  // Nested: (+ 1 (* 2 (- 10 3))) = 1 + 2*7 = 15
+  let e_nested = Expr::Add(
+    Expr::Num(1),
+    Expr::Mul(Expr::Num(2), Expr::Sub(Expr::Num(10), Expr::Num(3))))
+  all = check_str("eval_nested", eval_to_string(e_nested), "15") && all
+
+  // -- Section 3: comparison + boolean ---------------------------------------
+  // (< 3 5) = true
+  all = check_str("eval_lt_true",
+    eval_to_string(Expr::Lt(Expr::Num(3), Expr::Num(5))), "true") && all
+  // (< 5 3) = false
+  all = check_str("eval_lt_false",
+    eval_to_string(Expr::Lt(Expr::Num(5), Expr::Num(3))), "false") && all
+  // (= 4 4) = true
+  all = check_str("eval_eq_true",
+    eval_to_string(Expr::Eq(Expr::Num(4), Expr::Num(4))), "true") && all
+  // (and true false) = false
+  all = check_str("eval_and",
+    eval_to_string(Expr::And(Expr::Bln(true), Expr::Bln(false))), "false") && all
+  // (or false true) = true
+  all = check_str("eval_or",
+    eval_to_string(Expr::Or(Expr::Bln(false), Expr::Bln(true))), "true") && all
+  // (not true) = false
+  all = check_str("eval_not",
+    eval_to_string(Expr::Not(Expr::Bln(true))), "false") && all
+
+  // Short-circuit: (and false <div-by-zero>) = false WITHOUT evaluating rhs.
+  // If short-circuit failed, the rhs would raise "division by zero".
+  let e_sc_and = Expr::And(
+    Expr::Bln(false),
+    Expr::Lt(Expr::Div(Expr::Num(1), Expr::Num(0)), Expr::Num(1)))
+  all = check_str("eval_and_shortcircuit", eval_to_string(e_sc_and), "false") && all
+  // (or true <div-by-zero>) = true WITHOUT evaluating rhs.
+  let e_sc_or = Expr::Or(
+    Expr::Bln(true),
+    Expr::Lt(Expr::Div(Expr::Num(1), Expr::Num(0)), Expr::Num(1)))
+  all = check_str("eval_or_shortcircuit", eval_to_string(e_sc_or), "true") && all
+
+  // -- Section 4: type-error propagation via ? -------------------------------
+  // (+ 1 true) -> type error from expect_int on the bool operand.
+  let e_type_err = Expr::Add(Expr::Num(1), Expr::Bln(true))
+  all = check_str("eval_type_err", eval_to_string(e_type_err),
+    "ERR:type error: expected int, got bool") && all
+  // (not 5) -> expect_bool error on int.
+  all = check_str("eval_not_int",
+    eval_to_string(Expr::Not(Expr::Num(5))),
+    "ERR:type error: expected bool, got int") && all
+
+  // -- Section 5: let-binding + variables ------------------------------------
+  // (let x 5 (+ x x)) = 10
+  let e_let = Expr::Let {
+    name: "x",
+    value: Expr::Num(5),
+    body: Expr::Add(Expr::Var("x"), Expr::Var("x")),
+  }
+  all = check_str("eval_let", eval_to_string(e_let), "10") && all
+
+  // Nested let / shadowing:
+  // (let x 1 (let x 2 (+ x x))) = 4  (inner x shadows outer)
+  let e_shadow = Expr::Let {
+    name: "x",
+    value: Expr::Num(1),
+    body: Expr::Let {
+      name: "x",
+      value: Expr::Num(2),
+      body: Expr::Add(Expr::Var("x"), Expr::Var("x")),
+    },
+  }
+  all = check_str("eval_shadow", eval_to_string(e_shadow), "4") && all
+
+  // Two bindings:
+  // (let a 3 (let b 4 (* a b))) = 12
+  let e_two = Expr::Let {
+    name: "a",
+    value: Expr::Num(3),
+    body: Expr::Let {
+      name: "b",
+      value: Expr::Num(4),
+      body: Expr::Mul(Expr::Var("a"), Expr::Var("b")),
+    },
+  }
+  all = check_str("eval_two_let", eval_to_string(e_two), "12") && all
+
+  // Unbound variable error.
+  all = check_str("eval_unbound",
+    eval_to_string(Expr::Var("ghost")), "ERR:unbound variable: ghost") && all
+
+  // -- Section 6: if/else -----------------------------------------------------
+  // (if (< 1 2) 100 200) = 100
+  let e_if_t = Expr::If {
+    cond: Expr::Lt(Expr::Num(1), Expr::Num(2)),
+    then_branch: Expr::Num(100),
+    else_branch: Expr::Num(200),
+  }
+  all = check_str("eval_if_then", eval_to_string(e_if_t), "100") && all
+  // (if (< 2 1) 100 200) = 200
+  let e_if_f = Expr::If {
+    cond: Expr::Lt(Expr::Num(2), Expr::Num(1)),
+    then_branch: Expr::Num(100),
+    else_branch: Expr::Num(200),
+  }
+  all = check_str("eval_if_else", eval_to_string(e_if_f), "200") && all
+  // if with non-bool cond -> error at eval (expect_bool on int)
+  let e_if_bad = Expr::If {
+    cond: Expr::Num(1),
+    then_branch: Expr::Num(0),
+    else_branch: Expr::Num(0),
+  }
+  all = check_str("eval_if_badcond", eval_to_string(e_if_bad),
+    "ERR:type error: expected bool, got int") && all
+
+  // -- Section 7: a bigger program -------------------------------------------
+  // (let n 6
+  //   (if (< n 10)
+  //       (* n (+ n 1))      ; 6*7 = 42
+  //       0))
+  let e_big = Expr::Let {
+    name: "n",
+    value: Expr::Num(6),
+    body: Expr::If {
+      cond: Expr::Lt(Expr::Var("n"), Expr::Num(10)),
+      then_branch: Expr::Mul(Expr::Var("n"),
+        Expr::Add(Expr::Var("n"), Expr::Num(1))),
+      else_branch: Expr::Num(0),
+    },
+  }
+  all = check_str("eval_big", eval_to_string(e_big), "42") && all
+
+  // -- Section 8: pretty-printer ---------------------------------------------
+  all = check_str("show_add", show(e_add), "(+ 3 4)") && all
+  all = check_str("show_nested", show(e_nested), "(+ 1 (* 2 (- 10 3)))") && all
+  all = check_str("show_let", show(e_let), "(let x 5 (+ x x))") && all
+  all = check_str("show_if",
+    show(e_if_t), "(if (< 1 2) 100 200)") && all
+  all = check_str("show_bln_true", show(Expr::Bln(true)), "#t") && all
+  all = check_str("show_neg", show(Expr::Neg(Expr::Num(5))), "(neg 5)") && all
+
+  // -- Section 9: structural analyzers ---------------------------------------
+  // node_count:
+  //   e_add = Add(Num,Num) -> 1 + 1 + 1 = 3
+  all = check_int("nc_add", node_count(e_add), 3) && all
+  //   e_nested = Add(Num, Mul(Num, Sub(Num,Num)))
+  //     Sub = 3 ; Mul = 1+1+3 = 5 ; Add = 1+1+5 = 7
+  all = check_int("nc_nested", node_count(e_nested), 7) && all
+  //   e_let = Let{ value=Num(1node), body=Add(Var,Var)=3nodes } -> 1+1+3 = 5
+  all = check_int("nc_let", node_count(e_let), 5) && all
+
+  // depth:
+  //   e_add: Add over two leaves -> 1 + max(1,1) = 2
+  all = check_int("depth_add", depth(e_add), 2) && all
+  //   e_nested: Sub depth 2 -> Mul depth 3 -> Add depth 4
+  all = check_int("depth_nested", depth(e_nested), 4) && all
+  //   e_big: Let{ value=Num d1 ; body=If{...} }
+  //     If cond Lt(Var,Num) d2 ; then Mul(Var, Add(Var,Num))
+  //       Add d2 ; Mul d3 ; else Num d1 ; If = 1+max(2,3,1)=4 ; Let=1+max(1,4)=5
+  all = check_int("depth_big", depth(e_big), 5) && all
+
+  // var_refs:
+  //   e_let body uses x twice -> 2
+  all = check_int("vr_let", var_refs(e_let), 2) && all
+  //   e_two: (* a b) -> 2 var refs
+  all = check_int("vr_two", var_refs(e_two), 2) && all
+  //   e_big: Lt(Var n) + Mul(Var n, Add(Var n,1)) -> n appears 3 times
+  all = check_int("vr_big", var_refs(e_big), 3) && all
+  //   e_add: no vars -> 0
+  all = check_int("vr_add", var_refs(e_add), 0) && all
+
+  // -- Section 10: constant folding ------------------------------------------
+  // fold((+ 3 4)) -> Num(7) ; show = "7"
+  all = check_str("fold_add", show(fold(e_add)), "7") && all
+  // fold((+ 1 (* 2 (- 10 3)))) -> 1 + 2*7 = 15 -> "15"
+  all = check_str("fold_nested", show(fold(e_nested)), "15") && all
+  // fold((< 3 5)) -> #t
+  all = check_str("fold_lt",
+    show(fold(Expr::Lt(Expr::Num(3), Expr::Num(5)))), "#t") && all
+  // fold((not (< 5 3))) -> not #f -> #t
+  all = check_str("fold_not_lt",
+    show(fold(Expr::Not(Expr::Lt(Expr::Num(5), Expr::Num(3))))), "#t") && all
+  // fold of a Var-containing expr keeps the var:
+  //   fold((+ x (* 2 3))) -> (+ x 6)
+  let e_partial = Expr::Add(Expr::Var("x"),
+    Expr::Mul(Expr::Num(2), Expr::Num(3)))
+  all = check_str("fold_partial", show(fold(e_partial)), "(+ x 6)") && all
+  // fold of (and true (< x 1)) -> (< x 1)  [and-true elimination]
+  let e_and_true = Expr::And(Expr::Bln(true),
+    Expr::Lt(Expr::Var("x"), Expr::Num(1)))
+  all = check_str("fold_and_true", show(fold(e_and_true)), "(< x 1)") && all
+  // fold of (and false anything) -> #f
+  let e_and_false = Expr::And(Expr::Bln(false),
+    Expr::Lt(Expr::Var("x"), Expr::Num(1)))
+  all = check_str("fold_and_false", show(fold(e_and_false)), "#f") && all
+  // fold of (or false e) -> e
+  let e_or_false = Expr::Or(Expr::Bln(false),
+    Expr::Lt(Expr::Var("y"), Expr::Num(1)))
+  all = check_str("fold_or_false", show(fold(e_or_false)), "(< y 1)") && all
+  // fold of (if true a b) -> a (const-cond elimination)
+  let e_if_const = Expr::If {
+    cond: Expr::Lt(Expr::Num(1), Expr::Num(2)),  // folds to #t
+    then_branch: Expr::Add(Expr::Var("x"), Expr::Num(0)),
+    else_branch: Expr::Num(999),
+  }
+  // then_branch folds to (+ x 0) (x is a Var so Add stays) -> "(+ x 0)"
+  all = check_str("fold_if_const", show(fold(e_if_const)), "(+ x 0)") && all
+
+  // Folding preserves evaluation result (semantic equivalence) on closed exprs.
+  // run(e_nested) == run(fold(e_nested))
+  all = check_str("fold_preserves_eval",
+    eval_to_string(fold(e_nested)), eval_to_string(e_nested)) && all
+  // fold reduces node count for closed arithmetic: nc(fold(e_nested)) == 1
+  all = check_int("fold_reduces_nc", node_count(fold(e_nested)), 1) && all
+
+  // div-by-zero is NOT folded (kept as a Div so runtime still errors).
+  let e_div0 = Expr::Div(Expr::Num(1), Expr::Num(0))
+  all = check_str("fold_div0_kept", show(fold(e_div0)), "(/ 1 0)") && all
+
+  // -- Section 11: static type checker ---------------------------------------
+  all = check_str("ty_num", type_to_string(Expr::Num(1)), "int") && all
+  all = check_str("ty_bln", type_to_string(Expr::Bln(true)), "bool") && all
+  all = check_str("ty_add", type_to_string(e_add), "int") && all
+  all = check_str("ty_lt",
+    type_to_string(Expr::Lt(Expr::Num(1), Expr::Num(2))), "bool") && all
+  all = check_str("ty_and",
+    type_to_string(Expr::And(Expr::Bln(true), Expr::Bln(false))), "bool") && all
+  // (+ 1 true) ill-typed
+  all = check_str("ty_add_bad", type_to_string(e_type_err),
+    "TYERR:arith expects int operands") && all
+  // (and 1 2) ill-typed
+  all = check_str("ty_and_bad",
+    type_to_string(Expr::And(Expr::Num(1), Expr::Num(2))),
+    "TYERR:boolean op expects bool operands") && all
+  // (if 1 ...) ill-typed cond
+  all = check_str("ty_if_badcond", type_to_string(e_if_bad),
+    "TYERR:if cond must be bool") && all
+  // if branches disagree: (if (<1 2) 1 true)
+  let e_if_disagree = Expr::If {
+    cond: Expr::Lt(Expr::Num(1), Expr::Num(2)),
+    then_branch: Expr::Num(1),
+    else_branch: Expr::Bln(true),
+  }
+  all = check_str("ty_if_disagree", type_to_string(e_if_disagree),
+    "TYERR:if branches disagree") && all
+  // well-typed if: (if (<1 2) 1 2) -> int
+  all = check_str("ty_if_ok",
+    type_to_string(Expr::If {
+      cond: Expr::Lt(Expr::Num(1), Expr::Num(2)),
+      then_branch: Expr::Num(1),
+      else_branch: Expr::Num(2),
+    }), "int") && all
+
+  // -- Section 12: env operations + Option matching --------------------------
+  let env0 = Env::Empty
+  let env1 = env_extend(env0, "a", Value::IntV(1))
+  let env2 = env_extend(env1, "b", Value::BoolV(true))
+  all = check_int("env_size", env_size(env2), 2) && all
+  // Option matching on lookup hits + misses
+  all = check_str("env_lookup_hit",
+    match env_lookup(env2, "a") {
+      Some(v) => value_to_string(v)
+      None => "MISS"
+    }, "1") && all
+  all = check_str("env_lookup_miss",
+    match env_lookup(env2, "zzz") {
+      Some(v) => value_to_string(v)
+      None => "MISS"
+    }, "MISS") && all
+  // shadowing in env: extend a again, newest wins
+  let env3 = env_extend(env2, "a", Value::IntV(99))
+  all = check_str("env_shadow_newest",
+    match env_lookup(env3, "a") {
+      Some(v) => value_to_string(v)
+      None => "MISS"
+    }, "99") && all
+
+  // -- Section 13: a small "program suite" round-trip ------------------------
+  // Build 5 closed integer programs, fold them, and assert fold == eval for
+  // each, plus the exact folded literal.
+  let p1 = Expr::Mul(Expr::Add(Expr::Num(2), Expr::Num(3)), Expr::Num(4)) // 20
+  let p2 = Expr::Sub(Expr::Num(100), Expr::Mul(Expr::Num(9), Expr::Num(9))) // 19
+  let p3 = Expr::Neg(Expr::Add(Expr::Num(8), Expr::Num(2))) // -10
+  let p4 = Expr::Div(Expr::Mul(Expr::Num(6), Expr::Num(7)), Expr::Num(2)) // 21
+  let p5 = Expr::Add(Expr::Num(1),
+    Expr::Add(Expr::Num(2),
+      Expr::Add(Expr::Num(3), Expr::Num(4)))) // 10
+  all = check_str("p1_fold", show(fold(p1)), "20") && all
+  all = check_str("p2_fold", show(fold(p2)), "19") && all
+  all = check_str("p3_fold", show(fold(p3)), "-10") && all
+  all = check_str("p4_fold", show(fold(p4)), "21") && all
+  all = check_str("p5_fold", show(fold(p5)), "10") && all
+  all = check_str("p1_eval", eval_to_string(p1), "20") && all
+  all = check_str("p2_eval", eval_to_string(p2), "19") && all
+  all = check_str("p3_eval", eval_to_string(p3), "-10") && all
+  all = check_str("p4_eval", eval_to_string(p4), "21") && all
+  all = check_str("p5_eval", eval_to_string(p5), "10") && all
+
+  // -- Final verdict ----------------------------------------------------------
+  if all {
+    print("ALL_CHECKS_PASSED")
+  }
+}
+
+main()

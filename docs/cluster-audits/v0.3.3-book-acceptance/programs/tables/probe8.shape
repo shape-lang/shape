@@ -1,0 +1,42 @@
+// Probe 8: forEach scalar extraction + orderBy ordering + head/tail/limit
+from std::core::queryable use { Queryable }
+
+type Event {
+  id: int,
+  value: number,
+  tag: string
+}
+
+impl Queryable for Table {
+    method filter(predicate) { self.filter(predicate) }
+    method orderBy(key_fn, direction) { self.orderBy(key_fn, direction) }
+    method limit(n) { self.limit(n) }
+    method head(n) { self.head(n) }
+    method tail(n) { self.tail(n) }
+    method count() { self.count() }
+    method forEach(f) { self.forEach(f) }
+    method execute() { self }
+}
+
+let events: Table<Event> =
+    [1, 50.0,  "alpha"],
+    [2, 75.5,  "beta"],
+    [3, 120.0, "gamma"]
+
+print("--- forEach original order ---")
+events.forEach(|row| print(f"{row.id}:{row.value}:{row.tag}"))
+
+print("--- orderBy value desc ---")
+events.orderBy(|row| row.value, "desc").forEach(|row| print(f"{row.id}:{row.value}"))
+
+print("--- orderBy value asc ---")
+events.orderBy(|row| row.value, "asc").forEach(|row| print(f"{row.id}:{row.value}"))
+
+print("--- head 2 ---")
+events.head(2).forEach(|row| print(f"{row.id}"))
+
+print("--- tail 2 ---")
+events.tail(2).forEach(|row| print(f"{row.id}"))
+
+print("--- limit 1 ---")
+events.limit(1).forEach(|row| print(f"{row.id}"))

@@ -1,0 +1,15 @@
+// Probe FQ: first-query.mdx examples (plain arrays)
+let values = [20, 21, 19, 24, 22]
+print(values[0])
+print(values[values.len() - 1])
+
+let samples = [10.0, 12.0, 11.0, 14.0, 13.0, 12.0]
+let total = samples.sum()
+let count = samples.len()
+let avg = total / (count as number)
+print(f"count={count}, total={total}, avg={avg}")
+
+let readings = [18, 22, 27, 19, 30, 25]
+let threshold = 24
+let high = readings.filter(|v| v > threshold)
+print(high)

@@ -1,0 +1,91 @@
+// small.shape — generics slice (functions.mdx + traits.mdx)
+// Exercises the chapter's runnable=true generic-shaped surface:
+//   - higher-order functions (apply f x)
+//   - closure inference from context (.map / .filter on Vec<int>)
+//   - closure-returning functions bound to a let (adder)
+//   - dyn Trait polymorphic dispatch over a homogeneous Vec
+//   - extend blocks adding methods to a type
+// Self-checking: each check prints CHECK_FAILED on mismatch; ALL_CHECKS_PASSED at end.
+
+fn check(name: string, got: int, want: int) -> bool {
+  if got == want {
+    true
+  } else {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    false
+  }
+}
+
+// --- higher-order function (book: Higher-Order Functions) ---
+fn apply(f, x) { f(x) }
+
+// --- closure-returning function bound to let (book: Returning a callable) ---
+fn adder(a) { |b| a + b }
+
+// --- extend block (book traits.mdx: Extend Blocks) ---
+type Point { x: int, y: int }
+extend Point {
+  method magnitude_sq() -> int { self.x * self.x + self.y * self.y }
+  method sum() -> int { self.x + self.y }
+}
+
+// --- dyn Trait polymorphism (book traits.mdx: Trait Objects) ---
+// NOTE: the book's dyn-Trait examples only ever call a method and print its
+// (string) result — `print(item.display())`. We mirror that exact shape and
+// collect string results. Doing arithmetic on an *int* return of a
+// dyn-dispatched method (`acc + it.method()`) is NOT shown in the book and is
+// a real HEAD defect (the dyn-method int return is type-erased to `unknown` /
+// surfaces "no method 'add' on receiver kind Int64"); see REPORT.md.
+trait Named {
+  fn label() -> string;
+}
+type User { name: string }
+impl Named for User {
+  method label() -> string { self.name }
+}
+fn concat_labels(items: Vec<dyn Named>) -> string {
+  let mut acc = ""
+  for it in items {
+    // BOOK-GAP: a dyn-method return is inferred as `unknown`; an explicit
+    // annotation is required to recover the trait-declared `-> string`.
+    let part: string = it.label()
+    acc = acc + part
+  }
+  acc
+}
+
+let mut all_ok = true
+
+// higher-order: double via lambda passed to apply
+let double = |x| x * 2
+all_ok = check("apply_double", apply(double, 21), 42) && all_ok
+
+// closure inference from context: map + filter over Vec<int>
+let nums: Vec<int> = [1, 2, 3, 4, 5, 6]
+let evens = nums.filter(|x| x % 2 == 0)
+all_ok = check("filter_evens_len", evens.len(), 3) && all_ok
+let tens = nums.map(|x| x * 10)
+all_ok = check("map_tens_first", tens[0], 10) && all_ok
+all_ok = check("map_tens_last", tens[5], 60) && all_ok
+
+// closure-returning function
+let plus100 = adder(100)
+all_ok = check("adder_apply", plus100(23), 123) && all_ok
+
+// extend block methods
+let p = Point { x: 3, y: 4 }
+all_ok = check("point_mag_sq", p.magnitude_sq(), 25) && all_ok
+all_ok = check("point_sum", p.sum(), 7) && all_ok
+
+// dyn Trait polymorphic dispatch — book shape: call method, use string result.
+// We assert via the concatenated string's length (an int) so the int `check`
+// helper still applies while keeping dyn usage to the book-demonstrated shape.
+let users: Vec<dyn Named> = [User { name: "Alice" }, User { name: "Bob" }, User { name: "Eve" }]
+let joined = concat_labels(users)        // "AliceBobEve"
+all_ok = check("dyn_joined_len", joined.len(), 11) && all_ok
+
+if all_ok {
+  print("ALL_CHECKS_PASSED")
+} else {
+  print("SOME_CHECKS_FAILED")
+}
