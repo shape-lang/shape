@@ -141,10 +141,23 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
         // item value (the W15.2-D `[1,2,3,4].reduce(|a,b| a+b)` VM=10
         // JIT=4 divergence). Sister-class to LANG-9-spin-3-first per
         // supervisor ratify 2026-05-19.
+        // Strict REAL-MOVE binding-slot classification (2026-06-21
+        // CloseFalseGreen). Priority: (1) an explicit type annotation that
+        // resolves to a concrete heap/scalar type (strongest signal — covers
+        // annotated fn-return heap binds `let p: Array<int> = foo()` that the
+        // expr classifier cannot prove); then (2) builder-aware expr inference
+        // (literal heap ctors → NonCopy; identifier-sourced binds propagate
+        // the source binding's classification so `let p = a` inherits `a`'s
+        // heap-ness while a scalar `let p = i` stays Copy).
         let type_info = decl
-            .value
+            .type_annotation
             .as_ref()
-            .map(infer_local_type_from_expr)
+            .and_then(local_type_from_annotation)
+            .or_else(|| {
+                decl.value
+                    .as_ref()
+                    .map(|init_expr| infer_local_type_from_expr_with_builder(builder, init_expr))
+            })
             .unwrap_or(LocalTypeInfo::Unknown);
         // Allocate the slot WITHOUT registering the name. The name
         // resolution stays on the OUTER binding (if any) until after the
@@ -314,7 +327,7 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
     }
 
     let source_place = decl.value.as_ref().map(|init_expr| {
-        let type_info = infer_local_type_from_expr(init_expr);
+        let type_info = infer_local_type_from_expr_with_builder(builder, init_expr);
         let source_slot = builder.alloc_temp(type_info);
         let operand = match decl.ownership {
             ast::OwnershipModifier::Move => lower_expr_to_explicit_move_operand(builder, init_expr),

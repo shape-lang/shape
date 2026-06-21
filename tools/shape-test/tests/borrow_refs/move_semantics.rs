@@ -136,3 +136,103 @@ fn fstring_read_does_not_move_binding() {
     )
     .expect_output_contains("hi\nhi");
 }
+
+// --- Identifier-sourced moves (CloseFalseGreen 2026-06-21) -------------------
+//
+// A `let p = a` bind whose initializer is a bare IDENTIFIER (not a heap
+// literal) used to type `p` as `LocalTypeInfo::Unknown` — so a transitive
+// `let q = p` was kept as a non-consuming Clone and reading the moved-from `p`
+// was SILENTLY NOT caught (rc=0). `infer_local_type_from_expr_with_builder`
+// now propagates the source binding's classification, so an identifier-sourced
+// HEAP rebind moves (B0005) while a SCALAR identifier-sourced rebind stays
+// Copy. See `crates/shape-vm/src/mir/lowering/helpers.rs`.
+
+#[test]
+fn use_after_move_array_identifier_sourced_is_compile_error() {
+    // `let p = a` (identifier source) then `let q = p` moves the array out of
+    // `p`; `print(p)` reads moved-from `p`.
+    ShapeTest::new(
+        r#"
+        let a = [1, 2, 3]
+        let p = a
+        let q = p
+        print(p)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn use_after_move_struct_identifier_sourced_is_compile_error() {
+    ShapeTest::new(
+        r#"
+        type P { x: int }
+        let a = P { x: 1 }
+        let p = a
+        let q = p
+        print(p.x)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn use_after_move_string_identifier_sourced_is_compile_error() {
+    ShapeTest::new(
+        r#"
+        let s = "hello"
+        let p = s
+        let q = p
+        print(p)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn use_after_move_annotated_fn_return_heap_is_compile_error() {
+    // An annotated heap-returning bind classifies the slot NonCopy even though
+    // the fn-call initializer is not a literal — `let q = p` moves, `print(p)`
+    // reads moved-from.
+    ShapeTest::new(
+        r#"
+        fn foo() -> Array<int> { [1, 2, 3] }
+        let p: Array<int> = foo()
+        let q = p
+        print(p)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn scalar_identifier_sourced_rebind_stays_copy() {
+    // `let p = x` (identifier source, SCALAR) must NOT move — a transitive
+    // `let q = p` then `print(p)` must still work (no spurious B0005).
+    ShapeTest::new(
+        r#"
+        let x = 5
+        let p = x
+        let q = p
+        print(p)
+    "#,
+    )
+    .expect_output_contains("5");
+}
+
+#[test]
+fn scalar_identifier_sourced_rebind_reused_no_false_move() {
+    // The scalar source `x` flows through two identifier rebinds and is still
+    // read at the end — none of these are moves.
+    ShapeTest::new(
+        r#"
+        let x = 10
+        let a = x
+        let b = a
+        print(a)
+        print(b)
+        print(x)
+    "#,
+    )
+    .expect_output_contains("10\n10\n10");
+}

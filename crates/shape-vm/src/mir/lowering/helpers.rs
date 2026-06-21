@@ -291,6 +291,86 @@ pub(super) fn infer_local_type_from_expr(expr: &Expr) -> LocalTypeInfo {
     }
 }
 
+/// Classify a binding's `LocalTypeInfo` from its explicit type annotation
+/// (strict REAL-MOVE close, 2026-06-21 CloseFalseGreen). When a let binding
+/// carries an annotation that resolves to a concrete heap type (Array /
+/// HashMap / Option / Result / String / Decimal / BigInt / DateTime) the slot
+/// is `NonCopy`; a scalar annotation (int/number/bool/width-ints) is `Copy`.
+///
+/// This is the strongest available signal at the MIR-lowering layer, which
+/// does NOT thread function-return-type info. It lets an annotated
+/// heap-returning bind (`let p: Array<int> = foo()`) classify `p` as `NonCopy`
+/// so a later `let q = p; print(p)` fires B0005. Returns `None` when there is
+/// no annotation or it does not resolve to a concrete type (e.g. an unknown
+/// user-struct name — handled separately by the StructLiteral arm / identifier
+/// propagation).
+pub(super) fn local_type_from_annotation(
+    annotation: &shape_ast::ast::TypeAnnotation,
+) -> Option<LocalTypeInfo> {
+    use shape_value::v2::ConcreteType;
+    let ct = crate::compiler::v2_map_emission::concrete_type_from_annotation(annotation)?;
+    Some(match ct {
+        // Scalar / register-resident proven Copy types.
+        ConcreteType::I8
+        | ConcreteType::I16
+        | ConcreteType::I32
+        | ConcreteType::I64
+        | ConcreteType::U8
+        | ConcreteType::U16
+        | ConcreteType::U32
+        | ConcreteType::U64
+        | ConcreteType::F64
+        | ConcreteType::Bool
+        | ConcreteType::Void => LocalTypeInfo::Copy,
+        // Everything else is a heap-resident value (Array / HashMap / Option /
+        // Result / String / Decimal / BigInt / DateTime / struct / ...) — a
+        // real MOVE on rebind.
+        _ => LocalTypeInfo::NonCopy,
+    })
+}
+
+/// Builder-aware binding-slot type inference (strict REAL-MOVE close,
+/// 2026-06-21 CloseFalseGreen). Extends `infer_local_type_from_expr` by
+/// propagating the SOURCE binding's classification through an
+/// identifier-sourced rebind (`let q = p`).
+///
+/// The literal-only `infer_local_type_from_expr` returns `Unknown` for an
+/// `Expr::Identifier` source, because the expression node alone cannot tell a
+/// heap binding (`let p = a` where `a: Array`) from a scalar binding (`let p =
+/// i` where `i: int` — e.g. a loop var). That left heap use-after-move
+/// SILENTLY uncaught when the moved-from binding was identifier-sourced: the
+/// rebind slot stayed `Unknown`, the solver kept it as a non-consuming Clone
+/// (solver.rs Unknown arm, deliberately conservative to never move SCALARS),
+/// so `let a=[1,2,3]; let p=a; let q=p; print(p)` ran instead of raising
+/// B0005.
+///
+/// Fix (preferred option A): when the source is a bare identifier, look up the
+/// source binding's recorded `LocalTypeInfo` and propagate it. A `NonCopy`
+/// (proven heap: Array/Object/struct/string/...) source makes the rebind
+/// `NonCopy`, so the existing solver `NonCopy` arm MOVEs it and the later read
+/// of the moved-from source fires B0005 — regardless of whether the heap value
+/// itself came from a literal, a prior move, or a fn return (the source
+/// binding was already classified `NonCopy` at ITS own bind site). A `Copy`
+/// (proven scalar: int/number/bool) source keeps the rebind `Copy`, so
+/// scalars never move and `add(x, x)` / `let p = x` scalar temps are never
+/// false-flipped. An `Unknown` source (genuinely unproven) stays `Unknown` —
+/// the conservative non-consuming Clone — preserving scalar safety for the
+/// unproven case.
+pub(super) fn infer_local_type_from_expr_with_builder(
+    builder: &MirBuilder,
+    expr: &Expr,
+) -> LocalTypeInfo {
+    if let Expr::Identifier(name, _) = expr {
+        if let Some(src_slot) = builder.lookup_local(name) {
+            return builder.slot_type_info(src_slot);
+        }
+        // Unresolved identifier (e.g. a global / not-yet-bound name) — fall
+        // through to the literal-only classifier (yields Unknown), keeping the
+        // conservative non-consuming path.
+    }
+    infer_local_type_from_expr(expr)
+}
+
 pub(super) fn lower_binary_op(op: ast::BinaryOp) -> Option<BinOp> {
     match op {
         ast::BinaryOp::Add => Some(BinOp::Add),

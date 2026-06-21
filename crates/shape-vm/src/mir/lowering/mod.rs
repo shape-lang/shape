@@ -403,6 +403,19 @@ impl MirBuilder {
         self.local_slots.get(name).copied()
     }
 
+    /// Read the recorded `LocalTypeInfo` for a slot. Used by
+    /// `infer_local_type_from_expr_with_builder` to propagate a source
+    /// binding's Copy/NonCopy classification through an identifier-sourced
+    /// rebind (`let q = p`) so a heap move (`p: NonCopy`) is tracked as a real
+    /// MOVE while a scalar (`p: Copy`) stays Copy. Returns `Unknown` when the
+    /// slot has no record (e.g. out of range).
+    pub(super) fn slot_type_info(&self, slot: SlotId) -> LocalTypeInfo {
+        self.locals
+            .get(slot.0 as usize)
+            .map(|l| l.type_info.clone())
+            .unwrap_or(LocalTypeInfo::Unknown)
+    }
+
     pub fn visible_named_locals(&self) -> Vec<String> {
         self.local_slots
             .keys()
