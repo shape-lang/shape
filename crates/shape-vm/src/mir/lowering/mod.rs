@@ -138,6 +138,16 @@ pub struct MirBuilder {
     /// annotation resolves to `i8`/`i16`/`i32`/`u8`/`u16`/`u32`. Threaded
     /// into `MirFunction.local_declared_scalar_types`.
     local_declared_scalar_types: HashMap<SlotId, shape_value::v2::ConcreteType>,
+    /// Function-name → return-type `LocalTypeInfo` classification, seeded by
+    /// the compiler from the type-checked function registry (strict REAL-MOVE
+    /// close H1, 2026-06-21). Lets a `let p = mk()` binding sourced from a
+    /// fn-call classify its slot from `mk`'s declared/inferred return type
+    /// (heap ConcreteType → NonCopy → Move + B0005; scalar → Copy) instead of
+    /// the literal-only `Unknown` fallthrough. The MIR layer does not itself
+    /// run inference, so the compiler surfaces the already-type-checked return
+    /// classification here. Empty when lowering is invoked without a seed
+    /// (e.g. unit tests) — those binds keep the conservative `Unknown` path.
+    fn_return_types: HashMap<String, LocalTypeInfo>,
 }
 
 #[derive(Debug)]
@@ -194,7 +204,23 @@ impl MirBuilder {
             local_struct_type_names: HashMap::new(),
             local_typed_array_element_types: HashMap::new(),
             local_declared_scalar_types: HashMap::new(),
+            fn_return_types: HashMap::new(),
         }
+    }
+
+    /// Seed the function-name → return-type classification map (strict
+    /// REAL-MOVE close H1, 2026-06-21). Called by the compiler before lowering
+    /// a function body, with the type-checked return-type `LocalTypeInfo` for
+    /// every function in scope. Consumed by `infer_local_type_from_expr_with_
+    /// builder`'s `FunctionCall` arm so a fn-return-sourced bind classifies
+    /// correctly without the MIR layer re-running inference.
+    pub fn seed_fn_return_types(&mut self, map: HashMap<String, LocalTypeInfo>) {
+        self.fn_return_types = map;
+    }
+
+    /// Look up a function's return-type classification, if seeded.
+    pub(super) fn fn_return_type_info(&self, name: &str) -> Option<LocalTypeInfo> {
+        self.fn_return_types.get(name).copied()
     }
 
     /// Record the user-struct type name for a slot produced by an
@@ -713,7 +739,24 @@ pub fn lower_function_detailed(
     body: &[Statement],
     span: Span,
 ) -> MirLoweringResult {
+    lower_function_detailed_with_returns(name, params, body, span, HashMap::new())
+}
+
+/// As [`lower_function_detailed`], but seeds the function-name → return-type
+/// `LocalTypeInfo` map (strict REAL-MOVE close H1, 2026-06-21) so a
+/// fn-return-sourced binding (`let p = mk()`) classifies its slot from the
+/// callee's type-checked return type. The compiler builds the map from its
+/// type-checked function registry; tests use the empty-map
+/// `lower_function_detailed`.
+pub fn lower_function_detailed_with_returns(
+    name: &str,
+    params: &[ast::FunctionParameter],
+    body: &[Statement],
+    span: Span,
+    fn_return_types: HashMap<String, LocalTypeInfo>,
+) -> MirLoweringResult {
     let mut builder = MirBuilder::new(name.to_string(), span);
+    builder.seed_fn_return_types(fn_return_types);
 
     // Register parameters
     for param in params {
@@ -825,6 +868,65 @@ pub fn lower_function(
     span: Span,
 ) -> MirFunction {
     lower_function_detailed(name, params, body, span).mir
+}
+
+/// Classify a function's RETURN type annotation into a `LocalTypeInfo`
+/// (strict REAL-MOVE close H1, 2026-06-21). Used by the compiler to build the
+/// `fn_return_types` seed passed to [`lower_function_detailed_with_returns`]:
+/// a heap return type (string / struct / Array / HashMap / Option / Result /
+/// ...) classifies `NonCopy` so a `let p = mk()` bind moves on rebind; a
+/// scalar return (int/number/bool/width-ints) classifies `Copy`.
+///
+/// Unlike the binding-site `local_type_from_annotation` (which only classifies
+/// types that resolve via `concrete_type_from_annotation` and returns `None`
+/// for unknown names), a RETURN annotation that names an unresolved type is a
+/// user-defined struct/enum return (`fn mk() -> P`) — under the strict
+/// REAL-MOVE model a user struct is a HEAP value, so it classifies `NonCopy`.
+/// This closes the unannotated-struct-fn-return false-green (`fn mk()->P{..}
+/// let p=mk() let q=p p.x` ran instead of B0005).
+///
+/// `generic_params` is the function's own declared generic type-parameter
+/// names (`fn id<T>(x: T) -> T` ⇒ `{"T"}`). A return type whose name IS a
+/// generic param is deliberately NOT seeded (returns `None`) — a generic
+/// return could instantiate to a scalar, so classifying it `NonCopy` would
+/// false-flip a scalar instantiation. The generic case stays on the
+/// conservative non-consuming path. Unlike a fragile single-letter heuristic,
+/// this uses the function's REAL type-param set, so a concrete one-letter
+/// struct name (`type P { .. }`) still classifies as the heap `NonCopy`.
+pub fn classify_return_annotation(
+    annotation: &shape_ast::ast::TypeAnnotation,
+    generic_params: &std::collections::HashSet<String>,
+) -> Option<LocalTypeInfo> {
+    use shape_ast::ast::TypeAnnotation;
+    // First try the precise resolver (scalar → Copy, resolvable heap → NonCopy).
+    if let Some(info) = helpers::local_type_from_annotation(annotation) {
+        return Some(info);
+    }
+    // The resolver returned `None`. For a RETURN type, an unresolved *named*
+    // type that is not one of the function's generic type-parameters is a
+    // concrete user struct/enum → a heap value → `NonCopy`. A bare generic
+    // param is left unseeded.
+    match annotation {
+        TypeAnnotation::Basic(name) => {
+            if generic_params.contains(name) {
+                None
+            } else {
+                Some(LocalTypeInfo::NonCopy)
+            }
+        }
+        TypeAnnotation::Reference(path) => {
+            let name = path.to_string();
+            if generic_params.contains(&name) {
+                None
+            } else {
+                Some(LocalTypeInfo::NonCopy)
+            }
+        }
+        // A generic application that did not resolve above (e.g. a user generic
+        // type `Box<T>` / `MyWrapper<int>`) is still a heap value → `NonCopy`.
+        TypeAnnotation::Generic { .. } => Some(LocalTypeInfo::NonCopy),
+        _ => None,
+    }
 }
 
 pub fn compute_mutability_errors(lowering: &MirLoweringResult) -> Vec<MutabilityError> {

@@ -398,7 +398,9 @@ fn append_kept_slots(
 /// heap-slot's bits are recovered BY KIND from the source's
 /// `field_kinds[i]` parallel-kind track — never via `as_heap_value()` on
 /// a v2-raw flat carrier, never via raw-bit reinterpretation.
-fn deep_clone_typed_object(src: &TypedObjectStorage) -> *mut TypedObjectStorage {
+fn deep_clone_typed_object(
+    src: &TypedObjectStorage,
+) -> Result<*mut TypedObjectStorage, VMError> {
     let n = src.slots.len();
     let src_mask = src.heap_mask;
     let src_kinds = &src.field_kinds;
@@ -407,15 +409,39 @@ fn deep_clone_typed_object(src: &TypedObjectStorage) -> *mut TypedObjectStorage 
 
     for i in 0..n {
         let bits = src.slots[i].raw();
-        let kind = src_kinds.get(i).copied().unwrap_or(NativeKind::Bool);
         let is_heap_slot = i < 64 && (src_mask & (1u64 << i) != 0);
 
         if !is_heap_slot || bits == 0 {
             // Scalar field (or null heap slot): bit-copy verbatim. No
-            // share owed; scalars STAY COPY.
+            // share owed; scalars STAY COPY. The slot's kind is irrelevant
+            // here (the raw `u64` is copied as-is), so a missing kind entry
+            // is harmless for non-heap slots — only the live-heap-pointer
+            // arms below dispatch on `kind`.
             new_slots.push(src.slots[i]);
             continue;
         }
+
+        // SURFACE-AND-STOP (CLAUDE.md §Forbidden / ADR-006 §2.7.7): a live
+        // heap-mask slot MUST carry a real per-slot kind from the source's
+        // parallel-kind track. There is NO Bool-default — fabricating a
+        // kind for a heap pointer would mis-dispatch the deep-clone (e.g.
+        // treat a String pointer as a Bool scalar → leak / UAF). If the
+        // kind track is short of the slot count for a heap slot, the
+        // construction-side invariant is broken; refuse rather than guess.
+        let kind = match src_kinds.get(i).copied() {
+            Some(k) => k,
+            None => {
+                return Err(VMError::NotImplemented(format!(
+                    "SURFACE: deep_clone_typed_object: heap-mask slot {} (schema {}) \
+                     has no entry in the source field_kinds parallel-kind track \
+                     (len {}); cannot recover the slot's kind without fabricating \
+                     a Bool-default. Construction-side kind-track invariant broken.",
+                    i,
+                    src.schema_id,
+                    src_kinds.len(),
+                )));
+            }
+        };
 
         match kind {
             // Nested struct: recursive deep clone — the cloned slot owns a
@@ -427,7 +453,7 @@ fn deep_clone_typed_object(src: &TypedObjectStorage) -> *mut TypedObjectStorage 
                 // carrier) per the construction-side contract.
                 let nested: &TypedObjectStorage =
                     unsafe { &*(bits as *const TypedObjectStorage) };
-                let cloned_ptr = deep_clone_typed_object(nested);
+                let cloned_ptr = deep_clone_typed_object(nested)?;
                 new_slots.push(ValueSlot::from_u64(cloned_ptr as u64));
             }
             // Nested array: deep clone via `clone_array` — fresh array
@@ -466,12 +492,12 @@ fn deep_clone_typed_object(src: &TypedObjectStorage) -> *mut TypedObjectStorage 
         }
     }
 
-    TypedObjectStorage::_new(
+    Ok(TypedObjectStorage::_new(
         src.schema_id,
         new_slots.into_boxed_slice(),
         src_mask,
         Arc::clone(src_kinds),
-    )
+    ))
 }
 
 /// `obj.clone()` MethodFnV2 handler — deep-clone a TypedObject receiver.
@@ -501,7 +527,7 @@ pub(crate) fn handle_clone_typed_object(
             // dispatch shell holds one share for the call duration). We
             // borrow it read-only.
             let src: &TypedObjectStorage = unsafe { &*(bits as *const TypedObjectStorage) };
-            let cloned_ptr = deep_clone_typed_object(src);
+            let cloned_ptr = deep_clone_typed_object(src)?;
             Ok(KindedSlot::from_typed_object_raw(cloned_ptr))
         }
         _ => Err(VMError::RuntimeError(format!(

@@ -777,11 +777,13 @@ impl BytecodeCompiler {
             param.is_mut_reference = pass_mode.is_exclusive();
         }
 
-        let lowering = crate::mir::lowering::lower_function_detailed(
+        let fn_return_types = self.build_fn_return_type_seed();
+        let lowering = crate::mir::lowering::lower_function_detailed_with_returns(
             "__callable_expr__",
             &effective_params,
             body,
             span,
+            fn_return_types,
         );
         if lowering.had_fallbacks {
             return None;

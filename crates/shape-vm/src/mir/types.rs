@@ -809,7 +809,7 @@ pub struct MirFunction {
 }
 
 /// Type information for a local variable, used for Copy/Clone inference.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalTypeInfo {
     /// Primitive (int, number, bool, none) — implicitly Copy, no borrow tracking.
     Copy,

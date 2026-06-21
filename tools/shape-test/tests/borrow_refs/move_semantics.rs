@@ -236,3 +236,141 @@ fn scalar_identifier_sourced_rebind_reused_no_false_move() {
     )
     .expect_output_contains("10\n10\n10");
 }
+
+// =============================================================================
+// H1 — UNANNOTATED fn-return-sourced moves (strict REAL-MOVE close, 2026-06-21)
+//
+// `let p = mk()` where `mk` has a HEAP return type classifies `p` NonCopy via
+// the compiler's `fn_return_types` seed (built from the type-checked function
+// registry), even WITHOUT a binding annotation. A later `let q = p; <read p>`
+// then moves and fires B0005. The MIR layer does not run inference; the seed is
+// how the already-type-checked return type reaches the binding-classification
+// site.
+// =============================================================================
+
+#[test]
+fn use_after_move_unannotated_fn_return_string_is_compile_error() {
+    // `fn mk()->string` — heap string return; unannotated `let p = mk()`.
+    ShapeTest::new(
+        r#"
+        fn mk() -> string { "hi" }
+        let p = mk()
+        let q = p
+        print(p)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn use_after_move_unannotated_fn_return_struct_is_compile_error() {
+    // `fn mk()->P` — user-struct (heap) return; unannotated `let p = mk()`.
+    // The struct return name `P` resolves via the unknown-named-type → NonCopy
+    // arm of `classify_return_annotation` (NOT a generic param).
+    ShapeTest::new(
+        r#"
+        type P { x: int }
+        fn mk() -> P { P { x: 1 } }
+        let p = mk()
+        let q = p
+        print(p.x)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn scalar_unannotated_fn_return_rebind_stays_copy() {
+    // `fn mk()->int` — scalar return classifies the bind Copy; `let q = p` then
+    // `print(p + q)` must NOT be a move (no spurious B0005).
+    ShapeTest::new(
+        r#"
+        fn mk() -> int { 42 }
+        let p = mk()
+        let q = p
+        print(p + q)
+    "#,
+    )
+    .expect_output_contains("84");
+}
+
+#[test]
+fn generic_fn_return_scalar_instantiation_not_flipped() {
+    // A generic return `fn id<T>(x: T) -> T` is NOT seeded NonCopy (a generic
+    // could instantiate to a scalar). The scalar instantiation `let n = id(5)`
+    // stays Copy and a later rebind+read must not false-flip.
+    ShapeTest::new(
+        r#"
+        fn id<T>(x: T) -> T { x }
+        let n = id(5)
+        let m = n
+        print(n + m)
+    "#,
+    )
+    .expect_output_contains("10");
+}
+
+// =============================================================================
+// H2 — cross-block / nested-scope moves (strict REAL-MOVE close, 2026-06-21)
+//
+// A move consuming an OUTER binding inside a nested block marks the outer
+// binding moved at block exit. The move-error dataflow merges predecessor
+// out-states by MAY-MOVE union (a value moved on ANY path is moved at the
+// join), so the nested-block move propagates out to the outer read. The prior
+// must-move intersection dropped it (false-green).
+// =============================================================================
+
+#[test]
+fn use_after_move_array_in_nested_block_outer_read_is_compile_error() {
+    // `let q = p` inside the `if` block moves the OUTER `p`; `print(p)` after
+    // the block reads moved-from.
+    ShapeTest::new(
+        r#"
+        let p = [1, 2, 3]
+        if true { let q = p }
+        print(p)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn use_after_move_struct_in_nested_block_outer_read_is_compile_error() {
+    ShapeTest::new(
+        r#"
+        type P { x: int }
+        let p = P { x: 1 }
+        if true { let q = p }
+        print(p.x)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn scalar_in_nested_block_outer_read_stays_copy() {
+    // A SCALAR consumed by a nested-block rebind is COPIED, not moved — the
+    // outer read must still work (no spurious cross-block B0005).
+    ShapeTest::new(
+        r#"
+        let x = 5
+        if true { let y = x }
+        print(x + 1)
+    "#,
+    )
+    .expect_output_contains("6");
+}
+
+#[test]
+fn read_on_both_branches_no_move_no_false_error() {
+    // Reading (not moving) `p` on both branches is a BORROW on each path; the
+    // may-move union must not turn a non-consuming read into a move.
+    ShapeTest::new(
+        r#"
+        let p = [1, 2, 3]
+        if true { print(p) } else { print(p) }
+        print(p)
+    "#,
+    )
+    .expect_output_contains("[1, 2, 3]");
+}

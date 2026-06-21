@@ -368,6 +368,24 @@ pub(super) fn infer_local_type_from_expr_with_builder(
         // through to the literal-only classifier (yields Unknown), keeping the
         // conservative non-consuming path.
     }
+    // Strict REAL-MOVE close H1 (2026-06-21): a `let p = mk()` bind sourced
+    // from a direct function call classifies its slot from the callee's
+    // type-checked RETURN type. The MIR layer does not itself run inference,
+    // so the compiler seeds `fn_return_types` from its type-checked function
+    // registry; here we look the call target up by name. A heap return type
+    // (string / struct / Array / HashMap / Option / ...) makes the bind
+    // `NonCopy`, so the existing solver `NonCopy` arm MOVEs it and a later read
+    // of the moved-from `p` fires B0005 — closing the unannotated fn-return
+    // false-green (`fn mk()->string{"hi"} let p=mk() let q=p print(p)`). A
+    // scalar return (int/number/bool) keeps the bind `Copy`. A call whose
+    // target is not in the seed (closure value, builtin without a recorded
+    // return classification) stays unclassified → falls through to the
+    // conservative literal-only path. We never fabricate a classification.
+    if let Expr::FunctionCall { name, .. } = expr {
+        if let Some(info) = builder.fn_return_type_info(name) {
+            return info;
+        }
+    }
     infer_local_type_from_expr(expr)
 }
 

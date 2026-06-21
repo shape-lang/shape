@@ -50,6 +50,42 @@ pub(crate) fn diagnostic_to_shape_error(diag: &shape_diagnostics::Diagnostic) ->
 }
 
 impl BytecodeCompiler {
+    /// Build the function-name → return-type `LocalTypeInfo` seed for MIR
+    /// lowering (strict REAL-MOVE close H1, 2026-06-21). Walks the type-checked
+    /// function registry (`self.function_defs`) and classifies each function's
+    /// declared return-type annotation: a heap return (string / struct / Array
+    /// / HashMap / Option / Result / ...) → `NonCopy`, a scalar return → `Copy`.
+    /// Functions with no return annotation, or one that does not resolve to a
+    /// concrete type, are omitted — those callees stay on the conservative
+    /// non-consuming path (no fabricated classification). Consumed by
+    /// `infer_local_type_from_expr_with_builder`'s `FunctionCall` arm so a
+    /// `let p = mk()` bind sourced from a fn call classifies from `mk`'s return
+    /// type, closing the unannotated-fn-return use-after-move false-green.
+    pub(super) fn build_fn_return_type_seed(
+        &self,
+    ) -> HashMap<String, crate::mir::types::LocalTypeInfo> {
+        let mut map = HashMap::new();
+        for (name, def) in &self.function_defs {
+            if let Some(annotation) = def.return_type.as_ref() {
+                // The function's own declared generic type-param names — a
+                // return type naming one of these is a generic return (could
+                // instantiate to a scalar), so it is left unseeded rather than
+                // classified `NonCopy`.
+                let generic_params: std::collections::HashSet<String> = def
+                    .type_params
+                    .as_ref()
+                    .map(|tps| tps.iter().map(|tp| tp.name().to_string()).collect())
+                    .unwrap_or_default();
+                if let Some(info) =
+                    crate::mir::lowering::classify_return_annotation(annotation, &generic_params)
+                {
+                    map.insert(name.clone(), info);
+                }
+            }
+        }
+        map
+    }
+
     pub(super) fn explicit_param_pass_modes(
         params: &[shape_ast::ast::FunctionParameter],
     ) -> Vec<ParamPassMode> {
@@ -396,11 +432,13 @@ impl BytecodeCompiler {
         // lowering (no fallbacks). When authoritative, the lexical borrow checker
         // calls in helpers.rs are skipped. For functions where MIR lowering had
         // fallbacks, the lexical checker remains the active fallback.
-        let mir_lowering = crate::mir::lowering::lower_function_detailed(
+        let fn_return_types = self.build_fn_return_type_seed();
+        let mir_lowering = crate::mir::lowering::lower_function_detailed_with_returns(
             &effective_def.name,
             &effective_def.params,
             &effective_def.body,
             effective_def.name_span,
+            fn_return_types,
         );
         let callee_summaries =
             self.build_callee_summaries(Some(&effective_def.name), &mir_lowering.all_local_names);
@@ -1175,11 +1213,13 @@ impl BytecodeCompiler {
             return Ok(());
         }
 
-        let lowering = crate::mir::lowering::lower_function_detailed(
+        let fn_return_types = self.build_fn_return_type_seed();
+        let lowering = crate::mir::lowering::lower_function_detailed_with_returns(
             context_name,
             &[],
             &body,
             Self::synthetic_item_sequence_span(items),
+            fn_return_types,
         );
         let callee_summaries = self.build_callee_summaries(None, &lowering.all_local_names);
         let mut analysis = crate::mir::solver::analyze(&lowering.mir, &callee_summaries);

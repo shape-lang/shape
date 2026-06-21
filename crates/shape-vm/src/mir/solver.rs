@@ -1836,17 +1836,26 @@ fn compute_use_after_move_errors(
     while changed {
         changed = false;
         for &block_id in &cfg.reverse_postorder() {
-            let mut block_in: Option<HashMap<Place, shape_ast::ast::Span>> = None;
+            // MAY-MOVE merge (strict REAL-MOVE close H2, 2026-06-21): a value
+            // moved on ANY incoming path is moved at the join. `let p=[1,2,3];
+            // if c { let q=p } print(p)` moves `p` on the then-path; the join
+            // before `print(p)` must keep `p` in the moved-set even though the
+            // fallthrough path did not move it — reading a MAYBE-moved value is
+            // a use-after-move (mirrors Rust's borrow-check direction).
+            //
+            // This is the UNION of predecessor out-states (not the previous
+            // intersection / must-move, which silently dropped a value moved on
+            // only one branch and let the later read run — the H2 false-green).
+            // Earliest move span wins so the diagnostic points at the first
+            // consuming move. `if true` still folds to a real branch+join in
+            // MIR, so the union is what makes the nested-block move propagate
+            // out to the outer read.
+            let mut block_in: HashMap<Place, shape_ast::ast::Span> = HashMap::new();
             for &pred in cfg.predecessors(block_id) {
                 if let Some(pred_out) = out_states.get(&pred) {
-                    if let Some(current) = block_in.as_mut() {
-                        intersect_moved_places(current, pred_out);
-                    } else {
-                        block_in = Some(pred_out.clone());
-                    }
+                    union_moved_places(&mut block_in, pred_out);
                 }
             }
-            let block_in = block_in.unwrap_or_default();
 
             let mut block_out = block_in.clone();
             let block = mir.block(block_id);
@@ -1992,20 +2001,26 @@ fn compute_use_after_move_errors(
     errors
 }
 
-fn intersect_moved_places(
+/// MAY-MOVE merge (strict REAL-MOVE close H2, 2026-06-21): union the incoming
+/// moved-set into `dest`. A place moved on EITHER path is moved at the join; a
+/// later read of it is a use-after-move. When a place is moved on both paths,
+/// the earliest move span wins so the diagnostic points at the first consuming
+/// move. This replaces the prior must-move intersection, which dropped a place
+/// moved on only one branch and let the outer read run (the H2 false-green:
+/// `let p=[1,2,3]; if c { let q=p } print(p)`).
+fn union_moved_places(
     dest: &mut HashMap<Place, shape_ast::ast::Span>,
     incoming: &HashMap<Place, shape_ast::ast::Span>,
 ) {
-    dest.retain(|place, span| {
-        if let Some(incoming_span) = incoming.get(place) {
-            if incoming_span.start < span.start {
-                *span = *incoming_span;
-            }
-            true
-        } else {
-            false
-        }
-    });
+    for (place, incoming_span) in incoming {
+        dest.entry(place.clone())
+            .and_modify(|span| {
+                if incoming_span.start < span.start {
+                    *span = *incoming_span;
+                }
+            })
+            .or_insert(*incoming_span);
+    }
 }
 
 fn apply_move_transfer(
