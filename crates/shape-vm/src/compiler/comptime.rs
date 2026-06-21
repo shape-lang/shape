@@ -1079,12 +1079,13 @@ pub(crate) fn nb_to_literal(nb: &KindedSlot) -> shape_ast::ast::Literal {
         NativeKind::Int64 => return Literal::Int(nb.as_i64().unwrap_or(0)),
         NativeKind::Float64 => return Literal::Number(nb.as_f64().unwrap_or(0.0)),
         NativeKind::Bool => {
-            // KindedSlot::none() is Bool-kinded zero bits by convention
-            // (`kinded_slot.rs:262`); treat zero-bits as None at the
-            // literal boundary.
-            if nb.raw() == 0 {
-                return Literal::None;
-            }
+            // A `Bool`-kinded slot always materializes as a Bool literal,
+            // including `false` (raw 0). The none sentinel is `NativeKind::Null`
+            // (`KindedSlot::none()` → `NativeKind::Null`, kinded_slot.rs:565),
+            // NOT a Bool-kinded zero, so it never reaches this arm — it falls
+            // through to the heap path where `bits == 0 ≡ None`. Treating a
+            // Bool-kinded zero as None here mis-rendered `comptime { false }`
+            // (and `build_config().debug` in a release build) as `null`.
             return Literal::Bool(nb.as_bool().unwrap_or(false));
         }
         NativeKind::String => {
@@ -1166,11 +1167,12 @@ fn nb_to_expr(nb: &KindedSlot, span: Span) -> std::result::Result<Expr, String> 
             ));
         }
         NativeKind::Bool => {
-            if nb.raw() == 0 {
-                // KindedSlot::none() convention: Bool-kinded zero bits ≡
-                // the unit/none sentinel.
-                return Ok(Expr::Literal(shape_ast::ast::Literal::None, span));
-            }
+            // A `Bool`-kinded slot always materializes as a Bool literal,
+            // including `false` (raw 0). The none sentinel is `NativeKind::Null`
+            // (`KindedSlot::none()` → `NativeKind::Null`, kinded_slot.rs:565),
+            // NOT a Bool-kinded zero, so it never reaches this arm. Treating a
+            // Bool-kinded zero as None here mis-rendered `comptime { false }`
+            // (and `build_config().debug`) as `null`.
             return Ok(Expr::Literal(
                 shape_ast::ast::Literal::Bool(nb.as_bool().unwrap_or(false)),
                 span,
@@ -1430,6 +1432,57 @@ mod tests {
     #[test]
     #[ignore = "phase-2c — comptime rebuild against typed-Arc HeapValue layout — see ADR-006 §2.4"]
     fn placeholder_phase_2c_comptime_tests() {}
+
+    // Regression (2026-06-21): a comptime block evaluating to `false` (and
+    // `build_config().debug` in a release build) was baked as `null` at the
+    // print / f-string boundary. Root cause: the `NativeKind::Bool` arm in
+    // `nb_to_literal` / `nb_to_expr` short-circuited a Bool-kinded zero-bit
+    // slot to `Literal::None`, conflating a genuine `false` with the none
+    // sentinel. The none sentinel is `NativeKind::Null` (kinded_slot.rs:565),
+    // NOT a Bool-kinded zero, so the two are distinguishable by kind. These
+    // tests pin the distinction at the materialization layer shared by VM
+    // and JIT (comptime is resolved at compile time, before either runs).
+    #[test]
+    fn comptime_false_bool_materializes_as_false_not_null() {
+        use shape_value::KindedSlot;
+
+        // nb_to_literal: false bool → Literal::Bool(false), not None.
+        let lit_false = super::nb_to_literal(&KindedSlot::from_bool(false));
+        assert_eq!(
+            lit_false,
+            Literal::Bool(false),
+            "comptime `false` must bake as Bool(false), not null"
+        );
+        let lit_true = super::nb_to_literal(&KindedSlot::from_bool(true));
+        assert_eq!(lit_true, Literal::Bool(true));
+
+        // The none sentinel (NativeKind::Null) still materializes as None.
+        let lit_none = super::nb_to_literal(&KindedSlot::none());
+        assert_eq!(
+            lit_none,
+            Literal::None,
+            "NativeKind::Null sentinel must still bake as None"
+        );
+    }
+
+    #[test]
+    fn comptime_false_bool_nb_to_expr_is_bool_literal() {
+        use shape_value::KindedSlot;
+
+        let expr =
+            super::nb_to_expr_public(&KindedSlot::from_bool(false), Span::DUMMY).expect("ok");
+        match expr {
+            Expr::Literal(Literal::Bool(false), _) => {}
+            other => panic!("expected Bool(false) literal, got {:?}", other),
+        }
+
+        let none_expr =
+            super::nb_to_expr_public(&KindedSlot::none(), Span::DUMMY).expect("ok");
+        match none_expr {
+            Expr::Literal(Literal::None, _) => {}
+            other => panic!("expected None literal for none sentinel, got {:?}", other),
+        }
+    }
 
     // W17-comptime-vm-dispatch smoke tests (ADR-006 §2.7.26, 2026-05-12).
     // Verify the 4 comptime introspection forms wired by

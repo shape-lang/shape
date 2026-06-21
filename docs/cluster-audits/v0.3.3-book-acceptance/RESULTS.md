@@ -36,17 +36,17 @@ the gate is **NO-GO**.
 | functions | ✅ | ✅ | ✅ | FIXED (S4) | named-arg call on a free function now a CLEAN COMPILE ERROR (was silent-discard → wrong result); positional calls unchanged |
 | strings | ✅ | ✅ | ✅ | PASS | — |
 | objects-arrays | ✅ | ✅ | ✅ | FIXED (S4) | D1 `Array<int>.sum/min/max`→`int` (per-receiver-element); D2 `.map` elem-type OK; D3 empty `HashMap()` len/isEmpty OK (TypedMapLenStack opcode); D4 `?? 0` keeps `int` kind in loop (no `no method add` crash) |
-| enums | ✅ | ✅ | ✅ | PARTIAL | `(number)->bool` param annotation fails to parse (BOOK-WRONG); `s.to_int()` fictional (BOOK-WRONG) |
+| enums | ✅ | ✅ | ✅ | PARTIAL | `(number)->bool` param annotation fails to parse (BOOK-WRONG); `s.to_int()` fictional — BOOK FIXED (B1 2026-06-21: `parse_port` now uses real `(s as int?)?` API) |
 | traits | ✅ | ✅ | ✅ | FIXED (S4) | trait/extend declared return type now propagates to an un-annotated call-site binding (`p.sum()->int` binding tracks `int`; `a+a`→28 not 28.0) |
 | generics | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
 | pattern-matching | ✅ | ✅ | ✅ | PARTIAL | D2 FIXED (S3 2026-06-21: `Some(Enum::Variant(..))` now unwraps the W14 OptionData carrier before the inner variant check); D1 union type-pattern binder typed `unknown` (SCOPE-RECLAIM, v0.4) |
 | error-handling | ✅ | ✅ | ✅ | PARTIAL | `(arr_elem as int?)` rejects `Array<string>` element while literal `"42" as int?` Ok (carrier-kind) |
-| references | ✅ | ✅ | ✅ | PARTIAL | stored-ref index/method documented as compile-error but actually works (BOOK-WRONG, conservative direction) |
+| references | ✅ | ✅ | ✅ | PARTIAL | stored-ref index/method documented as compile-error but actually works — BOOK FIXED (B1 2026-06-21: NLL example now `runnable=true`, caution→tip showing `r[0]`/`r.len()` working) |
 | resource-mgmt | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
 | modules | ✅ | ✅ | ✅ | PASS (S4 re-verified) | `from std::core::math use { mean as avg }; avg([..])` binds the alias and runs (→2.0); the prior named-alias FAIL no longer reproduces |
 | datetime | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
 | content | ✅ | ✅ | ✅ | PASS | — |
-| comptime | ✅ | ✅ | ✅ | PARTIAL | comptime `false` baked/displayed as `null` (BOOK-WRONG + FN-REG); same hits `build_config().debug` |
+| comptime | ✅ | ✅ | ✅ | FIXED (B1) | comptime `false` baked/displayed as `null` — FIXED 2026-06-21 (Bool-kinded zero no longer conflated with the `NativeKind::Null` none sentinel in `nb_to_literal`/`nb_to_expr`); `comptime { false }` / `build_config().debug` now render `false` |
 | jit-compilation | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
 | ownership | ✅ | ✅ | ✅ | **FAIL** | BW-1 `var copy = data` auto-clone RESOLVED 2026-06-21 (let moves / var auto-clones); var-copy mutate-INDEPENDENCE RESOLVED (S1b 2026-06-21: auto-clone now DEEP, not a refcount alias); D2 reading non-Copy struct elem out of array aliases backing store |
 | collections | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
@@ -124,9 +124,13 @@ modes). Grouped by slice.
 - **BOOK-WRONG (parser)** — function-type param annotation `(number) -> bool` fails to
   parse (E0001 "unexpected }"); the `find_first(v, predicate: (number)->bool)` Option
   example is not writable as documented.
-- **BOOK-WRONG** — `s.to_int()` in the `parse_port` Result/`?` example does not exist
-  ("Method to_int not found on type string"); no alternative (`parse_int`, `"8080" as
-  int`) works. The documented Result<int,string> + `?` example cannot run as written.
+- **BOOK-WRONG — FIXED (B1 2026-06-21)** — `s.to_int()` in the `parse_port` Result/`?`
+  example did not exist ("Method to_int not found on type string"). FIXED in enums.mdx:
+  the example now uses the real fallible-conversion API `let n: int = (s as int?)?`
+  (the same `(raw as int?)?` form documented in error-handling.mdx) and is `runnable=true`
+  — verified end-to-end (Ok("8080")→port 8080; "99999"→out-of-range Err). The explicit
+  `: int` annotation is required because the `?`-unwrapped binding otherwise infers
+  `unknown` under strict typing (separate inference gap, not blocking the doc fix).
 
 ### traits
 - **FN-REG-CORRECTNESS** — trait/extend declared return type not propagated to an
@@ -159,10 +163,12 @@ modes). Grouped by slice.
   this strict-flip-collection-dispatch worktree.
 
 ### references
-- **BOOK-WRONG (conservative/under-promise, low severity)** — references-borrowing.mdx
-  225-227 state stored-reference index/method (`let r = &nums; r[0]`, `r.len()`) is a
-  v0.3.3 COMPILE ERROR; they actually WORK (prints 1 / 3, ec=0, VM + JIT). Mis-states a
-  falsifiable compile-error contract. Doc-only fix, but a BOOK-WRONG.
+- **BOOK-WRONG (conservative/under-promise) — FIXED (B1 2026-06-21)** —
+  references-borrowing.mdx 225-227 stated stored-reference index/method
+  (`let r = &nums; r[0]`, `r.len()`) is a v0.3.3 COMPILE ERROR; they actually WORK
+  (prints 1 / 3, ec=0, VM + JIT). FIXED: the NLL example is now `runnable=true` and the
+  `:::caution[v0.4 preview]` block became a `:::tip` showing `r[0]` / `r.len()` working
+  through a `let`-bound reference in v0.3.3.
 
 ### modules
 - **BOOK-WRONG + named-alias defect** — modules.mdx:42-44 `from math::stats use { mean
@@ -171,12 +177,18 @@ modes). Grouped by slice.
   `use { mean }` (no alias) works, and the same alias form on a FILESYSTEM module works.
 
 ### comptime
-- **BOOK-WRONG + FN-REG-CORRECTNESS** — a comptime block evaluating to boolean `false`
-  is displayed as `null` at the print/f-string/literal-bake boundary (VM == JIT).
-  `comptime { false }`, `comptime { 3 > 5 }`, `comptime { 2+2==5 }` → `null`;
-  `comptime { true }` → `true`. The VALUE is sound; only the literal-bake/display path
-  corrupts false→null. Same defect hits `build_config().debug` → `null` (documented LIVE
-  in v0.3.3).
+- **FN-REG-CORRECTNESS — FIXED (B1 2026-06-21)** — a comptime block evaluating to boolean
+  `false` was displayed as `null` at the print/f-string/literal-bake boundary (VM == JIT).
+  Root cause: the `NativeKind::Bool` arm in `nb_to_literal` / `nb_to_expr`
+  (`compiler/comptime.rs`) short-circuited a Bool-kinded ZERO-bit slot to `Literal::None`,
+  conflating a genuine `false` with the none sentinel. But the none sentinel is
+  `NativeKind::Null` (`KindedSlot::none()`, kinded_slot.rs:565), NOT a Bool-kinded zero —
+  the two are distinguishable by kind, so the special-case was unsound. Fix removes the
+  `raw()==0 → None` shortcut; a `Null`-kinded slot still materializes as `None` via the
+  heap fall-through (`bits==0 ≡ None`). `comptime { false }`, `comptime { 3 > 5 }`, and
+  `build_config().debug` now render `false`. Unit tests:
+  `comptime_false_bool_materializes_as_false_not_null` +
+  `comptime_false_bool_nb_to_expr_is_bool_literal`.
 
 ### ownership
 - **BW-1 RESOLVED (2026-06-21 binding-move reconcile)** — ownership.mdx §Smart Move/Clone
