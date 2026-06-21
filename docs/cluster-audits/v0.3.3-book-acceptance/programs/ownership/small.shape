@@ -58,8 +58,11 @@ p.y = 200
 check("field_x", p.x, 100)
 check("field_y", p.y, 200)
 
-// --- Owned value passed to fn; auto-ref for method dispatch (book "Auto-Referencing") ---
-fn total(arr: Array<int>) -> int {
+// --- Read-only fn param via shared borrow `&` (book "Shared Borrow `&`") ---
+// Under the consume call-convention (CallArgConsume), a by-value heap arg is
+// MOVED into the callee. A read-only function takes `&Array<int>` so the
+// caller keeps ownership and `data` stays usable after the call.
+fn total(arr: &Array<int>) -> int {
     var t = 0
     for v in arr {
         t = t + v
@@ -67,15 +70,16 @@ fn total(arr: Array<int>) -> int {
     return t
 }
 let data = [2, 4, 6, 8]
-check("owned_param_sum", total(data), 20)
-// data still usable after the call (Arc-shared, no move-out of caller)
+check("owned_param_sum", total(&data), 20)
+// data still usable after the call (borrowed, not moved)
 check("owned_param_caller_intact", data.len(), 4)
 
-// --- var auto move/clone inference (book "Smart Move/Clone Inference") ---
-// `copy = data` with data used after -> auto-clone; both independent.
-var src = [7, 7, 7]
-var copyOf = src
-check("var_autoclone_src", src.len(), 3)
-check("var_autoclone_copy", copyOf.len(), 3)
+// --- Clone to keep both bindings live (book "Clone Trait") ---
+// `let copyOf = src` on a heap value MOVES; reading `src` after would be
+// B0005. To keep BOTH live, clone explicitly — the shipped move/clone rule.
+let src = [7, 7, 7]
+let copyOf = src.clone()
+check("clone_keep_both_src", src.len(), 3)
+check("clone_keep_both_copy", copyOf.len(), 3)
 
 print("ALL_CHECKS_PASSED")
