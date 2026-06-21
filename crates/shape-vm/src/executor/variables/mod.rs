@@ -110,6 +110,8 @@ impl VirtualMachine {
             LoadLocalTrusted => self.op_load_local_trusted(instruction)?,
             LoadLocalMove => self.op_load_local_move(instruction)?,
             LoadLocalClone => self.op_load_local_clone(instruction)?,
+            LoadLocalDeepClone => self.op_load_local_deep_clone(instruction)?,
+            DeepCloneTop => self.op_deep_clone_top(instruction)?,
             StoreLocal => self.op_store_local(instruction)?,
             StoreLocalTyped => self.op_store_local_typed(instruction)?,
             StoreLocalDrop => self.op_store_local_drop(instruction)?,
@@ -1861,6 +1863,105 @@ impl VirtualMachine {
         let (bits, kind) = self.stack_read_kinded_raw(slot);
         crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
         self.push_kinded(bits, kind)
+    }
+
+    /// `LoadLocalDeepClone { idx }` — DEEP-clone semantics for the
+    /// `var copy = data` auto-clone of a still-live PROVEN-heap source
+    /// (ADR-006 SharedCow independence-on-mutation, S1b 2026-06-21).
+    ///
+    /// A shallow refcount share (`LoadLocalClone`) ALIASES the backing
+    /// buffer: `copy.push(99)` / `copy[0] = ...` mutate the source's
+    /// TypedArray / TypedObject in place (those mutating ops write through
+    /// the raw `view.ptr` with no copy-on-write barrier). To make the
+    /// copy independent we produce a fresh deep copy here, routed through
+    /// the same per-kind primitives as an explicit `.clone()` so the new
+    /// value owns a refcount=1 backing.
+    ///
+    /// Mutable-in-place carriers (`TypedArray`, `TypedObject`) get a real
+    /// deep clone. Immutable / already-copy-on-write carriers (String /
+    /// Decimal — immutable; HashMap / Set / Deque — `Arc::make_mut` CoW on
+    /// every mutation) are observably independent under a balanced shallow
+    /// share, so they take the `clone_with_kind` retain. Scalars copy their
+    /// bits verbatim (no share owed). No Bool-default, refcount-balanced.
+    fn op_load_local_deep_clone(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        let Some(Operand::Local(idx)) = instruction.operand else {
+            return Err(VMError::InvalidOperand);
+        };
+        let bp = self.current_locals_base();
+        let slot = bp + idx as usize;
+        debug_assert!(
+            slot < self.stack.len(),
+            "LoadLocalDeepClone slot {} out of bounds (stack len {})",
+            slot,
+            self.stack.len()
+        );
+        let (bits, kind) = self.stack_read_kinded_raw(slot);
+        let (new_bits, new_kind) = Self::deep_clone_kinded(bits, kind)?;
+        self.push_kinded(new_bits, new_kind)
+    }
+
+    /// `DeepCloneTop` — replace the top-of-stack value with an INDEPENDENT
+    /// deep copy and release the original's share. Stack-based sibling of
+    /// `LoadLocalDeepClone` used after a `LoadModuleBinding` for a
+    /// top-level `var copy = data` auto-clone (module bindings are not read
+    /// through the local-slot ownership path). The popped source owns one
+    /// share; `deep_clone_kinded` produces the independent copy, then we
+    /// release the popped source so refcounts stay balanced.
+    fn op_deep_clone_top(&mut self, _instruction: &Instruction) -> Result<(), VMError> {
+        let (bits, kind) = self.pop_kinded()?;
+        let (new_bits, new_kind) = Self::deep_clone_kinded(bits, kind)?;
+        // Release the popped source's share now that the independent copy
+        // owns its own backing. For scalar kinds this is a no-op.
+        crate::executor::vm_impl::stack::drop_with_kind(bits, kind);
+        self.push_kinded(new_bits, new_kind)
+    }
+
+    /// Produce an INDEPENDENT deep copy of a kinded value for the
+    /// `var`-still-live auto-clone (`LoadLocalDeepClone`). Returns the
+    /// new bits + kind. The caller pushes the result; ownership of the
+    /// returned share belongs to the new binding.
+    ///
+    /// - `Ptr(TypedArray)` → `clone_array` (fresh buffer, heap elements
+    ///   retained, scalars memcpy'd).
+    /// - `Ptr(TypedObject)` → `deep_clone_typed_object` (fresh storage,
+    ///   nested struct/array recursively deep-cloned).
+    /// - all other heap `Ptr(_)` kinds → balanced shallow share
+    ///   (`clone_with_kind`): immutable (String / Decimal) or already
+    ///   copy-on-write (HashMap / Set / Deque via `Arc::make_mut`), hence
+    ///   observably independent without a structural copy.
+    /// - scalar kinds → bits copied verbatim, no share owed.
+    fn deep_clone_kinded(bits: u64, kind: NativeKind) -> Result<(u64, NativeKind), VMError> {
+        use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, clone_array};
+        match kind {
+            NativeKind::Ptr(HeapKind::TypedArray) if bits != 0 => {
+                let view = as_v2_typed_array(bits, kind).ok_or_else(|| {
+                    VMError::RuntimeError(
+                        "LoadLocalDeepClone: Ptr(TypedArray) slot did not yield a v2 array view"
+                            .into(),
+                    )
+                })?;
+                let new_ptr = clone_array(&view);
+                Ok((new_ptr as u64, kind))
+            }
+            NativeKind::Ptr(HeapKind::TypedObject) if bits != 0 => {
+                // SAFETY: kind == Ptr(TypedObject) and bits != 0 ⇒ bits is a
+                // live `*const TypedObjectStorage` (v2-raw carrier); the slot
+                // holds a share so it is read-only-borrowable for the clone.
+                let src: &shape_value::TypedObjectStorage =
+                    unsafe { &*(bits as *const shape_value::TypedObjectStorage) };
+                let cloned_ptr =
+                    crate::executor::objects::object_operations::deep_clone_typed_object(src)?;
+                Ok((cloned_ptr as u64, kind))
+            }
+            // Immutable or copy-on-write heap carriers + scalar kinds:
+            // a balanced share / verbatim bit-copy is observably
+            // independent. `clone_with_kind` is a no-op for scalar kinds
+            // (it only bumps refcounts on heap `Ptr(_)` kinds).
+            _ => {
+                crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+                Ok((bits, kind))
+            }
+        }
     }
 
     /// `StoreLocalDrop { idx }` — pop a kinded source, install into

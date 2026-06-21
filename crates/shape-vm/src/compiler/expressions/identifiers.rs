@@ -479,6 +479,21 @@ impl BytecodeCompiler {
                     OpCode::LoadModuleBinding,
                     Some(Operand::ModuleBinding(binding_idx)),
                 ));
+                // S1b var-copy independence (2026-06-21): a top-level
+                // `var copy = data` reads `data` via `LoadModuleBinding`
+                // (a shallow heap share). When the enclosing statement's
+                // MIR ownership decision is `DeepClone` (the `var`-still-
+                // live auto-clone), follow with `DeepCloneTop` so the copy
+                // is an INDEPENDENT deep value — otherwise `copy.push(99)`
+                // would mutate the source's TypedArray in place. Skipped
+                // inside an interpolated-string fragment (parser-local span
+                // collision risk, mirrors `emit_load_local_owned`).
+                if self.in_interpolation_expr_depth == 0
+                    && self.query_ownership_decision_enclosing(&span)
+                        == Some(crate::mir::analysis::OwnershipDecision::DeepClone)
+                {
+                    self.emit(Instruction::new(OpCode::DeepCloneTop, None));
+                }
             }
             // Track schema for typed merge optimization
             let binding_type = self.type_tracker.get_binding_type(binding_idx).cloned();

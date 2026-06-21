@@ -614,6 +614,8 @@ impl VirtualMachine {
             | LoadLocalTrusted
             | LoadLocalMove
             | LoadLocalClone
+            | LoadLocalDeepClone
+            | DeepCloneTop
             | StoreLocal
             | StoreLocalTyped
             | StoreLocalDrop

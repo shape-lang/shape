@@ -1805,10 +1805,19 @@ fn compute_ownership_decisions(
                         // the source is dead after this point does `var` move
                         // (the move-when-dead half of the smart default). `let` /
                         // `let mut` destinations always move regardless.
+                        //
+                        // S1b independence (user 2026-06-21): the auto-clone of a
+                        // PROVEN heap source (`NonCopy`) is a DEEP clone, not a
+                        // shallow refcount share. A shallow share would alias the
+                        // backing buffer — `copy.push(99)` would mutate the
+                        // source's TypedArray in place. `DeepClone` routes the
+                        // bind through the same per-kind deep-clone primitives as
+                        // an explicit `.clone()`, giving the copy a fresh
+                        // refcount=1 backing so mutation is independent.
                         if dest_is_var
                             && liveness.is_live_after(block.id, stmt_idx, *src_slot, mir)
                         {
-                            OwnershipDecision::Clone
+                            OwnershipDecision::DeepClone
                         } else {
                             OwnershipDecision::Move
                         }

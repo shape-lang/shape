@@ -938,6 +938,20 @@ define_opcodes! {
     /// Load local with Clone semantics — clones the value, source stays live.
     /// For heap-tagged values, this bumps the Arc refcount.
     LoadLocalClone = 0x105, Variable, pops: 0, pushes: 1;
+    /// Load local with DeepClone semantics — produces an INDEPENDENT deep copy
+    /// of the source heap value, source stays live (`var copy = data`
+    /// auto-clone). Scalars copy verbatim. Routes heap carriers
+    /// (Array / struct / HashMap / …) through the same per-kind deep-clone
+    /// primitives as an explicit `.clone()` so mutating the copy never touches
+    /// the source (ADR-006 SharedCow independence-on-mutation).
+    LoadLocalDeepClone = 0x1C2, Variable, pops: 0, pushes: 1;
+    /// Replace the top-of-stack value with an INDEPENDENT deep copy and
+    /// release the original's share. Stack-based sibling of
+    /// `LoadLocalDeepClone` for the module-binding `var copy = data`
+    /// auto-clone (top-level script bindings load via `LoadModuleBinding`,
+    /// not a local-slot read). Scalars pass through verbatim; heap carriers
+    /// route through the same per-kind deep-clone primitives as `.clone()`.
+    DeepCloneTop = 0x1C3, Variable, pops: 1, pushes: 1;
     /// Store local with Drop semantics — drops the old value before storing.
     /// Respects ownership: if old value is uniquely owned, frees immediately.
     StoreLocalDrop = 0x106, Variable, pops: 1, pushes: 0;

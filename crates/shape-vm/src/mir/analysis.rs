@@ -319,7 +319,20 @@ pub enum OwnershipDecision {
     /// Move: source is dead after this point. Zero cost.
     Move,
     /// Clone: source is live after this point. Requires T: Clone.
+    ///
+    /// Emits a *shallow* heap share (refcount bump via `clone_with_kind`).
+    /// Correct for borrow-shaped non-consuming reads — a `&x` / `&mut x`
+    /// reference-parameter deref-read (`let old = x` inside `fn f(&x)`) and
+    /// unproven (`Unknown`) still-live sources, where the source and the
+    /// derived value are not independently mutated.
     Clone,
+    /// DeepClone: source is live after this point AND the destination is a
+    /// `var` heap-binding (the `var copy = data` auto-clone / SharedCow
+    /// intent, ADR-006). Produces an INDEPENDENT deep copy of the backing
+    /// heap value so that mutating the copy (`copy.push(...)`,
+    /// `copy[0] = ...`) does NOT touch the source. Routes to the same
+    /// per-kind deep-clone primitives as an explicit `.clone()`.
+    DeepClone,
     /// Copy: type is Copy (primitive). Trivially copied.
     Copy,
 }

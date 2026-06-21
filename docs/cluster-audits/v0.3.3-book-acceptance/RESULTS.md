@@ -29,7 +29,7 @@ the gate is **NO-GO**.
 
 | slice | small | large | VM==JIT | verdict | blocking findings |
 |-------|-------|-------|---------|---------|--------------------|
-| variables | ✅ | ✅ | ✅ | **FAIL** | var CoW aliasing rejected (BOOK-WRONG); ~~generic-struct construction SEGFAULT (ec=139)~~ FIXED (S2, WS-6b base-name re-stamp downgraded the monomorphized schema → FIELD_TAG_OBJECT deref of an inline scalar; `ws6b_name_would_downgrade` guard) |
+| variables | ✅ | ✅ | ✅ | **FAIL** | ~~var CoW aliasing (BOOK-WRONG)~~ FIXED (S1b 2026-06-21: `var copy = data` still-live heap rebind now DEEP-clones — `OwnershipDecision::DeepClone` → `LoadLocalDeepClone`/`DeepCloneTop`; mutating the copy no longer touches the source); ~~generic-struct construction SEGFAULT (ec=139)~~ FIXED (S2, WS-6b base-name re-stamp downgraded the monomorphized schema → FIELD_TAG_OBJECT deref of an inline scalar; `ws6b_name_would_downgrade` guard) |
 | types-primitive | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
 | operators | ✅ | ✅ | ✅ | **FAIL** | object-`+`-merge hijacked by in-scope impl Add; `+=`/`acc=acc+a` on user type rejected; left struct-literal operand of Sub/Mul rejected; decl-order-dependent operator-trait resolution; ANTI-TAUTOLOGY (large asserts buggy output) |
 | control-flow | ✅ | ✅ | ✅ | **FAIL** | `while`/`if`-prefixed identifier in a condition derails parser (E0001) |
@@ -48,7 +48,7 @@ the gate is **NO-GO**.
 | content | ✅ | ✅ | ✅ | PASS | — |
 | comptime | ✅ | ✅ | ✅ | PARTIAL | comptime `false` baked/displayed as `null` (BOOK-WRONG + FN-REG); same hits `build_config().debug` |
 | jit-compilation | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
-| ownership | ✅ | ✅ | ✅ | **FAIL** | BW-1 `var copy = data` auto-clone RESOLVED 2026-06-21 (let moves / var auto-clones); D2 reading non-Copy struct elem out of array aliases backing store |
+| ownership | ✅ | ✅ | ✅ | **FAIL** | BW-1 `var copy = data` auto-clone RESOLVED 2026-06-21 (let moves / var auto-clones); var-copy mutate-INDEPENDENCE RESOLVED (S1b 2026-06-21: auto-clone now DEEP, not a refcount alias); D2 reading non-Copy struct elem out of array aliases backing store |
 | collections | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
 | math-core | ✅ | ✅ | ✅ | PASS | — |
 

@@ -398,7 +398,7 @@ fn append_kept_slots(
 /// heap-slot's bits are recovered BY KIND from the source's
 /// `field_kinds[i]` parallel-kind track — never via `as_heap_value()` on
 /// a v2-raw flat carrier, never via raw-bit reinterpretation.
-fn deep_clone_typed_object(
+pub(crate) fn deep_clone_typed_object(
     src: &TypedObjectStorage,
 ) -> Result<*mut TypedObjectStorage, VMError> {
     let n = src.slots.len();

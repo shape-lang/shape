@@ -206,6 +206,47 @@ impl BytecodeCompiler {
         Some(analysis.ownership_at(*point))
     }
 
+    /// Ownership decision for an identifier READ whose own (token) span does
+    /// not equal the enclosing MIR statement span. `mir_span_to_point` is
+    /// keyed by STATEMENT spans (`stmt.span`), but a `var copy = data`
+    /// RHS identifier read carries the narrower `data`-token span — exact
+    /// `query_ownership_decision` therefore misses it. This resolves the
+    /// decision via the TIGHTEST enclosing statement span that contains the
+    /// read span (smallest `[start,end]` superset), so the read inherits its
+    /// binding statement's ownership decision (S1b 2026-06-21).
+    ///
+    /// Intentionally narrow: callers gate on the returned decision being
+    /// exactly `DeepClone` (the `var`-still-live auto-clone), so a coarse
+    /// containing-statement match cannot perturb the existing Move/Clone
+    /// emission, which keys on exact-span hits only.
+    pub(super) fn query_ownership_decision_enclosing(
+        &self,
+        span: &shape_ast::ast::Span,
+    ) -> Option<crate::mir::analysis::OwnershipDecision> {
+        if let Some(d) = self.query_ownership_decision(span) {
+            return Some(d);
+        }
+        let ctx = self.current_mir_context_name()?;
+        let analysis = self.mir_borrow_analyses.get(ctx)?;
+        let span_map = self.mir_span_to_point.get(ctx)?;
+        let mut best: Option<(&shape_ast::ast::Span, crate::mir::Point)> = None;
+        for (stmt_span, point) in span_map.iter() {
+            // Strict containment of the read span inside the statement span.
+            if stmt_span.start <= span.start && span.end <= stmt_span.end {
+                let tighter = match best {
+                    None => true,
+                    Some((cur, _)) => {
+                        (stmt_span.end - stmt_span.start) < (cur.end - cur.start)
+                    }
+                };
+                if tighter {
+                    best = Some((stmt_span, *point));
+                }
+            }
+        }
+        best.map(|(_, point)| analysis.ownership_at(point))
+    }
+
     /// Emit a local-variable load with ownership awareness.
     ///
     /// When MIR analysis is available and proves Move semantics, emits
@@ -260,6 +301,26 @@ impl BytecodeCompiler {
             && self.slot_is_heap_backed_owned(slot)
             && !self.slot_is_boxed(slot)
         {
+            // S1b var-copy independence (2026-06-21): a `var copy = data`
+            // auto-clone of a still-live PROVEN-heap source must produce an
+            // INDEPENDENT deep copy, not the shallow `CloneLocal` refcount
+            // share — otherwise `copy.push(99)` mutates the source's
+            // TypedArray in place. When the MIR ownership decision for this
+            // read is `DeepClone`, emit the deep-cloning load. (The
+            // span-keyed query is skipped inside an interpolated-string
+            // fragment, where the span is parser-local and could collide —
+            // `LoadLocalDeepClone` would deep-copy a live binding read by the
+            // format call; the shallow `CloneLocal` is correct there.)
+            if self.in_interpolation_expr_depth == 0
+                && self.query_ownership_decision_enclosing(span)
+                    == Some(crate::mir::analysis::OwnershipDecision::DeepClone)
+            {
+                self.emit(Instruction::new(
+                    OpCode::LoadLocalDeepClone,
+                    Some(Operand::Local(slot)),
+                ));
+                return;
+            }
             self.emit(Instruction::new(
                 OpCode::CloneLocal,
                 Some(Operand::Local(slot)),
@@ -283,9 +344,31 @@ impl BytecodeCompiler {
             self.query_ownership_decision(span)
         };
 
+        // S1b var-copy independence (2026-06-21): when the exact-span query
+        // does not yield a `var`-still-live auto-clone but the TIGHTEST
+        // enclosing statement does (the common case — the RHS identifier
+        // read of `var copy = data` carries the narrower `data`-token span,
+        // not the `var copy = data` statement span), upgrade to the
+        // deep-cloning load so the copy is independent of the source. This
+        // path covers top-level script code, where the slot is not flagged
+        // `heap_backed_owned` and the early `CloneLocal` shortcut above does
+        // not fire. Narrowly scoped to `DeepClone` so the coarse
+        // containing-statement match cannot perturb Move/Clone emission.
+        let decision = match decision {
+            Some(OwnershipDecision::DeepClone) => decision,
+            _ if self.in_interpolation_expr_depth == 0
+                && self.query_ownership_decision_enclosing(span)
+                    == Some(OwnershipDecision::DeepClone) =>
+            {
+                Some(OwnershipDecision::DeepClone)
+            }
+            other => other,
+        };
+
         let opcode = match decision {
             Some(OwnershipDecision::Move) => Some(OpCode::LoadLocalMove),
             Some(OwnershipDecision::Clone) => Some(OpCode::LoadLocalClone),
+            Some(OwnershipDecision::DeepClone) => Some(OpCode::LoadLocalDeepClone),
             _ => None,
         };
 

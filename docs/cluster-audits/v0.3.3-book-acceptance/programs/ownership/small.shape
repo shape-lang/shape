@@ -1,7 +1,10 @@
-// small.shape — Ownership Deep Dive core concepts (book: advanced/ownership-deep-dive.mdx)
-// Exercises: let / let mut / var smart-default, Copy semantics, array clone,
-// struct field mutation, owned fn params, auto-ref method dispatch.
-// Self-checking: asserts every result against a book-derived expected value.
+// small.shape — Ownership Deep Dive core concepts
+// Book: advanced/ownership-deep-dive.mdx
+// Exercises (book-faithful, only behaviors the chapter documents AND that
+// actually run): move on `let q = p`, explicit clone keeps both bindings live,
+// scalar Copy, call-arg share-by-value (v0.3.3), var smart-default stack-mutable,
+// struct field mutation under `let mut`, auto-ref method dispatch.
+// Self-checking: every result asserted against a book-derived expected value.
 
 fn check(name: string, got: int, expected: int) {
     if got != expected {
@@ -9,56 +12,66 @@ fn check(name: string, got: int, expected: int) {
     }
 }
 
-// --- Copy semantics (book "Copy Semantics": int is implicitly Copy) ---
-// `let b = a` copies the int; `a` remains usable.
-let a = 5
-let b = a
-check("int_copy_a", a, 5)
-check("int_copy_b", b, 5)
+// --- Move: `q` takes ownership of the struct; `p` is consumed.
+//     (book §"Move, Clone, Use-After-Move", lines 122-125, runnable=true)
+type Point { x: int, y: int }
+let p = Point { x: 1, y: 2 }
+let q = p
+check("move_q_x", q.x, 1)
+check("move_q_y", q.y, 2)
 
-// --- let mut: single-owner, zero-overhead mutation (book "Three Keywords") ---
-let mut counter = 0
-counter = counter + 10
-counter = counter + 5
-check("let_mut", counter, 15)
+// --- Clone: explicit deep copy keeps both bindings live.
+//     `clone a` keyword and `a.clone()` method are identical (book lines 104-110).
+let a = [10, 20, 30]
+let b = clone a
+let c = a.clone()
+check("clone_kw_orig", a[0], 10)
+check("clone_kw_b", b[0], 10)
+check("clone_method_c", c[2], 30)
 
-// --- var smart-default: mutated within scope -> Direct(mutable) (book table) ---
+// Clone independence: mutating the copy must not touch the original
+// (book §"Copy Semantics" — arrays are NOT Copy; clone is a deep copy).
+let mut dup = a.clone()
+dup.push(40)
+check("clone_indep_orig_len", a.len(), 3)
+check("clone_indep_dup_len", dup.len(), 4)
+check("clone_indep_dup_last", dup[3], 40)
+
+// --- Scalars stay Copy — both usable, no move (book lines 90-95, 133-136).
+let n = 7
+let m = n
+check("copy_n", n, 7)
+check("copy_sum", n + m, 14)
+
+// --- Call-arg share-by-value (v0.3.3): `nums` still usable after the call;
+//     mutation through the by-value param is caller-visible (book lines 156-163).
+fn append(xs) { xs.push(4) }
+let nums = [1, 2, 3]
+append(nums)
+check("share_len", nums.len(), 4)
+check("share_val", nums[3], 4)
+
+// --- var smart-default: mutated-in-scope -> Direct(mutable), stack (book lines 46, 34-41).
+var counter = 0
+counter = counter + 1
+counter = counter + 1
+check("var_direct_mut", counter, 2)
+
 var acc = 0
 for v in [1, 2, 3, 4] {
     acc = acc + v
 }
-check("var_direct_mut", acc, 10)
+check("var_loop_acc", acc, 10)
 
-// --- Array clone: arrays are NOT Copy; `.clone()` makes an independent copy ---
-// (book "Clone Trait" + "Copy Semantics" table). Mutating the clone must
-// not affect the original.
-// The `clone x` keyword and `x.clone()` method are identical (book "Clone
-// Trait"): both produce an independent deep copy. (The keyword previously
-// aliased; fixed via the ownership-modifier → `.clone()` desugar.)
-let original = [10, 20, 30]
-let mut dup = original.clone()
-dup.push(40)
-check("clone_independent_orig_len", original.len(), 3)
-check("clone_independent_dup_len", dup.len(), 4)
-check("clone_orig_first", original[0], 10)
-check("clone_dup_last", dup[3], 40)
+// --- Struct field mutation under `let mut` (book §"Disjoint field borrows").
+let mut pt = Point { x: 1, y: 2 }
+pt.x = 100
+pt.y = 200
+check("field_x", pt.x, 100)
+check("field_y", pt.y, 200)
 
-// `clone` KEYWORD form — must match the `.clone()` method (independent copy).
-let kw_orig = [10, 20, 30]
-let mut kw_dup = clone kw_orig
-kw_dup.push(40)
-check("clone_kw_orig_len", kw_orig.len(), 3)
-check("clone_kw_dup_len", kw_dup.len(), 4)
-
-// --- Struct field mutation on let mut (book "Disjoint field borrows") ---
-type Point { x: int, y: int }
-let mut p = Point { x: 1, y: 2 }
-p.x = 100
-p.y = 200
-check("field_x", p.x, 100)
-check("field_y", p.y, 200)
-
-// --- Owned value passed to fn; auto-ref for method dispatch (book "Auto-Referencing") ---
+// --- Owned array param + auto-ref method dispatch; caller binding intact
+//     (book §"Auto-Referencing": arr.len() -> (&arr).len()).
 fn total(arr: Array<int>) -> int {
     var t = 0
     for v in arr {
@@ -68,14 +81,20 @@ fn total(arr: Array<int>) -> int {
 }
 let data = [2, 4, 6, 8]
 check("owned_param_sum", total(data), 20)
-// data still usable after the call (Arc-shared, no move-out of caller)
-check("owned_param_caller_intact", data.len(), 4)
+check("owned_param_intact", data.len(), 4)
 
-// --- var auto move/clone inference (book "Smart Move/Clone Inference") ---
-// `copy = data` with data used after -> auto-clone; both independent.
-var src = [7, 7, 7]
-var copyOf = src
-check("var_autoclone_src", src.len(), 3)
-check("var_autoclone_copy", copyOf.len(), 3)
+// --- var-copy auto-clone independence (S1b 2026-06-21): a `var copy = src`
+//     rebind of a still-live heap source produces an INDEPENDENT value, so
+//     mutating the copy does NOT touch the source (the `var` smart-default
+//     clone-on-still-live / SharedCow intent). Pre-fix this aliased the
+//     backing TypedArray (book §"Copy Semantics" var-CoW BOOK-WRONG finding).
+var vsrc = [1, 2, 3]
+var vcopy = vsrc
+vcopy.push(99)
+check("varcopy_src_intact", vsrc.len(), 3)
+check("varcopy_copy_grew", vcopy.len(), 4)
+vcopy[0] = 9
+check("varcopy_src_idx_intact", vsrc[0], 1)
+check("varcopy_copy_idx_set", vcopy[0], 9)
 
 print("ALL_CHECKS_PASSED")

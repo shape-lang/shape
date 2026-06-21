@@ -643,3 +643,73 @@ fn clone_keyword_string_produces_value() {
         .expect_run_ok()
         .expect_output_contains("hello");
 }
+
+// ── var-copy mutate-independence (S1b 2026-06-21) ──────────────────────
+//
+// A `var copy = data` auto-clone of a still-live PROVEN-heap source must
+// produce an INDEPENDENT deep value. Pre-fix the solver recorded
+// `OwnershipDecision::Clone` and codegen emitted a SHALLOW refcount share
+// (`clone_with_kind` / `CloneLocal`), so `copy.push(99)` mutated the
+// SOURCE's TypedArray in place (the array push has no copy-on-write
+// write-barrier). The fix routes a `var`-still-live heap rebind through a
+// DEEP clone (`OwnershipDecision::DeepClone` → `LoadLocalDeepClone` /
+// `DeepCloneTop`), the same per-kind primitives as an explicit `.clone()`.
+
+#[test]
+fn var_copy_array_push_does_not_mutate_source() {
+    // Mutating the var copy via push must NOT touch the source.
+    let code = "var data = [1, 2, 3]\nvar copy = data\ncopy.push(99)\nprint(data)\nprint(copy)";
+    ShapeTest::new(code)
+        .expect_output("[1, 2, 3]\n[1, 2, 3, 99]");
+}
+
+#[test]
+fn var_copy_array_index_assign_does_not_mutate_source() {
+    // Mutating the var copy via index-assign must NOT touch the source.
+    let code = "var data = [1, 2, 3]\nvar copy = data\ncopy[0] = 9\nprint(data)\nprint(copy)";
+    ShapeTest::new(code)
+        .expect_output("[1, 2, 3]\n[9, 2, 3]");
+}
+
+#[test]
+fn var_copy_array_push_in_function_is_independent() {
+    // Same independence inside a function body (the local-slot ownership
+    // path, distinct from the top-level module-binding path).
+    let code = "fn main() {\n  var data = [1, 2, 3]\n  var copy = data\n  copy.push(99)\n  print(data)\n  print(copy)\n}\nmain()";
+    ShapeTest::new(code)
+        .expect_output("[1, 2, 3]\n[1, 2, 3, 99]");
+}
+
+#[test]
+fn var_copy_struct_field_assign_does_not_mutate_source() {
+    // Struct var-copy: field-assign on the copy must NOT touch the source.
+    let code = "type Point { x: int, y: int }\nvar p = Point { x: 1, y: 2 }\nvar q = p\nq.x = 99\nprint(p.x)\nprint(q.x)";
+    ShapeTest::new(code)
+        .expect_output("1\n99");
+}
+
+#[test]
+fn var_copy_scalar_is_copy_not_shared() {
+    // Scalars are Copy: the `var b = a` rebind must not alias, and mutating
+    // `b` must leave `a` unchanged (no DeepClone heap path for scalars).
+    let code = "var a = 5\nvar b = a\nb = b + 1\nprint(a)\nprint(b)";
+    ShapeTest::new(code).expect_output("5\n6");
+}
+
+#[test]
+fn var_copy_explicit_clone_still_independent() {
+    // Explicit `.clone()` must remain an independent copy (unchanged).
+    let code = "var data = [1, 2, 3]\nvar copy = data.clone()\ncopy.push(99)\nprint(data)\nprint(copy)";
+    ShapeTest::new(code)
+        .expect_output("[1, 2, 3]\n[1, 2, 3, 99]");
+}
+
+#[test]
+fn let_rebind_of_heap_still_moves_b0005() {
+    // `let q = p` MOVES a heap source; the still-live read of `p` is a
+    // compile-time use-after-move (B0005). The var-copy DeepClone path must
+    // NOT relax this — only `var` destinations auto-clone.
+    let code = "let p = [1, 2, 3]\nlet q = p\nprint(p)";
+    ShapeTest::new(code)
+        .expect_run_err_contains("after it was moved");
+}
