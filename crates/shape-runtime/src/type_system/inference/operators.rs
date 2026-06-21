@@ -427,10 +427,14 @@ impl TypeInferenceEngine {
                     out.push(TypeAnnotation::Object(fields.clone()));
                     true
                 }
-                Type::Concrete(TypeAnnotation::Reference(name)) => {
-                    out.push(TypeAnnotation::Reference(name.clone()));
-                    true
-                }
+                // NOTE: a bare `Reference(name)` (a NAMED type like `Money`) is
+                // deliberately NOT a merge member. Object-literal merge is for
+                // UNTYPED object literals only; a named type that implements
+                // `Add` dispatches to its impl (checked in the `Add` arm BEFORE
+                // this helper). Without this exclusion a `Money + Money` was
+                // hijacked into `Intersection([Money, Money])` — the structural
+                // merge of two named structs — instead of the user's
+                // `impl Add for Money`. MERGE-HIJACK fix (operators slice).
                 Type::Concrete(TypeAnnotation::Intersection(types)) => {
                     out.extend(types.clone());
                     true
@@ -715,6 +719,19 @@ impl TypeInferenceEngine {
         let right = &Self::deref_operand_for_operator(right);
         match op {
             BinaryOp::Add => {
+                // Operator-trait dispatch PRECEDES object-literal merge for a
+                // NAMED type that implements `Add`. A struct `Money` with
+                // `impl Add for Money` must dispatch to its impl, NOT be
+                // structurally merged. The object-literal-merge builtin
+                // (`infer_object_add_type` below) is reserved for UNTYPED object
+                // literals (`{ x: 1 } + { y: 2 }`); it no longer claims named
+                // types (the `Reference` arm was removed), so a `Money + Money`
+                // that would previously become `Intersection([Money, Money])`
+                // (and then fail to unify with a `-> Money` return) now resolves
+                // to the impl's `Money`. MERGE-HIJACK fix (operators slice).
+                if let Some(result_type) = self.check_operator_trait(left, "Add") {
+                    return Ok(result_type);
+                }
                 if let Some(merged) = Self::infer_object_add_type(left, right) {
                     return Ok(merged);
                 }
@@ -738,10 +755,6 @@ impl TypeInferenceEngine {
                 // dispatches these via `CallMethod("add")` (binary_ops.rs).
                 if let Some(result) = Self::temporal_arithmetic_result(&BinaryOp::Add, left, right) {
                     return Ok(result);
-                }
-                // Operator trait fallback: if left type implements Add, return left type
-                if let Some(result_type) = self.check_operator_trait(left, "Add") {
-                    return Ok(result_type);
                 }
                 // `+` is overloaded (numeric add OR string concat). When BOTH
                 // operands are still unresolved type variables there is nothing

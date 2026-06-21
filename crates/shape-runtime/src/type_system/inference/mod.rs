@@ -1522,6 +1522,9 @@ impl TypeInferenceEngine {
                 errors.push(err);
             }
         }
+        // Declaration-order-independent operator-trait dispatch (mirrors the
+        // production `infer_program_best_effort` path).
+        self.register_traits_and_impls_prepass(&consumer.items);
         for item in &consumer.items {
             if let Err(err) = self.infer_item(item, &mut types) {
                 errors.push(err);
@@ -1602,6 +1605,14 @@ impl TypeInferenceEngine {
                 errors.push(err);
             }
         }
+
+        // Register every trait + impl + enum across the WHOLE program before
+        // function bodies are inferred, so operator-trait dispatch is
+        // declaration-ORDER INDEPENDENT (a `fn` that uses `impl Add for T`
+        // resolves whether the impl is textually before or after it). Idempotent
+        // with the per-item registration in `infer_item`, which stays the
+        // canonical (source-order) error site.
+        self.register_traits_and_impls_prepass(&program.items);
 
         for item in &program.items {
             if let Err(err) = self.infer_item(item, &mut types) {

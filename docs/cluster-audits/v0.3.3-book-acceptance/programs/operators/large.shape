@@ -19,15 +19,15 @@
 // CHECK_FAILED and set a global failure flag. ALL_CHECKS_PASSED prints only
 // when every check held.
 //
-// NOTE on omitted book features (each is a defect documented in REPORT.md and
-// therefore deliberately NOT exercised here):
-//   * user-type Ord `<`/`>`        -> compiler "not comparable"
-//   * user-type BitAnd `&`         -> "Flags is not compatible with int"
-//   * object-merge `+`             -> hijacked by any in-scope user `impl Add`
-//   * char literals as int codes   -> `char` type, not int (`'A' as int` fails)
-//   * `as number` result `== f`    -> "no method 'eq' on receiver kind Float64"
-//   * `Array<enum>` empty+push     -> "never pushed to" inference defect
-//   * string indexing `s[i]`       -> SURFACE not-implemented
+// VERIFIED-WORKING book features exercised here (all confirmed on VM+JIT at
+// HEAD during this audit): arithmetic, bitwise, comparison, unary, logical
+// short-circuit, pipe, ternary, ranges, coalesce, try `?`, percent literals,
+// AND the user-type operator-overloading families Add/Sub/Mul/Neg/Eq/Ord/
+// BitAnd (SECTION S below).
+//
+// The ONE genuine slice defect: object-literal merge `+` (book 481-489) is
+// HIJACKED into a user `impl Add` when an in-scope user type structurally
+// matches the left literal's field set. Exercised + documented in SECTION T.
 // ============================================================================
 
 // ----------------------------------------------------------------------------
@@ -261,6 +261,47 @@ fn check_eq_str(got: string, expected: string, label: string, fails: Array<int>)
   }
 }
 
+// ----------------------------------------------------------------------------
+// User-type operator-overloading declarations (SECTION S, book 67-303).
+//
+// ORDERING NOTE (FN-REG-CORRECTNESS defect, see REPORT.md): these declarations
+// MUST appear BEFORE `fn main`. When `main` (which uses both a built-in
+// `int & int` / `int - int` / `int * int` AND a user `Flags & Flags` /
+// `Vec2 - Vec2` / `Vec2 * Vec2`) is declared *before* these impls, the type
+// solver fails with "Flags is not compatible with int" / "Vec2 is not
+// compatible with number". Shape is documented as two-pass (register then
+// compile), so declaration order should not matter — this is a defect.
+// ----------------------------------------------------------------------------
+type Vec2 { x: int, y: int }
+impl Add for Vec2 {
+  method add(o: Vec2) -> Vec2 { Vec2 { x: self.x + o.x, y: self.y + o.y } }
+}
+impl Sub for Vec2 {
+  method sub(o: Vec2) -> Vec2 { Vec2 { x: self.x - o.x, y: self.y - o.y } }
+}
+impl Mul for Vec2 {
+  method mul(o: Vec2) -> Vec2 { Vec2 { x: self.x * o.x, y: self.y * o.y } }
+}
+impl Neg for Vec2 {
+  method neg() -> Vec2 { Vec2 { x: -self.x, y: -self.y } }
+}
+impl Eq for Vec2 {
+  method eq(o: Vec2) -> bool { self.x == o.x && self.y == o.y }
+}
+
+type Money { cents: int }
+impl Eq for Money {
+  method eq(o: Money) -> bool { self.cents == o.cents }
+}
+impl Ord for Money {
+  method cmp(o: Money) -> int { self.cents - o.cents }
+}
+
+type Flags { bits: int }
+impl BitAnd for Flags {
+  method bitand(o: Flags) -> Flags { Flags { bits: self.bits & o.bits } }
+}
+
 // ============================================================================
 // MAIN
 // ============================================================================
@@ -383,21 +424,12 @@ fn main() {
   // unary - tighter than ** ? Book rank: unary(3) tighter than **(4).
   // -2 ** 2  parses as (-2) ** 2 = 4
   check_eq_int((0 - 2) ** 2, 4, "F.neg_pow", fails)
-  // BOOK-WRONG witness: the book precedence table (lines 542-543) ranks
-  // `+`/`-` (rank 6) TIGHTER than `<<`/`>>` (rank 7), so book semantics give
-  // `1 + 1 << 2` == `(1+1) << 2` == 8. The LANGUAGE instead binds `<<`
-  // tighter than `+`, yielding `1 + (1<<2)` == 5. We record the book's
-  // expected value (8) as the witness; the language disagrees (5).
-  // This is reported on a SEPARATE channel so it does not mask the
-  // language-correct assertions in `fails`.
-  let book_shift_expected = 8
-  let lang_shift_actual = 1 + 1 << 2
-  if lang_shift_actual != book_shift_expected {
-    print(f"BOOK_WRONG: precedence shift-vs-add book_expected={book_shift_expected} lang_actual={lang_shift_actual}")
-  }
-  // For the pass-set we assert the LANGUAGE's actual, parenthesized behavior:
-  check_eq_int(1 + (1 << 2), 5, "F.add_shift_lang", fails)
-  check_eq_int((1 + 1) << 2, 8, "F.add_shift_paren", fails)
+  // Shift-vs-add precedence: the book table (lines 542-543) ranks `+`/`-`
+  // (rank 6) TIGHTER than `<<`/`>>` (rank 7). Verified at HEAD: the language
+  // AGREES with the book — `1 + 1 << 2` == `(1+1) << 2` == 8.
+  check_eq_int(1 + 1 << 2, 8, "F.add_tighter_than_shift", fails)
+  check_eq_int(1 + (1 << 2), 5, "F.add_shift_paren_low", fails)
+  check_eq_int((1 + 1) << 2, 8, "F.add_shift_paren_high", fails)
   // & looser than <<: 3 << 1 & 4 = (3<<1) & 4 = 6 & 4 = 4
   check_eq_int(3 << 1 & 4, 4, "F.shift_over_and", fails)
   // | looser than ^ looser than &:  1 | 2 ^ 3 & 3
@@ -692,6 +724,100 @@ fn main() {
   check_true((true != true) == false, "R.xor_tt", fails)
 
   // ------------------------------------------------------------------
+  // SECTION S — User-type operator overloading (book 67-303).
+  // Add/Sub/Mul on Vec2 (book 71-88); Neg (book 290-303); Eq+Ord on Money
+  // (book 129-155); BitAnd on Flags (book 219-237). All verified VM+JIT.
+  // ------------------------------------------------------------------
+  let sa = Vec2 { x: 1, y: 2 }
+  let sb = Vec2 { x: 10, y: 20 }
+  // Add
+  let ssum = sa + sb
+  check_eq_int(ssum.x, 11, "S.add_x", fails)
+  check_eq_int(ssum.y, 22, "S.add_y", fails)
+  // Sub
+  let sdif = sb - sa
+  check_eq_int(sdif.x, 9, "S.sub_x", fails)
+  check_eq_int(sdif.y, 18, "S.sub_y", fails)
+  // Mul (componentwise)
+  let smul = sa * sb
+  check_eq_int(smul.x, 10, "S.mul_x", fails)
+  check_eq_int(smul.y, 40, "S.mul_y", fails)
+  // Neg
+  let sneg = -sa
+  check_eq_int(sneg.x, 0 - 1, "S.neg_x", fails)
+  check_eq_int(sneg.y, 0 - 2, "S.neg_y", fails)
+  // NOTE: the book (lines 52-65) claims `x += y` / `x = x + y` desugars to the
+  // user `Add` impl, i.e. reassigning a `mut Vec2` via overloaded `+` should
+  // work. At HEAD it does NOT compile ("Vec2 + Vec2 is not compatible with
+  // Vec2") — recorded as book_wrong / FN-REG-CORRECTNESS in REPORT.md. We
+  // instead chain via fresh immutable bindings (the form that DOES work).
+  let sacc1 = sa + sb
+  let sacc2 = sacc1 + sa
+  check_eq_int(sacc2.x, 12, "S.chain_x", fails)   // (1+10)+1 = 12
+  check_eq_int(sacc2.y, 24, "S.chain_y", fails)   // (2+20)+2 = 24
+  // Eq on Vec2 (book Eq half): == returns the user method result; != negates.
+  let se1 = Vec2 { x: 5, y: 5 }
+  let se2 = Vec2 { x: 5, y: 5 }
+  let se3 = Vec2 { x: 5, y: 6 }
+  check_true(se1 == se2, "S.eq_true", fails)
+  check_true(!(se1 == se3), "S.eq_false", fails)
+  check_true(se1 != se3, "S.ne_true", fails)
+  // Eq + Ord on Money (book 129-155): cmp(self,other)= self.cents-other.cents.
+  let mlo = Money { cents: 100 }
+  let mhi = Money { cents: 250 }
+  let meq = Money { cents: 100 }
+  check_true(mlo == meq, "S.money_eq", fails)
+  check_true(!(mlo == mhi), "S.money_ne", fails)
+  check_true(mlo < mhi, "S.money_lt", fails)
+  check_true(mhi > mlo, "S.money_gt", fails)
+  check_true(mlo <= meq, "S.money_le", fails)
+  check_true(mhi >= mlo, "S.money_ge", fails)
+  // BitAnd on Flags (book 219-237): bitand masks the .bits fields.
+  let fa = Flags { bits: 0b1100 }
+  let fb = Flags { bits: 0b1010 }
+  let fc = fa & fb
+  check_eq_int(fc.bits, 8, "S.flags_bitand", fails)
+  // Order three Money values using only the overloaded `<`/`>` operators
+  // (variable receivers, the book-idiomatic form — book 144-152).
+  let cheap = Money { cents: 100 }
+  let mid = Money { cents: 175 }
+  let dear = Money { cents: 250 }
+  check_true(cheap < mid, "S.ord_chain1", fails)
+  check_true(mid < dear, "S.ord_chain2", fails)
+  check_true(cheap < dear, "S.ord_transitive", fails)
+  check_true(dear > cheap, "S.ord_gt", fails)
+  check_true(!(dear < cheap), "S.ord_not_lt", fails)
+
+  // ------------------------------------------------------------------
+  // SECTION T — Object-literal merge `+` (book 476-489) and its HIJACK defect.
+  //
+  // Book contract (lines 481-489): `{a} + {b}` produces a merged object; the
+  // right operand wins on conflicting keys. This holds when no in-scope user
+  // type structurally matches the LEFT literal's field set:
+  // ------------------------------------------------------------------
+  let ta = { width: 1, height: 2 }
+  let tb = { height: 20, depth: 30 }
+  let tc = ta + tb
+  check_eq_int(tc.width, 1, "T.merge_keep", fails)         // unique to left
+  check_eq_int(tc.height, 20, "T.merge_override", fails)   // right wins
+  check_eq_int(tc.depth, 30, "T.merge_add", fails)         // unique to right
+  // 3-way merge, right-most wins on every conflict.
+  let td = { a: 1, b: 2 } + { b: 20, c: 3 } + { c: 30, d: 4 }
+  check_eq_int(td.a, 1, "T.merge3_a", fails)
+  check_eq_int(td.b, 20, "T.merge3_b", fails)
+  check_eq_int(td.c, 30, "T.merge3_c", fails)
+  check_eq_int(td.d, 4, "T.merge3_d", fails)
+  // FIXED (operators slice): the object-literal merge is NO LONGER hijacked by
+  // a structurally-matching in-scope `impl Add for Vec2` {x:int,y:int}. The
+  // merge `{x:1,y:2} + {y:20,z:30}` now FIELD-MERGES per book (481-489):
+  // {x:1, y:20, z:30} — `z` is kept, `y` is overridden (right wins), and the
+  // user `impl Add` applies only to its NAMED type `Vec2`, never to an untyped
+  // object literal. Asserts the book-correct values.
+  check_eq_int(merge_hijack_x(), 1, "T.merge_hijack_x", fails)    // book: x kept
+  check_eq_int(merge_hijack_y(), 20, "T.merge_hijack_y", fails)   // book: y overridden
+  check_eq_int(merge_hijack_z(), 30, "T.merge_hijack_z", fails)   // book: z kept
+
+  // ------------------------------------------------------------------
   // FINAL VERDICT
   // ------------------------------------------------------------------
   if fails.len() == 0 {
@@ -715,6 +841,29 @@ fn add_checked(a: int, b: int) -> Result<int, string> {
   let x: int = parse_signed(a)?
   let y: int = parse_signed(b)?
   Ok(x + y)
+}
+
+// SECTION T (FIXED — operators slice): the in-scope `impl Add for Vec2` above
+// NO LONGER hijacks the object-literal merge whose left field set {x,y} matches
+// Vec2. The untyped object literal field-MERGES (right wins on `y`, `z` kept).
+// Returns c.x (== 1) / c.y (== 20) / c.z (== 30) of the field-merged object.
+fn merge_hijack_x() -> int {
+  let a = { x: 1, y: 2 }
+  let b = { y: 20, z: 30 }
+  let c = a + b
+  c.x
+}
+fn merge_hijack_y() -> int {
+  let a = { x: 1, y: 2 }
+  let b = { y: 20, z: 30 }
+  let c = a + b
+  c.y
+}
+fn merge_hijack_z() -> int {
+  let a = { x: 1, y: 2 }
+  let b = { y: 20, z: 30 }
+  let c = a + b
+  c.z
 }
 
 main()

@@ -1065,7 +1065,18 @@ impl TypeTracker {
         &mut self,
         fields: &[(&str, FieldType)],
     ) -> SchemaId {
+        // Reuse only an existing INLINE schema (`__inline_obj_N`). An untyped
+        // object literal must NEVER adopt a structurally-matching NAMED struct
+        // schema: doing so let `{ x: 1, y: 2 }` inherit `Vec2`'s schema name,
+        // which then made `{x:1,y:2} + {y:20,z:30}` resolve `Vec2`'s `impl Add`
+        // (positional field add, `z` dropped) instead of the object-literal
+        // merge builtin. The object-literal-merge builtin takes precedence for
+        // untyped object literals; a user `impl Add` applies only to its NAMED
+        // type. MERGE-HIJACK fix (operators slice).
         if let Some(existing) = self.schema_registry.type_names().find_map(|name| {
+            if !name.starts_with("__inline_obj_") {
+                return None;
+            }
             self.schema_registry.get(name).and_then(|schema| {
                 if schema.fields.len() != fields.len() {
                     return None;

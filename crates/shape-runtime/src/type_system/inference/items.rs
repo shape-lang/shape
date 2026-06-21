@@ -375,6 +375,58 @@ impl TypeInferenceEngine {
         Ok(())
     }
 
+    /// Register all trait + impl + enum + extend definitions across the WHOLE
+    /// item list BEFORE any function body is type-checked, so operator-trait
+    /// dispatch is declaration-ORDER INDEPENDENT.
+    ///
+    /// The documented model is "register all, then compile" (CLAUDE.md two-pass
+    /// compiler). `predeclare_item` (pass 1) only predeclares fn/struct
+    /// signatures + extend; trait/impl/enum registration historically happened
+    /// inside `infer_item` (pass 2), interleaved with function-body inference.
+    /// That made a `fn f() { a + b }` declared textually BEFORE its
+    /// `impl Add for T` fail operator-trait resolution (`check_operator_trait`
+    /// saw no registered impl yet), while the same code after the impl worked.
+    ///
+    /// This pre-pass closes that gap: traits are registered first (impls
+    /// validate against their trait), then impls / enums in source order.
+    /// Registration is idempotent for matching shapes
+    /// (`register_trait_impl_with_assoc_types_named` returns `Ok(())` on an
+    /// exact re-registration), so `infer_item`'s own Trait/Impl/Enum arms still
+    /// run and remain the CANONICAL error-reporting site (preserving source-
+    /// order diagnostics). Errors here are deliberately SWALLOWED — this pass
+    /// exists only to make the impls visible to body inference; any genuine
+    /// conflict / arity / coherence error surfaces (once) from `infer_item`.
+    pub(crate) fn register_traits_and_impls_prepass(&mut self, items: &[Item]) {
+        // Traits first — impl registration validates method arity / comptime
+        // alignment against the trait definition.
+        for item in items {
+            match item {
+                Item::Trait(trait_def, _) => {
+                    let _ = self.register_trait(trait_def);
+                }
+                Item::Export(export, _) => {
+                    if let shape_ast::ast::ExportItem::Trait(trait_def) = &export.item {
+                        let _ = self.register_trait(trait_def);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Then impls + enums in source order. Extend is already registered by
+        // `predeclare_item` (pass 1), so it is not repeated here.
+        for item in items {
+            match item {
+                Item::Impl(impl_block, _) => {
+                    let _ = self.register_impl(impl_block);
+                }
+                Item::Enum(enum_def, _) => {
+                    self.env.register_enum(enum_def);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// DESIGN §2.4 — LOAD path = REPLAY, not re-infer.
     ///
     /// On a fresh `.shapec` cache hit (the §2.3 load-or-rebuild gate selected
@@ -848,6 +900,19 @@ impl TypeInferenceEngine {
                     if let Type::Variable(_) = &scheme.ty {
                         return scheme.ty.clone();
                     }
+                }
+                // A NAMED struct stays NOMINAL (`Reference("Money")`), even
+                // though it is also registered as a structural type alias
+                // (`Money -> { cents: int }`) for unification. Expanding a `fn
+                // f(m: Money)` param to its structural `Object` form lost the
+                // name, so `m + m` (with `impl Add for Money` in scope) could
+                // not resolve the operator trait — `check_operator_trait`
+                // requires a `Basic`/`Reference` name and rejects a bare
+                // `Object`. The solver already unifies nominal `Reference` with
+                // structural `Object` via `set_struct_schemas`, so keeping the
+                // nominal form is sound. (operators slice)
+                if self.struct_type_defs.contains_key(name) {
+                    return Type::Concrete(ann.clone());
                 }
                 if let Some(alias_entry) = self.env.lookup_type_alias(name) {
                     return self.resolve_type_annotation(&alias_entry.type_annotation);

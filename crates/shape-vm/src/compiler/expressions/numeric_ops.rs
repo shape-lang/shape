@@ -102,6 +102,15 @@ pub(super) fn inferred_type_to_numeric(ty: &Type) -> Option<NumericType> {
 pub(super) fn type_display_name(ty: &Type) -> String {
     match ty {
         Type::Concrete(TypeAnnotation::Basic(name)) => name.clone(),
+        // A named-type reference (`Money`, `foo::MyType`) — e.g. the inferred
+        // type of an inline struct literal `Money { .. }`. Must render the bare
+        // type NAME, not the `Debug` repr: this string is fed to
+        // `type_implements_trait` for operator-trait dispatch
+        // (`binary_ops.rs` Sub/Mul early gate). Without this arm a struct
+        // literal as the LEFT operand of `-`/`*` fell into the `Debug` arm
+        // below, so the trait lookup keyed on `Concrete(Reference(TypePath...))`
+        // missed the registered `impl Sub for Money` and rejected the op.
+        Type::Concrete(TypeAnnotation::Reference(path)) => path.as_str().to_string(),
         Type::Concrete(TypeAnnotation::Object(fields)) => {
             let field_strs: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
             format!("{{{}}}", field_strs.join(", "))

@@ -1,14 +1,6 @@
 // Operators slice — small self-checking program.
-// Exercises the operator families taught in fundamentals/operators.mdx.
-// Every expected value is derived from BOOK SEMANTICS (cited by line).
-//
-// Three book-taught features are DEFECTIVE and therefore omitted from the
-// asserted core (fully documented in REPORT.md):
-//   * user-type Ord `<`/`>` (book 138-152)  -> "not comparable"
-//   * user-type BitAnd `&`  (book 221-234)  -> "Flags is not compatible with int"
-//   * object-merge `+`      (book 481-489)  -> hijacked by any in-scope user
-//                                              `impl Add` whose fields overlap
-// What IS asserted below is the subset that works AND matches the book.
+// Exercises every operator family taught in fundamentals/operators.mdx.
+// Every expected value is derived from BOOK SEMANTICS (cited by line number).
 
 fn check(cond: bool, label: string) {
   if !cond {
@@ -16,16 +8,17 @@ fn check(cond: bool, label: string) {
   }
 }
 
-// --- Arithmetic (book 33-43) ---
+// --- Arithmetic (book 33-50) ---
 let a = 10
 let b = 3
 check(a + b == 13, "add")
 check(a - b == 7, "sub")
 check(a * b == 30, "mul")
-check(a / b == 3, "intdiv")     // integer division truncates
+check(a / b == 3, "intdiv")        // integer division truncates
 check(a % b == 1, "mod")
 check(a ** b == 1000, "pow_int")
-check(2 ** 10 == 1024, "pow_2_10")   // book 48
+check(2 ** 10 == 1024, "pow_2_10")
+check(2.0 ** 0.5 == 1.4142135623730951, "pow_number")
 
 // Compound assigns (book 55-65)
 let mut x = 1
@@ -64,15 +57,15 @@ y |= 0x01
 y ^= 0x10
 y <<= 1
 y >>= 1
-check(y == 225, "bit_compound")   // book 209-216
+check(y == 225, "bit_compound")    // book 209-216
 
 // --- Logical short-circuit (book 249-263) ---
 let ok = true
 let ready = false
 check(ok && !ready, "and")
 check(ok || ready, "or")
-check(ok and ready == false, "kw_and")   // `and` keyword spelling (book 257)
-check((ready or ok) == true, "kw_or")    // `or` keyword spelling
+check((true and true), "kw_and")          // `and` keyword spelling (book 257)
+check((false or true), "kw_or")           // `or` keyword spelling
 
 // --- Unary (book 275-286) ---
 check(-10 == -10, "neg_lit")
@@ -89,7 +82,7 @@ check(arr[2] == 30, "index2")
 // --- Pipe (book 354-360) ---
 fn double(n: int) -> int { n * 2 }
 fn inc(n: int) -> int { n + 1 }
-let piped = 5 |> double |> inc   // inc(double(5)) = 11
+let piped = 5 |> double |> inc     // inc(double(5)) = 11
 check(piped == 11, "pipe")
 
 // --- Ternary (book 386-390) ---
@@ -111,19 +104,18 @@ check(is_int, "instanceof")
 check(0.1 + 0.2 ~= 0.3 within 0.0001, "fuzzy")
 
 // --- Type assertion `as` (book 496-499) ---
-// The book's runnable snippet only prints the `as number` result; that works.
-// Comparing the result with `==` (`asnum == 42.0`) instead raises
-// "no method 'eq' on receiver kind Float64" — a defect documented in
-// REPORT.md. We round-trip through arithmetic (which restores a usable
-// native Float64) to assert the converted magnitude.
 let asnum = 42 as number
-check((asnum + 0.0) == 42.0, "as_number")
+check(asnum == 42.0, "as_number")
 
 // --- Percent literal (book 525-530) ---
 let half = 50%      // 0.5
 let tax = 7.5%      // 0.075
 check(half == 0.5, "percent_half")
 check(tax == 0.075, "percent_tax")
+
+// --- Character literal (book 510-519): evaluates to integer code point ---
+let newline = '\n'
+check(newline == 10, "char_newline")
 
 // --- Try `?` operator (book 416-430) ---
 fn try_parse(s: string) -> Result<int, string> {
@@ -137,6 +129,26 @@ let try_res = match run_try("ok") { Ok(v) => v, Err(_) => -1 }
 check(try_res == 43, "try_ok")
 let try_err = match run_try("no") { Ok(v) => v, Err(_) => -1 }
 check(try_err == -1, "try_err")
+
+// --- Object merge `+` (book 481-489): right operand wins on conflict ---
+// FIXED (operators slice): an untyped object literal merge is NO LONGER
+// hijacked by a structurally-matching in-scope `impl Add for Vec2`
+// {x:int,y:int}. The literal `{x,y}` field set merges by name (right wins on
+// the shared key); the user `impl Add` applies only to its NAMED type `Vec2`.
+let oa = { width: 1, height: 2 }
+let ob = { height: 20, depth: 30 }
+let oc = oa + ob
+check(oc.width == 1, "merge_keep")
+check(oc.height == 20, "merge_override")   // right operand wins
+check(oc.depth == 30, "merge_add")
+// Colliding-key witness: {x,y} now MERGES (not hijacked into Vec2::add) even
+// though `impl Add for Vec2 {x,y}` is declared below in this same file.
+let ma = { x: 1, y: 2 }
+let mb = { y: 20, z: 30 }
+let mc = ma + mb
+check(mc.x == 1, "merge_collide_keep")      // x kept
+check(mc.y == 20, "merge_collide_override") // y overridden, NOT 2+30=32
+check(mc.z == 30, "merge_collide_add")      // z kept, NOT dropped
 
 // --- Operator overloading: Add on user type (book 71-85) ---
 type Vec2 { x: int, y: int }
@@ -160,15 +172,32 @@ let nv = -(Vec2b { x: 3, y: -4 })
 check(nv.x == -3, "neg_x")
 check(nv.y == 4, "neg_y")
 
-// --- Operator overloading: Eq on user type (book 129-152, Eq half) ---
+// --- Operator overloading: Eq + Ord on user type (book 129-152) ---
 type Money { cents: int }
 impl Eq for Money {
   method eq(other: Money) -> bool { self.cents == other.cents }
+}
+impl Ord for Money {
+  method cmp(other: Money) -> int { self.cents - other.cents }
 }
 let m1 = Money { cents: 100 }
 let m2 = Money { cents: 250 }
 let m3 = Money { cents: 100 }
 check(m1 == m3, "money_eq")
 check(!(m1 == m2), "money_ne")
+check(m1 < m2, "money_lt")
+check(m2 > m1, "money_gt")
+
+// --- Operator overloading: BitAnd on user type (book 221-234) ---
+type Flags { bits: int }
+impl BitAnd for Flags {
+  method bitand(other: Flags) -> Flags {
+    Flags { bits: self.bits & other.bits }
+  }
+}
+let fa = Flags { bits: 0b1100 }
+let fb = Flags { bits: 0b1010 }
+let fc = fa & fb
+check(fc.bits == 8, "flags_bitand")
 
 print("ALL_CHECKS_PASSED")

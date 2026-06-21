@@ -145,6 +145,11 @@ fn try_emit_trait_dispatch(
     emit_operator_trait_call(compiler, method_name, op_span);
     if is_ordered_comparison(op) {
         emit_cmp_result_comparison(compiler, op);
+    } else if let Some(left_id) = left_schema {
+        // Arithmetic operator trait result is `Self` — restore the left schema
+        // so chained / assigned uses resolve. (operators slice —
+        // compound-assign fix)
+        compiler.restore_operator_trait_result_schema(left_id);
     }
     true
 }
@@ -297,6 +302,29 @@ enum EqOperandType {
 }
 
 impl BytecodeCompiler {
+    /// After an operator-trait dispatch (`a + b` → `a.add(b)` etc.), restore
+    /// the expr-type tracking to the RESULT type so a chained or assigned use
+    /// sees a concrete type. For the arithmetic operator traits (`Add`/`Sub`/
+    /// `Mul`/`Div`/`BitAnd`/`BitOr`/`BitXor`) the result type is `Self` — the
+    /// LEFT operand's type — so `result_schema_id` is the left operand's schema
+    /// id. `emit_operator_trait_call` clears `last_expr_schema` /
+    /// `last_expr_type_info`; without this restore, `acc = acc + x` (and the
+    /// `acc += x` it desugars from) dropped `acc`'s schema, so the NEXT
+    /// `acc + y` could not resolve the operator trait and failed with
+    /// "operand types are unknown". (operators slice — compound-assign fix)
+    fn restore_operator_trait_result_schema(&mut self, result_schema_id: SchemaId) {
+        if let Some(schema) = self
+            .type_tracker
+            .schema_registry()
+            .get_by_id(result_schema_id)
+        {
+            let name = schema.name.clone();
+            self.last_expr_schema = Some(result_schema_id);
+            self.last_expr_type_info =
+                Some(crate::type_tracking::VariableTypeInfo::known(result_schema_id, name));
+        }
+    }
+
     /// ε-1 PART 1 — emit-side soundness guard.
     ///
     /// Returns a `ProofGap`-derived compile error when a typed numeric opcode
@@ -1533,6 +1561,15 @@ impl BytecodeCompiler {
                         // The left operand (receiver) and right operand (arg)
                         // are already on the stack from compile_expr above.
                         emit_operator_trait_call(self, "add", op_span);
+                        // The result of `impl Add for T` is `T` (the receiver
+                        // type). `emit_operator_trait_call` clears the
+                        // expr-type tracking; restore the LEFT schema so a
+                        // chained / assigned use sees the result type. Without
+                        // this, `acc = acc + x` (or `acc += x`) lost `acc`'s
+                        // schema and the NEXT `acc + y` failed to resolve the
+                        // operator trait ("operand types are unknown").
+                        // (operators slice — compound-assign fix)
+                        self.restore_operator_trait_result_schema(left_id);
                     } else {
                         self.compile_typed_merge(left_id, right_id)?;
                         self.last_expr_numeric_type = None;
@@ -2435,6 +2472,12 @@ impl BytecodeCompiler {
                             emit_operator_trait_call(self, method_name, op_span);
                             if is_ordered_comparison(op) {
                                 emit_cmp_result_comparison(self, op);
+                            } else if let Some(left_id) = left_schema {
+                                // Arithmetic operator trait (`Sub`/`Mul`/...)
+                                // result is `Self` — restore the left schema so
+                                // chained / assigned uses resolve. (operators
+                                // slice — compound-assign fix)
+                                self.restore_operator_trait_result_schema(left_id);
                             }
                             return Ok(());
                         }
@@ -2807,10 +2850,21 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    /// Compile a typed object merge (a + b where both are TypedObjects)
+    /// Compile a typed object merge (a + b where both are TypedObjects).
     ///
-    /// This registers the intersection schema at compile time and emits
-    /// TypedMergeObject for O(1) memcpy-based merge.
+    /// Object-literal merge OVERRIDES on duplicate keys (right wins): the
+    /// merged field set is `left-fields-not-in-right ++ all-right-fields`,
+    /// preserving left order then right order. A shared key (`{x,y} + {y,z}`
+    /// shares `y`) appears ONCE, carrying the right operand's value and type.
+    ///
+    /// This registers that deduplicated merged schema at compile time under the
+    /// `__intersection_{left}_{right}` name that the runtime
+    /// `derive_merged_schema` looks up, then emits `MergeObject` — the
+    /// deduplicating runtime merge (`build_named_merged_storage`, layout
+    /// `keep_left ++ right`). The former `TypedMergeObject` path naively
+    /// CONCATENATED both field lists, so `{x:1,y:2}+{y:20,z:30}` produced a
+    /// schema with a DUPLICATE `y` (`{x, y, y, z}`) instead of the correct
+    /// `{x:1, y:20, z:30}`. (operators slice — merge override fix)
     fn compile_typed_merge(&mut self, left_id: SchemaId, right_id: SchemaId) -> Result<()> {
         let registry = self.type_tracker.schema_registry();
 
@@ -2828,42 +2882,37 @@ impl BytecodeCompiler {
                     location: None,
                 })?;
 
-        // Calculate sizes (8 bytes per field)
-        let left_size = left_schema.fields.len() * 8;
-        let right_size = right_schema.fields.len() * 8;
-
-        // Build merged field list
+        // Deduplicated merge layout (right wins on shared keys): match the
+        // runtime `op_merge_object` / `build_named_merged_storage` order —
+        // left fields whose name is NOT in the right schema (in left order),
+        // then ALL right fields (in right order).
+        let right_names: std::collections::HashSet<&str> =
+            right_schema.fields.iter().map(|f| f.name.as_str()).collect();
         let mut merged_fields: Vec<(String, FieldType)> = Vec::new();
         for f in &left_schema.fields {
-            merged_fields.push((f.name.clone(), f.field_type.clone()));
+            if !right_names.contains(f.name.as_str()) {
+                merged_fields.push((f.name.clone(), f.field_type.clone()));
+            }
         }
         for f in &right_schema.fields {
             merged_fields.push((f.name.clone(), f.field_type.clone()));
         }
 
-        // Register intersection schema
+        // Register the merged schema under the name the runtime's
+        // `derive_merged_schema` resolves for `MergeObject`.
         let merged_name = format!("__intersection_{}_{}", left_id, right_id);
         let target_id = self
             .type_tracker
             .schema_registry_mut()
-            .register_type(merged_name, merged_fields);
+            .register_type(merged_name.clone(), merged_fields);
 
-        // Emit TypedMergeObject
-        self.emit(Instruction::new(
-            OpCode::TypedMergeObject,
-            Some(Operand::TypedMerge {
-                target_schema_id: target_id as u16,
-                left_size: left_size as u16,
-                right_size: right_size as u16,
-            }),
-        ));
+        // Emit MergeObject (deduplicating runtime merge). It reads both operand
+        // schemas at runtime and derives the merged schema by name.
+        self.emit(Instruction::new(OpCode::MergeObject, None));
 
         // Track result schema for chained operations (e.g., a + b + c)
         self.last_expr_schema = Some(target_id);
-        self.last_expr_type_info = Some(VariableTypeInfo::known(
-            target_id,
-            format!("__intersection_{}_{}", left_id, right_id),
-        ));
+        self.last_expr_type_info = Some(VariableTypeInfo::known(target_id, merged_name));
 
         Ok(())
     }
@@ -3476,5 +3525,168 @@ mod s4_type_erasure_dispatch_tests {
     fn s4_functions_positional_args_still_work() {
         let code = "fn bv(w: int = 1, h: int = 1, d: int = 1) -> int { return w * h * d }\nbv(2, 3, 4)";
         assert_eq!(eval_typed_i64(code), 24);
+    }
+}
+
+#[cfg(test)]
+mod operator_trait_dispatch_completeness_tests {
+    //! Operators slice — operator-trait dispatch COMPLETENESS (4 findings):
+    //!  1. MERGE-HIJACK: an untyped object-literal merge must NOT be hijacked
+    //!     by a structurally-matching in-scope `impl Add`; the merge builtin
+    //!     wins for untyped object literals and OVERRIDES on shared keys.
+    //!  2. operator-trait dispatch works for `+=` / compound-assign on a `mut`
+    //!     user-type receiver, and for chained `acc = acc + x`.
+    //!  3. an inline struct-LITERAL as the LEFT operand of `Sub`/`Mul` resolves
+    //!     the user impl (like the variable form, and like Add).
+    //!  4. operator-trait resolution is declaration-ORDER INDEPENDENT (an impl
+    //!     declared AFTER a fn that uses it still resolves).
+    use crate::compiler::BytecodeCompiler;
+    use crate::test_utils::eval_typed_i64;
+    use shape_ast::parser::parse_program;
+
+    fn compiles(code: &str) -> bool {
+        let program = parse_program(code).expect("Failed to parse");
+        BytecodeCompiler::new().compile(&program).is_ok()
+    }
+
+    const MONEY_ADD: &str = "type Money { cents: int }\n\
+        impl Add for Money {\n\
+          method add(other: Money) -> Money { Money { cents: self.cents + other.cents } }\n\
+        }\n";
+
+    // ── Finding 1: object-literal merge is NOT hijacked by impl Add ──
+
+    #[test]
+    fn merge_not_hijacked_by_structural_impl_add_overrides_shared_key() {
+        // `{x:1,y:2} + {y:20,z:30}` must FIELD-MERGE (right wins on `y`, `z`
+        // kept) — NOT be hijacked into a structurally-matching `impl Add for
+        // Vec2 {x,y}` (which would positionally add and drop `z`).
+        let code = "type Vec2 { x: int, y: int }\n\
+            impl Add for Vec2 {\n\
+              method add(other: Vec2) -> Vec2 { Vec2 { x: self.x + other.x, y: self.y + other.y } }\n\
+            }\n\
+            let m = {x:1, y:2} + {y:20, z:30}\n\
+            m.x + m.y * 100 + m.z * 10000";
+        // x=1, y=20, z=30  → 1 + 2000 + 300000 = 302001
+        assert_eq!(eval_typed_i64(code), 302001);
+    }
+
+    #[test]
+    fn plain_object_merge_overrides_shared_key_right_wins() {
+        // No impl in scope: the merge builtin still overrides (no duplicate
+        // key). `{a:1,b:2} + {b:9,c:3}` → b=9.
+        let code = "let m = {a:1, b:2} + {b:9, c:3}\n\
+                    m.a + m.b * 10 + m.c * 100";
+        // a=1, b=9, c=3 → 1 + 90 + 300 = 391
+        assert_eq!(eval_typed_i64(code), 391);
+    }
+
+    // ── Finding 2: compound-assign + mut receiver on a user operator type ──
+
+    #[test]
+    fn compound_assign_on_mut_user_type_compiles() {
+        let code = format!(
+            "{MONEY_ADD}\
+             let a = Money {{ cents: 5 }}\n\
+             let mut acc = Money {{ cents: 0 }}\n\
+             acc += a\n\
+             acc.cents"
+        );
+        assert_eq!(eval_typed_i64(&code), 5);
+    }
+
+    #[test]
+    fn chained_mut_assign_then_add_keeps_user_type() {
+        // `acc += a` (desugars to `acc = acc + a`) must restore `acc`'s schema
+        // so the NEXT `acc = acc + b` still resolves the operator trait.
+        let code = format!(
+            "{MONEY_ADD}\
+             let a = Money {{ cents: 5 }}\n\
+             let b = Money {{ cents: 7 }}\n\
+             let mut acc = Money {{ cents: 0 }}\n\
+             acc += a\n\
+             acc = acc + b\n\
+             acc.cents"
+        );
+        assert_eq!(eval_typed_i64(&code), 12);
+    }
+
+    #[test]
+    fn immutable_let_user_add_still_works() {
+        let code = format!(
+            "{MONEY_ADD}\
+             let a = Money {{ cents: 5 }}\n\
+             let b = Money {{ cents: 7 }}\n\
+             let c = a + b\n\
+             c.cents"
+        );
+        assert_eq!(eval_typed_i64(&code), 12);
+    }
+
+    // ── Finding 3: inline struct-literal LEFT operand of Sub / Mul ──
+
+    #[test]
+    fn inline_struct_literal_left_of_sub_resolves_impl() {
+        let code = "type Money { cents: int }\n\
+            impl Sub for Money {\n\
+              method sub(other: Money) -> Money { Money { cents: self.cents - other.cents } }\n\
+            }\n\
+            let v = Money { cents: 3 }\n\
+            let r = Money { cents: 10 } - v\n\
+            r.cents";
+        assert_eq!(eval_typed_i64(code), 7);
+    }
+
+    #[test]
+    fn inline_struct_literal_both_operands_of_sub_resolves_impl() {
+        let code = "type Money { cents: int }\n\
+            impl Sub for Money {\n\
+              method sub(other: Money) -> Money { Money { cents: self.cents - other.cents } }\n\
+            }\n\
+            let r = Money { cents: 10 } - Money { cents: 3 }\n\
+            r.cents";
+        assert_eq!(eval_typed_i64(code), 7);
+    }
+
+    #[test]
+    fn inline_struct_literal_left_of_mul_resolves_impl() {
+        let code = "type Money { cents: int }\n\
+            impl Mul for Money {\n\
+              method mul(other: Money) -> Money { Money { cents: self.cents * other.cents } }\n\
+            }\n\
+            let v = Money { cents: 3 }\n\
+            let r = Money { cents: 10 } * v\n\
+            r.cents";
+        assert_eq!(eval_typed_i64(code), 30);
+    }
+
+    // ── Finding 4: declaration-order independence ──
+
+    #[test]
+    fn operator_trait_impl_declared_after_use_site_resolves() {
+        // `fn double` uses `m + m` and is declared BEFORE `impl Add for Money`.
+        let code = "type Money { cents: int }\n\
+            fn double(m: Money) -> Money { m + m }\n\
+            impl Add for Money {\n\
+              method add(other: Money) -> Money { Money { cents: self.cents + other.cents } }\n\
+            }\n\
+            let r = double(Money { cents: 4 })\n\
+            r.cents";
+        assert_eq!(eval_typed_i64(code), 8);
+    }
+
+    // ── Negative: a struct WITHOUT an Add impl in `+` is still rejected ──
+
+    #[test]
+    fn struct_without_add_impl_in_plus_is_compile_error() {
+        let code = "type P { a: int }\n\
+            let x = P { a: 1 }\n\
+            let y = P { a: 2 }\n\
+            let z = x + y\n\
+            z.a";
+        assert!(
+            !compiles(code),
+            "`+` on a struct with no `impl Add` must be a compile error"
+        );
     }
 }
