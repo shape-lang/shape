@@ -5,6 +5,7 @@ mod drop;
 mod infer;
 mod move_semantics;
 mod operator_deref;
+mod ref_dispatch;
 mod ref_params;
 mod soundness_guards;
 mod violations;

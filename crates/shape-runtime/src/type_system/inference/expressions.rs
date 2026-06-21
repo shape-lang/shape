@@ -283,6 +283,15 @@ impl TypeInferenceEngine {
                     {
                         return self.infer_tuple_index(elem_types, index);
                     }
+                    // Apply the current substitution before the index dispatch
+                    // so a `Borrow`-typed receiver that only resolves via the
+                    // unifier (e.g. `let r = &a` with no annotation, indexed
+                    // inside a function as `r[1]`) is seen as its concrete
+                    // `Borrow { inner }` form by `infer_index_access`'s
+                    // RefDispatch deref arm — not as a still-unresolved variable
+                    // that falls to the constraint path with the referent never
+                    // recovered (leaving the element `unknown`).
+                    let object_type = self.unifier.apply_substitutions(&object_type);
                     self.infer_index_access(&object_type, &index_type)
                 }
             }
@@ -639,6 +648,27 @@ impl TypeInferenceEngine {
                 ..
             } => {
                 let receiver_type = self.infer_expr(receiver)?;
+
+                // Method dispatch through a reference (v0.3.3 RefDispatch):
+                // `r.len()` on a `r: &Array<T>` / `&mut Array<T>` dispatches the
+                // method THROUGH the reference. Deref the `Borrow { inner }` to
+                // its referent so method resolution (PHF builtin table, struct
+                // method registry, generic-signature lookup) runs on the
+                // referent — exactly as `a.len()` would. Mirrors the
+                // field-access auto-deref in `infer_property_access_internal`
+                // (access.rs:46-52) and the index auto-deref in
+                // `infer_index_access`. Without this the `Borrow` receiver falls
+                // through to the property-access fallback -> `HasField` ->
+                // "Borrow(..) cannot have fields". The referent annotation is
+                // forwarded verbatim (no coercion). Bounded to method calls only
+                // (this arm); the namespace-constructor receiver below is a bare
+                // identifier, never a `Borrow`, so it is untouched.
+                let receiver_type = match &receiver_type {
+                    Type::Concrete(TypeAnnotation::Borrow { inner, .. }) => {
+                        Type::Concrete((**inner).clone())
+                    }
+                    _ => receiver_type,
+                };
 
                 // STRICT-FLIP namespace-constructor regression fix (SC0,
                 // 2026-06-16). A static constructor call on a built-in

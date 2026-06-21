@@ -678,10 +678,38 @@ impl BytecodeCompiler {
         let Ok(inner_ty) = self.infer_expr_type(inner) else {
             return;
         };
-        if let shape_runtime::type_system::Type::Concrete(
-            shape_ast::ast::TypeAnnotation::Basic(name),
-        ) = inner_ty
-        {
+        // Record the referent's type NAME. Scalars (`&int` -> `"int"`) drive the
+        // value-position operator auto-deref (`r + 1`). Array referents
+        // (`&Array<int>` -> `"int[]"`, via `type_display_name`) drive the
+        // RefDispatch index-element auto-deref (`r[i]`): `tracked_array_element_type`
+        // strips the `[]`/`Array<>`/`Vec<>` shape, so storing the array's display
+        // name lets `r[i]` recover its element type THROUGH the reference exactly
+        // as `a[i]` would on the array binding directly. No fabrication — the name
+        // comes from the referent's own proven type; a still-unknown inner stays
+        // unrecorded.
+        // Build the referent's array display name (`Array<int>` -> `"int[]"`)
+        // using the same `T[]` convention `tracked_array_element_type` strips.
+        // Only a `Basic`-element array is recorded (the common `&[int]` /
+        // `&[number]` / `&[string]` case); a nested/generic element is left
+        // unrecorded so no malformed name reaches the element-strip path.
+        let array_display_name =
+            |inner: &shape_ast::ast::TypeAnnotation| -> Option<String> {
+                if let shape_ast::ast::TypeAnnotation::Basic(elem) = inner {
+                    Some(format!("{}[]", elem))
+                } else {
+                    None
+                }
+            };
+        let referent_name = match &inner_ty {
+            shape_runtime::type_system::Type::Concrete(
+                shape_ast::ast::TypeAnnotation::Basic(name),
+            ) => Some(name.clone()),
+            shape_runtime::type_system::Type::Concrete(
+                shape_ast::ast::TypeAnnotation::Array(inner),
+            ) => array_display_name(inner),
+            _ => None,
+        };
+        if let Some(name) = referent_name {
             if is_local {
                 self.reference_value_local_referent_type.insert(slot, name);
             } else {

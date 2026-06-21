@@ -505,6 +505,17 @@ impl TypeInferenceEngine {
         index_type: &Type,
     ) -> TypeResult<Type> {
         match object_type {
+            // Index access through a reference (v0.3.3 RefDispatch):
+            // `r[i]` on a `r: &Array<T>` / `&mut Array<T>` indexes THROUGH the
+            // reference. Deref the `Borrow { inner }` to its referent and recurse
+            // so the element type resolves on the referent (mirrors the
+            // field-access auto-deref at access.rs:46-52). Without this the
+            // `Borrow` type falls to the `_` wildcard → a fresh indexable var
+            // and, in the constraint checker, the `Indexable` arm rejects with
+            // "Borrow(..) does not support index access".
+            Type::Concrete(TypeAnnotation::Borrow { inner, .. }) => {
+                self.infer_index_access(&Type::Concrete((**inner).clone()), index_type)
+            }
             // Row<T> disallows dynamic string indexing - use row.field instead
             Type::Concrete(TypeAnnotation::Generic { name, .. }) if name == "Row" => {
                 Err(TypeError::TypeMismatch(

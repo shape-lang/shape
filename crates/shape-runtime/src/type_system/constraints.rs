@@ -850,6 +850,21 @@ impl ConstraintSolver {
                         .unifier
                         .apply_substitutions(&Type::Variable(elem_var.clone()));
                     if let Type::Variable(_) = &elem_resolved {
+                        // RefDispatch (v0.3.3): `r[i]` on `r: &Array<T>` carries
+                        // an `Indexable` constraint on the `Borrow`-typed
+                        // variable. Deref the `Borrow { inner }` to its referent
+                        // before extracting the element type, so the carried
+                        // element var binds to the referent's element (mirrors
+                        // the `infer_index_access` Borrow arm for the eager path,
+                        // and the field-access auto-deref). Without this, an
+                        // index through a ref inside a function (`r[1] + 5`)
+                        // leaves the element `unknown` and strict typing rejects.
+                        let resolved = match &resolved {
+                            Type::Concrete(TypeAnnotation::Borrow { inner, .. }) => {
+                                Type::Concrete((**inner).clone())
+                            }
+                            other => other.clone(),
+                        };
                         let actual_elem: Option<Type> = match &resolved {
                             Type::Concrete(TypeAnnotation::Array(elem)) => {
                                 Some(Type::Concrete((**elem).clone()))
@@ -931,7 +946,7 @@ impl ConstraintSolver {
             // `obj[i]` index access. The carried element type is bound by
             // `apply_bounds` backward propagation (mirrors `HasField`); here
             // we only validate that the resolved type supports indexing.
-            TypeConstraint::Indexable(_) => match ty {
+            TypeConstraint::Indexable(elem) => match ty {
                 Type::Concrete(TypeAnnotation::Array(_)) => Ok(()),
                 Type::Generic { base, args } if args.len() == 1 && is_array_or_vec_base(base) => {
                     Ok(())
@@ -941,6 +956,17 @@ impl ConstraintSolver {
                 {
                     Ok(())
                 }
+                // Index access through a reference (v0.3.3 RefDispatch): a
+                // `Borrow { inner }` indexes THROUGH the reference — deref to its
+                // referent and re-check (mirrors the field-access auto-deref in
+                // `infer_property_access_internal`). Inference normally resolves
+                // the element type via `infer_index_access`'s Borrow arm before
+                // this constraint check runs; this arm covers the case where a
+                // constrained variable only resolves to a `Borrow` at check time.
+                Type::Concrete(TypeAnnotation::Borrow { inner, .. }) => self.check_constraint(
+                    &Type::Concrete((**inner).clone()),
+                    &TypeConstraint::Indexable(elem.clone()),
+                ),
                 _ => Err(TypeError::ConstraintViolation(format!(
                     "{:?} does not support index access",
                     ty

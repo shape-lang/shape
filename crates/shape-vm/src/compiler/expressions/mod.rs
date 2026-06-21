@@ -2004,7 +2004,16 @@ impl BytecodeCompiler {
         let Expr::Identifier(name, _) = object else {
             return None;
         };
-        let type_name = self.tracker_type_name_for_identifier(name)?;
+        // RefDispatch (v0.3.3): `r[i]` on `let r = &a` (a: Array<T>). The
+        // reference binding carries no array tracker `type_name`, but the
+        // referent's array display name (`"int[]"`) was recorded at bind time
+        // (`record_reference_referent_type`). Consult it so the element type is
+        // recovered THROUGH the reference, mirroring the scalar value-position
+        // auto-deref (`r + 1`). A scalar referent (`&int` -> `"int"`) has no
+        // array shape and falls through the strip below to None.
+        let type_name = self
+            .tracker_type_name_for_identifier(name)
+            .or_else(|| self.reference_referent_type_name(name))?;
         let trimmed = type_name.trim();
         let inner = trimmed
             .strip_prefix("Array<")
