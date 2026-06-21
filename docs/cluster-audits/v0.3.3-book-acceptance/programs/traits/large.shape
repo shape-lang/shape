@@ -288,6 +288,130 @@ fn ck_bool(label: string, got: bool, want: bool) -> bool {
 }
 
 // =====================================================================
+// §7b  GEOMETRY TRAIT LAYER (Metric trait + extend + dyn aggregation)
+// =====================================================================
+// A second, independent trait family rooted in the same chapter machinery,
+// exercising number-returning trait methods (via the annotation-bound idiom)
+// and sqrt-based closed-form geometry. Expected values (§0-geom) hand-derived:
+//   Vec2{3,4}.magnitude()  = sqrt(25) = 5.0
+//   Vec2{6,8}.magnitude()  = sqrt(100) = 10.0
+//   Vec2{5,12}.magnitude() = sqrt(169) = 13.0
+//   Vec2{8,15}.magnitude() = sqrt(289) = 17.0
+//   dot({3,4},{1,2}) = 3+8 = 11.0
+//   scaled({3,4},2)  = {6,8} ; its magnitude = 10.0
+//   manhattan({3,4}) = 3+4 = 7.0 (extend)
+trait Metric {
+  fn magnitude() -> number;
+}
+
+type Vec2 { x: number, y: number }
+
+impl Metric for Vec2 {
+  method magnitude() -> number {
+    let s: number = self.x * self.x + self.y * self.y
+    sqrt(s)
+  }
+}
+
+extend Vec2 {
+  method dot(o: Vec2) -> number { self.x * o.x + self.y * o.y }
+  method scaled(k: number) -> Vec2 { Vec2 { x: self.x * k, y: self.y * k } }
+  method manhattan() -> number { self.x + self.y }
+  method add(o: Vec2) -> Vec2 { Vec2 { x: self.x + o.x, y: self.y + o.y } }
+}
+
+// dyn Metric aggregator: sum of magnitudes over a homogeneous Vec<dyn Metric>.
+fn sum_magnitudes(items: Vec<dyn Metric>) -> number {
+  let mut total: number = 0.0
+  for it in items {
+    let m: number = it.magnitude()
+    total = total + m
+  }
+  total
+}
+
+// =====================================================================
+// §7c  RATING TRAIT LAYER (a supertrait chain three levels deep)
+// =====================================================================
+// Identified : Scored : Ranked   (Ranked is the leaf subtrait).
+// A Ranked value must implement Identified (id) and Scored (score) too.
+//   score() and id() per implementor; rank() = leaf method.
+// Player{name="ace", wins=9, losses=1}:
+//   id() = "P:ace" ; score() = wins*3 - losses = 27-1 = 26 ; rank() = "GOLD" (score>=20)
+// Player{name="rook", wins=3, losses=4}:
+//   id() = "P:rook"; score() = 9-4 = 5 ; rank() = "BRONZE" (score<10)
+// Player{name="mid", wins=5, losses=2}:
+//   id() = "P:mid" ; score() = 15-2 = 13 ; rank() = "SILVER" (10<=score<20)
+trait Identified {
+  fn id() -> string;
+}
+trait Scored : Identified {
+  fn score() -> int;
+}
+trait Ranked : Scored {
+  fn rank() -> string;
+}
+
+type Player { name: string, wins: int, losses: int }
+
+impl Identified for Player {
+  method id() -> string { f"P:{self.name}" }
+}
+impl Scored for Player {
+  method score() -> int { self.wins * 3 - self.losses }
+}
+impl Ranked for Player {
+  method rank() -> string {
+    let s: int = self.wins * 3 - self.losses
+    if s >= 20 { "GOLD" } else { if s >= 10 { "SILVER" } else { "BRONZE" } }
+  }
+}
+
+extend Player {
+  method games() -> int { self.wins + self.losses }
+  method win_rate_pct() -> int { (self.wins * 100) / (self.wins + self.losses) }
+}
+
+// dyn Scored aggregator over homogeneous Vec<dyn Scored>.
+fn sum_scores(players: Vec<dyn Scored>) -> int {
+  let mut total: int = 0
+  for p in players {
+    let s: int = p.score()
+    total = total + s
+  }
+  total
+}
+
+// =====================================================================
+// §7d  CONCRETE "Container" PATTERN (book Generic-Traits workaround)
+// =====================================================================
+// The book marks generic-trait IMPLs runnable=false (type-arg erasure). The
+// canonical shipped workaround is a CONCRETE impl. We model that here with a
+// concrete IntBag exposing get/count via a (non-generic) trait, mirroring the
+// stdlib `impl Queryable for Table` pattern the book cites.
+trait IntContainer {
+  fn at(i: int) -> int;
+  fn count() -> int;
+  fn total() -> int;
+}
+
+type IntBag { items: Array<int> }
+
+impl IntContainer for IntBag {
+  method at(i: int) -> int { self.items.get(i) }
+  method count() -> int { self.items.len() }
+  method total() -> int {
+    self.items.reduce(|acc, v| acc + v, 0)
+  }
+}
+
+extend IntBag {
+  method maxv() -> int {
+    self.items.reduce(|acc, v| if v > acc { v } else { acc }, 0)
+  }
+}
+
+// =====================================================================
 // §8  MAIN — drive every behavior, assert every result
 // =====================================================================
 fn main() {
@@ -675,6 +799,180 @@ fn main() {
   // ---------------------------------------------------------------
   let full_tags: string = f"{widget.tag()}|{promo.tag()}|{rail.tag()}|{tax.tag()}|{tip.tag()}"
   ok = ck_str("full_tags", full_tags, "ITEM:widget|DISC:promo|SHIP:rail|TAX:vat|TIP:server") && ok
+
+  // ===============================================================
+  // §9  GEOMETRY TRAIT LAYER (Metric + extend Vec2)
+  // ===============================================================
+  let v34 = Vec2 { x: 3.0, y: 4.0 }
+  let v68 = Vec2 { x: 6.0, y: 8.0 }
+  let v512 = Vec2 { x: 5.0, y: 12.0 }
+  let v815 = Vec2 { x: 8.0, y: 15.0 }
+
+  let m34: number = v34.magnitude()
+  if m34 == 5.0 { ok = ok && true } else { print(f"CHECK_FAILED: v34.magnitude expected=5.0 got={m34}"); ok = false }
+  let m68: number = v68.magnitude()
+  if m68 == 10.0 { ok = ok && true } else { print(f"CHECK_FAILED: v68.magnitude expected=10.0 got={m68}"); ok = false }
+  let m512: number = v512.magnitude()
+  if m512 == 13.0 { ok = ok && true } else { print(f"CHECK_FAILED: v512.magnitude expected=13.0 got={m512}"); ok = false }
+  let m815: number = v815.magnitude()
+  if m815 == 17.0 { ok = ok && true } else { print(f"CHECK_FAILED: v815.magnitude expected=17.0 got={m815}"); ok = false }
+
+  // extend Vec2: dot / scaled / manhattan / add
+  let dvw: number = v34.dot(Vec2 { x: 1.0, y: 2.0 })
+  if dvw == 11.0 { ok = ok && true } else { print(f"CHECK_FAILED: v34.dot expected=11.0 got={dvw}"); ok = false }
+  let scaled: Vec2 = v34.scaled(2.0)
+  let scaled_mag: number = scaled.magnitude()
+  if scaled_mag == 10.0 { ok = ok && true } else { print(f"CHECK_FAILED: scaled.magnitude expected=10.0 got={scaled_mag}"); ok = false }
+  let manh: number = v34.manhattan()
+  if manh == 7.0 { ok = ok && true } else { print(f"CHECK_FAILED: v34.manhattan expected=7.0 got={manh}"); ok = false }
+  let summed: Vec2 = v34.add(v68)
+  let summed_mag: number = summed.magnitude()
+  // {9,12} -> sqrt(81+144)=sqrt(225)=15.0
+  if summed_mag == 15.0 { ok = ok && true } else { print(f"CHECK_FAILED: summed.magnitude expected=15.0 got={summed_mag}"); ok = false }
+
+  // dyn Metric aggregation over homogeneous Vec<dyn Metric>
+  let metrics = [
+    Vec2 { x: 3.0, y: 4.0 },
+    Vec2 { x: 6.0, y: 8.0 },
+    Vec2 { x: 5.0, y: 12.0 },
+  ]
+  let mag_sum: number = sum_magnitudes(metrics)
+  // 5 + 10 + 13 = 28.0
+  if mag_sum == 28.0 { ok = ok && true } else { print(f"CHECK_FAILED: mag_sum expected=28.0 got={mag_sum}"); ok = false }
+
+  // Geometry sweep — magnitude of {i, 0} for i=1..=20 == i ; sum = 210.0
+  let mut geo_sweep: number = 0.0
+  let mut gi: int = 1
+  while gi <= 20 {
+    let gf: number = gi as number
+    let gv = Vec2 { x: gf, y: 0.0 }
+    let gm: number = gv.magnitude()
+    geo_sweep = geo_sweep + gm
+    gi = gi + 1
+  }
+  if geo_sweep == 210.0 { ok = ok && true } else { print(f"CHECK_FAILED: geo_sweep expected=210.0 got={geo_sweep}"); ok = false }
+
+  // ===============================================================
+  // §10  RATING TRAIT LAYER (3-level supertrait chain)
+  // ===============================================================
+  let ace  = Player { name: "ace",  wins: 9, losses: 1 }
+  let rook = Player { name: "rook", wins: 3, losses: 4 }
+  let mid  = Player { name: "mid",  wins: 5, losses: 2 }
+
+  let aid: string = ace.id()
+  ok = ck_str("ace.id", aid, "P:ace") && ok
+  let asc: int = ace.score()
+  ok = ck_int("ace.score", asc, 26) && ok
+  let ark: string = ace.rank()
+  ok = ck_str("ace.rank", ark, "GOLD") && ok
+
+  let rid: string = rook.id()
+  ok = ck_str("rook.id", rid, "P:rook") && ok
+  let rsc: int = rook.score()
+  ok = ck_int("rook.score", rsc, 5) && ok
+  let rrk: string = rook.rank()
+  ok = ck_str("rook.rank", rrk, "BRONZE") && ok
+
+  let mid_id: string = mid.id()
+  ok = ck_str("mid.id", mid_id, "P:mid") && ok
+  let msc: int = mid.score()
+  ok = ck_int("mid.score", msc, 13) && ok
+  let mrk: string = mid.rank()
+  ok = ck_str("mid.rank", mrk, "SILVER") && ok
+
+  // extend Player
+  let ag: int = ace.games()
+  ok = ck_int("ace.games", ag, 10) && ok
+  let awr: int = ace.win_rate_pct()
+  // 9*100/10 = 90
+  ok = ck_int("ace.win_rate_pct", awr, 90) && ok
+  let rwr: int = rook.win_rate_pct()
+  // 3*100/7 = 42 (integer division)
+  ok = ck_int("rook.win_rate_pct", rwr, 42) && ok
+
+  // dyn Scored aggregation over homogeneous Vec<dyn Scored>
+  let roster = [
+    Player { name: "ace",  wins: 9, losses: 1 },
+    Player { name: "rook", wins: 3, losses: 4 },
+    Player { name: "mid",  wins: 5, losses: 2 },
+  ]
+  let score_sum: int = sum_scores(roster)
+  // 26 + 5 + 13 = 44
+  ok = ck_int("score_sum", score_sum, 44) && ok
+
+  // supertrait-chain string assembly: leaf rank + middle score + root id
+  let chain_line: string = f"{ace.id()}={ace.score()}/{ace.rank()}"
+  ok = ck_str("chain_line", chain_line, "P:ace=26/GOLD") && ok
+
+  // Rank-distribution sweep over synthetic players score = wins*3 - 0
+  //   wins=0..9 -> score 0,3,6,9,12,15,18,21,24,27
+  //   BRONZE (score<10): 0,3,6,9 -> 4
+  //   SILVER (10..19):   12,15,18 -> 3
+  //   GOLD   (>=20):     21,24,27 -> 3
+  let mut bronze: int = 0
+  let mut silver: int = 0
+  let mut gold: int = 0
+  let mut pw: int = 0
+  while pw < 10 {
+    let pl = Player { name: "p", wins: pw, losses: 0 }
+    let pr: string = pl.rank()
+    if pr == "BRONZE" { bronze = bronze + 1 }
+    if pr == "SILVER" { silver = silver + 1 }
+    if pr == "GOLD" { gold = gold + 1 }
+    pw = pw + 1
+  }
+  ok = ck_int("rank.bronze", bronze, 4) && ok
+  ok = ck_int("rank.silver", silver, 3) && ok
+  ok = ck_int("rank.gold", gold, 3) && ok
+
+  // ===============================================================
+  // §11  CONCRETE Container PATTERN (IntContainer / IntBag)
+  // ===============================================================
+  let bag = IntBag { items: [5, 3, 9, 1, 7] }
+  let bc: int = bag.count()
+  ok = ck_int("bag.count", bc, 5) && ok
+  let b0: int = bag.at(0)
+  ok = ck_int("bag.at0", b0, 5) && ok
+  let b2: int = bag.at(2)
+  ok = ck_int("bag.at2", b2, 9) && ok
+  let bt: int = bag.total()
+  // 5+3+9+1+7 = 25
+  ok = ck_int("bag.total", bt, 25) && ok
+  let bm: int = bag.maxv()
+  ok = ck_int("bag.maxv", bm, 9) && ok
+
+  // a second bag, exercising the same concrete-trait dispatch
+  let bag2 = IntBag { items: [100, 200, 300] }
+  let bt2: int = bag2.total()
+  ok = ck_int("bag2.total", bt2, 600) && ok
+  let bm2: int = bag2.maxv()
+  ok = ck_int("bag2.maxv", bm2, 300) && ok
+  let bc2: int = bag2.count()
+  ok = ck_int("bag2.count", bc2, 3) && ok
+
+  // ===============================================================
+  // §12  CROSS-LAYER INVARIANT — every trait family agrees on totals
+  // ===============================================================
+  // Build a parallel scalar derivation and assert it equals the dyn-dispatch
+  // derivation for the Priced ledger (defense-in-depth on dispatch fidelity).
+  let slw: int = widget.cents()
+  let slg: int = gadget.cents()
+  let slb: int = bolt.cents()
+  let scalar_ledger: int = slw + slg + slb
+  let dyn_ledger: int = sum_priced([
+    LineItem { sku: "widget", qty: 3, unit: 250 },
+    LineItem { sku: "gadget", qty: 12, unit: 100 },
+    LineItem { sku: "bolt", qty: 4, unit: 25 },
+  ])
+  ok = ck_int("scalar_eq_dyn", scalar_ledger, dyn_ledger) && ok
+  ok = ck_int("scalar_ledger_value", scalar_ledger, 2050) && ok
+
+  // ===============================================================
+  // §13  FINAL aggregate sweep across BOTH numeric trait families
+  //   Priced sweep1 (5500) + Tax sweep5 (5500) + Tip sweep7 (420) = 11420
+  // ===============================================================
+  let combined: int = sweep1 + sweep5 + sweep7
+  ok = ck_int("combined_sweeps", combined, 11420) && ok
 
   if ok { print("ALL_CHECKS_PASSED") }
 }

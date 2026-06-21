@@ -1,0 +1,6 @@
+fn main() {
+  let one: number = true as number
+  let f7: number = 7 as number
+  print(f"one={one} f7={f7}")
+}
+main()

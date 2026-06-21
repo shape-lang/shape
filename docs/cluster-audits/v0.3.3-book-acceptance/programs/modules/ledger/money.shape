@@ -1,0 +1,58 @@
+// ledger/money.shape
+// Integer-cents money math. Money is stored as `int` cents to keep all
+// arithmetic exact (no float rounding). This module is a leaf module: it
+// imports nothing and is imported by txn, aggregate, and report.
+
+// Add two cent amounts.
+pub fn add(a: int, b: int) -> int {
+    a + b
+}
+
+// Subtract b from a.
+pub fn sub(a: int, b: int) -> int {
+    a - b
+}
+
+// Scale a cent amount by an integer percentage (e.g. 7% tax on 1000c = 70c),
+// using integer floor division so results stay exact and deterministic.
+pub fn percent(amount: int, pct: int) -> int {
+    (amount * pct) / 100
+}
+
+// Absolute value of a cent amount.
+pub fn abs_cents(a: int) -> int {
+    if a < 0 { 0 - a } else { a }
+}
+
+// Whole-dollar component of a cent amount (floor toward zero for non-negative).
+pub fn dollars(cents: int) -> int {
+    cents / 100
+}
+
+// Remaining cents component (0..99 for non-negative inputs).
+pub fn cents_part(cents: int) -> int {
+    cents % 100
+}
+
+// Format a non-negative cent amount as a "$D.CC" string.
+// Pads the cents component to two digits.
+pub fn format(cents: int) -> string {
+    let d = dollars(cents)
+    let c = cents_part(cents)
+    if c < 10 {
+        f"${d}.0{c}"
+    } else {
+        f"${d}.{c}"
+    }
+}
+
+// Format a possibly-negative cent amount, e.g. -89250 -> "-$892.50".
+// The sign prefixes the dollar sign; the magnitude is formatted via `format`.
+pub fn format_signed(cents: int) -> string {
+    if cents < 0 {
+        let body: string = format(abs_cents(cents))
+        f"-{body}"
+    } else {
+        format(cents)
+    }
+}

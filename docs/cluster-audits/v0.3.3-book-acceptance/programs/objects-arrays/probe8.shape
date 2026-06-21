@@ -1,3 +1,0 @@
-let xs = [1, 2, 3]
-let s = xs.sum()
-print(s + 1)

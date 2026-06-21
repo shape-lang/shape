@@ -1,0 +1,16 @@
+// geomlib/transforms.shape — imports a sibling module (cross-module import)
+from geomlib::stats use { mean }
+
+pub type Bounds {
+    lo: number,
+    hi: number
+}
+
+pub fn center(v: Array<number>) -> Array<number> {
+    let mu = mean(v)
+    v.map(|x| x - mu)
+}
+
+pub fn clamp(x: number, b: Bounds) -> number {
+    if x < b.lo { b.lo } else if x > b.hi { b.hi } else { x }
+}

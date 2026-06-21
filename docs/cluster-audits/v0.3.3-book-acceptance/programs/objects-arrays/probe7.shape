@@ -1,3 +1,0 @@
-let m = HashMap()
-print(m.isEmpty())
-print(m.len())

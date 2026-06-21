@@ -1,0 +1,152 @@
+# Book-acceptance slice: objects-arrays
+
+Book-PRIMARY source: `shape-web/book/book-site/src/content/docs/fundamentals/objects-arrays.mdx`
+Binary: `target/release/shape` (strict-flip-collection-dispatch worktree, HEAD).
+Both programs run memory-capped (`ulimit -v 12582912`) + `timeout 30`, modes vm & jit.
+Determinism: pure (hand-authored fixtures, no time/random/network).
+
+## Methodology
+
+Read the chapter first. The chapter marks a LARGE fraction of its surface
+`runnable=false` (object spread, array spread, list comprehensions, half-open /
+inclusive slices, overlapping-key merge, nested typed structs, object
+destructuring, `reduce`/`sort`/`flatMap`/`groupBy`, HashMap `keys/values/entries`,
+range `.map`). All of those are documented as v0.4 surfaces. I deliberately
+avoided every `runnable=false` feature and built ONLY from the documented-working
+surface: vec literals + indexing + closed-range slices, map/filter/find/findIndex/
+some/every/includes/indexOf/concat/reverse/take/drop/clone, NumericVec sum/avg/
+min/max, typed objects, anonymous objects, nested objects, disjoint-key merge,
+HashMap immutable chaining (set/get/has/len/isEmpty) + Option match.
+
+Self-checking uses hand-written `checkInt/checkNum/checkBool/checkStr` fail-counter
+helpers (`assert` is not a builtin in Shape — first author-error, fixed). Every
+expected value was derived by hand from the fixture + book semantics BEFORE the
+first run.
+
+## Programs
+
+### small.shape (97 LOC, 41 checks)
+- VM: ec=0, stdout `ALL_CHECKS_PASSED`.
+- JIT: ec=0, stdout `ALL_CHECKS_PASSED`.
+- VM stdout == JIT stdout: BYTE-IDENTICAL.
+- Exercises: literals/index/len/first/last, closed-range slice, map/filter,
+  includes/indexOf/some/every/findIndex/find, concat/reverse/take/drop, anon
+  objects, nested objects, disjoint merge, typed Point, HashMap chained.
+- `m.get("b")` is only PRINTED (book: `get` returns `Option<V>`; the book example
+  itself only prints it). Comparing `m.get(k) == int` is a type error
+  (Option<int> vs int) — correct strict behavior, NOT a defect.
+
+### large.shape (769 LOC, 233 checks)
+A deterministic in-memory employee/department analytics engine over a 12-row
+typed-object roster: projections, NumericVec aggregates, per-dept aggregation,
+HashMap indexes (name->salary, name->id, dept->total), grouped accumulation,
+nested anonymous report trees, disjoint merges, manual integer folds, and
+cross-section integrity invariants (dept sums reconstruct payroll, active+inactive
+partition headcount, indexOf round-trips).
+- VM: ec=0, stdout `checks_run=233` / `ALL_CHECKS_PASSED`.
+- JIT: ec=0, identical stdout.
+- VM stdout == JIT stdout: BYTE-IDENTICAL.
+
+## stderr verification noise (both programs, both modes — NOT a stdout defect)
+
+Any program touching the pure-Shape vec methods (`map`/`filter`/`concat`/`reverse`/
+`take`/`slice`/`Vec.first`/`last`) emits `V2 bytecode verification failed: N
+violation(s) — NewTypedArrayI64/TypedArrayPushI64 ... has no FrameDescriptor`
+to STDERR, and under `--mode jit` a `[jit-fallback] ... R8 W7 G.5 SURFACE
+(ADR-006 §2.7.14)` line that explicitly falls through to the interpreter so
+"the runtime error surface agrees with --mode vm". This is a known tracked
+surface (`docs/cluster-audits/v0.3-r8w6-hashmap-key-kind-audit.md`). Programs
+still produce CORRECT stdout (ec=0). Recorded for completeness; does not affect
+classification since stdout is clean and byte-identical.
+
+## Defects found (FN-REG-CORRECTNESS — followed the book, real bugs)
+
+These are genuine language defects encountered while writing book-idiomatic code.
+Each was recorded as FIRST-RUN truth and then worked around in-program so the
+deliverable still demonstrates the book's intent. Minimal repros below.
+
+### D1. `Vec<int>` NumericVec sum/min/max return `number`, not `int`
+The chapter's NumericVec section advertises `sum()`/`min()`/`max()` on `Vec<int>`
+receivers but gives no return type. They return `number`:
+```
+let v = [1, 2, 3]
+let s: int = v.sum()      // ERROR: number is not compatible with int
+fn takeInt(x: int) {}
+takeInt([1,2,3].sum())    // ERROR: (int)->void not compatible with (number)->void
+```
+Asymmetry: `v.sum() == 6` type-checks (int literal adapts), but forcing the result
+into a concrete `int` (annotation / fn param / int field) fails. Same under VM and
+JIT. Workaround in program: route every aggregate through `checkNum` with `.0`
+expected values; derive integer max/min via a manual `for` fold instead.
+This also blocks `e.salary == salaries.max()` (`int == number` error) inside a
+`find` closure.
+
+### D2. `.map()` element type not threaded to downstream `for` / comparison
+```
+let salaries = roster.map(|e| e.salary)   // Vec<int>, .sum()/.first() print fine
+for v in salaries { if v > mx { } }       // ERROR: Greater operands are unknown/unknown
+```
+The mapped result's element type is lost when it feeds an inference-requiring
+context (`for` + binary comparison). `.first()`/`.len()`/`.sum()` on the same value
+work. Workaround: annotate the binding `let salaries: Array<int> = roster.map(...)`,
+which restores the fold. (Consistent with the known typed-closure-inference
+regression cluster.)
+
+### D3. Empty `HashMap()` (never populated) crashes at runtime
+```
+let m: HashMap<string, int> = HashMap()
+m.isEmpty()   // Runtime error: no method 'isEmpty' on receiver kind UInt64
+```
+A never-`set` HashMap materializes as a `UInt64`, so `isEmpty()`/`len()` fail at
+runtime. A populated map (`HashMap().set(...)`) works. The book only ever calls
+`isEmpty()` on a populated map (returning `false`), which is fine — so the
+empty-map invariant the book IMPLIES (isEmpty()==true) is unreachable. Program
+drops the empty-map test.
+
+### D4. `<HashMap-readback-int> + <typedobject-field-int>` raises "no method 'add'"
+```
+while ... {
+  let e = emps[i]
+  let cur = match m.get(e.dept) { Some(v)=>v, None=>0 }
+  m = m.set(e.dept, cur + e.salary)   // 2nd iteration: Runtime error:
+}                                      //   no method 'add' on receiver kind Int64
+```
+First iteration (cur=0 from `None`) is fine; on the second, `cur` is read back from
+the HashMap and `cur + <typed-object field>` has no `add` handler. `cur + <literal>`
+(e.g. `cur + 1`, `cur + 100`) works across iterations; only `cur + field` fails.
+Workaround: copy both operands into explicitly-annotated `int` locals
+(`let sal: int = e.salary; let cur: int = match ...`), then `cur + sal` is correct
+(verified accumulated values: a=30, b=5).
+
+## book_gaps (book silent; required MCP/reference fallback OR undocumented strict reality)
+
+- No `assert` builtin and the chapter never shows how to self-check results;
+  a real user must hand-roll a checker (no MCP needed, but the book gives no
+  guidance on testing/asserting).
+- The chapter never states NumericVec return types — `Vec<int>.sum()` is `number`
+  (D1) is undocumented; a reader would reasonably expect `int`.
+- Empty/initial array bindings: strict typing requires `let x: Array<T> = []` for
+  a `[]` that is built up by `concat`, but the chapter only ever shows non-empty
+  literals — the empty-init pattern (and its required annotation) is undocumented.
+- Empty `HashMap()` with no `.set()` needs a `HashMap<K,V>` annotation to pin its
+  type args (then still crashes — D3); the chapter only shows immediately-chained
+  `HashMap().set(...)`.
+- The chapter shows `Option<V>` as the return of `get` but never shows how to
+  unwrap/match it; a reader must consult the error-handling/option material.
+- `as` casts (needed to bridge `int`/`number` from D1) are not mentioned in this
+  chapter (cross-chapter to builtin-types) — relevant because NumericVec forces
+  the reader into number/int bridging.
+
+## book_wrong (book documents behavior the language does not actually do)
+
+- NumericVec `sum()`/`min()`/`max()` "provided ... for Vec<number> / Vec<int>
+  receivers" implies they preserve the receiver's element type; on `Vec<int>` they
+  return `number` (D1), so the natural `let total: int = xs.sum()` is rejected.
+  The book's framing leads the reader straight into a compile error.
+
+## Notes on classification
+All four defects (D1-D4) had clean book-faithful workarounds, so BOTH deliverables
+PASS (ec=0, ALL_CHECKS_PASSED, VM==JIT byte-identical). The defects are real
+correctness/inference regressions surfaced by writing ordinary book-rooted code,
+hence FN-REG-CORRECTNESS for the slice. The `runnable=false` surfaces were avoided
+by design and are already tracked as v0.4 candidates by the book itself.

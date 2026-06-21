@@ -1,0 +1,46 @@
+// ledger/txn.shape
+// The Transaction type and constructors. This module imports from two sibling
+// modules (money for cent helpers, category for the Category enum), exercising
+// cross-module import of both a function and an enum type.
+
+from ledger::category use { Category, parse_cat, cat_index }
+from ledger::money use { abs_cents }
+
+// A single ledger transaction. `amount` is signed cents: negative = expense,
+// positive = income/refund.
+pub type Transaction {
+    id: int,
+    desc: string,
+    amount: int,
+    cat: Category,
+}
+
+// Build a transaction from raw fields, parsing the category tag.
+pub fn make_txn(id: int, desc: string, amount: int, cat_tag: string) -> Transaction {
+    Transaction {
+        id: id,
+        desc: desc,
+        amount: amount,
+        cat: parse_cat(cat_tag),
+    }
+}
+
+// True when the transaction is an expense (negative amount).
+pub fn is_expense(t: Transaction) -> bool {
+    t.amount < 0
+}
+
+// True when the transaction is income (positive amount).
+pub fn is_income(t: Transaction) -> bool {
+    t.amount > 0
+}
+
+// Magnitude of a transaction in cents (always non-negative).
+pub fn magnitude(t: Transaction) -> int {
+    abs_cents(t.amount)
+}
+
+// Category index of the transaction (0..4).
+pub fn txn_cat_index(t: Transaction) -> int {
+    cat_index(t.cat)
+}

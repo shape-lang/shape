@@ -643,7 +643,309 @@ failures = failures + expect_bool("badge4_payload", badge4.contains("migration_v
 failures = failures + expect_bool("badge2_styled", longer_than(badge2, 19))
 
 // ===========================================================================
-// 17. Final tally
+// 17. Book-pinned minimal + none border fixtures (§Border Styles)
+//     The book prints a verbatim visual-reference block for Border.minimal
+//     ("No outer border, ASCII `-` row separators only") and describes
+//     Border.none ("No borders at all"). We pin the full minimal rendering to
+//     the book's block, and assert none drops all box-drawing glyphs.
+//     Data: name/value, test/prod (same fixture the book uses).
+// ===========================================================================
+
+// Book §Border Styles, Border.minimal block (lines 281-288): a leading-space
+// separator row of " ------ ------- ", then 2-space-indented content rows, with
+// separators above and below the header and after the last data row.
+let minimal = Content.table(bp_headers, bp_rows).border(Border.minimal).to_string()
+let minimal_book = " ------ ------- \n  name   value  \n ------ ------- \n  test   142.5  \n  prod   378.2  \n ------ ------- \n"
+failures = failures + expect_str("book_border_minimal", minimal, minimal_book)
+
+// Border.none: "No borders at all" (book line 233). Cells separated by spaces,
+// no box-drawing characters, no ASCII separator rows.
+let bnone = Content.table(bp_headers, bp_rows).border(Border.none).to_string()
+let bnone_book = "name  value\ntest  142.5\nprod  378.2\n"
+failures = failures + expect_str("book_border_none", bnone, bnone_book)
+// none has none of the box-drawing corner glyphs.
+failures = failures + expect_bool("none_no_rounded", !bnone.contains("╭"))
+failures = failures + expect_bool("none_no_sharp", !bnone.contains("┌"))
+failures = failures + expect_bool("none_no_heavy", !bnone.contains("┏"))
+failures = failures + expect_bool("none_no_double", !bnone.contains("╔"))
+failures = failures + expect_bool("none_no_vrule", !bnone.contains("│"))
+
+// ===========================================================================
+// 18. Every documented chart type constructs and renders (§Chart Types table)
+//     The book lists 9 chart types (line/bar/scatter/area/histogram/
+//     candlestick/boxplot/heatmap/bubble). Each must construct via the
+//     namespace form, accept a title, and render to a non-empty block whose
+//     title round-trips. We use x/y pair data, valid for the line family;
+//     other types may render differently but must still produce output and
+//     echo the title (book §Charts: "title(text) Set chart title").
+// ===========================================================================
+
+fn chart_with_title(ct: string, t: string) -> string {
+    let c = Content.chart(ct)
+        .add("s", [[1, 10], [2, 20], [3, 15]])
+        .title(t)
+        .to_string()
+    return c
+}
+
+let ch_line = chart_with_title("line", "T_line")
+let ch_bar = chart_with_title("bar", "T_bar")
+let ch_scatter = chart_with_title("scatter", "T_scatter")
+let ch_area = chart_with_title("area", "T_area")
+
+failures = failures + expect_bool("ch_line_nonempty", longer_than(ch_line, 0))
+failures = failures + expect_bool("ch_line_title", ch_line.contains("T_line"))
+failures = failures + expect_bool("ch_bar_nonempty", longer_than(ch_bar, 0))
+failures = failures + expect_bool("ch_bar_title", ch_bar.contains("T_bar"))
+failures = failures + expect_bool("ch_scatter_nonempty", longer_than(ch_scatter, 0))
+failures = failures + expect_bool("ch_scatter_title", ch_scatter.contains("T_scatter"))
+failures = failures + expect_bool("ch_area_nonempty", longer_than(ch_area, 0))
+failures = failures + expect_bool("ch_area_title", ch_area.contains("T_area"))
+
+// Construct each remaining type via the ChartType namespace; assert the type
+// name resolves and a titled chart builds non-empty. (Histogram/candlestick/
+// etc. have stricter channel requirements per §Channel-Based Data Model; here
+// we only assert construction + title survival, which the builder guarantees.)
+let ch_hist = Content.chart(ChartType.histogram).add("v", [[1, 5], [2, 9]]).title("T_hist").to_string()
+failures = failures + expect_bool("ch_hist_nonempty", longer_than(ch_hist, 0))
+failures = failures + expect_bool("ch_hist_title", ch_hist.contains("T_hist"))
+
+// ===========================================================================
+// 19. Chart axis-label + size-hint coverage (§Chart Methods)
+//     .x_label / .y_label / .width / .height all chain and are accepted; the
+//     axis labels round-trip into the rendered output.
+// ===========================================================================
+
+let labelled = Content.chart("line")
+    .add("series", [[1, 100], [2, 140], [3, 90], [4, 160]])
+    .title("Labelled")
+    .x_label("X_AXIS_LABEL")
+    .y_label("Y_AXIS_LABEL")
+    .width(72)
+    .height(16)
+    .to_string()
+failures = failures + expect_bool("labelled_nonempty", longer_than(labelled, 0))
+failures = failures + expect_bool("labelled_title", labelled.contains("Labelled"))
+// NOTE: the book documents .x_label/.y_label as "Label the x/y-axis" but does
+// NOT promise the label TEXT appears in the .toString() terminal rendering (its
+// sample terminal output, lines 396-404, shows only the title + axis ticks, no
+// axis-label text). Probing confirms the label text is absent from the
+// rendering, so we assert only that the methods are ACCEPTED and chain (which is
+// what the book guarantees): the chart still builds non-empty with its title
+// intact after x_label/y_label/width/height. Asserting label-text presence would
+// assert a behavior the book never claims.
+failures = failures + expect_bool("labelled_chains_ok", longer_than(labelled, 10))
+
+// ===========================================================================
+// 20. Dashboard sequence (§Composition with Fragment, v0.3.3 form)
+//     The book's v0.3.3 guidance (lines 437-449): since Content.fragment is a
+//     v0.4 feature, "achieve the same result by printing each node in turn".
+//     We build the three nodes the book's runnable example builds (summary
+//     text, a table, a chart) and render each to a string, asserting each
+//     part's payload survives. This is the documented v0.3.3 substitute for
+//     fragments.
+// ===========================================================================
+
+let dash_summary: string = Content.text("Report").bold().to_string()
+let dash_table: string = Content.table(["name", "value"], [["test", "142.5"]]).to_string()
+let dash_chart: string = Content.chart("line").add("trend", [[1, 10], [2, 20]]).to_string()
+
+failures = failures + expect_bool("dash_summary_payload", dash_summary.contains("Report"))
+failures = failures + expect_bool("dash_summary_styled", longer_than(dash_summary, 6))
+failures = failures + expect_bool("dash_table_payload", dash_table.contains("test"))
+failures = failures + expect_bool("dash_table_header", dash_table.contains("name"))
+failures = failures + expect_bool("dash_chart_nonempty", longer_than(dash_chart, 0))
+
+// The three nodes are independent renderings (the v0.3.3 sequential pattern);
+// none of them is empty and each carries its own distinct payload.
+failures = failures + expect_bool("dash_parts_distinct_1", dash_summary != dash_table)
+failures = failures + expect_bool("dash_parts_distinct_2", dash_table != dash_chart)
+
+// ===========================================================================
+// 21. Empty / single-cell table edge cases (§Tables)
+//     A one-column, one-row table still draws a full bordered box, and the
+//     single cell's payload survives. Header-only-style minimal table checks
+//     the renderer handles small inputs deterministically.
+// ===========================================================================
+
+let single = Content.table(["k"], [["v"]]).border(Border.rounded).to_string()
+failures = failures + expect_bool("single_has_header", single.contains("k"))
+failures = failures + expect_bool("single_has_cell", single.contains("v"))
+failures = failures + expect_bool("single_rounded", single.contains("╭"))
+// 3 borders (top / header-sep / bottom) + 1 header + 1 body = 5 content lines,
+// + trailing newline -> line_count reports 6.
+let single_lc: int = line_count(single)
+failures = failures + expect_int("single_line_count", single_lc, 6)
+
+// A two-row, three-column table: line_count = 3 borders + 1 header + 2 body + 1
+// = 7.
+let grid = Content.table(["a", "b", "c"], [["1", "2", "3"], ["4", "5", "6"]])
+    .border(Border.sharp)
+    .to_string()
+let grid_lc: int = line_count(grid)
+failures = failures + expect_int("grid_line_count", grid_lc, 7)
+failures = failures + expect_bool("grid_has_6", grid.contains("6"))
+
+// ===========================================================================
+// 22. Styling-order independence within a chain (§Style Methods)
+//     The chapter documents the methods as independent decorations; applying
+//     fg then bold vs bold then fg both preserve the payload and produce a
+//     non-trivial (wrapped) rendering. We do not assert byte-equality of the
+//     two orderings (escape-code ordering is an implementation detail), only
+//     that both wrap the payload.
+// ===========================================================================
+
+let order_a = Content.text("z").fg(Color.red).bold().to_string()
+let order_b = Content.text("z").bold().fg(Color.red).to_string()
+failures = failures + expect_bool("order_a_payload", order_a.contains("z"))
+failures = failures + expect_bool("order_b_payload", order_b.contains("z"))
+failures = failures + expect_bool("order_a_wrapped", longer_than(order_a, 1))
+failures = failures + expect_bool("order_b_wrapped", longer_than(order_b, 1))
+
+// ===========================================================================
+// 23. Aggregate-driven verdict table (combines §Tables + computed data)
+//     Build a final verdict table whose cells are the computed pass-rates,
+//     and assert the computed percentages appear as cells.
+// ===========================================================================
+
+let vr_headers: Array<string> = ["suite", "pass_rate"]
+let vr0: Array<string> = ["auth", f"{pass_rate(auth)}"]
+let vr1: Array<string> = ["db", f"{pass_rate(db)}"]
+let vr2: Array<string> = ["api", f"{pass_rate(api)}"]
+let vr_rows: Array<Array<string>> = [vr0, vr1, vr2]
+let verdict_tbl = Content.table(vr_headers, vr_rows).border(Border.double).to_string()
+failures = failures + expect_bool("verdict_tbl_66", verdict_tbl.contains("66"))
+failures = failures + expect_bool("verdict_tbl_50", verdict_tbl.contains("50"))
+failures = failures + expect_bool("verdict_tbl_double", verdict_tbl.contains("╔"))
+// 3 borders + 1 header + 3 body + 1 trailing newline -> 8.
+let verdict_lc: int = line_count(verdict_tbl)
+failures = failures + expect_int("verdict_tbl_lines", verdict_lc, 8)
+
+// ===========================================================================
+// 24. Failing-cases-only table (computed projection over the fixture)
+//     Build a table containing only the FAIL cases. From the fixture there are
+//     exactly two: auth/token_expiry (31ms) and api/post_order (52ms). The
+//     table must contain both and NOT contain a passing case (e.g. login_ok).
+//     Row count is derived by hand from the fixture, not observed.
+// ===========================================================================
+
+fn is_fail(c: TestCase) -> bool {
+    return match c.outcome {
+        Outcome::Fail => true,
+        Outcome::Pass => false,
+        Outcome::Skip => false,
+    }
+}
+
+// Hand-enumerated fail rows (the two FAIL cases above).
+let fr0: Array<string> = case_row(cases[2])  // token_expiry FAIL 31
+let fr1: Array<string> = case_row(cases[7])  // post_order   FAIL 52
+let fail_rows: Array<Array<string>> = [fr0, fr1]
+
+// Cross-check the projection against the predicate over the whole fixture.
+let mut fail_count = 0
+for c in cases {
+    if is_fail(c) {
+        fail_count = fail_count + 1
+    }
+}
+failures = failures + expect_int("fail_count_matches", fail_count, 2)
+
+let fail_tbl = Content.table(["suite", "name", "status", "ms"], fail_rows)
+    .border(Border.heavy)
+    .to_string()
+failures = failures + expect_bool("fail_tbl_token", fail_tbl.contains("token_expiry"))
+failures = failures + expect_bool("fail_tbl_post", fail_tbl.contains("post_order"))
+failures = failures + expect_bool("fail_tbl_no_pass", !fail_tbl.contains("login_ok"))
+failures = failures + expect_bool("fail_tbl_all_FAIL", fail_tbl.contains("FAIL"))
+failures = failures + expect_bool("fail_tbl_no_PASS", !fail_tbl.contains("PASS"))
+failures = failures + expect_bool("fail_tbl_heavy", fail_tbl.contains("┏"))
+// 3 borders + 1 header + 2 body + trailing newline -> 7.
+let fail_lc: int = line_count(fail_tbl)
+failures = failures + expect_int("fail_tbl_lines", fail_lc, 7)
+
+// ===========================================================================
+// 25. Chart-type construction matrix (§Chart Types — all 9 documented types)
+//     Each documented ChartType namespace member constructs a titled chart that
+//     renders non-empty and echoes its title. We feed each the channel shape it
+//     can accept from [x,y] pairs (the .add helper builds x/y channels per
+//     §Channel-Based Data Model); types needing extra channels still construct.
+// ===========================================================================
+
+fn typed_chart(ct: string, title: string) -> string {
+    let c = Content.chart(ct)
+        .add("d", [[1, 30], [2, 45], [3, 28], [4, 60]])
+        .title(title)
+        .to_string()
+    return c
+}
+
+let tc_line = typed_chart(ChartType.line, "M_line")
+let tc_bar = typed_chart(ChartType.bar, "M_bar")
+let tc_scatter = typed_chart(ChartType.scatter, "M_scatter")
+let tc_area = typed_chart(ChartType.area, "M_area")
+let tc_hist = typed_chart(ChartType.histogram, "M_hist")
+let tc_candle = typed_chart(ChartType.candlestick, "M_candle")
+let tc_box = typed_chart(ChartType.boxplot, "M_box")
+let tc_heat = typed_chart(ChartType.heatmap, "M_heat")
+let tc_bubble = typed_chart(ChartType.bubble, "M_bubble")
+
+failures = failures + expect_bool("tc_line_ok", longer_than(tc_line, 0))
+failures = failures + expect_bool("tc_line_title", tc_line.contains("M_line"))
+failures = failures + expect_bool("tc_bar_ok", longer_than(tc_bar, 0))
+failures = failures + expect_bool("tc_bar_title", tc_bar.contains("M_bar"))
+failures = failures + expect_bool("tc_scatter_ok", longer_than(tc_scatter, 0))
+failures = failures + expect_bool("tc_scatter_title", tc_scatter.contains("M_scatter"))
+failures = failures + expect_bool("tc_area_ok", longer_than(tc_area, 0))
+failures = failures + expect_bool("tc_area_title", tc_area.contains("M_area"))
+failures = failures + expect_bool("tc_hist_ok", longer_than(tc_hist, 0))
+failures = failures + expect_bool("tc_hist_title", tc_hist.contains("M_hist"))
+failures = failures + expect_bool("tc_candle_ok", longer_than(tc_candle, 0))
+failures = failures + expect_bool("tc_candle_title", tc_candle.contains("M_candle"))
+failures = failures + expect_bool("tc_box_ok", longer_than(tc_box, 0))
+failures = failures + expect_bool("tc_box_title", tc_box.contains("M_box"))
+failures = failures + expect_bool("tc_heat_ok", longer_than(tc_heat, 0))
+failures = failures + expect_bool("tc_heat_title", tc_heat.contains("M_heat"))
+failures = failures + expect_bool("tc_bubble_ok", longer_than(tc_bubble, 0))
+failures = failures + expect_bool("tc_bubble_title", tc_bubble.contains("M_bubble"))
+
+// ===========================================================================
+// 26. Color namespace completeness (§Colors — all 8 named colors + default)
+//     The book lists red/green/blue/yellow/magenta/cyan/white/default. Each
+//     resolves to its lowercase name via interpolation, and each (except
+//     default) produces a distinct foreground rendering for the same text.
+// ===========================================================================
+
+failures = failures + expect_str("named_white", f"{Color.white}", "white")
+failures = failures + expect_str("named_default", f"{Color.default}", "default")
+
+let fg_red = Content.text("c").fg(Color.red).to_string()
+let fg_green = Content.text("c").fg(Color.green).to_string()
+let fg_blue = Content.text("c").fg(Color.blue).to_string()
+let fg_yellow = Content.text("c").fg(Color.yellow).to_string()
+let fg_magenta = Content.text("c").fg(Color.magenta).to_string()
+let fg_cyan = Content.text("c").fg(Color.cyan).to_string()
+let fg_white = Content.text("c").fg(Color.white).to_string()
+
+// All eight keep the payload.
+failures = failures + expect_bool("fg_red_payload", fg_red.contains("c"))
+failures = failures + expect_bool("fg_green_payload", fg_green.contains("c"))
+failures = failures + expect_bool("fg_blue_payload", fg_blue.contains("c"))
+failures = failures + expect_bool("fg_yellow_payload", fg_yellow.contains("c"))
+failures = failures + expect_bool("fg_magenta_payload", fg_magenta.contains("c"))
+failures = failures + expect_bool("fg_cyan_payload", fg_cyan.contains("c"))
+failures = failures + expect_bool("fg_white_payload", fg_white.contains("c"))
+
+// Distinct named colors yield distinct renderings for identical text.
+failures = failures + expect_bool("fg_red_ne_green", fg_red != fg_green)
+failures = failures + expect_bool("fg_green_ne_blue", fg_green != fg_blue)
+failures = failures + expect_bool("fg_blue_ne_yellow", fg_blue != fg_yellow)
+failures = failures + expect_bool("fg_yellow_ne_magenta", fg_yellow != fg_magenta)
+failures = failures + expect_bool("fg_magenta_ne_cyan", fg_magenta != fg_cyan)
+failures = failures + expect_bool("fg_cyan_ne_white", fg_cyan != fg_white)
+
+// ===========================================================================
+// 27. Final tally
 // ===========================================================================
 
 if failures == 0 {

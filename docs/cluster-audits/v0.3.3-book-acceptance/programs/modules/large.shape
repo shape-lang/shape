@@ -1,0 +1,353 @@
+// large.shape — Ledger Analytics Engine
+// =====================================================================
+// A non-interactive, machine-proofable demonstration of Shape's module
+// system. The program is a small multi-module library plus this driver:
+//
+//   ledger/money.shape      (leaf)     integer-cents money math + formatting
+//   ledger/category.shape   (leaf)     Category enum + parsing/naming
+//   ledger/txn.shape        -> money, category
+//   ledger/aggregate.shape  -> txn, category, money
+//   ledger/report.shape     -> aggregate, money, category, txn
+//   ledger/validate.shape   -> txn, category
+//   ledger/data.shape       -> txn, category     (deterministic fixture)
+//
+// This driver imports from every module using the book's import forms:
+//   - named import          (`from M use { a, b }`)
+//   - named alias           (`from M use { a as b }`)
+//   - namespace import      (`use M` + `M::member(...)`)
+//   - namespace alias       (`use M as X` + `X::member(...)`)
+//
+// Every computed result is asserted against an EXPECTED VALUE that was
+// hand-derived from the fixture in ledger/data.shape BEFORE running.
+// On success the program prints ALL_CHECKS_PASSED; any mismatch prints
+// CHECK_FAILED with the offending name, expected, and actual values.
+//
+// Hand-tabulated truth for ledger::data::sample_ledger() (20 txns):
+//   Category expense totals (cents): Food=10800, Rent=95000, Travel=45000,
+//     Utilities=12000, Other=2000
+//   Total expenses = 164800 ; Total income = 258000 ; Net = +93200
+//   Expense count = 17 ; Income count = 3 ; Count = 20
+//   Max expense = 90000 ; Min expense = 500 ; Mean expense = 9694 (floor)
+//   Top category index = 1 (Rent) ; Active categories = 5
+//   Sorted-desc first = 90000
+// =====================================================================
+
+// --- Named imports -------------------------------------------------------
+from ledger::data use { sample_ledger, valid_batch, invalid_batch }
+from ledger::txn use { Transaction, make_txn, is_expense, is_income, magnitude, txn_cat_index }
+from ledger::category use { Category, cat_name, parse_cat, cat_index, cat_count, is_essential }
+from ledger::money use { add, sub, percent, abs_cents, dollars, cents_part, format, format_signed }
+from ledger::validate use { validate_txn, validate_all }
+
+// --- Named alias ---------------------------------------------------------
+from ledger::aggregate use { total_expenses as sum_exp }
+
+// --- Namespace import (M::member call sites) -----------------------------
+use ledger::aggregate
+
+// --- Namespace alias -----------------------------------------------------
+use ledger::report as rep
+
+// =====================================================================
+// Tiny assertion harness (no `assert` builtin exists; we roll our own).
+// We accumulate a failure count and print one line per failure so a single
+// mismatch does not mask the rest.
+// =====================================================================
+let mut failures = 0
+
+fn check_int(name: string, expected: int, got: int) -> int {
+    if expected != got {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+        return 1
+    }
+    0
+}
+
+fn check_str(name: string, expected: string, got: string) -> int {
+    if expected != got {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+        return 1
+    }
+    0
+}
+
+fn check_bool(name: string, expected: bool, got: bool) -> int {
+    if expected != got {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+        return 1
+    }
+    0
+}
+
+// =====================================================================
+// SECTION 1 — money module (leaf): exact integer-cents arithmetic.
+// =====================================================================
+failures = failures + check_int("money.add", 300, add(100, 200))
+failures = failures + check_int("money.sub", 75, sub(200, 125))
+failures = failures + check_int("money.percent_7", 70, percent(1000, 7))
+failures = failures + check_int("money.percent_floor", 33, percent(1000, 3) + 3)
+failures = failures + check_int("money.abs_neg", 500, abs_cents(0 - 500))
+failures = failures + check_int("money.abs_pos", 500, abs_cents(500))
+failures = failures + check_int("money.dollars", 12, dollars(1234))
+failures = failures + check_int("money.cents_part", 34, cents_part(1234))
+failures = failures + check_int("money.cents_part_zero", 0, cents_part(1200))
+failures = failures + check_str("money.format_mid", "$12.34", format(1234))
+failures = failures + check_str("money.format_pad", "$12.05", format(1205))
+failures = failures + check_str("money.format_whole", "$12.00", format(1200))
+failures = failures + check_str("money.format_big", "$950.00", format(95000))
+failures = failures + check_str("money.format_signed_neg", "-$892.50", format_signed(0 - 89250))
+failures = failures + check_str("money.format_signed_pos", "$932.00", format_signed(93200))
+
+// =====================================================================
+// SECTION 2 — category module (leaf): enum naming, parsing, indexing.
+// =====================================================================
+failures = failures + check_int("cat.count", 5, cat_count())
+failures = failures + check_str("cat.name_food", "Food", cat_name(Category::Food))
+failures = failures + check_str("cat.name_rent", "Rent", cat_name(Category::Rent))
+failures = failures + check_str("cat.name_travel", "Travel", cat_name(Category::Travel))
+failures = failures + check_str("cat.name_util", "Utilities", cat_name(Category::Utilities))
+failures = failures + check_str("cat.name_other", "Other", cat_name(Category::Other))
+failures = failures + check_int("cat.index_food", 0, cat_index(Category::Food))
+failures = failures + check_int("cat.index_rent", 1, cat_index(Category::Rent))
+failures = failures + check_int("cat.index_other", 4, cat_index(Category::Other))
+// parse round-trips through name
+let pf: Category = parse_cat("food")
+failures = failures + check_str("cat.parse_food", "Food", cat_name(pf))
+let pr: Category = parse_cat("rent")
+failures = failures + check_int("cat.parse_rent_idx", 1, cat_index(pr))
+let pu: Category = parse_cat("zzz")
+failures = failures + check_str("cat.parse_unknown", "Other", cat_name(pu))
+failures = failures + check_bool("cat.food_essential", true, is_essential(Category::Food))
+failures = failures + check_bool("cat.travel_inessential", false, is_essential(Category::Travel))
+
+// =====================================================================
+// SECTION 3 — txn module: constructors, predicates, magnitude.
+// make_txn builds and parses; we bind each result to a typed `let` so the
+// concrete Transaction type is proven before use.
+// =====================================================================
+let t_exp: Transaction = make_txn(900, "Lunch", 0 - 1250, "food")
+let t_inc: Transaction = make_txn(901, "Salary", 250000, "other")
+failures = failures + check_bool("txn.exp_is_expense", true, is_expense(t_exp))
+failures = failures + check_bool("txn.exp_is_income", false, is_income(t_exp))
+failures = failures + check_bool("txn.inc_is_income", true, is_income(t_inc))
+failures = failures + check_int("txn.exp_magnitude", 1250, magnitude(t_exp))
+failures = failures + check_int("txn.inc_magnitude", 250000, magnitude(t_inc))
+failures = failures + check_int("txn.exp_cat_index", 0, txn_cat_index(t_exp))
+failures = failures + check_str("txn.inc_cat_name", "Other", cat_name(parse_cat("other")))
+
+// =====================================================================
+// SECTION 4 — aggregate module over the deterministic fixture.
+// Values hand-derived in the header comment.
+// `sum_exp` is total_expenses imported under a NAMED ALIAS.
+// `aggregate::member(...)` exercises NAMESPACE-IMPORT call sites.
+// =====================================================================
+let ledger: Array<Transaction> = sample_ledger()
+
+failures = failures + check_int("agg.count", 20, aggregate::count(ledger))
+failures = failures + check_int("agg.expense_count", 17, aggregate::expense_count(ledger))
+failures = failures + check_int("agg.income_count", 3, aggregate::income_count(ledger))
+failures = failures + check_int("agg.total_expenses_alias", 164800, sum_exp(ledger))
+failures = failures + check_int("agg.total_expenses_ns", 164800, aggregate::total_expenses(ledger))
+failures = failures + check_int("agg.total_income", 258000, aggregate::total_income(ledger))
+failures = failures + check_int("agg.net_balance", 93200, aggregate::net_balance(ledger))
+failures = failures + check_int("agg.max_expense", 90000, aggregate::max_expense(ledger))
+failures = failures + check_int("agg.min_expense", 500, aggregate::min_expense(ledger))
+failures = failures + check_int("agg.mean_expense", 9694, aggregate::mean_expense(ledger))
+failures = failures + check_int("agg.top_category", 1, aggregate::top_category_index(ledger))
+failures = failures + check_int("agg.active_categories", 5, aggregate::active_category_count(ledger))
+
+// Per-category totals via category_totals (Array<int> indexed by cat index).
+let ctot: Array<int> = aggregate::category_totals(ledger)
+let ct_food: int = ctot[0]
+let ct_rent: int = ctot[1]
+let ct_travel: int = ctot[2]
+let ct_util: int = ctot[3]
+let ct_other: int = ctot[4]
+failures = failures + check_int("agg.cat_food", 10800, ct_food)
+failures = failures + check_int("agg.cat_rent", 95000, ct_rent)
+failures = failures + check_int("agg.cat_travel", 45000, ct_travel)
+failures = failures + check_int("agg.cat_util", 12000, ct_util)
+failures = failures + check_int("agg.cat_other", 2000, ct_other)
+
+// expenses_in_cat / count_in_cat cross-check the table above.
+failures = failures + check_int("agg.eic_food", 10800, aggregate::expenses_in_cat(ledger, 0))
+failures = failures + check_int("agg.eic_rent", 95000, aggregate::expenses_in_cat(ledger, 1))
+failures = failures + check_int("agg.cic_food", 5, aggregate::count_in_cat(ledger, 0))
+failures = failures + check_int("agg.cic_travel", 4, aggregate::count_in_cat(ledger, 2))
+// Income category (Other-as-expense) total excludes income -> 2000, not 260000.
+failures = failures + check_int("agg.eic_other_excludes_income", 2000, aggregate::expenses_in_cat(ledger, 4))
+
+// Conservation: sum of category totals == total expenses.
+let cat_sum: int = ct_food + ct_rent + ct_travel + ct_util + ct_other
+failures = failures + check_int("agg.category_conservation", 164800, cat_sum)
+// Net == income - expenses (independent recomputation).
+let net_recompute: int = aggregate::total_income(ledger) - sum_exp(ledger)
+failures = failures + check_int("agg.net_recompute", 93200, net_recompute)
+
+// Sorted-descending expense magnitudes: first/last and monotonicity.
+let sd: Array<int> = aggregate::sorted_expenses_desc(ledger)
+failures = failures + check_int("agg.sorted_len", 17, sd.length)
+let sd_first: int = sd[0]
+let sd_last: int = sd[16]
+failures = failures + check_int("agg.sorted_first", 90000, sd_first)
+failures = failures + check_int("agg.sorted_last", 500, sd_last)
+// monotonic non-increasing
+let mut mono_ok = true
+let mut si = 1
+while si < sd.length {
+    let prev: int = sd[si - 1]
+    let cur: int = sd[si]
+    if cur > prev { mono_ok = false }
+    si = si + 1
+}
+failures = failures + check_bool("agg.sorted_monotonic", true, mono_ok)
+// sum of sorted list equals total expenses (no element lost in the sort).
+// NB: the book documents `Array.sum()` as returning `number` (modules chapter,
+// stats example), so we accumulate with an int loop to keep an int total.
+let mut sorted_sum = 0
+let mut ssi = 0
+while ssi < sd.length {
+    let e: int = sd[ssi]
+    sorted_sum = sorted_sum + e
+    ssi = ssi + 1
+}
+failures = failures + check_int("agg.sorted_sum", 164800, sorted_sum)
+
+// =====================================================================
+// SECTION 5 — report module via NAMESPACE ALIAS `rep`.
+// We assert exact rendered strings (book `format` is "$D.CC").
+// =====================================================================
+failures = failures + check_str("rep.money_line", "Total: $912.50", rep::money_line("Total", 91250))
+failures = failures + check_str("rep.signed_pos", "Net: $932.00", rep::signed_money_line("Net", 93200))
+failures = failures + check_str("rep.signed_neg", "Net: -$50.00", rep::signed_money_line("Net", 0 - 5000))
+failures = failures + check_str("rep.verdict_surplus", "SURPLUS", rep::verdict(ledger))
+
+// Build the full summary report and assert it line-by-line.
+let summary: Array<string> = rep::summary_lines(ledger)
+failures = failures + check_int("rep.summary_len", 6, summary.length)
+let s0: string = summary[0]
+let s1: string = summary[1]
+let s2: string = summary[2]
+let s3: string = summary[3]
+let s4: string = summary[4]
+let s5: string = summary[5]
+failures = failures + check_str("rep.summary_income",  "Total income: $2580.00",   s0)
+failures = failures + check_str("rep.summary_expense", "Total expenses: $1648.00", s1)
+failures = failures + check_str("rep.summary_net",     "Net balance: $932.00",     s2)
+failures = failures + check_str("rep.summary_max",     "Largest expense: $900.00", s3)
+failures = failures + check_str("rep.summary_min",     "Smallest expense: $5.00",  s4)
+failures = failures + check_str("rep.summary_mean",    "Mean expense: $96.94",     s5)
+
+// render() joins with newlines: rendered length == sum of line lengths + 5 \n.
+let rendered: string = rep::render(summary)
+let mut line_chars = 0
+let mut ri = 0
+while ri < summary.length {
+    let ln: string = summary[ri]
+    line_chars = line_chars + ln.length
+    ri = ri + 1
+}
+let expected_rendered_len: int = line_chars + 5
+failures = failures + check_int("rep.render_len", expected_rendered_len, rendered.length)
+
+// Per-category report lines.
+let cat_names: Array<string> = ["Food", "Rent", "Travel", "Utilities", "Other"]
+let clines: Array<string> = rep::category_lines(ledger, cat_names)
+failures = failures + check_int("rep.cat_lines_len", 5, clines.length)
+let cl0: string = clines[0]
+let cl1: string = clines[1]
+let cl2: string = clines[2]
+let cl3: string = clines[3]
+let cl4: string = clines[4]
+failures = failures + check_str("rep.cat_line_food",   "Food: $108.00",      cl0)
+failures = failures + check_str("rep.cat_line_rent",   "Rent: $950.00",      cl1)
+failures = failures + check_str("rep.cat_line_travel", "Travel: $450.00",    cl2)
+failures = failures + check_str("rep.cat_line_util",   "Utilities: $120.00", cl3)
+failures = failures + check_str("rep.cat_line_other",  "Other: $20.00",      cl4)
+
+// =====================================================================
+// SECTION 6 — validate module: Result/`?` propagation across modules.
+// =====================================================================
+let vb: Array<Transaction> = valid_batch()
+let v_ok = validate_all(vb)
+let mut v_ok_count = -1
+let mut v_ok_err = false
+match v_ok {
+    Ok(n) => { v_ok_count = n }
+    Err(e) => { v_ok_err = true }
+}
+failures = failures + check_bool("validate.valid_no_err", false, v_ok_err)
+failures = failures + check_int("validate.valid_count", 2, v_ok_count)
+
+let ib: Array<Transaction> = invalid_batch()
+let v_bad = validate_all(ib)
+let mut v_bad_err = ""
+let mut v_bad_is_err = false
+match v_bad {
+    Ok(n) => { v_bad_is_err = false }
+    Err(e) => { v_bad_is_err = true; v_bad_err = e }
+}
+failures = failures + check_bool("validate.invalid_is_err", true, v_bad_is_err)
+failures = failures + check_str("validate.invalid_msg", "amount must be non-zero", v_bad_err)
+
+// Single-transaction validation: a good expense returns its magnitude.
+let one_good: Transaction = make_txn(500, "Coffee", 0 - 980, "food")
+let v_one = validate_txn(one_good)
+let mut v_one_mag = -1
+match v_one {
+    Ok(m) => { v_one_mag = m }
+    Err(e) => { v_one_mag = -2 }
+}
+failures = failures + check_int("validate.one_magnitude", 980, v_one_mag)
+
+// The whole sample ledger validates (every txn is non-zero / non-empty).
+let v_all = validate_all(ledger)
+let mut v_all_count = -1
+match v_all {
+    Ok(n) => { v_all_count = n }
+    Err(e) => { v_all_count = -2 }
+}
+failures = failures + check_int("validate.sample_count", 20, v_all_count)
+
+// =====================================================================
+// SECTION 7 — cross-cutting invariants computed inline in the driver,
+// exercising imported predicates directly over the fixture.
+// =====================================================================
+// Recompute total expenses by hand with a driver-local loop and compare to
+// the aggregate module's answer (two independent code paths must agree).
+let mut driver_exp = 0
+let mut driver_inc = 0
+let mut driver_food_count = 0
+let food_idx: int = cat_index(Category::Food)
+for t in ledger {
+    if is_expense(t) {
+        driver_exp = add(driver_exp, magnitude(t))
+        let ti: int = txn_cat_index(t)
+        if ti == food_idx {
+            driver_food_count = driver_food_count + 1
+        }
+    }
+    if is_income(t) {
+        driver_inc = add(driver_inc, magnitude(t))
+    }
+}
+failures = failures + check_int("xcut.driver_expenses", 164800, driver_exp)
+failures = failures + check_int("xcut.driver_income", 258000, driver_inc)
+failures = failures + check_int("xcut.driver_food_count", 5, driver_food_count)
+failures = failures + check_int("xcut.matches_aggregate", sum_exp(ledger), driver_exp)
+
+// Essential vs discretionary split: essential = Food+Rent+Utilities expenses.
+let essential_total: int = ct_food + ct_rent + ct_util
+let discretionary_total: int = ct_travel + ct_other
+failures = failures + check_int("xcut.essential_total", 117800, essential_total)
+failures = failures + check_int("xcut.discretionary_total", 47000, discretionary_total)
+failures = failures + check_int("xcut.essential_plus_disc", 164800, essential_total + discretionary_total)
+
+// =====================================================================
+// Final verdict.
+// =====================================================================
+if failures == 0 {
+    print("ALL_CHECKS_PASSED")
+} else {
+    print(f"TOTAL_FAILURES: {failures}")
+}

@@ -1,5 +1,0 @@
-let m = HashMap().set("a", 1)
-let v = m.get("a")
-print(v)
-let missing = m.get("zzz")
-print(missing)

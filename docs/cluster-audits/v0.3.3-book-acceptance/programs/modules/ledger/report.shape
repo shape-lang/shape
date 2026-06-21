@@ -1,0 +1,82 @@
+// ledger/report.shape
+// Human-readable report rendering. Imports the analytics layer (aggregate),
+// the money formatter, and category naming. This is the top of the library
+// dependency graph: aggregate -> {txn, category, money}, report -> {aggregate,
+// money, category, txn}.
+//
+// All string assembly uses f-string interpolation (the book's recommended
+// idiom): strict typing does not implicitly convert `unknown` to string for
+// `+` concatenation, so f-strings keep rendering robust.
+
+from ledger::aggregate use {
+    total_expenses, total_income, net_balance, count, expense_count,
+    category_totals, top_category_index, mean_expense, max_expense, min_expense,
+    active_category_count,
+}
+from ledger::money use { format, format_signed }
+from ledger::category use { cat_count }
+from ledger::txn use { Transaction }
+
+// One formatted summary line: "<label>: <money>".
+pub fn money_line(label: string, cents: int) -> string {
+    let m: string = format(cents)
+    f"{label}: {m}"
+}
+
+// Like money_line but renders a possibly-negative amount with a sign.
+pub fn signed_money_line(label: string, cents: int) -> string {
+    let m: string = format_signed(cents)
+    f"{label}: {m}"
+}
+
+// Render the per-category breakdown as an array of "Name: $D.CC" lines.
+// `names` is the category display names indexed parallel to category index.
+pub fn category_lines(ts: Array<Transaction>, names: Array<string>) -> Array<string> {
+    let totals: Array<int> = category_totals(ts)
+    let mut out: Array<string> = []
+    let mut i = 0
+    while i < totals.length {
+        let nm: string = names[i]
+        let v: int = totals[i]
+        let m: string = format(v)
+        out = out.push(f"{nm}: {m}")
+        i = i + 1
+    }
+    out
+}
+
+// Build the full summary report as an array of lines.
+pub fn summary_lines(ts: Array<Transaction>) -> Array<string> {
+    let mut out: Array<string> = []
+    out = out.push(money_line("Total income", total_income(ts)))
+    out = out.push(money_line("Total expenses", total_expenses(ts)))
+    out = out.push(signed_money_line("Net balance", net_balance(ts)))
+    out = out.push(money_line("Largest expense", max_expense(ts)))
+    out = out.push(money_line("Smallest expense", min_expense(ts)))
+    out = out.push(money_line("Mean expense", mean_expense(ts)))
+    out
+}
+
+// Join an array of strings with newlines into one report blob.
+pub fn render(lines: Array<string>) -> string {
+    let mut out = ""
+    let mut i = 0
+    while i < lines.length {
+        let ln: string = lines[i]
+        if i == 0 {
+            out = ln
+        } else {
+            out = f"{out}\n{ln}"
+        }
+        i = i + 1
+    }
+    out
+}
+
+// A compact one-line health verdict based on the net balance.
+pub fn verdict(ts: Array<Transaction>) -> string {
+    let net = net_balance(ts)
+    if net > 0 { return "SURPLUS" }
+    if net == 0 { return "BALANCED" }
+    "DEFICIT"
+}

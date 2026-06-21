@@ -1,767 +1,686 @@
 // ============================================================================
-// large.shape  —  control-flow slice, v0.3.3 book-acceptance
+// large.shape — control-flow slice acceptance program (~1000 LOC)
 //
-// A deterministic, non-interactive, machine-proofable expression-evaluation
-// engine, built entirely from the control-flow chapter's vocabulary:
-//   - if / else-if / else as expressions (chapter "If Expressions")
-//   - blocks returning their last expression  (chapter "Blocks Return Values")
-//   - for over exclusive 0..n and inclusive 0..=n ranges (chapter "For Loops")
-//   - while loops (chapter "While Loops")
-//   - break / continue (chapter "Break and Continue")
-//   - loop with plain break (chapter "Loop")
-//   - match as an expression (chapter "Match")
+// A deterministic, non-interactive, machine-proofable application built ONLY
+// from constructs taught in fundamentals/control-flow.mdx:
+//   - if / else if / else as expressions
+//   - blocks return their last expression
+//   - for over exclusive (0..n) and inclusive (0..=n) ranges
+//   - destructuring loop bindings
+//   - while loops
+//   - break / continue
+//   - loop { } and break-with-value
 //
-// Supporting data: integer arrays used as stacks/queues. To stay rooted in the
-// control-flow slice (and to avoid orthogonal string-method defects), the input
-// is a *pre-tokenized* integer token stream rather than raw source text:
-//   token >= 0            : an operand (the literal integer value)
-//   token  = OP_ADD (-1)  : binary '+'
-//   token  = OP_SUB (-2)  : binary '-'
-//   token  = OP_MUL (-3)  : binary '*'
-//   token  = OP_DIV (-4)  : binary '/' (integer division, truncating)
-//   token  = OP_LPAR (-5) : '('
-//   token  = OP_RPAR (-6) : ')'
+// It implements three independent control-flow-heavy engines and proves each
+// against expected values DERIVED FROM SPEC BEFORE RUNNING (never back-filled):
+//   PART A: Collatz / hailstone analysis            (loop + break-with-value)
+//   PART B: 1-D cellular automaton (Rule 90 & 110)  (nested for + if-chains)
+//   PART C: a tiny stack-based RPN calculator        (while + if-chains)
+//   PART D: traffic-light finite state machine       (for + match-free if-chain)
+//   PART E: integer "histogram + classification"     (for/continue/break)
 //
-// The engine:
-//   1. shunting-yard: infix token stream -> RPN (Reverse Polish) token stream
-//   2. rpn_eval: evaluate an RPN stream on an operand stack
-//   3. a tiny register state-machine that runs a fixed micro-program
+// Self-check protocol (book-only): each check compares against an expected
+// constant; mismatch prints CHECK_FAILED and clears `ok`. All-pass prints
+// ALL_CHECKS_PASSED.
 //
-// EVERY expected value below was computed BY HAND from arithmetic / book
-// semantics BEFORE the first run, and asserted. On all-pass the program prints
-// "ALL_CHECKS_PASSED"; any mismatch prints "CHECK_FAILED: <which> ...".
+// NOTE on identifiers: per a discovered parser defect, identifiers whose
+// prefix equals an enclosing control-flow keyword (e.g. `whileCount` inside a
+// `while` condition) derail parsing. This program therefore avoids
+// keyword-prefixed names in condition positions.
 // ============================================================================
 
-// ---- operator token codes ----
-let OP_ADD: int = -1
-let OP_SUB: int = -2
-let OP_MUL: int = -3
-let OP_DIV: int = -4
-let OP_LPAR: int = -5
-let OP_RPAR: int = -6
+var ok = true
 
-// ---------------------------------------------------------------------------
-// classification helpers (if/else-if/else expressions + match)
-// ---------------------------------------------------------------------------
-
-// Is this token an operand (a non-negative literal)?
-fn is_operand(tok: int) -> bool {
-  if tok >= 0 { true } else { false }
-}
-
-// Is this token one of the four binary operators?
-fn is_binop(tok: int) -> bool {
-  if tok == OP_ADD { true }
-  else if tok == OP_SUB { true }
-  else if tok == OP_MUL { true }
-  else if tok == OP_DIV { true }
-  else { false }
-}
-
-// Operator precedence: * and / bind tighter (2) than + and - (1).
-// Non-operators get 0.
-fn precedence(tok: int) -> int {
-  if tok == OP_MUL { 2 }
-  else if tok == OP_DIV { 2 }
-  else if tok == OP_ADD { 1 }
-  else if tok == OP_SUB { 1 }
-  else { 0 }
-}
-
-// A human-readable name, exercising `match` as an expression (chapter "Match").
-fn op_name(tok: int) -> string {
-  match tok {
-    -1 => "ADD",
-    -2 => "SUB",
-    -3 => "MUL",
-    -4 => "DIV",
-    -5 => "LPAR",
-    -6 => "RPAR",
-    _ => "NUM",
+fn checkInt(label: string, expected: int, got: int) {
+  if expected != got {
+    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    ok = false
   }
 }
 
-// Apply a binary operator to two operands. Integer arithmetic only.
-fn apply_op(op: int, a: int, b: int) -> int {
-  if op == OP_ADD { a + b }
-  else if op == OP_SUB { a - b }
-  else if op == OP_MUL { a * b }
-  else if op == OP_DIV { a / b }
-  else { 0 }
+fn checkBool(label: string, expected: bool, got: bool) {
+  if expected != got {
+    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    ok = false
+  }
 }
 
-// ---------------------------------------------------------------------------
-// Shunting-yard: infix integer-token stream -> RPN integer-token stream.
+fn checkStr(label: string, expected: string, got: string) {
+  if expected != got {
+    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
+    ok = false
+  }
+}
+
+// ============================================================================
+// PART A — Collatz / hailstone sequences
 //
-// Classic Dijkstra algorithm, expressed with while/for/if/break/continue.
-// All operators here are left-associative, so an incoming operator pops
-// operators of >= precedence from the op-stack to the output.
-// ---------------------------------------------------------------------------
-fn to_rpn(tokens: Array<int>) -> Array<int> {
-  var output: Array<int> = []
-  var ops: Array<int> = []
-  var nop = 0          // void-typed sentinel; see branch-unification note below
-  let n = tokens.len()
-  var i = 0
-  while i < n {
-    let tok = tokens[i]
-    // NOTE on the trailing `nop = 0` in each branch: `.push()` returns the
-    // array (Array<int>), so a push at a branch tail makes that branch's value
-    // type Array<int>. In an if/else-if chain in statement position, sibling
-    // branches (especially the `loop`/`break` branch, typed Void) then fail to
-    // unify ("Vec<int> is not compatible with void"). The book's documented fix
-    // — a trailing `;` to discard the value and yield `()` — DOES resolve this
-    // (verified in REPORT.md); a Void-typed statement like `nop = 0` is an
-    // equivalent alternate. We keep `nop = 0` here for uniformity across the
-    // file, but the book-taught `;` mechanism is the canonical fix.
-    if is_operand(tok) {
-      output.push(tok)
-      nop = 0
-    } else if is_binop(tok) {
-      // pop while top-of-ops is an operator of >= precedence
-      let myprec = precedence(tok)
-      loop {
-        if ops.len() == 0 { break }
-        let topv = ops[ops.len() - 1]
-        if topv == OP_LPAR { break }
-        if precedence(topv) < myprec { break }
-        let popped = ops.pop()
-        output.push(popped)
-        nop = 0
-      }
-      ops.push(tok)
-      nop = 0
-    } else if tok == OP_LPAR {
-      ops.push(tok)
-      nop = 0
-    } else if tok == OP_RPAR {
-      // pop until matching '('
-      loop {
-        if ops.len() == 0 { break }
-        let topv = ops[ops.len() - 1]
-        if topv == OP_LPAR {
-          let discard = ops.pop()
-          break
-        }
-        let popped = ops.pop()
-        output.push(popped)
-        nop = 0
-      }
-    } else {
-      nop = 0
+// Spec (standard Collatz): start with n>0. While n != 1: if n even, n = n/2;
+// else n = 3n+1. Count steps to reach 1. We use loop + break-with-value to
+// return the step count, exercising break-with-value as the book describes.
+//
+// Hand-derived expected step counts (number of operations to reach 1):
+//   n=1  -> 0
+//   n=2  -> 1            (2 -> 1)
+//   n=3  -> 7            (3,10,5,16,8,4,2,1)
+//   n=6  -> 8            (6,3,10,5,16,8,4,2,1)
+//   n=7  -> 16
+//   n=27 -> 111          (classic long hailstone)
+//   max value reached for n=27 is 9232
+// ============================================================================
+
+fn collatzSteps(start: int) -> int {
+  var cur = start
+  let steps = loop {
+    if cur == 1 {
+      break 0
     }
-    i = i + 1
-  }
-  // drain remaining operators
-  while ops.len() > 0 {
-    let popped = ops.pop()
-    output.push(popped)
-  }
-  output
-}
-
-// ---------------------------------------------------------------------------
-// RPN evaluator: evaluate an RPN integer-token stream on an operand stack.
-// ---------------------------------------------------------------------------
-fn rpn_eval(rpn: Array<int>) -> int {
-  var stack: Array<int> = []
-  let n = rpn.len()
-  var i = 0
-  while i < n {
-    let tok = rpn[i]
-    if is_operand(tok) {
-      stack.push(tok)
-    } else {
-      // binary operator: pop b then a, push apply_op(op, a, b)
-      let b = stack.pop()
-      let a = stack.pop()
-      let r = apply_op(tok, a, b)
-      stack.push(r)
-    }
-    i = i + 1
-  }
-  if stack.len() == 0 { return 0 }
-  stack[stack.len() - 1]
-}
-
-// Convenience: full infix -> value pipeline.
-fn evaluate(tokens: Array<int>) -> int {
-  let rpn = to_rpn(tokens)
-  rpn_eval(rpn)
-}
-
-// ---------------------------------------------------------------------------
-// Sum of an int array (helper used in assertions over RPN token streams).
-// ---------------------------------------------------------------------------
-fn arr_sum(xs: Array<int>) -> int {
-  var s = 0
-  for x in xs { s = s + x }
-  s
-}
-
-// Count operands (>=0 tokens) in a stream.
-fn count_operands(xs: Array<int>) -> int {
-  var c = 0
-  for x in xs {
-    if is_operand(x) { c = c + 1 }
-  }
-  c
-}
-
-// ---------------------------------------------------------------------------
-// A tiny deterministic register state-machine.  Opcodes:
-//   0 NOP    1 SET r,v    2 ADD r,s    3 MUL r,s    4 JNZ r,target
-// Program is a flat int array; pc walks it with a `loop` + manual stepping,
-// using break to halt.  Demonstrates loop/break/match-style dispatch.
-// We model 4 registers R0..R3 in a small int array.
-// ---------------------------------------------------------------------------
-fn run_machine(prog: Array<int>) -> int {
-  // registers
-  var regs: Array<int> = []
-  regs.push(0)
-  regs.push(0)
-  regs.push(0)
-  regs.push(0)
-  var pc = 0
-  var steps = 0
-  let n = prog.len()
-  loop {
-    if pc >= n { break }
-    if steps > 1000 { break } // safety bound (deterministic)
-    steps = steps + 1
-    let opcode = prog[pc]
-    if opcode == 0 {
-      // NOP
-      pc = pc + 1
-    } else if opcode == 1 {
-      // SET r, v
-      let r = prog[pc + 1]
-      let v = prog[pc + 2]
-      regs[r] = v
-      pc = pc + 3
-    } else if opcode == 2 {
-      // ADD r, s :  regs[r] += regs[s]
-      let r = prog[pc + 1]
-      let s = prog[pc + 2]
-      regs[r] = regs[r] + regs[s]
-      pc = pc + 3
-    } else if opcode == 3 {
-      // MUL r, s :  regs[r] *= regs[s]
-      let r = prog[pc + 1]
-      let s = prog[pc + 2]
-      regs[r] = regs[r] * regs[s]
-      pc = pc + 3
-    } else if opcode == 4 {
-      // JNZ r, target : if regs[r] != 0 jump to target else fall through
-      let r = prog[pc + 1]
-      let target = prog[pc + 2]
-      if regs[r] != 0 {
-        pc = target
+    var count = 0
+    // inner while drives the chain; outer loop only used for break-with-value
+    while cur != 1 {
+      if cur % 2 == 0 {
+        cur = cur / 2
       } else {
-        pc = pc + 3
+        cur = 3 * cur + 1
       }
-    } else {
-      // unknown opcode halts
-      break
+      count = count + 1
     }
-  }
-  // return R0
-  regs[0]
-}
-
-// ---------------------------------------------------------------------------
-// Number-theory mini-suite (pure control flow over ranges).
-// ---------------------------------------------------------------------------
-fn is_prime(n: int) -> bool {
-  if n < 2 { return false }
-  var d = 2
-  while d * d <= n {
-    if n % d == 0 { return false }
-    d = d + 1
-  }
-  true
-}
-
-fn count_primes_below(limit: int) -> int {
-  var c = 0
-  for k in 0..limit {
-    if is_prime(k) { c = c + 1 }
-  }
-  c
-}
-
-fn factorial(n: int) -> int {
-  var f = 1
-  for k in 1..=n { f = f * k }
-  f
-}
-
-fn fib(n: int) -> int {
-  if n < 2 { return n }
-  var a = 0
-  var b = 1
-  var i = 2
-  while i <= n {
-    let next = a + b
-    a = b
-    b = next
-    i = i + 1
-  }
-  b
-}
-
-fn gcd(a: int, b: int) -> int {
-  var x = a
-  var y = b
-  while y != 0 {
-    let t = y
-    y = x % y
-    x = t
-  }
-  x
-}
-
-// Collatz step count (uses while + if branching).
-fn collatz_steps(start: int) -> int {
-  var v = start
-  var steps = 0
-  while v != 1 {
-    if v % 2 == 0 {
-      v = v / 2
-    } else {
-      v = 3 * v + 1
-    }
-    steps = steps + 1
+    break count
   }
   steps
 }
 
-// Sum of digits of a non-negative integer (while + modulo).
-fn digit_sum(n: int) -> int {
-  var v = n
-  var s = 0
-  if v == 0 { return 0 }
-  while v > 0 {
-    s = s + (v % 10)
-    v = v / 10
+fn collatzMaxValue(start: int) -> int {
+  var cur = start
+  var peak = start
+  while cur != 1 {
+    if cur % 2 == 0 {
+      cur = cur / 2
+    } else {
+      cur = 3 * cur + 1
+    }
+    if cur > peak {
+      peak = cur
+    }
   }
-  s
+  peak
 }
 
-// Reverse an int array into a new array (for over reversed indices).
-fn reverse_ints(xs: Array<int>) -> Array<int> {
-  var out: Array<int> = []
-  let n = xs.len()
-  var i = n - 1
-  while i >= 0 {
-    out.push(xs[i])
-    i = i - 1
+fn partA() {
+  checkInt("collatz n=1", 0, collatzSteps(1))
+  checkInt("collatz n=2", 1, collatzSteps(2))
+  checkInt("collatz n=3", 7, collatzSteps(3))
+  checkInt("collatz n=6", 8, collatzSteps(6))
+  checkInt("collatz n=7", 16, collatzSteps(7))
+  checkInt("collatz n=27", 111, collatzSteps(27))
+  checkInt("collatz max n=27", 9232, collatzMaxValue(27))
+
+  // Sum of step counts for n in 1..=10 (inclusive range).
+  // Steps: 1->0,2->1,3->7,4->2,5->5,6->8,7->16,8->3,9->19,10->6  => sum = 67
+  var total = 0
+  for n in 1..=10 {
+    total = total + collatzSteps(n)
   }
-  out
+  checkInt("collatz sum 1..=10", 67, total)
+
+  // Longest chain among 1..=20 and its argmax.
+  // Step counts 1..=20:
+  // 1:0 2:1 3:7 4:2 5:5 6:8 7:16 8:3 9:19 10:6 11:14 12:9 13:9 14:17
+  // 15:17 16:4 17:12 18:20 19:20 20:7  -> max = 20 at n=18 (first occurrence)
+  var best = 0
+  var bestN = 0
+  for n in 1..=20 {
+    let s = collatzSteps(n)
+    if s > best {
+      best = s
+      bestN = n
+    }
+  }
+  checkInt("collatz longest steps 1..=20", 20, best)
+  checkInt("collatz longest argmax 1..=20", 18, bestN)
 }
 
-// Bubble sort an int array (nested loops + swap via temp).
-fn bubble_sort(xs: Array<int>) -> Array<int> {
-  var a: Array<int> = []
-  for x in xs { a.push(x) }
-  let n = a.len()
-  var pass = 0
-  while pass < n {
-    var j = 0
-    while j + 1 < n {
-      if a[j] > a[j + 1] {
-        let tmp = a[j]
-        a[j] = a[j + 1]
-        a[j + 1] = tmp
+// ============================================================================
+// PART B — 1-D elementary cellular automaton
+//
+// A row of W cells (0/1). Each step, every cell's next value is a function of
+// its left/self/right neighbours under an 8-bit "rule" number. Boundaries wrap
+// (toroidal). We compute the population (count of 1s) after N steps.
+//
+// We implement Rule 90 (XOR of neighbours) and Rule 110.
+//
+// Rule lookup: pattern p = left*4 + self*2 + right (0..7).
+//   next = (rule >> p) & 1
+//
+// Hand/spec-derived expected values:
+//   Rule 90, width=8, start = single 1 at index 4, after 1 step:
+//     left/right of the seed become 1, seed becomes 0 (XOR), pop=2.
+//   Rule 90 is XOR; from a single seed on an infinite line it makes a
+//     Sierpinski pattern. On width=8 toroidal we verify by independent
+//     hand-simulation encoded as expected constants below.
+// ============================================================================
+
+fn ruleBit(rule: int, pattern: int) -> int {
+  // (rule >> pattern) & 1  — implemented with division since we keep to ints.
+  var shifted = rule
+  var p = 0
+  while p < pattern {
+    shifted = shifted / 2
+    p = p + 1
+  }
+  shifted % 2
+}
+
+fn population(row: Array<int>) -> int {
+  var pop = 0
+  for c in row {
+    if c == 1 {
+      pop = pop + 1
+    }
+  }
+  pop
+}
+
+fn stepRule(row: Array<int>, rule: int) -> Array<int> {
+  let width = row.len()
+  // width is fixed at 8 throughout this program; build a fresh 8-cell row.
+  var next = [0, 0, 0, 0, 0, 0, 0, 0]
+  for i in 0..width {
+    // wrap indices
+    let leftIdx = if i == 0 { width - 1 } else { i - 1 }
+    let rightIdx = if i == width - 1 { 0 } else { i + 1 }
+    let l = row[leftIdx]
+    let s = row[i]
+    let r = row[rightIdx]
+    let pattern = l * 4 + s * 2 + r
+    next[i] = ruleBit(rule, pattern)
+  }
+  next
+}
+
+fn runRule(width: int, seedIndex: int, rule: int, generations: int) -> Array<int> {
+  // width is fixed at 8 by every caller in this program.
+  var row = [0, 0, 0, 0, 0, 0, 0, 0]
+  row[seedIndex] = 1
+  var g = 0
+  while g < generations {
+    row = stepRule(row, rule)
+    g = g + 1
+  }
+  row
+}
+
+fn partB() {
+  // ruleBit sanity: rule=90 binary 01011010.
+  // bit positions: p0=0,p1=1,p2=0,p3=1,p4=1,p5=0,p6=1,p7=0
+  checkInt("rule90 bit0", 0, ruleBit(90, 0))
+  checkInt("rule90 bit1", 1, ruleBit(90, 1))
+  checkInt("rule90 bit2", 0, ruleBit(90, 2))
+  checkInt("rule90 bit3", 1, ruleBit(90, 3))
+  checkInt("rule90 bit4", 1, ruleBit(90, 4))
+  checkInt("rule90 bit5", 0, ruleBit(90, 5))
+  checkInt("rule90 bit6", 1, ruleBit(90, 6))
+  checkInt("rule90 bit7", 0, ruleBit(90, 7))
+
+  // Rule 90, width 8, seed at idx 4, after 1 step.
+  // Only patterns with exactly one neighbour set produce 1 (XOR of neighbours;
+  // self ignored because rule90 = left XOR right).
+  // Seed at 4 affects cells 3 and 5 (each sees exactly one '1' neighbour) -> 1.
+  // Cell 4 sees neighbours 3=0,5=0 -> 0. pop=2.
+  let r1 = runRule(8, 4, 90, 1)
+  checkInt("rule90 w8 seed4 step1 pop", 2, population(r1))
+  checkInt("rule90 w8 seed4 step1 cell3", 1, r1[3])
+  checkInt("rule90 w8 seed4 step1 cell4", 0, r1[4])
+  checkInt("rule90 w8 seed4 step1 cell5", 1, r1[5])
+
+  // After 2 steps: from {3,5} each spawns to its non-overlapping neighbours.
+  // step2: cell c is 1 iff exactly one of {c-1,c+1} is in {3,5}.
+  //   c=2: nbrs 1,3 -> 3 in set -> 1
+  //   c=3: nbrs 2,4 -> none -> 0
+  //   c=4: nbrs 3,5 -> both -> XOR=0
+  //   c=5: nbrs 4,6 -> none -> 0
+  //   c=6: nbrs 5,7 -> 5 in set -> 1
+  // pop = 2 (cells 2 and 6).
+  let r2 = runRule(8, 4, 90, 2)
+  checkInt("rule90 w8 seed4 step2 pop", 2, population(r2))
+  checkInt("rule90 w8 seed4 step2 cell2", 1, r2[2])
+  checkInt("rule90 w8 seed4 step2 cell4", 0, r2[4])
+  checkInt("rule90 w8 seed4 step2 cell6", 1, r2[6])
+
+  // Rule 110 sanity bits: 110 binary = 01101110
+  // p0=0 p1=1 p2=1 p3=1 p4=0 p5=1 p6=1 p7=0
+  checkInt("rule110 bit0", 0, ruleBit(110, 0))
+  checkInt("rule110 bit1", 1, ruleBit(110, 1))
+  checkInt("rule110 bit2", 1, ruleBit(110, 2))
+  checkInt("rule110 bit3", 1, ruleBit(110, 3))
+  checkInt("rule110 bit4", 0, ruleBit(110, 4))
+  checkInt("rule110 bit5", 1, ruleBit(110, 5))
+  checkInt("rule110 bit6", 1, ruleBit(110, 6))
+  checkInt("rule110 bit7", 0, ruleBit(110, 7))
+
+  // Rule 110, width 8, single seed at idx 7 (rightmost), after 1 step.
+  // Toroidal: cell i's pattern = (left*4 + self*2 + right).
+  // seed at 7. compute each cell pattern:
+  //  i=0: l=row[7]=1,s=0,r=row[1]=0 -> pattern=4 -> bit4=0
+  //  i=6: l=0,s=0,r=row[7]=1 -> pattern=1 -> bit1=1
+  //  i=7: l=row[6]=0,s=1,r=row[0]=0 -> pattern=2 -> bit2=1
+  //  all other cells pattern 0 -> 0
+  // result 1s at indices 6 and 7 -> pop=2
+  let r110 = runRule(8, 7, 110, 1)
+  checkInt("rule110 w8 seed7 step1 pop", 2, population(r110))
+  checkInt("rule110 w8 seed7 step1 cell6", 1, r110[6])
+  checkInt("rule110 w8 seed7 step1 cell7", 1, r110[7])
+  checkInt("rule110 w8 seed7 step1 cell0", 0, r110[0])
+}
+
+// ============================================================================
+// PART C — RPN (Reverse Polish Notation) calculator
+//
+// To keep this part pure control-flow (the control-flow chapter teaches no
+// string parsing — `.chars()` is unavailable, see REPORT.md book_gap), the
+// token stream is an Array<int> where:
+//   - any value >= 0 is a literal operand
+//   - -1 = '+'  -2 = '-'  -3 = '*'  -4 = '/'
+// A while loop walks the tokens; an if-chain dispatches operators; a
+// fixed-capacity int array + explicit `top` index is the evaluation stack.
+// Result = final stack top.
+//
+// Spec-derived expected values (operators spelled in the comment):
+//   [3,4,+]              -> 7
+//   [5,1,2,+,4,*,+,3,-]  -> 14   (classic example)
+//   [2,3,4,*,+]          -> 14
+//   [10,2,/]             -> 5
+//   [7,2,-,3,*]          -> 15
+// ============================================================================
+
+fn isOperator(t: int) -> bool {
+  if t < 0 { true } else { false }
+}
+
+fn evalRpn(tokens: Array<int>) -> int {
+  // Fixed-capacity stack with an explicit integer top index. Reading an
+  // element of an int-literal array yields `int`, sidestepping the empty-array
+  // pop()-element-type inference gap (see REPORT.md, book_gap). The test inputs
+  // never exceed depth 16.
+  var stack = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  var top = 0
+  var idx = 0
+  let n = tokens.len()
+  while idx < n {
+    let t = tokens[idx]
+    if isOperator(t) {
+      let b = stack[top - 1]
+      let a = stack[top - 2]
+      top = top - 2
+      let res = if t == -1 { a + b }
+        else if t == -2 { a - b }
+        else if t == -3 { a * b }
+        else { a / b }
+      stack[top] = res
+      top = top + 1
+    } else {
+      stack[top] = t
+      top = top + 1
+    }
+    idx = idx + 1
+  }
+  stack[top - 1]
+}
+
+fn partC() {
+  // operator encoding: + = -1, - = -2, * = -3, / = -4
+  checkInt("rpn 3 4 +", 7, evalRpn([3, 4, -1]))
+  checkInt("rpn classic", 14, evalRpn([5, 1, 2, -1, 4, -3, -1, 3, -2]))
+  checkInt("rpn 2 3 4 * +", 14, evalRpn([2, 3, 4, -3, -1]))
+  checkInt("rpn 10 2 /", 5, evalRpn([10, 2, -4]))
+  checkInt("rpn 7 2 - 3 *", 15, evalRpn([7, 2, -2, 3, -3]))
+
+  // isOperator
+  checkBool("isop + (-1)", true, isOperator(-1))
+  checkBool("isop 5", false, isOperator(5))
+}
+
+// ============================================================================
+// PART D — Traffic-light finite state machine
+//
+// States cycle: Green(3 ticks) -> Yellow(1 tick) -> Red(2 ticks) -> Green...
+// We run T ticks and count how many ticks were spent in each state, plus how
+// many full Green->Yellow->Red cycles completed.
+//
+// State encoded as int: 0=Green,1=Yellow,2=Red. Durations: green=3,yellow=1,
+// red=2 => full cycle length = 6 ticks.
+//
+// Spec-derived expected for T=12 ticks starting at Green tick 0:
+//   ticks: G G G Y R R | G G G Y R R   (two full cycles)
+//   green=6, yellow=2, red=4, cycles=2
+//
+// For T=7 ticks:  G G G Y R R G  -> green=4, yellow=1, red=2, cycles=1
+// ============================================================================
+
+fn greenDuration() -> int { 3 }
+fn yellowDuration() -> int { 1 }
+fn redDuration() -> int { 2 }
+
+fn nextState(state: int) -> int {
+  if state == 0 { 1 }
+  else if state == 1 { 2 }
+  else { 0 }
+}
+
+fn stateDuration(state: int) -> int {
+  if state == 0 { greenDuration() }
+  else if state == 1 { yellowDuration() }
+  else { redDuration() }
+}
+
+// Returns [greenTicks, yellowTicks, redTicks, fullCycles].
+fn runLights(ticks: int) -> Array<int> {
+  var state = 0
+  var remaining = stateDuration(0)
+  var green = 0
+  var yellow = 0
+  var red = 0
+  var cycles = 0
+  var t = 0
+  while t < ticks {
+    if state == 0 { green = green + 1 }
+    else if state == 1 { yellow = yellow + 1 }
+    else { red = red + 1 }
+
+    remaining = remaining - 1
+    if remaining == 0 {
+      // a full cycle completes when we leave Red (state 2 -> 0)
+      if state == 2 {
+        cycles = cycles + 1
       }
-      j = j + 1
+      state = nextState(state)
+      remaining = stateDuration(state)
     }
-    pass = pass + 1
+    t = t + 1
   }
-  a
+  [green, yellow, red, cycles]
 }
 
-// Linear search returning index or explicit -1 (early return discipline).
-fn index_of(xs: Array<int>, target: int) -> int {
-  var i = 0
-  let n = xs.len()
-  while i < n {
-    if xs[i] == target { return i }
-    i = i + 1
-  }
-  return -1
+fn partD() {
+  let r12 = runLights(12)
+  checkInt("lights12 green", 6, r12[0])
+  checkInt("lights12 yellow", 2, r12[1])
+  checkInt("lights12 red", 4, r12[2])
+  checkInt("lights12 cycles", 2, r12[3])
+
+  let r7 = runLights(7)
+  checkInt("lights7 green", 4, r7[0])
+  checkInt("lights7 yellow", 1, r7[1])
+  checkInt("lights7 red", 2, r7[2])
+  checkInt("lights7 cycles", 1, r7[3])
+
+  // nextState cycle
+  checkInt("next G", 1, nextState(0))
+  checkInt("next Y", 2, nextState(1))
+  checkInt("next R", 0, nextState(2))
+
+  // total ticks conservation for T=12
+  let total = r12[0] + r12[1] + r12[2]
+  checkInt("lights12 total ticks", 12, total)
 }
 
-// Clamp via if/else-if/else expression.
-fn clamp(v: int, lo: int, hi: int) -> int {
-  if v < lo { lo } else if v > hi { hi } else { v }
-}
-
-// ---------------------------------------------------------------------------
-// Assertion plumbing.  We track a global failure count via a mutable var
-// captured-by-reference would not be book-taught here, so instead each check
-// appends to a results array and we tally at the end.
-// ---------------------------------------------------------------------------
-var failures = 0
-
-fn check_int(label: string, got: int, expected: int) {
-  if got != expected {
-    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
-    failures = failures + 1
-  }
-}
-
-fn check_bool(label: string, got: bool, expected: bool) {
-  if got != expected {
-    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
-    failures = failures + 1
-  }
-}
-
-fn check_str(label: string, got: string, expected: string) {
-  if got != expected {
-    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
-    failures = failures + 1
-  }
-}
-
-// ===========================================================================
-// SECTION 1 — token classification
-// ===========================================================================
-check_bool("is_operand_5", is_operand(5), true)
-check_bool("is_operand_0", is_operand(0), true)
-check_bool("is_operand_add", is_operand(OP_ADD), false)
-check_bool("is_binop_add", is_binop(OP_ADD), true)
-check_bool("is_binop_mul", is_binop(OP_MUL), true)
-check_bool("is_binop_lpar", is_binop(OP_LPAR), false)
-check_bool("is_binop_num", is_binop(7), false)
-check_int("prec_mul", precedence(OP_MUL), 2)
-check_int("prec_div", precedence(OP_DIV), 2)
-check_int("prec_add", precedence(OP_ADD), 1)
-check_int("prec_sub", precedence(OP_SUB), 1)
-check_int("prec_num", precedence(9), 0)
-check_int("prec_lpar", precedence(OP_LPAR), 0)
-check_str("name_add", op_name(OP_ADD), "ADD")
-check_str("name_sub", op_name(OP_SUB), "SUB")
-check_str("name_mul", op_name(OP_MUL), "MUL")
-check_str("name_div", op_name(OP_DIV), "DIV")
-check_str("name_lpar", op_name(OP_LPAR), "LPAR")
-check_str("name_rpar", op_name(OP_RPAR), "RPAR")
-check_str("name_num", op_name(42), "NUM")
-
-// ===========================================================================
-// SECTION 2 — apply_op direct arithmetic
-// ===========================================================================
-check_int("apply_add", apply_op(OP_ADD, 3, 4), 7)
-check_int("apply_sub", apply_op(OP_SUB, 10, 4), 6)
-check_int("apply_mul", apply_op(OP_MUL, 6, 7), 42)
-check_int("apply_div", apply_op(OP_DIV, 20, 6), 3)   // truncating: 20/6 = 3
-check_int("apply_div_exact", apply_op(OP_DIV, 21, 7), 3)
-check_int("apply_sub_neg", apply_op(OP_SUB, 4, 9), -5)
-
-// ===========================================================================
-// SECTION 3 — shunting-yard RPN conversion
+// ============================================================================
+// PART E — histogram + classification with continue/break
 //
-// Infix:  3 + 4 * 2      tokens: [3, +, 4, *, 2]
-// Expected RPN:  3 4 2 * +   tokens: [3, 4, 2, MUL, ADD]
-// (hand-derived from precedence: * binds tighter than +)
-// ===========================================================================
-let infix1 = [3, OP_ADD, 4, OP_MUL, 2]
-let rpn1 = to_rpn(infix1)
-check_int("rpn1_len", rpn1.len(), 5)
-check_int("rpn1_0", rpn1[0], 3)
-check_int("rpn1_1", rpn1[1], 4)
-check_int("rpn1_2", rpn1[2], 2)
-check_int("rpn1_3", rpn1[3], OP_MUL)
-check_int("rpn1_4", rpn1[4], OP_ADD)
-// operand count preserved through conversion
-check_int("rpn1_operands", count_operands(rpn1), 3)
-
-// Infix:  ( 3 + 4 ) * 2     -> RPN: 3 4 + 2 *
-let infix2 = [OP_LPAR, 3, OP_ADD, 4, OP_RPAR, OP_MUL, 2]
-let rpn2 = to_rpn(infix2)
-check_int("rpn2_len", rpn2.len(), 5)
-check_int("rpn2_0", rpn2[0], 3)
-check_int("rpn2_1", rpn2[1], 4)
-check_int("rpn2_2", rpn2[2], OP_ADD)
-check_int("rpn2_3", rpn2[3], 2)
-check_int("rpn2_4", rpn2[4], OP_MUL)
-
-// Infix:  10 - 2 - 3   (left-assoc) -> RPN: 10 2 - 3 -
-let infix3 = [10, OP_SUB, 2, OP_SUB, 3]
-let rpn3 = to_rpn(infix3)
-check_int("rpn3_len", rpn3.len(), 5)
-check_int("rpn3_0", rpn3[0], 10)
-check_int("rpn3_1", rpn3[1], 2)
-check_int("rpn3_2", rpn3[2], OP_SUB)
-check_int("rpn3_3", rpn3[3], 3)
-check_int("rpn3_4", rpn3[4], OP_SUB)
-
-// ===========================================================================
-// SECTION 4 — RPN evaluation (and full pipeline)
+// Given a list of integers, build a histogram of value -> count using a
+// frequency array of size BUCKETS; skip negatives (continue); stop scanning at
+// the first sentinel value -1 ... wait, negatives are skipped, so use a
+// distinct sentinel 999 to stop (break). Classify the sum of processed values.
 //
-// 3 + 4 * 2          = 3 + 8        = 11
-// ( 3 + 4 ) * 2      = 7 * 2        = 14
-// 10 - 2 - 3         = 8 - 3        = 5
-// 2 * 3 + 4 * 5      = 6 + 20       = 26
-// 100 / 5 / 2        = 20 / 2       = 10
-// ( 8 + 2 ) * ( 7 - 3 ) = 10 * 4    = 40
-// 7                  = 7  (single operand)
-// 2 + 3 * 4 - 5      = 2 + 12 - 5   = 9
-// ===========================================================================
-check_int("eval1", evaluate([3, OP_ADD, 4, OP_MUL, 2]), 11)
-check_int("eval2", evaluate([OP_LPAR, 3, OP_ADD, 4, OP_RPAR, OP_MUL, 2]), 14)
-check_int("eval3", evaluate([10, OP_SUB, 2, OP_SUB, 3]), 5)
-check_int("eval4", evaluate([2, OP_MUL, 3, OP_ADD, 4, OP_MUL, 5]), 26)
-check_int("eval5", evaluate([100, OP_DIV, 5, OP_DIV, 2]), 10)
-check_int("eval6", evaluate([OP_LPAR, 8, OP_ADD, 2, OP_RPAR, OP_MUL, OP_LPAR, 7, OP_SUB, 3, OP_RPAR]), 40)
-check_int("eval7", evaluate([7]), 7)
-check_int("eval8", evaluate([2, OP_ADD, 3, OP_MUL, 4, OP_SUB, 5]), 9)
-// direct rpn_eval on hand-written RPN: 5 1 2 + 4 * + 3 -  = 5 + (1+2)*4 - 3 = 5+12-3 = 14
-check_int("rpn_direct", rpn_eval([5, 1, 2, OP_ADD, 4, OP_MUL, OP_ADD, 3, OP_SUB]), 14)
+// data = [1,3,3,7,2,3,1, -5(skip), 7, 999(stop), 100(never)]
+//   processed values: 1,3,3,7,2,3,1,7  (the -5 is skipped, 999 breaks)
+//   sum = 1+3+3+7+2+3+1+7 = 27
+//   counts: value1=2, value2=1, value3=3, value7=2
+//   classification of sum 27: 27 is odd and 27 > 20 -> "odd-large"
+// ============================================================================
 
-// ===========================================================================
-// SECTION 5 — register state-machine
-//
-// Program A:  R0 = 6;  R1 = 7;  R0 = R0 * R1   -> R0 = 42
-//   SET 0 6 | SET 1 7 | MUL 0 1
-//   encoded: [1,0,6, 1,1,7, 3,0,1]
-//
-// Program B (countdown loop using JNZ):
-//   R0 = 1 ; R1 = 5 ; R2 = 0
-//   LOOP: R0 = R0 * R1   (multiply accumulator)
-//         R1 = R1 + Rneg? -> we lack subtract-immediate, so instead:
-//   Simpler deterministic loop: accumulate R0 += R1 five times via JNZ counter.
-//   We use R3 as a counter initialised to a "remaining" flag pattern.
-//
-//   Program B: compute 4 * 5 by repeated addition:
-//     R0=0 ; R1=5 ; R2=4   (R2 = remaining count, R3 = step "1")
-//     R3=1
-//   LOOP (pc=12): R0 = R0 + R1     ; ADD 0 1
-//                 R2 = R2 + Rneg1  -> need decrement. Encode a "-1" register.
-//   Since SET takes a literal, set R3 = -1 and ADD R2 += R3 to decrement.
-//     SET 3 -1 (decrement step)
-//   Full encoding below; expected R0 = 5*4 = 20.
-// ===========================================================================
-let progA = [1, 0, 6, 1, 1, 7, 3, 0, 1]
-check_int("machineA", run_machine(progA), 42)
-
-// Program B layout (indices):
-//  0: SET 0 0      -> [1,0,0]
-//  3: SET 1 5      -> [1,1,5]
-//  6: SET 2 4      -> [1,2,4]    (counter)
-//  9: SET 3 -1     -> [1,3,-1]   (decrement step)
-// 12: ADD 0 1      -> [2,0,1]    (R0 += R1)            LOOP
-// 15: ADD 2 3      -> [2,2,3]    (R2 += -1)
-// 18: JNZ 2 12     -> [4,2,12]   (if R2 != 0 goto 12)
-// 21: (end)
-// Iterations: R2 = 4 -> after add 3, R2=3 (jnz), ... until R2=0.
-//   R0 += 5 happens once per iteration; R2 goes 4->3->2->1->0, JNZ stops at 0.
-//   That is 4 iterations -> R0 = 5 * 4 = 20.
-let progB = [1,0,0, 1,1,5, 1,2,4, 1,3,-1, 2,0,1, 2,2,3, 4,2,12]
-check_int("machineB", run_machine(progB), 20)
-
-// Program C: just a NOP then SET R0 = 99
-let progC = [0, 1, 0, 99]
-check_int("machineC", run_machine(progC), 99)
-
-// ===========================================================================
-// SECTION 6 — number theory over ranges
-// ===========================================================================
-check_bool("prime_2", is_prime(2), true)
-check_bool("prime_3", is_prime(3), true)
-check_bool("prime_4", is_prime(4), false)
-check_bool("prime_17", is_prime(17), true)
-check_bool("prime_1", is_prime(1), false)
-check_bool("prime_0", is_prime(0), false)
-check_bool("prime_25", is_prime(25), false)
-check_bool("prime_97", is_prime(97), true)
-// primes below 20: 2,3,5,7,11,13,17,19 -> 8
-check_int("primes_below_20", count_primes_below(20), 8)
-// primes below 2: none -> 0
-check_int("primes_below_2", count_primes_below(2), 0)
-// primes below 30: above 8 plus 23,29 -> 10
-check_int("primes_below_30", count_primes_below(30), 10)
-
-check_int("fact_0", factorial(0), 1)
-check_int("fact_1", factorial(1), 1)
-check_int("fact_5", factorial(5), 120)
-check_int("fact_6", factorial(6), 720)
-
-check_int("fib_0", fib(0), 0)
-check_int("fib_1", fib(1), 1)
-check_int("fib_2", fib(2), 1)
-check_int("fib_7", fib(7), 13)
-check_int("fib_10", fib(10), 55)
-
-check_int("gcd_12_8", gcd(12, 8), 4)
-check_int("gcd_17_5", gcd(17, 5), 1)
-check_int("gcd_100_60", gcd(100, 60), 20)
-check_int("gcd_0_9", gcd(0, 9), 9)
-
-// Collatz: 6 -> 3 -> 10 -> 5 -> 16 -> 8 -> 4 -> 2 -> 1 : 8 steps
-check_int("collatz_6", collatz_steps(6), 8)
-// 1 -> already 1 : 0 steps
-check_int("collatz_1", collatz_steps(1), 0)
-// 7 -> 22,11,34,17,52,26,13,40,20,10,5,16,8,4,2,1 : 16 steps
-check_int("collatz_7", collatz_steps(7), 16)
-
-check_int("digsum_0", digit_sum(0), 0)
-check_int("digsum_305", digit_sum(305), 8)
-check_int("digsum_9999", digit_sum(9999), 36)
-check_int("digsum_1000", digit_sum(1000), 1)
-
-// ===========================================================================
-// SECTION 7 — array transforms (loops + indexing)
-// ===========================================================================
-let src = [4, 1, 3, 2, 5]
-let rev = reverse_ints(src)
-check_int("rev_len", rev.len(), 5)
-check_int("rev_0", rev[0], 5)
-check_int("rev_4", rev[4], 4)
-check_int("rev_sum", arr_sum(rev), 15)
-
-let sorted = bubble_sort(src)
-check_int("sorted_0", sorted[0], 1)
-check_int("sorted_1", sorted[1], 2)
-check_int("sorted_2", sorted[2], 3)
-check_int("sorted_3", sorted[3], 4)
-check_int("sorted_4", sorted[4], 5)
-check_int("sorted_sum", arr_sum(sorted), 15)
-// original unchanged (bubble_sort copies)
-check_int("src_unchanged_0", src[0], 4)
-
-check_int("index_of_3", index_of(src, 3), 2)
-check_int("index_of_4", index_of(src, 4), 0)
-check_int("index_of_missing", index_of(src, 99), -1)
-
-check_int("clamp_lo", clamp(-5, 0, 10), 0)
-check_int("clamp_hi", clamp(15, 0, 10), 10)
-check_int("clamp_mid", clamp(7, 0, 10), 7)
-
-// ===========================================================================
-// SECTION 8 — nested loops with break/continue (combinatorial counts)
-//
-// Count ordered pairs (i, j), 0<=i<5, 0<=j<5, with i != j and i+j < 5.
-// Enumerate by hand:
-//   i=0: j in {1,2,3,4} with 0+j<5 -> j=1,2,3,4 (j!=0) -> 4
-//   i=1: j!=1, 1+j<5 -> j<4 -> j=0,2,3 -> 3
-//   i=2: j!=2, 2+j<5 -> j<3 -> j=0,1 -> 2
-//   i=3: j!=3, 3+j<5 -> j<2 -> j=0,1 -> 2
-//   i=4: j!=4, 4+j<5 -> j<1 -> j=0   -> 1
-//   total = 4+3+2+2+1 = 12
-// ===========================================================================
-fn count_pairs(n: int) -> int {
-  var c = 0
-  for i in 0..n {
-    for j in 0..n {
-      if i == j { continue }
-      if i + j >= n { break }
-      c = c + 1
-    }
-  }
-  c
+fn classify(sum: int) -> string {
+  let parity = if sum % 2 == 0 { "even" } else { "odd" }
+  let size = if sum > 20 { "large" } else if sum > 5 { "medium" } else { "small" }
+  f"{parity}-{size}"
 }
-check_int("count_pairs_5", count_pairs(5), 12)
 
-// Triangle number via inclusive range: sum 1..=10 = 55
-fn triangle(n: int) -> int {
-  var s = 0
-  for k in 1..=n { s = s + k }
-  s
-}
-check_int("triangle_10", triangle(10), 55)
-check_int("triangle_1", triangle(1), 1)
-check_int("triangle_0", triangle(0), 0)
-
-// Sum of even numbers in 0..20 using continue: 0+2+...+18 = 90
-fn sum_evens(limit: int) -> int {
-  var s = 0
-  for k in 0..limit {
-    if k % 2 != 0 { continue }
-    s = s + k
-  }
-  s
-}
-check_int("sum_evens_20", sum_evens(20), 90)
-
-// First k>=1 whose square exceeds 50, via loop+break (plain break + captured var)
-fn first_square_over(threshold: int) -> int {
-  var k = 1
-  var found = 0
-  loop {
-    if k * k > threshold {
-      found = k
+fn partE() {
+  let data = [1, 3, 3, 7, 2, 3, 1, -5, 7, 999, 100]
+  let buckets = 10
+  // fixed 10-bucket frequency array (book teaches only array literals).
+  var counts = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  var sum = 0
+  for v in data {
+    if v == 999 {
       break
     }
+    if v < 0 {
+      continue
+    }
+    sum = sum + v
+    if v < buckets {
+      counts[v] = counts[v] + 1
+    }
+  }
+  checkInt("histE sum", 27, sum)
+  checkInt("histE count1", 2, counts[1])
+  checkInt("histE count2", 1, counts[2])
+  checkInt("histE count3", 3, counts[3])
+  checkInt("histE count7", 2, counts[7])
+  checkInt("histE count0", 0, counts[0])
+  checkStr("histE classify", "odd-large", classify(sum))
+
+  // classify variety (spec-derived):
+  //   4  -> even, 4<=5 -> small  => "even-small"
+  //   10 -> even, 10>5 medium    => "even-medium"
+  //   21 -> odd,  21>20 large    => "odd-large"
+  //   7  -> odd,  7>5 medium     => "odd-medium"
+  checkStr("classify 4", "even-small", classify(4))
+  checkStr("classify 10", "even-medium", classify(10))
+  checkStr("classify 21", "odd-large", classify(21))
+  checkStr("classify 7", "odd-medium", classify(7))
+
+  // Nested loop: count pairs (i,j) with i in 0..5, j in 0..5, i<j and i+j even.
+  // pairs i<j over 0..5 (i,j in {0,1,2,3,4}):
+  //   (0,2)(0,4)(1,3)(2,4) have even sum -> 4 pairs
+  var pairs = 0
+  for i in 0..5 {
+    for j in 0..5 {
+      if j <= i {
+        continue
+      }
+      if (i + j) % 2 == 0 {
+        pairs = pairs + 1
+      }
+    }
+  }
+  checkInt("nested even-sum pairs", 4, pairs)
+
+  // loop + break-with-value: find smallest k where k*k >= 50 -> k=8 (64)
+  var k = 0
+  let firstK = loop {
     k = k + 1
+    if k * k >= 50 {
+      break k
+    }
   }
-  found
+  checkInt("first k where k*k>=50", 8, firstK)
 }
-// 7*7=49 (not >50), 8*8=64 (>50) -> 8
-check_int("first_sq_over_50", first_square_over(50), 8)
-// 1*1=1 (not>0)? 1>0 true -> k=1 -> 1
-check_int("first_sq_over_0", first_square_over(0), 1)
 
-// while-driven Newton-ish integer sqrt (floor): repeated until convergence.
-fn isqrt(n: int) -> int {
-  if n < 2 { return n }
-  var x = n
-  var y = (x + 1) / 2
-  while y < x {
-    x = y
-    y = (x + n / x) / 2
+// ============================================================================
+// PART F — deterministic LCG (linear congruential generator) statistics
+//
+// Recurrence (the spec): x_{n+1} = (a*x_n + c) mod m, with a=5, c=3, m=16,
+// seed=7. These small constants give a full-period generator whose first 16
+// outputs are a permutation of 0..15:
+//   6,1,8,11,10,5,12,15,14,9,0,3,2,13,4,7
+// Hand-derived expected statistics over those 16 outputs:
+//   sum            = 0+1+...+15 = 120
+//   even count     = 8   (6,8,10,12,14,0,2,4)
+//   buckets x % 4  = [4,4,4,4]   (each residue appears 4 times)
+//   max            = 15
+//   min            = 0
+//   count > 9      = 6   (11,10,12,15,14,13)
+// We use while/for, if-chains, continue, and a 4-element int bucket array.
+// ============================================================================
+
+fn lcgNext(x: int) -> int {
+  (5 * x + 3) % 16
+}
+
+fn partF() {
+  var x = 7
+  var sum = 0
+  var evens = 0
+  var maxV = 0
+  var minV = 99
+  var aboveNine = 0
+  var b0 = 0
+  var b1 = 0
+  var b2 = 0
+  var b3 = 0
+  var i = 0
+  while i < 16 {
+    x = lcgNext(x)
+    sum = sum + x
+    if x % 2 == 0 {
+      evens = evens + 1
+    }
+    if x > maxV {
+      maxV = x
+    }
+    if x < minV {
+      minV = x
+    }
+    if x > 9 {
+      aboveNine = aboveNine + 1
+    }
+    let r = x % 4
+    if r == 0 { b0 = b0 + 1 }
+    else if r == 1 { b1 = b1 + 1 }
+    else if r == 2 { b2 = b2 + 1 }
+    else { b3 = b3 + 1 }
+    i = i + 1
   }
-  x
-}
-check_int("isqrt_0", isqrt(0), 0)
-check_int("isqrt_1", isqrt(1), 1)
-check_int("isqrt_16", isqrt(16), 4)
-check_int("isqrt_17", isqrt(17), 4)
-check_int("isqrt_99", isqrt(99), 9)
-check_int("isqrt_100", isqrt(100), 10)
+  checkInt("lcg sum", 120, sum)
+  checkInt("lcg evens", 8, evens)
+  checkInt("lcg max", 15, maxV)
+  checkInt("lcg min", 0, minV)
+  checkInt("lcg above9", 6, aboveNine)
+  checkInt("lcg bucket0", 4, b0)
+  checkInt("lcg bucket1", 4, b1)
+  checkInt("lcg bucket2", 4, b2)
+  checkInt("lcg bucket3", 4, b3)
 
-// ===========================================================================
-// SECTION 9 — running totals combining many features
-// Build [1,4,9,16,25] (squares), reverse, sort, evaluate an expression that
-// uses the sum as an operand.
-// ===========================================================================
-fn squares(n: int) -> Array<int> {
-  var out: Array<int> = []
-  for k in 1..=n { out.push(k * k) }
-  out
-}
-let sq = squares(5)
-check_int("sq_len", sq.len(), 5)
-check_int("sq_sum", arr_sum(sq), 55)   // 1+4+9+16+25
-check_int("sq_last", sq[sq.len() - 1], 25)
+  // The generator has full period 16: the 16th output returns to the seed.
+  // Re-running the recurrence from output 16 (=7) reproduces output 1 (=6).
+  let wrap = lcgNext(7)
+  checkInt("lcg period wrap", 6, wrap)
 
-// Expression using sq_sum: ( 55 - 5 ) / ( 2 + 3 ) = 50 / 5 = 10
-let combined = evaluate([OP_LPAR, 55, OP_SUB, 5, OP_RPAR, OP_DIV, OP_LPAR, 2, OP_ADD, 3, OP_RPAR])
-check_int("combined_expr", combined, 10)
-
-// Accumulate a deterministic "checksum" by walking many evaluations.
-// For e in 1..=6: value = evaluate([e, *, e]) = e*e ; checksum = sum of e*e = 91
-fn checksum() -> int {
-  var total = 0
-  for e in 1..=6 {
-    // NOTE: an inline array literal built from a `for` loop variable
-    // (`evaluate([e, OP_MUL, e])`) infers element type Vec<unknown>, not
-    // Vec<int>, and fails to match the Array<int> parameter. Annotating the
-    // intermediate binding threads the element type. (Defect in REPORT.md.)
-    let expr: Array<int> = [e, OP_MUL, e]
-    let v = evaluate(expr)
-    total = total + v
+  // Skip-and-collect with continue: sum only the LCG outputs that are odd.
+  // odds among the 16 outputs: 1,11,5,15,9,3,13,7 -> sum = 64
+  var y = 7
+  var oddSum = 0
+  var j = 0
+  while j < 16 {
+    y = lcgNext(y)
+    if y % 2 == 0 {
+      j = j + 1
+      continue
+    }
+    oddSum = oddSum + y
+    j = j + 1
   }
-  total
+  checkInt("lcg oddSum", 64, oddSum)
 }
-check_int("checksum_squares", checksum(), 91)   // 1+4+9+16+25+36
 
-// ===========================================================================
-// FINAL TALLY
-// ===========================================================================
-if failures == 0 {
+// ============================================================================
+// PART G — Rule 90 population trajectory (toroidal width 8, seed idx 4)
+//
+// Hand-derived (spec: rule90 next[i] = row[i-1] XOR row[i+1], wrap width 8):
+//   gen0 row=00001000 pop=1
+//   gen1 row=00010100 pop=2
+//   gen2 row=00100010 pop=2
+//   gen3 row=01010101 pop=4
+//   gen4 row=00000000 pop=0   (XOR cancellation collapses the pattern)
+//   gen5..gen8 stay 0
+//   sum of pops gen0..gen8 = 1+2+2+4+0+0+0+0+0 = 9
+//   first generation with pop 0 = gen4
+// Also exercises break (stop at first all-zero generation).
+// ============================================================================
+
+fn partG() {
+  var popSum = 1   // gen0 pop is 1 (seed)
+  var firstDead = -1
+  var row = [0, 0, 0, 0, 0, 0, 0, 0]
+  row[4] = 1
+  var g = 1
+  while g <= 8 {
+    row = stepRule(row, 90)
+    let p = population(row)
+    popSum = popSum + p
+    if p == 0 {
+      if firstDead == -1 {
+        firstDead = g
+      }
+      break
+    }
+    g = g + 1
+  }
+  checkInt("rule90 traj popSum", 9, popSum)
+  checkInt("rule90 first dead gen", 4, firstDead)
+
+  // Verify the specific generation-3 row 01010101 cell-by-cell.
+  var r3 = [0, 0, 0, 0, 0, 0, 0, 0]
+  r3[4] = 1
+  var h = 0
+  while h < 3 {
+    r3 = stepRule(r3, 90)
+    h = h + 1
+  }
+  checkInt("rule90 gen3 pop", 4, population(r3))
+  checkInt("rule90 gen3 cell1", 1, r3[1])
+  checkInt("rule90 gen3 cell3", 1, r3[3])
+  checkInt("rule90 gen3 cell5", 1, r3[5])
+  checkInt("rule90 gen3 cell7", 1, r3[7])
+  checkInt("rule90 gen3 cell0", 0, r3[0])
+
+  // Nested-loop spiral-order fill sanity: fill a 3x3 grid (row-major) with
+  // running counter, then sum the diagonal. Grid filled with values 1..9
+  // row-major; diagonal = positions (0,0),(1,1),(2,2) = 1,5,9 -> sum 15.
+  var grid = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  var counter = 1
+  for rr in 0..3 {
+    for cc in 0..3 {
+      grid[rr * 3 + cc] = counter
+      counter = counter + 1
+    }
+  }
+  var diag = 0
+  for d in 0..3 {
+    diag = diag + grid[d * 3 + d]
+  }
+  checkInt("grid diagonal sum", 15, diag)
+  // anti-diagonal = (0,2),(1,1),(2,0) = 3,5,7 -> 15 as well
+  var anti = 0
+  for d in 0..3 {
+    anti = anti + grid[d * 3 + (2 - d)]
+  }
+  checkInt("grid anti-diagonal sum", 15, anti)
+}
+
+// ============================================================================
+// Driver
+// ============================================================================
+partA()
+partB()
+partC()
+partD()
+partE()
+partF()
+partG()
+
+if ok {
   print("ALL_CHECKS_PASSED")
-} else {
-  print(f"FAILED_TOTAL: {failures}")
 }

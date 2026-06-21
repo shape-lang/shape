@@ -1,4 +1,0 @@
-let nums = [1, 2, 3]
-let mut total = 0
-nums.forEach(|x| { total = total + x })
-print(total)

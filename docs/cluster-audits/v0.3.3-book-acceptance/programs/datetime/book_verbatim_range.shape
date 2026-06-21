@@ -1,10 +1,11 @@
 from std::core::intrinsics use { DateTime }
-// Verbatim from book "Date Range Iteration" (un-annotated empty array)
+
+// VERBATIM from book "Date Range Iteration" (lines 362-376), annotated form.
 let start = DateTime.parse("2024-01-01T00:00:00+00:00")
 let end = DateTime.parse("2024-01-31T00:00:00+00:00")
 
 let mut current = start
-let mut weekdays = []
+let mut weekdays: Array<string> = []
 while current.is_before(end) or current.is_same_day(end) {
     if current.is_weekday() {
         weekdays = weekdays + [current.format("%Y-%m-%d")]

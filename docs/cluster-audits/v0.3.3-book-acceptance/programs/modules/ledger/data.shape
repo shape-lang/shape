@@ -1,0 +1,60 @@
+// ledger/data.shape
+// A fixed, deterministic transaction fixture, returned by a function so callers
+// import data the same way they import behavior. Imports the Transaction type
+// and Category enum. Amounts are signed cents (negative = expense).
+
+from ledger::txn use { Transaction }
+from ledger::category use { Category }
+
+// The canonical fixture used by the demo report. 20 transactions.
+// Hand-tabulated totals (see main.shape assertions) are derived from these.
+pub fn sample_ledger() -> Array<Transaction> {
+    [
+        // Food: 1250 + 4500 + 980 + 2200 = 8930
+        Transaction { id: 1,  desc: "Lunch",      amount: 0 - 1250,  cat: Category::Food },
+        Transaction { id: 2,  desc: "Groceries",  amount: 0 - 4500,  cat: Category::Food },
+        Transaction { id: 3,  desc: "Coffee",     amount: 0 - 980,   cat: Category::Food },
+        Transaction { id: 4,  desc: "Dinner",     amount: 0 - 2200,  cat: Category::Food },
+        // Rent: 90000
+        Transaction { id: 5,  desc: "Rent",       amount: 0 - 90000, cat: Category::Rent },
+        // Travel: 30000 + 4500 + 1500 = 36000
+        Transaction { id: 6,  desc: "Flight",     amount: 0 - 30000, cat: Category::Travel },
+        Transaction { id: 7,  desc: "Taxi",       amount: 0 - 4500,  cat: Category::Travel },
+        Transaction { id: 8,  desc: "Bus pass",   amount: 0 - 1500,  cat: Category::Travel },
+        // Utilities: 6000 + 3500 + 2000 = 11500
+        Transaction { id: 9,  desc: "Electric",   amount: 0 - 6000,  cat: Category::Utilities },
+        Transaction { id: 10, desc: "Water",      amount: 0 - 3500,  cat: Category::Utilities },
+        Transaction { id: 11, desc: "Internet",   amount: 0 - 2000,  cat: Category::Utilities },
+        // Other (expenses): 1200 + 800 = 2000
+        Transaction { id: 12, desc: "Gift",       amount: 0 - 1200,  cat: Category::Other },
+        Transaction { id: 13, desc: "Stationery", amount: 0 - 800,   cat: Category::Other },
+        // Income (positive amounts): 250000 + 5000 + 3000 = 258000
+        Transaction { id: 14, desc: "Salary",     amount: 250000,    cat: Category::Other },
+        Transaction { id: 15, desc: "Bonus",      amount: 5000,      cat: Category::Other },
+        Transaction { id: 16, desc: "Refund",     amount: 3000,      cat: Category::Other },
+        // More Food expenses to make Food the runner-up: +1870 -> Food total 10800
+        Transaction { id: 17, desc: "Snacks",     amount: 0 - 1870,  cat: Category::Food },
+        // More Travel: +9000 -> Travel total 45000
+        Transaction { id: 18, desc: "Hotel",      amount: 0 - 9000,  cat: Category::Travel },
+        // More Utilities: +500 -> Utilities total 12000
+        Transaction { id: 19, desc: "Trash",      amount: 0 - 500,   cat: Category::Utilities },
+        // More Rent (storage unit): +5000 -> Rent total 95000
+        Transaction { id: 20, desc: "Storage",    amount: 0 - 5000,  cat: Category::Rent },
+    ]
+}
+
+// A small all-valid batch for validation testing.
+pub fn valid_batch() -> Array<Transaction> {
+    [
+        Transaction { id: 101, desc: "A", amount: 0 - 100, cat: Category::Food },
+        Transaction { id: 102, desc: "B", amount: 250,     cat: Category::Other },
+    ]
+}
+
+// A batch containing one invalid (zero-amount) transaction.
+pub fn invalid_batch() -> Array<Transaction> {
+    [
+        Transaction { id: 201, desc: "Ok",   amount: 0 - 100, cat: Category::Food },
+        Transaction { id: 202, desc: "Zero", amount: 0,       cat: Category::Other },
+    ]
+}

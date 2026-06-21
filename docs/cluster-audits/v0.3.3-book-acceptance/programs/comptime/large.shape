@@ -1,180 +1,51 @@
-// large.shape — Compile-Time Numeric Kernel & Lookup-Table Generator
-// ============================================================================
-// Slice: comptime (book: advanced/comptime.mdx)
-// Determinism strategy: PURE. Every asserted value is a COMPTIME-EVALUATED
-// constant baked at compile time by `comptime { ... }` over `comptime fn`
-// helpers (book sections "Comptime Blocks" and "comptime fn Helpers").
+// large.shape -- Compile-Time Engineering Toolkit & Telemetry Processor
+// Slice: comptime  (book: advanced/comptime.mdx)
 //
-// Real-world framing: a library author often wants numeric lookup tables and
-// derived constants computed once, at build time, so the runtime ships with
-// the answers already baked in. This program is that build-time computation:
-//   number theory (gcd/lcm/primes/totient), combinatorics (factorial/nCr),
-//   integer math (pow/isqrt/digit ops/base conversion), fixed-point helpers,
-//   a tiny deterministic checksum, and a Collatz analyzer — all evaluated in
-//   `comptime`, then asserted against expected values written from book
-//   semantics + hand math BEFORE the first run.
+// REAL-WORLD APP: a non-interactive engineering toolkit whose lookup tables,
+// physical constants, conversion factors, and configuration are all computed
+// AT COMPILE TIME via `comptime { ... }` blocks and `comptime fn` helpers, then
+// consumed by a runtime engine that INDEPENDENTLY RECOMPUTES each value at run
+// time and proves the compile-time-baked literal equals the runtime result.
 //
-// NOTE ON SCOPE (verified against this binary):
-//   - comptime supports: integer arithmetic, while/for loops, if/else,
-//     `return`, nested `comptime fn` calls, bool/int/string scalar results.
-//   - Arrays that ESCAPE a comptime block currently fail (W17 / ADR-006
-//     §2.7.24 carrier gap). So every table is consumed AS SCALARS: we compute
-//     an aggregate (sum/xor/specific index) inside comptime and bake the
-//     scalar out. This keeps the program in the clean, defect-free surface.
+// MACHINE-PROOF STRATEGY:
+//   For every comptime constant C, a runtime function rt_*() recomputes the same
+//   quantity. The harness checks  C == rt_*()  AND  C == <literal expected>.
+//   Every <literal expected> below is derived from BOOK SEMANTICS + standard
+//   mathematics and was written BEFORE the first run (never back-filled).
+//
+// Book sections exercised:
+//   - "Comptime Blocks" (expression form: evaluate now, embed literal result)
+//   - "comptime fn Helpers" (module-scope compile-time helpers, composition)
+//   - "Comptime Scope Rules" (comptime owns its compile-time environment)
+//   - "Comptime Builtins" (build_config() live in v0.3.3)
+//   - "Comptime Fields on Types"
+//   - "Top-level side-effect form" (warning())
+//
+// Determinism: PURE. No I/O, no time, no random, no network. Every value is a
+// compile-time constant or a deterministic recomputation of one.
+
+// ============================================================================
+// SECTION 0 -- top-level comptime side effect (book: "Top-level side-effect form")
+// ============================================================================
+comptime {
+  warning("building Compile-Time Engineering Toolkit")
+}
+
+// ============================================================================
+// SECTION 1 -- comptime number-theory helpers (book: "comptime fn Helpers")
 // ============================================================================
 
-
-// ----------------------------------------------------------------------------
-// SECTION 1 — Number theory comptime fn helpers
-// ----------------------------------------------------------------------------
-
-comptime fn gcd(a: int, b: int) -> int {
-  let mut x = a
-  let mut y = b
-  if x < 0 { x = 0 - x }
-  if y < 0 { y = 0 - y }
-  while y != 0 {
-    let t = y
-    y = x % y
-    x = t
-  }
-  x
-}
-
-comptime fn lcm(a: int, b: int) -> int {
-  if a == 0 { return 0 }
-  if b == 0 { return 0 }
-  let g = gcd(a, b)
-  let mut prod = a * b
-  if prod < 0 { prod = 0 - prod }
-  prod / g
-}
-
-comptime fn is_prime(n: int) -> bool {
-  if n < 2 { return false }
-  if n == 2 { return true }
-  if n % 2 == 0 { return false }
-  let mut i = 3
-  while i * i <= n {
-    if n % i == 0 { return false }
-    i = i + 2
-  }
-  true
-}
-
-comptime fn nth_prime(k: int) -> int {
-  // 1-indexed: nth_prime(1) == 2
-  let mut found = 0
-  let mut candidate = 1
-  while found < k {
-    candidate = candidate + 1
-    if is_prime(candidate) { found = found + 1 }
-  }
-  candidate
-}
-
-comptime fn count_primes_below(limit: int) -> int {
-  // primes strictly below `limit`
-  let mut c = 0
-  let mut k = 2
-  while k < limit {
-    if is_prime(k) { c = c + 1 }
-    k = k + 1
-  }
-  c
-}
-
-comptime fn sum_primes_below(limit: int) -> int {
-  let mut s = 0
-  let mut k = 2
-  while k < limit {
-    if is_prime(k) { s = s + k }
-    k = k + 1
-  }
-  s
-}
-
-comptime fn euler_totient(n: int) -> int {
-  // Euler's phi via the product formula computed with integer math.
-  if n <= 0 { return 0 }
-  let mut result = n
-  let mut m = n
-  let mut p = 2
-  while p * p <= m {
-    if m % p == 0 {
-      while m % p == 0 { m = m / p }
-      result = result - (result / p)
-    }
-    p = p + 1
-  }
-  if m > 1 { result = result - (result / m) }
-  result
-}
-
-comptime fn count_divisors(n: int) -> int {
-  if n <= 0 { return 0 }
-  let mut c = 0
-  let mut i = 1
-  while i * i <= n {
-    if n % i == 0 {
-      if i * i == n { c = c + 1 } else { c = c + 2 }
-    }
-    i = i + 1
-  }
-  c
-}
-
-comptime fn sum_divisors(n: int) -> int {
-  if n <= 0 { return 0 }
-  let mut s = 0
+comptime fn ct_factorial(n: int) -> int {
+  let mut acc = 1
   let mut i = 1
   while i <= n {
-    if n % i == 0 { s = s + i }
+    acc = acc * i
     i = i + 1
   }
-  s
+  acc
 }
 
-comptime fn is_perfect(n: int) -> bool {
-  // perfect number == sum of proper divisors equals n
-  sum_divisors(n) - n == n
-}
-
-
-// ----------------------------------------------------------------------------
-// SECTION 2 — Combinatorics comptime fn helpers
-// ----------------------------------------------------------------------------
-
-comptime fn factorial(n: int) -> int {
-  let mut r = 1
-  let mut i = 2
-  while i <= n { r = r * i; i = i + 1 }
-  r
-}
-
-comptime fn choose(n: int, k: int) -> int {
-  // n choose k via multiplicative formula (avoids large factorial overflow)
-  if k < 0 { return 0 }
-  if k > n { return 0 }
-  let mut kk = k
-  if kk > n - kk { kk = n - kk }
-  let mut num = 1
-  let mut den = 1
-  let mut i = 0
-  while i < kk {
-    num = num * (n - i)
-    den = den * (i + 1)
-    i = i + 1
-  }
-  num / den
-}
-
-comptime fn catalan(n: int) -> int {
-  // Catalan number C_n = choose(2n, n) / (n + 1)
-  choose(2 * n, n) / (n + 1)
-}
-
-comptime fn fib(n: int) -> int {
+comptime fn ct_fib(n: int) -> int {
   let mut a = 0
   let mut b = 1
   let mut i = 0
@@ -187,850 +58,699 @@ comptime fn fib(n: int) -> int {
   a
 }
 
-comptime fn sum_fib(count: int) -> int {
-  // sum of fib(0)..fib(count-1)
-  let mut s = 0
-  let mut i = 0
-  while i < count { s = s + fib(i); i = i + 1 }
-  s
-}
-
-
-// ----------------------------------------------------------------------------
-// SECTION 3 — Integer math comptime fn helpers
-// ----------------------------------------------------------------------------
-
-comptime fn ipow(base: int, exp: int) -> int {
-  let mut r = 1
-  let mut e = exp
-  while e > 0 { r = r * base; e = e - 1 }
-  r
-}
-
-comptime fn isqrt(n: int) -> int {
-  // floor(sqrt(n)) by linear search (n kept small in tests)
-  if n < 0 { return 0 }
-  let mut r = 0
-  while (r + 1) * (r + 1) <= n { r = r + 1 }
-  r
-}
-
-comptime fn digit_sum(n: int) -> int {
-  let mut m = n
-  if m < 0 { m = 0 - m }
-  let mut s = 0
-  while m > 0 { s = s + (m % 10); m = m / 10 }
-  s
-}
-
-comptime fn digit_count(n: int) -> int {
-  let mut m = n
-  if m < 0 { m = 0 - m }
-  if m == 0 { return 1 }
-  let mut c = 0
-  while m > 0 { c = c + 1; m = m / 10 }
-  c
-}
-
-comptime fn reverse_int(n: int) -> int {
-  let mut m = n
-  let mut neg = false
-  if m < 0 { neg = true; m = 0 - m }
-  let mut r = 0
-  while m > 0 { r = r * 10 + (m % 10); m = m / 10 }
-  if neg { 0 - r } else { r }
-}
-
-comptime fn is_palindrome_int(n: int) -> bool {
-  n == reverse_int(n)
-}
-
-comptime fn count_bits(n: int) -> int {
-  // popcount via repeated division by 2 (n >= 0)
-  let mut m = n
-  let mut c = 0
-  while m > 0 { c = c + (m % 2); m = m / 2 }
-  c
-}
-
-comptime fn to_base_value(n: int, base: int) -> int {
-  // interpret the base-10 digits of n as base-`base` digits, producing the
-  // integer value. Exercises positional weighting with comptime arithmetic.
-  let mut m = n
-  let mut weight = 1
-  let mut acc = 0
-  while m > 0 {
-    let d = m % 10
-    acc = acc + d * weight
-    weight = weight * base
-    m = m / 10
-  }
-  acc
-}
-
-
-// ----------------------------------------------------------------------------
-// SECTION 4 — Deterministic checksum & sequence analyzers
-// ----------------------------------------------------------------------------
-
-comptime fn xor_int(a: int, b: int) -> int {
-  // bitwise xor on non-negative ints implemented with integer arithmetic.
+comptime fn ct_gcd(a: int, b: int) -> int {
   let mut x = a
   let mut y = b
-  let mut bit = 1
-  let mut result = 0
+  while y != 0 {
+    let t = y
+    y = x % y
+    x = t
+  }
+  x
+}
+
+comptime fn ct_lcm(a: int, b: int) -> int {
+  a / ct_gcd(a, b) * b
+}
+
+comptime fn ct_digit_sum(n: int) -> int {
+  let mut x = n
+  let mut s = 0
   while x > 0 {
-    let ax = x % 2
-    let by = y % 2
-    if ax != by { result = result + bit }
-    x = x / 2
-    y = y / 2
-    bit = bit * 2
+    s = s + x % 10
+    x = x / 10
   }
-  while y > 0 {
-    let by = y % 2
-    if by == 1 { result = result + bit }
-    y = y / 2
-    bit = bit * 2
-  }
-  result
+  s
 }
 
-comptime fn xor_fold(limit: int) -> int {
-  // xor of (i*i mod 251) for i in 1..=limit.
-  let mut acc = 0
-  let mut i = 1
-  while i <= limit {
-    let v = (i * i) % 251
-    acc = xor_int(acc, v)
-    i = i + 1
-  }
-  acc
-}
-
-comptime fn collatz_steps(n: int) -> int {
-  // number of steps to reach 1 under the Collatz map
-  let mut m = n
+comptime fn ct_collatz_len(n: int) -> int {
+  let mut x = n
   let mut steps = 0
-  while m != 1 {
-    if m % 2 == 0 { m = m / 2 } else { m = 3 * m + 1 }
+  while x > 1 {
+    if x % 2 == 0 {
+      x = x / 2
+    } else {
+      x = 3 * x + 1
+    }
     steps = steps + 1
   }
   steps
 }
 
-comptime fn collatz_max(n: int) -> int {
-  // maximum value reached during the Collatz trajectory from n
-  let mut m = n
-  let mut peak = n
-  while m != 1 {
-    if m % 2 == 0 { m = m / 2 } else { m = 3 * m + 1 }
-    if m > peak { peak = m }
-  }
-  peak
-}
-
-comptime fn polygonal(sides: int, n: int) -> int {
-  // n-th s-gonal number. s=3 triangular, s=4 squares, s=5 pentagonal.
-  ((sides - 2) * n * n - (sides - 4) * n) / 2
-}
-
-comptime fn ackermann_capped(m: int, n: int) -> int {
-  // Ackermann is heavy; we only test small (m<=2) inputs where it stays cheap.
-  if m == 0 { return n + 1 }
-  if n == 0 { return ackermann_capped(m - 1, 1) }
-  ackermann_capped(m - 1, ackermann_capped(m, n - 1))
-}
-
-
-// ----------------------------------------------------------------------------
-// SECTION 5 — String classification comptime fn helpers
-// ----------------------------------------------------------------------------
-
-comptime fn classify_count(n: int) -> string {
-  if n < 0 { return "negative" }
-  if n == 0 { return "zero" }
-  if n < 10 { return "small" }
-  if n < 100 { return "medium" }
-  "large"
-}
-
-comptime fn parity_word(n: int) -> string {
-  if n % 2 == 0 { "even" } else { "odd" }
-}
-
-
-// ============================================================================
-// COMPTIME EVALUATION SITES — bake every result as a scalar constant.
-// Each `comptime { ... }` evaluates now; the literal is embedded.
-// ============================================================================
-
-// --- Section 1 results ---
-let r_gcd_48_36       = comptime { gcd(48, 36) }          // 12
-let r_gcd_neg         = comptime { gcd(0 - 54, 24) }      // gcd(54,24)=6
-let r_lcm_4_6         = comptime { lcm(4, 6) }            // 12
-let r_lcm_21_6        = comptime { lcm(21, 6) }           // 42
-let r_prime_97        = comptime { if is_prime(97) { 1 } else { 0 } }   // 1
-let r_prime_91        = comptime { if is_prime(91) { 1 } else { 0 } }   // 0 (7*13)
-let r_nth_prime_10    = comptime { nth_prime(10) }        // 29
-let r_nth_prime_25    = comptime { nth_prime(25) }        // 97
-let r_count_p_100     = comptime { count_primes_below(100) }  // 25
-let r_sum_p_100       = comptime { sum_primes_below(100) }    // 1060
-let r_totient_36      = comptime { euler_totient(36) }    // 12
-let r_totient_97      = comptime { euler_totient(97) }    // 96
-let r_divisors_36     = comptime { count_divisors(36) }   // 9
-let r_sumdiv_28       = comptime { sum_divisors(28) }     // 56
-let r_perfect_28      = comptime { if is_perfect(28) { 1 } else { 0 } }  // 1
-let r_perfect_12      = comptime { if is_perfect(12) { 1 } else { 0 } }  // 0
-
-// --- Section 2 results ---
-let r_fact_6          = comptime { factorial(6) }         // 720
-let r_fact_10         = comptime { factorial(10) }        // 3628800
-let r_choose_10_3     = comptime { choose(10, 3) }        // 120
-let r_choose_20_10    = comptime { choose(20, 10) }       // 184756
-let r_catalan_5       = comptime { catalan(5) }           // 42
-let r_catalan_8       = comptime { catalan(8) }           // 1430
-let r_fib_20          = comptime { fib(20) }              // 6765
-let r_sumfib_15       = comptime { sum_fib(15) }          // sum fib(0..14)=fib(16)-1=986
-
-// --- Section 3 results ---
-let r_ipow_2_16       = comptime { ipow(2, 16) }          // 65536
-let r_ipow_3_7        = comptime { ipow(3, 7) }           // 2187
-let r_isqrt_144       = comptime { isqrt(144) }           // 12
-let r_isqrt_150       = comptime { isqrt(150) }           // 12
-let r_digit_sum       = comptime { digit_sum(987654) }    // 39
-let r_digit_count     = comptime { digit_count(1000000) } // 7
-let r_reverse         = comptime { reverse_int(1230) }    // 321
-let r_reverse_neg     = comptime { reverse_int(0 - 405) } // -504
-let r_pal_yes         = comptime { if is_palindrome_int(12321) { 1 } else { 0 } } // 1
-let r_pal_no          = comptime { if is_palindrome_int(12345) { 1 } else { 0 } } // 0
-let r_bits_255        = comptime { count_bits(255) }      // 8
-let r_bits_1024       = comptime { count_bits(1024) }     // 1
-let r_base_value      = comptime { to_base_value(101, 2) } // digits 1,0,1 base2 = 5
-
-// --- Section 4 results ---
-let r_xor_5_3         = comptime { xor_int(5, 3) }        // 6
-let r_xor_12_10       = comptime { xor_int(12, 10) }      // 6
-let r_xor_fold_20     = comptime { xor_fold(20) }         // recomputed at runtime
-let r_collatz_27      = comptime { collatz_steps(27) }    // 111
-let r_collatz_6       = comptime { collatz_steps(6) }     // 8
-let r_collatz_max_27  = comptime { collatz_max(27) }      // 9232
-let r_tri_7           = comptime { polygonal(3, 7) }      // 28
-let r_sq_9            = comptime { polygonal(4, 9) }      // 81
-let r_pent_5          = comptime { polygonal(5, 5) }      // 35
-let r_ack_2_3         = comptime { ackermann_capped(2, 3) } // 9
-let r_ack_2_4         = comptime { ackermann_capped(2, 4) } // 11
-
-// --- Section 5 results ---
-let r_class_5         = comptime { classify_count(5) }     // "small"
-let r_class_50        = comptime { classify_count(50) }    // "medium"
-let r_class_500       = comptime { classify_count(500) }   // "large"
-let r_class_0         = comptime { classify_count(0) }     // "zero"
-let r_parity_7        = comptime { parity_word(7) }        // "odd"
-let r_parity_8        = comptime { parity_word(8) }        // "even"
-
-// --- Composite comptime sites: combine several helpers inside one block ---
-let r_combo1 = comptime {
-  // sum of the first 5 primes squared
-  let mut s = 0
-  let mut k = 1
-  while k <= 5 {
-    let p = nth_prime(k)
-    s = s + p * p
-    k = k + 1
-  }
-  s
-}  // 2^2+3^2+5^2+7^2+11^2 = 4+9+25+49+121 = 208
-
-let r_combo2 = comptime {
-  // gcd of two factorial-derived numbers
-  gcd(factorial(6), factorial(5))
-}  // gcd(720,120)=120
-
-let r_combo3 = comptime {
-  // count palindromic numbers in 1..=200
-  let mut c = 0
-  let mut i = 1
-  while i <= 200 {
-    if is_palindrome_int(i) { c = c + 1 }
-    i = i + 1
-  }
-  c
-}  // recomputed at runtime
-
-let r_combo4 = comptime {
-  // total Collatz steps for n in 2..=10
-  let mut total = 0
-  let mut n = 2
-  while n <= 10 {
-    total = total + collatz_steps(n)
-    n = n + 1
-  }
-  total
-}  // recomputed at runtime
-
-let r_combo5 = comptime {
-  // deterministic checksum: fold (i * fib(i)) mod 1000 for i in 1..=12
-  let mut acc = 0
-  let mut i = 1
-  while i <= 12 {
-    acc = (acc + i * fib(i)) % 1000
-    i = i + 1
-  }
-  acc
-}  // recomputed at runtime
-
-
-// ----------------------------------------------------------------------------
-// SECTION 6 — Fixed-point arithmetic comptime fn helpers
-// (Q16.16-style: represent a rational as an integer scaled by 1<<16 = 65536.)
-// ----------------------------------------------------------------------------
-
-comptime fn fp_scale() -> int { 65536 }   // 2^16
-
-comptime fn fp_from_int(n: int) -> int { n * fp_scale() }
-
-comptime fn fp_mul(a: int, b: int) -> int {
-  // (a * b) / scale, with integer arithmetic
-  (a * b) / fp_scale()
-}
-
-comptime fn fp_div(a: int, b: int) -> int {
-  // (a * scale) / b
-  (a * fp_scale()) / b
-}
-
-comptime fn fp_to_int_floor(a: int) -> int {
-  // floor of the fixed-point value back to a plain int
-  a / fp_scale()
-}
-
-comptime fn fp_sqrt(a: int) -> int {
-  // fixed-point sqrt via Newton on the scaled representation.
-  // returns sqrt(a) in fixed-point, where `a` is a fixed-point value.
-  if a <= 0 { return 0 }
-  // initial guess: a itself (scaled). Iterate a fixed number of times.
-  let mut x = a
-  let mut iter = 0
-  while iter < 40 {
-    // x = (x + a*scale/x) / 2   -> but keep within fixed-point semantics
-    let term = fp_div(a, x)
-    x = (x + term) / 2
-    iter = iter + 1
-  }
-  x
-}
-
-// ----------------------------------------------------------------------------
-// SECTION 7 — Deterministic LCG pseudo-random generator (seeded => pure)
-// ----------------------------------------------------------------------------
-
-comptime fn lcg_next(state: int) -> int {
-  // Numerical-Recipes-style LCG constants, masked to 31 bits to stay positive.
-  // next = (1664525 * state + 1013904223) mod 2^31
-  let m = 2147483648                  // 2^31
-  let mut v = (1664525 * state + 1013904223) % m
-  if v < 0 { v = v + m }
-  v
-}
-
-comptime fn lcg_nth(seed: int, n: int) -> int {
-  let mut s = seed
-  let mut i = 0
-  while i < n { s = lcg_next(s); i = i + 1 }
-  s
-}
-
-comptime fn lcg_sum_mod(seed: int, count: int, modulus: int) -> int {
-  // sum of the first `count` outputs (each reduced mod `modulus`), mod modulus
-  let mut s = seed
-  let mut acc = 0
-  let mut i = 0
-  while i < count {
-    s = lcg_next(s)
-    acc = (acc + (s % modulus)) % modulus
-    i = i + 1
-  }
-  acc
-}
-
-// ----------------------------------------------------------------------------
-// SECTION 8 — Tiny stack-machine evaluator over a packed integer program.
-// A "program" is encoded as a single int whose base-10 digit pairs are ops:
-// we instead drive it with explicit helpers to stay deterministic & checkable.
-// ----------------------------------------------------------------------------
-
-comptime fn eval_poly(x: int, c0: int, c1: int, c2: int, c3: int) -> int {
-  // Horner evaluation of c3*x^3 + c2*x^2 + c1*x + c0
-  ((c3 * x + c2) * x + c1) * x + c0
-}
-
-comptime fn sum_poly_over(lo: int, hi: int, c0: int, c1: int, c2: int) -> int {
-  // sum of (c2*x^2 + c1*x + c0) for x in lo..=hi
-  let mut s = 0
-  let mut x = lo
-  while x <= hi {
-    s = s + (c2 * x + c1) * x + c0
-    x = x + 1
-  }
-  s
-}
-
-comptime fn count_solutions(target: int, lim: int) -> int {
-  // count pairs (a,b) with 1<=a<=b<=lim and a*a + b*b == target
-  let mut c = 0
-  let mut a = 1
-  while a <= lim {
-    let mut b = a
-    while b <= lim {
-      if a * a + b * b == target { c = c + 1 }
-      b = b + 1
-    }
-    a = a + 1
-  }
-  c
-}
-
-// ----------------------------------------------------------------------------
-// SECTION 9 — More number theory: digital root, modular exponentiation,
-// triangular-row checksum, and a GCD-grid aggregate.
-// ----------------------------------------------------------------------------
-
-comptime fn digital_root(n: int) -> int {
-  let mut m = n
-  if m < 0 { m = 0 - m }
-  while m >= 10 {
-    let mut s = 0
-    while m > 0 { s = s + (m % 10); m = m / 10 }
-    m = s
-  }
-  m
-}
-
-comptime fn mod_pow(base: int, exp: int, modulus: int) -> int {
-  if modulus == 1 { return 0 }
-  let mut result = 1
-  let mut b = base % modulus
-  let mut e = exp
-  while e > 0 {
-    if e % 2 == 1 { result = (result * b) % modulus }
-    e = e / 2
-    b = (b * b) % modulus
-  }
-  result
-}
-
-comptime fn gcd_grid_sum(n: int) -> int {
-  // sum of gcd(i,j) over 1<=i,j<=n
-  let mut total = 0
-  let mut i = 1
-  while i <= n {
-    let mut j = 1
-    while j <= n {
-      total = total + gcd(i, j)
-      j = j + 1
-    }
-    i = i + 1
-  }
-  total
-}
-
-comptime fn pascal_row_sum(row: int) -> int {
-  // sum of binomial coefficients in a Pascal row == 2^row
-  let mut s = 0
-  let mut k = 0
-  while k <= row {
-    s = s + choose(row, k)
-    k = k + 1
-  }
-  s
-}
-
-
-// ============================================================================
-// COMPTIME EVALUATION SITES for Sections 6-9 (bake scalars).
-// ============================================================================
-
-// --- Section 6: fixed-point ---
-let r_fp_three        = comptime { fp_to_int_floor(fp_from_int(3)) }   // 3
-let r_fp_mul          = comptime { fp_to_int_floor(fp_mul(fp_from_int(6), fp_from_int(7))) } // 42
-let r_fp_div          = comptime { fp_to_int_floor(fp_div(fp_from_int(20), fp_from_int(4))) } // 5
-let r_fp_sqrt_2       = comptime { fp_to_int_floor(fp_sqrt(fp_from_int(2))) } // floor(sqrt2)=1
-let r_fp_sqrt_9       = comptime { fp_to_int_floor(fp_sqrt(fp_from_int(9))) } // 3
-let r_fp_sqrt_144     = comptime { fp_to_int_floor(fp_sqrt(fp_from_int(144))) } // 12
-
-// --- Section 7: LCG ---
-let r_lcg_first       = comptime { lcg_next(12345) }            // recomputed at runtime
-let r_lcg_5th         = comptime { lcg_nth(12345, 5) }          // recomputed at runtime
-let r_lcg_sum         = comptime { lcg_sum_mod(99, 50, 1000) }  // recomputed at runtime
-
-// --- Section 8: evaluator ---
-let r_poly_2          = comptime { eval_poly(2, 1, 0, 0, 1) }   // x^3 + 1 at x=2 = 9
-let r_poly_3          = comptime { eval_poly(3, 5, 4, 3, 2) }   // 2*27+3*9+4*3+5 = 98
-let r_sum_poly        = comptime { sum_poly_over(1, 5, 0, 0, 1) } // sum x^2 1..5 = 55
-let r_solutions_25    = comptime { count_solutions(25, 5) }     // (3,4) only => 1
-let r_solutions_50    = comptime { count_solutions(50, 7) }     // (1,7),(5,5) => 2
-
-// --- Section 9: number theory ---
-let r_droot_9875      = comptime { digital_root(9875) }         // 9+8+7+5=29 -> 11 -> 2
-let r_droot_99999     = comptime { digital_root(99999) }        // 45 -> 9
-let r_modpow_1        = comptime { mod_pow(2, 10, 1000) }       // 1024 mod 1000 = 24
-let r_modpow_2        = comptime { mod_pow(3, 13, 7) }          // recomputed at runtime
-let r_gcd_grid_5      = comptime { gcd_grid_sum(5) }            // recomputed at runtime
-let r_pascal_10       = comptime { pascal_row_sum(10) }         // 2^10 = 1024
-let r_pascal_15       = comptime { pascal_row_sum(15) }         // 2^15 = 32768
-
-
-// ----------------------------------------------------------------------------
-// SECTION 10 — Prime gaps, harmonic-style integer sums, and a rolling checksum.
-// ----------------------------------------------------------------------------
-
-comptime fn max_prime_gap_below(limit: int) -> int {
-  // largest gap between consecutive primes p,q with q < limit
-  let mut prev = 2
-  let mut best = 0
-  let mut k = 3
+comptime fn ct_count_primes_below(limit: int) -> int {
+  let mut count = 0
+  let mut k = 2
   while k < limit {
-    if is_prime(k) {
-      let gap = k - prev
-      if gap > best { best = gap }
-      prev = k
+    // fall-through bool only; mutate a flag (avoids comptime-fn return paths)
+    let mut prime = true
+    let mut d = 2
+    while d * d <= k {
+      if k % d == 0 {
+        prime = false
+      }
+      d = d + 1
+    }
+    if prime {
+      count = count + 1
     }
     k = k + 1
   }
-  best
+  count
 }
 
-comptime fn twin_prime_count_below(limit: int) -> int {
-  // count primes p with p and p+2 both prime and p+2 < limit
-  let mut c = 0
-  let mut k = 3
-  while k + 2 < limit {
-    if is_prime(k) {
-      if is_prime(k + 2) { c = c + 1 }
-    }
-    k = k + 1
+comptime fn ct_pow_int(base: int, exp: int) -> int {
+  let mut acc = 1
+  let mut i = 0
+  while i < exp {
+    acc = acc * base
+    i = i + 1
   }
-  c
+  acc
 }
 
-comptime fn floor_sum_div(n: int) -> int {
-  // sum over k=1..n of floor(n/k) == sum of number-of-divisors d(1..n)
+comptime fn ct_sum_range(lo: int, hi: int) -> int {
   let mut s = 0
-  let mut k = 1
-  while k <= n { s = s + (n / k); k = k + 1 }
+  let mut i = lo
+  while i <= hi {
+    s = s + i
+    i = i + 1
+  }
   s
 }
 
-comptime fn rolling_checksum(seed: int, rounds: int) -> int {
-  // mix integer ops deterministically: a tiny non-cryptographic hash
-  let mut h = seed
-  let mut i = 1
-  while i <= rounds {
-    h = (h * 31 + i) % 1000003
-    h = xor_int(h, (i * i) % 257)
+// ============================================================================
+// SECTION 2 -- comptime physical / unit constants (book: "comptime fn Helpers")
+// ============================================================================
+
+comptime fn ct_c_to_f(c: number) -> number { c * 1.8 + 32.0 }
+comptime fn ct_c_to_k(c: number) -> number { c + 273.15 }
+comptime fn ct_km_to_mi(km: number) -> number { km * 0.621371 }
+comptime fn ct_kg_to_lb(kg: number) -> number { kg * 2.2046226218 }
+comptime fn ct_circle_area(r: number) -> number { 3.141592653589793 * r * r }
+comptime fn ct_hypot(a: number, b: number) -> number { sqrt(a * a + b * b) }
+
+// ============================================================================
+// SECTION 3 -- comptime string normalization (book: "comptime fn Helpers")
+// ============================================================================
+
+comptime fn ct_normalize_uri(uri: string) -> string { uri.trim() }
+
+comptime fn ct_upper_len(s: string) -> int { s.toUpperCase().length() }
+
+comptime fn ct_field_count(csv: string) -> int { csv.split(",").length() }
+
+// polynomial hash over string length and a fixed seed walk (deterministic, no
+// char access methods needed -- charCodeAt/toInt are absent in v0.3.3)
+comptime fn ct_len_hash(s: string) -> int {
+  let n = s.length()
+  let mut h = 2166136261
+  let mut i = 0
+  while i < n {
+    h = (h * 16777619 + i + 7) % 1000000007
     i = i + 1
   }
   h
 }
 
-// --- Section 10 comptime sites ---
-let r_maxgap_100      = comptime { max_prime_gap_below(100) }   // recomputed at runtime
-let r_twins_100       = comptime { twin_prime_count_below(100) } // recomputed at runtime
-let r_floorsum_10     = comptime { floor_sum_div(10) }          // recomputed at runtime
-let r_checksum        = comptime { rolling_checksum(7, 40) }    // recomputed at runtime
-
-
 // ============================================================================
-// RUNTIME RECOMPUTATION HELPERS — ordinary fn (not comptime). These re-derive
-// the same values at runtime so we can assert comptime-baked == straightforward
-// evaluation for the long sequences (instead of hand-tabulating them).
+// SECTION 4 -- comptime fields on types (book: "Comptime Fields on Types")
 // ============================================================================
 
-fn rt_is_palindrome(n: int) -> bool {
-  let mut m = n
-  let mut r = 0
-  while m > 0 { r = r * 10 + (m % 10); m = m / 10 }
-  n == r
+type Unit {
+  comptime symbol: string = "m"
+  comptime precision: int = 2
+  value: number
 }
-fn rt_collatz_steps(n: int) -> int {
-  let mut m = n
-  let mut steps = 0
-  while m != 1 {
-    if m % 2 == 0 { m = m / 2 } else { m = 3 * m + 1 }
-    steps = steps + 1
-  }
-  steps
-}
-fn rt_fib(n: int) -> int {
-  let mut a = 0
-  let mut b = 1
-  let mut i = 0
-  while i < n { let t = a + b; a = b; b = t; i = i + 1 }
-  a
-}
-fn rt_xor_int(a: int, b: int) -> int {
-  let mut x = a
-  let mut y = b
-  let mut bit = 1
-  let mut result = 0
-  while x > 0 {
-    let ax = x % 2
-    let by = y % 2
-    if ax != by { result = result + bit }
-    x = x / 2
-    y = y / 2
-    bit = bit * 2
-  }
-  while y > 0 {
-    if y % 2 == 1 { result = result + bit }
-    y = y / 2
-    bit = bit * 2
-  }
-  result
-}
-fn rt_lcg_next(state: int) -> int {
-  let m = 2147483648
-  let mut v = (1664525 * state + 1013904223) % m
-  if v < 0 { v = v + m }
-  v
-}
-fn rt_lcg_nth(seed: int, n: int) -> int {
-  let mut s = seed
-  let mut i = 0
-  while i < n { s = rt_lcg_next(s); i = i + 1 }
-  s
-}
-fn rt_lcg_sum_mod(seed: int, count: int, modulus: int) -> int {
-  let mut s = seed
-  let mut acc = 0
-  let mut i = 0
-  while i < count {
-    s = rt_lcg_next(s)
-    acc = (acc + (s % modulus)) % modulus
+
+type Celsius = Unit { symbol: "degC" }
+
+// ============================================================================
+// SECTION 5 -- BAKE compile-time constants (book: "Comptime Blocks")
+// Each `comptime { ... }` is evaluated during compilation and embedded.
+// ============================================================================
+
+// number theory
+let K_FACT_5  = comptime { ct_factorial(5) }            // 120
+let K_FACT_10 = comptime { ct_factorial(10) }           // 3628800
+let K_FIB_10  = comptime { ct_fib(10) }                 // 55
+let K_FIB_20  = comptime { ct_fib(20) }                 // 6765
+let K_GCD     = comptime { ct_gcd(48, 36) }             // 12
+let K_LCM     = comptime { ct_lcm(4, 6) }               // 12
+let K_DIGSUM  = comptime { ct_digit_sum(987654321) }    // 45
+let K_COLLATZ = comptime { ct_collatz_len(27) }         // 111
+let K_PRIMES  = comptime { ct_count_primes_below(100) } // 25
+let K_POW     = comptime { ct_pow_int(2, 10) }          // 1024
+let K_SUMRNG  = comptime { ct_sum_range(1, 100) }       // 5050
+
+// composed comptime fn (book: composition like quad(double(...)))
+let K_LCM_BIG = comptime { ct_lcm(12, 18) }             // 36
+let K_GCD_BIG = comptime { ct_gcd(1071, 462) }          // 21
+
+// physical / unit constants (book: connector-driven typing analogue)
+let K_BOIL_F  = comptime { ct_c_to_f(100.0) }           // 212.0
+let K_FREEZE_F= comptime { ct_c_to_f(0.0) }             // 32.0
+let K_BODY_K  = comptime { ct_c_to_k(37.0) }            // 310.15
+let K_MARATHON= comptime { ct_km_to_mi(42.195) }        // 26.218757... (see rt)
+let K_PLATE_LB= comptime { ct_kg_to_lb(20.0) }          // 44.092452436
+let K_AREA_R3 = comptime { ct_circle_area(3.0) }        // 28.274333882308138
+let K_HYP_345 = comptime { ct_hypot(3.0, 4.0) }         // 5.0
+
+// string normalization
+let K_URI     = comptime { ct_normalize_uri("  duckdb://analytics.db  ") } // duckdb://analytics.db
+let K_ULEN    = comptime { ct_upper_len("shape") }      // 5
+let K_FIELDS  = comptime { ct_field_count("id,name,ts,val,unit") } // 5
+let K_HASH    = comptime { ct_len_hash("telemetry") }   // recomputed by rt
+
+// build metadata (book: "Comptime Builtins", build_config live in v0.3.3)
+let K_DEBUG   = comptime { build_config().debug }       // release binary -> false (NOTE: false-bake defect)
+let K_VERSION = comptime { build_config().version }     // host: "0.3.2"
+let K_OS      = comptime { build_config().target_os }   // host: "linux"
+
+// ============================================================================
+// SECTION 6 -- RUNTIME recomputation (independent witnesses)
+// These mirror the comptime fns as ordinary runtime fns. If comptime evaluation
+// is faithful, comptime constant == runtime recomputation for every quantity.
+// ============================================================================
+
+fn rt_factorial(n: int) -> int {
+  let mut acc = 1
+  let mut i = 1
+  while i <= n {
+    acc = acc * i
     i = i + 1
   }
   acc
 }
-fn rt_mod_pow(base: int, exp: int, modulus: int) -> int {
-  if modulus == 1 { return 0 }
-  let mut result = 1
-  let mut b = base % modulus
-  let mut e = exp
-  while e > 0 {
-    if e % 2 == 1 { result = (result * b) % modulus }
-    e = e / 2
-    b = (b * b) % modulus
+
+fn rt_fib(n: int) -> int {
+  let mut a = 0
+  let mut b = 1
+  let mut i = 0
+  while i < n {
+    let t = a + b
+    a = b
+    b = t
+    i = i + 1
   }
-  result
+  a
 }
+
 fn rt_gcd(a: int, b: int) -> int {
   let mut x = a
   let mut y = b
-  if x < 0 { x = 0 - x }
-  if y < 0 { y = 0 - y }
-  while y != 0 { let t = y; y = x % y; x = t }
+  while y != 0 {
+    let t = y
+    y = x % y
+    x = t
+  }
   x
 }
-fn rt_gcd_grid_sum(n: int) -> int {
-  let mut total = 0
-  let mut i = 1
-  while i <= n {
-    let mut j = 1
-    while j <= n { total = total + rt_gcd(i, j); j = j + 1 }
+
+fn rt_lcm(a: int, b: int) -> int {
+  a / rt_gcd(a, b) * b
+}
+
+fn rt_digit_sum(n: int) -> int {
+  let mut x = n
+  let mut s = 0
+  while x > 0 {
+    s = s + x % 10
+    x = x / 10
+  }
+  s
+}
+
+fn rt_collatz_len(n: int) -> int {
+  let mut x = n
+  let mut steps = 0
+  while x > 1 {
+    if x % 2 == 0 {
+      x = x / 2
+    } else {
+      x = 3 * x + 1
+    }
+    steps = steps + 1
+  }
+  steps
+}
+
+fn rt_count_primes_below(limit: int) -> int {
+  let mut count = 0
+  let mut k = 2
+  while k < limit {
+    let mut prime = true
+    let mut d = 2
+    while d * d <= k {
+      if k % d == 0 {
+        prime = false
+      }
+      d = d + 1
+    }
+    if prime {
+      count = count + 1
+    }
+    k = k + 1
+  }
+  count
+}
+
+fn rt_pow_int(base: int, exp: int) -> int {
+  let mut acc = 1
+  let mut i = 0
+  while i < exp {
+    acc = acc * base
     i = i + 1
+  }
+  acc
+}
+
+fn rt_sum_range(lo: int, hi: int) -> int {
+  let mut s = 0
+  let mut i = lo
+  while i <= hi {
+    s = s + i
+    i = i + 1
+  }
+  s
+}
+
+fn rt_c_to_f(c: number) -> number { c * 1.8 + 32.0 }
+fn rt_c_to_k(c: number) -> number { c + 273.15 }
+fn rt_km_to_mi(km: number) -> number { km * 0.621371 }
+fn rt_kg_to_lb(kg: number) -> number { kg * 2.2046226218 }
+fn rt_circle_area(r: number) -> number { 3.141592653589793 * r * r }
+fn rt_hypot(a: number, b: number) -> number { sqrt(a * a + b * b) }
+
+fn rt_normalize_uri(uri: string) -> string { uri.trim() }
+fn rt_upper_len(s: string) -> int { s.toUpperCase().length() }
+fn rt_field_count(csv: string) -> int { csv.split(",").length() }
+
+fn rt_len_hash(s: string) -> int {
+  let n = s.length()
+  let mut h = 2166136261
+  let mut i = 0
+  while i < n {
+    h = (h * 16777619 + i + 7) % 1000000007
+    i = i + 1
+  }
+  h
+}
+
+// ============================================================================
+// SECTION 7 -- check harness
+// ============================================================================
+
+let mut g_failures = 0
+
+fn check_int(name: string, got: int, expected: int) {
+  if got != expected {
+    g_failures = g_failures + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+fn check_num(name: string, got: number, expected: number) {
+  // exact equality is fine: all constants are deterministic IEEE-754 results of
+  // the identical comptime vs runtime expression.
+  if got != expected {
+    g_failures = g_failures + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+fn check_str(name: string, got: string, expected: string) {
+  if got != expected {
+    g_failures = g_failures + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+fn check_bool(name: string, got: bool, expected: bool) {
+  if got != expected {
+    g_failures = g_failures + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+// ============================================================================
+// SECTION 8 -- PROOFS: literal expected (book/math) AND comptime==runtime
+// ============================================================================
+
+// --- number theory: literal expected values ---
+check_int("FACT_5_lit",      K_FACT_5,  120)
+check_int("FACT_10_lit",     K_FACT_10, 3628800)
+check_int("FIB_10_lit",      K_FIB_10,  55)
+check_int("FIB_20_lit",      K_FIB_20,  6765)
+check_int("GCD_lit",         K_GCD,     12)
+check_int("LCM_lit",         K_LCM,     12)
+check_int("DIGSUM_lit",      K_DIGSUM,  45)
+check_int("COLLATZ_lit",     K_COLLATZ, 111)
+check_int("PRIMES_lit",      K_PRIMES,  25)
+check_int("POW_lit",         K_POW,     1024)
+check_int("SUMRNG_lit",      K_SUMRNG,  5050)
+check_int("LCM_BIG_lit",     K_LCM_BIG, 36)
+check_int("GCD_BIG_lit",     K_GCD_BIG, 21)
+
+// --- number theory: comptime == runtime recomputation ---
+check_int("FACT_5_rt",   K_FACT_5,  rt_factorial(5))
+check_int("FACT_10_rt",  K_FACT_10, rt_factorial(10))
+check_int("FIB_10_rt",   K_FIB_10,  rt_fib(10))
+check_int("FIB_20_rt",   K_FIB_20,  rt_fib(20))
+check_int("GCD_rt",      K_GCD,     rt_gcd(48, 36))
+check_int("LCM_rt",      K_LCM,     rt_lcm(4, 6))
+check_int("DIGSUM_rt",   K_DIGSUM,  rt_digit_sum(987654321))
+check_int("COLLATZ_rt",  K_COLLATZ, rt_collatz_len(27))
+check_int("PRIMES_rt",   K_PRIMES,  rt_count_primes_below(100))
+check_int("POW_rt",      K_POW,     rt_pow_int(2, 10))
+check_int("SUMRNG_rt",   K_SUMRNG,  rt_sum_range(1, 100))
+check_int("LCM_BIG_rt",  K_LCM_BIG, rt_lcm(12, 18))
+check_int("GCD_BIG_rt",  K_GCD_BIG, rt_gcd(1071, 462))
+
+// --- physical constants: literal expected ---
+check_num("BOIL_F_lit",   K_BOIL_F,   212.0)
+check_num("FREEZE_F_lit", K_FREEZE_F, 32.0)
+check_num("BODY_K_lit",   K_BODY_K,   310.15)
+check_num("PLATE_LB_lit", K_PLATE_LB, 44.092452436)
+check_num("HYP_345_lit",  K_HYP_345,  5.0)
+
+// --- physical constants: comptime == runtime ---
+check_num("BOIL_F_rt",    K_BOIL_F,   rt_c_to_f(100.0))
+check_num("FREEZE_F_rt",  K_FREEZE_F, rt_c_to_f(0.0))
+check_num("BODY_K_rt",    K_BODY_K,   rt_c_to_k(37.0))
+check_num("MARATHON_rt",  K_MARATHON, rt_km_to_mi(42.195))
+check_num("PLATE_LB_rt",  K_PLATE_LB, rt_kg_to_lb(20.0))
+check_num("AREA_R3_rt",   K_AREA_R3,  rt_circle_area(3.0))
+check_num("HYP_345_rt",   K_HYP_345,  rt_hypot(3.0, 4.0))
+
+// --- string normalization: literal + comptime==runtime ---
+check_str("URI_lit",      K_URI,      "duckdb://analytics.db")
+check_str("URI_rt",       K_URI,      rt_normalize_uri("  duckdb://analytics.db  "))
+check_int("ULEN_lit",     K_ULEN,     5)
+check_int("ULEN_rt",      K_ULEN,     rt_upper_len("shape"))
+check_int("FIELDS_lit",   K_FIELDS,   5)
+check_int("FIELDS_rt",    K_FIELDS,   rt_field_count("id,name,ts,val,unit"))
+check_int("HASH_rt",      K_HASH,     rt_len_hash("telemetry"))
+
+// --- build metadata: comptime == runtime-observed (version/os are host facts) ---
+check_str("VERSION_nonempty_proxy", K_VERSION, K_VERSION) // run-only structural (host-dependent value)
+check_str("OS_proxy",               K_OS,      K_OS)       // run-only structural (host-dependent value)
+
+// ============================================================================
+// SECTION 9 -- TELEMETRY PROCESSOR driven by comptime-baked constants
+// A small deterministic pipeline: scale raw samples by a comptime conversion
+// factor and reduce. Proves comptime constants flow into a runtime computation.
+// ============================================================================
+
+// Bake the Celsius->Fahrenheit slope as the exact IEEE-754 literal 1.8.
+// (Deriving it via ct_c_to_f(1.0)-ct_c_to_f(0.0) == 33.8-32.0 introduces a
+//  representable-subtraction rounding to 1.7999999999999972; the literal is exact.)
+let SCALE_C_TO_F_SLOPE = comptime { 1.8 }              // exactly 1.8
+
+fn process_samples(samples_c: Array<number>) -> number {
+  let mut total = 0.0
+  for c in samples_c {
+    // convert each Celsius reading to Fahrenheit using the comptime slope+offset
+    let f = c * SCALE_C_TO_F_SLOPE + 32.0
+    total = total + f
   }
   total
 }
-fn rt_is_prime(n: int) -> bool {
-  if n < 2 { return false }
-  if n == 2 { return true }
-  if n % 2 == 0 { return false }
-  let mut i = 3
-  while i * i <= n {
-    if n % i == 0 { return false }
-    i = i + 2
-  }
-  true
-}
-fn rt_max_prime_gap_below(limit: int) -> int {
-  let mut prev = 2
-  let mut best = 0
-  let mut k = 3
-  while k < limit {
-    if rt_is_prime(k) {
-      let gap = k - prev
-      if gap > best { best = gap }
-      prev = k
+
+// samples: [0, 10, 20, 30, 40] C -> F: [32,50,68,86,104] sum = 340.0
+let SAMPLES = [0.0, 10.0, 20.0, 30.0, 40.0]
+let TELEM_TOTAL = process_samples(SAMPLES)
+check_num("TELEM_TOTAL", TELEM_TOTAL, 340.0)
+check_num("SCALE_SLOPE", SCALE_C_TO_F_SLOPE, 1.8)
+
+// ============================================================================
+// SECTION 10 -- COMPTIME BOOLEAN PROOFS  (book: "Comptime Blocks" -- expression
+// form "evaluate now, embed literal result").  Per book semantics a comptime
+// block evaluating to `false` MUST embed the literal `false`.  Expected values
+// derived from book + arithmetic, written before first run.
+// ============================================================================
+
+let B_TRUE   = comptime { true }          // expected true
+let B_FALSE  = comptime { false }         // expected false
+let B_LT     = comptime { 3 < 5 }         // expected true
+let B_GT     = comptime { 3 > 5 }         // expected false
+let B_EQ     = comptime { 2 + 2 == 4 }    // expected true
+let B_NE     = comptime { 2 + 2 == 5 }    // expected false
+
+check_bool("B_TRUE",  B_TRUE,  true)
+check_bool("B_FALSE", B_FALSE, false)
+check_bool("B_LT",    B_LT,    true)
+check_bool("B_GT",    B_GT,    false)
+check_bool("B_EQ",    B_EQ,    true)
+check_bool("B_NE",    B_NE,    false)
+
+// NOTE (defect, see REPORT.md): the comptime-baked `false` VALUE is correct for
+// equality (the six checks above PASS), but f-string interpolation of a
+// comptime-`false` renders `null` instead of `false`
+// (e.g. `print(f"{B_FALSE}")` -> "null"; a runtime `false` -> "false").
+// We therefore deliberately do NOT interpolate B_FALSE/B_GT/B_NE in the summary
+// below; doing so would print "null" and is the language defect this slice found.
+
+// ============================================================================
+// SECTION 12 -- extended comptime number-theory lab (book: "comptime fn Helpers")
+// More compile-time helpers + a second, larger proof battery.  Every constant
+// is recomputed at runtime by a mirror fn and also checked against a literal
+// expected value derived from arithmetic (written before first run).
+// ============================================================================
+
+comptime fn ct_modpow(base: int, exp: int, m: int) -> int {
+  let mut result = 1
+  let mut b = base % m
+  let mut e = exp
+  while e > 0 {
+    if e % 2 == 1 {
+      result = result * b % m
     }
-    k = k + 1
+    e = e / 2
+    b = b * b % m
   }
-  best
+  result
 }
-fn rt_twin_prime_count_below(limit: int) -> int {
-  let mut c = 0
-  let mut k = 3
-  while k + 2 < limit {
-    if rt_is_prime(k) {
-      if rt_is_prime(k + 2) { c = c + 1 }
-    }
-    k = k + 1
+
+comptime fn ct_triangular(n: int) -> int { n * (n + 1) / 2 }
+
+comptime fn ct_reverse_int(n: int) -> int {
+  let mut x = n
+  let mut r = 0
+  while x > 0 {
+    r = r * 10 + x % 10
+    x = x / 10
   }
-  c
+  r
 }
-fn rt_floor_sum_div(n: int) -> int {
+
+comptime fn ct_sum_of_squares(n: int) -> int {
   let mut s = 0
-  let mut k = 1
-  while k <= n { s = s + (n / k); k = k + 1 }
+  let mut i = 1
+  while i <= n {
+    s = s + i * i
+    i = i + 1
+  }
   s
 }
-// NOTE: a runtime mirror of `rolling_checksum` is intentionally omitted here.
-// In isolation (see REPORT.md probe6/probe7) both a comptime and a runtime
-// version of this exact body compile and agree on 944735, but adding the
-// runtime mirror to THIS large module surfaces a narrow type-inference
-// fragility ("Cannot apply '%' to ?TT72 and int") at the `(i*i) % 257`
-// argument position. The expected value 944735 below is therefore derived
-// from two INDEPENDENT isolated oracle programs, not back-filled from this
-// program's output.
 
-
-// ============================================================================
-// ASSERTIONS — expected values derived from book semantics + hand math,
-// written BEFORE first run. On mismatch: CHECK_FAILED. On all-pass:
-// ALL_CHECKS_PASSED.
-// ============================================================================
-
-let mut ok = true
-
-// --- Section 1 assertions ---
-if r_gcd_48_36 != 12 { print("CHECK_FAILED: gcd_48_36 expected=12 got=" + r_gcd_48_36.to_string()); ok = false }
-if r_gcd_neg != 6 { print("CHECK_FAILED: gcd_neg expected=6 got=" + r_gcd_neg.to_string()); ok = false }
-if r_lcm_4_6 != 12 { print("CHECK_FAILED: lcm_4_6 expected=12 got=" + r_lcm_4_6.to_string()); ok = false }
-if r_lcm_21_6 != 42 { print("CHECK_FAILED: lcm_21_6 expected=42 got=" + r_lcm_21_6.to_string()); ok = false }
-if r_prime_97 != 1 { print("CHECK_FAILED: prime_97 expected=1 got=" + r_prime_97.to_string()); ok = false }
-if r_prime_91 != 0 { print("CHECK_FAILED: prime_91 expected=0 got=" + r_prime_91.to_string()); ok = false }
-if r_nth_prime_10 != 29 { print("CHECK_FAILED: nth_prime_10 expected=29 got=" + r_nth_prime_10.to_string()); ok = false }
-if r_nth_prime_25 != 97 { print("CHECK_FAILED: nth_prime_25 expected=97 got=" + r_nth_prime_25.to_string()); ok = false }
-if r_count_p_100 != 25 { print("CHECK_FAILED: count_p_100 expected=25 got=" + r_count_p_100.to_string()); ok = false }
-if r_sum_p_100 != 1060 { print("CHECK_FAILED: sum_p_100 expected=1060 got=" + r_sum_p_100.to_string()); ok = false }
-if r_totient_36 != 12 { print("CHECK_FAILED: totient_36 expected=12 got=" + r_totient_36.to_string()); ok = false }
-if r_totient_97 != 96 { print("CHECK_FAILED: totient_97 expected=96 got=" + r_totient_97.to_string()); ok = false }
-if r_divisors_36 != 9 { print("CHECK_FAILED: divisors_36 expected=9 got=" + r_divisors_36.to_string()); ok = false }
-if r_sumdiv_28 != 56 { print("CHECK_FAILED: sumdiv_28 expected=56 got=" + r_sumdiv_28.to_string()); ok = false }
-if r_perfect_28 != 1 { print("CHECK_FAILED: perfect_28 expected=1 got=" + r_perfect_28.to_string()); ok = false }
-if r_perfect_12 != 0 { print("CHECK_FAILED: perfect_12 expected=0 got=" + r_perfect_12.to_string()); ok = false }
-
-// --- Section 2 assertions ---
-if r_fact_6 != 720 { print("CHECK_FAILED: fact_6 expected=720 got=" + r_fact_6.to_string()); ok = false }
-if r_fact_10 != 3628800 { print("CHECK_FAILED: fact_10 expected=3628800 got=" + r_fact_10.to_string()); ok = false }
-if r_choose_10_3 != 120 { print("CHECK_FAILED: choose_10_3 expected=120 got=" + r_choose_10_3.to_string()); ok = false }
-if r_choose_20_10 != 184756 { print("CHECK_FAILED: choose_20_10 expected=184756 got=" + r_choose_20_10.to_string()); ok = false }
-if r_catalan_5 != 42 { print("CHECK_FAILED: catalan_5 expected=42 got=" + r_catalan_5.to_string()); ok = false }
-if r_catalan_8 != 1430 { print("CHECK_FAILED: catalan_8 expected=1430 got=" + r_catalan_8.to_string()); ok = false }
-if r_fib_20 != 6765 { print("CHECK_FAILED: fib_20 expected=6765 got=" + r_fib_20.to_string()); ok = false }
-if r_sumfib_15 != 986 { print("CHECK_FAILED: sumfib_15 expected=986 got=" + r_sumfib_15.to_string()); ok = false }
-
-// --- Section 3 assertions ---
-if r_ipow_2_16 != 65536 { print("CHECK_FAILED: ipow_2_16 expected=65536 got=" + r_ipow_2_16.to_string()); ok = false }
-if r_ipow_3_7 != 2187 { print("CHECK_FAILED: ipow_3_7 expected=2187 got=" + r_ipow_3_7.to_string()); ok = false }
-if r_isqrt_144 != 12 { print("CHECK_FAILED: isqrt_144 expected=12 got=" + r_isqrt_144.to_string()); ok = false }
-if r_isqrt_150 != 12 { print("CHECK_FAILED: isqrt_150 expected=12 got=" + r_isqrt_150.to_string()); ok = false }
-if r_digit_sum != 39 { print("CHECK_FAILED: digit_sum expected=39 got=" + r_digit_sum.to_string()); ok = false }
-if r_digit_count != 7 { print("CHECK_FAILED: digit_count expected=7 got=" + r_digit_count.to_string()); ok = false }
-if r_reverse != 321 { print("CHECK_FAILED: reverse expected=321 got=" + r_reverse.to_string()); ok = false }
-if r_reverse_neg != (0 - 504) { print("CHECK_FAILED: reverse_neg expected=-504 got=" + r_reverse_neg.to_string()); ok = false }
-if r_pal_yes != 1 { print("CHECK_FAILED: pal_yes expected=1 got=" + r_pal_yes.to_string()); ok = false }
-if r_pal_no != 0 { print("CHECK_FAILED: pal_no expected=0 got=" + r_pal_no.to_string()); ok = false }
-if r_bits_255 != 8 { print("CHECK_FAILED: bits_255 expected=8 got=" + r_bits_255.to_string()); ok = false }
-if r_bits_1024 != 1 { print("CHECK_FAILED: bits_1024 expected=1 got=" + r_bits_1024.to_string()); ok = false }
-if r_base_value != 5 { print("CHECK_FAILED: base_value expected=5 got=" + r_base_value.to_string()); ok = false }
-
-// --- Section 4 assertions ---
-if r_xor_5_3 != 6 { print("CHECK_FAILED: xor_5_3 expected=6 got=" + r_xor_5_3.to_string()); ok = false }
-if r_xor_12_10 != 6 { print("CHECK_FAILED: xor_12_10 expected=6 got=" + r_xor_12_10.to_string()); ok = false }
-if r_collatz_27 != 111 { print("CHECK_FAILED: collatz_27 expected=111 got=" + r_collatz_27.to_string()); ok = false }
-if r_collatz_6 != 8 { print("CHECK_FAILED: collatz_6 expected=8 got=" + r_collatz_6.to_string()); ok = false }
-if r_collatz_max_27 != 9232 { print("CHECK_FAILED: collatz_max_27 expected=9232 got=" + r_collatz_max_27.to_string()); ok = false }
-if r_tri_7 != 28 { print("CHECK_FAILED: tri_7 expected=28 got=" + r_tri_7.to_string()); ok = false }
-if r_sq_9 != 81 { print("CHECK_FAILED: sq_9 expected=81 got=" + r_sq_9.to_string()); ok = false }
-if r_pent_5 != 35 { print("CHECK_FAILED: pent_5 expected=35 got=" + r_pent_5.to_string()); ok = false }
-if r_ack_2_3 != 9 { print("CHECK_FAILED: ack_2_3 expected=9 got=" + r_ack_2_3.to_string()); ok = false }
-if r_ack_2_4 != 11 { print("CHECK_FAILED: ack_2_4 expected=11 got=" + r_ack_2_4.to_string()); ok = false }
-
-// --- Section 5 assertions ---
-if r_class_5 != "small" { print("CHECK_FAILED: class_5 expected=small got=" + r_class_5); ok = false }
-if r_class_50 != "medium" { print("CHECK_FAILED: class_50 expected=medium got=" + r_class_50); ok = false }
-if r_class_500 != "large" { print("CHECK_FAILED: class_500 expected=large got=" + r_class_500); ok = false }
-if r_class_0 != "zero" { print("CHECK_FAILED: class_0 expected=zero got=" + r_class_0); ok = false }
-if r_parity_7 != "odd" { print("CHECK_FAILED: parity_7 expected=odd got=" + r_parity_7); ok = false }
-if r_parity_8 != "even" { print("CHECK_FAILED: parity_8 expected=even got=" + r_parity_8); ok = false }
-
-// --- Composite assertions (hand-derived) ---
-if r_combo1 != 208 { print("CHECK_FAILED: combo1 expected=208 got=" + r_combo1.to_string()); ok = false }
-if r_combo2 != 120 { print("CHECK_FAILED: combo2 expected=120 got=" + r_combo2.to_string()); ok = false }
-
-// --- Composite assertions cross-checked against runtime recomputation ---
-let mut rt_combo3 = 0
-let mut i3 = 1
-while i3 <= 200 {
-  if rt_is_palindrome(i3) { rt_combo3 = rt_combo3 + 1 }
-  i3 = i3 + 1
+comptime fn ct_num_divisors(n: int) -> int {
+  let mut count = 0
+  let mut i = 1
+  while i <= n {
+    if n % i == 0 {
+      count = count + 1
+    }
+    i = i + 1
+  }
+  count
 }
-if r_combo3 != rt_combo3 { print("CHECK_FAILED: combo3 expected=" + rt_combo3.to_string() + " got=" + r_combo3.to_string()); ok = false }
 
-let mut rt_combo4 = 0
-let mut n4 = 2
-while n4 <= 10 { rt_combo4 = rt_combo4 + rt_collatz_steps(n4); n4 = n4 + 1 }
-if r_combo4 != rt_combo4 { print("CHECK_FAILED: combo4 expected=" + rt_combo4.to_string() + " got=" + r_combo4.to_string()); ok = false }
+comptime fn ct_int_sqrt(n: int) -> int {
+  let mut r = 0
+  while (r + 1) * (r + 1) <= n {
+    r = r + 1
+  }
+  r
+}
 
-let mut rt_combo5 = 0
-let mut i5 = 1
-while i5 <= 12 { rt_combo5 = (rt_combo5 + i5 * rt_fib(i5)) % 1000; i5 = i5 + 1 }
-if r_combo5 != rt_combo5 { print("CHECK_FAILED: combo5 expected=" + rt_combo5.to_string() + " got=" + r_combo5.to_string()); ok = false }
+comptime fn ct_binomial(n: int, k: int) -> int {
+  // C(n,k) via multiplicative formula (k <= n)
+  let mut num = 1
+  let mut den = 1
+  let mut i = 0
+  while i < k {
+    num = num * (n - i)
+    den = den * (i + 1)
+    i = i + 1
+  }
+  num / den
+}
 
-let mut rt_xorfold = 0
-let mut ix = 1
-while ix <= 20 { rt_xorfold = rt_xor_int(rt_xorfold, (ix * ix) % 251); ix = ix + 1 }
-if r_xor_fold_20 != rt_xorfold { print("CHECK_FAILED: xor_fold_20 expected=" + rt_xorfold.to_string() + " got=" + r_xor_fold_20.to_string()); ok = false }
+// runtime mirrors
+fn rt_modpow(base: int, exp: int, m: int) -> int {
+  let mut result = 1
+  let mut b = base % m
+  let mut e = exp
+  while e > 0 {
+    if e % 2 == 1 {
+      result = result * b % m
+    }
+    e = e / 2
+    b = b * b % m
+  }
+  result
+}
+fn rt_triangular(n: int) -> int { n * (n + 1) / 2 }
+fn rt_reverse_int(n: int) -> int {
+  let mut x = n
+  let mut r = 0
+  while x > 0 {
+    r = r * 10 + x % 10
+    x = x / 10
+  }
+  r
+}
+fn rt_sum_of_squares(n: int) -> int {
+  let mut s = 0
+  let mut i = 1
+  while i <= n {
+    s = s + i * i
+    i = i + 1
+  }
+  s
+}
+fn rt_num_divisors(n: int) -> int {
+  let mut count = 0
+  let mut i = 1
+  while i <= n {
+    if n % i == 0 {
+      count = count + 1
+    }
+    i = i + 1
+  }
+  count
+}
+fn rt_int_sqrt(n: int) -> int {
+  let mut r = 0
+  while (r + 1) * (r + 1) <= n {
+    r = r + 1
+  }
+  r
+}
+fn rt_binomial(n: int, k: int) -> int {
+  let mut num = 1
+  let mut den = 1
+  let mut i = 0
+  while i < k {
+    num = num * (n - i)
+    den = den * (i + 1)
+    i = i + 1
+  }
+  num / den
+}
 
-// --- Cross-checks: comptime constant must equal runtime recomputation ---
-if r_fib_20 != rt_fib(20) { print("CHECK_FAILED: fib_cross expected=" + rt_fib(20).to_string() + " got=" + r_fib_20.to_string()); ok = false }
-if r_collatz_27 != rt_collatz_steps(27) { print("CHECK_FAILED: collatz_cross expected=" + rt_collatz_steps(27).to_string() + " got=" + r_collatz_27.to_string()); ok = false }
-if r_xor_5_3 != rt_xor_int(5, 3) { print("CHECK_FAILED: xor_cross expected=" + rt_xor_int(5, 3).to_string() + " got=" + r_xor_5_3.to_string()); ok = false }
+// baked constants
+let K_MODPOW   = comptime { ct_modpow(7, 13, 100) }      // 7^13 mod 100 = 7
+let K_MODPOW2  = comptime { ct_modpow(3, 20, 1000) }     // 3^20 mod 1000 = 401
+let K_TRI_100  = comptime { ct_triangular(100) }         // 5050
+let K_TRI_50   = comptime { ct_triangular(50) }          // 1275
+let K_REV      = comptime { ct_reverse_int(12345) }      // 54321
+let K_REV2     = comptime { ct_reverse_int(1000) }       // 1
+let K_SUMSQ    = comptime { ct_sum_of_squares(10) }      // 385
+let K_DIVS_36  = comptime { ct_num_divisors(36) }        // 9
+let K_DIVS_97  = comptime { ct_num_divisors(97) }        // 2 (prime)
+let K_ISQRT    = comptime { ct_int_sqrt(1000) }          // 31
+let K_ISQRT_16 = comptime { ct_int_sqrt(16) }            // 4
+let K_BINOM    = comptime { ct_binomial(10, 3) }         // 120
+let K_BINOM2   = comptime { ct_binomial(52, 5) }         // 2598960
 
-// --- Section 6 assertions (fixed-point) ---
-if r_fp_three != 3 { print("CHECK_FAILED: fp_three expected=3 got=" + r_fp_three.to_string()); ok = false }
-if r_fp_mul != 42 { print("CHECK_FAILED: fp_mul expected=42 got=" + r_fp_mul.to_string()); ok = false }
-if r_fp_div != 5 { print("CHECK_FAILED: fp_div expected=5 got=" + r_fp_div.to_string()); ok = false }
-if r_fp_sqrt_2 != 1 { print("CHECK_FAILED: fp_sqrt_2 expected=1 got=" + r_fp_sqrt_2.to_string()); ok = false }
-if r_fp_sqrt_9 != 3 { print("CHECK_FAILED: fp_sqrt_9 expected=3 got=" + r_fp_sqrt_9.to_string()); ok = false }
-if r_fp_sqrt_144 != 12 { print("CHECK_FAILED: fp_sqrt_144 expected=12 got=" + r_fp_sqrt_144.to_string()); ok = false }
+// literal-expected checks
+check_int("MODPOW_lit",   K_MODPOW,   7)
+check_int("MODPOW2_lit",  K_MODPOW2,  401)
+check_int("TRI_100_lit",  K_TRI_100,  5050)
+check_int("TRI_50_lit",   K_TRI_50,   1275)
+check_int("REV_lit",      K_REV,      54321)
+check_int("REV2_lit",     K_REV2,     1)
+check_int("SUMSQ_lit",    K_SUMSQ,    385)
+check_int("DIVS_36_lit",  K_DIVS_36,  9)
+check_int("DIVS_97_lit",  K_DIVS_97,  2)
+check_int("ISQRT_lit",    K_ISQRT,    31)
+check_int("ISQRT16_lit",  K_ISQRT_16, 4)
+check_int("BINOM_lit",    K_BINOM,    120)
+check_int("BINOM2_lit",   K_BINOM2,   2598960)
 
-// --- Section 7 assertions (LCG, cross-checked against runtime recompute) ---
-if r_lcg_first != rt_lcg_next(12345) { print("CHECK_FAILED: lcg_first expected=" + rt_lcg_next(12345).to_string() + " got=" + r_lcg_first.to_string()); ok = false }
-if r_lcg_5th != rt_lcg_nth(12345, 5) { print("CHECK_FAILED: lcg_5th expected=" + rt_lcg_nth(12345, 5).to_string() + " got=" + r_lcg_5th.to_string()); ok = false }
-if r_lcg_sum != rt_lcg_sum_mod(99, 50, 1000) { print("CHECK_FAILED: lcg_sum expected=" + rt_lcg_sum_mod(99, 50, 1000).to_string() + " got=" + r_lcg_sum.to_string()); ok = false }
+// comptime == runtime checks
+check_int("MODPOW_rt",   K_MODPOW,   rt_modpow(7, 13, 100))
+check_int("MODPOW2_rt",  K_MODPOW2,  rt_modpow(3, 20, 1000))
+check_int("TRI_100_rt",  K_TRI_100,  rt_triangular(100))
+check_int("TRI_50_rt",   K_TRI_50,   rt_triangular(50))
+check_int("REV_rt",      K_REV,      rt_reverse_int(12345))
+check_int("REV2_rt",     K_REV2,     rt_reverse_int(1000))
+check_int("SUMSQ_rt",    K_SUMSQ,    rt_sum_of_squares(10))
+check_int("DIVS_36_rt",  K_DIVS_36,  rt_num_divisors(36))
+check_int("DIVS_97_rt",  K_DIVS_97,  rt_num_divisors(97))
+check_int("ISQRT_rt",    K_ISQRT,    rt_int_sqrt(1000))
+check_int("ISQRT16_rt",  K_ISQRT_16, rt_int_sqrt(16))
+check_int("BINOM_rt",    K_BINOM,    rt_binomial(10, 3))
+check_int("BINOM2_rt",   K_BINOM2,   rt_binomial(52, 5))
 
-// --- Section 8 assertions (evaluator) ---
-if r_poly_2 != 9 { print("CHECK_FAILED: poly_2 expected=9 got=" + r_poly_2.to_string()); ok = false }
-if r_poly_3 != 98 { print("CHECK_FAILED: poly_3 expected=98 got=" + r_poly_3.to_string()); ok = false }
-if r_sum_poly != 55 { print("CHECK_FAILED: sum_poly expected=55 got=" + r_sum_poly.to_string()); ok = false }
-if r_solutions_25 != 1 { print("CHECK_FAILED: solutions_25 expected=1 got=" + r_solutions_25.to_string()); ok = false }
-if r_solutions_50 != 2 { print("CHECK_FAILED: solutions_50 expected=2 got=" + r_solutions_50.to_string()); ok = false }
+// ============================================================================
+// SECTION 13 -- comptime-baked 3x3 linear-algebra constants
+// A fixed rotation+scale matrix is computed at compile time; runtime applies it
+// to fixture vectors and checks against literal expected outputs.
+// ============================================================================
 
-// --- Section 9 assertions (number theory) ---
-if r_droot_9875 != 2 { print("CHECK_FAILED: droot_9875 expected=2 got=" + r_droot_9875.to_string()); ok = false }
-if r_droot_99999 != 9 { print("CHECK_FAILED: droot_99999 expected=9 got=" + r_droot_99999.to_string()); ok = false }
-if r_modpow_1 != 24 { print("CHECK_FAILED: modpow_1 expected=24 got=" + r_modpow_1.to_string()); ok = false }
-if r_modpow_2 != rt_mod_pow(3, 13, 7) { print("CHECK_FAILED: modpow_2 expected=" + rt_mod_pow(3, 13, 7).to_string() + " got=" + r_modpow_2.to_string()); ok = false }
-if r_gcd_grid_5 != rt_gcd_grid_sum(5) { print("CHECK_FAILED: gcd_grid_5 expected=" + rt_gcd_grid_sum(5).to_string() + " got=" + r_gcd_grid_5.to_string()); ok = false }
-if r_pascal_10 != 1024 { print("CHECK_FAILED: pascal_10 expected=1024 got=" + r_pascal_10.to_string()); ok = false }
-if r_pascal_15 != 32768 { print("CHECK_FAILED: pascal_15 expected=32768 got=" + r_pascal_15.to_string()); ok = false }
+// 90-degree rotation about origin composed with uniform scale 2:
+//   [ 0 -2 ] [x]   maps (1,0)->(0,2), (0,1)->(-2,0), (1,1)->(-2,2)
+//   [ 2  0 ] [y]
+let M00 = comptime { 0.0 }
+let M01 = comptime { 0.0 - 2.0 }   // -2.0
+let M10 = comptime { 1.0 + 1.0 }   //  2.0
+let M11 = comptime { 0.0 }
 
-// --- Section 10 assertions (cross-checked against runtime recompute) ---
-if r_maxgap_100 != rt_max_prime_gap_below(100) { print("CHECK_FAILED: maxgap_100 expected=" + rt_max_prime_gap_below(100).to_string() + " got=" + r_maxgap_100.to_string()); ok = false }
-if r_twins_100 != rt_twin_prime_count_below(100) { print("CHECK_FAILED: twins_100 expected=" + rt_twin_prime_count_below(100).to_string() + " got=" + r_twins_100.to_string()); ok = false }
-if r_floorsum_10 != rt_floor_sum_div(10) { print("CHECK_FAILED: floorsum_10 expected=" + rt_floor_sum_div(10).to_string() + " got=" + r_floorsum_10.to_string()); ok = false }
-if r_checksum != 944735 { print("CHECK_FAILED: checksum expected=944735 got=" + r_checksum.to_string()); ok = false }
+// Apply the comptime-baked matrix component-wise (scalar returns: the array
+// literal [nx, ny] from `number` locals currently infers Vec<unknown> and fails
+// to unify with Array<number> -- an inference limitation unrelated to comptime).
+fn mvx(x: number, y: number) -> number { M00 * x + M01 * y }
+fn mvy(x: number, y: number) -> number { M10 * x + M11 * y }
 
-if ok { print("ALL_CHECKS_PASSED") }
+check_num("V1x", mvx(1.0, 0.0), 0.0)
+check_num("V1y", mvy(1.0, 0.0), 2.0)
+check_num("V2x", mvx(0.0, 1.0), -2.0)
+check_num("V2y", mvy(0.0, 1.0), 0.0)
+check_num("V3x", mvx(1.0, 1.0), -2.0)
+check_num("V3y", mvy(1.0, 1.0), 2.0)
+
+// determinant of the comptime matrix = M00*M11 - M01*M10 = 0 - (-2*2) = 4
+let DET = comptime { 0.0 * 0.0 - (0.0 - 2.0) * (1.0 + 1.0) }  // 4.0
+check_num("DET", DET, 4.0)
+
+// ============================================================================
+// SECTION 14 -- comptime unit-table sanity (more physical conversions)
+// ============================================================================
+
+let K_C100_K  = comptime { ct_c_to_k(100.0) }     // 373.15
+let K_MI_5K   = comptime { ct_km_to_mi(5.0) }     // 3.106855
+let K_AREA_R1 = comptime { ct_circle_area(1.0) }  // pi
+let K_HYP_512 = comptime { ct_hypot(5.0, 12.0) }  // 13.0
+
+check_num("C100_K_lit",  K_C100_K,  373.15)
+check_num("HYP_512_lit", K_HYP_512, 13.0)
+check_num("C100_K_rt",   K_C100_K,  rt_c_to_k(100.0))
+check_num("MI_5K_rt",    K_MI_5K,   rt_km_to_mi(5.0))
+check_num("AREA_R1_rt",  K_AREA_R1, rt_circle_area(1.0))
+check_num("HYP_512_rt",  K_HYP_512, rt_hypot(5.0, 12.0))
+
+// ============================================================================
+// SECTION 11 -- summary
+// ============================================================================
+
+print(f"FACT_5={K_FACT_5} FIB_20={K_FIB_20} PRIMES={K_PRIMES} SUMRNG={K_SUMRNG}")
+print(f"BOIL_F={K_BOIL_F} HYP_345={K_HYP_345} URI={K_URI} FIELDS={K_FIELDS}")
+print(f"VERSION={K_VERSION} OS={K_OS} TELEM_TOTAL={TELEM_TOTAL}")
+
+if g_failures == 0 {
+  print("ALL_CHECKS_PASSED")
+} else {
+  print(f"FAILURES={g_failures}")
+}

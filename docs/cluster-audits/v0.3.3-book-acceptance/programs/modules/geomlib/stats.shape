@@ -1,0 +1,9 @@
+// geomlib/stats.shape — basic statistics over numeric arrays
+pub fn mean(v: Array<number>) -> number {
+    v.sum() / (v.length as number)
+}
+
+pub fn variance(v: Array<number>) -> number {
+    let mu = mean(v)
+    v.map(|x| (x - mu) * (x - mu)).sum() / (v.length as number)
+}

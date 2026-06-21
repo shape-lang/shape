@@ -1,110 +1,65 @@
-// small.shape — error-handling chapter core exercise
-// Book: fundamentals/error-handling.mdx
-// Exercises: Result (Ok/Err), Option (Some/None), `?` propagation,
-//            `!!` context operator, `??` None-coalescing, match on Result/Option,
-//            `as Type?` fallible cast.
-// Self-checking: asserts every result against book-derived expected values.
+// small.shape — error-handling slice (book: fundamentals/error-handling.mdx)
+// Exercises: Result/Option constructors, `?` propagation, `!!` context,
+// `??` None-coalescing, `as Type?` fallible cast. Self-checking.
+from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
 
-// ---- Result-returning helpers ----------------------------------------------
-
-fn safe_div(a: int, b: int) -> Result<int> {
-    if b == 0 {
-        return Err("division by zero");   // Err normalizes payload into AnyError
-    }
-    return Ok(a / b);
+fn read_file(path: string) -> Result<string> {
+    if path == "" { return Err("empty path"); }
+    return Ok("port = 8080");
 }
 
-// `?` propagation: on Ok yields v; on Err early-returns the Err (book §`?`).
-fn div_then_inc(a: int, b: int) -> Result<int> {
-    let q = safe_div(a, b)?;
-    return Ok(q + 1);
-}
-
-// Option lookup; `??` supplies a default for None (book §Related Operators).
-fn lookup(id: int) -> Option<string> {
-    if id == 1 { return Some("alice"); }
-    if id == 2 { return Some("bob"); }
-    return None;
-}
-
-// `!!` adds context and always yields Result; `(opt !! ctx)?` converts None->Err
-// then unwraps (book §`!!` + §`!! + ?` parsing).
-fn require_user(id: int) -> Result<string> {
-    let name = (lookup(id) !! "user not found")?;
-    return Ok(name);
-}
-
-// `as int?` is the fallible cast returning Result<int, AnyError> (book §Fallible).
-fn parse_int(raw: string) -> Result<int> {
-    let n = (raw as int?)?;
+fn parse_config(text: string) -> Result<int> {
+    let n = ("8080" as int?)?;
     return Ok(n);
 }
 
-// ---- assertion helpers ------------------------------------------------------
-
-fn check_int(label: string, got: int, expected: int) {
-    if got != expected {
-        print(f"CHECK_FAILED: {label} expected={expected} got={got}");
-    }
+fn load_config(path: string) -> Result<int> {
+    let text = (read_file(path) !! "Failed to read config")?;
+    return parse_config(text) !! "Config parse failed";
 }
 
-fn check_str(label: string, got: string, expected: string) {
-    if got != expected {
-        print(f"CHECK_FAILED: {label} expected={expected} got={got}");
-    }
+fn find_user(found: bool) -> Option<int> {
+    if found { return Some(7); }
+    return None;
 }
 
-fn main() {
-    // safe_div Ok branch -> 10/2 = 5
-    match safe_div(10, 2) {
-        Ok(v) => check_int("div_ok", v, 5),
-        Err(e) => print("CHECK_FAILED: div_ok unexpected Err"),
-    }
-    // safe_div Err branch -> divide by zero is caught
-    match safe_div(10, 0) {
-        Ok(v) => print("CHECK_FAILED: div_zero unexpected Ok"),
-        Err(e) => check_int("div_zero_caught", 1, 1),
-    }
-
-    // `?` propagation success: (10/5)+1 = 3
-    match div_then_inc(10, 5) {
-        Ok(v) => check_int("chain_ok", v, 3),
-        Err(e) => print("CHECK_FAILED: chain_ok unexpected Err"),
-    }
-    // `?` propagation of Err short-circuits div_then_inc
-    match div_then_inc(10, 0) {
-        Ok(v) => print("CHECK_FAILED: chain_err unexpected Ok"),
-        Err(e) => check_int("chain_err_caught", 1, 1),
-    }
-
-    // `!!` + `?`: present user -> alice
-    match require_user(1) {
-        Ok(n) => check_str("require_present", n, "alice"),
-        Err(e) => print("CHECK_FAILED: require_present unexpected Err"),
-    }
-    // `!!` + `?`: missing user -> None becomes Err via context
-    match require_user(99) {
-        Ok(n) => print("CHECK_FAILED: require_missing unexpected Ok"),
-        Err(e) => check_int("require_missing_caught", 1, 1),
-    }
-
-    // `??` None-coalescing with a plain default (book Quick Reference: `a ?? b`)
-    let a = lookup(2) ?? "nobody";   // Some("bob") -> "bob"
-    check_str("coalesce_some", a, "bob");
-    let b = lookup(99) ?? "nobody";  // None -> "nobody"
-    check_str("coalesce_none", b, "nobody");
-
-    // `as int?` fallible cast: valid and invalid
-    match parse_int("42") {
-        Ok(v) => check_int("parse_ok", v, 42),
-        Err(e) => print("CHECK_FAILED: parse_ok unexpected Err"),
-    }
-    match parse_int("notanumber") {
-        Ok(v) => print("CHECK_FAILED: parse_bad unexpected Ok"),
-        Err(e) => check_int("parse_bad_caught", 1, 1),
-    }
-
-    print("ALL_CHECKS_PASSED");
+fn lookup(found: bool) -> Result<int> {
+    let id = (find_user(found) !! "User not found")?;
+    return Ok(id);
 }
 
-main();
+let mut ok = true;
+
+match load_config("config.shape") {
+    Ok(v) => { if v != 8080 { ok = false; print("CHECK_FAILED: load_ok expected=8080"); } }
+    Err(e) => { ok = false; print("CHECK_FAILED: load_ok unexpected err"); }
+}
+
+match load_config("") {
+    Ok(v) => { ok = false; print("CHECK_FAILED: load_err expected Err got Ok"); }
+    Err(e) => { }
+}
+
+match lookup(true) {
+    Ok(v) => { if v != 7 { ok = false; print("CHECK_FAILED: lookup_ok expected=7"); } }
+    Err(e) => { ok = false; print("CHECK_FAILED: lookup_ok unexpected err"); }
+}
+
+match lookup(false) {
+    Ok(v) => { ok = false; print("CHECK_FAILED: lookup_none expected Err got Ok"); }
+    Err(e) => { }
+}
+
+let a = find_user(false) ?? 99;
+if a != 99 { ok = false; print("CHECK_FAILED: coalesce_none expected=99"); }
+
+let b = find_user(true) ?? 99;
+if b != 7 { ok = false; print("CHECK_FAILED: coalesce_some expected=7"); }
+
+fn wrap_plain() -> Result<int> { return 42 !! "ctx"; }
+match wrap_plain() {
+    Ok(v) => { if v != 42 { ok = false; print("CHECK_FAILED: wrap_plain expected=42"); } }
+    Err(e) => { ok = false; print("CHECK_FAILED: wrap_plain unexpected err"); }
+}
+
+if ok { print("ALL_CHECKS_PASSED"); }

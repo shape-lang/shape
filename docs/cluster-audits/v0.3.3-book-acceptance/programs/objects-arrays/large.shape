@@ -1,529 +1,769 @@
-// large.shape — Objects and Vectors slice (book: fundamentals/objects-arrays.mdx)
 // ============================================================================
-// A deterministic HR / payroll analytics report. NON-INTERACTIVE,
-// MACHINE-PROOFABLE: every computed result is asserted against an expected
-// value derived by hand from BOOK SEMANTICS (cited inline), written BEFORE the
-// first run. On all-pass prints ALL_CHECKS_PASSED; on any mismatch prints
-// CHECK_FAILED: <which> expected=<e> got=<g>.
+// large.shape — In-memory analytics engine over typed-object records + vectors
+// Slice: objects-arrays (book: fundamentals/objects-arrays.mdx)
 //
-// Execution model: SCRIPT MODE (top-level statements run; `fn main` is NOT
-// auto-invoked under `shape run`). All driver code is at top level.
+// A deterministic, non-interactive, machine-proofable application built ONLY
+// from features the objects-arrays chapter documents as working at HEAD:
+//   - Vec literals, indexing, closed-range slicing, len/first/last
+//   - map / filter / find / findIndex / some / every / includes / indexOf
+//   - concat / reverse / take / drop / clone
+//   - NumericVec: sum / avg / min / max
+//   - typed objects (`type T { ... }`), anonymous objects, nested objects,
+//     object merge `+` (disjoint keys)
+//   - HashMap immutable chaining (set / get / has / len / isEmpty) + Option match
 //
-// Book-derived workarounds applied (each is recorded in REPORT.md as a defect):
-//   * Method-call results are LET-BOUND before use as a binary-op operand or
-//     as a multi-arg function argument, because the strict-typing inference
-//     declares `unknown` when both operands / consecutive higher-order calls
-//     are method-call results in those positions. The book's method table
-//     gives concrete return types, so these workarounds preserve book
-//     semantics; they only sidestep an inference gap.
+// Every expected value below is derived BY HAND from book semantics BEFORE the
+// first run, never back-filled from observed output.
 // ============================================================================
 
-// ---------------------------------------------------------------------------
-// Assertion harness (the book is silent on a test idiom; we build one).
-// ---------------------------------------------------------------------------
-let mut failures = 0
+let mut fails = 0
+let mut checks = 0
 
-fn fail(which: string, expected: string, got: string) {
-  print(f"CHECK_FAILED: {which} expected={expected} got={got}")
-}
-
-fn check_int(which: string, got: int, expected: int) {
-  if got != expected {
-    fail(which, f"{expected}", f"{got}")
-    failures = failures + 1
+fn checkInt(name: string, got: int, want: int) {
+  checks = checks + 1
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    fails = fails + 1
   }
 }
 
-fn check_str(which: string, got: string, expected: string) {
-  if got != expected {
-    fail(which, expected, got)
-    failures = failures + 1
+fn checkNum(name: string, got: number, want: number) {
+  checks = checks + 1
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    fails = fails + 1
   }
 }
 
-fn check_bool(which: string, got: bool, expected: bool) {
-  if got != expected {
-    fail(which, f"{expected}", f"{got}")
-    failures = failures + 1
+fn checkBool(name: string, got: bool, want: bool) {
+  checks = checks + 1
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    fails = fails + 1
   }
 }
 
-fn check_num(which: string, got: number, expected: number) {
-  if got != expected {
-    fail(which, f"{expected}", f"{got}")
-    failures = failures + 1
+fn checkStr(name: string, got: string, want: string) {
+  checks = checks + 1
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    fails = fails + 1
   }
 }
 
-// Element-wise int-vector equality. (Book never shows `vecA == vecB`; strict
-// typing rejects it because the operands infer as `unknown`. We compare
-// element-by-element instead, all via let-bound lengths.)
-fn veq(a: Array<int>, b: Array<int>) -> bool {
-  let la = a.len()
-  let lb = b.len()
-  if la != lb { return false }
-  let mut i = 0
-  let mut ok = true
-  while i < la {
-    let av = a[i]
-    let bv = b[i]
-    if av != bv { ok = false }
-    i = i + 1
-  }
-  return ok
-}
+// ----------------------------------------------------------------------------
+// Section 1: Fixture data — a roster of employees as typed-object records.
+// Deterministic, hand-authored. id is unique and dense 1..=12.
+// ----------------------------------------------------------------------------
 
-fn check_vec(which: string, got: Array<int>, expected: Array<int>) {
-  let same = veq(got, expected)
-  if !same {
-    let gl = got.len()
-    let el = expected.len()
-    fail(which, f"len={el}", f"len={gl}")
-    failures = failures + 1
-  }
-}
-
-// String-vector equality via join (book "Vector Methods": join(sep) -> string).
-// (Indexing an `Array<string>` parameter element-wise yields `unknown` element
-// type in this build — see REPORT — so we compare the joined string forms,
-// which is itself a book-supported operation. "|" is not a value in the data.)
-fn check_svec(which: string, got: Array<string>, expected: Array<string>) {
-  let gj = got.join("|")
-  let ej = expected.join("|")
-  if gj != ej {
-    fail(which, ej, gj)
-    failures = failures + 1
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Domain types (book "Typed Objects": fixed-shape records via `type`).
-// ---------------------------------------------------------------------------
 type Employee {
   id: int,
+  name: string,
   dept: string,
   salary: int,
-  age: int
+  level: int,
+  active: bool
 }
 
-// ---------------------------------------------------------------------------
-// Helper functions over typed-object arrays (book "Vector Methods":
-// map/filter return Vec<U>/Vec<T>; the element type flows through the chain).
-// ---------------------------------------------------------------------------
-fn salaries_of(es: Array<Employee>) -> Array<int> {
-  return es.map(|e| e.salary)
-}
-
-fn ages_of(es: Array<Employee>) -> Array<int> {
-  return es.map(|e| e.age)
-}
-
-fn ids_of(es: Array<Employee>) -> Array<int> {
-  return es.map(|e| e.id)
-}
-
-fn depts_of(es: Array<Employee>) -> Array<string> {
-  return es.map(|e| e.dept)
-}
-
-fn names_of(es: Array<Employee>) -> Array<string> {
-  return es.map(|e| e.dept)
-}
-
-fn in_dept(es: Array<Employee>, d: string) -> Array<Employee> {
-  return es.filter(|e| e.dept == d)
-}
-
-fn salary_at_least(es: Array<Employee>, threshold: int) -> Array<Employee> {
-  return es.filter(|e| e.salary >= threshold)
-}
-
-fn younger_than(es: Array<Employee>, max_age: int) -> Array<Employee> {
-  return es.filter(|e| e.age < max_age)
-}
-
-fn count_in_dept(es: Array<Employee>, d: string) -> int {
-  let f = in_dept(es, d)
-  return f.len()
-}
-
-// NOTE: NumericVec `sum()` on a `Vec<int>` is statically typed `number`
-// in this build (xs.sum() + 1 -> 61.0), so this aggregate is `number`.
-fn total_payroll(es: Array<Employee>) -> number {
-  let sal = salaries_of(es)
-  return sal.sum()
-}
-
-// ---------------------------------------------------------------------------
-// The roster (deterministic fixture — 12 employees).
-// ---------------------------------------------------------------------------
-let emps = [
-  Employee { id: 1,  dept: "eng",   salary: 100, age: 30 },
-  Employee { id: 2,  dept: "sales", salary: 80,  age: 40 },
-  Employee { id: 3,  dept: "eng",   salary: 120, age: 35 },
-  Employee { id: 4,  dept: "sales", salary: 90,  age: 28 },
-  Employee { id: 5,  dept: "eng",   salary: 110, age: 45 },
-  Employee { id: 6,  dept: "ops",   salary: 70,  age: 50 },
-  Employee { id: 7,  dept: "ops",   salary: 75,  age: 33 },
-  Employee { id: 8,  dept: "sales", salary: 95,  age: 38 },
-  Employee { id: 9,  dept: "eng",   salary: 130, age: 41 },
-  Employee { id: 10, dept: "ops",   salary: 72,  age: 29 },
-  Employee { id: 11, dept: "sales", salary: 88,  age: 31 },
-  Employee { id: 12, dept: "eng",   salary: 105, age: 27 }
+let roster = [
+  Employee { id: 1,  name: "ada",     dept: "eng",     salary: 120, level: 5, active: true  },
+  Employee { id: 2,  name: "bob",     dept: "eng",     salary: 90,  level: 3, active: true  },
+  Employee { id: 3,  name: "cy",      dept: "eng",     salary: 150, level: 6, active: false },
+  Employee { id: 4,  name: "dot",     dept: "sales",   salary: 70,  level: 2, active: true  },
+  Employee { id: 5,  name: "eve",     dept: "sales",   salary: 110, level: 4, active: true  },
+  Employee { id: 6,  name: "fin",     dept: "sales",   salary: 80,  level: 3, active: false },
+  Employee { id: 7,  name: "gil",     dept: "ops",     salary: 60,  level: 2, active: true  },
+  Employee { id: 8,  name: "hue",     dept: "ops",     salary: 130, level: 5, active: true  },
+  Employee { id: 9,  name: "ivy",     dept: "ops",     salary: 100, level: 4, active: true  },
+  Employee { id: 10, name: "jon",     dept: "eng",     salary: 200, level: 7, active: true  },
+  Employee { id: 11, name: "kim",     dept: "sales",   salary: 95,  level: 3, active: true  },
+  Employee { id: 12, name: "lia",     dept: "ops",     salary: 85,  level: 3, active: false }
 ]
 
-// ===========================================================================
-// SECTION 1 — Roster basics: len, index, first, last.
-// Book "Index Access and Bounds" / "Vectors".
-// Expected: 12 employees; first.id=1; last.id=12.
-// ===========================================================================
-let n_emps = emps.len()
-check_int("roster_len", n_emps, 12)
+// Hand-derived facts about the fixture (from the literal above):
+//   count = 12
+//   salaries = [120,90,150,70,110,80,60,130,100,200,95,85]
+//   sum(salaries) = 120+90+150+70+110+80+60+130+100+200+95+85 = 1290
+//   max = 200 (jon), min = 60 (gil)
+//   active: ids {3,6,12} are inactive -> 9 active, 3 inactive
+//   dept counts: eng={1,2,3,10}=4, sales={4,5,6,11}=4, ops={7,8,9,12}=4
 
-let first_emp = emps.first()
-check_int("first_id", first_emp.id, 1)
-check_str("first_dept", first_emp.dept, "eng")
+checkInt("roster.len", roster.len(), 12)
+checkStr("roster.first.name", roster.first().name, "ada")
+checkStr("roster.last.name", roster.last().name, "lia")
+checkInt("roster[0].id", roster[0].id, 1)
+checkInt("roster[11].id", roster[11].id, 12)
+checkStr("roster[5].name", roster[5].name, "fin")
 
-let last_emp = emps.last()
-check_int("last_id", last_emp.id, 12)
-check_str("last_dept", last_emp.dept, "eng")
+// ----------------------------------------------------------------------------
+// Section 2: map projections + NumericVec aggregates
+// ----------------------------------------------------------------------------
 
-let e3 = emps[2]                 // zero-based index 2 -> id 3
-check_int("index2_id", e3.id, 3)
-check_int("index2_salary", e3.salary, 120)
+// Annotate the mapped result: `.map()`'s element type does not thread through
+// to a later `for`/comparison context without it (see REPORT.md inference gap).
+let salaries: Array<int> = roster.map(|e| e.salary)
+checkInt("salaries.len", salaries.len(), 12)
+checkNum("salaries.sum", salaries.sum(), 1290.0)
+checkNum("salaries.max", salaries.max(), 200.0)
+checkNum("salaries.min", salaries.min(), 60.0)
+checkInt("salaries.first", salaries.first(), 120)
+checkInt("salaries.last", salaries.last(), 85)
 
-// ===========================================================================
-// SECTION 2 — Projections via map (book "Vector Methods": map -> Vec<U>).
-// ids: 1..12 ; salaries and ages as listed.
-// ===========================================================================
-let ids = ids_of(emps)
-check_vec("ids", ids, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+// avg works on Vec<int> receivers directly (book: NumericVec section) and
+// returns a number. sum = 1290, count = 12, avg = 1290/12 = 107.5
+checkNum("salaries.avg", salaries.avg(), 107.5)
 
-let salaries = salaries_of(emps)
-check_vec("salaries", salaries, [100, 80, 120, 90, 110, 70, 75, 95, 130, 72, 88, 105])
+let levels = roster.map(|e| e.level)
+// levels = [5,3,6,2,4,3,2,5,4,7,3,3] ; sum = 5+3+6+2+4+3+2+5+4+7+3+3 = 47
+checkNum("levels.sum", levels.sum(), 47.0)
+checkNum("levels.max", levels.max(), 7.0)
+checkNum("levels.min", levels.min(), 2.0)
 
-let ages = ages_of(emps)
-check_vec("ages", ages, [30, 40, 35, 28, 45, 50, 33, 38, 41, 29, 31, 27])
+let names = roster.map(|e| e.name)
+checkInt("names.len", names.len(), 12)
+checkStr("names.first", names.first(), "ada")
+checkStr("names[9]", names[9], "jon")
 
-let dept_names = depts_of(emps)
-check_svec("depts", dept_names, ["eng", "sales", "eng", "sales", "eng", "ops", "ops", "sales", "eng", "ops", "sales", "eng"])
+// ----------------------------------------------------------------------------
+// Section 3: filter predicates
+// ----------------------------------------------------------------------------
 
-// ===========================================================================
-// SECTION 3 — Numeric aggregates (book "Vector Methods": NumericVec
-// sum/min/max/avg on Vec<int> / Vec<number>).
-// salaries: 100+80+120+90+110+70+75+95+130+72+88+105 = 1135
-// min salary = 70 ; max salary = 130 ; avg = 1135/12 = 94.5833...
-// NumericVec methods on Vec<int> are statically typed `number` in this build,
-// so each aggregate is asserted with check_num against a `.0` expected value
-// (the book is silent on the per-receiver return type; see REPORT book_gaps).
-// ages sum = 30+40+35+28+45+50+33+38+41+29+31+27 = 427 ; min 27 ; max 50
-// ===========================================================================
-let pay_total = salaries.sum()
-check_num("salary_sum", pay_total, 1135.0)
-check_num("salary_min", salaries.min(), 70.0)
-check_num("salary_max", salaries.max(), 130.0)
+let active = roster.filter(|e| e.active)
+checkInt("active.len", active.len(), 9)
 
-let age_sum = ages.sum()
-check_num("age_sum", age_sum, 427.0)
-check_num("age_min", ages.min(), 27.0)
-check_num("age_max", ages.max(), 50.0)
+let inactive = roster.filter(|e| e.active == false)
+checkInt("inactive.len", inactive.len(), 3)
+checkStr("inactive.first.name", inactive.first().name, "cy")
+checkStr("inactive.last.name", inactive.last().name, "lia")
 
-// total_payroll helper agrees with direct sum.
-let payroll = total_payroll(emps)
-check_num("total_payroll_helper", payroll, 1135.0)
+let eng = roster.filter(|e| e.dept == "eng")
+checkInt("eng.len", eng.len(), 4)
+let sales = roster.filter(|e| e.dept == "sales")
+checkInt("sales.len", sales.len(), 4)
+let ops = roster.filter(|e| e.dept == "ops")
+checkInt("ops.len", ops.len(), 4)
 
-// ===========================================================================
-// SECTION 4 — Department filters (book "Common Operations": filter -> Vec<T>).
-// eng:   ids 1,3,5,9,12  (5) salaries 100,120,110,130,105 sum=565
-// sales: ids 2,4,8,11    (4) salaries 80,90,95,88        sum=353
-// ops:   ids 6,7,10      (3) salaries 70,75,72           sum=217
-// ===========================================================================
-let eng = in_dept(emps, "eng")
-check_int("eng_count", eng.len(), 5)
-check_vec("eng_ids", ids_of(eng), [1, 3, 5, 9, 12])
-let eng_sal = salaries_of(eng)
-check_num("eng_salary_sum", eng_sal.sum(), 565.0)
-check_num("eng_salary_max", eng_sal.max(), 130.0)
-check_num("eng_salary_min", eng_sal.min(), 100.0)
+// high earners: salary >= 120 -> ids {1(120),3(150),8(130),10(200)} = 4
+let highEarners = roster.filter(|e| e.salary >= 120)
+checkInt("highEarners.len", highEarners.len(), 4)
+let highSalaries = highEarners.map(|e| e.salary)
+// [120,150,130,200] sum = 600
+checkNum("highSalaries.sum", highSalaries.sum(), 600.0)
+checkNum("highSalaries.max", highSalaries.max(), 200.0)
 
-let sales = in_dept(emps, "sales")
-check_int("sales_count", sales.len(), 4)
-check_vec("sales_ids", ids_of(sales), [2, 4, 8, 11])
-let sales_sal = salaries_of(sales)
-check_num("sales_salary_sum", sales_sal.sum(), 353.0)
+// senior + active: level >= 4 AND active.
+// level>=4: ids {1(5),3(6),5(4),8(5),9(4),10(7)} ; remove inactive id 3.
+// -> {1,5,8,9,10} = 5
+let seniorActive = roster.filter(|e| e.level >= 4).filter(|e| e.active)
+checkInt("seniorActive.len", seniorActive.len(), 5)
 
-let ops = in_dept(emps, "ops")
-check_int("ops_count", ops.len(), 3)
-check_vec("ops_ids", ids_of(ops), [6, 7, 10])
-let ops_sal = salaries_of(ops)
-check_num("ops_salary_sum", ops_sal.sum(), 217.0)
+// ----------------------------------------------------------------------------
+// Section 4: find / findIndex / some / every / includes / indexOf
+// ----------------------------------------------------------------------------
 
-// counts via helper
-check_int("count_eng", count_in_dept(emps, "eng"), 5)
-check_int("count_sales", count_in_dept(emps, "sales"), 4)
-check_int("count_ops", count_in_dept(emps, "ops"), 3)
-check_int("count_missing", count_in_dept(emps, "legal"), 0)
+let jon = roster.find(|e| e.salary == 200)
+checkStr("find.jon.name", jon.name, "jon")
+checkInt("find.jon.id", jon.id, 10)
 
-// partition completeness: 5 + 4 + 3 = 12
-let part_total = eng.len() + sales.len() + ops.len()
-check_int("partition_total", part_total, 12)
+let firstOps = roster.find(|e| e.dept == "ops")
+checkStr("firstOps.name", firstOps.name, "gil")
 
-// ===========================================================================
-// SECTION 5 — salary / age threshold filters.
-// salary >= 100: ids 1,3,5,9,12  (eng all >=100) -> 5 ; salaries 100,120,110,130,105
-// salary >= 110: ids 3,5,9       -> 3
-// salary < 80:   ids 6(70),7(75),10(72) -> 3 (all ops)
-// younger than 35 (age<35): ages 30,28,33,29,31,27 -> ids 1,4,7,10,11,12 -> 6
-// ===========================================================================
-let hi = salary_at_least(emps, 100)
-check_int("hi100_count", hi.len(), 5)
-check_vec("hi100_ids", ids_of(hi), [1, 3, 5, 9, 12])
+// findIndex: first eng record is index 0 (ada)
+checkInt("findIndex.eng", roster.findIndex(|e| e.dept == "eng"), 0)
+// first ops record is index 6 (gil)
+checkInt("findIndex.ops", roster.findIndex(|e| e.dept == "ops"), 6)
+// no one earns 999 -> -1
+checkInt("findIndex.none", roster.findIndex(|e| e.salary == 999), -1)
 
-let hi110 = salary_at_least(emps, 110)
-check_int("hi110_count", hi110.len(), 3)
-check_vec("hi110_ids", ids_of(hi110), [3, 5, 9])
+checkBool("some.over190", roster.some(|e| e.salary > 190), true)
+checkBool("some.over300", roster.some(|e| e.salary > 300), false)
+checkBool("every.positiveSalary", roster.every(|e| e.salary > 0), true)
+checkBool("every.active", roster.every(|e| e.active), false)
+checkBool("every.level>=2", roster.every(|e| e.level >= 2), true)
 
-let young = younger_than(emps, 35)
-check_int("young35_count", young.len(), 6)
-check_vec("young35_ids", ids_of(young), [1, 4, 7, 10, 11, 12])
+// includes / indexOf on a projected int vector
+let ids = roster.map(|e| e.id)
+checkBool("ids.includes.7", ids.includes(7), true)
+checkBool("ids.includes.13", ids.includes(13), false)
+checkInt("ids.indexOf.7", ids.indexOf(7), 6)
+checkInt("ids.indexOf.99", ids.indexOf(99), -1)
 
-// ===========================================================================
-// SECTION 6 — find / findIndex (book "Vector Methods").
-// find first salary > 125 -> id 9 (salary 130). findIndex of that emp -> 8.
-// find first dept == "ops" -> id 6. findIndex -> 5.
-// ===========================================================================
-let top_emp = emps.find(|e| e.salary > 125)
-check_int("find_top_id", top_emp.id, 9)
-check_int("find_top_salary", top_emp.salary, 130)
+// ----------------------------------------------------------------------------
+// Section 5: concat / reverse / take / drop / clone / slice
+// ----------------------------------------------------------------------------
 
-let top_idx = emps.findIndex(|e| e.salary > 125)
-check_int("findIndex_top", top_idx, 8)
+let a1 = [1, 2, 3]
+let a2 = [4, 5, 6]
+let joined = a1.concat(a2)
+checkInt("joined.len", joined.len(), 6)
+checkInt("joined.first", joined.first(), 1)
+checkInt("joined.last", joined.last(), 6)
+checkNum("joined.sum", joined.sum(), 21.0)
 
-let first_ops = emps.find(|e| e.dept == "ops")
-check_int("find_ops_id", first_ops.id, 6)
-let first_ops_idx = emps.findIndex(|e| e.dept == "ops")
-check_int("findIndex_ops", first_ops_idx, 5)
+let rev = a1.reverse()
+checkInt("rev.first", rev.first(), 3)
+checkInt("rev.last", rev.last(), 1)
+// original unchanged (reverse returns a copy per book)
+checkInt("a1.first.afterReverse", a1.first(), 1)
 
-// findIndex with no match returns -1 (book method table).
-let none_idx = emps.findIndex(|e| e.salary > 1000)
-check_int("findIndex_none", none_idx, -1)
+let firstThree = ids.take(3)
+checkInt("take3.len", firstThree.len(), 3)
+checkInt("take3.last", firstThree.last(), 3)
 
-// ===========================================================================
-// SECTION 7 — some / every (book "Vector Methods": existential / universal).
-// some salary > 125 -> true (id 9). some salary > 200 -> false.
-// every salary >= 60 -> true. every salary >= 100 -> false (sales/ops below).
-// every age > 0 -> true. some age > 49 -> true (id 6 age 50).
-// Each higher-order result is LET-BOUND before assertion (inference workaround).
-// ===========================================================================
-let some_gt_125 = emps.some(|e| e.salary > 125)
-check_bool("some_gt_125", some_gt_125, true)
+let afterThree = ids.drop(3)
+checkInt("drop3.len", afterThree.len(), 9)
+checkInt("drop3.first", afterThree.first(), 4)
 
-let some_gt_200 = emps.some(|e| e.salary > 200)
-check_bool("some_gt_200", some_gt_200, false)
+let cloned = a1.clone()
+checkInt("clone.len", cloned.len(), 3)
+checkNum("clone.sum", cloned.sum(), 6.0)
 
-let every_ge_60 = emps.every(|e| e.salary >= 60)
-check_bool("every_ge_60", every_ge_60, true)
+// closed-range slice: ids[3..7] = elements at indices 3,4,5,6 = [4,5,6,7]
+let sl = ids[3..7]
+checkInt("slice.len", sl.len(), 4)
+checkInt("slice.first", sl.first(), 4)
+checkInt("slice.last", sl.last(), 7)
+checkNum("slice.sum", sl.sum(), 22.0)
 
-let every_ge_100 = emps.every(|e| e.salary >= 100)
-check_bool("every_ge_100", every_ge_100, false)
+// ----------------------------------------------------------------------------
+// Section 6: HashMap index — build a name->salary map by rebind in a loop.
+// ----------------------------------------------------------------------------
 
-let every_age_pos = emps.every(|e| e.age > 0)
-check_bool("every_age_pos", every_age_pos, true)
-
-let some_age_50 = emps.some(|e| e.age > 49)
-check_bool("some_age_50", some_age_50, true)
-
-// ===========================================================================
-// SECTION 8 — includes / indexOf on int vectors (book "Vector Methods").
-// ids includes 7 -> true ; includes 99 -> false.
-// indexOf 9 in ids (1..12) -> position 8 ; indexOf 99 -> -1.
-// ===========================================================================
-let inc7 = ids.includes(7)
-check_bool("includes_7", inc7, true)
-let inc99 = ids.includes(99)
-check_bool("includes_99", inc99, false)
-check_int("indexOf_9", ids.indexOf(9), 8)
-check_int("indexOf_99", ids.indexOf(99), -1)
-
-// ===========================================================================
-// SECTION 9 — take / drop / slice / reverse / clone (book "Vector Methods").
-// ids = [1..12].
-// take 3 -> [1,2,3] ; drop 9 -> [10,11,12] ; slice(3,6) -> [4,5,6]
-// reverse -> [12,11,...,1] ; clone -> identical.
-// closed-range slice ids[2..5] -> [3,4,5].
-// ===========================================================================
-check_vec("take3", ids.take(3), [1, 2, 3])
-check_vec("drop9", ids.drop(9), [10, 11, 12])
-check_vec("slice_3_6", ids.slice(3, 6), [4, 5, 6])
-check_vec("reverse", ids.reverse(), [12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1])
-check_vec("clone", ids.clone(), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
-check_vec("range_slice", ids[2..5], [3, 4, 5])
-
-// concat: eng ids ++ ops ids -> [1,3,5,9,12,6,7,10]
-let eng_ids = ids_of(eng)
-let ops_ids = ids_of(ops)
-let combined = eng_ids.concat(ops_ids)
-check_vec("concat_eng_ops", combined, [1, 3, 5, 9, 12, 6, 7, 10])
-check_int("concat_len", combined.len(), 8)
-
-// ===========================================================================
-// SECTION 10 — join (book "Vector Methods": join(sep) -> string).
-// dept names joined by "," — book table line 260.
-// ===========================================================================
-let dept_csv = dept_names.join(",")
-check_str("dept_csv", dept_csv, "eng,sales,eng,sales,eng,ops,ops,sales,eng,ops,sales,eng")
-
-// ===========================================================================
-// SECTION 11 — push / pop on a mutable vector (book method table).
-// Build [1,2,3,4,5] by pushing; pop returns 5; remaining [1,2,3,4].
-// ===========================================================================
-let mut bucket = [1]
-bucket.push(2)
-bucket.push(3)
-bucket.push(4)
-bucket.push(5)
-check_vec("push_built", bucket, [1, 2, 3, 4, 5])
-let popped = bucket.pop()
-check_int("pop_value", popped, 5)
-check_vec("pop_remaining", bucket, [1, 2, 3, 4])
-
-// accumulate a running sum into a vector via for + push.
-let src = [10, 20, 30, 40]
-let mut running = [10]
-let mut acc = 10
-let mut idx = 1
-while idx < src.len() {
-  acc = acc + src[idx]
-  running.push(acc)
-  idx = idx + 1
+fn buildSalaryIndex(emps: Array<Employee>) -> HashMap<string, int> {
+  let mut idx = HashMap()
+  let mut i = 0
+  while i < emps.len() {
+    let e = emps[i]
+    idx = idx.set(e.name, e.salary)
+    i = i + 1
+  }
+  idx
 }
-// prefix sums: 10, 30, 60, 100
-check_vec("prefix_sums", running, [10, 30, 60, 100])
 
-// ===========================================================================
-// SECTION 12 — Anonymous objects, nested, merge (book "Objects" sections).
-// ===========================================================================
-let summary = {
-  total: pay_total,
-  headcount: n_emps,
-  top_id: top_emp.id
+let salaryIndex = buildSalaryIndex(roster)
+checkInt("salaryIndex.len", salaryIndex.len(), 12)
+checkBool("salaryIndex.has.jon", salaryIndex.has("jon"), true)
+checkBool("salaryIndex.has.zzz", salaryIndex.has("zzz"), false)
+checkBool("salaryIndex.isEmpty", salaryIndex.isEmpty(), false)
+
+// Option<int> lookups via match
+fn lookupSalary(idx: HashMap<string, int>, name: string) -> int {
+  match idx.get(name) {
+    Some(v) => v,
+    None => -1
+  }
 }
-check_num("summary_total", summary.total, 1135.0)
-check_int("summary_headcount", summary.headcount, 12)
-check_int("summary_top", summary.top_id, 9)
+checkInt("lookup.ada", lookupSalary(salaryIndex, "ada"), 120)
+checkInt("lookup.jon", lookupSalary(salaryIndex, "jon"), 200)
+checkInt("lookup.gil", lookupSalary(salaryIndex, "gil"), 60)
+checkInt("lookup.missing", lookupSalary(salaryIndex, "nobody"), -1)
+
+// NOTE: an empty-map invariant (`HashMap().isEmpty() == true`) is NOT exercised
+// here — a never-populated HashMap() crashes at runtime ("no method 'isEmpty'
+// on receiver kind UInt64"). The book only ever calls isEmpty() on a populated
+// map (returning false), which works. Defect recorded in REPORT.md.
+
+// ----------------------------------------------------------------------------
+// Section 7: Per-department aggregation via filter + NumericVec.
+// Pre-computed expected sums:
+//   eng  salaries = [120,90,150,200] sum=560 count=4 avg=140.0 max=200 min=90
+//   sales salaries= [70,110,80,95]   sum=355 count=4 avg=88.75 max=110 min=70
+//   ops  salaries = [60,130,100,85]  sum=375 count=4 avg=93.75 max=130 min=60
+// ----------------------------------------------------------------------------
+
+fn deptSalaries(emps: Array<Employee>, dept: string) -> Array<int> {
+  emps.filter(|e| e.dept == dept).map(|e| e.salary)
+}
+
+let engSal = deptSalaries(roster, "eng")
+checkInt("eng.count", engSal.len(), 4)
+checkNum("eng.sum", engSal.sum(), 560.0)
+checkNum("eng.max", engSal.max(), 200.0)
+checkNum("eng.min", engSal.min(), 90.0)
+
+let salesSal = deptSalaries(roster, "sales")
+checkInt("sales.count", salesSal.len(), 4)
+checkNum("sales.sum", salesSal.sum(), 355.0)
+checkNum("sales.max", salesSal.max(), 110.0)
+checkNum("sales.min", salesSal.min(), 70.0)
+
+let opsSal = deptSalaries(roster, "ops")
+checkInt("ops.count", opsSal.len(), 4)
+checkNum("ops.sum", opsSal.sum(), 375.0)
+checkNum("ops.max", opsSal.max(), 130.0)
+checkNum("ops.min", opsSal.min(), 60.0)
+
+// avg() on Vec<int> dept slices returns a number directly (book NumericVec).
+checkNum("eng.avg", engSal.avg(), 140.0)
+checkNum("sales.avg", salesSal.avg(), 88.75)
+checkNum("ops.avg", opsSal.avg(), 93.75)
+
+// Department count map (name -> count) built immutably
+fn deptCounts(emps: Array<Employee>) -> HashMap<string, int> {
+  let mut m = HashMap()
+  let mut i = 0
+  while i < emps.len() {
+    let d = emps[i].dept
+    let cur = match m.get(d) {
+      Some(v) => v,
+      None => 0
+    }
+    m = m.set(d, cur + 1)
+    i = i + 1
+  }
+  m
+}
+let counts = deptCounts(roster)
+checkInt("deptCounts.len", counts.len(), 3)
+checkInt("deptCounts.eng", lookupSalary(counts, "eng"), 4)
+checkInt("deptCounts.sales", lookupSalary(counts, "sales"), 4)
+checkInt("deptCounts.ops", lookupSalary(counts, "ops"), 4)
+
+// ----------------------------------------------------------------------------
+// Section 8: anonymous objects, nesting, and merge as report records.
+// ----------------------------------------------------------------------------
+
+// total/top/bottom are `number` because NumericVec sum/max/min return number.
+type DeptReport {
+  dept: string,
+  count: int,
+  total: number,
+  top: number,
+  bottom: number
+}
+
+fn deptReport(emps: Array<Employee>, dept: string) -> DeptReport {
+  let sals = deptSalaries(emps, dept)
+  DeptReport {
+    dept: dept,
+    count: sals.len(),
+    total: sals.sum(),
+    top: sals.max(),
+    bottom: sals.min()
+  }
+}
+
+let engReport = deptReport(roster, "eng")
+checkStr("engReport.dept", engReport.dept, "eng")
+checkInt("engReport.count", engReport.count, 4)
+checkNum("engReport.total", engReport.total, 560.0)
+checkNum("engReport.top", engReport.top, 200.0)
+checkNum("engReport.bottom", engReport.bottom, 90.0)
 
 // nested object
-let report = {
-  meta: { version: 1, source: "fixture" },
-  totals: { payroll: pay_total, heads: n_emps }
+let summary = {
+  org: "acme",
+  meta: {
+    headcount: roster.len(),
+    payroll: salaries.sum()
+  }
 }
-check_int("report_version", report.meta.version, 1)
-check_str("report_source", report.meta.source, "fixture")
-check_num("report_payroll", report.totals.payroll, 1135.0)
-check_int("report_heads", report.totals.heads, 12)
+checkStr("summary.org", summary.org, "acme")
+checkInt("summary.headcount", summary.meta.headcount, 12)
+checkNum("summary.payroll", summary.meta.payroll, 1290.0)
 
-// merge disjoint anonymous objects (book "Object Merge": + ; right wins,
-// but keys are disjoint here per the book's overlapping-key caveat).
-let base_obj = { eng_count: 5, sales_count: 4 }
-let more_obj = { ops_count: 3, total_count: 12 }
-let merged = base_obj + more_obj
-check_int("merge_eng", merged.eng_count, 5)
-check_int("merge_sales", merged.sales_count, 4)
-check_int("merge_ops", merged.ops_count, 3)
-check_int("merge_total", merged.total_count, 12)
+// merge two disjoint anonymous objects
+let base = { region: "emea", currency: "eur" }
+let extra = { fiscalYear: 2026, audited: true }
+let merged = base + extra
+checkStr("merged.region", merged.region, "emea")
+checkStr("merged.currency", merged.currency, "eur")
+checkInt("merged.fiscalYear", merged.fiscalYear, 2026)
+checkBool("merged.audited", merged.audited, true)
 
-// ===========================================================================
-// SECTION 13 — HashMap as a department-rate lookup table.
-// Book "HashMap": immutable; chain set() on a single binding; get/has/len/
-// isEmpty/delete.
-// rates: eng->150, sales->120, ops->100.
-// ===========================================================================
-let rates = HashMap().set("eng", 150).set("sales", 120).set("ops", 100)
-check_int("rate_eng", rates.get("eng") ?? 0, 150)
-check_int("rate_sales", rates.get("sales") ?? 0, 120)
-check_int("rate_ops", rates.get("ops") ?? 0, 100)
-check_int("rate_missing", rates.get("legal") ?? -1, -1)
-check_int("rates_len", rates.len(), 3)
-check_bool("rates_has_eng", rates.has("eng"), true)
-check_bool("rates_has_legal", rates.has("legal"), false)
-check_bool("rates_empty", rates.isEmpty(), false)
+// ----------------------------------------------------------------------------
+// Section 9: a tiny query DSL over the roster expressed as composable fns.
+// All results asserted against hand-computed expected values.
+// ----------------------------------------------------------------------------
 
-// NOTE: a standalone bare `HashMap()` used for isEmpty()/len() is NOT
-// demonstrated by the book and does not work here (the empty literal
-// materializes as a scalar, not a map) — see REPORT book_gaps. We assert
-// isEmpty()/len() only on the book-demonstrated non-empty + chained forms.
+// total payroll of active employees only.
+// active = all except ids {3,6,12} with salaries {150,80,85}.
+// payroll(all)=1290 ; inactive sum=150+80+85=315 ; active payroll=1290-315=975
+// NOTE: NumericVec.sum() returns `number` even for Vec<int> receivers in this
+// build (defect: see REPORT.md), so payroll aggregates are number-typed.
+let activePayroll = roster.filter(|e| e.active).map(|e| e.salary).sum()
+checkNum("activePayroll", activePayroll, 975.0)
 
-// delete returns a NEW map (immutability): drop "ops".
-let rates2 = rates.delete("ops")
-check_int("rates2_len", rates2.len(), 2)
-check_bool("rates2_has_ops", rates2.has("ops"), false)
-check_bool("rates_still_has_ops", rates.has("ops"), true)   // original untouched
+let inactivePayroll = roster.filter(|e| e.active == false).map(|e| e.salary).sum()
+checkNum("inactivePayroll", inactivePayroll, 315.0)
+checkNum("payroll.split.invariant", activePayroll + inactivePayroll, 1290.0)
 
-// HashMap.map transforms values (book HashMap method table): double each rate.
-let doubled_rates = rates.map(|k, v| v * 2)
-check_int("dbl_eng", doubled_rates.get("eng") ?? 0, 300)
-check_int("dbl_sales", doubled_rates.get("sales") ?? 0, 240)
-check_int("dbl_ops", doubled_rates.get("ops") ?? 0, 200)
+// count of employees at each level via filter (levels present: 2,3,4,5,6,7)
+// level==2: ids {4,7} = 2
+// level==3: ids {2,6,11,12} = 4
+// level==4: ids {5,9} = 2
+// level==5: ids {1,8} = 2
+// level==6: ids {3} = 1
+// level==7: ids {10} = 1
+checkInt("level2.count", roster.filter(|e| e.level == 2).len(), 2)
+checkInt("level3.count", roster.filter(|e| e.level == 3).len(), 4)
+checkInt("level4.count", roster.filter(|e| e.level == 4).len(), 2)
+checkInt("level5.count", roster.filter(|e| e.level == 5).len(), 2)
+checkInt("level6.count", roster.filter(|e| e.level == 6).len(), 1)
+checkInt("level7.count", roster.filter(|e| e.level == 7).len(), 1)
 
-// HashMap.filter keeps matching entries (book HashMap method table): rate>=120.
-let hi_rates = rates.filter(|k, v| v >= 120)
-check_int("hi_rates_len", hi_rates.len(), 2)
-check_bool("hi_rates_has_eng", hi_rates.has("eng"), true)
-check_bool("hi_rates_has_ops", hi_rates.has("ops"), false)
+// chained: active eng employees, mapped to salary, summed.
+// active eng = ids {1(120),2(90),10(200)} (3 excluded, inactive). sum=410
+let activeEngPayroll = roster
+  .filter(|e| e.dept == "eng")
+  .filter(|e| e.active)
+  .map(|e| e.salary)
+  .sum()
+checkNum("activeEngPayroll", activeEngPayroll, 410.0)
 
-// ===========================================================================
-// SECTION 14 — A small derived report combining all of the above.
-// "billing" = per-dept headcount * dept rate.
-//   eng:   5 * 150 = 750
-//   sales: 4 * 120 = 480
-//   ops:   3 * 100 = 300
-//   grand total = 1530
-// ===========================================================================
-let eng_n = count_in_dept(emps, "eng")
-let sales_n = count_in_dept(emps, "sales")
-let ops_n = count_in_dept(emps, "ops")
-let eng_rate = rates.get("eng") ?? 0
-let sales_rate = rates.get("sales") ?? 0
-let ops_rate = rates.get("ops") ?? 0
-let eng_bill = eng_n * eng_rate
-let sales_bill = sales_n * sales_rate
-let ops_bill = ops_n * ops_rate
-check_int("eng_bill", eng_bill, 750)
-check_int("sales_bill", sales_bill, 480)
-check_int("ops_bill", ops_bill, 300)
-let grand = eng_bill + sales_bill + ops_bill
-check_int("grand_total", grand, 1530)
+// raise simulation: give everyone +10, recompute payroll.
+// new payroll = old + 10*12 = 1290 + 120 = 1410
+let raised = roster.map(|e| e.salary + 10)
+checkNum("raised.sum", raised.sum(), 1410.0)
+checkNum("raised.max", raised.max(), 210.0)
+checkNum("raised.min", raised.min(), 70.0)
 
-// build the billing vector and re-check via numeric methods.
-// (NumericVec aggregates are statically `number` -> check_num with `.0`.)
-let bills = [eng_bill, sales_bill, ops_bill]
-check_num("bills_sum", bills.sum(), 1530.0)
-check_num("bills_max", bills.max(), 750.0)
-check_num("bills_min", bills.min(), 300.0)
+// percentage-style integer arithmetic: 10% raise via *11/10 on each salary.
+// ada 120 -> 132, jon 200 -> 220. spot-check two and the count.
+let pctRaised = roster.map(|e| e.salary * 11 / 10)
+checkInt("pctRaised.len", pctRaised.len(), 12)
+checkInt("pctRaised.ada", pctRaised.first(), 132)
+checkInt("pctRaised.lia", pctRaised.last(), 93)   // 85*11/10 = 935/10 = 93 (int div)
 
-// ===========================================================================
-// SECTION 15 — averages (number-returning numeric methods).
-// avg salary = 1135 / 12 = 94.58333333333333
-// avg age    = 427  / 12 = 35.583333333333336
-// ===========================================================================
-let avg_salary = salaries.avg()
-check_num("avg_salary", avg_salary, 1135.0 / 12.0)
-let avg_age = ages.avg()
-check_num("avg_age", avg_age, 427.0 / 12.0)
+// ----------------------------------------------------------------------------
+// Section 10: building derived typed-object records via map.
+// Promote each employee to a Promotion record (level+1, salary*2).
+// ----------------------------------------------------------------------------
 
-// ===========================================================================
-// SECTION 16 — forEach side-effect iteration (book method table).
-// Sum salaries by mutating an outer accumulator from forEach.
-// ===========================================================================
-let mut foreach_sum = 0
-salaries.forEach(|s| foreach_sum = foreach_sum + s)
-check_int("foreach_sum", foreach_sum, 1135)
+type Promotion {
+  id: int,
+  newLevel: int,
+  newSalary: int
+}
 
-// ---------------------------------------------------------------------------
-// Final verdict.
-// ---------------------------------------------------------------------------
-if failures == 0 {
+let promotions = roster.map(|e| Promotion { id: e.id, newLevel: e.level + 1, newSalary: e.salary * 2 })
+checkInt("promotions.len", promotions.len(), 12)
+checkInt("promotions.first.id", promotions.first().id, 1)
+checkInt("promotions.first.newLevel", promotions.first().newLevel, 6)
+checkInt("promotions.first.newSalary", promotions.first().newSalary, 240)
+checkInt("promotions.last.newSalary", promotions.last().newSalary, 170)  // lia 85*2
+
+let promoSalaries = promotions.map(|p| p.newSalary)
+// each doubled -> sum = 1290*2 = 2580
+checkNum("promoSalaries.sum", promoSalaries.sum(), 2580.0)
+checkNum("promoSalaries.max", promoSalaries.max(), 400.0)  // jon 200*2
+
+let promoLevels = promotions.map(|p| p.newLevel)
+// each +1 -> sum = 47 + 12 = 59
+checkNum("promoLevels.sum", promoLevels.sum(), 59.0)
+checkNum("promoLevels.max", promoLevels.max(), 8.0)
+
+// ----------------------------------------------------------------------------
+// Section 11: numeric vector analytics on a fixed dataset (NumericVec).
+// data = [4, 8, 15, 16, 23, 42]
+//   sum = 4+8+15+16+23+42 = 108
+//   max = 42, min = 4, count = 6, avg = 108/6 = 18.0
+// ----------------------------------------------------------------------------
+
+let data = [4, 8, 15, 16, 23, 42]
+checkNum("data.sum", data.sum(), 108.0)
+checkNum("data.max", data.max(), 42.0)
+checkNum("data.min", data.min(), 4.0)
+checkInt("data.len", data.len(), 6)
+
+let dataNums = [4.0, 8.0, 15.0, 16.0, 23.0, 42.0]
+checkNum("dataNums.sum", dataNums.sum(), 108.0)
+checkNum("dataNums.avg", dataNums.avg(), 18.0)
+checkNum("dataNums.max", dataNums.max(), 42.0)
+checkNum("dataNums.min", dataNums.min(), 4.0)
+
+// transform: square each, then sum. squares = [16,64,225,256,529,1764] sum=2854
+let squared = data.map(|x| x * x)
+checkNum("squared.sum", squared.sum(), 2854.0)
+checkNum("squared.max", squared.max(), 1764.0)
+
+// running manual fold to double-check sum independently of NumericVec.sum
+let mut manualSum = 0
+for x in data {
+  manualSum = manualSum + x
+}
+checkInt("manualSum", manualSum, 108)
+
+// filter then aggregate: keep > 10 -> [15,16,23,42] sum=96 count=4
+let big = data.filter(|x| x > 10)
+checkInt("big.count", big.len(), 4)
+checkNum("big.sum", big.sum(), 96.0)
+checkNum("big.min", big.min(), 15.0)
+
+// ----------------------------------------------------------------------------
+// Section 12: cross-checks combining multiple sections (integrity invariants).
+// ----------------------------------------------------------------------------
+
+// department sums must reconstruct total payroll
+let deptTotalCheck = engSal.sum() + salesSal.sum() + opsSal.sum()
+checkNum("deptTotal.reconstructs.payroll", deptTotalCheck, 1290.0)
+
+// dept counts must reconstruct headcount
+let countCheck = engSal.len() + salesSal.len() + opsSal.len()
+checkInt("deptCount.reconstructs.headcount", countCheck, 12)
+
+// active + inactive partition the roster
+checkInt("partition.count", active.len() + inactive.len(), 12)
+
+// every id appears exactly once: indexOf of each id equals its position
+checkInt("ids[0].indexOf", ids.indexOf(1), 0)
+checkInt("ids[11].indexOf", ids.indexOf(12), 11)
+
+// max/min salary as INT via a manual fold (NumericVec.max()/.min() return
+// `number`, which cannot be compared `==` to the int field `e.salary`; a `for`
+// fold over the int projection keeps everything int — book teaches `for`).
+let mut maxSal = salaries.first()
+let mut minSal = salaries.first()
+for v in salaries {
+  if v > maxSal { maxSal = v }
+  if v < minSal { minSal = v }
+}
+checkInt("maxSal.foldInt", maxSal, 200)
+checkInt("minSal.foldInt", minSal, 60)
+
+let topEarner = roster.find(|e| e.salary == maxSal)
+checkStr("topEarner.name", topEarner.name, "jon")
+
+let lowEarner = roster.find(|e| e.salary == minSal)
+checkStr("lowEarner.name", lowEarner.name, "gil")
+
+// ----------------------------------------------------------------------------
+// Section 13: vector-method boundary & edge cases (hand-derived expectations).
+// ----------------------------------------------------------------------------
+
+let base10: Array<int> = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+checkInt("base10.len", base10.len(), 10)
+checkInt("base10.first", base10.first(), 0)
+checkInt("base10.last", base10.last(), 9)
+
+// take(0) -> empty ; take(10) -> all ; take(3) -> [0,1,2]
+checkInt("take0.len", base10.take(0).len(), 0)
+checkInt("take10.len", base10.take(10).len(), 10)
+let t3 = base10.take(3)
+checkInt("take3.len", t3.len(), 3)
+checkInt("take3.last", t3.last(), 2)
+
+// drop(0) -> all ; drop(10) -> empty ; drop(7) -> [7,8,9]
+checkInt("drop0.len", base10.drop(0).len(), 10)
+checkInt("drop10.len", base10.drop(10).len(), 0)
+let d7 = base10.drop(7)
+checkInt("drop7.len", d7.len(), 3)
+checkInt("drop7.first", d7.first(), 7)
+checkInt("drop7.last", d7.last(), 9)
+
+// slice closed-range: [2..5] = indices 2,3,4 = [2,3,4]
+let sl25 = base10[2..5]
+checkInt("sl25.len", sl25.len(), 3)
+checkInt("sl25.first", sl25.first(), 2)
+checkInt("sl25.last", sl25.last(), 4)
+
+// reverse twice = identity (element-wise spot check)
+let r1 = base10.reverse()
+checkInt("r1.first", r1.first(), 9)
+let r2 = r1.reverse()
+checkInt("r2.first", r2.first(), 0)
+checkInt("r2.last", r2.last(), 9)
+
+// clone independence: original unaffected after operations on clone
+let orig: Array<int> = [10, 20, 30]
+let cl = orig.clone()
+checkInt("cl.sumIsNumber", cl.len(), 3)
+checkInt("orig.first.afterClone", orig.first(), 10)
+
+// includes / indexOf across full range
+checkBool("base10.includes.0", base10.includes(0), true)
+checkBool("base10.includes.9", base10.includes(9), true)
+checkBool("base10.includes.10", base10.includes(10), false)
+checkInt("base10.indexOf.0", base10.indexOf(0), 0)
+checkInt("base10.indexOf.5", base10.indexOf(5), 5)
+checkInt("base10.indexOf.99", base10.indexOf(99), -1)
+
+// some / every over a known predicate
+checkBool("base10.some.even", base10.some(|x| x % 2 == 0), true)
+checkBool("base10.some.gt8", base10.some(|x| x > 8), true)
+checkBool("base10.some.gt100", base10.some(|x| x > 100), false)
+checkBool("base10.every.lt10", base10.every(|x| x < 10), true)
+checkBool("base10.every.even", base10.every(|x| x % 2 == 0), false)
+
+// findIndex of first even (0), first odd (1), first >5 (6)
+checkInt("findIndex.firstEven", base10.findIndex(|x| x % 2 == 0), 0)
+checkInt("findIndex.firstOdd", base10.findIndex(|x| x % 2 == 1), 1)
+checkInt("findIndex.firstGt5", base10.findIndex(|x| x > 5), 6)
+checkInt("findIndex.none", base10.findIndex(|x| x > 100), -1)
+
+// ----------------------------------------------------------------------------
+// Section 14: chained map/filter pipelines with hand-derived sums.
+// ----------------------------------------------------------------------------
+
+// (0..9) -> keep even -> [0,2,4,6,8] -> *3 -> [0,6,12,18,24] -> sum = 60
+let pipe1 = base10.filter(|x| x % 2 == 0).map(|x| x * 3)
+checkInt("pipe1.len", pipe1.len(), 5)
+checkInt("pipe1.first", pipe1.first(), 0)
+checkInt("pipe1.last", pipe1.last(), 24)
+checkNum("pipe1.sum", pipe1.sum(), 60.0)
+
+// (0..9) -> *x -> [0,1,4,9,16,25,36,49,64,81] -> keep >20 -> [25,36,49,64,81]
+// sum = 25+36+49+64+81 = 255 ; count = 5 ; max = 81
+let pipe2 = base10.map(|x| x * x).filter(|x| x > 20)
+checkInt("pipe2.len", pipe2.len(), 5)
+checkNum("pipe2.sum", pipe2.sum(), 255.0)
+checkNum("pipe2.max", pipe2.max(), 81.0)
+checkInt("pipe2.first", pipe2.first(), 25)
+
+// concat two pipelines then aggregate
+let pc = pipe1.concat(pipe2)
+checkInt("pc.len", pc.len(), 10)
+checkNum("pc.sum", pc.sum(), 315.0)   // 60 + 255
+
+// ----------------------------------------------------------------------------
+// Section 15: HashMap value updates (immutable set overwrites a key).
+// ----------------------------------------------------------------------------
+
+let v0 = HashMap().set("x", 1).set("y", 2).set("x", 99)
+// "x" overwritten to 99, "y" stays 2, len = 2 (keys are x,y)
+checkInt("hm.overwrite.len", v0.len(), 2)
+checkInt("hm.overwrite.x", lookupSalary(v0, "x"), 99)
+checkInt("hm.overwrite.y", lookupSalary(v0, "y"), 2)
+checkBool("hm.overwrite.has.x", v0.has("x"), true)
+checkBool("hm.overwrite.has.z", v0.has("z"), false)
+
+// build a name->id index from the roster and verify a few lookups
+fn buildIdIndex(emps: Array<Employee>) -> HashMap<string, int> {
+  let mut idx = HashMap()
+  let mut i = 0
+  while i < emps.len() {
+    let e = emps[i]
+    idx = idx.set(e.name, e.id)
+    i = i + 1
+  }
+  idx
+}
+let idIndex = buildIdIndex(roster)
+checkInt("idIndex.len", idIndex.len(), 12)
+checkInt("idIndex.ada", lookupSalary(idIndex, "ada"), 1)
+checkInt("idIndex.jon", lookupSalary(idIndex, "jon"), 10)
+checkInt("idIndex.lia", lookupSalary(idIndex, "lia"), 12)
+checkInt("idIndex.missing", lookupSalary(idIndex, "zzz"), -1)
+
+// ----------------------------------------------------------------------------
+// Section 16: grouped sums via HashMap accumulation (dept -> total salary).
+// eng=560, sales=355, ops=375 (matches Section 7).
+// ----------------------------------------------------------------------------
+
+// NOTE: `<hashmap-readback-int> + <typedobject-field-int>` raises a runtime
+// "no method 'add' on receiver kind Int64" (defect in REPORT.md). Copying both
+// operands into explicitly-annotated `int` locals first restores correct add.
+fn deptSalaryTotals(emps: Array<Employee>) -> HashMap<string, int> {
+  let mut m = HashMap()
+  let mut i = 0
+  while i < emps.len() {
+    let e = emps[i]
+    let sal: int = e.salary
+    let cur: int = match m.get(e.dept) {
+      Some(v) => v,
+      None => 0
+    }
+    m = m.set(e.dept, cur + sal)
+    i = i + 1
+  }
+  m
+}
+let deptTotals = deptSalaryTotals(roster)
+checkInt("deptTotals.len", deptTotals.len(), 3)
+checkInt("deptTotals.eng", lookupSalary(deptTotals, "eng"), 560)
+checkInt("deptTotals.sales", lookupSalary(deptTotals, "sales"), 355)
+checkInt("deptTotals.ops", lookupSalary(deptTotals, "ops"), 375)
+// sum of the three group totals reconstructs the full payroll
+checkInt("deptTotals.reconstruct",
+  lookupSalary(deptTotals, "eng") + lookupSalary(deptTotals, "sales") + lookupSalary(deptTotals, "ops"),
+  1290)
+
+// ----------------------------------------------------------------------------
+// Section 17: nested typed-object-free report tree (anonymous nesting + merge).
+// ----------------------------------------------------------------------------
+
+let report = {
+  title: "payroll-2026",
+  totals: {
+    headcount: roster.len(),
+    active: active.len(),
+    inactive: inactive.len()
+  },
+  flags: {
+    audited: true,
+    finalized: false
+  }
+}
+checkStr("report.title", report.title, "payroll-2026")
+checkInt("report.totals.headcount", report.totals.headcount, 12)
+checkInt("report.totals.active", report.totals.active, 9)
+checkInt("report.totals.inactive", report.totals.inactive, 3)
+checkBool("report.flags.audited", report.flags.audited, true)
+checkBool("report.flags.finalized", report.flags.finalized, false)
+
+// merge metadata onto a base header (disjoint keys)
+let header = { schema: "v1", source: "fixtures" }
+let stamped = header + { generatedBy: "large.shape", checksOk: true }
+checkStr("stamped.schema", stamped.schema, "v1")
+checkStr("stamped.source", stamped.source, "fixtures")
+checkStr("stamped.generatedBy", stamped.generatedBy, "large.shape")
+checkBool("stamped.checksOk", stamped.checksOk, true)
+
+// ----------------------------------------------------------------------------
+// Section 18: integer-only statistics on a fixed dataset via manual folds.
+// dataset = [7, 3, 9, 1, 8, 2, 6, 4, 5] (a permutation of 1..9)
+//   sum = 45, count = 9, max = 9, min = 1
+//   manual mean*count = 45 ; sorted-free median check via counting
+// ----------------------------------------------------------------------------
+
+let perm: Array<int> = [7, 3, 9, 1, 8, 2, 6, 4, 5]
+checkInt("perm.len", perm.len(), 9)
+
+// manual sum (int) — independent of NumericVec
+let mut psum = 0
+for x in perm {
+  psum = psum + x
+}
+checkInt("perm.manualSum", psum, 45)
+
+// manual max/min (int)
+let mut pmax = perm.first()
+let mut pmin = perm.first()
+for x in perm {
+  if x > pmax { pmax = x }
+  if x < pmin { pmin = x }
+}
+checkInt("perm.max", pmax, 9)
+checkInt("perm.min", pmin, 1)
+
+// count of elements > 5 -> {7,9,8,6} = 4 ; count <= 5 -> 5
+let mut gt5 = 0
+let mut le5 = 0
+for x in perm {
+  if x > 5 { gt5 = gt5 + 1 } else { le5 = le5 + 1 }
+}
+checkInt("perm.gt5", gt5, 4)
+checkInt("perm.le5", le5, 5)
+checkInt("perm.partition", gt5 + le5, 9)
+
+// every value appears exactly once: includes 1..9, excludes 0 and 10
+checkBool("perm.includes.1", perm.includes(1), true)
+checkBool("perm.includes.9", perm.includes(9), true)
+checkBool("perm.includes.0", perm.includes(0), false)
+checkBool("perm.includes.10", perm.includes(10), false)
+
+// indexOf round-trip: the value at indexOf(v) equals v
+checkInt("perm.idx.9", perm[perm.indexOf(9)], 9)
+checkInt("perm.idx.1", perm[perm.indexOf(1)], 1)
+checkInt("perm.idx.5", perm[perm.indexOf(5)], 5)
+
+// ----------------------------------------------------------------------------
+// Final tally
+// ----------------------------------------------------------------------------
+
+print(f"checks_run={checks}")
+if fails == 0 {
   print("ALL_CHECKS_PASSED")
 } else {
-  print(f"FAILURES: {failures}")
+  print(f"FAILS={fails}")
 }

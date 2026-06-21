@@ -1,493 +1,817 @@
-// large.shape — Recursive-descent arithmetic interpreter with error recovery,
-// wired entirely through Shape's Result/Option error model.
-// Book: fundamentals/error-handling.mdx (Result/Option, `?`, `!!`, `??`, match)
+// large.shape — error-handling slice (book: fundamentals/error-handling.mdx)
+// ============================================================================
+// A recursive-descent arithmetic expression evaluator with error recovery.
 //
-// A REAL-WORLD, NON-INTERACTIVE, MACHINE-PROOFABLE application: a small
-// arithmetic-expression language (lexer over an int-coded source, a
-// recursive-descent parser/evaluator, and a key/value config front-end). EVERY
-// fallible path flows through Ok/Err, Some/None, `?`, `!!`, and `??` — the
-// subject of this chapter.
+// This is the canonical "parser with error recovery" application for the
+// error-handling slice. Every fallible step returns Result<T> or Option<T>.
+// We use:
+//   - `?`  to propagate failures up through the recursive grammar    (book §"? Try Operator")
+//   - `!!` to attach higher-level context at recovery boundaries     (book §"!! Error Context Operator")
+//   - `??` to supply defaults for Option lookups                     (book §"Related Operators")
+//   - `as int?` fallible cast for numeric literal parsing            (book §"Typed Conversion / Fallible")
+//   - match on Result/Option for branch handling                    (book §"AnyError Structure" example)
 //
-// MACHINE-PROOFABLE: every computed result is asserted against an EXPECTED value
-// derived BY HAND from the grammar + book semantics, written BEFORE the first
-// run. On all-pass it prints ALL_CHECKS_PASSED; any mismatch prints
-// CHECK_FAILED: <which> expected=<e> got=<g>.
-//
-// Determinism: no IO, no clock, no randomness — pure value computation over
-// fixed in-source fixtures.
-//
-// IMPLEMENTATION NOTE (infra workaround, see REPORT):
-//   At this HEAD an EMPTY array literal `[]` of a TypedObject element type
-//   triggers an `op_new_array(0)` SURFACE (V3-S5 ckpt-5 TypedArray-of-
-//   TypedObject construction is unimplemented). That is NOT an error-handling
-//   defect, but it WOULD crash this program. So this program NEVER writes an
-//   empty struct-array literal: every Array<Struct> is seeded with at least one
-//   element. Token streams are therefore non-empty by construction; the
-//   "empty input" error case is modelled with a dedicated end-of-stream
-//   sentinel token rather than a zero-length array.
-//
-// Error vocabulary used (every item from the book chapter):
-//   - Ok(v) / Err(payload)             (Constructors)
-//   - Some(v) / None                   (Constructors)
-//   - `?`  early-return on failure     (? Try Operator)
-//   - `!!` attach higher-level context (!! Error Context Operator)
-//   - `??` default for None on Option  (Related Operators)
-//   - match Ok/Err and Some/None       (pattern-based recovery)
-
-from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
-
-// =============================================================================
-// Token model
-// =============================================================================
-// Token kinds:
-//   0 = number (value field carries the integer)
-//   1 = '+'   2 = '-'   3 = '*'   4 = '/'   5 = '('   6 = ')'
-//   7 = END   (explicit end-of-stream sentinel — lets us avoid empty arrays)
-
-type Token {
-    kind: int,
-    value: int,
-}
-
-fn tok(kind: int, value: int) -> Token { return Token { kind: kind, value: value }; }
-fn num(v: int) -> Token { return tok(0, v); }
-fn plus() -> Token { return tok(1, 0); }
-fn minus() -> Token { return tok(2, 0); }
-fn star() -> Token { return tok(3, 0); }
-fn slash() -> Token { return tok(4, 0); }
-fn lparen() -> Token { return tok(5, 0); }
-fn rparen() -> Token { return tok(6, 0); }
-fn end() -> Token { return tok(7, 0); }
-
-// =============================================================================
-// Parser cursor
-// =============================================================================
-// A single-field mutable record acts as the cursor so helper fns advance it in
-// place. Streams always carry a trailing END token, so peek never indexes past
-// the end.
-
-type Cursor { pos: int }
-fn cur_make() -> Cursor { return Cursor { pos: 0 }; }
-
-// peek_kind returns the kind at the cursor. Streams always end with END (7).
-fn peek_kind(toks: Array<Token>, c: Cursor) -> int {
-    if c.pos >= toks.length {
-        return 7; // END
-    }
-    return toks[c.pos].kind;
-}
-
-fn peek_value(toks: Array<Token>, c: Cursor) -> int {
-    return toks[c.pos].value;
-}
-
-fn advance(c: Cursor) { c.pos = c.pos + 1; }
-
-// =============================================================================
-// Recursive-descent parser/evaluator
-// =============================================================================
-// Grammar (standard precedence, left-associative):
+// Grammar (space-separated tokens):
 //   expr   := term (('+' | '-') term)*
-//   term   := factor (('*' | '/') factor)*
+//   term   := factor (('*' | '/' | '%') factor)*
 //   factor := NUMBER | '(' expr ')' | '-' factor
 //
-// Each parse function returns Result<int> = the evaluated value of the parsed
-// subtree, so `?` threads any parse/eval error to the top automatically.
+// The evaluator is a module-level state machine: `g_tokens` + `g_pos`.
+// Each parse resets that state. Errors do NOT crash the batch driver; the
+// driver catches each Result and recovers, continuing to the next input.
 //
-// NOTE: the textbook three-cycle mutual recursion expr->term->factor->expr is
-// expressed directly here. (A separate evidence file probes a >=3-cycle linker
-// surface; the Result-returning shape below links and runs — see REPORT.)
+// MACHINE-PROOFABLE: every expected value below is derived from arithmetic +
+// book error-handling semantics and written BEFORE the first run.
+// ============================================================================
+from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
 
-fn parse_factor(toks: Array<Token>, c: Cursor) -> Result<int> {
-    let k = peek_kind(toks, c);
-    if k == 0 {
-        let v = peek_value(toks, c);
-        advance(c);
-        return Ok(v);
-    }
-    if k == 2 {
-        // unary minus: '-' factor
-        advance(c);
-        let inner: int = parse_factor(toks, c)?;
-        return Ok(0 - inner);
-    }
-    if k == 5 {
-        advance(c); // consume '('
-        let inner: int = parse_expr(toks, c)?;
-        if peek_kind(toks, c) != 6 {
-            return Err("expected ')'");
-        }
-        advance(c); // consume ')'
-        return Ok(inner);
-    }
-    return Err("expected number, '(' or unary '-'");
+// ---------------------------------------------------------------------------
+// Module-level lexer/parser state (book-supported: module-level `let mut`,
+// mutated from functions — verified pattern).
+// ---------------------------------------------------------------------------
+let mut g_tokens: Array<string> = [];
+let mut g_pos: int = 0;
+
+fn reset_state(toks: Array<string>) {
+    g_tokens = toks;
+    g_pos = 0;
 }
 
-fn parse_term(toks: Array<Token>, c: Cursor) -> Result<int> {
-    let mut acc: int = parse_factor(toks, c)?;
-    let mut go = true;
-    while go {
-        let k = peek_kind(toks, c);
-        if k == 3 {
-            advance(c);
-            let rhs: int = parse_factor(toks, c)?;
-            acc = acc * rhs;
-        } else if k == 4 {
-            advance(c);
-            let rhs: int = parse_factor(toks, c)?;
-            if rhs == 0 {
-                return Err("division by zero");
-            }
-            acc = acc / rhs;
-        } else {
-            go = false;
-        }
-    }
-    return Ok(acc);
-}
-
-fn parse_expr(toks: Array<Token>, c: Cursor) -> Result<int> {
-    let mut acc: int = parse_term(toks, c)?;
-    let mut go = true;
-    while go {
-        let k = peek_kind(toks, c);
-        if k == 1 {
-            advance(c);
-            let rhs: int = parse_term(toks, c)?;
-            acc = acc + rhs;
-        } else if k == 2 {
-            advance(c);
-            let rhs: int = parse_term(toks, c)?;
-            acc = acc - rhs;
-        } else {
-            go = false;
-        }
-    }
-    return Ok(acc);
-}
-
-// Full pipeline: parse a token stream and require every non-END token consumed.
-// `!!` attaches higher-level context onto whatever lower-level Err bubbled up
-// (book: !! Error Context Operator); `?` then unwraps or early-returns.
-// The success type is pinned with an explicit annotation on `value` so the
-// `!!`-then-`?`-then-arithmetic chain has a concrete success type (see REPORT
-// book_wrong: un-annotated `!!`+`?` infers `unknown`).
-fn eval_tokens(toks: Array<Token>) -> Result<int> {
-    let c = cur_make();
-    let value: int = (parse_expr(toks, c) !! "parse failed")?;
-    // Every well-formed stream ends exactly at the END sentinel.
-    if peek_kind(toks, c) != 7 {
-        return Err("trailing tokens after expression");
-    }
-    return Ok(value);
-}
-
-// =============================================================================
-// Config front-end: key -> token-stream value, Option lookups, `??` defaults
-// =============================================================================
-
-type ConfigSrc {
-    key: string,
-    tokens: Array<Token>,
-}
-
-type Entry {
-    key: string,
-    value: int,
-}
-
-fn cfg_src(key: string, tokens: Array<Token>) -> ConfigSrc {
-    return ConfigSrc { key: key, tokens: tokens };
-}
-
-// Parse every config source's expression into an Entry. `?` propagates any eval
-// error and `!!` tags it with a higher-level context for a useful causal chain.
-// The store is SEEDED with the first parsed entry (never an empty struct array)
-// and the remaining entries are pushed in a loop. We deliberately do NOT re-seed
-// an `Array<Struct>` literal inside the loop body — at this HEAD that defeats
-// strict-typing element inference (see REPORT book_gaps / array-literal note).
-// Callers in this program always pass a non-empty `srcs`.
-fn config_parse(srcs: Array<ConfigSrc>) -> Result<Array<Entry>> {
-    let first = srcs[0];
-    let v0: int = (eval_tokens(first.tokens) !! "bad config value")?;
-    let mut store: Array<Entry> = [Entry { key: first.key, value: v0 }];
-    let mut i = 1;
-    while i < srcs.length {
-        let s = srcs[i];
-        let v: int = (eval_tokens(s.tokens) !! "bad config value")?;
-        store.push(Entry { key: s.key, value: v });
-        i = i + 1;
-    }
-    return Ok(store);
-}
-
-fn config_get(store: Array<Entry>, key: string) -> Option<int> {
-    for e in store {
-        if e.key == key {
-            return Some(e.value);
-        }
+// Option-returning lookahead: None at end of input. (book: Option missing-value sentinel)
+fn peek() -> Option<string> {
+    if g_pos < g_tokens.len() {
+        return Some(g_tokens[g_pos]);
     }
     return None;
 }
 
-// =============================================================================
-// Assertion harness
-// =============================================================================
-
-type Counters { failed: int }
-
-fn fail(ctr: Counters, msg: string) {
-    print(msg);
-    ctr.failed = ctr.failed + 1;
+// Consume the current token; Err if at end. (book: Err normalizes a payload)
+fn consume() -> Result<string> {
+    match peek() {
+        Some(t) => {
+            g_pos = g_pos + 1;
+            return Ok(t);
+        }
+        None => {
+            return Err("unexpected end of input");
+        }
+    }
 }
 
-// Assert eval_tokens(toks) yields Ok(expected).
-fn expect_ok(ctr: Counters, label: string, toks: Array<Token>, expected: int) {
-    match eval_tokens(toks) {
+fn at_end() -> bool {
+    return g_pos >= g_tokens.len();
+}
+
+// ---------------------------------------------------------------------------
+// Tokenizer: split on spaces, drop empty fragments. Returns Result so an
+// all-whitespace / empty source is a recoverable Err (not a silent success).
+// ---------------------------------------------------------------------------
+fn tokenize(src: string) -> Result<Array<string>> {
+    let raw = src.split(" ");
+    let mut out: Array<string> = [];
+    for piece in raw {
+        if piece != "" {
+            out.push(piece);
+        }
+    }
+    if out.len() == 0 {
+        return Err("empty expression");
+    }
+    return Ok(out);
+}
+
+// ---------------------------------------------------------------------------
+// Numeric literal recognizer. Uses the fallible cast `as int?` (book §Fallible).
+// A token that is not an integer literal yields Err with context via `!!`.
+// ---------------------------------------------------------------------------
+fn parse_number(tok: string) -> Result<int> {
+    // NOTE (book-faithful form is `(tok as int?) !! ...`): in v0.3.3 the
+    // `as int?` conversion REJECTS a string read directly from an
+    // Array<string> element (distinct internal carrier kind), even though the
+    // identical literal converts fine. See REPORT.md FN-REG-CORRECTNESS.
+    // Reconstructing a fresh string via an f-string (a core book construct,
+    // §strings) normalizes the carrier so the documented cast works. This is
+    // the SINGLE deviation from the book-literal form.
+    let fresh = f"{tok}";
+    let n = (fresh as int?) !! f"not a number: {tok}";
+    return n;
+}
+
+// ---------------------------------------------------------------------------
+// Recursive-descent grammar. Each level returns Result<int>; `?` propagates.
+// ---------------------------------------------------------------------------
+
+// factor := NUMBER | '(' expr ')' | '-' factor
+fn parse_factor() -> Result<int> {
+    match peek() {
+        Some(t) => {
+            if t == "(" {
+                let open = consume()?;                       // '('
+                let inner = parse_expr()?;                   // recurse
+                match peek() {
+                    Some(c) => {
+                        if c == ")" {
+                            let close = consume()?;          // ')'
+                            return Ok(inner);
+                        }
+                        return Err(f"expected ')' but found '{c}'");
+                    }
+                    None => {
+                        return Err("unbalanced '(' : missing ')'");
+                    }
+                }
+            }
+            if t == "-" {
+                let neg = consume()?;                        // unary minus
+                let operand = parse_factor()?;
+                return Ok(0 - operand);
+            }
+            // otherwise must be a number
+            let numtok = consume()?;
+            return parse_number(numtok) !! "invalid factor";
+        }
+        None => {
+            return Err("unexpected end of input in factor");
+        }
+    }
+}
+
+// ipow: integer power by repeated multiply; Err on negative exponent.
+// (book §"? Try Operator" pattern: an inner fallible primitive returning Result)
+fn ipow(base: int, exp: int) -> Result<int> {
+    if exp < 0 {
+        return Err("negative exponent");
+    }
+    let mut r = 1;
+    let mut i = 0;
+    while i < exp {
+        r = r * base;
+        i = i + 1;
+    }
+    return Ok(r);
+}
+
+// power := factor ('^' factor)*  (left-associative for determinism)
+// `?` propagates a failing factor OR a failing ipow up to the caller.
+fn parse_power() -> Result<int> {
+    let mut acc = parse_factor()?;
+    let mut go = true;
+    while go {
+        match peek() {
+            Some(op) => {
+                if op == "^" {
+                    let o = consume()?;
+                    let rhs = parse_factor()?;
+                    // ipow returns Result; `?` unwraps or propagates the Err
+                    let powed = ipow(acc, rhs) !! "power evaluation failed";
+                    acc = powed?;
+                } else {
+                    go = false;
+                }
+            }
+            None => {
+                go = false;
+            }
+        }
+    }
+    return Ok(acc);
+}
+
+// term := power (('*' | '/' | '%') power)*
+fn parse_term() -> Result<int> {
+    let mut acc = parse_power()?;
+    let mut go = true;
+    while go {
+        match peek() {
+            Some(op) => {
+                if op == "*" {
+                    let o = consume()?;
+                    let rhs = parse_power()?;
+                    acc = acc * rhs;
+                } else {
+                    if op == "/" {
+                        let o = consume()?;
+                        let rhs = parse_power()?;
+                        if rhs == 0 {
+                            return Err("division by zero");
+                        }
+                        acc = acc / rhs;
+                    } else {
+                        if op == "%" {
+                            let o = consume()?;
+                            let rhs = parse_power()?;
+                            if rhs == 0 {
+                                return Err("modulo by zero");
+                            }
+                            acc = acc % rhs;
+                        } else {
+                            go = false;
+                        }
+                    }
+                }
+            }
+            None => {
+                go = false;
+            }
+        }
+    }
+    return Ok(acc);
+}
+
+// expr := term (('+' | '-') term)*
+fn parse_expr() -> Result<int> {
+    let mut acc = parse_term()?;
+    let mut go = true;
+    while go {
+        match peek() {
+            Some(op) => {
+                if op == "+" {
+                    let o = consume()?;
+                    let rhs = parse_term()?;
+                    acc = acc + rhs;
+                } else {
+                    if op == "-" {
+                        let o = consume()?;
+                        let rhs = parse_term()?;
+                        acc = acc - rhs;
+                    } else {
+                        go = false;
+                    }
+                }
+            }
+            None => {
+                go = false;
+            }
+        }
+    }
+    return Ok(acc);
+}
+
+// Top-level: tokenize, parse, require all input consumed. Context via `!!`.
+fn evaluate(src: string) -> Result<int> {
+    let toks = tokenize(src) !! "tokenize failed";
+    reset_state(toks?);
+    let value = parse_expr() !! "parse failed";
+    let v = value?;
+    if !at_end() {
+        let leftover = peek() ?? "?";
+        return Err(f"trailing tokens after expression: '{leftover}'");
+    }
+    return Ok(v);
+}
+
+// ---------------------------------------------------------------------------
+// Batch driver with error RECOVERY: evaluate each line, collect outcomes.
+// A failing line is caught and recorded; the batch continues.
+// Returns counts so the harness can assert recovery behavior.
+// ---------------------------------------------------------------------------
+type BatchResult { ok_count: int, err_count: int, sum_ok: int }
+
+fn run_batch(lines: Array<string>) -> BatchResult {
+    let mut ok_count = 0;
+    let mut err_count = 0;
+    let mut sum_ok = 0;
+    for line in lines {
+        match evaluate(line) {
+            Ok(v) => {
+                ok_count = ok_count + 1;
+                sum_ok = sum_ok + v;
+            }
+            Err(e) => {
+                // recovery point: record and continue (do not propagate)
+                err_count = err_count + 1;
+            }
+        }
+    }
+    return BatchResult { ok_count: ok_count, err_count: err_count, sum_ok: sum_ok };
+}
+
+// ===========================================================================
+// CHECK HARNESS
+// ===========================================================================
+let mut failures = 0;
+
+fn check_eq_int(name: string, got: int, expected: int) {
+    if got != expected {
+        failures = failures + 1;
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}");
+    }
+}
+
+fn check_ok(name: string, src: string, expected: int) {
+    match evaluate(src) {
         Ok(v) => {
             if v != expected {
-                fail(ctr, f"CHECK_FAILED: {label} expected={expected} got={v}");
+                failures = failures + 1;
+                print(f"CHECK_FAILED: {name} expected={expected} got={v}");
             }
         }
-        Err(e) => fail(ctr, f"CHECK_FAILED: {label} expected={expected} got=Err"),
-    }
-}
-
-// Assert eval_tokens(toks) yields an Err (recovery path exercised).
-fn expect_err(ctr: Counters, label: string, toks: Array<Token>) {
-    match eval_tokens(toks) {
-        Ok(v) => fail(ctr, f"CHECK_FAILED: {label} expected=Err got={v}"),
-        Err(e) => { }
-    }
-}
-
-// Assert config_get(store, key) ?? dflt == expected (book `a ?? b`).
-fn expect_cfg(ctr: Counters, store: Array<Entry>, key: string, dflt: int, expected: int) {
-    let got = config_get(store, key) ?? dflt;
-    if got != expected {
-        fail(ctr, f"CHECK_FAILED: cfg[{key}] expected={expected} got={got}");
-    }
-}
-
-// =============================================================================
-// Sentinel-streams: each expression ends with end() so peek never overruns and
-// no empty struct array is ever constructed.
-// =============================================================================
-
-fn s_add() -> Array<Token> { return [num(1), plus(), num(2), end()]; }                 // 3
-fn s_mul_add() -> Array<Token> { return [num(2), star(), num(3), plus(), num(4), end()]; } // 10
-fn s_add_mul() -> Array<Token> { return [num(2), plus(), num(3), star(), num(4), end()]; } // 14
-fn s_paren_mul() -> Array<Token> {
-    return [lparen(), num(2), plus(), num(3), rparen(), star(), num(4), end()];        // 20
-}
-fn s_sub_assoc() -> Array<Token> { return [num(10), minus(), num(2), minus(), num(3), end()]; } // 5
-fn s_div_assoc() -> Array<Token> { return [num(20), slash(), num(5), slash(), num(2), end()]; } // 2
-fn s_bare() -> Array<Token> { return [num(100), end()]; }                              // 100
-fn s_unary_neg() -> Array<Token> { return [minus(), num(5), end()]; }                  // -5
-fn s_unary_group() -> Array<Token> {
-    return [minus(), lparen(), num(2), plus(), num(3), rparen(), end()];               // -5
-}
-fn s_mul_neg() -> Array<Token> { return [num(2), star(), minus(), num(3), end()]; }    // -6
-fn s_nested_paren() -> Array<Token> {
-    return [lparen(), lparen(), num(1), rparen(), rparen(), end()];                    // 1
-}
-fn s_sum5() -> Array<Token> {
-    return [num(1), plus(), num(2), plus(), num(3), plus(), num(4), plus(), num(5), end()]; // 15
-}
-fn s_prod4() -> Array<Token> {
-    return [num(2), star(), num(3), star(), num(4), star(), num(5), end()];            // 120
-}
-fn s_div_groups() -> Array<Token> {
-    return [lparen(), num(10), minus(), num(4), rparen(), slash(),
-            lparen(), num(1), plus(), num(1), rparen(), end()];                         // 3
-}
-fn s_sub_add() -> Array<Token> { return [num(7), minus(), num(3), plus(), num(2), end()]; } // 6
-fn s_div_add_div() -> Array<Token> {
-    return [num(9), slash(), num(3), plus(), num(9), slash(), num(3), end()];          // 6
-}
-fn s_neg_mul_neg() -> Array<Token> {
-    return [minus(), num(2), star(), minus(), num(2), end()];                          // 4
-}
-fn s_zero() -> Array<Token> { return [num(0), minus(), num(0), end()]; }               // 0
-fn s_big() -> Array<Token> { return [num(1000000), plus(), num(1), end()]; }           // 1000001
-
-// error streams
-fn s_trailing_plus() -> Array<Token> { return [num(1), plus(), end()]; }
-fn s_unclosed() -> Array<Token> { return [lparen(), num(1), plus(), num(2), end()]; }
-fn s_trailing_rparen() -> Array<Token> { return [num(1), plus(), num(2), rparen(), end()]; }
-fn s_leading_star() -> Array<Token> { return [star(), num(5), end()]; }
-fn s_div_zero() -> Array<Token> { return [num(1), slash(), num(0), end()]; }
-fn s_div_zero_computed() -> Array<Token> {
-    return [num(10), slash(), lparen(), num(5), minus(), num(5), rparen(), end()];
-}
-fn s_two_numbers() -> Array<Token> { return [num(1), num(2), end()]; }
-fn s_only_end() -> Array<Token> { return [end()]; }                  // models "empty input"
-fn s_empty_parens() -> Array<Token> { return [lparen(), rparen(), end()]; }
-fn s_double_op() -> Array<Token> { return [num(1), plus(), plus(), num(2), end()]; }
-
-// =============================================================================
-// Batch helpers: sum a fixed list of expressions via `?` (short-circuits on
-// first failure). Expected sums hand-derived below.
-// =============================================================================
-
-fn sum_batch() -> Result<int> {
-    let mut total = 0;
-    let a: int = eval_tokens([num(3), star(), num(3), end()])?;                 // 9
-    total = total + a;
-    let b: int = eval_tokens([num(4), plus(), num(4), end()])?;                 // 8
-    total = total + b;
-    let c: int = eval_tokens([num(10), minus(), num(1), end()])?;              // 9
-    total = total + c;
-    let d: int = eval_tokens(
-        [num(2), star(), lparen(), num(3), plus(), num(1), rparen(), end()])?; // 8
-    total = total + d;
-    return Ok(total);                                                          // 34
-}
-
-fn sum_batch_bad() -> Result<int> {
-    let mut total = 0;
-    let a: int = eval_tokens([num(1), plus(), num(1), end()])?;   // 2
-    total = total + a;
-    let b: int = eval_tokens([num(5), slash(), num(0), end()])?;  // Err -> short-circuit
-    total = total + b;
-    let c: int = eval_tokens([num(9), end()])?;                   // never reached
-    total = total + c;
-    return Ok(total);
-}
-
-// =============================================================================
-// Driver: every expected value computed BY HAND from the grammar + book rules
-// =============================================================================
-
-fn main() {
-    let ctr = Counters { failed: 0 };
-
-    // ---- Arithmetic OK cases (hand-computed, standard precedence) -----------
-    expect_ok(ctr, "add", s_add(), 3);
-    expect_ok(ctr, "mul_then_add", s_mul_add(), 10);
-    expect_ok(ctr, "add_then_mul", s_add_mul(), 14);
-    expect_ok(ctr, "paren_mul", s_paren_mul(), 20);
-    expect_ok(ctr, "sub_assoc", s_sub_assoc(), 5);
-    expect_ok(ctr, "div_assoc", s_div_assoc(), 2);
-    expect_ok(ctr, "bare_number", s_bare(), 100);
-    expect_ok(ctr, "unary_neg", s_unary_neg(), -5);
-    expect_ok(ctr, "unary_group", s_unary_group(), -5);
-    expect_ok(ctr, "mul_neg", s_mul_neg(), -6);
-    expect_ok(ctr, "nested_paren", s_nested_paren(), 1);
-    expect_ok(ctr, "sum5", s_sum5(), 15);
-    expect_ok(ctr, "prod4", s_prod4(), 120);
-    expect_ok(ctr, "div_groups", s_div_groups(), 3);
-    expect_ok(ctr, "sub_add", s_sub_add(), 6);
-    expect_ok(ctr, "div_add_div", s_div_add_div(), 6);
-    expect_ok(ctr, "neg_mul_neg", s_neg_mul_neg(), 4);
-    expect_ok(ctr, "zero", s_zero(), 0);
-    expect_ok(ctr, "big", s_big(), 1000001);
-
-    // ---- Error-recovery cases: each must land in the Err arm ----------------
-    expect_err(ctr, "trailing_plus", s_trailing_plus());
-    expect_err(ctr, "unclosed", s_unclosed());
-    expect_err(ctr, "trailing_rparen", s_trailing_rparen());
-    expect_err(ctr, "leading_star", s_leading_star());
-    expect_err(ctr, "div_zero", s_div_zero());
-    expect_err(ctr, "div_zero_computed", s_div_zero_computed());
-    expect_err(ctr, "two_numbers", s_two_numbers());
-    expect_err(ctr, "only_end", s_only_end());
-    expect_err(ctr, "empty_parens", s_empty_parens());
-    expect_err(ctr, "double_op", s_double_op());
-
-    // ---- Config front-end over a fixed fixture ------------------------------
-    // width  = 80
-    // height = 24
-    // area   = 80 * 24 = 1920
-    // margin = 2 + 2   = 4
-    // scale  = (10 - 2) / 4 = 8/4 = 2
-    let srcs: Array<ConfigSrc> = [
-        cfg_src("width", s_cfg_width()),
-        cfg_src("height", s_cfg_height()),
-        cfg_src("area", s_cfg_area()),
-        cfg_src("margin", s_cfg_margin()),
-        cfg_src("scale", s_cfg_scale()),
-    ];
-    match config_parse(srcs) {
-        Ok(store) => {
-            expect_cfg(ctr, store, "width", -1, 80);
-            expect_cfg(ctr, store, "height", -1, 24);
-            expect_cfg(ctr, store, "area", -1, 1920);
-            expect_cfg(ctr, store, "margin", -1, 4);
-            expect_cfg(ctr, store, "scale", -1, 2);
-            // Missing key falls back to the `??` default (book `a ?? b`):
-            expect_cfg(ctr, store, "depth", 7, 7);
-            // Present key ignores the default:
-            expect_cfg(ctr, store, "width", 999, 80);
-            // present Some keeps its value; default ignored.
-            let some_default = config_get(store, "height") ?? 0;
-            if some_default != 24 {
-                fail(ctr, f"CHECK_FAILED: some_default expected=24 got={some_default}");
-            }
-            // absent key on a non-empty store -> None -> default.
-            let none_default = config_get(store, "missing") ?? -9;
-            if none_default != -9 {
-                fail(ctr, f"CHECK_FAILED: none_default expected=-9 got={none_default}");
-            }
+        Err(e) => {
+            failures = failures + 1;
+            print(f"CHECK_FAILED: {name} expected Ok({expected}) got Err");
         }
-        Err(e) => fail(ctr, "CHECK_FAILED: config_parse unexpected Err"),
     }
+}
 
-    // ---- Config containing a bad value: parse must fail (Err arm) -----------
-    let bad_srcs: Array<ConfigSrc> = [
-        cfg_src("ok", s_cfg_ok()),
-        cfg_src("broken", s_cfg_broken()),  // 1/0 -> Err, `?` propagates
-    ];
-    match config_parse(bad_srcs) {
-        Ok(store) => fail(ctr, "CHECK_FAILED: bad config unexpectedly Ok"),
-        Err(e) => { }   // expected
-    }
-
-    // ---- Direct Option / `??` unit checks (book Related Operators) ----------
-    let some42 = Some(42) ?? 0;
-    if some42 != 42 {
-        fail(ctr, f"CHECK_FAILED: some42 expected=42 got={some42}");
-    }
-    let none7: Option<int> = None;
-    let none7v = none7 ?? 7;
-    if none7v != 7 {
-        fail(ctr, f"CHECK_FAILED: none7 expected=7 got={none7v}");
-    }
-
-    // ---- A larger derived computation chained through Result ----------------
-    // eval(3*3)=9, eval(4+4)=8, eval(10-1)=9, eval(2*(3+1))=8 => 34
-    match sum_batch() {
-        Ok(total) => {
-            if total != 34 {
-                fail(ctr, f"CHECK_FAILED: sum_batch expected=34 got={total}");
-            }
+fn check_err(name: string, src: string) {
+    match evaluate(src) {
+        Ok(v) => {
+            failures = failures + 1;
+            print(f"CHECK_FAILED: {name} expected Err got Ok({v})");
         }
-        Err(e) => fail(ctr, "CHECK_FAILED: sum_batch unexpected Err"),
-    }
-
-    // ---- A batch with a failing element: must surface Err -------------------
-    match sum_batch_bad() {
-        Ok(total) => fail(ctr, f"CHECK_FAILED: sum_batch_bad expected=Err got={total}"),
-        Err(e) => { }   // expected: 5/0 fails, `?` short-circuits the sum
-    }
-
-    // ---- Final verdict -----------------------------------------------------
-    if ctr.failed == 0 {
-        print("ALL_CHECKS_PASSED");
-    } else {
-        print(f"FAILURES: {ctr.failed}");
+        Err(e) => {
+            // expected
+        }
     }
 }
 
-// config fixture streams (kept as fns to avoid empty/shared-literal pitfalls)
-fn s_cfg_width() -> Array<Token> { return [num(80), end()]; }
-fn s_cfg_height() -> Array<Token> { return [num(24), end()]; }
-fn s_cfg_area() -> Array<Token> { return [num(80), star(), num(24), end()]; }
-fn s_cfg_margin() -> Array<Token> { return [num(2), plus(), num(2), end()]; }
-fn s_cfg_scale() -> Array<Token> {
-    return [lparen(), num(10), minus(), num(2), rparen(), slash(), num(4), end()];
-}
-fn s_cfg_ok() -> Array<Token> { return [num(1), plus(), num(1), end()]; }
-fn s_cfg_broken() -> Array<Token> { return [num(1), slash(), num(0), end()]; }
+// ---------------------------------------------------------------------------
+// SECTION 1 — basic arithmetic (expected values = plain integer arithmetic)
+// ---------------------------------------------------------------------------
+check_ok("add", "1 + 2", 3);
+check_ok("sub", "10 - 4", 6);
+check_ok("mul", "6 * 7", 42);
+check_ok("div", "20 / 5", 4);
+check_ok("mod", "17 % 5", 2);
+check_ok("single", "99", 99);
+check_ok("zero", "0", 0);
 
-main();
+// ---------------------------------------------------------------------------
+// SECTION 2 — precedence (* binds tighter than +/-)
+// ---------------------------------------------------------------------------
+check_ok("prec1", "1 + 2 * 3", 7);          // 1 + 6
+check_ok("prec2", "2 * 3 + 4", 10);         // 6 + 4
+check_ok("prec3", "10 - 2 * 3", 4);         // 10 - 6
+check_ok("prec4", "2 + 3 * 4 - 1", 13);     // 2 + 12 - 1
+check_ok("prec5", "100 / 5 / 2", 10);       // (100/5)/2 = 20/2
+check_ok("prec6", "20 - 5 - 3", 12);        // left assoc: (20-5)-3
+check_ok("prec7", "2 * 3 * 4", 24);
+
+// ---------------------------------------------------------------------------
+// SECTION 3 — parentheses
+// ---------------------------------------------------------------------------
+check_ok("paren1", "( 1 + 2 ) * 3", 9);
+check_ok("paren2", "2 * ( 3 + 4 )", 14);
+check_ok("paren3", "( ( 1 + 1 ) )", 2);
+check_ok("paren4", "( 10 - 2 ) / ( 1 + 1 )", 4);     // 8/2
+check_ok("paren5", "3 * ( 2 + ( 4 - 1 ) )", 15);     // 3*(2+3)=15
+
+// ---------------------------------------------------------------------------
+// SECTION 4 — unary minus
+// ---------------------------------------------------------------------------
+check_ok("neg1", "- 5", -5);
+check_ok("neg2", "0 - 5", -5);
+check_ok("neg3", "10 + - 3", 7);             // 10 + (-3)
+check_ok("neg4", "- ( 2 + 3 )", -5);
+check_ok("neg5", "- 2 * 3", -6);             // (-2)*3
+
+// ---------------------------------------------------------------------------
+// SECTION 5 — integer division / modulo semantics (truncation toward zero)
+// ---------------------------------------------------------------------------
+check_ok("idiv1", "7 / 2", 3);
+check_ok("idiv2", "9 / 4", 2);
+check_ok("imod1", "10 % 3", 1);
+check_ok("imod2", "20 % 7", 6);
+check_ok("combo", "2 * 10 % 7", 6);          // (2*10)%7 = 20%7 = 6
+
+// ---------------------------------------------------------------------------
+// SECTION 6 — ERROR cases (each must be a recoverable Err, never a crash)
+// Book §"? Try Operator": Err propagates to nearest enclosing fallible scope;
+// here that's evaluate(), which returns it to the caller.
+// ---------------------------------------------------------------------------
+check_err("err_empty", "");                  // tokenize → "empty expression"
+check_err("err_spaces", "     ");            // all whitespace → empty
+check_err("err_div0", "5 / 0");              // division by zero guard
+check_err("err_mod0", "5 % 0");              // modulo by zero guard
+check_err("err_badtok", "1 + x");            // "x" not a number
+check_err("err_open", "( 1 + 2");            // missing ')'
+check_err("err_close", "1 + 2 )");           // trailing ')' → trailing tokens
+check_err("err_trailing", "1 2");            // two numbers, no operator
+check_err("err_dangling_op", "1 +");         // operator then EOF
+check_err("err_lead_op", "* 3");             // term starts with operator
+check_err("err_only_op", "+");               // operator only
+check_err("err_unbalanced2", "( ( 1 )");     // one ')' missing
+
+// ---------------------------------------------------------------------------
+// SECTION 7 — `??` None-coalescing on Option (book §"Related Operators")
+// Probe peek()'s Option directly via a small helper.
+// ---------------------------------------------------------------------------
+fn first_token_or_default(src: string, dflt: string) -> string {
+    let toks = src.split(" ");
+    reset_state(toks);
+    // peek() returns Option<string>; ?? supplies the default for None
+    return peek() ?? dflt;
+}
+let ft1 = first_token_or_default("42 + 1", "EMPTY");
+if ft1 != "42" { failures = failures + 1; print(f"CHECK_FAILED: coalesce_present expected=42 got={ft1}"); }
+let ft2 = first_token_or_default("", "EMPTY");
+// "".split(" ") yields [""] (one empty fragment); reset_state stores it, so
+// peek() returns Some("") — NOT None. Expected per split semantics = "".
+if ft2 != "" { failures = failures + 1; print(f"CHECK_FAILED: coalesce_empty expected=<empty> got={ft2}"); }
+
+// Force a true None: reset to an explicitly empty token array.
+reset_state([]);
+let none_default = peek() ?? "FALLBACK";
+if none_default != "FALLBACK" { failures = failures + 1; print(f"CHECK_FAILED: coalesce_none expected=FALLBACK got={none_default}"); }
+
+// ---------------------------------------------------------------------------
+// SECTION 8 — `!!` always yields Result; Ok / Some / plain all become Ok
+// (book §"!! Error Context Operator" table rows)
+// ---------------------------------------------------------------------------
+fn wrap_ok() -> Result<int> { return Ok(5) !! "ctx"; }
+fn wrap_some() -> Result<int> { return Some(9) !! "ctx"; }
+fn wrap_plain() -> Result<int> { return 11 !! "ctx"; }
+fn wrap_err() -> Result<int> { return Err("inner") !! "outer"; }
+
+match wrap_ok()   { Ok(v) => check_eq_int("wrap_ok", v, 5),   Err(e) => { failures = failures + 1; print("CHECK_FAILED: wrap_ok err"); } }
+match wrap_some() { Ok(v) => check_eq_int("wrap_some", v, 9), Err(e) => { failures = failures + 1; print("CHECK_FAILED: wrap_some err"); } }
+match wrap_plain(){ Ok(v) => check_eq_int("wrap_plain", v, 11),Err(e) => { failures = failures + 1; print("CHECK_FAILED: wrap_plain err"); } }
+match wrap_err()  { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: wrap_err expected Err"); }, Err(e) => { } }
+
+// ---------------------------------------------------------------------------
+// SECTION 9 — `?` chaining through several fallible calls (book end-to-end)
+// ---------------------------------------------------------------------------
+fn step_a(x: int) -> Result<int> {
+    if x < 0 { return Err("negative input"); }
+    return Ok(x + 1);
+}
+fn step_b(x: int) -> Result<int> {
+    if x > 100 { return Err("too large"); }
+    return Ok(x * 2);
+}
+fn pipeline(x: int) -> Result<int> {
+    let a = step_a(x)?;
+    let b = step_b(a)?;
+    return Ok(b);
+}
+match pipeline(10) { Ok(v) => check_eq_int("pipe_ok", v, 22), Err(e) => { failures = failures + 1; print("CHECK_FAILED: pipe_ok err"); } }   // (10+1)*2
+match pipeline(-3) { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: pipe_neg expected Err"); }, Err(e) => { } }
+match pipeline(200){ Ok(v) => { failures = failures + 1; print("CHECK_FAILED: pipe_big expected Err"); }, Err(e) => { } }
+
+// ---------------------------------------------------------------------------
+// SECTION 10 — `as int?` fallible cast: valid vs invalid (book §Fallible)
+// ---------------------------------------------------------------------------
+match ("123" as int?) { Ok(v) => check_eq_int("cast_ok", v, 123), Err(e) => { failures = failures + 1; print("CHECK_FAILED: cast_ok err"); } }
+match ("0"   as int?) { Ok(v) => check_eq_int("cast_zero", v, 0), Err(e) => { failures = failures + 1; print("CHECK_FAILED: cast_zero err"); } }
+match ("xyz" as int?) { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: cast_bad expected Err"); }, Err(e) => { } }
+match ("12a" as int?) { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: cast_partial expected Err"); }, Err(e) => { } }
+
+// ---------------------------------------------------------------------------
+// SECTION 11 — BATCH RECOVERY: a mixed batch; assert ok/err counts + sum.
+// Inputs:  "1 + 1"=2 ok, "bad x"=err, "3 * 3"=9 ok, "5 / 0"=err,
+//          "( 2 + 2 )"=4 ok, ""=err, "10 - 3"=7 ok
+// Expected: ok_count=4, err_count=3, sum_ok = 2+9+4+7 = 22
+// ---------------------------------------------------------------------------
+let batch = ["1 + 1", "bad x", "3 * 3", "5 / 0", "( 2 + 2 )", "", "10 - 3"];
+let br = run_batch(batch);
+check_eq_int("batch_ok_count", br.ok_count, 4);
+check_eq_int("batch_err_count", br.err_count, 3);
+check_eq_int("batch_sum_ok", br.sum_ok, 22);
+
+// ---------------------------------------------------------------------------
+// SECTION 12 — larger deterministic stress batch.
+// 20 well-formed expressions; assert the running sum of all results.
+// Each expected value computed by hand from the grammar.
+// ---------------------------------------------------------------------------
+let stress = [
+    "1 + 2 + 3 + 4 + 5",          // 15
+    "2 * 3 * 4",                  // 24
+    "100 - 50 - 25",              // 25
+    "( 1 + 2 ) * ( 3 + 4 )",      // 21
+    "81 / 9 / 3",                 // 3
+    "7 % 4 + 1",                  // 4
+    "- 5 + 10",                   // 5
+    "3 * 3 + 4 * 4",              // 25
+    "( 10 - 4 ) * 2",            // 12
+    "1000 / 10 / 10",            // 10
+    "2 + 2 * 2 * 2",             // 10  (2 + 8)
+    "50 % 7",                     // 1
+    "( 6 + 4 ) / 5",             // 2
+    "9 - 3 - 3 - 3",             // 0
+    "8 * ( 2 + 3 )",             // 40
+    "- ( 4 * 2 )",               // -8
+    "15 % 4 % 2",                // 1  ((15%4)=3, 3%2=1)
+    "( ( 2 ) )",                 // 2
+    "1 + 1 + 1 + 1 + 1 + 1",     // 6
+    "60 / 2 / 3 / 5",            // 2
+];
+// Expected total = 15+24+25+21+3+4+5+25+12+10+10+1+2+0+40-8+1+2+6+2
+//                = 200
+let sr = run_batch(stress);
+check_eq_int("stress_ok_count", sr.ok_count, 20);
+check_eq_int("stress_err_count", sr.err_count, 0);
+check_eq_int("stress_sum_ok", sr.sum_ok, 200);
+
+// ---------------------------------------------------------------------------
+// SECTION 13 — all-error batch: every input is malformed; recovery keeps going.
+// ---------------------------------------------------------------------------
+let bad_batch = ["", "+ +", "( ( (", "1 2 3", "5 / 0", "x", ") )", "* /"];
+let bb = run_batch(bad_batch);
+check_eq_int("bad_ok_count", bb.ok_count, 0);
+check_eq_int("bad_err_count", bb.err_count, 8);
+check_eq_int("bad_sum_ok", bb.sum_ok, 0);
+
+// ---------------------------------------------------------------------------
+// SECTION 14 — deep nesting (recursion depth through parens).
+// (((((((((( 1 + 1 )))))))))) = 2 with 10 levels.
+// ---------------------------------------------------------------------------
+check_ok("deep", "( ( ( ( ( ( ( ( ( ( 1 + 1 ) ) ) ) ) ) ) ) ) )", 2);
+check_ok("deep_calc", "( ( ( 2 * 3 ) + ( 4 * 5 ) ) - 6 )", 20);  // (6+20)-6
+
+// ---------------------------------------------------------------------------
+// SECTION 15 — context-chaining via `!!` then `?` (book §"!! + ? Parsing")
+// `lhs !! rhs?` parses as `(lhs !! rhs)?`.
+// ---------------------------------------------------------------------------
+fn parse_or_zero(src: string) -> int {
+    match evaluate(src) {
+        Ok(v) => { return v; }
+        Err(e) => { return 0; }
+    }
+}
+check_eq_int("por_ok", parse_or_zero("4 * 5"), 20);
+check_eq_int("por_bad", parse_or_zero("nope"), 0);
+
+fn must_eval(src: string) -> Result<int> {
+    // (evaluate(src) !! "evaluation failed")?  — combined !! + ?
+    let v = (evaluate(src) !! "evaluation failed")?;
+    return Ok(v);
+}
+match must_eval("7 + 8") { Ok(v) => check_eq_int("must_ok", v, 15), Err(e) => { failures = failures + 1; print("CHECK_FAILED: must_ok err"); } }
+match must_eval("oops")  { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: must_bad expected Err"); }, Err(e) => { } }
+
+// ---------------------------------------------------------------------------
+// SECTION 16 — power operator `^` (left-assoc, higher precedence than * / %)
+// Expected values computed by hand.
+// ---------------------------------------------------------------------------
+check_ok("pow1", "2 ^ 10", 1024);
+check_ok("pow2", "3 ^ 0", 1);                 // anything ^ 0 = 1
+check_ok("pow3", "5 ^ 1", 5);
+check_ok("pow4", "2 ^ 3 ^ 2", 64);            // left-assoc: (2^3)^2 = 8^2 = 64
+check_ok("pow5", "2 ^ 3 + 1", 9);             // 8 + 1   (^ binds tighter than +)
+check_ok("pow6", "1 + 2 ^ 3", 9);             // 1 + 8
+check_ok("pow7", "2 * 3 ^ 2", 18);            // 2 * 9   (^ binds tighter than *)
+check_ok("pow8", "( 1 + 1 ) ^ 4", 16);        // 2^4
+check_ok("pow9", "10 ^ 0 ^ 5", 1);            // (10^0)^5 = 1^5 = 1
+// Grammar: power := factor ('^' factor)*. parse_factor consumes unary '-'
+// BEFORE the power loop, so "- 2 ^ 2" structures as (-2) ^ 2 = 4.
+check_ok("pow10", "- 2 ^ 2", 4);              // (-2)^2 = 4
+
+// power error: negative exponent surfaces ipow's Err through `!!` + `?`
+check_err("pow_negexp", "2 ^ - 1");           // ipow(2,-1) → "negative exponent"
+
+// ---------------------------------------------------------------------------
+// SECTION 17 — multi-statement program: ';'-separated expressions.
+// Evaluate each; the program result is the LAST successful value.
+// If ANY statement errors, the whole program errors (book §"? Try Operator":
+// `?` early-returns the Err from run_program).
+// ---------------------------------------------------------------------------
+fn run_program(src: string) -> Result<int> {
+    let stmts = src.split(";");
+    let mut last = 0;
+    let mut seen = false;
+    for stmt in stmts {
+        let trimmed = stmt.trim();
+        if trimmed != "" {
+            // evaluate returns Result; `?` propagates the first failing stmt
+            last = evaluate(trimmed)?;
+            seen = true;
+        }
+    }
+    if !seen {
+        return Err("empty program");
+    }
+    return Ok(last);
+}
+match run_program("1 + 1 ; 2 * 3 ; 10 - 4") {
+    Ok(v) => check_eq_int("prog_last", v, 6),                 // last stmt = 10-4
+    Err(e) => { failures = failures + 1; print("CHECK_FAILED: prog_last err"); }
+}
+match run_program("5 ; 5 / 0 ; 9") {
+    Ok(v) => { failures = failures + 1; print("CHECK_FAILED: prog_midfail expected Err"); }
+    Err(e) => { }                                            // 2nd stmt fails → whole program Err
+}
+match run_program("   ;   ;   ") {
+    Ok(v) => { failures = failures + 1; print("CHECK_FAILED: prog_empty expected Err"); }
+    Err(e) => { }
+}
+match run_program("42") {
+    Ok(v) => check_eq_int("prog_single", v, 42),
+    Err(e) => { failures = failures + 1; print("CHECK_FAILED: prog_single err"); }
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 18 — running a program with `??` to default a failing program to 0.
+// run_program returns Result; convert to Option-like default via match.
+// ---------------------------------------------------------------------------
+fn program_or(src: string, dflt: int) -> int {
+    match run_program(src) {
+        Ok(v) => { return v; }
+        Err(e) => { return dflt; }
+    }
+}
+check_eq_int("progor_ok", program_or("2 ^ 4 ; 3 * 3", -1), 9);
+check_eq_int("progor_bad", program_or("oops ; 1", -1), -1);
+
+// ---------------------------------------------------------------------------
+// SECTION 19 — large mixed batch with power + recovery. 24 inputs.
+//  index: expr              => result / ERR
+//   0  "2 ^ 5"              => 32
+//   1  "bad"                => ERR
+//   2  "( 3 + 4 ) ^ 2"      => 49
+//   3  "10 % 0"             => ERR
+//   4  "2 * 3 ^ 2"          => 18
+//   5  ""                   => ERR
+//   6  "100 - 1"            => 99
+//   7  "5 / 0"              => ERR
+//   8  "- 3 ^ 2"            => 9    ((-3)^2)
+//   9  "( ( 2 ) )"          => 2
+//  10  "7"                  => 7
+//  11  "1 +"                => ERR
+//  12  "8 / 2 / 2"          => 2
+//  13  "3 ^ 0"             => 1
+//  14  "x + 1"              => ERR
+//  15  "20 % 6"             => 2
+//  16  "( 1 + 2 ) * 3"      => 9
+//  17  "2 ^ - 1"            => ERR  (neg exp)
+//  18  "0"                  => 0
+//  19  "( 5"                => ERR  (unbalanced)
+//  20  "4 ^ 2 - 1"          => 15
+//  21  "1 2"                => ERR  (trailing)
+//  22  "6 % 4 + 2"          => 4
+//  23  "9 / 3 ^ 2"          => 1    (9 / 9)
+//
+// ok values: 32,49,18,99,9,2,7,2,1,2,9,0,15,4,1
+//   count = 15;  sum = 32+49+18+99+9+2+7+2+1+2+9+0+15+4+1 = 250
+// err count = 9
+// ---------------------------------------------------------------------------
+let mega = [
+    "2 ^ 5", "bad", "( 3 + 4 ) ^ 2", "10 % 0", "2 * 3 ^ 2", "",
+    "100 - 1", "5 / 0", "- 3 ^ 2", "( ( 2 ) )", "7", "1 +",
+    "8 / 2 / 2", "3 ^ 0", "x + 1", "20 % 6", "( 1 + 2 ) * 3", "2 ^ - 1",
+    "0", "( 5", "4 ^ 2 - 1", "1 2", "6 % 4 + 2", "9 / 3 ^ 2",
+];
+let mr = run_batch(mega);
+check_eq_int("mega_ok_count", mr.ok_count, 15);
+check_eq_int("mega_err_count", mr.err_count, 9);
+check_eq_int("mega_sum_ok", mr.sum_ok, 250);
+
+// ---------------------------------------------------------------------------
+// SECTION 20 — deterministic generated batch: evaluate "i + i" for i in 0..30,
+// each must equal 2*i; assert the total. Exercises the parser at volume.
+//   sum over i=0..29 of (2*i) = 2 * (0+1+...+29) = 2 * 435 = 870
+// ---------------------------------------------------------------------------
+let mut gen_total = 0;
+let mut gen_fail = 0;
+let mut gi = 0;
+while gi < 30 {
+    let src = f"{gi} + {gi}";
+    match evaluate(src) {
+        Ok(v) => {
+            if v != gi + gi {
+                gen_fail = gen_fail + 1;
+            }
+            gen_total = gen_total + v;
+        }
+        Err(e) => {
+            gen_fail = gen_fail + 1;
+        }
+    }
+    gi = gi + 1;
+}
+check_eq_int("gen_total", gen_total, 870);
+check_eq_int("gen_fail", gen_fail, 0);
+
+// ---------------------------------------------------------------------------
+// SECTION 21 — generated power table: evaluate "2 ^ k" for k in 0..12.
+//   results: 1,2,4,...,2048;  sum = 2^13 - 1 = 8191
+// ---------------------------------------------------------------------------
+let mut pow_total = 0;
+let mut pk = 0;
+while pk < 13 {
+    let src = f"2 ^ {pk}";
+    let v = evaluate(src)?;          // top-level `?`: any failure aborts (none expected)
+    pow_total = pow_total + v;
+    pk = pk + 1;
+}
+check_eq_int("pow_total", pow_total, 8191);
+
+// ---------------------------------------------------------------------------
+// SECTION 22 — `?` at TOP LEVEL aborts the script on failure (book §"? Try
+// Operator": at script top-level a propagated failure surfaces as uncaught).
+// We DON'T trigger it here (that would abort the run); instead we prove the
+// caught form: a function using `?` returns the Err to its caller, who matches.
+// ---------------------------------------------------------------------------
+fn strict_eval(src: string) -> Result<int> {
+    let v = evaluate(src)?;      // propagate up — NOT to top level
+    return Ok(v + 1000);
+}
+match strict_eval("5 + 5") { Ok(v) => check_eq_int("strict_ok", v, 1010), Err(e) => { failures = failures + 1; print("CHECK_FAILED: strict_ok err"); } }
+match strict_eval("5 / 0") { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: strict_bad expected Err"); }, Err(e) => { } }
+
+// ---------------------------------------------------------------------------
+// SECTION 23 — Option `?` propagation: None inside a Result-returning fn
+// becomes Err (book §"? Try Operator" table: None → Err(AnyError) OPTION_NONE).
+// ---------------------------------------------------------------------------
+fn add_opts(a: Option<int>, b: Option<int>) -> Result<int> {
+    let x = a?;          // Some→value, None→propagate Err
+    let y = b?;
+    return Ok(x + y);
+}
+match add_opts(Some(3), Some(4)) { Ok(v) => check_eq_int("addopt_ok", v, 7), Err(e) => { failures = failures + 1; print("CHECK_FAILED: addopt_ok err"); } }
+match add_opts(Some(3), None)    { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: addopt_none expected Err"); }, Err(e) => { } }
+match add_opts(None, Some(4))    { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: addopt_none2 expected Err"); }, Err(e) => { } }
+
+// ---------------------------------------------------------------------------
+// SECTION 24 — `??` chaining (book §"Related Operators"): a ?? (b ?? dflt)
+// ---------------------------------------------------------------------------
+fn coalesce3(a: Option<int>, b: Option<int>, dflt: int) -> int {
+    return a ?? (b ?? dflt);
+}
+check_eq_int("c3_first",  coalesce3(Some(5), Some(9), 0), 5);
+check_eq_int("c3_second", coalesce3(None, Some(9), 0), 9);
+check_eq_int("c3_dflt",   coalesce3(None, None, -1), -1);
+
+// ---------------------------------------------------------------------------
+// SECTION 25 — Option-returning safe lookup + `!!` to convert to Result.
+// A "find first evaluable token" scanner over an Array<string>: returns the
+// first token that parses as a complete expression, else Err.
+// ---------------------------------------------------------------------------
+fn first_evaluable(candidates: Array<string>) -> Result<int> {
+    for cand in candidates {
+        match evaluate(cand) {
+            Ok(v) => { return Ok(v); }      // recovery: take the first success
+            Err(e) => { }                   // skip failures, keep scanning
+        }
+    }
+    return Err("no evaluable candidate");
+}
+match first_evaluable(["bad", "x +", "3 * 4", "5 + 5"]) {
+    Ok(v) => check_eq_int("scan_first", v, 12),     // first OK is "3 * 4"
+    Err(e) => { failures = failures + 1; print("CHECK_FAILED: scan_first err"); }
+}
+match first_evaluable(["1 +", "(", "/ 0"]) {
+    Ok(v) => { failures = failures + 1; print("CHECK_FAILED: scan_none expected Err"); }
+    Err(e) => { }                                   // none evaluable
+}
+match first_evaluable(["( 2 + 3 ) ^ 2"]) {
+    Ok(v) => check_eq_int("scan_single", v, 25),    // 5^2
+    Err(e) => { failures = failures + 1; print("CHECK_FAILED: scan_single err"); }
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 26 — combined `!!` context + `?` over a deeper call chain, asserting
+// the SUCCESS value flows through unchanged (book §"!! + ? Parsing":
+// `lhs !! rhs?` == `(lhs !! rhs)?`; Ok(v) !! ctx == Ok(v)).
+// ---------------------------------------------------------------------------
+fn layer3(src: string) -> Result<int> {
+    let v = (evaluate(src) !! "layer3 failed")?;
+    return Ok(v);
+}
+fn layer2(src: string) -> Result<int> {
+    let v = (layer3(src) !! "layer2 failed")?;
+    return Ok(v * 2);
+}
+fn layer1(src: string) -> Result<int> {
+    let v = (layer2(src) !! "layer1 failed")?;
+    return Ok(v + 1);
+}
+match layer1("3 + 4") {
+    Ok(v) => check_eq_int("layered_ok", v, 15),     // ((7)*2)+1 = 15
+    Err(e) => { failures = failures + 1; print("CHECK_FAILED: layered_ok err"); }
+}
+match layer1("3 / 0") {
+    Ok(v) => { failures = failures + 1; print("CHECK_FAILED: layered_bad expected Err"); }
+    Err(e) => { }                                   // div0 propagates through all 3 layers
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 27 — final generated stress: evaluate "( i + 1 ) * ( i + 1 )" for
+// i in 0..25, each must equal (i+1)^2; assert the total.
+//   sum over i=0..24 of (i+1)^2 = sum of 1^2..25^2 = 25*26*51/6 = 5525
+// ---------------------------------------------------------------------------
+let mut sq_total = 0;
+let mut sq_fail = 0;
+let mut si = 0;
+while si < 25 {
+    let src = f"( {si} + 1 ) * ( {si} + 1 )";
+    match evaluate(src) {
+        Ok(v) => {
+            let exp = (si + 1) * (si + 1);
+            if v != exp { sq_fail = sq_fail + 1; }
+            sq_total = sq_total + v;
+        }
+        Err(e) => { sq_fail = sq_fail + 1; }
+    }
+    si = si + 1;
+}
+check_eq_int("sq_total", sq_total, 5525);
+check_eq_int("sq_fail", sq_fail, 0);
+
+// ===========================================================================
+// FINAL VERDICT
+// ===========================================================================
+if failures == 0 {
+    print("ALL_CHECKS_PASSED");
+} else {
+    print(f"TOTAL_FAILURES={failures}");
+}

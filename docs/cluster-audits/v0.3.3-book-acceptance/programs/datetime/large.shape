@@ -10,11 +10,15 @@
 // result is asserted against an EXPECTED value derived from book semantics
 // (written BEFORE first run). On all-pass: "ALL_CHECKS_PASSED".
 //
-// NOTE (language constraint encountered): under this strict-typing build a
-// `DateTime` value cannot be stored as an array element (neither `[dt]` nor
-// `.push(dt)` type-checks, even with `Array<DateTime>` annotation). The engine
-// therefore stores schedule entries as epoch-millisecond `int`s and formatted
-// `string`s — reconstructing DateTimes on demand via `DateTime.from_epoch`.
+// NOTE (verified BOOK-GAP, not a defect): under this strict-typing build an
+// array literal whose elements are `DateTime` values fails element-type
+// inference — `let a: Array<DateTime> = [dt]` errors with "cannot infer the
+// element type of this array literal" even WITH the annotation. The book never
+// claims DateTime arrays work (its Date-Range example collects Array<string>),
+// so this is a documentation gap, not a contradiction. The engine therefore
+// stores schedule entries as epoch-millisecond `int`s and formatted `string`s
+// — reconstructing DateTimes on demand via `DateTime.from_epoch`. (Scalar int
+// methods like unix_timestamp() on DateTime PARAMS propagate fine — verified.)
 // =============================================================================
 from std::core::intrinsics use { DateTime }
 
@@ -69,15 +73,10 @@ fn count_weekdays(start: DateTime, end: DateTime) -> int {
     n
 }
 
-// Whole days between two instants given their unix_timestamp seconds.
-// NOTE: this takes pre-extracted `int` seconds rather than `DateTime` params.
-// Under this build, an `int`-returning DateTime method (e.g. unix_timestamp())
-// called on a `DateTime`-typed *parameter* does not propagate its `int` type
-// into an arithmetic operator (the operands come back `unknown`) — so the
-// timestamps are extracted at the call site (top-level, where method-return
-// types resolve) and passed in as ints. See REPORT.md (FN-REG-CORRECTNESS).
-fn days_between_secs(a_secs: int, b_secs: int) -> int {
-    (b_secs - a_secs) / 86400
+// Whole days between two DateTimes via their unix_timestamp seconds.
+// Book: unix_timestamp() returns int seconds since epoch.
+fn days_between(a: DateTime, b: DateTime) -> int {
+    (b.unix_timestamp() - a.unix_timestamp()) / 86400
 }
 
 // Add N business days to a date (skips weekends), returning the landing date.
@@ -293,12 +292,10 @@ fn section_business_days() {
     let wkend = DateTime.parse("2024-06-21T00:00:00+00:00")
     ck_int("biz.week.weekdays", count_weekdays(wkstart, wkend), 5)
 
-    // days_between: 2024-06-10 .. 2024-06-15 = 5.
-    // Timestamps extracted top-of-section (method-return int resolves here),
-    // then passed as ints — see days_between_secs note.
-    let a_secs = DateTime.parse("2024-06-10T12:00:00+00:00").unix_timestamp()
-    let b_secs = DateTime.parse("2024-06-15T12:00:00+00:00").unix_timestamp()
-    ck_int("biz.daysbetween", days_between_secs(a_secs, b_secs), 5)
+    // days_between: 2024-06-10 .. 2024-06-15 = 5 days.
+    let d_a = DateTime.parse("2024-06-10T12:00:00+00:00")
+    let d_b = DateTime.parse("2024-06-15T12:00:00+00:00")
+    ck_int("biz.daysbetween", days_between(d_a, d_b), 5)
 }
 
 // ============================================================================
@@ -476,6 +473,232 @@ fn section_week_quarter() {
     ck_int("q.feb", (q1.month() - 1) / 3 + 1, 1)
 }
 
+// ============================================================================
+// SECTION 13 — Parse-format-variants matrix
+//   Each book-accepted input format (Parsing Strings table) is parsed and its
+//   normalized iso8601() is asserted. No-timezone inputs default to UTC.
+// ============================================================================
+fn section_parse_matrix() {
+    // RFC 3339 with offset, normalized to UTC offset string form.
+    ck_str("pm.rfc3339",
+        DateTime.parse("2024-01-15T10:30:00+00:00").iso8601(),
+        "2024-01-15T10:30:00+00:00")
+    // ISO with negative offset preserves its offset in iso8601().
+    ck_str("pm.iso.neg",
+        DateTime.parse("2024-01-15T10:30:00-05:00").iso8601(),
+        "2024-01-15T10:30:00-05:00")
+    // Date + time, no tz -> assumes UTC.
+    ck_str("pm.datetime.notz",
+        DateTime.parse("2024-01-15 10:30:00").iso8601(),
+        "2024-01-15T10:30:00+00:00")
+    // Date + hours:minutes -> seconds zero.
+    ck_int("pm.hm.second",
+        DateTime.parse("2024-01-15 10:30").second(), 0)
+    ck_int("pm.hm.minute",
+        DateTime.parse("2024-01-15 10:30").minute(), 30)
+    // Date only -> midnight UTC.
+    let donly = DateTime.parse("2024-01-15")
+    ck_int("pm.dateonly.hour", donly.hour(), 0)
+    ck_int("pm.dateonly.minute", donly.minute(), 0)
+    ck_int("pm.dateonly.day", donly.day(), 15)
+    // Component checks across the negative-offset value (local wall-clock).
+    let neg = DateTime.parse("2024-01-15T10:30:00-05:00")
+    ck_int("pm.neg.hour", neg.hour(), 10)        // wall-clock hour preserved
+    ck_int("pm.neg.utc.hour", neg.to_utc().hour(), 15)  // 10:30-05:00 -> 15:30 UTC
+    ck_str("pm.neg.offset", neg.offset(), "-05:00")
+}
+
+// ============================================================================
+// SECTION 14 — Full-month weekday/weekend census for June 2024
+//   June 1 2024 is a Saturday. June has 30 days. Expected:
+//   weekdays = 20, weekend days = 10. We walk the month day-by-day.
+// ============================================================================
+fn section_month_census() {
+    let mut cur = DateTime.parse("2024-06-01T00:00:00+00:00")
+    let endd = DateTime.parse("2024-06-30T00:00:00+00:00")
+    let mut weekdays = 0
+    let mut weekends = 0
+    let mut total = 0
+    while cur.is_before(endd) or cur.is_same_day(endd) {
+        if cur.is_weekday() {
+            weekdays = weekdays + 1
+        } else {
+            weekends = weekends + 1
+        }
+        total = total + 1
+        cur = cur.add_days(1)
+    }
+    ck_int("census.total", total, 30)
+    ck_int("census.weekdays", weekdays, 20)
+    ck_int("census.weekends", weekends, 10)
+    // June 1 2024 is Saturday (dow 5).
+    ck_int("census.jun1.dow", DateTime.parse("2024-06-01T00:00:00+00:00").day_of_week(), 5)
+    // June 30 2024 is Sunday (dow 6).
+    ck_int("census.jun30.dow", DateTime.parse("2024-06-30T00:00:00+00:00").day_of_week(), 6)
+}
+
+// ============================================================================
+// SECTION 15 — SLA / deadline tracker
+//   A ticket opened 2024-06-14T16:00:00Z (Friday) has a 2-business-day SLA.
+//   Adding 2 business days lands on 2024-06-18 (Tue). The resolution at
+//   2024-06-18T10:00:00Z is BEFORE the deadline end-of-day; assert ordering.
+// ============================================================================
+fn section_sla() {
+    let opened = DateTime.parse("2024-06-14T16:00:00+00:00")
+    ck_int("sla.opened.dow", opened.day_of_week(), 4)  // Friday
+    let deadline_day = add_business_days(opened, 2)     // Fri -> Mon -> Tue
+    ck_str("sla.deadline.date", deadline_day.format("%Y-%m-%d"), "2024-06-18")
+    ck_int("sla.deadline.dow", deadline_day.day_of_week(), 1)  // Tuesday
+
+    // Resolution well inside the window.
+    let resolved = DateTime.parse("2024-06-18T10:00:00+00:00")
+    let deadline_eod = DateTime.parse("2024-06-18T23:59:59+00:00")
+    ck_bool("sla.met", resolved.is_before(deadline_eod), true)
+    ck_bool("sla.after.open", resolved.is_after(opened), true)
+
+    // Elapsed business handling: open Fri 16:00 to resolved Tue 10:00.
+    // Whole-day delta via timestamps (book: unix_timestamp seconds).
+    ck_int("sla.elapsed.days", days_between(opened, resolved), 3)  // Fri16->Tue10 ~3.75d floor 3
+}
+
+// ============================================================================
+// SECTION 16 — Duration ledger (DateTime - DateTime arithmetic)
+//   Book: DateTime - DateTime -> Duration; string form PT<seconds>S.
+//   We compute a set of known deltas and assert their ISO-duration strings
+//   and their second-counts (via unix_timestamp).
+// ============================================================================
+fn section_duration_ledger() {
+    let t0 = DateTime.parse("2024-06-15T00:00:00+00:00")
+    let t1 = DateTime.parse("2024-06-15T01:00:00+00:00")   // +1h
+    let t2 = DateTime.parse("2024-06-16T00:00:00+00:00")   // +1d
+    let t3 = DateTime.parse("2024-06-22T00:00:00+00:00")   // +1w
+
+    ck_str("dur.1h", f"{t1 - t0}", "PT3600S")
+    ck_str("dur.1d", f"{t2 - t0}", "PT86400S")
+    ck_str("dur.1w", f"{t3 - t0}", "PT604800S")
+
+    // Cross-check via unix_timestamp second deltas.
+    ck_int("dur.1h.secs", t1.unix_timestamp() - t0.unix_timestamp(), 3600)
+    ck_int("dur.1d.secs", t2.unix_timestamp() - t0.unix_timestamp(), 86400)
+    ck_int("dur.1w.secs", t3.unix_timestamp() - t0.unix_timestamp(), 604800)
+
+    // Operator add of duration literals reproduces the same instants.
+    ck_int("dur.add.1h.hour", (t0 + 1h).hour(), 1)
+    ck_int("dur.add.1d.day", (t0 + 1d).day(), 16)
+    ck_int("dur.add.1w.day", (t0 + 1w).day(), 22)
+}
+
+// ============================================================================
+// SECTION 17 — Anniversary / age calculator using add_months & add_days
+//   Birthdate 2000-02-29 (leap). Adding whole years via add_months(12*n).
+//   2000-02-29 + 12 months -> 2001-02-28 (clamp, non-leap).
+//   + 48 months -> 2004-02-29 (leap again).
+// ============================================================================
+fn section_anniversary() {
+    let birth = DateTime.parse("2000-02-29T00:00:00+00:00")
+    ck_int("anniv.birth.day", birth.day(), 29)
+
+    let y1 = birth.add_months(12)
+    ck_str("anniv.y1", y1.format("%Y-%m-%d"), "2001-02-28")  // clamp to non-leap
+    let y4 = birth.add_months(48)
+    ck_str("anniv.y4", y4.format("%Y-%m-%d"), "2004-02-29")  // leap again
+
+    // Days lived from birth to 2000-03-01 = 1 day (Feb 29 -> Mar 1).
+    let nextday = DateTime.parse("2000-03-01T00:00:00+00:00")
+    ck_int("anniv.daysto.mar1", days_between(birth, nextday), 1)
+
+    // Decade later via add_days. From 2000-02-29, 10 calendar years to
+    // 2010-02-28 spans 3652 days (2004 & 2008 are the leap days inside the
+    // half-open interval; 2000's Feb 29 is the start point, not counted).
+    // So add_days(3652) -> 2010-02-28, and add_days(3653) -> 2010-03-01.
+    ck_str("anniv.decade.eve", birth.add_days(3652).format("%Y-%m-%d"), "2010-02-28")
+    ck_str("anniv.decade", birth.add_days(3653).format("%Y-%m-%d"), "2010-03-01")
+}
+
+// ============================================================================
+// SECTION 18 — Cross-timezone DST awareness
+//   chrono-tz handles DST. 2024-01-15 12:00 UTC in New York is EST (UTC-5) =>
+//   07:00. 2024-06-15 12:00 UTC in New York is EDT (UTC-4) => 08:00. Same zone
+//   string, different offset by season.
+// ============================================================================
+fn section_dst() {
+    let winter = DateTime.parse("2024-01-15T12:00:00+00:00")
+    let summer = DateTime.parse("2024-06-15T12:00:00+00:00")
+    ck_int("dst.ny.winter", winter.to_timezone("America/New_York").hour(), 7)  // EST UTC-5
+    ck_int("dst.ny.summer", summer.to_timezone("America/New_York").hour(), 8)  // EDT UTC-4
+
+    // London: winter GMT (UTC+0) => 12:00 ; summer BST (UTC+1) => 13:00.
+    ck_int("dst.lon.winter", winter.to_timezone("Europe/London").hour(), 12)
+    ck_int("dst.lon.summer", summer.to_timezone("Europe/London").hour(), 13)
+
+    // Tokyo has no DST: both 21:00.
+    ck_int("dst.tky.winter", winter.to_timezone("Asia/Tokyo").hour(), 21)
+    ck_int("dst.tky.summer", summer.to_timezone("Asia/Tokyo").hour(), 21)
+
+    // Round-trip through a DST zone preserves the instant.
+    ck_int("dst.rt.hour", summer.to_timezone("America/New_York").to_utc().hour(), 12)
+}
+
+// ============================================================================
+// SECTION 19 — Quarter & half-year bucketing report
+//   Bucket a set of dates into quarters (pure month math) and verify counts.
+//   Dates: Jan(Q1), Feb(Q1), Apr(Q2), Jul(Q3), Sep(Q3), Nov(Q4), Dec(Q4).
+//   Expected counts: Q1=2, Q2=1, Q3=2, Q4=2.
+// ============================================================================
+fn section_quarter_buckets() {
+    let mut months: Array<int> = []
+    months = months + [DateTime.parse("2024-01-10T00:00:00+00:00").month()]
+    months = months + [DateTime.parse("2024-02-10T00:00:00+00:00").month()]
+    months = months + [DateTime.parse("2024-04-10T00:00:00+00:00").month()]
+    months = months + [DateTime.parse("2024-07-10T00:00:00+00:00").month()]
+    months = months + [DateTime.parse("2024-09-10T00:00:00+00:00").month()]
+    months = months + [DateTime.parse("2024-11-10T00:00:00+00:00").month()]
+    months = months + [DateTime.parse("2024-12-10T00:00:00+00:00").month()]
+
+    let mut q1 = 0
+    let mut q2 = 0
+    let mut q3 = 0
+    let mut q4 = 0
+    let mut i = 0
+    while i < months.length() {
+        let q = (months[i] - 1) / 3 + 1
+        if q == 1 { q1 = q1 + 1 }
+        if q == 2 { q2 = q2 + 1 }
+        if q == 3 { q3 = q3 + 1 }
+        if q == 4 { q4 = q4 + 1 }
+        i = i + 1
+    }
+    ck_int("qb.q1", q1, 2)
+    ck_int("qb.q2", q2, 1)
+    ck_int("qb.q3", q3, 2)
+    ck_int("qb.q4", q4, 2)
+    ck_int("qb.total", q1 + q2 + q3 + q4, 7)
+}
+
+// ============================================================================
+// SECTION 20 — Countdown / time-to-event with formatted breakdown
+//   From 2024-06-15T12:00:00Z to event 2024-06-18T15:30:00Z.
+//   Delta = 3 days 3 hours 30 minutes. Verify each component via second math.
+// ============================================================================
+fn section_countdown() {
+    let now_fixed = DateTime.parse("2024-06-15T12:00:00+00:00")
+    let event = DateTime.parse("2024-06-18T15:30:00+00:00")
+    let secs = event.unix_timestamp() - now_fixed.unix_timestamp()
+    // 3d = 259200, 3h = 10800, 30m = 1800 -> 271800 total.
+    ck_int("cd.total.secs", secs, 271800)
+    let days = secs / 86400
+    let rem1 = secs - days * 86400
+    let hours = rem1 / 3600
+    let rem2 = rem1 - hours * 3600
+    let mins = rem2 / 60
+    ck_int("cd.days", days, 3)
+    ck_int("cd.hours", hours, 3)
+    ck_int("cd.mins", mins, 30)
+    let breakdown = f"{days}d {hours}h {mins}m"
+    ck_str("cd.breakdown", breakdown, "3d 3h 30m")
+    ck_bool("cd.future", event.is_after(now_fixed), true)
+}
+
 // ----------------------------------------------------------------------------
 // Driver
 // ----------------------------------------------------------------------------
@@ -491,6 +714,14 @@ section_tz_board()
 section_timesheet()
 section_epoch_ledger()
 section_week_quarter()
+section_parse_matrix()
+section_month_census()
+section_sla()
+section_duration_ledger()
+section_anniversary()
+section_dst()
+section_quarter_buckets()
+section_countdown()
 
 if FAILS == 0 {
     print("ALL_CHECKS_PASSED")

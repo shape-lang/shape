@@ -1,0 +1,59 @@
+// ledger/category.shape
+// Expense categories as an enum, plus parsing and naming helpers.
+// Leaf module (imports nothing). Imported by txn, aggregate, report.
+
+pub enum Category {
+    Food,
+    Rent,
+    Travel,
+    Utilities,
+    Other,
+}
+
+// Canonical display name for a category.
+pub fn cat_name(c: Category) -> string {
+    match c {
+        Category::Food => "Food",
+        Category::Rent => "Rent",
+        Category::Travel => "Travel",
+        Category::Utilities => "Utilities",
+        Category::Other => "Other",
+    }
+}
+
+// Parse a lowercase tag into a category. Unknown tags map to Other.
+pub fn parse_cat(s: string) -> Category {
+    if s == "food" { return Category::Food }
+    if s == "rent" { return Category::Rent }
+    if s == "travel" { return Category::Travel }
+    if s == "utilities" { return Category::Utilities }
+    Category::Other
+}
+
+// Stable integer index for a category (used for grouping/ordering without
+// relying on enum `==`, which the strict-flip build infers as `unknown`).
+pub fn cat_index(c: Category) -> int {
+    match c {
+        Category::Food => 0,
+        Category::Rent => 1,
+        Category::Travel => 2,
+        Category::Utilities => 3,
+        Category::Other => 4,
+    }
+}
+
+// Total number of distinct categories.
+pub fn cat_count() -> int {
+    5
+}
+
+// Whether a category is considered "essential" spending.
+pub fn is_essential(c: Category) -> bool {
+    match c {
+        Category::Food => true,
+        Category::Rent => true,
+        Category::Travel => false,
+        Category::Utilities => true,
+        Category::Other => false,
+    }
+}

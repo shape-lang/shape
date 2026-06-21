@@ -1,78 +1,99 @@
-// small.shape — Functions chapter core exercise
-// Book: fundamentals/functions.mdx
-// Exercises: named fn + return type, tail expression, default params (positional),
-// lambdas, closure-inference-from-context (map/filter), higher-order fn (apply),
-// closure-returning fn bound to let (adder), read-only capture, const param.
+// small.shape — exercises the core of fundamentals/functions.mdx
+// Uses ONLY constructs the book marks runnable=true.
 
+// Basic function + tail-expression return (book "Basic Function", "Tail Expression")
 fn double(x: int) -> int {
   x * 2
 }
 
 fn add(a: int, b: int) -> int {
-  a + b
+  let sum = a + b
+  sum
 }
 
-fn triple(x: int) -> int {
-  let t = x * 3
-  t
-}
-
+// Default parameter values, positional default-filling (book "Default Parameter Values")
 fn rect(width: int = 10, height: int = 20) -> int {
   width * height
 }
 
+// const immutable param (book "Reference Parameters" -> const)
 fn no_mutate(const x: int) -> int {
   x * 2
 }
 
+// Higher-order function taking a lambda (book "Higher-Order Functions")
 fn apply(f, x) { f(x) }
 
-fn adder(a) { |b| a + b }
+// Returning a callable bound to a let (book "Higher-Order Functions": fn adder(a){ |b| a+b })
+fn make_adder(a) { |b| a + b }
 
-fn check(name: string, got: int, expected: int) {
-  if got != expected {
-    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+// check helper: prints a CHECK_FAILED line on mismatch, returns ok-ness
+fn check(name: string, got: int, want: int) -> bool {
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    false
+  } else {
+    true
   }
 }
 
-check("double", double(21), 42)
-check("add", add(2, 3), 5)
-check("triple", triple(7), 21)
+// --- assertions: every expected value derived from book semantics ---
+let mut ok = true
 
-check("rect_defaults", rect(), 200)
-check("rect_one", rect(5), 100)
-check("rect_two", rect(5, 6), 30)
+// double(21) -> 42 (book prints double(21))
+if !check("double", double(21), 42) { ok = false }
 
-check("no_mutate", no_mutate(21), 42)
+// add(2,3) -> 5
+if !check("add", add(2, 3), 5) { ok = false }
 
+// rect(): both defaults -> 10*20 = 200 (book comment "// 200")
+if !check("rect_defaults", rect(), 200) { ok = false }
+// rect(5): height defaults to 20 -> 5*20 = 100 (book comment "// 100")
+if !check("rect_one", rect(5), 100) { ok = false }
+// rect(5,6) -> 30 (book comment "// 30")
+if !check("rect_two", rect(5, 6), 30) { ok = false }
+
+// no_mutate(21) -> 42
+if !check("no_mutate", no_mutate(21), 42) { ok = false }
+
+// Single-param lambda bound to let (book "Lambdas": inc(10) -> 11)
 let inc = |x| x + 1
-check("inc", inc(10), 11)
+if !check("inc", inc(10), 11) { ok = false }
 
-let count = 10
-let bump_by_count = |x| x + count
-check("capture1", bump_by_count(5), 15)
-check("capture2", bump_by_count(7), 17)
-
-let nums: Vec<int> = [1, 2, 3, 4]
-let evens = nums.filter(|x| x % 2 == 0)
-let big = nums.map(|x| x * 10)
-check("filter_len", evens.len(), 2)
-check("filter_0", evens[0], 2)
-check("filter_1", evens[1], 4)
-check("map_0", big[0], 10)
-check("map_3", big[3], 40)
-
+// Block-body lambda in .map (book "Lambdas")
+let nums: Vec<int> = [1, 2, 3]
 let doubled = nums.map(|x| {
   let bumped = x + 1
   bumped * 2
 })
-check("blocklambda_0", doubled[0], 4)
-check("blocklambda_3", doubled[3], 10)
+// (1+1)*2=4, (2+1)*2=6, (3+1)*2=8
+if !check("doubled0", doubled[0], 4) { ok = false }
+if !check("doubled1", doubled[1], 6) { ok = false }
+if !check("doubled2", doubled[2], 8) { ok = false }
 
+// Closure inference from context: filter + map (book "Closure Inference from Context")
+let xs: Vec<int> = [1, 2, 3, 4]
+let evens = xs.filter(|x| x % 2 == 0)
+if !check("evens0", evens[0], 2) { ok = false }
+if !check("evens1", evens[1], 4) { ok = false }
+let big = xs.map(|x| x * 10)
+if !check("big0", big[0], 10) { ok = false }
+if !check("big3", big[3], 40) { ok = false }
+
+// HOF: apply(double, 21) -> 42 (book "Higher-Order Functions": prints 42)
 let dbl = |x| x * 2
-check("apply", apply(dbl, 21), 42)
+if !check("apply", apply(dbl, 21), 42) { ok = false }
 
-let plus10 = adder(10)
-check("adder", plus10(5), 15)
+// Returning a callable bound to a let (book: plus10(5) -> 15)
+let plus10 = make_adder(10)
+if !check("plus10", plus10(5), 15) { ok = false }
 
-print("ALL_CHECKS_PASSED")
+// Read-only capture (book "Closures and Capture": 15, 17)
+let count = 10
+let bump_by_count = |x| x + count
+if !check("capture5", bump_by_count(5), 15) { ok = false }
+if !check("capture7", bump_by_count(7), 17) { ok = false }
+
+if ok {
+  print("ALL_CHECKS_PASSED")
+}

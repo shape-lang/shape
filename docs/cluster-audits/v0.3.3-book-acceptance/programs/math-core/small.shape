@@ -1,57 +1,78 @@
-// small.shape — math-core slice
-// Exercises the chapter core: bare-global arithmetic builtins (native/math.mdx)
-// and the std::core::math constants + trigonometry + helpers.
-// Self-checking: every result asserted against a book-derived expected value.
+// math-core small program: exercises the core of stdlib/core/math + native/math.
+// Book sources:
+//   stdlib/core/math.mdx  — sum, mean, std, variance
+//   stdlib/native/math.mdx — bare globals (floor/ceil/round/abs/min/max/sqrt/pow),
+//                            constants PI()/E()/TAU(), trig (radians), clamp, lerp, sign, degrees, radians
+//
+// Self-checking: each check returns 0 on pass, 1 (and prints CHECK_FAILED) on fail.
+// The total is summed at the top level; ALL_CHECKS_PASSED is printed iff total == 0.
 
-from std::core::math use { PI, E, TAU, sin, cos, radians, degrees, clamp, lerp, sign, sum, mean, variance, std }
+from std::core::math use { sum, mean, std, variance, PI, E, TAU, sin, cos, clamp, lerp, sign, degrees, radians }
 
-fn approx(a: number, b: number) -> bool {
-    let d = a - b
-    let ad = if d < 0.0 { 0.0 - d } else { d }
-    ad < 0.000001
+// approximate equality for number results
+fn close(got: number, expected: number) -> bool {
+    abs(got - expected) < 0.000001
 }
 
-fn check(name: string, cond: bool) {
-    if !cond {
-        print(f"CHECK_FAILED: {name}")
+fn check_num(name: string, got: number, expected: number) -> int {
+    if close(got, expected) {
+        0
+    } else {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+        1
     }
 }
 
-// Bare global builtins (native/math.mdx "Bare Global Builtins")
-check("sqrt_hyp", approx(sqrt(3.0 * 3.0 + 4.0 * 4.0), 5.0))
-check("abs_neg", approx(abs(-7.0), 7.0))
-check("floor", floor(3.7) == 3)
-check("ceil", ceil(3.2) == 4)
-check("round", round(3.5) == 4)
-check("min", approx(min(3.0, 5.0), 3.0))
-check("max", approx(max(3.0, 5.0), 5.0))
-check("pow", approx(pow(2.0, 10.0), 1024.0))
+fn check_int(name: string, got: int, expected: int) -> int {
+    if got == expected {
+        0
+    } else {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+        1
+    }
+}
 
-// Constants
-check("PI", approx(PI(), 3.141592653589793))
-check("E", approx(E(), 2.718281828459045))
-check("TAU", approx(TAU(), 6.283185307179586))
-check("TAU_is_2PI", approx(TAU(), 2.0 * PI()))
+let mut failures: int = 0
 
-// Trigonometry (radians)
-check("sin_90", approx(sin(radians(90.0)), 1.0))
-check("cos_0", approx(cos(0.0), 1.0))
-check("radians_180", approx(radians(180.0), PI()))
-check("degrees_PI", approx(degrees(PI()), 180.0))
+// --- Basic statistics (stdlib/core/math.mdx) ---
+failures = failures + check_num("sum", sum([1.0, 2.0, 3.0, 4.0]), 10.0)
+failures = failures + check_num("mean", mean([10.0, 20.0, 30.0]), 20.0)
+failures = failures + check_num("std", std([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]), 2.0)
+failures = failures + check_num("variance", variance([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]), 4.0)
 
-// Helpers
-check("clamp_hi", approx(clamp(150.0, 0.0, 100.0), 100.0))
-check("clamp_lo", approx(clamp(-5.0, 0.0, 100.0), 0.0))
-check("clamp_mid", approx(clamp(42.0, 0.0, 100.0), 42.0))
-check("lerp_mid", approx(lerp(0.0, 10.0, 0.5), 5.0))
-check("sign_neg", sign(-5) == -1)
-check("sign_zero", sign(0) == 0)
-check("sign_pos", sign(7) == 1)
+// --- Bare global builtins (stdlib/native/math.mdx) ---
+failures = failures + check_num("sqrt_hypot", sqrt(3.0 * 3.0 + 4.0 * 4.0), 5.0)
+failures = failures + check_num("abs", abs(-7.0), 7.0)
+failures = failures + check_int("floor", floor(3.7), 3)
+failures = failures + check_int("ceil", ceil(3.2), 4)
+failures = failures + check_int("round", round(3.5), 4)
+failures = failures + check_num("min", min(3.0, 5.0), 3.0)
+failures = failures + check_num("max", max(3.0, 5.0), 5.0)
+failures = failures + check_num("pow", pow(2.0, 10.0), 1024.0)
 
-// Statistical surface (core/math.mdx) — documented-and-working set only
-check("sum", approx(sum([1.0, 2.0, 3.0, 4.0]), 10.0))
-check("mean", approx(mean([10.0, 20.0, 30.0]), 20.0))
-check("variance", approx(variance([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]), 4.0))
-check("std", approx(std([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]), 2.0))
+// --- Constants (functions, call with ()) ---
+failures = failures + check_num("PI", PI(), 3.141592653589793)
+failures = failures + check_num("E", E(), 2.718281828459045)
+failures = failures + check_num("TAU", TAU(), 6.283185307179586)
+failures = failures + check_num("tau_is_2pi", TAU(), 2.0 * PI())
 
-print("ALL_CHECKS_PASSED")
+// --- Trigonometry (radians) ---
+failures = failures + check_num("sin_half_pi", sin(radians(90.0)), 1.0)
+failures = failures + check_num("cos_zero", cos(0.0), 1.0)
+
+// --- Helpers ---
+failures = failures + check_num("clamp_high", clamp(150.0, 0.0, 100.0), 100.0)
+failures = failures + check_num("clamp_low", clamp(-5.0, 0.0, 100.0), 0.0)
+failures = failures + check_num("clamp_mid", clamp(42.0, 0.0, 100.0), 42.0)
+failures = failures + check_num("lerp", lerp(0.0, 10.0, 0.5), 5.0)
+failures = failures + check_int("sign_neg", sign(-5), -1)
+failures = failures + check_int("sign_zero", sign(0), 0)
+failures = failures + check_int("sign_pos", sign(7), 1)
+failures = failures + check_num("degrees_tau", degrees(TAU()), 360.0)
+failures = failures + check_num("radians_180", radians(180.0), PI())
+
+if failures == 0 {
+    print("ALL_CHECKS_PASSED")
+} else {
+    print(f"FAILURES: {failures}")
+}

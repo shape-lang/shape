@@ -17,8 +17,9 @@ bytecode-verification diagnostic and (under jit) a `[jit-fallback]` line to
 Determinism strategy for this slice: pure (impl, supertraits, dyn). No clocks,
 no randomness, no I/O beyond `print`; all fixtures are literals.
 
-Re-verified 2026-06-20 at worktree HEAD: `large.shape` PASS (vm+jit, ec=0,
-byte-identical, 3/3 stable, ~70 machine-checked assertions). `small.shape`
+Re-verified 2026-06-21 at worktree HEAD: `large.shape` extended to 980 LOC /
+111 machine-checked assertions — PASS (vm+jit, ec=0, byte-identical, 3/3
+stable). `small.shape`
 required an AUTHOR-ERROR correction on re-verification (an earlier draft used
 `+` concatenation of a method result → hard compile error; rewritten to the
 book's f-string / annotation-bound idiom → PASS vm+jit byte-identical). Details
@@ -114,7 +115,7 @@ underlying mis-typing is recorded as an incidental defect below.
 
 ---
 
-## DELIVERABLE 2 — `large.shape` (682 LOC, ~70 machine-checked assertions)
+## DELIVERABLE 2 — `large.shape` (980 LOC, 111 machine-checked assertions)
 
 A deterministic **invoice / ledger rendering engine** rooted entirely in trait
 machinery: `Priced` / `Renderable` traits with FIVE concrete implementors
@@ -125,6 +126,15 @@ traits via `match self`, `dyn`-dispatch aggregation over homogeneous
 `Vec<dyn Priced>` / `Vec<dyn Renderable>` collections, primitive + fallible
 conversion traits, and declaration-only `Container<T>` (generic trait) +
 `Sequence { type Element : Renderable; }` (associated type with bound).
+
+The 2026-06-21 extension added THREE further trait families (all from the same
+chapter machinery): §9 `Metric` trait + `extend Vec2` with sqrt-based geometry
+and a `Vec<dyn Metric>` aggregator; §10 a three-level supertrait chain
+`Identified : Scored : Ranked` with a `Vec<dyn Scored>` aggregator and a
+rank-distribution sweep; §11 a CONCRETE `IntContainer`/`IntBag` modelling the
+book's cited generic-trait workaround (`impl Queryable for Table`); §12-13
+cross-layer invariant checks (scalar-vs-dyn dispatch agreement) and a combined
+multi-family sweep total (11420).
 
 Every numeric/string result is asserted against a value derived from the §0
 fixture block and book semantics, written BEFORE the first run. §0 hand-computes

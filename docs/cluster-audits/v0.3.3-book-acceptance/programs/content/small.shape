@@ -1,17 +1,16 @@
-// small.shape — Content slice (fundamentals/content.mdx)
-// Exercises the Content builder API the chapter teaches:
-//   Content.text + style chaining, Color namespace, Content.table + borders,
-//   Content.chart, and the Content trait with a direct .render() call.
-// Determinism strategy: render every node to a string via .to_string() and
-// assert on stable substrings / equalities (book §"Styled Text", §"Tables").
+// small.shape — Content builders (fundamentals/content.mdx, v0.3.3 surface)
+// Exercises the chapter's runnable core: Content.text + style methods, the
+// Color namespace, Content.table + border styles + max_rows, and Content.chart.
+// Determinism strategy: render each node to a string and assert on stable
+// structure (substrings / lengths / inequalities), per the slice strategy.
 //
-// NOTE: the book's headline syntax c"..." (§Content Strings), the 2-arg-less
-// Content.table(records) form, render(Plain) adapter selection, and the
-// print()-auto-dispatches-the-Content-trait claim do NOT hold in the shipped
-// binary — see REPORT.md (book_wrong). This program uses the API that works.
+// BOOK-GAP captured below: every runnable example in the chapter binds the node
+// with `let x = Content.text(...)` and only ever print()s it. To ASSERT a
+// rendered string you must annotate the .toString() result `: string`, else
+// strict typing reports the operand as `unknown` at a `==` site. The chapter
+// never shows this.
 
 let mut failures = 0
-
 fn check(cond: bool, label: string) {
     if !cond {
         print(f"CHECK_FAILED: {label}")
@@ -19,90 +18,72 @@ fn check(cond: bool, label: string) {
     }
 }
 
-// --- Plain text renders to exactly its text (no codes) ---
-// Book §Content Trait: Content.text(...) is the primitive text node.
-let plain = Content.text("hello").to_string()
-check(plain == "hello", "plain-text-roundtrip expected=hello")
+// --- Styled text -----------------------------------------------------------
+// Book lines 8-13: plain Content.text renders to its text; .toString() and
+// .to_string() are aliases.
+let plain: string = Content.text("Hello").toString()
+let plainAlias: string = Content.text("Hello").to_string()
+check(plain == "Hello", "plain text renders with no styling expected=Hello")
+check(plainAlias == "Hello", "to_string is an alias of toString")
+check(plain.length() == 5, "plain length expected=5")
 
-// --- Styling wraps text but preserves the payload ---
-// Book §Styled Text: .fg / .bold etc. chain on a ContentNode.
-let styled = Content.text("Error").fg(Color.red).bold().to_string()
-check(styled.contains("Error"), "styled-contains-payload")
-// Styling wraps the payload in ANSI escapes, so the rendered string is
-// strictly longer than the bare payload "Error" (5 chars).
-let styled_len: int = styled.len()
-check(styled_len > 5, "styling-adds-escape-codes")
+// Book lines 156-196: style methods chain on a node and wrap it. A styled
+// node differs from plain, still carries the payload, and is strictly longer
+// (escape bytes added). We assert structure, not exact escape ordering.
+let styled: string = Content.text("Hello").fg(Color.red).bold().toString()
+check(styled != plain, "styled differs from plain")
+check(styled.contains("Hello"), "styled keeps the payload")
+check(styled.contains("31m"), "red foreground emits SGR code 31")
+check(styled.length() > plain.length(), "styling adds escape bytes")
 
-// --- Each named color produces a distinct rendering ---
-// Book §Colors: Color.red/green/blue are named colors.
-let red = Content.text("X").fg(Color.red).to_string()
-let green = Content.text("X").fg(Color.green).to_string()
-let blue = Content.text("X").fg(Color.blue).to_string()
-check(red != green, "red-distinct-from-green")
-check(green != blue, "green-distinct-from-blue")
-check(red.contains("X") && green.contains("X") && blue.contains("X"),
-      "all-colors-keep-payload")
+// Each named color renders distinctly (Color namespace, lines 158-171).
+let red: string = Content.text("X").fg(Color.red).toString()
+let green: string = Content.text("X").fg(Color.green).toString()
+let blue: string = Content.text("X").fg(Color.blue).toString()
+check(red != green, "red distinct from green")
+check(green != blue, "green distinct from blue")
 
-// --- RGB color ---
-// Book §Colors: Color.rgb(r,g,b), 0-255 per channel.
-let rgb = Content.text("rgb").bg(Color.rgb(40, 0, 0)).to_string()
-check(rgb.contains("rgb"), "rgb-bg-keeps-payload")
+// RGB + all decoration methods chain (lines 170, 186-196).
+let rgb: string = Content.text("rgb").bg(Color.rgb(40, 0, 0)).toString()
+check(rgb.contains("rgb"), "rgb bg keeps payload")
+let deco: string = Content.text("d").italic().underline().dim().toString()
+check(deco.contains("d"), "decoration chain keeps payload")
 
-// --- All decoration methods chain ---
-// Book §Style Methods table.
-let deco = Content.text("d").italic().underline().dim().to_string()
-check(deco.contains("d"), "decoration-chain-keeps-payload")
-
-// --- Table renders headers and cells ---
-// Book §Tables. NOTE: book prose shows Content.table(records); the runtime
-// takes Content.table(headers, rows) — recorded book-wrong in REPORT.
+// --- Tables ----------------------------------------------------------------
+// Book lines 198-244: Content.table(headers, rows); default border rounded (╭).
 let headers = ["name", "value"]
 let rows = [["test", "142.5"], ["prod", "378.2"]]
-let tbl = Content.table(headers, rows).border(Border.rounded).to_string()
-check(tbl.contains("name"), "table-header-name")
-check(tbl.contains("value"), "table-header-value")
-check(tbl.contains("test"), "table-cell-test")
-check(tbl.contains("378.2"), "table-cell-378.2")
-// Rounded border draws U+256D top-left corner per book §Border Styles.
-check(tbl.contains("╭"), "rounded-corner-drawn")
+let rounded: string = Content.table(headers, rows).toString()
+check(rounded.contains("name"), "table header name")
+check(rounded.contains("378.2"), "table data cell")
+check(rounded.contains("╭"), "default border rounded top-left expected=╭")
 
-// --- Sharp border draws a different corner ---
-let sharp = Content.table(headers, rows).border(Border.sharp).to_string()
-check(sharp.contains("┌"), "sharp-corner-drawn")
-check(!sharp.contains("╭"), "sharp-has-no-rounded-corner")
+// Border styles (lines 224-288): sharp ┌, heavy ┏, double ╔.
+let sharp: string = Content.table(headers, rows).border(Border.sharp).toString()
+check(sharp.contains("┌"), "sharp top-left expected=┌")
+check(!sharp.contains("╭"), "sharp has no rounded corner")
+let heavy: string = Content.table(headers, rows).border(Border.heavy).toString()
+check(heavy.contains("┏"), "heavy top-left expected=┏")
+let dbl: string = Content.table(headers, rows).border(Border.double).toString()
+check(dbl.contains("╔"), "double top-left expected=╔")
 
-// --- max_rows truncates ---
-// Book §Table Methods: .max_rows(n) truncates after n rows.
-let big = Content.table(["n"], [["1"], ["2"], ["3"], ["4"]])
+// max_rows truncates display (line 294).
+let capped: string = Content.table(["n"], [["1"], ["2"], ["3"], ["4"]])
     .max_rows(2)
-    .to_string()
-check(big.contains("more rows"), "max_rows-truncates")
+    .toString()
+check(capped.contains("more rows"), "max_rows truncation notice shown")
 
-// --- Chart builds without error and renders to a non-empty string ---
-// Book §Charts: Content.chart(type).add(label,data).title(...).
-let chart = Content.chart("line")
+// --- Charts ----------------------------------------------------------------
+// Book lines 301-322: Content.chart("line").add(label,[[x,y],...]).title(...);
+// the title appears in the terminal rendering.
+let chart: string = Content.chart("line")
     .add("Revenue", [[1, 100], [2, 200], [3, 350]])
     .title("Quarterly Revenue")
-    .to_string()
-let chart_len: int = chart.len()
-check(chart_len > 0, "chart-renders-nonempty")
-
-// --- Content trait: implement render() and call it directly ---
-// Book §Content Trait. NOTE: book claims print(value) auto-dispatches the
-// trait; the runtime does NOT (recorded book-wrong). Direct .render() works.
-type Label {
-    text: string,
-}
-
-impl Content for Label {
-    method render() {
-        Content.text(self.text).bold()
-    }
-}
-
-let lbl = Label { text: "tagged" }
-let rendered = lbl.render().to_string()
-check(rendered.contains("tagged"), "trait-render-produces-payload")
+    .x_label("Quarter")
+    .y_label("USD")
+    .toString()
+check(chart.contains("Quarterly Revenue"), "chart title appears in rendering")
+check(chart.length() > 0, "chart renders non-empty")
 
 if failures == 0 {
     print("ALL_CHECKS_PASSED")

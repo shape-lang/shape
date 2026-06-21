@@ -1,0 +1,182 @@
+// ledger/aggregate.shape
+// Aggregation/analytics over a list of transactions. Imports the Transaction
+// type and helpers from txn, the Category enum from category, and money math.
+// This is the "business logic" module that several callers depend on.
+//
+// Implementation note: aggregations are written as explicit accumulator loops
+// over the transaction list rather than as filter/map/sum chains. Both styles
+// are valid Shape, but explicit loops keep every intermediate value's concrete
+// type proven, which is what strict typing wants.
+
+from ledger::txn use { Transaction, is_expense, is_income, magnitude, txn_cat_index }
+from ledger::category use { Category, cat_count }
+from ledger::money use { add }
+
+// Sum of all expense magnitudes (cents). Income is excluded.
+pub fn total_expenses(ts: Array<Transaction>) -> int {
+    let mut total = 0
+    for t in ts {
+        if is_expense(t) {
+            total = add(total, magnitude(t))
+        }
+    }
+    total
+}
+
+// Sum of all income amounts (cents).
+pub fn total_income(ts: Array<Transaction>) -> int {
+    let mut total = 0
+    for t in ts {
+        if is_income(t) {
+            total = add(total, t.amount)
+        }
+    }
+    total
+}
+
+// Net balance (income minus expenses), signed cents.
+pub fn net_balance(ts: Array<Transaction>) -> int {
+    total_income(ts) - total_expenses(ts)
+}
+
+// Number of transactions.
+pub fn count(ts: Array<Transaction>) -> int {
+    ts.length
+}
+
+// Number of expense transactions.
+pub fn expense_count(ts: Array<Transaction>) -> int {
+    let mut c = 0
+    for t in ts {
+        if is_expense(t) { c = c + 1 }
+    }
+    c
+}
+
+// Number of income transactions.
+pub fn income_count(ts: Array<Transaction>) -> int {
+    let mut c = 0
+    for t in ts {
+        if is_income(t) { c = c + 1 }
+    }
+    c
+}
+
+// Expense magnitude total restricted to a single category (by index 0..4).
+pub fn expenses_in_cat(ts: Array<Transaction>, cat_idx: int) -> int {
+    let mut total = 0
+    for t in ts {
+        if is_expense(t) {
+            if txn_cat_index(t) == cat_idx {
+                total = add(total, magnitude(t))
+            }
+        }
+    }
+    total
+}
+
+// Count of expense transactions in a single category (by index).
+pub fn count_in_cat(ts: Array<Transaction>, cat_idx: int) -> int {
+    let mut c = 0
+    for t in ts {
+        if is_expense(t) {
+            if txn_cat_index(t) == cat_idx { c = c + 1 }
+        }
+    }
+    c
+}
+
+// Build a per-category expense-total table indexed by category index.
+// Returns an Array<int> of length cat_count() where slot i is the total
+// expense magnitude for category index i.
+pub fn category_totals(ts: Array<Transaction>) -> Array<int> {
+    let n = cat_count()
+    let mut out: Array<int> = []
+    let mut i = 0
+    while i < n {
+        out = out.push(expenses_in_cat(ts, i))
+        i = i + 1
+    }
+    out
+}
+
+// Largest single expense magnitude (cents). Returns 0 for no expenses.
+pub fn max_expense(ts: Array<Transaction>) -> int {
+    let mut best = 0
+    for t in ts {
+        if is_expense(t) {
+            let m = magnitude(t)
+            if m > best { best = m }
+        }
+    }
+    best
+}
+
+// Smallest single expense magnitude (cents). Returns 0 for no expenses.
+pub fn min_expense(ts: Array<Transaction>) -> int {
+    let mut best = -1
+    for t in ts {
+        if is_expense(t) {
+            let m = magnitude(t)
+            if best == -1 { best = m } else if m < best { best = m }
+        }
+    }
+    if best == -1 { return 0 }
+    best
+}
+
+// Mean expense magnitude using integer floor division (cents).
+// Returns 0 when there are no expenses.
+pub fn mean_expense(ts: Array<Transaction>) -> int {
+    let c = expense_count(ts)
+    if c == 0 { return 0 }
+    total_expenses(ts) / c
+}
+
+// Index of the category with the largest expense total. Ties resolve to the
+// lowest category index (first wins). Returns -1 when there are no expenses.
+pub fn top_category_index(ts: Array<Transaction>) -> int {
+    let totals: Array<int> = category_totals(ts)
+    let mut best_idx = -1
+    let mut best_val = 0
+    let mut i = 0
+    while i < totals.length {
+        let v: int = totals[i]
+        if v > best_val {
+            best_val = v
+            best_idx = i
+        }
+        i = i + 1
+    }
+    best_idx
+}
+
+// All expense magnitudes (cents) in transaction order.
+pub fn expense_magnitudes(ts: Array<Transaction>) -> Array<int> {
+    let mut out: Array<int> = []
+    for t in ts {
+        if is_expense(t) {
+            out = out.push(magnitude(t))
+        }
+    }
+    out
+}
+
+// Sorted (descending) list of expense magnitudes.
+pub fn sorted_expenses_desc(ts: Array<Transaction>) -> Array<int> {
+    let exp: Array<int> = expense_magnitudes(ts)
+    exp.sort(|a, b| b - a)
+}
+
+// Number of categories that have at least one expense.
+pub fn active_category_count(ts: Array<Transaction>) -> int {
+    let totals: Array<int> = category_totals(ts)
+    let mut c = 0
+    let mut i = 0
+    while i < totals.length {
+        let v: int = totals[i]
+        if v > 0 { c = c + 1 }
+        i = i + 1
+    }
+    c
+}

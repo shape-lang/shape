@@ -61,29 +61,23 @@ overflow arithmetic is not portable across VM/JIT).
 
 ## Failure classifications
 
-1. **RE-VALIDATION 2026-06-20 — the earlier "FN-REG-CORRECTNESS defect" is NOT a
-   defect at HEAD; it is correct strict-typing behavior.** Minimal repro:
-   `defect_struct_array_field_arith.shape`. At HEAD the program fails at COMPILE
-   time with a clear, actionable strict-typing diagnostic (no longer the opaque
-   `Reference(Run) cannot have fields` / `no method 'add' on receiver kind Int64`
-   that the prior run recorded):
+1. **RE-VALIDATION 2026-06-21 — the earlier "FN-REG-CORRECTNESS defect" is FULLY
+   RESOLVED at HEAD: the program compiles AND runs correctly.** Minimal repro:
+   `defect_struct_array_field_arith.shape`. At HEAD, run via the exact prescribed
+   harness (`bash -c 'ulimit ...; timeout 30 ... run --mode {vm,jit} <file>'`),
+   the program returns ec=0 and prints `4` then `5` under BOTH VM and JIT. Field
+   read off an indexed element of a `Vec<StructType>` flowing into an arithmetic
+   operator (`rs[0].len + 1`) now works. The unannotated `let mut rs = []` +
+   `.push(Run{...})` element-type inference succeeds — the strict-flip does NOT
+   reject it here.
 
-   > `error[SEMANTIC]: Type constraint violation: cannot infer the type of field
-   > 'len' read off an element of 'Run': its element type is only known from a
-   > 'push' into an unannotated empty array ('[]'), which has no declared element
-   > type. Strict typing requires a known element type — annotate the array
-   > ('let rs: Array<Run> = []').`
-
-   Applying the compiler's own suggested fix — annotating the array as
-   `let mut rs: Array<Run> = []` — makes the EXACT program compile and run
-   correctly (`print(rs[0].len)` -> 4; `rs[0].len + 1` -> 5). The root cause was
-   always an unannotated `[]` whose element type was inferred only from a later
-   `.push`; under the strict-flip the compiler now refuses that inference gap and
-   tells the user precisely how to close it. Reproduces identically VM and JIT.
-   **Classification: PASS / correct strict-typing rejection** (the language does
-   the right thing and the error message is good). The large.shape struct-of-arrays
-   design still works and is also a legitimate, in-chapter encoding; it did not
-   need to change.
+   CORRECTION of the prior 2026-06-20 note: that note claimed HEAD now rejects
+   this at COMPILE time with a strict-typing diagnostic demanding
+   `let rs: Array<Run> = []`. That claim is WRONG — it was an artifact of a
+   broken heredoc (fish/bash single-quote collision in the test harness), not
+   real language behavior. Re-run via the exact env-var harness form, the program
+   compiles and runs clean. **Classification: PASS.** No annotation is required;
+   large.shape's struct-of-arrays design is correct and in-chapter.
 
 2. **AUTHOR-ERROR** — empty `if` block (small.shape draft); negative-literal cast
    precedence (`-1 as u8` parses as `-(1 as u8) == -1`, not `(-1) as u8`). The book's

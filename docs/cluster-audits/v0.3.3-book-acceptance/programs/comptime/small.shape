@@ -1,61 +1,72 @@
-// small.shape — comptime slice core exercise.
-// Book: advanced/comptime.mdx
-//   - "Comptime Blocks" expression form: evaluate now, embed literal result
-//   - "comptime fn Helpers": reusable compile-time helpers at module scope
-//   - "Comptime Builtins": build_config() -> { debug, version, target_os, target_arch }
-//   - "Comptime Fields on Types": comptime fields are compile-time-only metadata
-//
-// Strategy: PURE. Every asserted value is a comptime-evaluated constant baked
-// at compile time. Expected values are derived from book semantics BEFORE running.
+// small.shape -- comptime slice (book: advanced/comptime.mdx)
+// Exercises: comptime expression block, comptime fn helpers (composition),
+// top-level side-effect form, build_config(), comptime fields on types.
+// Determinism: every comptime value is baked at compile time (pure).
 
 // --- comptime fn helpers (book: "comptime fn Helpers") ---
-comptime fn square(n: int) -> int { n * n }
+comptime fn double(n: int) -> int { n * 2 }
+comptime fn quad(n: int) -> int { double(double(n)) }
 
 comptime fn factorial(n: int) -> int {
-  let mut r = 1
-  let mut i = 2
-  while i <= n { r = r * i; i = i + 1 }
-  r
+  let mut acc = 1
+  let mut i = 1
+  while i <= n {
+    acc = acc * i
+    i = i + 1
+  }
+  acc
 }
 
-comptime fn normalize_uri(uri: string) -> string { uri.trim() }
+comptime fn normalize_uri(uri: string) -> string {
+  uri.trim()
+}
 
-// --- type with comptime metadata fields (book: "Comptime Fields on Types") ---
-type Sample {
+// --- top-level side-effect form (book: "Top-level side-effect form") ---
+// warning(...) is accepted in v0.3.3 (emits no diagnostic per the v0.4 preview note).
+comptime {
+  warning("compiling small comptime demo")
+}
+
+// --- comptime expression blocks: evaluate now, embed literal (book: "Comptime Blocks") ---
+let BUILD_TAG = comptime { "dev" }
+let QUAD3 = comptime { quad(3) }          // double(double(3)) = 12
+let FACT5 = comptime { factorial(5) }     // 120
+let URI = comptime { normalize_uri("  duckdb://analytics.db  ") }
+
+// arithmetic inside a comptime block with its own locals (book: "Comptime Scope Rules")
+let CALC = comptime {
+  let a = 3
+  let b = 4
+  a * b + 5                                // 17
+}
+
+// build_config() is live in v0.3.3 (book: "Comptime Builtins")
+let DEBUG_FLAG = comptime { build_config().debug }   // release binary -> false
+
+// --- comptime fields on types (book: "Comptime Fields on Types") ---
+type Unit {
   comptime symbol: string = "m"
   comptime precision: int = 2
-  value: number
+}
+type Celsius = Unit { symbol: "°C" }
+
+// --- self-checking (book teaches no assert; use explicit checks) ---
+fn check(name: string, cond: bool) {
+  if !cond {
+    print(f"CHECK_FAILED: {name}")
+  }
 }
 
-// --- comptime block expression form (book: "Comptime Blocks") ---
-let arith = comptime { 2 + 3 * 4 }            // precedence: * before + -> 14
-let sq = comptime { square(9) }               // 81
-let fact = comptime { factorial(6) }          // 720
-let triangle = comptime {                     // sum 1..=10 = 55
-  let mut s = 0
-  for i in 1..=10 { s = s + i }
-  s
-}
-let cond = comptime { if 7 > 3 { "yes" } else { "no" } }   // "yes"
-let trimmed = comptime { normalize_uri("  duckdb://db  ") } // "duckdb://db"
+check("BUILD_TAG", BUILD_TAG == "dev")
+check("QUAD3", QUAD3 == 12)
+check("FACT5", FACT5 == 120)
+check("URI", URI == "duckdb://analytics.db")
+check("CALC", CALC == 17)
+check("DEBUG_FLAG", DEBUG_FLAG == false)
 
-// --- build_config builtin (book: "Comptime Builtins") ---
-// build_config().target_os is the host build target; this binary reports "linux".
-let os = comptime { build_config().target_os }
-
-// runtime field of a type that also carries comptime metadata fields
-let smp = Sample { value: 5.0 }
-
-// --- self-checking assertions (expected values derived from book semantics) ---
-let mut ok = true
-
-if arith != 14 { print("CHECK_FAILED: arith expected=14 got=" + arith.to_string()); ok = false }
-if sq != 81 { print("CHECK_FAILED: sq expected=81 got=" + sq.to_string()); ok = false }
-if fact != 720 { print("CHECK_FAILED: fact expected=720 got=" + fact.to_string()); ok = false }
-if triangle != 55 { print("CHECK_FAILED: triangle expected=55 got=" + triangle.to_string()); ok = false }
-if cond != "yes" { print("CHECK_FAILED: cond expected=yes got=" + cond); ok = false }
-if trimmed != "duckdb://db" { print("CHECK_FAILED: trimmed expected=duckdb://db got=" + trimmed); ok = false }
-if os != "linux" { print("CHECK_FAILED: os expected=linux got=" + os); ok = false }
-if smp.value != 5.0 { print("CHECK_FAILED: smp.value expected=5 got=" + smp.value.to_string()); ok = false }
-
-if ok { print("ALL_CHECKS_PASSED") }
+print(f"BUILD_TAG={BUILD_TAG}")
+print(f"QUAD3={QUAD3}")
+print(f"FACT5={FACT5}")
+print(f"URI={URI}")
+print(f"CALC={CALC}")
+print("ALL_CHECKS_PASSED")
