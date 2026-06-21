@@ -1098,4 +1098,59 @@ mod tests {
             5
         );
     }
+
+    // ── D3 (S4): empty/typed HashMap `len` / `isEmpty` ────────────────────
+    // A v2 typed-map carrier (raw `*const TypedMap*`, `NativeKind::UInt64`)
+    // cannot dispatch `len`/`isEmpty` through the generic `CallMethod` path
+    // (its kind is `UInt64`, not `Ptr(HashMap)`). The stack-based
+    // `TypedMapLenStack` opcode reads the K/V-independent `len` field.
+
+    #[test]
+    fn s4_d3_empty_typed_map_len_is_zero() {
+        assert_eq!(
+            crate::test_utils::eval_typed_i64(
+                "fn run() -> int {\n\
+                 let m: HashMap<string,int> = HashMap()\n\
+                 m.len()\n\
+                 }\n\
+                 run()"
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn s4_d3_empty_typed_map_is_empty_true() {
+        assert!(crate::test_utils::eval_typed_bool(
+            "fn run() -> bool {\n\
+             let m: HashMap<string,int> = HashMap()\n\
+             m.isEmpty()\n\
+             }\n\
+             run()"
+        ));
+    }
+
+    #[test]
+    fn s4_d3_populated_typed_map_len_and_is_empty() {
+        assert_eq!(
+            crate::test_utils::eval_typed_i64(
+                "fn run() -> int {\n\
+                 let mut m: HashMap<string,int> = HashMap()\n\
+                 m.set(\"a\", 1)\n\
+                 m.set(\"b\", 2)\n\
+                 m.len()\n\
+                 }\n\
+                 run()"
+            ),
+            2
+        );
+        assert!(!crate::test_utils::eval_typed_bool(
+            "fn run() -> bool {\n\
+             let mut m: HashMap<string,int> = HashMap()\n\
+             m.set(\"a\", 1)\n\
+             m.isEmpty()\n\
+             }\n\
+             run()"
+        ));
+    }
 }

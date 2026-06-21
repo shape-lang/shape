@@ -973,6 +973,11 @@ define_opcodes! {
     MapHasStr = 0x112, Object, pops: 1, pushes: 1;
     /// Get HashMap length. Operand: map slot.
     MapLenTyped = 0x113, Object, pops: 0, pushes: 1;
+    /// D3 (S4): get the length of a v2 typed-map carrier whose raw
+    /// `*const TypedMap<K,V>` pointer is on the stack (NativeKind::UInt64).
+    /// The `len` field lives at a K/V-independent struct offset, so a single
+    /// opcode serves every typed-map kind. Pops the map ptr, pushes Int64 len.
+    TypedMapLenStack = 0x1C1, Object, pops: 1, pushes: 1;
 
     // ===== Typed String Access (local-slot based) =====
     /// Get string length (chars). Operand: string slot.

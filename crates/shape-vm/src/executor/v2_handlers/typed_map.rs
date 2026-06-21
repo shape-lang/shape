@@ -423,6 +423,21 @@ impl VirtualMachine {
                 Ok(())
             }
 
+            // D3 (S4): length of any v2 typed-map carrier. The `len` field lives
+            // at a K/V-independent struct offset (`TypedMap<K,V>` shares the
+            // header + ptr-sized buckets pointer before `len`), so reading
+            // through any concrete `TypedMap*` alias yields the correct count.
+            OpCode::TypedMapLenStack => {
+                let (map_bits, map_kind) = self.pop_kinded()?;
+                // SAFETY: `map_bits` is a live `*const TypedMap<K,V>` (kind
+                // UInt64). `TypedMap::len` reads only the fixed-offset `len`
+                // field, identical across every K/V instantiation.
+                let len = unsafe { TypedMap::len(map_bits as *const TypedMapStringI64) };
+                drop_with_kind(map_bits, map_kind);
+                self.push_kinded(len as u64, NativeKind::Int64)?;
+                Ok(())
+            }
+
             _ => Err(VMError::NotImplemented(format!(
                 "v2 typed map opcode {:?} not implemented",
                 instruction.opcode

@@ -1362,12 +1362,25 @@ impl BytecodeCompiler {
                 // LHS was absent — pop the placeholder, compile RHS
                 self.emit(Instruction::simple(OpCode::Pop));
                 self.compile_expr(right)?;
+                // D4 (S4): `a ?? b` yields the present value, whose numeric kind
+                // equals the default `b`'s numeric kind (both branches agree by
+                // type — strict typing requires it). Capture the RIGHT operand's
+                // numeric type so the result carries a proven numeric kind. The
+                // prior unconditional `= None` dropped it, so a `let h = m.get(k)
+                // ?? 0` binding lost its `int` kind — outside a loop the slot
+                // tracker recovered it via `concrete_type_for_expr`, but inside a
+                // loop body `h` read back as `unknown` and a downstream `h + 1`
+                // emitted a dynamic `add` method dispatch → runtime "no method
+                // 'add' on receiver kind Int64". Propagating the right operand's
+                // numeric type is the proof (ADR-006 §2.7.5) — no Bool-default,
+                // no fabrication (a non-numeric right operand leaves it `None`).
+                let coalesce_numeric = self.last_expr_numeric_type;
                 let end_jump = self.emit_jump(OpCode::Jump, 0);
                 // LHS was present — the unwrapped value is already on the stack
                 self.patch_jump(use_lhs_jump);
                 self.patch_jump(end_jump);
                 self.last_expr_schema = None;
-                self.last_expr_numeric_type = None;
+                self.last_expr_numeric_type = coalesce_numeric;
             }
             BinaryOp::ErrorContext => {
                 // WS-3 F3: the `!!` error-context operator. Before this
@@ -3382,5 +3395,86 @@ mod r1_r4_reference_type_tests {
             "a reference-typed binop operand must auto-deref and compile (R4): {:?}",
             result.err()
         );
+    }
+}
+
+#[cfg(test)]
+mod s4_type_erasure_dispatch_tests {
+    //! S4: the type-erasure dispatch tail surfacing in collection / trait /
+    //! null-coalesce contexts.
+    //!
+    //! - D1: `Array<int>.sum()/.min()/.max()` return `int` (element type),
+    //!   `Array<number>` returns `number`; mixed int/number programs no longer
+    //!   collide via the shared `_oob` placeholder var.
+    //! - traits: an `extend`/`impl Trait` method's DECLARED return type
+    //!   propagates to an un-annotated call-site binding (no silent
+    //!   `int → number` float corruption).
+    //! - D4: `a ?? b` preserves the right operand's numeric kind, so a
+    //!   `let h = m.get(k) ?? 0` binding stays `int` inside a loop body (no
+    //!   runtime "no method 'add' on receiver kind Int64").
+    //! - functions: a free-function call with named arguments is a clean
+    //!   compile error (was silent-discard → wrong result).
+    use crate::compiler::BytecodeCompiler;
+    use crate::test_utils::{eval_typed_bool, eval_typed_i64};
+    use shape_ast::parser::parse_program;
+
+    #[test]
+    fn s4_d1_array_int_sum_min_max_return_int() {
+        assert_eq!(eval_typed_i64("let s: int = [1, 2, 3].sum()\ns"), 6);
+        assert_eq!(eval_typed_i64("let v = [4, 1, 9]\nlet m: int = v.min()\nm"), 1);
+        assert_eq!(eval_typed_i64("let v = [4, 1, 9]\nlet m: int = v.max()\nm"), 9);
+    }
+
+    #[test]
+    fn s4_d1_mixed_int_and_number_sum_do_not_collide() {
+        // Both call sites hit the receiver-element projection; the `_oob`
+        // placeholder must be freshened per call so `int` and `number`
+        // results don't unify.
+        let code = "let s: int = [1, 2, 3].sum()\nlet fs: number = [1.0, 2.0].sum()\ns";
+        assert_eq!(eval_typed_i64(code), 6);
+    }
+
+    #[test]
+    fn s4_traits_extend_method_int_return_propagates_to_binding() {
+        // `p.tot()` declared `-> int`; an un-annotated `let a = p.tot()`
+        // must track `int` so `a + a` emits `AddInt` → 28 (not 28.0).
+        let code = "type P { x: int, y: int }\n\
+                    extend P { method tot() -> int { self.x + self.y } }\n\
+                    let p = P { x: 6, y: 8 }\n\
+                    let a = p.tot()\n\
+                    a + a";
+        assert_eq!(eval_typed_i64(code), 28);
+    }
+
+    #[test]
+    fn s4_d4_null_coalesce_preserves_int_kind_in_loop() {
+        // `m.get(k) ?? 0` must keep `int` across loop iterations.
+        let code = "let mut m: HashMap<string,int> = HashMap()\n\
+                    m.set(\"x\", 3)\n\
+                    let mut acc = 0\n\
+                    for i in [0, 1] {\n\
+                      let h = m.get(\"x\") ?? 0\n\
+                      acc = acc + h\n\
+                    }\n\
+                    acc";
+        assert_eq!(eval_typed_i64(code), 6);
+    }
+
+    #[test]
+    fn s4_functions_named_args_on_free_fn_are_compile_error() {
+        let code = "fn bv(w: int = 1, h: int = 1, d: int = 1) -> int { return w * h * d }\n\
+                    print(bv(w: 2, h: 3, d: 4))";
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_err(),
+            "named call arguments on a free function must be a clean compile error"
+        );
+    }
+
+    #[test]
+    fn s4_functions_positional_args_still_work() {
+        let code = "fn bv(w: int = 1, h: int = 1, d: int = 1) -> int { return w * h * d }\nbv(2, 3, 4)";
+        assert_eq!(eval_typed_i64(code), 24);
     }
 }

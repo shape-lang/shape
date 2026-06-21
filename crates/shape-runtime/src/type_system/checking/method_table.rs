@@ -521,12 +521,22 @@ impl MethodTable {
         }
         // Numeric-vector aggregates (`impl NumericVec for Vec`). Receiver-param
         // generic so they register in the generic table alongside the rest.
+        // D1 (S4): the receiver-element-dependent aggregates return the
+        // receiver's ELEMENT type, not an unconditional `number`. `Array<int>
+        // .sum()/.min()/.max()` must be `int` (the typed-array method registry
+        // returns `KindedSlot::from_<elem>` per receiver-element kind); only
+        // `Array<number>` returns `number`. `ElementOf(ReceiverParam(0))`
+        // projects `Vec<int>`→`int` / `Vec<number>`→`number` per-receiver.
+        // `avg`/`mean`/`std`/`variance`/`norm` are genuine `number`-producing
+        // reductions regardless of element type (division / sqrt), so they stay
+        // `num()`.
+        let elem_of_recv = || E::ElementOf(Box::new(E::ReceiverParam(0)));
         let vec_numeric: Vec<(&str, Vec<E>, E)> = vec![
-            ("sum", vec![], num()),
+            ("sum", vec![], elem_of_recv()),
             ("avg", vec![], num()),
             ("mean", vec![], num()),
-            ("min", vec![], num()),
-            ("max", vec![], num()),
+            ("min", vec![], elem_of_recv()),
+            ("max", vec![], elem_of_recv()),
             ("std", vec![], num()),
             ("variance", vec![], num()),
             ("dot", vec![vec_of(num())], num()),
@@ -1288,16 +1298,52 @@ impl MethodTable {
             let method_vars: Vec<Type> = (0..gsig.method_type_params)
                 .map(|_| var_gen.fresh_type())
                 .collect();
-            return Some(Self::resolve_type_param_expr(
+            let resolved = Self::resolve_type_param_expr(
                 &gsig.return_type,
                 receiver_type,
                 &receiver_params,
                 &method_vars,
-            ));
+            );
+            // D1 (S4): the `_oob` placeholder minted by `resolve_type_param_expr`
+            // for an un-resolvable projection (e.g. `ElementOf` over a receiver
+            // whose element type is not yet pinned) is a FIXED-NAME var. If two
+            // call sites both fall into it (`[1,2,3].sum()` and
+            // `[1.0,2.0].sum()` in the same program), the shared name unifies
+            // their results and produces a spurious `int`-vs-`number` clash.
+            // Freshen any `_oob` occurrence per call so each unresolved
+            // projection gets its own independent var (which the surrounding
+            // inference then solves or surfaces in isolation).
+            return Some(Self::freshen_oob_placeholder(resolved, var_gen));
         }
 
         let sig = self.lookup(receiver_type, method_name)?;
         Some(sig.return_type.clone())
+    }
+
+    /// Replace every `_oob` placeholder var (the fixed-name fallback minted by
+    /// `resolve_type_param_expr` for an un-resolvable projection) with a fresh
+    /// per-call type variable. Keeps two distinct call sites that both hit the
+    /// placeholder from accidentally unifying their result types (D1, S4).
+    fn freshen_oob_placeholder(ty: Type, var_gen: &mut crate::type_system::TypeVarGen) -> Type {
+        match ty {
+            Type::Variable(ref v) if v.0 == "_oob" => var_gen.fresh_type(),
+            Type::Variable(_) | Type::Concrete(_) => ty,
+            Type::Generic { base, args } => Type::Generic {
+                base: Box::new(Self::freshen_oob_placeholder(*base, var_gen)),
+                args: args
+                    .into_iter()
+                    .map(|a| Self::freshen_oob_placeholder(a, var_gen))
+                    .collect(),
+            },
+            Type::Function { params, returns } => Type::Function {
+                params: params
+                    .into_iter()
+                    .map(|p| Self::freshen_oob_placeholder(p, var_gen))
+                    .collect(),
+                returns: Box::new(Self::freshen_oob_placeholder(*returns, var_gen)),
+            },
+            Type::Constrained { .. } => ty,
+        }
     }
 
     /// Look up the generic signature for a method on a type.

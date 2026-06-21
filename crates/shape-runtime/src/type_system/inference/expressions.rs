@@ -1074,9 +1074,17 @@ impl TypeInferenceEngine {
                     }
                 }
 
-                // Try to resolve the method statically using the method table
+                // Try to resolve the method statically using the method table.
+                // D1 (S4): apply substitutions to the receiver FIRST so an
+                // `ElementOf(ReceiverParam(0))` return projection
+                // (`Array<int>.sum()` → `int`) sees the receiver's element
+                // type once it has been bound by the array-literal elements.
+                // Without this, an inline literal receiver (`[1,2,3].sum()`)
+                // still has an un-applied element var at resolution time and
+                // `ElementOf` falls back to an OOB placeholder.
+                let resolved_receiver = self.unifier.apply_substitutions(&receiver_type);
                 if let Some(result_type) = self.method_table.resolve_method_call(
-                    &receiver_type,
+                    &resolved_receiver,
                     method,
                     &arg_types,
                     &mut self.type_var_gen,

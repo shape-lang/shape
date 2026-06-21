@@ -1036,7 +1036,8 @@ impl VirtualMachine {
             | TypedMapStringPtrDelete
             | TypedMapI64F64Delete
             | TypedMapI64I64Delete
-            | TypedMapI64PtrDelete => {
+            | TypedMapI64PtrDelete
+            | TypedMapLenStack => {
                 return self.exec_v2_typed_map(instruction);
             }
 

@@ -2784,8 +2784,15 @@ impl BytecodeCompiler {
         // appropriate. Falls through to the legacy CallMethod path when the
         // receiver isn't tracked as a typed map or when the method isn't one
         // of the four typed-map methods.
-        if matches!(method, "set" | "get" | "has" | "delete")
-            && self.is_typed_map_receiver(receiver)
+        if matches!(
+            method,
+            // D3 (S4): `len`/`size`/`isEmpty` added — the v2 typed-map carrier
+            // (raw `*const TypedMap*`, NativeKind::UInt64) cannot dispatch
+            // through the generic `CallMethod` path, so route these through the
+            // stack-based `TypedMapLenStack` opcode in
+            // `try_compile_typed_map_method`.
+            "set" | "get" | "has" | "delete" | "len" | "size" | "isEmpty" | "is_empty"
+        ) && self.is_typed_map_receiver(receiver)
         {
             if let Some(()) = self.try_compile_typed_map_method(receiver, method, args)? {
                 return Ok(());
@@ -4354,6 +4361,27 @@ impl BytecodeCompiler {
                 self.emit(Instruction::simple(kind.delete_opcode()));
                 // delete() returns the map itself for chaining.
                 reload_receiver(self)?;
+            }
+            // D3 (S4): `len`/`size`/`isEmpty`. The receiver map pointer is on
+            // the stack (compiled above). `TypedMapLenStack` pops it and pushes
+            // the Int64 entry count; `isEmpty` then compares the length to 0.
+            "len" | "size" | "isEmpty" | "is_empty" if args.is_empty() => {
+                self.emit(Instruction::simple(OpCode::TypedMapLenStack));
+                if matches!(method, "isEmpty" | "is_empty") {
+                    let zero = self.program.add_constant(Constant::Int(0));
+                    self.emit(Instruction::new(
+                        OpCode::PushConst,
+                        Some(Operand::Const(zero)),
+                    ));
+                    self.emit(Instruction::simple(OpCode::EqInt));
+                    self.last_expr_numeric_type = None;
+                } else {
+                    self.last_expr_numeric_type = Some(NumericType::Int);
+                }
+                self.last_expr_schema = None;
+                self.last_expr_type_info = None;
+                self.clear_last_expr_reference_result();
+                return Ok(Some(()));
             }
             _ => return Ok(None),
         }

@@ -2262,6 +2262,42 @@ pub fn method_call_receiver_derived_concrete_type(
     // nested forms (`m.split(",")[0].toUpperCase()`): `split` → `Array<string>`,
     // index-read unwraps to `string`, `toUpperCase` resolves via the same
     // monomorphic lookup.
+    // --- traits (S4): user-defined struct/enum receiver with an `extend` /
+    // `impl Trait for T` method whose DECLARED return type is concrete. The
+    // method is registered in the same `method_table` keyed by the struct name
+    // (`register_extend` → `register_user_method("Point", "sum", [], int)`).
+    // Without recovering it, `let a = p.sum()` (un-annotated) records no
+    // ConcreteType for `a`, the tracker falls back to the default numeric kind
+    // (`number`), and a downstream `a + a` emits `AddNumber` → `28.0` instead of
+    // `28` (silent float corruption). The DECLARED return annotation IS the
+    // proof (ADR-006 §2.7.5); only a fully-concrete return converts (a generic
+    // / type-var return yields `None` — clean fall-through, no fabrication, no
+    // Bool-default).
+    if let Some(struct_name) =
+        crate::compiler::patterns::binding::concrete_type_tracker_name(&receiver_ct)
+    {
+        // `extend T { method m(...) -> R }` desugars to a function registered
+        // as `function_defs["T.m"]` (`desugar_extend_method`,
+        // `statements.rs:2109`); an `impl Trait for T` method registers as
+        // `function_defs["T::m"]` with its return type back-filled from the
+        // trait declaration (`desugar_impl_method`). Read the declared return
+        // annotation from whichever desugared function def exists and convert a
+        // fully-concrete return — that annotation IS the proof (ADR-006 §2.7.5).
+        let candidates = [
+            format!("{}.{}", struct_name, method),
+            format!("{}::{}", struct_name, method),
+        ];
+        for fname in &candidates {
+            if let Some(fdef) = compiler.function_defs.get(fname) {
+                if let Some(ann) = fdef.return_type.as_ref() {
+                    if let Some(ct) = concrete_type_from_annotation(ann, &HashMap::new()) {
+                        return Some(ct);
+                    }
+                }
+            }
+        }
+    }
+
     let receiver_type_name = match &receiver_ct {
         ConcreteType::String => Some("string"),
         _ => None,

@@ -906,6 +906,35 @@ impl BytecodeCompiler {
         self.current_expr_result_mode
     }
 
+    /// functions (S4): reject a free-function call that supplies named
+    /// arguments. The call-lowering path compiles only the positional `args`
+    /// and silently drops `named_args`, so `bv(w: 2, h: 3, d: 4)` computes with
+    /// every parameter at its default and returns a wrong result. Shape does
+    /// not support named arguments on functions; such a call must REJECT
+    /// cleanly (ADR-006 surface-and-stop) rather than miscompute.
+    pub(super) fn reject_named_function_args(
+        &self,
+        name: &str,
+        named_args: &[(String, Expr)],
+        span: shape_ast::ast::Span,
+    ) -> Result<()> {
+        if named_args.is_empty() {
+            return Ok(());
+        }
+        let names = named_args
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "Named call arguments are not supported on functions: `{name}` was \
+                 called with named argument(s) ({names}). Pass arguments positionally."
+            ),
+            location: Some(self.span_to_source_location(span)),
+        })
+    }
+
     pub(super) fn compile_expr_preserving_refs(&mut self, expr: &Expr) -> Result<()> {
         let saved_mode = self.current_expr_result_mode;
         self.current_expr_result_mode = ExprResultMode::PreserveRef;
@@ -916,8 +945,15 @@ impl BytecodeCompiler {
                 self.compile_expr_identifier_preserving_refs(name, *span)
             }
             Expr::FunctionCall {
-                name, args, span, ..
-            } => self.compile_expr_function_call(name, args, *span),
+                name,
+                args,
+                named_args,
+                span,
+                ..
+            } => {
+                self.reject_named_function_args(name, named_args, *span)?;
+                self.compile_expr_function_call(name, args, *span)
+            }
             Expr::QualifiedFunctionCall {
                 namespace,
                 function,
@@ -1058,8 +1094,15 @@ impl BytecodeCompiler {
 
             // Function calls
             Expr::FunctionCall {
-                name, args, span, ..
-            } => self.compile_expr_function_call(name, args, *span),
+                name,
+                args,
+                named_args,
+                span,
+                ..
+            } => {
+                self.reject_named_function_args(name, named_args, *span)?;
+                self.compile_expr_function_call(name, args, *span)
+            }
             Expr::QualifiedFunctionCall {
                 namespace,
                 function,

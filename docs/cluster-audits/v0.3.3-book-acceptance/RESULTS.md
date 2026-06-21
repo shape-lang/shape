@@ -33,17 +33,17 @@ the gate is **NO-GO**.
 | types-primitive | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
 | operators | ✅ | ✅ | ✅ | **FAIL** | object-`+`-merge hijacked by in-scope impl Add; `+=`/`acc=acc+a` on user type rejected; left struct-literal operand of Sub/Mul rejected; decl-order-dependent operator-trait resolution; ANTI-TAUTOLOGY (large asserts buggy output) |
 | control-flow | ✅ | ✅ | ✅ | **FAIL** | `while`/`if`-prefixed identifier in a condition derails parser (E0001) |
-| functions | ✅ | ✅ | ✅ | PARTIAL | named-arg call on default-valued fn silently discards named values, wrong result (BOOK-WRONG + silent-wrong-output) |
+| functions | ✅ | ✅ | ✅ | FIXED (S4) | named-arg call on a free function now a CLEAN COMPILE ERROR (was silent-discard → wrong result); positional calls unchanged |
 | strings | ✅ | ✅ | ✅ | PASS | — |
-| objects-arrays | ✅ | ✅ | ✅ | PASS* | D1 `Vec<int>.sum/min/max`→`number` (BOOK-WRONG); D2 `.map` elem-type lost into for+compare; D3 empty `HashMap()`→UInt64 runtime crash; D4 hashmap-int + field-int runtime `no method add` |
+| objects-arrays | ✅ | ✅ | ✅ | FIXED (S4) | D1 `Array<int>.sum/min/max`→`int` (per-receiver-element); D2 `.map` elem-type OK; D3 empty `HashMap()` len/isEmpty OK (TypedMapLenStack opcode); D4 `?? 0` keeps `int` kind in loop (no `no method add` crash) |
 | enums | ✅ | ✅ | ✅ | PARTIAL | `(number)->bool` param annotation fails to parse (BOOK-WRONG); `s.to_int()` fictional (BOOK-WRONG) |
-| traits | ✅ | ✅ | ✅ | PARTIAL | trait/extend declared return type not propagated to un-annotated call site → silent-wrong-output (`p.sum()->int` yields 14.0) |
+| traits | ✅ | ✅ | ✅ | FIXED (S4) | trait/extend declared return type now propagates to an un-annotated call-site binding (`p.sum()->int` binding tracks `int`; `a+a`→28 not 28.0) |
 | generics | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
 | pattern-matching | ✅ | ✅ | ✅ | PARTIAL | D2 FIXED (S3 2026-06-21: `Some(Enum::Variant(..))` now unwraps the W14 OptionData carrier before the inner variant check); D1 union type-pattern binder typed `unknown` (SCOPE-RECLAIM, v0.4) |
 | error-handling | ✅ | ✅ | ✅ | PARTIAL | `(arr_elem as int?)` rejects `Array<string>` element while literal `"42" as int?` Ok (carrier-kind) |
 | references | ✅ | ✅ | ✅ | PARTIAL | stored-ref index/method documented as compile-error but actually works (BOOK-WRONG, conservative direction) |
 | resource-mgmt | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
-| modules | ✅ | ✅ | ✅ | **FAIL** | `use { mean as avg }` named-alias of a STDLIB fn does not bind the alias (BOOK-WRONG) |
+| modules | ✅ | ✅ | ✅ | PASS (S4 re-verified) | `from std::core::math use { mean as avg }; avg([..])` binds the alias and runs (→2.0); the prior named-alias FAIL no longer reproduces |
 | datetime | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
 | content | ✅ | ✅ | ✅ | PASS | — |
 | comptime | ✅ | ✅ | ✅ | PARTIAL | comptime `false` baked/displayed as `null` (BOOK-WRONG + FN-REG); same hits `build_config().debug` |
