@@ -1,23 +1,6 @@
 use super::*;
 
 impl BytecodeCompiler {
-    /// Borrowing-param map for the MIR move analysis: a param BORROWS (does
-    /// NOT move its by-value heap arg) iff it is an EXPLICIT reference param
-    /// (`&p` / `&mut p`), tracked via `inferred_ref_params` (`param.is_reference`
-    /// ∪ disabled inferred-ref, see `infer_reference_params_from_types`).
-    ///
-    /// CallArgConsume (user 2026-06-21): a by-value (non-`&`) heap param is
-    /// OWNERSHIP-TAKING — its argument MOVES (`fn consume(p: P){}; consume(x);
-    /// print(x)` ⇒ B0005). The WS-7 mutation-share-by-value convention (a
-    /// non-`&` param mutated in place silently shared, mutation-visible to the
-    /// caller) is REVERSED: caller-VISIBLE mutation now requires an explicit
-    /// `&mut p` param (the loan-back path). A plain `fn fill(arr){arr[i]=v}`
-    /// CONSUMES `arr`; to mutate the caller's binding write
-    /// `fn fill(arr: &mut Array<int>){arr[i]=v}` and call `fill(&mut xs)`.
-    pub(crate) fn borrowing_params_for_move_analysis(&self) -> HashMap<String, Vec<bool>> {
-        self.inferred_ref_params.clone()
-    }
-
     pub(super) fn infer_reference_params_from_types(
         program: &Program,
         inferred_types: &HashMap<String, Type>,

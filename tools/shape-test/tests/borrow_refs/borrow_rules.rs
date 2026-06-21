@@ -254,17 +254,16 @@ fn test_borrow_assign_after_borrow_release() {
 
 #[test]
 fn test_borrow_two_mutating_params_different_vars_ok() {
-    // CallArgConsume: caller-visible mutation through two distinct `&mut` args.
     ShapeTest::new(
         r#"
-        fn swap_first(a: &mut Array<int>, b: &mut Array<int>) {
+        fn swap_first(a, b) {
             let t = a[0]
             a[0] = b[0]
             b[0] = t
         }
-        let mut xs = [1]
-        let mut ys = [2]
-        swap_first(&mut xs, &mut ys)
+        let xs = [1]
+        let ys = [2]
+        swap_first(xs, ys)
         xs[0] * 10 + ys[0]
     "#,
     )
