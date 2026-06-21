@@ -1059,6 +1059,29 @@ impl TypeInferenceEngine {
                     return Ok(self.unifier.apply_substitutions(&result_type));
                 }
 
+                // REAL-MOVE keep-both (v0.3.3, user 2026-06-21): `clone p`
+                // desugars to `p.clone()` (desugar.rs:640). Arrays / strings
+                // resolve `clone` via the method-table (handled above); a
+                // user-defined struct (`type P { ... }`) has no PHF `clone`
+                // entry, so it would otherwise fall through to the deferred
+                // `HasMethod` constraint and reject with
+                // "Method 'clone' not found on type 'P'". `clone` is a
+                // universal deep-copy returning `Self`: for any CONCRETE
+                // object/struct receiver with zero args, resolve the result
+                // type to the receiver type itself. Bounded to concrete
+                // object-like receivers so unresolved generics and real
+                // missing-method cases still surface their own diagnostics.
+                if method == "clone" && arg_types.is_empty() {
+                    let is_concrete_objectlike = matches!(
+                        &receiver_type,
+                        Type::Concrete(TypeAnnotation::Object(_))
+                            | Type::Concrete(TypeAnnotation::Reference(_))
+                    );
+                    if is_concrete_objectlike {
+                        return Ok(self.unifier.apply_substitutions(&receiver_type));
+                    }
+                }
+
                 // STRICT-FLIP (v0.3.3, SMOKE-s5): method call on a `dyn Trait`
                 // receiver resolves against the trait's declared method
                 // signatures. `let arr: Array<dyn HasX> = [...]` makes

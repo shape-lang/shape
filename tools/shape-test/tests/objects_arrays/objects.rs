@@ -456,3 +456,68 @@ let v = m.get("missing")
 print(v)"#;
     ShapeTest::new(code).expect_run_ok();
 }
+
+// =====================================================================
+// Struct deep-clone (REAL-MOVE keep-both, v0.3.3 user 2026-06-21)
+// `clone p` deep-copies a TypedObject; the copy is independent of the
+// source. Scalars stay copy; nested heap (struct / array) deep-copied;
+// strings shared with a balanced retain. Refcount-balanced (valgrind:
+// 0 definitely-lost, 0 invalid-access vs baseline).
+// =====================================================================
+
+#[test]
+fn struct_clone_is_independent() {
+    let code = r#"type P { x: int, name: string }
+let p = P { x: 1, name: "a" }
+let mut q = clone p
+q.x = 99
+print(p.x)
+print(q.x)"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("1\n99");
+}
+
+#[test]
+fn struct_clone_nested_struct_is_deep() {
+    let code = r#"type Inner { v: int }
+type Outer { inner: Inner, tag: string }
+let a = Outer { inner: Inner { v: 5 }, tag: "x" }
+let mut b = clone a
+b.inner.v = 77
+print(a.inner.v)
+print(b.inner.v)"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("5\n77");
+}
+
+#[test]
+fn struct_clone_preserves_string_field() {
+    let code = r#"type P { x: int, name: string }
+let p = P { x: 7, name: "hello" }
+let q = clone p
+print(q.x)
+print(q.name)
+print(p.name)"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("7\nhello\nhello");
+}
+
+#[test]
+fn struct_clone_with_array_field_does_not_crash() {
+    // Nested Array<int> field is deep-cloned; mutating a scalar field on
+    // the clone leaves the source untouched and the array intact in both.
+    let code = r#"type Bag { items: Array<int>, name: string }
+let g = Bag { items: [1, 2, 3], name: "g" }
+let mut h = clone g
+h.name = "h"
+print(g.items[0])
+print(h.items[0])
+print(g.name)
+print(h.name)"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("1\n1\ng\nh");
+}

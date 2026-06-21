@@ -3628,6 +3628,21 @@ impl BytecodeCompiler {
         self.last_expr_schema = None;
         self.last_expr_numeric_type = method_return_numeric_type(method);
 
+        // REAL-MOVE keep-both (v0.3.3, user 2026-06-21): `clone` returns
+        // `Self`. For a struct (`TypedObject`) receiver carrying a known
+        // compile-time schema, the deep-clone result has the SAME schema —
+        // so a subsequent `q.x = ...` field write can resolve the slot
+        // offset (without this, `last_expr_schema = None` makes the binding
+        // schema-less and the field-write compiler rejects with "requires
+        // compile-time field resolution"). Mirror of the type-preserving
+        // table-method propagation below.
+        if method == "clone" && receiver_schema.is_some() {
+            self.last_expr_schema = receiver_schema;
+            self.last_expr_type_info = receiver_type_info.clone();
+            self.clear_last_expr_reference_result();
+            return Ok(());
+        }
+
         // Propagate Table<T> type through type-preserving methods.
         // After filter/head/tail/etc., the result is still Table<T>.
         if self.is_type_preserving_table_method(method) {

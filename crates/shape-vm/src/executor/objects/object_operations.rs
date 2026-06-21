@@ -43,10 +43,12 @@
 use crate::{
     bytecode::{Instruction, Operand},
     executor::VirtualMachine,
+    executor::v2_handlers::v2_array_detect::{as_v2_typed_array, clone_array},
     executor::vm_impl::stack::{clone_with_kind, drop_with_kind},
 };
+use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::{HeapKind, TypedObjectStorage};
-use shape_value::{NativeKind, VMError, ValueSlot};
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 use std::sync::Arc;
 
 impl VirtualMachine {
@@ -354,5 +356,157 @@ fn append_kept_slots(
             // same kind. Inline-scalar kinds are no-ops.
             clone_with_kind(bits, kind);
         }
+    }
+}
+
+/// REAL-MOVE keep-both (v0.3.3, user 2026-06-21): recursive, refcount-
+/// balanced DEEP clone of a `TypedObjectStorage`.
+///
+/// `clone p` desugars to `p.clone()` (desugar.rs:640). Under real-move,
+/// `let q = clone p` is how a program keeps BOTH `p` and `q`: the clone
+/// must be an INDEPENDENT object so that mutating one does not observe
+/// in the other.
+///
+/// Allocates a fresh storage via `TypedObjectStorage::_new` (refcount=1),
+/// copying the source's `schema_id` / `heap_mask` / `field_kinds`, and
+/// fills each slot per its source `field_kinds[i]`:
+///
+/// - **non-heap-mask slots** (scalars: int / number / bool / char / …):
+///   bit-copy the raw `u64` verbatim. Scalars STAY COPY — no share, no
+///   recursion.
+/// - **`Ptr(HeapKind::TypedObject)` slots**: RECURSIVELY deep-clone the
+///   nested struct, storing the fresh pointer (its own refcount=1 share).
+///   No retain of the source's nested pointer.
+/// - **`Ptr(HeapKind::TypedArray)` slots**: deep-clone the nested array
+///   via `clone_array` (a fresh allocation; the array's heap elements are
+///   themselves retained per `clone_array`'s element-clone discipline),
+///   storing the fresh pointer.
+/// - **all other heap-mask slots** (String / StringV2 / Decimal / HashMap
+///   / Set / … — immutable or share-semantics heap values): SHALLOW share
+///   via `clone_with_kind`, bumping one strong-count share so the cloned
+///   storage owns a balanced reference.
+///
+/// Refcount discipline: every heap-mask slot in the returned storage owns
+/// exactly one share (a fresh allocation's sole share for the deep-clone
+/// arms, or a retained share for the shallow arms). The source storage is
+/// only read — never mutated or released here. The returned storage's
+/// `_drop` walks `heap_mask` and retires exactly those shares (mirror of
+/// `heap_value.rs::TypedObjectStorage::drop_fields`), so the clone is
+/// double-free / UAF free.
+///
+/// 5-arm receiver-recovery soundness rule (CLAUDE.md / handover §0): each
+/// heap-slot's bits are recovered BY KIND from the source's
+/// `field_kinds[i]` parallel-kind track — never via `as_heap_value()` on
+/// a v2-raw flat carrier, never via raw-bit reinterpretation.
+fn deep_clone_typed_object(src: &TypedObjectStorage) -> *mut TypedObjectStorage {
+    let n = src.slots.len();
+    let src_mask = src.heap_mask;
+    let src_kinds = &src.field_kinds;
+
+    let mut new_slots: Vec<ValueSlot> = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let bits = src.slots[i].raw();
+        let kind = src_kinds.get(i).copied().unwrap_or(NativeKind::Bool);
+        let is_heap_slot = i < 64 && (src_mask & (1u64 << i) != 0);
+
+        if !is_heap_slot || bits == 0 {
+            // Scalar field (or null heap slot): bit-copy verbatim. No
+            // share owed; scalars STAY COPY.
+            new_slots.push(src.slots[i]);
+            continue;
+        }
+
+        match kind {
+            // Nested struct: recursive deep clone — the cloned slot owns a
+            // fresh allocation (refcount=1), fully independent from the
+            // source's nested struct.
+            NativeKind::Ptr(HeapKind::TypedObject) => {
+                // SAFETY: heap_mask bit i set with kind Ptr(TypedObject)
+                // ⇒ bits is a live `*const TypedObjectStorage` (v2-raw
+                // carrier) per the construction-side contract.
+                let nested: &TypedObjectStorage =
+                    unsafe { &*(bits as *const TypedObjectStorage) };
+                let cloned_ptr = deep_clone_typed_object(nested);
+                new_slots.push(ValueSlot::from_u64(cloned_ptr as u64));
+            }
+            // Nested array: deep clone via `clone_array` — fresh array
+            // allocation; element shares handled by `clone_array` itself
+            // (heap elements retained, scalars memcpy'd).
+            NativeKind::Ptr(HeapKind::TypedArray) => {
+                match as_v2_typed_array(bits, kind) {
+                    Some(view) => {
+                        let cloned_ptr = clone_array(&view);
+                        new_slots.push(ValueSlot::from_u64(cloned_ptr as u64));
+                    }
+                    None => {
+                        // Could not recover an array view (should not
+                        // happen for a Ptr(TypedArray)-kinded slot).
+                        // Fall back to a balanced shallow retain rather
+                        // than leak or UB.
+                        debug_assert!(
+                            false,
+                            "deep_clone_typed_object: TypedArray slot {} did not \
+                             yield a v2 array view",
+                            i
+                        );
+                        clone_with_kind(bits, kind);
+                        new_slots.push(src.slots[i]);
+                    }
+                }
+            }
+            // All other heap kinds (String / StringV2 / Decimal / HashMap
+            // / Set / Deque / …): shallow share with a balanced retain.
+            // These are immutable or share-semantics heap values; a
+            // refcount bump gives the clone its own balanced reference.
+            _ => {
+                clone_with_kind(bits, kind);
+                new_slots.push(src.slots[i]);
+            }
+        }
+    }
+
+    TypedObjectStorage::_new(
+        src.schema_id,
+        new_slots.into_boxed_slice(),
+        src_mask,
+        Arc::clone(src_kinds),
+    )
+}
+
+/// `obj.clone()` MethodFnV2 handler — deep-clone a TypedObject receiver.
+///
+/// Registered on the `HeapKind::TypedObject` method-dispatch arm so the
+/// `clone` keyword desugar (`let q = clone p` → `p.clone()`) resolves at
+/// runtime for user-defined structs (Array / String have their own
+/// `clone` handlers). Receiver = `args[0]`, kind `Ptr(HeapKind::TypedObject)`,
+/// bits = `*const TypedObjectStorage` (v2-raw carrier).
+///
+/// The dispatch shell owns the receiver's share for the call duration
+/// (it pops the receiver after this returns), so we only BORROW the
+/// source here — `deep_clone_typed_object` reads it and never mutates or
+/// releases it. The returned `KindedSlot` carries a fresh storage
+/// (refcount=1) via `KindedSlot::from_typed_object_raw`.
+pub(crate) fn handle_clone_typed_object(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    let recv = &args[0];
+    let bits = recv.slot.raw();
+    match recv.kind {
+        NativeKind::Ptr(HeapKind::TypedObject) if bits != 0 => {
+            // SAFETY: kind == Ptr(TypedObject) and bits != 0 ⇒ bits is a
+            // live `*const TypedObjectStorage` with refcount ≥ 1 (the
+            // dispatch shell holds one share for the call duration). We
+            // borrow it read-only.
+            let src: &TypedObjectStorage = unsafe { &*(bits as *const TypedObjectStorage) };
+            let cloned_ptr = deep_clone_typed_object(src);
+            Ok(KindedSlot::from_typed_object_raw(cloned_ptr))
+        }
+        _ => Err(VMError::RuntimeError(format!(
+            "clone: expected TypedObject receiver, got kind {:?}",
+            recv.kind
+        ))),
     }
 }

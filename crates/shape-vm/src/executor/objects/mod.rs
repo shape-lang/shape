@@ -862,13 +862,25 @@ impl VirtualMachine {
                     }
                 }
                 HeapKind::TypedObject => {
-                    // User-defined object methods land here. The
-                    // built-in DataTable PHF covers shared table-shape
-                    // methods; UFCS resolution below catches user-
-                    // defined `fn TypeName.method(self, ...)` shapes.
-                    method_registry::DATATABLE_METHODS
-                        .get(method_name)
-                        .copied()
+                    // REAL-MOVE keep-both (v0.3.3, user 2026-06-21):
+                    // `clone p` desugars to `p.clone()`. A user-defined
+                    // struct has no PHF `clone` entry; route it to the
+                    // recursive, refcount-balanced deep-clone handler so
+                    // `let q = clone p` yields an independent copy (mirror
+                    // of Array.clone / String.clone). Checked before the
+                    // DataTable PHF so it applies to every TypedObject.
+                    if method_name == "clone" {
+                        Some(crate::executor::objects::object_operations::handle_clone_typed_object
+                            as method_registry::MethodHandler)
+                    } else {
+                        // User-defined object methods land here. The
+                        // built-in DataTable PHF covers shared table-shape
+                        // methods; UFCS resolution below catches user-
+                        // defined `fn TypeName.method(self, ...)` shapes.
+                        method_registry::DATATABLE_METHODS
+                            .get(method_name)
+                            .copied()
+                    }
                 }
                 HeapKind::TableView => method_registry::DATATABLE_METHODS
                     .get(method_name)
