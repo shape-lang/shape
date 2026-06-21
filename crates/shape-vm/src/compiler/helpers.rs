@@ -3396,6 +3396,42 @@ impl BytecodeCompiler {
         self.type_tracker.set_binding_type(slot, info);
     }
 
+    /// Guard for the WS-6b GAP A `set_*_type_info(tn)` stamps.
+    ///
+    /// `concrete_type_tracker_name` projects a `ConcreteType::Struct` to its
+    /// BASE name (`Box`), dropping the generic arguments. For a generic
+    /// struct the construction path has already stamped the slot with the
+    /// precise MONOMORPHIZED schema (`Box<int>`, whose `value` field is the
+    /// concrete `FieldType::I64`). Re-stamping the base name would resolve
+    /// `tn` back to the BASE schema (`Box`, whose `value` field is the
+    /// unsound `FieldType::Object("T")`), and a downstream typed field read
+    /// would stamp `FIELD_TAG_OBJECT` on a slot holding an inline scalar —
+    /// `clone_with_kind` then dereferences the scalar bits as a
+    /// `*const TypedObjectStorage` (ADR-006 §2.7.5 producer-side stamp
+    /// violation → SIGSEGV). This returns `true` exactly when the slot's
+    /// existing tracker entry is `tn` itself or a monomorphization `tn<...>`
+    /// carrying a concrete `schema_id`, so the WS-6b base-name stamp must be
+    /// skipped rather than downgrade the precise schema.
+    pub(super) fn ws6b_name_would_downgrade(
+        existing: Option<&VariableTypeInfo>,
+        base_name: &str,
+    ) -> bool {
+        let Some(info) = existing else {
+            return false;
+        };
+        if info.schema_id.is_none() {
+            return false;
+        }
+        match info.type_name.as_deref() {
+            // A monomorphized name `Box<int>` for base `Box` — keep it.
+            Some(existing_name) => {
+                existing_name == base_name
+                    || existing_name.starts_with(&format!("{base_name}<"))
+            }
+            None => false,
+        }
+    }
+
     /// Capture local storage hints for a compiled function.
     ///
     /// Must be called before the function scope is popped so the type tracker still

@@ -2071,6 +2071,94 @@ mod tests {
         );
     }
 
+    /// S2 regression (generic-struct construction segfault, ec=139).
+    ///
+    /// `let b = Box{value: 9}; let v = b.value` where `type Box<T> { value: T }`
+    /// previously SEGFAULTED: the WS-6b GAP A inferred-type stamp
+    /// (`concrete_type_tracker_name` → base name `Box`) overwrote the
+    /// construction-site monomorphized schema (`Box<int>`, `value: I64`) with
+    /// the BASE `Box` schema (`value: Object("T")`). The downstream typed field
+    /// read then stamped `FIELD_TAG_OBJECT` on a slot holding the inline scalar
+    /// `9`, and `clone_with_kind` dereferenced the scalar bits as a
+    /// `*const TypedObjectStorage` (misaligned-pointer SIGSEGV per ADR-006
+    /// §2.7.5 producer-side stamp). The fix (`ws6b_name_would_downgrade`)
+    /// declines the base-name re-stamp when the slot already carries the
+    /// monomorphized schema.
+    ///
+    /// This asserts the producer-side invariant at compile time: NO field-read
+    /// operand may carry `FIELD_TAG_OBJECT` for the scalar generic field —
+    /// every read of `Box<int>.value` must stamp `FIELD_TAG_I64`.
+    #[test]
+    fn test_generic_struct_scalar_field_read_not_object_tagged() {
+        use crate::bytecode::Operand;
+        use crate::executor::typed_object_ops::{FIELD_TAG_I64, FIELD_TAG_OBJECT};
+
+        let code = r#"
+            type Box<T> { value: T }
+            let b = Box{value: 9}
+            let v = b.value
+        "#;
+        let program = parse_program(code).unwrap();
+        let compiled = BytecodeCompiler::new()
+            .compile_with_source(&program, code)
+            .expect("generic-struct construction + field read must compile");
+
+        let mut saw_i64_field_read = false;
+        for instr in &compiled.instructions {
+            if let Some(Operand::TypedField {
+                field_type_tag, ..
+            }) = &instr.operand
+            {
+                assert_ne!(
+                    *field_type_tag, FIELD_TAG_OBJECT,
+                    "S2 regression: a generic scalar field read is FIELD_TAG_OBJECT-tagged \
+                     — the read would deref an inline scalar as a heap pointer (SIGSEGV). \
+                     The slot must carry the monomorphized Box<int> schema (value: I64)."
+                );
+                if *field_type_tag == FIELD_TAG_I64 {
+                    saw_i64_field_read = true;
+                }
+            }
+        }
+        assert!(
+            saw_i64_field_read,
+            "expected at least one FIELD_TAG_I64 field read for Box<int>.value"
+        );
+    }
+
+    /// S2 sibling: the heap-typed instantiation `Box<string>` reads its
+    /// generic field as a String carrier, never as the unsound nested-Object
+    /// label. Guards against a regression that re-routes heap generic fields
+    /// through `FIELD_TAG_OBJECT` (which would mis-project the String Arc).
+    #[test]
+    fn test_generic_struct_string_field_read_not_object_tagged() {
+        use crate::bytecode::Operand;
+        use crate::executor::typed_object_ops::FIELD_TAG_OBJECT;
+
+        let code = r#"
+            type Box<T> { value: T }
+            let b = Box{value: "hi"}
+            let v = b.value
+        "#;
+        let program = parse_program(code).unwrap();
+        let compiled = BytecodeCompiler::new()
+            .compile_with_source(&program, code)
+            .expect("Box<string> construction + field read must compile");
+
+        for instr in &compiled.instructions {
+            if let Some(Operand::TypedField {
+                field_type_tag, ..
+            }) = &instr.operand
+            {
+                assert_ne!(
+                    *field_type_tag, FIELD_TAG_OBJECT,
+                    "S2 regression: Box<string>.value read is FIELD_TAG_OBJECT-tagged \
+                     instead of the String carrier tag."
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_struct_literal_int_widens_to_number() {
         let code = r#"

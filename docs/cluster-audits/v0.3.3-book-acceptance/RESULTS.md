@@ -29,7 +29,7 @@ the gate is **NO-GO**.
 
 | slice | small | large | VM==JIT | verdict | blocking findings |
 |-------|-------|-------|---------|---------|--------------------|
-| variables | ✅ | ✅ | ✅ | **FAIL** | var CoW aliasing rejected (BOOK-WRONG); generic-struct construction SEGFAULT (ec=139) |
+| variables | ✅ | ✅ | ✅ | **FAIL** | var CoW aliasing rejected (BOOK-WRONG); ~~generic-struct construction SEGFAULT (ec=139)~~ FIXED (S2, WS-6b base-name re-stamp downgraded the monomorphized schema → FIELD_TAG_OBJECT deref of an inline scalar; `ws6b_name_would_downgrade` guard) |
 | types-primitive | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
 | operators | ✅ | ✅ | ✅ | **FAIL** | object-`+`-merge hijacked by in-scope impl Add; `+=`/`acc=acc+a` on user type rejected; left struct-literal operand of Sub/Mul rejected; decl-order-dependent operator-trait resolution; ANTI-TAUTOLOGY (large asserts buggy output) |
 | control-flow | ✅ | ✅ | ✅ | **FAIL** | `while`/`if`-prefixed identifier in a condition derails parser (E0001) |

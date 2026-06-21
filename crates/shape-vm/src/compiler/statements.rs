@@ -5362,7 +5362,16 @@ impl BytecodeCompiler {
                                     // records nothing). Mirror of the annotated path's
                                     // `set_module_binding_type_info`.
                                     if let Some(tn) = crate::compiler::patterns::binding::concrete_type_tracker_name(&ct) {
-                                        self.set_module_binding_type_info(binding_idx, &tn);
+                                        // Do not downgrade an already-stamped
+                                        // monomorphized schema (`Box<int>`) to the
+                                        // base name (`Box`) — see
+                                        // `ws6b_name_would_downgrade` (ADR-006 §2.7.5).
+                                        let existing = self
+                                            .type_tracker
+                                            .get_binding_type(binding_idx);
+                                        if !Self::ws6b_name_would_downgrade(existing, &tn) {
+                                            self.set_module_binding_type_info(binding_idx, &tn);
+                                        }
                                     }
                                     self.module_binding_concrete_types.insert(binding_idx, ct);
                                 }
@@ -5754,7 +5763,14 @@ impl BytecodeCompiler {
                                     // side-table) is what `p.age` / `iter_element_type_name`
                                     // consult. ConcreteType IS the proof (ADR-006 §2.7.5).
                                     if let Some(tn) = crate::compiler::patterns::binding::concrete_type_tracker_name(&ct) {
-                                        self.set_local_type_info(local_idx, &tn);
+                                        // Do not downgrade an already-stamped
+                                        // monomorphized schema (`Box<int>`) to the
+                                        // base name (`Box`) — see
+                                        // `ws6b_name_would_downgrade` (ADR-006 §2.7.5).
+                                        let existing = self.type_tracker.get_local_type(local_idx);
+                                        if !Self::ws6b_name_would_downgrade(existing, &tn) {
+                                            self.set_local_type_info(local_idx, &tn);
+                                        }
                                     }
                                     self.current_function_local_concrete_types.insert(local_idx, ct);
                                 }
