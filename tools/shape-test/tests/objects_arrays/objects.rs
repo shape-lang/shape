@@ -94,52 +94,85 @@ print(b)"#;
 }
 
 // =====================================================================
-// Struct (TypedObject) move-then-read independence
+// Struct (TypedObject) REAL-MOVE semantics (user 2026-06-21)
 //
-// `let q = p` whole-value-binds a struct; reading `p` AFTER the bind must
-// still yield `p`'s original value (the VM ownership model keeps `p` live —
-// the bind is a Clone, not a destructive move). These regress the JIT
-// move-then-read divergence that SIGSEGV'd under `--mode jit`
-// (`mir_has_move_then_read_divergence` missed the field-projection later read
-// of `p`; now keyed on the place root local -> whole-function deopt).
+// `let q = p` whole-value-binds a struct. A struct is a HEAP value, so the
+// bind is a destructive MOVE (Rust-shaped): `p` is consumed and reading it
+// afterward is a compile-time use-after-move (B0005). To keep BOTH `p` and
+// `q` live, the program must opt into an explicit deep copy with `clone p`.
+//
+// These tests were rebaselined from the old clone-on-still-live policy
+// (which kept `p` live silently). The move-then-read JIT divergence they
+// originally regressed is now moot: the moved-from read is rejected at
+// compile time, before any JIT/VM execution divergence can occur.
 // =====================================================================
 
 #[test]
-fn struct_read_original_after_whole_value_bind() {
+fn struct_read_original_after_move_is_use_after_move() {
+    // Real-move: `let q = p` consumes the struct `p`; the later `p.x` read is
+    // a use-after-move. (Old policy: silent clone-on-still-live -> "1".)
     let code = r#"type P { x: int }
 let p = P { x: 1 }
 let q = p
 print(p.x)"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("1");
+    ShapeTest::new(code).expect_run_err_contains("B0005");
 }
 
 #[test]
-fn struct_read_original_after_bind_heap_field() {
+fn struct_clone_keeps_both_live() {
+    // Explicit `clone p` deep-copies the struct; both `p` and `q` stay live.
+    let code = r#"type P { x: int }
+let p = P { x: 1 }
+let q = clone p
+print(p.x)
+print(q.x)"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("1\n1");
+}
+
+#[test]
+fn struct_read_original_after_bind_heap_field_is_use_after_move() {
+    // A struct with a heap (string) field still moves whole; reading the
+    // moved-from `p` is a use-after-move.
     let code = r#"type P { x: int, name: string }
 let p = P { x: 1, name: "a" }
 let q = p
 print(p.x)"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("1");
+    ShapeTest::new(code).expect_run_err_contains("B0005");
 }
 
 #[test]
-fn struct_read_both_alias_and_original() {
+fn struct_read_moved_to_binding_ok() {
+    // Reading ONLY the moved-to binding `q` is fine — `p` is consumed but
+    // never read after the move, so there is no use-after-move.
+    let code = r#"type P { x: int }
+let p = P { x: 7 }
+let q = p
+print(q.x)"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("7");
+}
+
+#[test]
+fn struct_read_both_alias_and_original_is_use_after_move() {
+    // Reading the moved-to `q` then the moved-from `p` still fires B0005 on
+    // the `p` read (the move is destructive regardless of the `q` read).
     let code = r#"type P { x: int }
 let p = P { x: 7 }
 let q = p
 print(q.x)
 print(p.x)"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("7\n7");
+    ShapeTest::new(code).expect_run_err_contains("B0005");
 }
 
 #[test]
-fn struct_two_binds_then_read() {
+fn struct_two_binds_then_read_is_use_after_move() {
+    // The first `let q = p` already consumes `p`; the second `let r = p` is a
+    // use-after-move (and so would the later `r.x` read be moot).
     let code = r#"type P { x: int }
 let p = P { x: 3 }
 let q = p
 let r = p
 print(r.x)"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("3");
+    ShapeTest::new(code).expect_run_err_contains("B0005");
 }
 
 // =====================================================================
