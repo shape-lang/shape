@@ -471,17 +471,21 @@ fn read_on_both_branches_no_move_no_false_error() {
 // cannot reuse it (B0005). EXCEPTIONS that BORROW (no move):
 //   - read-only builtins (print / format / f-string / assert / range);
 //   - method receivers/args (.len / .get / .map / ...);
-//   - explicit `&p` params (lower to a borrow temp, never the binding);
-//   - params MUTATED IN PLACE by the callee (`fn fill(arr){arr[i]=v}`) — Shape
-//     shares heap collections by-value as a shared Arc; in-place mutation is
-//     visible to the caller, so the param SHARES, it is not consumed.
+//   - explicit `&p` / `&mut p` params (lower to a borrow temp, never the
+//     binding) — `&mut p` is the loan-back path: caller-VISIBLE mutation.
 //   - SCALARS stay Copy.
 //
 // Implementation: `solver::terminator_moved_arg_places` marks by-value heap
 // Call-terminator args as moved unless `callee_borrows_all_args` /
-// `arg_index_is_borrowed` (the `BorrowingParams` map = inferred-ref ∪
-// mutation-share, built by `build_param_mutation_share_map`).
+// `arg_index_is_borrowed` (the `BorrowingParams` map = the EXPLICIT-`&`
+// `inferred_ref_params`).
 // =============================================================================
+//
+// CallArgConsume (user 2026-06-21): the WS-7 mutation-share-by-value
+// convention is REVERSED. A by-value (non-`&`) heap param that MUTATES IN
+// PLACE (`fn fill(arr){arr[i]=v}`) now CONSUMES its arg — caller-VISIBLE
+// mutation requires an explicit `&mut p` param. See
+// `borrowing_params_for_move_analysis`.
 
 #[test]
 fn call_arg_struct_move_then_use_is_compile_error() {
@@ -641,10 +645,10 @@ fn explicit_ref_arg_does_not_move() {
 }
 
 #[test]
-fn in_place_mutating_param_shares_not_moves() {
-    // `fill` mutates its array param in place (index-assign in a loop) — the
-    // param SHARES (mutation-visible Arc), so the caller reuses `xs` and SEES
-    // the mutation. NOT a move.
+fn in_place_mutating_by_value_param_consumes_then_reuse_is_compile_error() {
+    // CallArgConsume reversal: a by-value (non-`&`) heap param that mutates in
+    // place CONSUMES its arg. `fill(xs)` moves `xs`; reusing `xs[0]` after is
+    // B0005. Caller-visible mutation now requires `&mut` (next test).
     ShapeTest::new(
         r#"
         fn fill(arr, val) {
@@ -656,6 +660,28 @@ fn in_place_mutating_param_shares_not_moves() {
         }
         let xs = [0, 0, 0, 0]
         fill(xs, 7)
+        print(xs[0])
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn mut_ref_param_fill_is_caller_visible() {
+    // The loan-back path: an explicit `&mut Array<int>` param BORROWS and its
+    // in-place mutation is VISIBLE to the caller. `xs` stays usable and sees
+    // the writes.
+    ShapeTest::new(
+        r#"
+        fn fill(arr: &mut Array<int>, val: int) {
+            let mut i = 0
+            while i < arr.len() {
+                arr[i] = val
+                i = i + 1
+            }
+        }
+        let mut xs = [0, 0, 0, 0]
+        fill(&mut xs, 7)
         print(xs[0] + xs[1] + xs[2] + xs[3])
     "#,
     )
@@ -663,8 +689,23 @@ fn in_place_mutating_param_shares_not_moves() {
 }
 
 #[test]
-fn in_place_mutating_method_param_shares_not_moves() {
-    // A param mutated via a mutating METHOD (`.push`) shares, not moves.
+fn mut_ref_param_struct_field_assign_is_caller_visible() {
+    // `fn modify(p: &mut P){p.x=9}` — caller-visible mutation through `&mut`.
+    ShapeTest::new(
+        r#"
+        type P { x: int }
+        fn modify(p: &mut P) { p.x = 9 }
+        let mut x = P { x: 1 }
+        modify(&mut x)
+        print(x.x)
+    "#,
+    )
+    .expect_output_contains("9");
+}
+
+#[test]
+fn in_place_mutating_method_by_value_param_consumes_then_reuse_is_compile_error() {
+    // A by-value param mutated via a mutating METHOD (`.push`) also CONSUMES.
     ShapeTest::new(
         r#"
         fn grow(arr: Array<int>) { arr.push(9) }
@@ -673,5 +714,38 @@ fn in_place_mutating_method_param_shares_not_moves() {
         print(xs.len())
     "#,
     )
-    .expect_output_contains("3");
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn fn_returning_moved_arg_threads_ownership_out() {
+    // A consuming fn that THREADS its moved arg out as the return value: the
+    // caller rebinds the returned owner and reads it; the original `x` is
+    // moved (reading it would be B0005, exercised elsewhere).
+    ShapeTest::new(
+        r#"
+        type P { x: int }
+        fn passthru(p: P) -> P { p }
+        let x = P { x: 7 }
+        let y = passthru(x)
+        print(y.x)
+    "#,
+    )
+    .expect_output_contains("7");
+}
+
+#[test]
+fn fn_returning_moved_arg_then_use_original_is_compile_error() {
+    // After `let y = passthru(x)` threads `x` out, reading the moved-from `x`
+    // is a use-after-move.
+    ShapeTest::new(
+        r#"
+        type P { x: int }
+        fn passthru(p: P) -> P { p }
+        let x = P { x: 7 }
+        let y = passthru(x)
+        print(x.x)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
 }

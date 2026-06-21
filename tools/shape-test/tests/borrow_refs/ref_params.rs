@@ -161,12 +161,13 @@ fn test_ref_in_recursive_function() {
 
 #[test]
 fn test_ref_implicit_ref_for_array_mutation() {
-    // Arrays passed to functions that mutate them are auto-promoted to refs
+    // CallArgConsume: caller-visible array mutation requires an explicit `&mut`
+    // param (the WS-7 auto-promote-to-ref convention is reversed).
     ShapeTest::new(
         r#"
-        fn set_first(arr, v) { arr[0] = v }
-        let xs = [1, 2, 3]
-        set_first(xs, 99)
+        fn set_first(arr: &mut Array<int>, v: int) { arr[0] = v }
+        let mut xs = [1, 2, 3]
+        set_first(&mut xs, 99)
         xs[0]
     "#,
     )

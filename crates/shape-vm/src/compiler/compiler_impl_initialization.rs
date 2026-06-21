@@ -169,7 +169,6 @@ impl BytecodeCompiler {
             exclusive_reference_value_module_bindings: HashSet::new(),
             call_arg_module_binding_ref_writebacks: Vec::new(),
             inferred_ref_params: HashMap::new(),
-            param_mutation_share_params: HashMap::new(),
             inferred_ref_mutates: HashMap::new(),
             inferred_param_pass_modes: HashMap::new(),
             inferred_param_type_hints: HashMap::new(),

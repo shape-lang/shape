@@ -1353,13 +1353,6 @@ pub struct BytecodeCompiler {
     pub(crate) call_arg_module_binding_ref_writebacks: Vec<Vec<(u16, u16)>>,
     /// Inferred reference parameters for untyped params: function -> per-param flag.
     pub(crate) inferred_ref_params: HashMap<String, Vec<bool>>,
-    /// STAGE T2 (user 2026-06-21): per-callee "param BORROWS (shared,
-    /// mutation-visible)" map. `[fn][i]==true` ⇒ param `i` is mutated in place
-    /// by the callee body (`p[k]=v` / `p.f=v` / `p.push(..)`) and must be
-    /// SHARED — a by-value heap call-arg flowing to it does NOT move. Built by
-    /// `build_param_mutation_share_map`; consumed at the MIR move-analysis
-    /// call sites (`functions.rs` `analyze_with_borrowing_params`).
-    pub(crate) param_mutation_share_params: HashMap<String, Vec<bool>>,
     /// Inferred mutating-reference params: function -> per-param flag.
     pub(crate) inferred_ref_mutates: HashMap<String, Vec<bool>>,
     /// Effective per-parameter pass mode (explicit + inferred), by function name.
