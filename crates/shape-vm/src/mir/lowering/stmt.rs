@@ -168,6 +168,13 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
             binding_metadata.clone(),
         );
 
+        // Binding-move reconcile (user 2026-06-21): record `var` slots so the
+        // borrow solver keeps `var copy = data` on clone-on-still-live (auto-
+        // clone) while `let` / `let mut` get Move + B0005 use-after-move.
+        if matches!(decl.kind, ast::VarKind::Var) {
+            builder.record_var_binding_slot(slot);
+        }
+
         // ADR-006 §2.7.5 stamp-at-compile-time — V3-S6e-jit-specialized-
         // vec-map-aggregate-classify (Phase 3 cluster-0+1 Wave 3, 2026-
         // 05-16; V3-S6 multi-session chain checkpoint-final).

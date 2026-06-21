@@ -117,6 +117,13 @@ pub struct MirBuilder {
     /// `PriorityQueue()`); consumed at `Expr::MethodCall` lowering to decide
     /// whether to emit the receiver write-back assignment after the call.
     mut_self_container_locals: HashMap<SlotId, crate::compiler::mutation_writeback::ContainerKind>,
+    /// Slots backing a `var` smart-default binding (`var x = ...`). Populated at
+    /// `lower_var_decl` for `VarKind::Var` declarations. Threaded into
+    /// `MirFunction.var_binding_slots`; the borrow solver uses it to keep `var`
+    /// on `OwnershipDecision::Clone` on a still-live source (auto-clone /
+    /// clone-on-still-live) while `let` / `let mut` get Move + B0005 (binding-
+    /// move reconcile, user 2026-06-21).
+    var_binding_slots: HashSet<SlotId>,
     /// Per-slot user-struct type name for slots produced by
     /// `Expr::StructLiteral { type_name, .. }` lowering — ADR-006 §2.7.5
     /// producing-site classification, Phase 3 cluster-0 Round 13 T1' gap 1
@@ -201,6 +208,7 @@ impl MirBuilder {
             span,
             fallback_spans: Vec::new(),
             mut_self_container_locals: HashMap::new(),
+            var_binding_slots: HashSet::new(),
             local_struct_type_names: HashMap::new(),
             local_typed_array_element_types: HashMap::new(),
             local_declared_scalar_types: HashMap::new(),
@@ -300,6 +308,14 @@ impl MirBuilder {
         kind: crate::compiler::mutation_writeback::ContainerKind,
     ) {
         self.mut_self_container_locals.insert(slot, kind);
+    }
+
+    /// Record that `slot` backs a `var` smart-default binding. Called from
+    /// `lower_var_decl` for `VarKind::Var`. The borrow solver reads the threaded
+    /// set (`MirFunction.var_binding_slots`) to keep `var` on clone-on-still-live
+    /// while `let` / `let mut` get Move + B0005 (user 2026-06-21 reconcile).
+    pub(super) fn record_var_binding_slot(&mut self, slot: SlotId) {
+        self.var_binding_slots.insert(slot);
     }
 
     /// Look up a recognized COW-container kind for a binding slot. Returns
@@ -705,6 +721,7 @@ impl MirBuilder {
                 local_typed_array_element_types: self.local_typed_array_element_types,
                 local_declared_scalar_types: self.local_declared_scalar_types,
                 binding_slots,
+                var_binding_slots: self.var_binding_slots,
             },
             had_fallbacks,
             fallback_spans,

@@ -806,6 +806,18 @@ pub struct MirFunction {
     /// f-string suppression at `helpers_binding.rs:280` at the MIR layer). This
     /// set is the discriminator.
     pub binding_slots: std::collections::HashSet<SlotId>,
+    /// Slots that back a `var` smart-default binding (`var x = ...`), as opposed
+    /// to an explicit `let` / `let mut` binding.
+    ///
+    /// Binding-move reconcile (user 2026-06-21): `let` / `let mut` are explicit
+    /// MOVE bindings — a `let q = p` HEAP rebind consumes `p`, and a still-live
+    /// read of the moved-from source is a compile-time use-after-move (B0005).
+    /// `var` is the ergonomic smart-default that AUTO-CLONES on a still-live
+    /// source (`var copy = data; print(data)` keeps BOTH — the documented
+    /// clone-on-still-live / CoW behavior). The destination binding slot's
+    /// membership in this set is the discriminator the ownership-decision uses
+    /// to keep `var` on `OwnershipDecision::Clone` while `let` gets `Move`.
+    pub var_binding_slots: std::collections::HashSet<SlotId>,
 }
 
 /// Type information for a local variable, used for Copy/Clone inference.

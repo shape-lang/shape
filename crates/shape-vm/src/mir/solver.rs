@@ -1743,11 +1743,24 @@ fn compute_ownership_decisions(
         for (stmt_idx, stmt) in block.statements.iter().enumerate() {
             // Match both Move and Copy operands — identifier loads use Copy in MIR,
             // but the ownership decision (Move vs Clone) depends on liveness analysis.
-            let src_slot = match &stmt.kind {
-                StatementKind::Assign(_, Rvalue::Use(Operand::Move(Place::Local(s)))) => s,
-                StatementKind::Assign(_, Rvalue::Use(Operand::Copy(Place::Local(s)))) => s,
+            let (dest_place, src_slot) = match &stmt.kind {
+                StatementKind::Assign(dest, Rvalue::Use(Operand::Move(Place::Local(s)))) => {
+                    (dest, s)
+                }
+                StatementKind::Assign(dest, Rvalue::Use(Operand::Copy(Place::Local(s)))) => {
+                    (dest, s)
+                }
                 _ => continue,
             };
+            // Binding-move reconcile (user 2026-06-21): `var copy = data` is the
+            // ergonomic smart-default — it AUTO-CLONES on a still-live source
+            // (clone-on-still-live / CoW) so BOTH `copy` and `data` stay valid.
+            // `let q = p` / `let mut q = p` are explicit MOVE bindings (the
+            // moved-from source's later read is B0005). The discriminator is the
+            // DESTINATION binding slot: a `var` destination keeps the
+            // conservative non-consuming Clone on a still-live source; a `let` /
+            // `let mut` destination gets the REAL-MOVE flip.
+            let dest_is_var = mir.var_binding_slots.contains(&dest_place.root_local());
             {
                 // Check if the source is a non-Copy type
                 let src_type = mir
@@ -1784,8 +1797,21 @@ fn compute_ownership_decisions(
                         // `actual_move_places`). Scalars (int/number/bool) are
                         // `LocalTypeInfo::Copy` and never reach this arm — they
                         // stay Copy by construction.
-                        let _ = liveness.is_live_after(block.id, stmt_idx, *src_slot, mir);
-                        OwnershipDecision::Move
+                        //
+                        // EXCEPTION — `var` smart-default (user 2026-06-21
+                        // reconcile): a `var copy = data` destination AUTO-CLONES
+                        // on a still-live source (clone-on-still-live / CoW), so
+                        // BOTH bindings stay valid and no B0005 fires. Only when
+                        // the source is dead after this point does `var` move
+                        // (the move-when-dead half of the smart default). `let` /
+                        // `let mut` destinations always move regardless.
+                        if dest_is_var
+                            && liveness.is_live_after(block.id, stmt_idx, *src_slot, mir)
+                        {
+                            OwnershipDecision::Clone
+                        } else {
+                            OwnershipDecision::Move
+                        }
                     }
                     LocalTypeInfo::Unknown => {
                         // CRITICAL scalar-safety (user 2026-06-21): `Unknown` is
@@ -2211,6 +2237,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2265,6 +2292,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2331,6 +2359,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2386,6 +2415,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2461,6 +2491,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2530,6 +2561,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2586,6 +2618,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2652,6 +2685,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2707,6 +2741,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2756,6 +2791,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2834,6 +2870,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2898,6 +2935,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2952,6 +2990,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -3133,6 +3172,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();
@@ -3214,6 +3254,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -3281,6 +3322,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();
@@ -3379,6 +3421,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();
@@ -3441,6 +3484,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         }
     }
 

@@ -362,6 +362,7 @@ mod tests {
             local_typed_array_element_types: StdHashMap::new(),
             local_declared_scalar_types: StdHashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         }
     }
 

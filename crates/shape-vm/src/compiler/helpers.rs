@@ -7648,6 +7648,7 @@ mod call_return_kind_tests {
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         }
     }
 
@@ -7748,6 +7749,7 @@ mod call_return_kind_tests {
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
         let resolver = |name: &str| -> Option<ConcreteType> {
             if name == "divide" {
@@ -7828,6 +7830,7 @@ mod call_return_kind_tests {
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
         let result = infer_top_level_concrete_types_from_mir(&mir);
         assert!(
@@ -7910,6 +7913,7 @@ mod call_return_kind_tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
         let method_returns = |type_name: &str, method_name: &str| -> Option<ConcreteType> {
             if type_name == "X" && method_name == "name" {
@@ -8005,6 +8009,7 @@ mod call_return_kind_tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
         let method_returns = |type_name: &str, method_name: &str| -> Option<ConcreteType> {
             if type_name == "X" && method_name == "name" {
@@ -8080,6 +8085,7 @@ mod call_return_kind_tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
         // No method_returns resolver — destination stays Void.
         let result =
@@ -8134,6 +8140,7 @@ mod call_return_kind_tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
         let method_returns = |_type_name: &str, _method_name: &str| -> Option<ConcreteType> {
             // Resolver would return String, but it's unreachable

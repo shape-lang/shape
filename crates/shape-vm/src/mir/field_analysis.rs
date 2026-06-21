@@ -570,6 +570,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -654,6 +655,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -748,6 +750,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -826,6 +829,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -884,6 +888,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -982,6 +987,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -1031,6 +1037,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);
@@ -1096,6 +1103,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            var_binding_slots: Default::default(),
         };
 
         let cfg = ControlFlowGraph::build(&mir);

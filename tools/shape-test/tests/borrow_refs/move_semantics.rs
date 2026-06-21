@@ -462,3 +462,113 @@ fn read_on_both_branches_no_move_no_false_error() {
     )
     .expect_output_contains("[1, 2, 3]");
 }
+
+// =============================================================================
+// var SMART-DEFAULT — AUTO-CLONE on still-live source (user 2026-06-21 reconcile)
+//
+// `let` / `let mut` are explicit MOVE bindings (B0005 on use-after-move).
+// `var` is the ergonomic smart-default: it AUTO-CLONES on a STILL-LIVE source
+// (clone-on-still-live / CoW), so `var copy = data; print(data)` keeps BOTH.
+// The discriminator is the DESTINATION binding kind: a `var` destination keeps
+// the non-consuming Clone; a `let` / `let mut` destination gets the REAL-MOVE
+// flip. See `solver::compute_ownership_decisions` (`dest_is_var` gate) +
+// `MirFunction.var_binding_slots` populated at `lower_var_decl`.
+// =============================================================================
+
+#[test]
+fn var_array_autoclones_source_stays_usable() {
+    // `var copy = data` on a still-live `data` AUTO-CLONES — both stay usable,
+    // no B0005 (the documented `var` clone-on-still-live behavior).
+    ShapeTest::new(
+        r#"
+        let data = [1, 2, 3]
+        var copy = data
+        print(data.len())
+        print(copy.len())
+    "#,
+    )
+    .expect_output_contains("3\n3");
+}
+
+#[test]
+fn var_struct_autoclones_source_stays_usable() {
+    ShapeTest::new(
+        r#"
+        type P { x: int }
+        let p = P { x: 7 }
+        var q = p
+        print(p.x)
+        print(q.x)
+    "#,
+    )
+    .expect_output_contains("7\n7");
+}
+
+#[test]
+fn var_string_autoclones_source_stays_usable() {
+    ShapeTest::new(
+        r#"
+        let s = "hello"
+        var t = s
+        print(s)
+        print(t)
+    "#,
+    )
+    .expect_output_contains("hello\nhello");
+}
+
+#[test]
+fn let_move_still_fires_b0005_while_var_autoclones() {
+    // CONTRAST: the identical rebind under `let` MOVES and a still-live read of
+    // the moved-from source is B0005 — `var` does NOT, `let` does.
+    ShapeTest::new(
+        r#"
+        let p = [1, 2, 3]
+        let q = p
+        print(p)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn let_mut_move_still_fires_b0005() {
+    // `let mut` is ALSO an explicit-move binding (not a `var` smart-default):
+    // the moved-from source's later read is B0005.
+    ShapeTest::new(
+        r#"
+        let p = [1, 2, 3]
+        let mut q = p
+        print(p)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn var_source_dead_after_still_runs() {
+    // When the `var copy = data` source is DEAD afterward (the move-when-dead
+    // half of the smart default), the program still runs — `copy` owns it.
+    ShapeTest::new(
+        r#"
+        let data = [1, 2, 3]
+        var copy = data
+        print(copy.len())
+    "#,
+    )
+    .expect_output_contains("3");
+}
+
+#[test]
+fn var_scalar_stays_copy_both_usable() {
+    // Scalars are Copy for `var` too — no move, both usable.
+    ShapeTest::new(
+        r#"
+        let x = 5
+        var y = x
+        print(x)
+        print(y)
+    "#,
+    )
+    .expect_output_contains("5\n5");
+}
