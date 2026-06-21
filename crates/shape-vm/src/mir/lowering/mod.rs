@@ -929,6 +929,49 @@ pub fn classify_return_annotation(
     }
 }
 
+/// Classify a type-checker-INFERRED return-type hint name into a `LocalTypeInfo`
+/// (strict REAL-MOVE close R1, 2026-06-21). Used by the compiler to seed
+/// `fn_return_types` for UNANNOTATED functions: the MIR layer does not run
+/// inference, so `build_fn_return_type_seed` threads the already-inferred
+/// return type (`Compiler::infer_return_type_hints_from_types`) here as a
+/// `to_type_string` hint name (`"string"`, `"int"`, `"Array<int>"`, a struct
+/// name `"P"`, ...).
+///
+/// This closes the last binding-move false-green: an UNANNOTATED fn-return that
+/// yields a heap value (`fn mk() { "hi" } let p = mk() let q = p print(p)`) was
+/// previously bound `Unknown` (the MIR lowering never threaded the inferred
+/// return type), so the solver kept the rebind a non-consuming Clone and the
+/// use-after-move ran instead of raising B0005. An annotated `fn mk() -> string`
+/// was already caught via `classify_return_annotation`; this brings the
+/// unannotated case to parity.
+///
+/// Scalar hint names (`int` / `number` / `bool` / `char` / width-ints / `f64`)
+/// classify `Copy` so a scalar unannotated return (`fn n() { 1 } let x = n()`)
+/// never false-moves. `void` / `unit` / `null` / `never` / `undefined` are not
+/// heap values → `Copy` (non-consuming). Every other proven concrete name —
+/// `string` / `decimal` / `bigint` / `DateTime` / `Array<..>` / `HashMap<..>` /
+/// `Option<..>` / a user struct/enum name — is a heap value → `NonCopy`, a real
+/// MOVE on rebind.
+///
+/// Genuinely-unprovable returns never reach here: an unresolved return type
+/// stays a `Type::Variable` and `inferred_type_to_hint_name` returns `None`, so
+/// the function gets NO seed entry and falls through to the conservative
+/// `Unknown` non-consuming path. We never fabricate a classification (no
+/// Bool-default / force-scalar) — ADR-006 §Forbidden, surface-and-stop.
+pub fn classify_return_hint_name(hint: &str) -> LocalTypeInfo {
+    match hint {
+        // Proven scalar / register-resident Copy types.
+        "int" | "number" | "bool" | "char" | "f64" | "i8" | "i16" | "i32" | "i64" | "u8"
+        | "u16" | "u32" | "u64" => LocalTypeInfo::Copy,
+        // Non-heap, non-value returns — nothing to move.
+        "void" | "unit" | "()" | "null" | "never" | "undefined" => LocalTypeInfo::Copy,
+        // Everything else is a proven concrete heap value (string / decimal /
+        // bigint / DateTime / Array<..> / HashMap<..> / Option<..> / Result<..>
+        // / a user struct or enum name) — a real MOVE on rebind.
+        _ => LocalTypeInfo::NonCopy,
+    }
+}
+
 pub fn compute_mutability_errors(lowering: &MirLoweringResult) -> Vec<MutabilityError> {
     let tracked_bindings: HashMap<SlotId, &LoweredBindingInfo> = lowering
         .binding_infos

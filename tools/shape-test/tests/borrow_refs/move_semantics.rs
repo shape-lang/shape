@@ -311,6 +311,94 @@ fn generic_fn_return_scalar_instantiation_not_flipped() {
 }
 
 // =============================================================================
+// R1 — genuinely UNANNOTATED fn-return-sourced moves (strict REAL-MOVE close,
+// 2026-06-21). Distinct from H1: there the FUNCTION carries a `-> string` /
+// `-> P` return annotation (only the *binding* is unannotated). Here the
+// function itself has NO return annotation — the type-checker INFERS the return
+// type, and `build_fn_return_type_seed` threads that inferred hint
+// (`type_tracker.function_return_types`) into the binding-classification site.
+// A heap inferred return (string / struct / Array) classifies the bind NonCopy
+// → MOVE → B0005; a scalar inferred return stays Copy.
+//
+// Was the last binding-move false-green: `fn make() { let s="hello"; s }
+// let a=make(); let b=a; print(a)` RAN (a moved into b, not caught) because the
+// MIR lowering left the unannotated-fn-return bind `Unknown`.
+// =============================================================================
+
+#[test]
+fn use_after_move_inferred_string_fn_return_is_compile_error() {
+    // No `-> T` on `make`; return type `string` is INFERRED. Heap → NonCopy.
+    ShapeTest::new(
+        r#"
+        fn make() { let s = "hello"; s }
+        let a = make()
+        let b = a
+        print(a)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn use_after_move_inferred_struct_fn_return_is_compile_error() {
+    // No `-> T` on `mk`; return type `P` (user struct, heap) is INFERRED.
+    ShapeTest::new(
+        r#"
+        type P { x: int }
+        fn mk() { let p = P { x: 1 }; p }
+        let a = mk()
+        let b = a
+        print(a.x)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn use_after_move_inferred_array_fn_return_is_compile_error() {
+    // No `-> T` on `mka`; return type `Array<int>` is INFERRED. Heap → NonCopy.
+    ShapeTest::new(
+        r#"
+        fn mka() { let a = [1, 2, 3]; a }
+        let a = mka()
+        let b = a
+        print(a)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn scalar_inferred_fn_return_rebind_stays_copy() {
+    // No `-> T` on `n`; return type `int` is INFERRED. Scalar → Copy, no move:
+    // `let b = a` then `print(a + b)` must NOT raise B0005.
+    ShapeTest::new(
+        r#"
+        fn n() { let x = 5; x }
+        let a = n()
+        let b = a
+        print(a + b)
+    "#,
+    )
+    .expect_output_contains("10");
+}
+
+#[test]
+fn single_move_of_inferred_string_fn_return_runs() {
+    // A LEGIT single move of an unannotated-inferred heap return: `let b = a`
+    // then reading `b` (not `a`) must run — the move is not a use-after-move.
+    ShapeTest::new(
+        r#"
+        fn make() { let s = "hello"; s }
+        let a = make()
+        let b = a
+        print(b)
+    "#,
+    )
+    .expect_output_contains("hello");
+}
+
+// =============================================================================
 // H2 — cross-block / nested-scope moves (strict REAL-MOVE close, 2026-06-21)
 //
 // A move consuming an OUTER binding inside a nested block marks the outer

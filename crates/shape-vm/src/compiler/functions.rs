@@ -81,6 +81,32 @@ impl BytecodeCompiler {
                 {
                     map.insert(name.clone(), info);
                 }
+                // An explicit annotation is the stronger signal — done.
+                continue;
+            }
+            // Strict REAL-MOVE close R1 (2026-06-21): seed UNANNOTATED functions
+            // from the type-checker-INFERRED return type. The MIR layer does not
+            // run inference, so the compiler's inference pass already recorded
+            // the inferred return type as a `to_type_string` hint name in
+            // `type_tracker.function_return_types`
+            // (via `infer_return_type_hints_from_types` →
+            // `register_function_return_type`). Classifying that hint here closes
+            // the last binding-move hole: `fn mk() { "hi" } let p = mk() let q =
+            // p print(p)` now classifies `p` `NonCopy` → MOVE → B0005 (parity
+            // with the annotated `fn mk() -> string` case). Scalar inferred
+            // returns classify `Copy` so a scalar chain never false-moves.
+            //
+            // A function whose generic-param return stayed an unresolved
+            // `Type::Variable` produces NO hint (`inferred_type_to_hint_name`
+            // returns `None`), so it never registers a return type and stays
+            // unseeded → conservative `Unknown` non-consuming path. We never
+            // fabricate a classification (no Bool-default / force-scalar) —
+            // ADR-006 §Forbidden, surface-and-stop.
+            if let Some(hint) = self.type_tracker.get_function_return_type(name) {
+                map.insert(
+                    name.clone(),
+                    crate::mir::lowering::classify_return_hint_name(hint),
+                );
             }
         }
         map
