@@ -641,6 +641,16 @@ impl MirBuilder {
             .filter(|l| !l.name.starts_with("__mir_"))
             .map(|l| l.name.clone())
             .collect();
+        // Real user-binding slots (strict REAL-MOVE move-detection
+        // discriminator, see MirFunction::binding_slots). Index === slot id,
+        // matching `local_types`'s positional layout.
+        let binding_slots: HashSet<SlotId> = self
+            .locals
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| !l.name.starts_with("__mir_"))
+            .map(|(idx, _)| SlotId(idx as u16))
+            .collect();
 
         MirLoweringResult {
             mir: MirFunction {
@@ -655,6 +665,7 @@ impl MirBuilder {
                 local_struct_type_names: self.local_struct_type_names,
                 local_typed_array_element_types: self.local_typed_array_element_types,
                 local_declared_scalar_types: self.local_declared_scalar_types,
+                binding_slots,
             },
             had_fallbacks,
             fallback_spans,

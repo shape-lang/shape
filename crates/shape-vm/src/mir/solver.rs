@@ -1758,16 +1758,50 @@ fn compute_ownership_decisions(
 
                 let decision = match src_type {
                     LocalTypeInfo::Copy => OwnershipDecision::Copy,
-                    LocalTypeInfo::NonCopy => {
-                        // Smart inference: check if source is live after this point
+                    LocalTypeInfo::NonCopy if slot_is_reference_param(mir, *src_slot) => {
+                        // A `&x` / `&mut x` reference PARAMETER is classified
+                        // `NonCopy` ("references are always tracked", lowering
+                        // mod.rs:708) but it is a BORROW, not an owned heap
+                        // value. Reading through it (`let old = x` inside
+                        // `fn f(&x)`) is a deref-read that does NOT consume the
+                        // referent; moving it would spuriously fire B0005 on the
+                        // next read of the reference (e.g. `x = x + 1`). Keep the
+                        // conservative still-live Clone for reference params.
                         if liveness.is_live_after(block.id, stmt_idx, *src_slot, mir) {
                             OwnershipDecision::Clone
                         } else {
                             OwnershipDecision::Move
                         }
                     }
+                    LocalTypeInfo::NonCopy => {
+                        // Strict REAL-MOVE model (user 2026-06-21): HEAP values
+                        // (Array/struct/string/HashMap/...) MOVE on `let q = p`
+                        // even when the source `p` is still live afterward. The
+                        // still-live read of the moved-from source is then a
+                        // compile-time use-after-move (B0005), raised by
+                        // `compute_use_after_move_errors` once the moved-from
+                        // source is entered into the moved-set (see
+                        // `actual_move_places`). Scalars (int/number/bool) are
+                        // `LocalTypeInfo::Copy` and never reach this arm — they
+                        // stay Copy by construction.
+                        let _ = liveness.is_live_after(block.id, stmt_idx, *src_slot, mir);
+                        OwnershipDecision::Move
+                    }
                     LocalTypeInfo::Unknown => {
-                        // Conservative: assume Clone if live, Move if dead
+                        // CRITICAL scalar-safety (user 2026-06-21): `Unknown` is
+                        // NOT proven heap. `infer_local_type_from_expr` returns
+                        // `Unknown` for any identifier-sourced bind (`let x = i`),
+                        // which includes SCALARS (e.g. a loop variable `i: int`).
+                        // The REAL-MOVE flip must NOT move scalars — moving them
+                        // both breaks Copy semantics (a later read becomes a
+                        // spurious B0005) AND explodes cost ~10x. Only PROVEN heap
+                        // (`NonCopy`) moves; `Unknown` keeps the conservative
+                        // non-consuming still-live Clone (Copy-cheap for scalars,
+                        // refcount-balanced share for any heap value that slips
+                        // through unproven). The genuine HEAP `let q = p` rebind is
+                        // already proven `NonCopy` for struct/array/string sources
+                        // via the binding-slot type inference, so heap moves are
+                        // unaffected.
                         if liveness.is_live_after(block.id, stmt_idx, *src_slot, mir) {
                             OwnershipDecision::Clone
                         } else {
@@ -2035,6 +2069,28 @@ fn actual_move_places(
         {
             vec![place.clone()]
         }
+        // KEY HAZARD (strict REAL-MOVE flip): identifier loads lower to
+        // `Operand::Copy`, not `Operand::Move`. Without this arm, a HEAP bind
+        // whose ownership decision is `Move` would never enter the moved-set,
+        // so the still-live read of the moved-from source would silently NOT
+        // raise B0005 (false-green). When the liveness-driven decision at this
+        // point is `Move`, the Copy-operand source is genuinely consumed —
+        // enter it into the moved-set so use-after-move fires.
+        //
+        // BUT: only when the bind DESTINATION is a real user binding
+        // (`MirFunction::binding_slots`). A Copy read into a synthesized temp
+        // (`__mir_tmp*`) — the `f"{s}"` concatenation accumulator, expression
+        // operand staging, etc. — is a NON-consuming derived-value read, never
+        // the binding's semantic last-use; consuming the source there would
+        // spuriously fire B0005 on a later legitimate read of `s` and would
+        // break the f-string suppression (helpers_binding.rs:280) at the MIR
+        // layer. The temp-destination filter is the discriminator.
+        StatementKind::Assign(dest, Rvalue::Use(Operand::Copy(place)))
+            if ownership_decisions.get(&stmt.point) == Some(&OwnershipDecision::Move)
+                && mir.binding_slots.contains(&dest.root_local()) =>
+        {
+            vec![place.clone()]
+        }
         StatementKind::Assign(_, Rvalue::Use(Operand::MoveExplicit(place)))
             if place_root_local_type(place, mir) != Some(LocalTypeInfo::Copy) =>
         {
@@ -2046,6 +2102,18 @@ fn actual_move_places(
 
 fn place_root_local_type(place: &Place, mir: &MirFunction) -> Option<LocalTypeInfo> {
     mir.local_types.get(place.root_local().0 as usize).cloned()
+}
+
+/// True when `slot` is a `&x` / `&mut x` reference PARAMETER. Such params are
+/// `LocalTypeInfo::NonCopy` ("references are always tracked") but are BORROWS,
+/// not owned heap values — the strict REAL-MOVE flip must not consume them.
+fn slot_is_reference_param(mir: &MirFunction, slot: SlotId) -> bool {
+    mir.param_slots
+        .iter()
+        .position(|p| *p == slot)
+        .and_then(|idx| mir.param_reference_kinds.get(idx))
+        .map(|k| k.is_some())
+        .unwrap_or(false)
 }
 
 fn reinitializes_moved_place(dest_place: &Place, moved_place: &Place) -> bool {
@@ -2127,6 +2195,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2180,6 +2249,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2245,6 +2315,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2299,6 +2370,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2373,6 +2445,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2441,6 +2514,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2496,6 +2570,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2561,6 +2636,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2615,6 +2691,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2663,6 +2740,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2740,6 +2818,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -2753,9 +2832,13 @@ mod tests {
     }
 
     #[test]
-    fn test_clone_decision_when_source_live_after() {
+    fn test_move_decision_for_noncopy_source_even_when_live_after() {
+        // Strict REAL-MOVE rebaseline (user 2026-06-21): a NonCopy (heap)
+        // source MOVES on bind even when it is still live afterward — the
+        // pre-flip "still-live → Clone" policy is gone. The still-live read of
+        // the moved-from source is now a compile-time use-after-move (B0005).
         // _0 = value (NonCopy)
-        // _1 = move _0 (point 1 — _0 IS live after because _2 uses it)
+        // _1 = move _0 (point 1 — _0 IS live after; under REAL-MOVE → Move)
         // _2 = move _0 (point 2 — _0 NOT live after → Move)
         let mir = MirFunction {
             name: "test".to_string(),
@@ -2799,16 +2882,18 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
-        // At point 1, _0 is still used at point 2, so it's live → Clone
+        // At point 1, _0 is still used at point 2 (live), but under REAL-MOVE a
+        // NonCopy source moves regardless of liveness → Move.
         assert_eq!(
             analysis.ownership_at(Point(1)),
-            OwnershipDecision::Clone,
-            "source live after → should be Clone"
+            OwnershipDecision::Move,
+            "NonCopy source → Move even when live after (REAL-MOVE flip)"
         );
-        // At point 2, _0 is not used after → Move
+        // At point 2, _0 is not used after → Move (unchanged).
         assert_eq!(
             analysis.ownership_at(Point(2)),
             OwnershipDecision::Move,
@@ -2851,6 +2936,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -3031,6 +3117,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();
@@ -3111,6 +3198,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let analysis = analyze(&mir, &Default::default());
@@ -3177,6 +3265,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();
@@ -3274,6 +3363,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         };
 
         let mut callee_summaries = CalleeSummaries::new();
@@ -3335,6 +3425,7 @@ mod tests {
             local_struct_type_names: std::collections::HashMap::new(),
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
+            binding_slots: Default::default(),
         }
     }
 

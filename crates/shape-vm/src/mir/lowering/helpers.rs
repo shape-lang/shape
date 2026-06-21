@@ -275,6 +275,18 @@ pub(super) fn infer_local_type_from_expr(expr: &Expr) -> LocalTypeInfo {
             }
         },
         Expr::Reference { .. } => LocalTypeInfo::NonCopy,
+        // Proven HEAP-producing literals (strict REAL-MOVE model, user
+        // 2026-06-21). These constructors always yield a heap value
+        // (Array/Object/struct/tuple), so a `let x = <heap-literal>` binding's
+        // slot is `NonCopy` — and a subsequent `let q = x` rebind reads a
+        // NonCopy source and therefore MOVES (raising B0005 on a later read of
+        // `x`). Classifying these here is what makes the heap-move flip fire
+        // for `let p = P { .. }` / `let a = [..]` sources, while leaving
+        // identifier-sourced binds (`let x = i`, possibly a SCALAR loop var)
+        // as `Unknown` → non-consuming Clone so scalars never move.
+        Expr::Array(..) | Expr::Object(..) | Expr::StructLiteral { .. } => {
+            LocalTypeInfo::NonCopy
+        }
         _ => LocalTypeInfo::Unknown,
     }
 }

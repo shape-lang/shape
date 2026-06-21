@@ -791,6 +791,21 @@ pub struct MirFunction {
     /// from_mir_with_resolvers`.
     pub local_declared_scalar_types:
         std::collections::HashMap<SlotId, shape_value::v2::ConcreteType>,
+    /// Slots that back a real user-visible `let`/`let mut`/param binding (any
+    /// local whose name does NOT start with `__mir_`). Compiler-synthesized
+    /// temporaries (`__mir_tmp*`, f-string concat accumulators, call-arg
+    /// staging slots) are excluded.
+    ///
+    /// Strict REAL-MOVE model (user 2026-06-21): a `let q = p` HEAP bind moves
+    /// `p`. Identifier reads lower to `Operand::Copy`, so the move-detection in
+    /// `solver::actual_move_places` must enter the Copy source into the
+    /// moved-set — but ONLY when the bind destination is a real user binding.
+    /// A Copy read into a synthesized temp (e.g. the `f"{s}"` concatenation
+    /// accumulator) is a NON-consuming derived-value read, never the binding's
+    /// semantic last-use, and must NOT consume the source (preserves the
+    /// f-string suppression at `helpers_binding.rs:280` at the MIR layer). This
+    /// set is the discriminator.
+    pub binding_slots: std::collections::HashSet<SlotId>,
 }
 
 /// Type information for a local variable, used for Copy/Clone inference.
