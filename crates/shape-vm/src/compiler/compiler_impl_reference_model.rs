@@ -1,6 +1,262 @@
 use super::*;
 
 impl BytecodeCompiler {
+    /// STAGE T2 call-arg move classification (user 2026-06-21).
+    ///
+    /// Builds the per-callee "param BORROWS (shared, mutation-visible)" map.
+    /// `[fn_name][i] == true` ⇒ parameter `i` is mutated IN PLACE by the
+    /// callee body (index-assign `p[k]=v`, property-assign `p.f=v`, or a
+    /// known mutating method `p.push(..)` / `p.sort()` / ...). Such a param
+    /// MUST be SHARED, not moved: Shape passes heap collections by-value as a
+    /// shared `Arc` pointer, and in-place mutation through that shared `Arc`
+    /// is VISIBLE to the caller (the documented "mutation visible to caller"
+    /// feature — see `infer_reference_params_from_types`'s WS-7 note on why
+    /// inferred-ref is disabled but mutation-visibility survives under the
+    /// by-value-Arc convention). Moving such a param would reject
+    /// `fn fill(arr){arr[i]=v}; fill(xs); xs[0]` and silently delete the
+    /// feature.
+    ///
+    /// A param NOT marked here is OWNERSHIP-TAKING — its by-value heap
+    /// argument MOVES (`fn consume(p: P){}; consume(x); print(x)` ⇒ B0005).
+    ///
+    /// SURFACED RESIDUAL (read-only-but-reused): a param the callee only
+    /// READS (`fn first(arr){arr[0]}`) is currently classified ownership-
+    /// taking ⇒ it MOVES, so `first(xs); other(xs)` would be a use-after-move.
+    /// Whether a read-only (non-mutating, non-`&`) heap param should
+    /// borrow-share or move is the open ambiguity flagged for a user ruling.
+    /// No passing test currently exercises read-only-then-reuse of a heap arg
+    /// across two user calls, so this map (mutation ⇒ share) regresses nothing
+    /// in the suite while landing the unambiguous ownership-taking moves.
+    pub(super) fn build_param_mutation_share_map(
+        program: &Program,
+    ) -> HashMap<String, Vec<bool>> {
+        let funcs = Self::collect_program_functions(program);
+        let mut map = HashMap::new();
+        for (name, func) in funcs {
+            let mut param_names: HashMap<String, usize> = HashMap::new();
+            for (idx, p) in func.params.iter().enumerate() {
+                if let Some(pname) = p.simple_name() {
+                    param_names.insert(pname.to_string(), idx);
+                }
+            }
+            let mut shared = vec![false; func.params.len()];
+            for stmt in &func.body {
+                Self::collect_param_inplace_mutations(stmt, &param_names, &mut shared);
+            }
+            map.insert(name, shared);
+        }
+        map
+    }
+
+    /// STAGE T2 borrowing-param map for the MIR move analysis: a param BORROWS
+    /// (does NOT move its by-value heap arg) when it is an inferred/explicit ref
+    /// param OR mutated in place by the callee (mutation-share). The per-element
+    /// union of `inferred_ref_params` and `param_mutation_share_params`.
+    pub(crate) fn borrowing_params_for_move_analysis(&self) -> HashMap<String, Vec<bool>> {
+        let mut out = self.inferred_ref_params.clone();
+        for (name, share_flags) in &self.param_mutation_share_params {
+            let entry = out.entry(name.clone()).or_default();
+            if entry.len() < share_flags.len() {
+                entry.resize(share_flags.len(), false);
+            }
+            for (i, &shared) in share_flags.iter().enumerate() {
+                if shared {
+                    entry[i] = true;
+                }
+            }
+        }
+        out
+    }
+
+    /// Mark `shared[i]` when statement `stmt` mutates param `i` in place.
+    fn collect_param_inplace_mutations(
+        stmt: &shape_ast::ast::Statement,
+        param_names: &HashMap<String, usize>,
+        shared: &mut [bool],
+    ) {
+        use shape_ast::ast::{ForInit, Statement};
+        match stmt {
+            Statement::Assignment(assign, _) => {
+                // A `Statement::Assignment` rebinds a destructure pattern
+                // (whole-variable reassign) — that is NOT an in-place mutation
+                // of a param's contents (`p[k]=v` / `p.f=v` parse as
+                // `Statement::Expression(Expr::Assign{..})`, handled below).
+                // Just recurse into the value expression.
+                Self::collect_param_inplace_mutations_expr(&assign.value, param_names, shared);
+            }
+            Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+                Self::collect_param_inplace_mutations_expr(expr, param_names, shared);
+            }
+            Statement::VariableDecl(decl, _) => {
+                if let Some(value) = &decl.value {
+                    Self::collect_param_inplace_mutations_expr(value, param_names, shared);
+                }
+            }
+            Statement::If(if_stmt, _) => {
+                Self::collect_param_inplace_mutations_expr(&if_stmt.condition, param_names, shared);
+                for s in &if_stmt.then_body {
+                    Self::collect_param_inplace_mutations(s, param_names, shared);
+                }
+                if let Some(else_body) = &if_stmt.else_body {
+                    for s in else_body {
+                        Self::collect_param_inplace_mutations(s, param_names, shared);
+                    }
+                }
+            }
+            Statement::While(w, _) => {
+                Self::collect_param_inplace_mutations_expr(&w.condition, param_names, shared);
+                for s in &w.body {
+                    Self::collect_param_inplace_mutations(s, param_names, shared);
+                }
+            }
+            Statement::For(f, _) => {
+                if let ForInit::ForIn { iter, .. } = &f.init {
+                    Self::collect_param_inplace_mutations_expr(iter, param_names, shared);
+                }
+                for s in &f.body {
+                    Self::collect_param_inplace_mutations(s, param_names, shared);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Mark `shared[i]` when expression `expr` mutates param `i` in place
+    /// (`Expr::Assign` to `p[k]`/`p.f`, or a mutating method `p.push(..)`).
+    fn collect_param_inplace_mutations_expr(
+        expr: &shape_ast::ast::Expr,
+        param_names: &HashMap<String, usize>,
+        shared: &mut [bool],
+    ) {
+        use shape_ast::ast::Expr;
+        match expr {
+            Expr::Assign(assign, _) => {
+                if let Some(idx) =
+                    Self::param_index_of_mutated_root(&assign.target, param_names)
+                {
+                    shared[idx] = true;
+                }
+                Self::collect_param_inplace_mutations_expr(&assign.value, param_names, shared);
+            }
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                ..
+            } => {
+                if Self::method_mutates_receiver(method)
+                    && let Expr::Identifier(name, _) = receiver.as_ref()
+                    && let Some(&idx) = param_names.get(name)
+                {
+                    shared[idx] = true;
+                }
+                Self::collect_param_inplace_mutations_expr(receiver, param_names, shared);
+                for a in args {
+                    Self::collect_param_inplace_mutations_expr(a, param_names, shared);
+                }
+            }
+            Expr::Block(block, _) => {
+                use shape_ast::ast::BlockItem;
+                for item in &block.items {
+                    match item {
+                        BlockItem::Statement(s) => {
+                            Self::collect_param_inplace_mutations(s, param_names, shared);
+                        }
+                        BlockItem::Assignment(assign) => {
+                            Self::collect_param_inplace_mutations_expr(
+                                &assign.value,
+                                param_names,
+                                shared,
+                            );
+                        }
+                        BlockItem::VariableDecl(decl) => {
+                            if let Some(value) = &decl.value {
+                                Self::collect_param_inplace_mutations_expr(
+                                    value, param_names, shared,
+                                );
+                            }
+                        }
+                        BlockItem::Expression(e) => {
+                            Self::collect_param_inplace_mutations_expr(e, param_names, shared);
+                        }
+                    }
+                }
+            }
+            Expr::FunctionCall { args, .. } | Expr::QualifiedFunctionCall { args, .. } => {
+                for a in args {
+                    Self::collect_param_inplace_mutations_expr(a, param_names, shared);
+                }
+            }
+            Expr::If(if_expr, _) => {
+                Self::collect_param_inplace_mutations_expr(
+                    &if_expr.condition,
+                    param_names,
+                    shared,
+                );
+                Self::collect_param_inplace_mutations_expr(
+                    &if_expr.then_branch,
+                    param_names,
+                    shared,
+                );
+                if let Some(e) = &if_expr.else_branch {
+                    Self::collect_param_inplace_mutations_expr(e, param_names, shared);
+                }
+            }
+            // `while` / `for` / `loop` are EXPRESSIONS in Shape (body is a
+            // Box<Expr> block) — walk the body so in-place mutations inside a
+            // loop (`while .. { arr[i]=v }`) are detected.
+            Expr::While(while_expr, _) => {
+                Self::collect_param_inplace_mutations_expr(
+                    &while_expr.condition,
+                    param_names,
+                    shared,
+                );
+                Self::collect_param_inplace_mutations_expr(&while_expr.body, param_names, shared);
+            }
+            Expr::For(for_expr, _) => {
+                Self::collect_param_inplace_mutations_expr(
+                    &for_expr.iterable,
+                    param_names,
+                    shared,
+                );
+                Self::collect_param_inplace_mutations_expr(&for_expr.body, param_names, shared);
+            }
+            Expr::Loop(loop_expr, _) => {
+                Self::collect_param_inplace_mutations_expr(&loop_expr.body, param_names, shared);
+            }
+            _ => {}
+        }
+    }
+
+    /// If `target` is an index/property assignment rooted at a param
+    /// identifier (`p[k]` / `p.f` / `p.f[k]`), return that param's index.
+    fn param_index_of_mutated_root(
+        target: &shape_ast::ast::Expr,
+        param_names: &HashMap<String, usize>,
+    ) -> Option<usize> {
+        use shape_ast::ast::Expr;
+        match target {
+            Expr::IndexAccess { object, .. } | Expr::PropertyAccess { object, .. } => {
+                Self::param_index_of_mutated_root(object, param_names)
+                    .or_else(|| match object.as_ref() {
+                        Expr::Identifier(name, _) => param_names.get(name).copied(),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        }
+    }
+
+    /// True for a method that mutates its receiver in place (so a param
+    /// receiver must SHARE, not move). Reuses the runtime `MUT_SELF_*` sets.
+    fn method_mutates_receiver(method: &str) -> bool {
+        use crate::executor::objects::method_registry as mr;
+        mr::MUT_SELF_ARRAY_METHODS.contains(method)
+            || mr::MUT_SELF_HASHMAP_METHODS.contains(method)
+            || mr::MUT_SELF_HASHSET_METHODS.contains(method)
+            || mr::MUT_SELF_DEQUE_METHODS.contains(method)
+    }
+
     pub(super) fn infer_reference_params_from_types(
         program: &Program,
         inferred_types: &HashMap<String, Type>,
@@ -2038,6 +2294,9 @@ impl BytecodeCompiler {
         self.inferred_param_pass_modes =
             Self::build_param_pass_mode_map(&program, &inferred_ref_params, &inferred_ref_mutates);
         self.inferred_ref_params = inferred_ref_params;
+        // STAGE T2: per-callee mutation-share map (params mutated in place must
+        // SHARE, not move — preserves the mutation-visible-Arc feature).
+        self.param_mutation_share_params = Self::build_param_mutation_share_map(&program);
         self.inferred_ref_mutates = inferred_ref_mutates;
         self.inferred_param_type_hints = inferred_param_type_hints;
         self.inferred_param_concrete_types = inferred_param_concrete_types;

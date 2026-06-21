@@ -374,3 +374,216 @@ fn read_on_both_branches_no_move_no_false_error() {
     )
     .expect_output_contains("[1, 2, 3]");
 }
+
+// =============================================================================
+// STAGE T2 — call-argument moves (full Rust-style; user 2026-06-21)
+//
+// A by-value (non-`&`) HEAP call-argument MOVES the source binding: an
+// ownership-TAKING user fn `fn consume(p: P)` consumes its arg, so the caller
+// cannot reuse it (B0005). EXCEPTIONS that BORROW (no move):
+//   - read-only builtins (print / format / f-string / assert / range);
+//   - method receivers/args (.len / .get / .map / ...);
+//   - explicit `&p` params (lower to a borrow temp, never the binding);
+//   - params MUTATED IN PLACE by the callee (`fn fill(arr){arr[i]=v}`) — Shape
+//     shares heap collections by-value as a shared Arc; in-place mutation is
+//     visible to the caller, so the param SHARES, it is not consumed.
+//   - SCALARS stay Copy.
+//
+// Implementation: `solver::terminator_moved_arg_places` marks by-value heap
+// Call-terminator args as moved unless `callee_borrows_all_args` /
+// `arg_index_is_borrowed` (the `BorrowingParams` map = inferred-ref ∪
+// mutation-share, built by `build_param_mutation_share_map`).
+// =============================================================================
+
+#[test]
+fn call_arg_struct_move_then_use_is_compile_error() {
+    // `consume(x)` takes ownership of the struct; `print(x.x)` reads moved-from.
+    ShapeTest::new(
+        r#"
+        type P { x: int }
+        fn consume(p: P) {}
+        let x = P { x: 1 }
+        consume(x)
+        print(x.x)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn call_arg_array_move_then_index_is_compile_error() {
+    ShapeTest::new(
+        r#"
+        fn consume(a: Array<int>) {}
+        let arr = [1, 2, 3]
+        consume(arr)
+        print(arr[0])
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn call_arg_array_move_then_method_is_compile_error() {
+    ShapeTest::new(
+        r#"
+        fn consume(a: Array<int>) {}
+        let arr = [1, 2, 3]
+        consume(arr)
+        print(arr.len())
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn call_arg_two_heap_args_first_moved_then_read_is_compile_error() {
+    ShapeTest::new(
+        r#"
+        type P { x: int }
+        fn consume2(a: P, b: P) {}
+        let p = P { x: 1 }
+        let q = P { x: 2 }
+        consume2(p, q)
+        print(p.x)
+    "#,
+    )
+    .expect_run_err_contains("after it was moved");
+}
+
+#[test]
+fn print_borrows_arg_reusable() {
+    // print is a read-only builtin — it BORROWS, so the same value prints twice.
+    ShapeTest::new(
+        r#"
+        let s = "hello"
+        print(s)
+        print(s)
+    "#,
+    )
+    .expect_output_contains("hello\nhello");
+}
+
+#[test]
+fn format_borrows_arg_reusable() {
+    ShapeTest::new(
+        r#"
+        let s = "x"
+        let m = f"v={s}"
+        print(s)
+        print(m)
+    "#,
+    )
+    .expect_output_contains("x");
+}
+
+#[test]
+fn method_receiver_borrows_reusable() {
+    // `.len()` / `.map()` borrow the receiver — `arr` stays usable.
+    ShapeTest::new(
+        r#"
+        let arr = [1, 2, 3]
+        let n = arr.len()
+        let b = arr.map(|e| e + 1)
+        print(arr[0])
+        print(n)
+    "#,
+    )
+    .expect_output_contains("1\n3");
+}
+
+#[test]
+fn clone_keeps_source_across_consuming_call() {
+    // `clone x` produces an independent value to consume; `x` stays live.
+    ShapeTest::new(
+        r#"
+        type P { x: int }
+        fn consume(p: P) {}
+        let x = P { x: 1 }
+        let c = clone x
+        consume(c)
+        print(x.x)
+    "#,
+    )
+    .expect_output_contains("1");
+}
+
+#[test]
+fn scalar_arg_stays_copy_across_calls() {
+    // SCALAR args are Copy — passing `a` to two consuming calls is fine.
+    ShapeTest::new(
+        r#"
+        fn dbl(n: int) -> int { n + n }
+        let a = 4
+        let r1 = dbl(a)
+        let r2 = dbl(a)
+        print(r1 + r2)
+    "#,
+    )
+    .expect_output_contains("16");
+}
+
+#[test]
+fn fn_returning_moved_arg_is_ok() {
+    // A fn that returns its moved arg; the caller binds the returned owner.
+    ShapeTest::new(
+        r#"
+        type P { x: int }
+        fn passthru(p: P) -> P { p }
+        let x = P { x: 7 }
+        let y = passthru(x)
+        print(y.x)
+    "#,
+    )
+    .expect_output_contains("7");
+}
+
+#[test]
+fn explicit_ref_arg_does_not_move() {
+    // An explicit `&arr` reference param BORROWS — the binding stays usable.
+    ShapeTest::new(
+        r#"
+        fn read_first(&arr) { arr[0] }
+        let xs = [9]
+        let a = read_first(&xs)
+        print(xs[0])
+    "#,
+    )
+    .expect_output_contains("9");
+}
+
+#[test]
+fn in_place_mutating_param_shares_not_moves() {
+    // `fill` mutates its array param in place (index-assign in a loop) — the
+    // param SHARES (mutation-visible Arc), so the caller reuses `xs` and SEES
+    // the mutation. NOT a move.
+    ShapeTest::new(
+        r#"
+        fn fill(arr, val) {
+            let mut i = 0
+            while i < arr.len() {
+                arr[i] = val
+                i = i + 1
+            }
+        }
+        let xs = [0, 0, 0, 0]
+        fill(xs, 7)
+        print(xs[0] + xs[1] + xs[2] + xs[3])
+    "#,
+    )
+    .expect_output_contains("28");
+}
+
+#[test]
+fn in_place_mutating_method_param_shares_not_moves() {
+    // A param mutated via a mutating METHOD (`.push`) shares, not moves.
+    ShapeTest::new(
+        r#"
+        fn grow(arr: Array<int>) { arr.push(9) }
+        let xs = [1, 2]
+        grow(xs)
+        print(xs.len())
+    "#,
+    )
+    .expect_output_contains("3");
+}

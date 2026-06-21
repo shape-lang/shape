@@ -1695,7 +1695,33 @@ fn operand_uses_param(op: &Operand, param_slot: SlotId) -> bool {
     }
 }
 
+/// Per-callee borrowing-parameter map (STAGE T2 call-arg move classification).
+///
+/// `borrowing_params[fn_name][i] == true` ⇒ parameter `i` of `fn_name` BORROWS
+/// its argument (it is an explicit `&p`/`&mut p` reference param OR an
+/// implicitly auto-ref'd mutation-visible param — Shape lets
+/// `fn fill(arr) { arr[i] = v }` mutate the caller's array in place). A
+/// borrowing param does NOT move its argument: `fill(xs); xs[0]` keeps `xs`
+/// live. A param NOT marked (or a callee absent from the map) is OWNERSHIP-
+/// TAKING — its by-value heap argument MOVES (the `consume(x)` shape).
+///
+/// Sourced from the bytecode compiler's `inferred_ref_params`
+/// (`compiler/mod.rs:1355` — explicit + inferred ref params unified). Threaded
+/// through `analyze_with_borrowing_params`; the bare `analyze` wrapper passes an
+/// empty map (every direct user-fn call owns), which is correct for the
+/// lowering self-tests that call it but NOT for the production borrow-check
+/// path — that path MUST call `analyze_with_borrowing_params`.
+pub type BorrowingParams = HashMap<String, Vec<bool>>;
+
 pub fn analyze(mir: &MirFunction, callee_summaries: &CalleeSummaries) -> BorrowAnalysis {
+    analyze_with_borrowing_params(mir, callee_summaries, &BorrowingParams::new())
+}
+
+pub fn analyze_with_borrowing_params(
+    mir: &MirFunction,
+    callee_summaries: &CalleeSummaries,
+    borrowing_params: &BorrowingParams,
+) -> BorrowAnalysis {
     let cfg = ControlFlowGraph::build(mir);
 
     // 1. Compute liveness (for move/clone inference)
@@ -1709,7 +1735,8 @@ pub fn analyze(mir: &MirFunction, callee_summaries: &CalleeSummaries) -> BorrowA
 
     // 4. Compute ownership decisions (move/clone) based on liveness
     let ownership_decisions = compute_ownership_decisions(mir, &liveness);
-    let mut move_errors = compute_use_after_move_errors(mir, &cfg, &ownership_decisions);
+    let mut move_errors =
+        compute_use_after_move_errors(mir, &cfg, &ownership_decisions, borrowing_params);
 
     // 5. Combine into BorrowAnalysis
     let loans = solver_result
@@ -1822,6 +1849,7 @@ fn compute_use_after_move_errors(
     mir: &MirFunction,
     cfg: &ControlFlowGraph,
     ownership_decisions: &HashMap<Point, OwnershipDecision>,
+    borrowing_params: &BorrowingParams,
 ) -> Vec<BorrowError> {
     let mut in_states: HashMap<BasicBlockId, HashMap<Place, shape_ast::ast::Span>> = HashMap::new();
     let mut out_states: HashMap<BasicBlockId, HashMap<Place, shape_ast::ast::Span>> =
@@ -1862,8 +1890,9 @@ fn compute_use_after_move_errors(
             for stmt in &block.statements {
                 apply_move_transfer(&mut block_out, stmt, mir, ownership_decisions);
             }
-            // Also apply Call terminator moves (destination write clears moved status)
-            apply_terminator_move_transfer(&mut block_out, &block.terminator);
+            // Also apply Call terminator moves (ownership-taking calls move
+            // their by-value heap args; destination write clears moved status)
+            apply_terminator_move_transfer(&mut block_out, &block.terminator, mir, borrowing_params);
 
             if in_states.get(&block_id) != Some(&block_in) {
                 in_states.insert(block_id, block_in);
@@ -1992,7 +2021,18 @@ fn compute_use_after_move_errors(
                     }
                 }
             }
-            // Destination write clears moved status
+            // Ownership-TAKING call: by-value heap args MOVE their source
+            // binding (STAGE T2). Applied AFTER the read-checks above so the
+            // call's own args are not flagged against themselves; a LATER read
+            // of a moved arg then fires B0005 in a subsequent statement/block.
+            // Read-only builtins / method receivers / explicit-+auto-ref user
+            // params BORROW (no move) — see `terminator_moved_arg_places`. Then
+            // the destination write clears moved status. This MUST mirror
+            // `apply_terminator_move_transfer` (the fixpoint pass) so in-block
+            // and cross-block agree.
+            for place in terminator_moved_arg_places(func, args, mir, borrowing_params) {
+                moved_places.insert(place, block.terminator.span);
+            }
             moved_places
                 .retain(|moved_place, _| !reinitializes_moved_place(destination, moved_place));
         }
@@ -2038,19 +2078,182 @@ fn apply_move_transfer(
     }
 }
 
+/// Strict REAL-MOVE call-argument classification (STAGE T2, user 2026-06-21).
+///
+/// THE MODEL (full Rust-style): a by-value (non-`&`) HEAP call-argument MOVES
+/// the source binding — `fn consume(p: P){}; consume(x); print(x)` is a
+/// use-after-move (B0005). The caller cannot reuse the value after an
+/// ownership-TAKING call.
+///
+/// EXCEPTION — read-only builtins BORROW their args/receiver, so
+/// `print(s); print(s)` and `arr.len(); arr.len()` still work:
+///   - read-only builtin FUNCTIONS (`print` / `println` / `format` / `assert`
+///     / comparison helpers / `range`) — `MirConstant::Function(name)` whose
+///     name is in the borrow-set below;
+///   - ALL METHOD calls (`MirConstant::Method(_)`) — the receiver and args are
+///     BORROWED. The task explicitly classifies the read-only collection/string
+///     methods (`.get` / `.contains` / index-read / `.map` / `.filter`
+///     receiver / `.len`) as borrowing; mutating-method receiver-consume is the
+///     SURFACE ambiguity (see the close note) and the conservative borrow keeps
+///     the (vastly more common) read-only method chains working without a flood
+///     of spurious B0005.
+///
+/// A `&p` / `&mut p` argument is an EXPLICIT borrow: it lowers to a temp slot
+/// holding `Rvalue::Borrow(...)`, so the Call-terminator arg operand roots at
+/// the temp, never the original `p` binding — those never move regardless of
+/// this classifier.
+///
+/// Returns `true` when the whole callee BORROWS every arg regardless of param
+/// index (read-only builtins, method receivers, indirect calls). When `false`,
+/// the callee is a direct/qualified user function whose per-PARAM borrowing must
+/// be consulted via `borrowing_params` (`arg_index_is_borrowed`).
+fn callee_borrows_all_args(func: &Operand) -> bool {
+    match func {
+        // Method calls borrow the receiver + args (read-only-method default;
+        // mutating-method consume is the surfaced ambiguity).
+        Operand::Constant(MirConstant::Method(_)) => true,
+        // Direct/qualified function calls: borrow ALL args iff a read-only
+        // builtin. A NON-builtin (user fn) defers to per-param classification.
+        Operand::Constant(MirConstant::Function(name)) => is_read_only_builtin_function(name),
+        // Indirect calls through a slot (closures, `f"{...}"` builder,
+        // value-call) are not statically a known callee — conservatively BORROW
+        // to avoid spurious B0005 on closure/IIFE call sites (no verify case
+        // requires a closure arg to move; the let-bind move path already covers
+        // heap ownership transfer into closures via capture).
+        _ => true,
+    }
+}
+
+/// True when argument `arg_index` of a direct/qualified user-function call
+/// `func` BORROWS its argument (do NOT move it). A borrowing param is an
+/// explicit `&p`/`&mut p` reference param OR an implicitly auto-ref'd
+/// mutation-visible param (`fn fill(arr){ arr[i]=v }`) — both let the caller
+/// keep using the value after the call. Sourced from the compiler's
+/// `inferred_ref_params` (threaded as `BorrowingParams`). When the callee is
+/// not in the map, or the arg index is past the recorded params, the param is
+/// OWNERSHIP-TAKING (returns `false` ⇒ the by-value heap arg moves).
+fn arg_index_is_borrowed(
+    func: &Operand,
+    arg_index: usize,
+    borrowing_params: &BorrowingParams,
+) -> bool {
+    let callee_name = match func {
+        Operand::Constant(MirConstant::Function(name)) => name.as_str(),
+        _ => return false,
+    };
+    borrowing_params
+        .get(callee_name)
+        .and_then(|flags| flags.get(arg_index))
+        .copied()
+        .unwrap_or(false)
+}
+
+/// Read-only builtin FUNCTION names that BORROW their args (do NOT move).
+/// These are the prelude builtins that only read/observe their arguments:
+/// printing, formatting, assertions, comparisons, and `range`. A name NOT in
+/// this set that arrives as a direct `MirConstant::Function` call is a
+/// user-defined (ownership-TAKING) function and MOVES its by-value heap args.
+///
+/// `format` covers the f-string / `format(...)` machinery; `print`/`println`
+/// the output builtins; `assert*` the test/debug assertions. Bare enum-variant
+/// and collection constructors (`Ok` / `Some` / `Set` / `HashMap` / ...) never
+/// reach here as `Call` terminators — they are intercepted at MIR lowering into
+/// `Aggregate` + `EnumStore` (expr.rs §W12), where their payload operands move
+/// via the container-construction path (a struct/array/enum CONSTRUCTION takes
+/// ownership of its fields, matching the let-bind REAL-MOVE model).
+fn is_read_only_builtin_function(name: &str) -> bool {
+    matches!(
+        name,
+        "print"
+            | "println"
+            | "format"
+            | "assert"
+            | "assert_eq"
+            | "assert_ne"
+            | "debug"
+            | "eprint"
+            | "eprintln"
+            | "range"
+    )
+}
+
 /// Apply move transfer for a Call terminator.
-/// The call writes its return value to `destination`, which reinitializes that place.
-/// Call args are typically temp slots created by `lower_expr_as_moved_operand` —
-/// the moves of source values INTO those temps happen in prior statements (via Assign/Move),
-/// not in the terminator itself, so we don't need to mark args as moved here.
+/// The call writes its return value to `destination`, which reinitializes that
+/// place. For ownership-TAKING calls (not read-only builtins — see
+/// `callee_borrows_args`), each by-value HEAP arg sourced from a binding slot
+/// MOVES that source: it enters the moved-set so a later read is B0005.
 fn apply_terminator_move_transfer(
     moved_places: &mut HashMap<Place, shape_ast::ast::Span>,
     terminator: &Terminator,
+    mir: &MirFunction,
+    borrowing_params: &BorrowingParams,
 ) {
-    if let TerminatorKind::Call { destination, .. } = &terminator.kind {
-        // The call writes to destination, which reinitializes that place
+    if let TerminatorKind::Call {
+        func,
+        args,
+        destination,
+        ..
+    } = &terminator.kind
+    {
+        for place in terminator_moved_arg_places(func, args, mir, borrowing_params) {
+            moved_places.insert(place, terminator.span);
+        }
+        // The call writes to destination, which reinitializes that place.
         moved_places.retain(|moved_place, _| !reinitializes_moved_place(destination, moved_place));
     }
+}
+
+/// The set of source bindings a Call terminator MOVES (STAGE T2). A by-value
+/// heap arg moves UNLESS the callee borrows it: read-only builtins / method
+/// receivers borrow ALL args (`callee_borrows_all_args`); a direct user-fn
+/// borrows only its explicit-ref / auto-ref params (`arg_index_is_borrowed`).
+/// Scalars / Unknown / borrow-temps never move (`call_arg_moved_place`).
+fn terminator_moved_arg_places(
+    func: &Operand,
+    args: &[Operand],
+    mir: &MirFunction,
+    borrowing_params: &BorrowingParams,
+) -> Vec<Place> {
+    if callee_borrows_all_args(func) {
+        return Vec::new();
+    }
+    let mut moved = Vec::new();
+    for (arg_index, arg) in args.iter().enumerate() {
+        if arg_index_is_borrowed(func, arg_index, borrowing_params) {
+            continue;
+        }
+        if let Some(place) = call_arg_moved_place(arg, mir) {
+            moved.push(place);
+        }
+    }
+    moved
+}
+
+/// The source `Place` a by-value call-argument MOVES, or `None` if the arg does
+/// not consume a binding (scalar Copy, unproven Unknown, borrow, or constant).
+///
+/// Scalar-safety (mirrors `compute_ownership_decisions`): only a PROVEN heap
+/// (`LocalTypeInfo::NonCopy`) source moves. Scalars (`Copy`) STAY COPY —
+/// `g(5); g(5)` works. `Unknown` is NOT proven heap, so it does NOT move
+/// (no Bool-default / no fabricated heap classification — an unproven slot
+/// keeps its value, never silently consumed). A `&p` arg roots at a borrow
+/// temp, not the `p` binding, so `slot_is_reference_param`-style false moves
+/// cannot occur here.
+fn call_arg_moved_place(arg: &Operand, mir: &MirFunction) -> Option<Place> {
+    let place = match arg {
+        Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => place,
+        Operand::Constant(_) => return None,
+    };
+    // Only PROVEN heap moves. Copy/Unknown stay put.
+    if place_root_local_type(place, mir) != Some(LocalTypeInfo::NonCopy) {
+        return None;
+    }
+    // A `&x`/`&mut x` reference PARAMETER read-through is a borrow, not an owned
+    // heap value (same carve-out as `compute_ownership_decisions`); do not move.
+    if slot_is_reference_param(mir, place.root_local()) {
+        return None;
+    }
+    Some(place.clone())
 }
 
 fn statement_borrow_place(kind: &StatementKind) -> Option<&Place> {

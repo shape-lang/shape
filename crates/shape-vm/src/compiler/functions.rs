@@ -442,7 +442,17 @@ impl BytecodeCompiler {
         );
         let callee_summaries =
             self.build_callee_summaries(Some(&effective_def.name), &mir_lowering.all_local_names);
-        let mut mir_analysis = crate::mir::solver::analyze(&mir_lowering.mir, &callee_summaries);
+        // STAGE T2 (user 2026-06-21): a by-value heap call-arg MOVES its source
+        // binding for ownership-TAKING user-fn params; explicit-`&`/auto-ref
+        // (mutation-visible) params and read-only builtins BORROW. The borrow
+        // set is `inferred_ref_params` (explicit + inferred ref params unified,
+        // `compiler/mod.rs:1355`).
+        let borrowing_params = self.borrowing_params_for_move_analysis();
+        let mut mir_analysis = crate::mir::solver::analyze_with_borrowing_params(
+            &mir_lowering.mir,
+            &callee_summaries,
+            &borrowing_params,
+        );
         mir_analysis.mutability_errors =
             crate::mir::lowering::compute_mutability_errors(&mir_lowering);
         crate::mir::repair::attach_repairs(&mut mir_analysis, &mir_lowering.mir);
@@ -1222,7 +1232,14 @@ impl BytecodeCompiler {
             fn_return_types,
         );
         let callee_summaries = self.build_callee_summaries(None, &lowering.all_local_names);
-        let mut analysis = crate::mir::solver::analyze(&lowering.mir, &callee_summaries);
+        // STAGE T2: ownership-taking call-args move; explicit-/auto-ref params
+        // and read-only builtins borrow (see the `:445` site comment).
+        let borrowing_params = self.borrowing_params_for_move_analysis();
+        let mut analysis = crate::mir::solver::analyze_with_borrowing_params(
+            &lowering.mir,
+            &callee_summaries,
+            &borrowing_params,
+        );
         analysis.mutability_errors = crate::mir::lowering::compute_mutability_errors(&lowering);
         crate::mir::repair::attach_repairs(&mut analysis, &lowering.mir);
 
