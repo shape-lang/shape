@@ -233,6 +233,9 @@ impl BytecodeCompiler {
                             }
                         };
                         // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
+                        // `None` is the null sentinel (`MirConstant::None`),
+                        // so `IsNull` rejects it; a `Some(v)` carrier is a
+                        // non-null `Arc<OptionData>` and passes here.
                         self.emit(Instruction::new(
                             OpCode::LoadLocal,
                             Some(Operand::Local(value_local)),
@@ -240,9 +243,29 @@ impl BytecodeCompiler {
                         self.emit(Instruction::simple(OpCode::IsNull));
                         let jump = self.emit_jump(OpCode::JumpIfTrue, 0);
                         fail_jumps.push(jump);
+                        // S3 nested-constructor fix: `Some(x)` is the canonical
+                        // W14 `Arc<OptionData>` carrier (SomeCtor in
+                        // `vm_impl/builtins.rs`), NOT null-coding `Some(x) ≡ x`.
+                        // Recursing the inner pattern against the *wrapper*
+                        // local read field 0 of `OptionData` as if it were the
+                        // payload's `__variant`, silently selecting the wrong
+                        // nested arm. Unwrap to the payload first — mirroring
+                        // the Result arm below and the binding path's
+                        // `UnwrapOption` (patterns/binding.rs).
+                        let inner_local = self.declare_temp_local("__pattern_some_inner_")?;
+                        self.emit(Instruction::new(
+                            OpCode::LoadLocal,
+                            Some(Operand::Local(value_local)),
+                        ));
+                        self.emit(Instruction::simple(OpCode::UnwrapOption));
+                        self.emit(Instruction::new(
+                            OpCode::StoreLocal,
+                            Some(Operand::Local(inner_local)),
+                        ));
+                        self.stamp_unwrapped_payload_local(value_local, inner_local, "Some");
                         self.compile_pattern_check_local(
                             &field_pats[0],
-                            value_local,
+                            inner_local,
                             fail_jumps,
                             hint_span,
                         )
@@ -460,5 +483,124 @@ impl BytecodeCompiler {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod nested_constructor_pattern_tests {
+    //! S3 regression: nested-constructor patterns (a registered enum variant
+    //! inside `Some(...)`) must discriminate on BOTH the outer Option carrier
+    //! AND the inner variant. Before the fix, the `Some` check arm recursed
+    //! the inner pattern against the *wrapper* local (the W14
+    //! `Arc<OptionData>` carrier from `SomeCtor`), so the inner enum check
+    //! read field 0 of `OptionData` as if it were the payload's `__variant` —
+    //! silently selecting the wrong arm and binding garbage (VM == JIT
+    //! consistent-wrong). The fix unwraps via `UnwrapOption` before recursing.
+
+    use crate::test_utils::eval_typed_i64;
+
+    const ENUMS: &str = "enum Inner { A, B(int) }\n\
+                         enum Status { Active, Done(int), Wrap(Inner) }\n\
+                         enum Shape { Circle { radius: int }, Square { side: int } }\n";
+
+    fn run(body: &str) -> i64 {
+        eval_typed_i64(&format!("{ENUMS}{body}"))
+    }
+
+    #[test]
+    fn some_nested_enum_payload_selects_inner_arm_and_binds() {
+        // The canonical S3 repro: Some(Status::Done(42)) must hit the
+        // Done(n) arm with n == 42 — NOT the Active arm (variant 0).
+        let body = "fn d(s: Option<Status>) -> int {\n\
+                    match s {\n\
+                    Some(Status::Active) => 0\n\
+                    Some(Status::Done(n)) => n\n\
+                    Some(Status::Wrap(_)) => -1\n\
+                    None => -2\n\
+                    }\n\
+                    }\n\
+                    d(Some(Status::Done(42)))";
+        assert_eq!(run(body), 42);
+    }
+
+    #[test]
+    fn some_nested_unit_variant_selects_active() {
+        let body = "fn d(s: Option<Status>) -> int {\n\
+                    match s {\n\
+                    Some(Status::Active) => 7\n\
+                    Some(Status::Done(n)) => n\n\
+                    Some(Status::Wrap(_)) => -1\n\
+                    None => -2\n\
+                    }\n\
+                    }\n\
+                    d(Some(Status::Active))";
+        assert_eq!(run(body), 7);
+    }
+
+    #[test]
+    fn none_selects_none_arm() {
+        let body = "fn d(s: Option<Status>) -> int {\n\
+                    match s {\n\
+                    Some(Status::Active) => 0\n\
+                    Some(Status::Done(n)) => n\n\
+                    Some(Status::Wrap(_)) => -1\n\
+                    None => 99\n\
+                    }\n\
+                    }\n\
+                    d(None)";
+        assert_eq!(run(body), 99);
+    }
+
+    #[test]
+    fn three_level_nest_some_status_wrap_inner_b() {
+        let body = "fn d(s: Option<Status>) -> int {\n\
+                    match s {\n\
+                    Some(Status::Wrap(Inner::B(n))) => n\n\
+                    Some(Status::Wrap(Inner::A)) => -10\n\
+                    _ => -20\n\
+                    }\n\
+                    }\n\
+                    d(Some(Status::Wrap(Inner::B(13))))";
+        assert_eq!(run(body), 13);
+    }
+
+    #[test]
+    fn three_level_nest_inner_unit_variant() {
+        let body = "fn d(s: Option<Status>) -> int {\n\
+                    match s {\n\
+                    Some(Status::Wrap(Inner::B(n))) => n\n\
+                    Some(Status::Wrap(Inner::A)) => 5\n\
+                    _ => -20\n\
+                    }\n\
+                    }\n\
+                    d(Some(Status::Wrap(Inner::A)))";
+        assert_eq!(run(body), 5);
+    }
+
+    #[test]
+    fn some_nested_struct_variant_binds_field() {
+        let body = "fn d(s: Option<Shape>) -> int {\n\
+                    match s {\n\
+                    Some(Shape::Circle { radius }) => radius\n\
+                    Some(Shape::Square { side }) => side + 1000\n\
+                    None => -1\n\
+                    }\n\
+                    }\n\
+                    d(Some(Shape::Square { side: 9 }))";
+        assert_eq!(run(body), 1009);
+    }
+
+    #[test]
+    fn guard_on_nested_binder() {
+        let body = "fn d(s: Option<Status>) -> int {\n\
+                    match s {\n\
+                    Some(Status::Done(n)) where n > 10 => 1\n\
+                    Some(Status::Done(n)) => 2\n\
+                    _ => 3\n\
+                    }\n\
+                    }\n\
+                    d(Some(Status::Done(99))) + d(Some(Status::Done(3))) * 10";
+        // big -> 1, small -> 2  =>  1 + 2*10 = 21
+        assert_eq!(run(body), 21);
     }
 }

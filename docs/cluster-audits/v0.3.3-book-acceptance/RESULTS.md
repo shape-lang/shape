@@ -39,7 +39,7 @@ the gate is **NO-GO**.
 | enums | ✅ | ✅ | ✅ | PARTIAL | `(number)->bool` param annotation fails to parse (BOOK-WRONG); `s.to_int()` fictional (BOOK-WRONG) |
 | traits | ✅ | ✅ | ✅ | PARTIAL | trait/extend declared return type not propagated to un-annotated call site → silent-wrong-output (`p.sum()->int` yields 14.0) |
 | generics | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
-| pattern-matching | ✅ | ✅ | ✅ | **FAIL** | D2 nested constructor patterns silently mis-match + bind garbage; D1 union type-pattern binder typed `unknown` (SCOPE-RECLAIM) |
+| pattern-matching | ✅ | ✅ | ✅ | PARTIAL | D2 FIXED (S3 2026-06-21: `Some(Enum::Variant(..))` now unwraps the W14 OptionData carrier before the inner variant check); D1 union type-pattern binder typed `unknown` (SCOPE-RECLAIM, v0.4) |
 | error-handling | ✅ | ✅ | ✅ | PARTIAL | `(arr_elem as int?)` rejects `Array<string>` element while literal `"42" as int?` Ok (carrier-kind) |
 | references | ✅ | ✅ | ✅ | PARTIAL | stored-ref index/method documented as compile-error but actually works (BOOK-WRONG, conservative direction) |
 | resource-mgmt | ✅ | ✅ | ✅ | PARTIAL | — (gaps only) |
@@ -136,10 +136,18 @@ modes). Grouped by slice.
   `14`. Slice programs mask it by annotation-binding every method result.
 
 ### pattern-matching
-- **D2 FN-REG-CORRECTNESS** — nested constructor patterns silently mis-match and bind
-  garbage. `match Some(Status::Done(42))` against `[Some(Status::Active)=>…,
-  Some(Status::Done(n))=>…]` selects the Active arm. `Some(Token::Num(7))` binds null.
-  No compile/runtime error; VM==JIT consistent-wrong.
+- **D2 FN-REG-CORRECTNESS — FIXED (S3, 2026-06-21)** — nested constructor patterns
+  silently mis-matched and bound garbage. `match Some(Status::Done(42))` against
+  `[Some(Status::Active)=>…, Some(Status::Done(n))=>…]` selected the Active arm.
+  Root cause: `Some(x)` is the canonical W14 `Arc<OptionData>` carrier (`SomeCtor`),
+  but the pattern-CHECK path's `Some` arm did only `IsNull` then recursed the inner
+  pattern against the *wrapper* local — so the inner enum check read field 0 of
+  `OptionData` as if it were the payload's `__variant`. Fix (`patterns/checking.rs`
+  `Some` arm): unwrap via `UnwrapOption` into a fresh local + `stamp_unwrapped_payload_local`
+  before recursing — mirrors the `Result` check arm and the binding path. Verified
+  (both modes, capped): nested-tuple-payload, nested-unit-variant, None, 3-level nest,
+  struct-variant nested, guard-on-nested-binder. Regression test
+  `compiler::patterns::checking::nested_constructor_pattern_tests` (7 cases).
 - **D1 SCOPE-RECLAIM (dated 2026-05-21)** — a type pattern (`n: int`) on a union
   scrutinee (`int|string`) binds the payload as `unknown`; any guard/arithmetic on the
   binder is a compile error. Plain non-union scrutinee + guard works.

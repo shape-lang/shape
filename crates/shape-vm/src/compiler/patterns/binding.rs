@@ -550,7 +550,12 @@ impl BytecodeCompiler {
     /// `ConcreteType` (`Result(T, E)` / `Option(T)`) — no fabrication. When the
     /// scrutinee has no recorded concrete type (still generic / unannotated),
     /// nothing is stamped and the pre-existing behavior is preserved.
-    fn stamp_unwrapped_payload_local(&mut self, value_local: u16, inner_local: u16, variant: &str) {
+    pub(in crate::compiler) fn stamp_unwrapped_payload_local(
+        &mut self,
+        value_local: u16,
+        inner_local: u16,
+        variant: &str,
+    ) {
         use shape_value::v2::ConcreteType;
         let Some(scrutinee_ct) = self
             .current_function_local_concrete_types
