@@ -1781,3 +1781,70 @@ fn comptime_block_at_top_level_still_parses_after_trait_comptime_prefix() {
     // layer (statement vs item), and is outside the J-CT.0 scope.
     assert!(!items.is_empty(), "expected at least one item");
 }
+
+// =========================================================================
+// Function-type annotation tests
+//
+// A function-type annotation `(T1, T2) -> R` must parse as a parameter /
+// binding type (the documented HOF param form). Both the Rust-shaped `->`
+// arrow and the legacy `=>` arrow are accepted in type position.
+// =========================================================================
+
+#[test]
+fn test_function_type_param_arrow() {
+    // `(int) -> bool` as a higher-order-function parameter annotation.
+    let result =
+        parse_program_helper("fn apply(f: (int) -> bool, x: int) -> bool { return f(x); }");
+    assert!(
+        result.is_ok(),
+        "function-type param `(int) -> bool` must parse: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_function_type_param_number_arrow() {
+    let result =
+        parse_program_helper("fn apply(f: (number) -> bool, x: number) -> bool { return f(x); }");
+    assert!(
+        result.is_ok(),
+        "function-type param `(number) -> bool` must parse: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_function_type_param_multi_arg() {
+    let result = parse_program_helper(
+        "fn combine(f: (int, int) -> int, a: int, b: int) -> int { return f(a, b); }",
+    );
+    assert!(
+        result.is_ok(),
+        "multi-arg function-type param `(int, int) -> int` must parse: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_function_type_param_fat_arrow_still_parses() {
+    // The legacy `=>` arrow must remain accepted in type position.
+    let result =
+        parse_program_helper("fn apply(f: (int) => bool, x: int) -> bool { return f(x); }");
+    assert!(
+        result.is_ok(),
+        "function-type param with `=>` arrow must still parse: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_parenthesized_type_still_parses() {
+    // `(int)` without an arrow must still parse as a parenthesized type,
+    // not be mis-consumed by the function_type alternative.
+    let result = parse_program_helper("fn id(x: (int)) -> int { return x; }");
+    assert!(
+        result.is_ok(),
+        "parenthesized type `(int)` must still parse: {:?}",
+        result.err()
+    );
+}
