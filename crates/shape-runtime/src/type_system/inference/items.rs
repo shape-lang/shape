@@ -2307,12 +2307,25 @@ impl TypeInferenceEngine {
                 | TypeAnnotation::Intersection(_),
             ) => true,
             Type::Function { .. } => true,
-            // A bare nominal name is provably non-enum ONLY if it is a KNOWN
-            // primitive. An unknown nominal name (incl. the `unknown`
-            // placeholder and an unregistered/pub enum) is left unprovable.
-            Type::Concrete(TypeAnnotation::Basic(name)) => Self::is_known_primitive_name(name),
+            // A bare nominal name is provably non-enum if it is a KNOWN
+            // primitive OR it resolves in the type registry to a REGISTERED
+            // STRUCT. A registered struct is positively provable as non-enum:
+            // its constructor (`Point{...}`) produces a struct value that a
+            // variant pattern can never validly destructure. Matching a
+            // constructor pattern (`Some(n)`, `Ok(v)`) against it would bind
+            // the inner binder to raw struct-pointer bits with no type check —
+            // the same catastrophic reinterpret R2 exists to close.
+            //
+            // An unknown nominal name (the `unknown` placeholder of a lost
+            // type var, or an unregistered/`pub enum` not yet visible to
+            // `get_enum` — the registration gap) is still left UNPROVABLE:
+            // it surfaces-and-stops because it MIGHT be an enum.
+            Type::Concrete(TypeAnnotation::Basic(name)) => {
+                Self::is_known_primitive_name(name) || self.is_registered_non_enum_nominal(name)
+            }
             Type::Concrete(TypeAnnotation::Reference(path)) => {
                 Self::is_known_primitive_name(path.as_str())
+                    || self.is_registered_non_enum_nominal(path.as_str())
             }
             // Builtin collection generics (`Array<T>`, `HashMap<K,V>`, …) are
             // non-enum. A generic over a registered enum is handled above; a
@@ -2326,6 +2339,30 @@ impl TypeInferenceEngine {
             }
             _ => false,
         }
+    }
+
+    /// FIX A (v0.3.3 strict-flip): a bare nominal name that resolves in the
+    /// type registry to a REGISTERED STRUCT is positively provable as
+    /// non-enum. This closes the constructor-over-registered-struct reinterpret
+    /// hole: `match g() { Ok(Some(n)) => … }` over `Result<Point, string>`
+    /// recurses into `Ok`'s payload — a registered struct `Point` — and the
+    /// inner `Some(n)` would otherwise surface-and-stop (a bare nominal we
+    /// could not classify) and bind `n` to raw struct-pointer bits.
+    ///
+    /// Critically this is asymmetric: a name that is a registered ENUM must
+    /// return false (the registered-enum branch in
+    /// `check_constructor_pattern_ownership` owns it and never reaches here,
+    /// but we guard defensively). A name not in EITHER registry — the `pub
+    /// enum` registration gap, the `unknown` placeholder, a forward reference
+    /// — also returns false: it remains UNPROVABLE and surfaces-and-stops.
+    fn is_registered_non_enum_nominal(&self, name: &str) -> bool {
+        // A registered enum is never a non-enum nominal. Defensive: the
+        // enum branch above handles registered enums, but if a name is in
+        // BOTH registries we must not classify it as a struct.
+        if self.env.get_enum(name).is_some() {
+            return false;
+        }
+        self.struct_type_defs.contains_key(name)
     }
 
     /// Names of the built-in primitive (non-enum) types. A constructor

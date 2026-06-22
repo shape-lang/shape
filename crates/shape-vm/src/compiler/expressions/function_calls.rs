@@ -1369,6 +1369,32 @@ impl BytecodeCompiler {
                         .map(|p| p.type_annotation.clone())
                         .collect()
                 });
+
+            // FIX B (strict-flip, THE GENERAL ROOT): an argument whose inferred
+            // type is `unknown` / an unresolved free variable MUST NOT be
+            // accepted into a parameter whose declared type is a PROVEN concrete
+            // type (a primitive, a registered struct, or another concrete
+            // nominal). This is the keystone's no-any-sink rule for binary-op
+            // operands, extended to call arguments — it closes the LAUNDER
+            // boundary that a pattern-bound `unknown` (or any other genuinely
+            // un-inferable value) would otherwise pass through into a typed slot
+            // and be bit-reinterpreted as that slot's NativeKind.
+            //
+            // No false positives after the T1 keystone: legitimate dispatch
+            // results (`.map`/`.get`/match-arm binders/...) now resolve to
+            // CONCRETE types via the post-solve expr-type table, so a VALID
+            // program never passes `unknown` here. Only a genuinely un-inferable
+            // value reaches this gate, and it SHOULD reject.
+            //
+            // A generic param (`fn f<T>(x: T)`) is NOT a proven concrete type —
+            // its annotation names a type parameter, so it is excluded.
+            self.reject_unknown_arg_into_typed_param(
+                name,
+                &call_name,
+                args,
+                param_annotations.as_deref(),
+            )?;
+
             let writebacks = self.compile_call_args_with_param_types(
                 args,
                 Some(&pass_modes),
@@ -1668,6 +1694,150 @@ impl BytecodeCompiler {
             message,
             location: Some(self.span_to_source_location(span)),
         })
+    }
+
+    /// FIX B (strict-flip, THE GENERAL ROOT — close the launder boundary):
+    /// reject an argument whose inferred type is `unknown` / an unresolved free
+    /// variable when the matching parameter's declared type is a PROVEN concrete
+    /// type (a primitive, a registered struct, or a registered concrete enum).
+    ///
+    /// This mirrors the keystone's no-any-sink rule for binary-op operands,
+    /// extended to call arguments. Without it a pattern-bound `unknown` (or any
+    /// other genuinely un-inferable value) launders through the typed fn-arg
+    /// boundary into a concrete slot and is bit-reinterpreted as that slot's
+    /// NativeKind — the catastrophic cross-type reinterpret
+    /// (`sink(n)` with `n: unknown` → `int` param → raw-ptr arithmetic).
+    ///
+    /// NO FALSE POSITIVES after the T1 keystone: legitimate dispatch results
+    /// (`.map`/`.get`/match-arm binders) resolve to CONCRETE types via the
+    /// post-solve expr-type table, so a valid program never passes `unknown`
+    /// here. A generic param (`fn f<T>(x: T)`) is excluded — its annotation
+    /// names a type parameter, not a proven concrete type.
+    fn reject_unknown_arg_into_typed_param(
+        &mut self,
+        name: &str,
+        call_name: &str,
+        args: &[Expr],
+        param_annotations: Option<&[Option<shape_ast::ast::TypeAnnotation>]>,
+    ) -> Result<()> {
+        let Some(param_annotations) = param_annotations else {
+            return Ok(());
+        };
+
+        // The callee's own generic type-parameter names. A param annotated with
+        // one of these is NOT a proven concrete type (it is monomorphized from
+        // the call-site arg), so it must NOT trigger the reject.
+        let type_param_names: std::collections::HashSet<String> = self
+            .function_defs
+            .get(call_name)
+            .or_else(|| self.function_defs.get(name))
+            .and_then(|def| def.type_params.as_ref())
+            .map(|tps| tps.iter().map(|tp| tp.name().to_string()).collect())
+            .unwrap_or_default();
+
+        for (idx, arg) in args.iter().enumerate() {
+            let Some(Some(ann)) = param_annotations.get(idx) else {
+                continue;
+            };
+            if !self.param_annotation_is_proven_concrete(ann, &type_param_names) {
+                continue;
+            }
+            // The param slot is a proven concrete type. Reject only when the
+            // argument's type is genuinely un-inferable.
+            let Ok(arg_ty) = self.infer_expr_type(arg) else {
+                continue;
+            };
+            if Self::type_is_unknown(&arg_ty) {
+                let param_disp = Self::annotation_display_name(ann);
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "argument #{} to '{}' has an un-inferable type (`unknown`), \
+                         but the parameter has the proven concrete type '{}' — an \
+                         `unknown`-typed value cannot be passed into a typed parameter \
+                         (this would reinterpret its raw bits as '{}'). Annotate the \
+                         value or destructure it through a type-checked pattern.",
+                        idx + 1,
+                        name,
+                        param_disp,
+                        param_disp
+                    ),
+                    location: Some(self.span_to_source_location(arg.span())),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// True when a parameter's declared annotation resolves to a PROVEN concrete
+    /// type — a known primitive, a registered struct (type alias to an object
+    /// shape), or a registered enum — and is NOT one of the callee's generic
+    /// type-parameter names. Generic, structural, and unresolved annotations are
+    /// NOT proven concrete (conservative: only positive proof triggers FIX B).
+    fn param_annotation_is_proven_concrete(
+        &self,
+        ann: &shape_ast::ast::TypeAnnotation,
+        type_param_names: &std::collections::HashSet<String>,
+    ) -> bool {
+        use shape_ast::ast::TypeAnnotation;
+        let name = match ann {
+            TypeAnnotation::Basic(n) => n.as_str(),
+            TypeAnnotation::Reference(p) => p.as_str(),
+            _ => return false,
+        };
+        // A generic type-parameter name is monomorphized from the arg — never a
+        // proven concrete slot.
+        if type_param_names.contains(name) {
+            return false;
+        }
+        if Self::is_known_concrete_primitive_name(name) {
+            return true;
+        }
+        // A registered struct (`type Point { ... }` → type alias to Object) or a
+        // registered enum is a proven concrete nominal slot.
+        self.type_inference.env.lookup_type_alias(name).is_some()
+            || self.type_inference.env.get_enum(name).is_some()
+    }
+
+    /// Known primitive (non-generic) type names. Mirrors the type-system side
+    /// `is_known_primitive_name`; kept compiler-local to avoid a cross-crate
+    /// pub surface just for this gate.
+    fn is_known_concrete_primitive_name(name: &str) -> bool {
+        matches!(
+            name,
+            "int" | "number"
+                | "bool"
+                | "string"
+                | "decimal"
+                | "bigint"
+                | "char"
+                | "byte"
+                | "DateTime"
+                | "Duration"
+        )
+    }
+
+    /// True when an inferred argument type is genuinely un-inferable: an
+    /// unresolved free type variable, a still-bounded constrained variable, or
+    /// the `"unknown"` placeholder a lost type var renders to.
+    fn type_is_unknown(ty: &shape_runtime::type_system::Type) -> bool {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+        match ty {
+            Type::Variable(_) | Type::Constrained { .. } => true,
+            Type::Concrete(TypeAnnotation::Basic(n)) => n == "unknown",
+            Type::Concrete(TypeAnnotation::Reference(p)) => p.as_str() == "unknown",
+            _ => false,
+        }
+    }
+
+    /// Display name for a param annotation in a FIX-B diagnostic.
+    fn annotation_display_name(ann: &shape_ast::ast::TypeAnnotation) -> String {
+        use shape_ast::ast::TypeAnnotation;
+        match ann {
+            TypeAnnotation::Basic(n) => n.clone(),
+            TypeAnnotation::Reference(p) => p.to_string(),
+            other => format!("{:?}", other),
+        }
     }
 
     /// Check if a method name accepts a closure argument with a receiver-typed row parameter.

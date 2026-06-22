@@ -923,3 +923,96 @@ match v { Ok(Some(n)) => print(n), Ok(None) => print(-1), Err(e) => print(-2) }
 "#;
     ShapeTest::new(code).expect_run_ok().expect_output("9");
 }
+
+// =========================================================================
+// FIX A (v0.3.3 strict-flip): constructor-over-REGISTERED-STRUCT reinterpret
+// hole. `Ok(Some(n))` over `Result<Point,string>` recurses into `Ok`'s
+// payload — a REGISTERED STRUCT `Point`. R2's positive non-enum classifier
+// covered primitives + builtin collections but NOT a bare nominal struct, so
+// `Some(n)` surfaced-and-stopped and `n` bound to RAW struct-pointer bits;
+// `sink(n)` then did arithmetic on the raw heap pointer (VM != JIT,
+// nondeterministic). FIX A looks the bare nominal up in the type registry: a
+// registered struct is POSITIVELY provable as non-enum, so the constructor
+// pattern is rejected.
+// =========================================================================
+
+#[test]
+fn nested_constructor_over_registered_struct_payload_rejected() {
+    // The CONFIRMED CATASTROPHIC repro. `Some(n)` against `Ok`'s `Point`
+    // payload (a registered struct) must be a clean compile error.
+    let code = r#"
+type Point { x: int, y: int }
+fn sink(v: int) -> int { v + 100 }
+fn g() -> Result<Point,string> { Ok(Point { x: 42, y: 2 }) }
+match g() { Ok(Some(n)) => print(sink(n)), Err(e) => print(e) }
+"#;
+    ShapeTest::new(code).expect_run_err_contains("requires an enum-typed value");
+}
+
+#[test]
+fn nested_constructor_over_registered_struct_three_levels_rejected() {
+    // Three-level nesting: `Ok(Ok(Some(n)))` where the innermost `Some` is
+    // matched against a registered struct `Point` payload.
+    let code = r#"
+type Point { x: int, y: int }
+fn g() -> Result<Result<Point,string>,string> { Ok(Ok(Point { x: 1, y: 2 })) }
+match g() { Ok(Ok(Some(n))) => print(n), Err(e) => print(e) }
+"#;
+    ShapeTest::new(code).expect_run_err_contains("requires an enum-typed value");
+}
+
+// =========================================================================
+// FIX B (v0.3.3 strict-flip, THE GENERAL ROOT): an `unknown`/un-inferable
+// value must NOT launder through a typed function-call argument boundary into
+// a PROVEN concrete parameter slot. This mirrors the keystone's no-any-sink
+// rule for binary-op operands, extended to call arguments — it closes the
+// launder boundary regardless of pattern nesting.
+//
+// CRITICAL no-FP: after the T1 keystone, legitimate dispatch results
+// (`.map`/`.get`/match-arm binders) resolve to CONCRETE types, so a VALID
+// program never passes `unknown` here — the keystone-dispatch tests below
+// confirm those still compile + run.
+// =========================================================================
+
+#[test]
+fn keystone_map_into_for_into_typed_fn_still_passes() {
+    // `.map` result → `for` binder → typed `sink(int)`. The dispatch result is
+    // a concrete `int` post-keystone, so FIX B does NOT false-positive.
+    let code = r#"
+fn sink(v: int) -> int { v + 100 }
+let xs = [1, 2, 3]
+let ys = xs.map(|x| x * 2)
+for v in ys { print(sink(v)) }
+"#;
+    ShapeTest::new(code).expect_run_ok();
+}
+
+#[test]
+fn keystone_get_into_match_into_typed_fn_still_passes() {
+    // HashMap `.get` → match-arm `Some(n)` binder → typed `sink(int)`. The
+    // binder resolves to a concrete `int`, so FIX B does NOT false-positive.
+    let code = r#"
+fn sink(v: int) -> int { v + 1 }
+fn run() -> int {
+  let m: HashMap<string,int> = HashMap()
+  m.set("a", 10)
+  match m.get("a") { Some(n) => sink(n), None => 0 }
+}
+print(run())
+"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("11");
+}
+
+#[test]
+fn keystone_filter_into_reduce_with_typed_fn_still_passes() {
+    // `.filter` → `.reduce` with a typed `add(int,int)` callback. Concrete
+    // throughout post-keystone.
+    let code = r#"
+fn add(a: int, b: int) -> int { a + b }
+let xs = [1, 2, 3, 4]
+let evens = xs.filter(|x| x % 2 == 0)
+let s = evens.reduce(|acc, x| add(acc, x), 0)
+print(s)
+"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("6");
+}
