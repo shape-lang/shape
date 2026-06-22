@@ -670,6 +670,39 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
                         // ADR-006 §2.7.5 — is v0.4 per
                         // `docs/v0.3-close-summary.md` §5.16 JIT-lowering
                         // followup workstream.
+                        // f-string bool-as-int VM!=JIT divergence fix
+                        // (2026-06). `Rvalue::PrimitiveCast` is the MIR
+                        // marker for a primitive infallible `as`-cast
+                        // (`true as int`, `1 as number`, …) whose result
+                        // kind differs from the source. The JIT has no typed
+                        // convert body — `vm_only_opcode_reason` already lists
+                        // the bytecode `OpCode::ConvertTo*` family as VM-only,
+                        // and the opcode-FFI trampoline passes operand bits
+                        // through UNCHANGED, so a JIT'd `f"{true as int}"`
+                        // formatted with the SOURCE kind (`Bool`) renders
+                        // `true` instead of `1`. Pre-fix the MIR lowering
+                        // mirrored that pass-through (`Rvalue::Use(arg)`);
+                        // now it emits this marker and preflight REJECTS so
+                        // the W12 `[jit-fallback]` path routes the whole
+                        // program to the bytecode interpreter, where
+                        // `ConvertTo*` restamps the result kind correctly.
+                        // Surface-and-stop (the typed JIT convert is a v0.4
+                        // follow-up), NOT a dynamic-fallback shim. Mirrors
+                        // the TypePatternTest / EnumDiscriminantTest /
+                        // EnumPayload preflight-reject precedent.
+                        Rvalue::PrimitiveCast { target, .. } => {
+                            blockers.push(format!(
+                                "PrimitiveCast (f-string bool-as-int fix): \
+                                 `expr as {}` has no typed JIT convert body \
+                                 (the bytecode `OpCode::ConvertTo*` family is \
+                                 VM-only per `vm_only_opcode_reason`); \
+                                 whole-program deopt via W12 `[jit-fallback]` \
+                                 routes to the bytecode interpreter (which \
+                                 restamps the cast result kind). Tracked v0.4 \
+                                 JIT-lowering followup. at {:?}",
+                                target, stmt.span
+                            ));
+                        }
                         Rvalue::EnumPayload { variant, .. } => {
                             blockers.push(format!(
                                 "EnumPayload (R8 W9 G.2 Step 2 Bucket 2): \

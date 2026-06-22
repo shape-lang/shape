@@ -457,6 +457,37 @@ pub enum Rvalue {
         enum_name: Option<String>,
         variant_name: String,
     },
+    /// A primitive infallible `as`-cast (`expr as int` / `as number` /
+    /// `as string` / `as bool` / `as decimal` / `as char`) whose result
+    /// kind differs from the operand's source kind (e.g. `true as int` —
+    /// bool→int, `1 as number` — int→number).
+    ///
+    /// f-string bool-as-int VM!=JIT divergence fix (2026-06): the bytecode
+    /// VM lowers these to the kind-restamping `OpCode::ConvertTo*` family,
+    /// which `vm_only_opcode_reason` (`shape-jit::compiler::accessors`)
+    /// already lists as VM-only — the JIT has no typed convert body, and
+    /// the opcode-FFI trampoline (`ffi/generic_builtin::dispatch_opcode`)
+    /// passes the operand bits through UNCHANGED. The MIR lowering of
+    /// `Expr::TypeAssertion` previously mirrored that pass-through
+    /// (`Rvalue::Use(arg)` with a "value is already the right bits"
+    /// comment), so a JIT'd `f"{true as int}"` / `let v: int = true as int`
+    /// formatted the value with the SOURCE kind (`Bool`) and rendered
+    /// `true` instead of `1` — a real VM≠JIT correctness divergence.
+    ///
+    /// Producer-side classification per ADR-006 §2.7.5 stamp-at-compile-
+    /// time: the target type name is carried verbatim from the
+    /// `ast::TypeAnnotation`. Consumer status: the JIT MIR preflight
+    /// (`shape-jit::mir_compiler::preflight`) REJECTS on this Rvalue →
+    /// whole-program deopt via the W12 `[jit-fallback]` path routes the
+    /// program to the bytecode interpreter, where `OpCode::ConvertTo*`
+    /// restamps the result kind correctly. This is surface-and-stop (the
+    /// JIT simply does not implement the typed convert yet), NOT a dynamic
+    /// fallback shim. Mirrors the `TypePatternTest` / `EnumDiscriminantTest`
+    /// preflight-reject precedent. VM never consumes MIR.
+    PrimitiveCast {
+        operand: Operand,
+        target: String,
+    },
 }
 
 /// Binary operations in MIR.

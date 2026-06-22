@@ -3661,4 +3661,62 @@ mod tests {
         let (y_dst, x_src) = cross_slot_assign;
         assert_ne!(y_dst, x_src, "y must be a fresh slot");
     }
+
+    // f-string bool-as-int VM!=JIT divergence fix (2026-06): a primitive
+    // infallible `as`-cast must lower to `Rvalue::PrimitiveCast` (carrying
+    // the target type name), NOT a kind-blind `Rvalue::Use` pass-through
+    // (the deleted W4-δ tagged-dispatch shape that left the SOURCE kind on
+    // the slot and rendered `f"{true as int}"` as `true` under JIT). The
+    // PrimitiveCast Rvalue is preflight-rejected on the JIT side so the
+    // program deopts to the interpreter, where `OpCode::ConvertTo*`
+    // restamps the result kind.
+    #[test]
+    fn test_lower_bool_as_int_emits_primitive_cast() {
+        let lowering = lower_parsed_function(
+            r#"
+                fn cast_it() {
+                    true as int
+                }
+            "#,
+        );
+        let mut found = None;
+        for block in &lowering.mir.blocks {
+            for stmt in &block.statements {
+                if let StatementKind::Assign(_, Rvalue::PrimitiveCast { target, .. }) = &stmt.kind {
+                    found = Some(target.clone());
+                }
+            }
+        }
+        assert_eq!(
+            found.as_deref(),
+            Some("int"),
+            "`true as int` must lower to Rvalue::PrimitiveCast {{ target: \"int\" }} \
+             (not a kind-blind Use pass-through). blocks = {:?}",
+            lowering.mir.blocks
+        );
+    }
+
+    #[test]
+    fn test_lower_int_as_number_emits_primitive_cast() {
+        let lowering = lower_parsed_function(
+            r#"
+                fn cast_it() {
+                    5 as number
+                }
+            "#,
+        );
+        let found = lowering.mir.blocks.iter().any(|b| {
+            b.statements.iter().any(|s| {
+                matches!(
+                    &s.kind,
+                    StatementKind::Assign(_, Rvalue::PrimitiveCast { target, .. })
+                        if target == "number"
+                )
+            })
+        });
+        assert!(
+            found,
+            "`5 as number` must lower to Rvalue::PrimitiveCast {{ target: \"number\" }}"
+        );
+    }
 }

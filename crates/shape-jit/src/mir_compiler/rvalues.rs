@@ -504,6 +504,39 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     enum_name, variant_name
                 ))
             }
+            Rvalue::PrimitiveCast { target, .. } => {
+                // f-string bool-as-int VM!=JIT divergence fix (2026-06).
+                // The MIR producer emits `Rvalue::PrimitiveCast` for a
+                // primitive infallible `as`-cast whose result kind differs
+                // from the source (`true as int`, `1 as number`, …). The
+                // JIT has no typed convert body — the bytecode
+                // `OpCode::ConvertTo*` family is VM-only per
+                // `vm_only_opcode_reason`, and the opcode-FFI trampoline
+                // passes operand bits through UNCHANGED (rendering `true`
+                // instead of `1`). The preflight at `mir_compiler::preflight`
+                // rejects this Rvalue at the program-level gate, so the W12
+                // fall-through routes the program to the bytecode
+                // interpreter (which restamps the cast result kind via
+                // `ConvertTo*`). This arm is defense in depth: if a future
+                // caller invokes `compile_rvalue` without running preflight,
+                // surface-and-stop here rather than emitting the kind-blind
+                // pass-through the MIR lowering used to (CLAUDE.md
+                // "Forbidden rationalizations" — the W4-δ "value passes
+                // through, executor reads the tag" shape refused on sight).
+                // NOT a Bool-default — the target type name IS the
+                // producer-side classification (ADR-006 §2.7.5). Native
+                // typed convert codegen lands as a v0.4 follow-up.
+                Err(format!(
+                    "Route A surface-and-stop: NotImplemented(SURFACE) — \
+                     `Rvalue::PrimitiveCast` (`expr as {}`) codegen not yet \
+                     wired (the bytecode `OpCode::ConvertTo*` family is \
+                     VM-only). W12 fall-through to the interpreter is the \
+                     canonical path today; preflight should have already \
+                     rejected this MIR before reaching `compile_rvalue`. \
+                     Native typed convert codegen lands as a v0.4 follow-up.",
+                    target
+                ))
+            }
         }
     }
 

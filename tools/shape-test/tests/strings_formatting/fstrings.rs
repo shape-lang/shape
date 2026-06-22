@@ -185,3 +185,52 @@ fn cstring_nested_string_in_interpolation() {
     )
     .expect_parse_ok();
 }
+
+// =====================================================================
+// f-string infallible-cast interpolation (VM==JIT divergence fix)
+// =====================================================================
+//
+// `f"{true as int}"` must render `1` (not `true`): the bool→int
+// infallible cast restamps the interpolated value's kind so the
+// formatter renders the int. Under --mode jit the f-string-interp path
+// previously DROPPED the cast (the MIR lowering of `Expr::TypeAssertion`
+// passed the operand bits through unchanged, leaving the SOURCE Bool
+// kind), rendering `true` — a VM!=JIT divergence. Fixed by routing the
+// primitive `as`-cast through `Rvalue::PrimitiveCast`, which the JIT MIR
+// preflight rejects so the program deopts to the interpreter (where
+// `OpCode::ConvertToInt` restamps the kind). VM output below is the
+// shared canonical result for both modes.
+
+#[test]
+fn fstring_bool_true_as_int_renders_one() {
+    ShapeTest::new(r#"print(f"{true as int}")"#)
+        .expect_run_ok()
+        .expect_output("1");
+}
+
+#[test]
+fn fstring_bool_false_as_int_renders_zero() {
+    ShapeTest::new(r#"print(f"{false as int}")"#)
+        .expect_run_ok()
+        .expect_output("0");
+}
+
+#[test]
+fn bool_as_int_print_and_fstring_agree() {
+    // The bare `print(true as int)` and the f-string-interp form must
+    // produce the identical `1` (and `0` for false).
+    let code = r#"print(true as int)
+print(f"{true as int}")
+print(false as int)
+print(f"{false as int}")"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("1\n1\n0\n0");
+}
+
+#[test]
+fn fstring_int_as_number_cast() {
+    ShapeTest::new(r#"print(f"{5 as number}")"#)
+        .expect_run_ok()
+        .expect_output("5.0");
+}

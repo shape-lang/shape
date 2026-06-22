@@ -345,13 +345,37 @@ macro_rules! define_exec_v2_typed_array {
                                     },
                                 )?
                             };
-                            // Retain the per-element header: array
-                            // keeps its share, caller gets a fresh
-                            // share released via the $h_kind arm in
-                            // drop_with_kind.
-                            unsafe { v2_retain(&(*elem_ptr).header) };
+                            // c5 copy-on-bind (strict value semantics):
+                            // a TypedObject (struct) element read produces an
+                            // INDEPENDENT copy of the storage, so a later
+                            // `local.field = x` mutates the local copy and not
+                            // the array's backing element. Scalar/String/
+                            // Decimal/TraitObject/Nested elements keep the
+                            // retain-the-existing-pointer discipline (their
+                            // value semantics are unchanged: scalars are Copy,
+                            // the heap-pointer rows share by design). The
+                            // sibling `GetProp` consumer path
+                            // (`v2_array_detect::read_element`) applies the
+                            // SAME copy for the same V2ElemType::TypedObject.
+                            let (push_bits, push_kind) = if $h_kind
+                                == NativeKind::Ptr(HeapKind::TypedObject)
+                            {
+                                let copy = unsafe {
+                                    super::v2_array_detect::copy_typed_object_for_bind(
+                                        elem_ptr as *const TypedObjectStorage,
+                                    )
+                                };
+                                (copy as u64, NativeKind::Ptr(HeapKind::TypedObject))
+                            } else {
+                                // Retain the per-element header: array
+                                // keeps its share, caller gets a fresh
+                                // share released via the $h_kind arm in
+                                // drop_with_kind.
+                                unsafe { v2_retain(&(*elem_ptr).header) };
+                                (elem_ptr as u64, $h_kind)
+                            };
                             drop_with_kind(arr_bits, arr_kind);
-                            self.push_kinded(elem_ptr as u64, $h_kind)?;
+                            self.push_kinded(push_bits, push_kind)?;
                             Ok(())
                         }
                         OpCode::$h_push => {

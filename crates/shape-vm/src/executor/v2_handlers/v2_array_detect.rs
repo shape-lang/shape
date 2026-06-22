@@ -428,11 +428,18 @@ pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<(u64, NativeK
         // `vm_impl/stack.rs:115`). The caller of read_element gets a fresh share
         // released by the matching `clone_with_kind` / `drop_with_kind`
         // `NativeKind::Ptr(HeapKind::TypedObject)` arm.
+        // c5 copy-on-bind (strict value semantics): a TypedObject (struct)
+        // element read produces an INDEPENDENT copy of the storage (its own
+        // refcount=1 header), NOT a retained alias of the array's element.
+        // So `let mut a = arr[i]; a.field = x` mutates the local copy and
+        // leaves the array's backing element untouched — a struct element
+        // read is a copy, like a scalar element. (The sibling typed-emission
+        // consumer `array.rs::TypedArrayGetTypedObject` applies the same copy.)
         V2ElemType::TypedObject => unsafe {
             let arr = view.ptr as *const TypedArray<*const TypedObjectStorage>;
             let elem_ptr = TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, index);
-            v2_retain(&(*elem_ptr).header);
-            (elem_ptr as u64, NativeKind::Ptr(HeapKind::TypedObject))
+            let copy = copy_typed_object_for_bind(elem_ptr);
+            (copy as u64, NativeKind::Ptr(HeapKind::TypedObject))
         },
         // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
         // mirror of the TypedObject arm. Each element is a `*const
@@ -460,6 +467,47 @@ pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<(u64, NativeK
         },
     };
     Some(pair)
+}
+
+/// c5 copy-on-bind: produce an INDEPENDENT `_new`-allocated copy of a
+/// `TypedObjectStorage` element read out of a typed array, with its own
+/// refcount=1 header. Used so `let mut a = arr[i]` for a struct element gives
+/// `a` a private copy — a later `a.field = x` mutates the copy in place and
+/// leaves the array's backing element untouched (strict value semantics: a
+/// struct element read is a copy, like a scalar element).
+///
+/// The copy clones the per-field slot bits verbatim and bumps one refcount
+/// share per heap-kinded slot via the canonical per-`NativeKind` retain
+/// primitive (`clone_with_kind`). Heap-pointer fields therefore stay shared
+/// (standard struct-copy semantics — copying a struct copies its slot bits; a
+/// heap-pointer slot aliases the same heap object), while the struct's own
+/// scalar slots become independent. No bit-reinterpret, no ValueWord, no tag
+/// decode: `field_kinds[i]` is the compile-time stamped per-slot kind
+/// (ADR-006 §2.7.5) and drives the retain dispatch.
+///
+/// # Safety
+/// `src` must point to a live `TypedObjectStorage` (the array still owns its
+/// share; this read does not consume it).
+pub(crate) unsafe fn copy_typed_object_for_bind(
+    src: *const TypedObjectStorage,
+) -> *mut TypedObjectStorage {
+    use crate::executor::vm_impl::stack::clone_with_kind;
+    let storage = unsafe { &*src };
+    // Clone the slot bits verbatim (ValueSlot is Copy).
+    let slots: Box<[shape_value::slot::ValueSlot]> = storage.slots.clone();
+    let heap_mask = storage.heap_mask;
+    let field_kinds = storage.field_kinds.clone();
+    // Bump one share per heap-kinded slot — the copy now owns its own share,
+    // retired by `_drop`'s heap-mask walk at refcount=0.
+    let n = slots.len().min(field_kinds.len()).min(64);
+    for i in 0..n {
+        if (heap_mask >> i) & 1 == 0 {
+            continue;
+        }
+        let bits = slots[i].raw();
+        clone_with_kind(bits, field_kinds[i]);
+    }
+    TypedObjectStorage::_new(storage.schema_id, slots, heap_mask, field_kinds)
 }
 
 /// Write `(bits, kind)` to element `index` of a v2 typed array.

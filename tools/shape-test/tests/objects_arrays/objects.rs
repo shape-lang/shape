@@ -554,3 +554,82 @@ print(h.name)"#;
         .expect_run_ok()
         .expect_output("1\n1\ng\nh");
 }
+
+// =====================================================================
+// c5 struct-element copy-on-bind (strict value semantics)
+// =====================================================================
+//
+// Reading a STRUCT element out of an array must produce an INDEPENDENT
+// copy (like a scalar element), NOT an alias of the array's backing
+// store. Mutating the local must NOT touch the array. Fixed in
+// `executor/v2_handlers/v2_array_detect.rs::copy_typed_object_for_bind`
+// + the sibling `array.rs::TypedArrayGetTypedObject` arm.
+
+#[test]
+fn struct_array_element_read_is_a_copy_not_an_alias() {
+    let code = r#"type Acct { balance: int }
+let arr = [Acct { balance: 1 }]
+let mut a = arr[0]
+a.balance = 999
+print(arr[0].balance)
+print(a.balance)"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        // array element UNCHANGED (1); local copy mutated (999).
+        .expect_output("1\n999");
+}
+
+#[test]
+fn struct_array_element_copy_preserves_string_field_share() {
+    // Struct with a heap (string) field: the copy shares the field's heap
+    // object (standard struct-copy semantics) but its own scalar slot is
+    // independent. No double-free / UAF when the local replaces its string
+    // slot and is later dropped while the array's share survives.
+    let code = r#"type Person { name: string, age: int }
+let arr = [Person { name: "Alice", age: 30 }, Person { name: "Bob", age: 25 }]
+let mut p = arr[0]
+p.age = 99
+p.name = "Zoe"
+print(arr[0].name)
+print(arr[0].age)
+print(p.name)
+print(p.age)
+print(arr[1].name)"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("Alice\n30\nZoe\n99\nBob");
+}
+
+#[test]
+fn struct_array_multiple_independent_element_copies() {
+    let code = r#"type Acct { balance: int, label: string }
+let arr = [Acct { balance: 1, label: "alpha" }]
+let mut a = arr[0]
+a.balance = 100
+let mut b = arr[0]
+b.balance = 200
+let mut c = arr[0]
+c.balance = 300
+print(a.balance)
+print(b.balance)
+print(c.balance)
+print(arr[0].balance)
+print(arr[0].label)"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("100\n200\n300\n1\nalpha");
+}
+
+#[test]
+fn scalar_array_element_read_is_still_copy() {
+    // Regression guard: scalar elements were already Copy; the c5 fix is
+    // struct-only and must not disturb the scalar path.
+    let code = r#"let nums = [10, 20, 30]
+let mut x = nums[0]
+x = 999
+print(nums[0])
+print(x)"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("10\n999");
+}

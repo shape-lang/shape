@@ -1677,6 +1677,24 @@ fn infer_rvalue_kind_with_projections(
         // rejects it); the destination slot's kind is still well-defined
         // per ADR-006 §2.7.5 producer-side classification. W15.2-LANG-1.
         Rvalue::EnumDiscriminantTest { .. } => Some(NativeKind::Bool),
+        // PrimitiveCast (`expr as int/number/string/bool/decimal/char`) —
+        // the destination slot kind is the cast TARGET kind per ADR-006
+        // §2.7.5 producer-side classification (the target type name is
+        // carried verbatim from `ast::TypeAnnotation`). The JIT consumer
+        // surfaces-and-stops on this Rvalue (preflight rejects it →
+        // whole-program deopt to the bytecode interpreter), but the
+        // destination kind is still well-defined for the kind-flow passes
+        // that run before the preflight decision. f-string bool-as-int
+        // VM!=JIT divergence fix (2026-06).
+        Rvalue::PrimitiveCast { target, .. } => Some(match target.as_str() {
+            "int" => NativeKind::Int64,
+            "number" => NativeKind::Float64,
+            "bool" => NativeKind::Bool,
+            "char" => NativeKind::Char,
+            "string" => NativeKind::String,
+            "decimal" => NativeKind::DecimalV2,
+            _ => return None,
+        }),
     }
 }
 
