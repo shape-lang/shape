@@ -539,6 +539,29 @@ impl TypeRegistry {
         self.enum_defs.get(name)
     }
 
+    /// Resolve a bare capitalized identifier in pattern position to the enum
+    /// that declares it as a **unit** variant. Mirrors
+    /// `TypeSchemaRegistry::enum_for_unit_variant` at the inference tier so
+    /// `match l { Red => … }` binds `Red` as a refutable variant pattern, not
+    /// a catch-all binder. Returns `None` when no enum declares `name` as a
+    /// unit variant, or when the name is ambiguous across two or more enums.
+    pub fn enum_for_unit_variant(&self, name: &str) -> Option<String> {
+        let mut found: Option<&str> = None;
+        for enum_def in self.enum_defs.values() {
+            let is_unit_variant = enum_def.members.iter().any(|m| {
+                m.name == name
+                    && matches!(m.kind, shape_ast::ast::EnumMemberKind::Unit { .. })
+            });
+            if is_unit_variant {
+                if found.is_some() && found != Some(enum_def.name.as_str()) {
+                    return None;
+                }
+                found = Some(enum_def.name.as_str());
+            }
+        }
+        found.map(|s| s.to_string())
+    }
+
     /// Register a record schema
     pub fn register_record_schema(&mut self, name: &str, schema: RecordSchema) {
         self.record_schemas.insert(name.to_string(), schema);

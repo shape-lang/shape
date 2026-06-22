@@ -155,6 +155,16 @@ pub struct MirBuilder {
     /// classification here. Empty when lowering is invoked without a seed
     /// (e.g. unit tests) — those binds keep the conservative `Unknown` path.
     fn_return_types: HashMap<String, LocalTypeInfo>,
+    /// Names of capitalized enum **unit** variants in scope (e.g. `Red`,
+    /// `Green`). Seeded by the compiler from its schema registry. Used by
+    /// `lower_match_expr` to resolve the pattern-identifier-vs-unit-variant
+    /// ambiguity: a bare `match l { Red => … }` arm whose `Red` names a unit
+    /// variant is a refutable variant pattern, not a catch-all binder. The
+    /// MIR layer has no schema-registry access, so this set is the producer-
+    /// side classification handed down at lowering time. Empty under
+    /// unseeded lowering (unit tests) — bare capitalized identifiers then
+    /// stay binders, matching the pre-fix behavior.
+    known_unit_variant_names: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -213,7 +223,21 @@ impl MirBuilder {
             local_typed_array_element_types: HashMap::new(),
             local_declared_scalar_types: HashMap::new(),
             fn_return_types: HashMap::new(),
+            known_unit_variant_names: HashSet::new(),
         }
+    }
+
+    /// Seed the in-scope enum unit-variant name set (pattern-identifier-vs-
+    /// unit-variant ambiguity resolution). Called by the compiler before
+    /// lowering with the unit-variant names drawn from its schema registry.
+    pub fn seed_unit_variant_names(&mut self, names: HashSet<String>) {
+        self.known_unit_variant_names = names;
+    }
+
+    /// Is `name` a known enum unit-variant in scope? Drives the
+    /// `Pattern::Identifier` → refutable-variant rewrite in `lower_match_expr`.
+    pub(super) fn is_known_unit_variant(&self, name: &str) -> bool {
+        self.known_unit_variant_names.contains(name)
     }
 
     /// Seed the function-name → return-type classification map (strict
@@ -772,8 +796,32 @@ pub fn lower_function_detailed_with_returns(
     span: Span,
     fn_return_types: HashMap<String, LocalTypeInfo>,
 ) -> MirLoweringResult {
+    lower_function_detailed_with_returns_and_variants(
+        name,
+        params,
+        body,
+        span,
+        fn_return_types,
+        HashSet::new(),
+    )
+}
+
+/// As [`lower_function_detailed_with_returns`], but additionally seeds the
+/// in-scope enum unit-variant name set so a bare `match l { Red => … }` arm
+/// resolves `Red` as a refutable variant pattern (pattern-identifier-vs-unit-
+/// variant ambiguity). The compiler builds the set from its schema registry;
+/// the variant-less wrapper passes an empty set (binders unchanged).
+pub fn lower_function_detailed_with_returns_and_variants(
+    name: &str,
+    params: &[ast::FunctionParameter],
+    body: &[Statement],
+    span: Span,
+    fn_return_types: HashMap<String, LocalTypeInfo>,
+    unit_variant_names: HashSet<String>,
+) -> MirLoweringResult {
     let mut builder = MirBuilder::new(name.to_string(), span);
     builder.seed_fn_return_types(fn_return_types);
+    builder.seed_unit_variant_names(unit_variant_names);
 
     // Register parameters
     for param in params {

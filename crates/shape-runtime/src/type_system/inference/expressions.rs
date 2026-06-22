@@ -2558,8 +2558,19 @@ impl TypeInferenceEngine {
 
         match pattern {
             Pattern::Identifier(name) => {
-                let var_type = self.fresh_type_var();
-                self.env.define(name, TypeScheme::mono(var_type));
+                // A bare capitalized identifier that names a known unit enum
+                // variant is a refutable variant pattern, not a binder — it
+                // introduces no binding and must not shadow the variant name
+                // with a fresh type var (which would make the arm a
+                // catch-all). Only genuine binders define a variable.
+                if name.chars().next().is_some_and(|c| c.is_uppercase())
+                    && self.env.enum_for_unit_variant(name).is_some()
+                {
+                    // Refutable unit-variant pattern — binds nothing.
+                } else {
+                    let var_type = self.fresh_type_var();
+                    self.env.define(name, TypeScheme::mono(var_type));
+                }
             }
             Pattern::Typed {
                 name,

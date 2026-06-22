@@ -1641,13 +1641,38 @@ pub(super) fn lower_match_expr(
             no_match_block
         };
         let pattern_span = arm.pattern_span.unwrap_or(span);
+
+        // Resolve the pattern-identifier-vs-unit-variant ambiguity. A bare
+        // capitalized `Red` that names a known enum unit variant is a
+        // refutable variant pattern (matches only that variant), NOT a
+        // catch-all binder. Rewrite it to the equivalent `Constructor` so
+        // both the binding walk (`pattern_has_bindings` → no binding) and the
+        // condition lowering (`EnumDiscriminantTest`, which the JIT preflight
+        // rejects → interpreter fallback, exactly like a syntactically-
+        // qualified `Enum::Red`) treat it as a variant rather than a binder.
+        // Genuine binders (unknown / lowercase names) are left unchanged.
+        let normalized_pattern: Option<ast::Pattern> = match &arm.pattern {
+            ast::Pattern::Identifier(name)
+                if name.chars().next().is_some_and(|c| c.is_uppercase())
+                    && builder.is_known_unit_variant(name) =>
+            {
+                Some(ast::Pattern::Constructor {
+                    enum_name: None,
+                    variant: name.clone(),
+                    fields: ast::PatternConstructorFields::Unit,
+                })
+            }
+            _ => None,
+        };
+        let arm_pattern: &ast::Pattern = normalized_pattern.as_ref().unwrap_or(&arm.pattern);
+
         let mut binding_scope_active = false;
-        if super::stmt::pattern_has_bindings(&arm.pattern) {
+        if super::stmt::pattern_has_bindings(arm_pattern) {
             builder.push_scope();
             binding_scope_active = true;
             super::stmt::lower_pattern_bindings_from_place(
                 builder,
-                &arm.pattern,
+                arm_pattern,
                 &Place::Local(scrutinee_slot),
                 pattern_span,
                 Some(immutable_binding_metadata(pattern_span, false, false)),
@@ -1656,7 +1681,7 @@ pub(super) fn lower_match_expr(
 
         if let Some(pattern_operand) = lower_match_pattern_condition_operand(
             builder,
-            &arm.pattern,
+            arm_pattern,
             scrutinee_slot,
             pattern_span,
         ) {

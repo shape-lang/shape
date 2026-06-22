@@ -34,6 +34,49 @@ pub(super) fn typed_eq_opcode_for_literal(lit: &Literal) -> Option<OpCode> {
 }
 
 impl BytecodeCompiler {
+    /// Resolve the pattern-identifier-vs-unit-variant ambiguity.
+    ///
+    /// A bare capitalized identifier in pattern position (e.g. `Red` in
+    /// `match l { Red => 1, Green => 2 }`) is parsed by the grammar as a
+    /// `Pattern::Identifier` — a variable binder that matches *everything*
+    /// (a catch-all). When the name collides with a registered enum's
+    /// **unit** variant it must instead be a refutable variant pattern that
+    /// only matches that variant. This rewrites such an identifier to the
+    /// equivalent `Pattern::Constructor { enum_name: None, variant, Unit }`
+    /// so both the check and binding paths treat it as a variant.
+    ///
+    /// A genuinely-unknown identifier (no matching unit variant in scope)
+    /// is returned unchanged and stays a binder. Ambiguous names (declared
+    /// as a unit variant by two or more distinct enums) also stay binders —
+    /// `enum_for_unit_variant` returns `None` in that case.
+    pub(in crate::compiler) fn normalize_unit_variant_pattern(
+        &self,
+        pattern: &shape_ast::ast::Pattern,
+    ) -> Option<shape_ast::ast::Pattern> {
+        let shape_ast::ast::Pattern::Identifier(name) = pattern else {
+            return None;
+        };
+        // Only capitalized identifiers can name a variant; lowercase names
+        // are ordinary binders by convention and never collide.
+        if !name.chars().next().is_some_and(|c| c.is_uppercase()) {
+            return None;
+        }
+        let owner = self
+            .type_tracker
+            .schema_registry()
+            .enum_for_unit_variant(name)?;
+        // Fill in the resolved owning enum so the rewritten pattern takes the
+        // exact same compile path as a syntactically-qualified `Enum::Variant`
+        // pattern (`(Some(enum), _)` arms in both check and binding), rather
+        // than the bare `(None, _)` fallthrough. This keeps the discriminant
+        // check and the binding-side codegen identical to the qualified form.
+        Some(shape_ast::ast::Pattern::Constructor {
+            enum_name: Some(shape_ast::ast::TypePath::simple(owner)),
+            variant: name.clone(),
+            fields: shape_ast::ast::PatternConstructorFields::Unit,
+        })
+    }
+
     pub(super) fn emit_pattern_type_check(
         &mut self,
         value_local: u16,

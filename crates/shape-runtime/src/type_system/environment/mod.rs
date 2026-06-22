@@ -1487,6 +1487,13 @@ impl TypeEnvironment {
         self.type_registry.get_enum(name)
     }
 
+    /// Resolve a bare capitalized identifier in pattern position to the enum
+    /// that declares it as a unit variant (see
+    /// `TypeRegistry::enum_for_unit_variant`).
+    pub fn enum_for_unit_variant(&self, name: &str) -> Option<String> {
+        self.type_registry.enum_for_unit_variant(name)
+    }
+
     // =========================================================================
     // Record Schema Methods
     // =========================================================================

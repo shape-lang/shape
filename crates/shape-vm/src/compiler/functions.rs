@@ -112,6 +112,16 @@ impl BytecodeCompiler {
         map
     }
 
+    /// Build the in-scope enum unit-variant name set for MIR lowering. The MIR
+    /// layer has no schema-registry access, so the compiler hands down the
+    /// names of every registered enum unit variant; `lower_match_expr` uses
+    /// them to rewrite a bare `match l { Red => … }` arm's `Red` identifier
+    /// into a refutable variant pattern (pattern-identifier-vs-unit-variant
+    /// ambiguity) instead of a catch-all binder.
+    pub(super) fn build_unit_variant_name_seed(&self) -> std::collections::HashSet<String> {
+        self.type_tracker.schema_registry().unit_variant_names()
+    }
+
     pub(super) fn explicit_param_pass_modes(
         params: &[shape_ast::ast::FunctionParameter],
     ) -> Vec<ParamPassMode> {
@@ -459,12 +469,14 @@ impl BytecodeCompiler {
         // calls in helpers.rs are skipped. For functions where MIR lowering had
         // fallbacks, the lexical checker remains the active fallback.
         let fn_return_types = self.build_fn_return_type_seed();
-        let mir_lowering = crate::mir::lowering::lower_function_detailed_with_returns(
+        let unit_variant_names = self.build_unit_variant_name_seed();
+        let mir_lowering = crate::mir::lowering::lower_function_detailed_with_returns_and_variants(
             &effective_def.name,
             &effective_def.params,
             &effective_def.body,
             effective_def.name_span,
             fn_return_types,
+            unit_variant_names,
         );
         let callee_summaries =
             self.build_callee_summaries(Some(&effective_def.name), &mir_lowering.all_local_names);
@@ -1240,12 +1252,14 @@ impl BytecodeCompiler {
         }
 
         let fn_return_types = self.build_fn_return_type_seed();
-        let lowering = crate::mir::lowering::lower_function_detailed_with_returns(
+        let unit_variant_names = self.build_unit_variant_name_seed();
+        let lowering = crate::mir::lowering::lower_function_detailed_with_returns_and_variants(
             context_name,
             &[],
             &body,
             Self::synthetic_item_sequence_span(items),
             fn_return_types,
+            unit_variant_names,
         );
         let callee_summaries = self.build_callee_summaries(None, &lowering.all_local_names);
         let mut analysis = crate::mir::solver::analyze(&lowering.mir, &callee_summaries);

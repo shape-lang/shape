@@ -1096,3 +1096,85 @@ print(use_it())
 "#;
     ShapeTest::new(code).expect_run_ok().expect_output("9");
 }
+
+// =========================================================================
+// Bare unit-variant pattern is REFUTABLE, not a catch-all binder
+// (pattern-identifier-vs-unit-variant ambiguity). A capitalized identifier
+// in pattern position that names a known enum unit variant matches ONLY that
+// variant; it must not silently bind as a catch-all variable. (Pre-fix
+// `match l { Red => 1, Green => 2 }` returned 1 for every input because `Red`
+// was bound as a variable that always matches.)
+// =========================================================================
+
+#[test]
+fn bare_unit_variant_pattern_is_refutable_not_catch_all() {
+    // `Red` is a unit variant of `Light`, NOT a binder. The `Red` arm must
+    // NOT catch `Light::Green` — the `Green` arm fires, returning 2.
+    let code = r#"
+enum Light { Red, Green }
+fn f(l: Light) -> int { match l { Red => 1, Green => 2 } }
+print(f(Light::Green))
+"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("2");
+}
+
+#[test]
+fn bare_unit_variant_pattern_matches_its_own_variant() {
+    // The `Red` arm DOES fire for `Light::Red`, returning 1.
+    let code = r#"
+enum Light { Red, Green }
+fn f(l: Light) -> int { match l { Red => 1, Green => 2 } }
+print(f(Light::Red))
+"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("1");
+}
+
+#[test]
+fn bare_unit_variant_pattern_arm_order_independent() {
+    // Order must not matter: with `Green` first, `f(Light::Red)` still hits
+    // the `Red` arm (1), not the first arm. Pre-fix the first arm always won.
+    let code = r#"
+enum Light { Red, Green }
+fn f(l: Light) -> int { match l { Green => 2, Red => 1 } }
+print(f(Light::Red))
+"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("1");
+}
+
+#[test]
+fn qualified_unit_variant_pattern_still_works() {
+    // The syntactically-qualified `Light::Red` form is unchanged.
+    let code = r#"
+enum Light { Red, Green }
+fn f(l: Light) -> int { match l { Light::Red => 1, Light::Green => 2 } }
+print(f(Light::Green))
+"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("2");
+}
+
+#[test]
+fn bare_unit_variant_mixed_with_lowercase_binder() {
+    // A lowercase identifier is still an ordinary catch-all binder, even in
+    // the same match: `Red` is refutable, `other` binds everything else.
+    let code = r#"
+enum Light { Red, Green, Blue }
+fn f(l: Light) -> int { match l { Red => 1, other => 99 } }
+print(f(Light::Green))
+print(f(Light::Red))
+print(f(Light::Blue))
+"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("99\n1\n99");
+}
+
+#[test]
+fn genuine_variable_binder_still_binds() {
+    // A plain identifier with no matching unit variant in scope stays a
+    // binder: `match x { n => n + 1 }` binds `n` to the scrutinee.
+    let code = r#"
+fn g(x: int) -> int { match x { n => n + 1 } }
+print(g(41))
+"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("42");
+}

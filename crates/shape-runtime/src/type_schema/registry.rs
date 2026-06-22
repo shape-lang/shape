@@ -194,6 +194,63 @@ impl TypeSchemaRegistry {
         self.by_id.get(&id).and_then(|name| self.by_name.get(name))
     }
 
+    /// Resolve a bare capitalized identifier in pattern position to the enum
+    /// that declares it as a **unit** variant.
+    ///
+    /// A capitalized identifier like `Red` in a `match` arm is syntactically
+    /// ambiguous: the grammar parses it as `Pattern::Identifier` (a variable
+    /// binder / catch-all). If a registered enum declares `Red` as a unit
+    /// variant, the identifier must instead resolve to a refutable variant
+    /// pattern. This returns the declaring enum's name when exactly one such
+    /// enum exists. Only **unit** variants participate — tuple/struct variants
+    /// require a payload at the syntax level and are never bare identifiers.
+    ///
+    /// Returns `None` when no enum declares `name` as a unit variant, or when
+    /// the name is ambiguous across two or more enums (the caller leaves it a
+    /// binder rather than guessing).
+    pub fn enum_for_unit_variant(&self, name: &str) -> Option<String> {
+        let mut found: Option<String> = None;
+        for schema in self.by_name.values() {
+            let Some(enum_info) = schema.get_enum_info() else {
+                continue;
+            };
+            if let Some(variant) = enum_info.variant_by_name(name) {
+                if matches!(
+                    variant.kind,
+                    crate::type_schema::EnumVariantKind::Unit
+                ) {
+                    if found.is_some() && found.as_deref() != Some(schema.name.as_str()) {
+                        // Ambiguous across multiple enums — do not guess.
+                        return None;
+                    }
+                    found = Some(schema.name.clone());
+                }
+            }
+        }
+        found
+    }
+
+    /// Collect the names of every enum **unit** variant registered. Used by
+    /// the bytecode compiler to seed the MIR lowering layer (which has no
+    /// schema-registry access) so a bare `match l { Red => … }` arm resolves
+    /// `Red` as a refutable variant pattern rather than a catch-all binder.
+    /// Tuple/struct variants are excluded — they require a payload at the
+    /// syntax level and are never bare identifiers.
+    pub fn unit_variant_names(&self) -> std::collections::HashSet<String> {
+        let mut names = std::collections::HashSet::new();
+        for schema in self.by_name.values() {
+            let Some(enum_info) = schema.get_enum_info() else {
+                continue;
+            };
+            for variant in &enum_info.variants {
+                if matches!(variant.kind, crate::type_schema::EnumVariantKind::Unit) {
+                    names.insert(variant.name.clone());
+                }
+            }
+        }
+        names
+    }
+
     /// Highest schema ID currently stored in this registry.
     pub fn max_schema_id(&self) -> Option<SchemaId> {
         self.by_id.keys().copied().max()

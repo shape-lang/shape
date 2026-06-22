@@ -473,13 +473,23 @@ impl BytecodeCompiler {
         let scrutinee_type_info = self.type_tracker.get_local_type(scrutinee_local).cloned();
 
         for arm in &match_expr.arms {
+            // Resolve the pattern-identifier-vs-unit-variant ambiguity ONCE,
+            // up front, so every downstream pass (check, binding, and the
+            // binding-semantics walks below) sees the same refutable
+            // `Constructor` pattern instead of a catch-all `Identifier`
+            // binder. A bare capitalized `Red` that names a known unit enum
+            // variant becomes `Enum::Red` here; everything else is unchanged.
+            let normalized = self.normalize_unit_variant_pattern(&arm.pattern);
+            let arm_pattern: &shape_ast::ast::Pattern =
+                normalized.as_ref().unwrap_or(&arm.pattern);
+
             // Pattern check — restore scrutinee schema before checking
             self.last_expr_schema = scrutinee_schema;
             self.emit(Instruction::new(
                 OpCode::LoadLocal,
                 Some(Operand::Local(scrutinee_local)),
             ));
-            self.compile_pattern_check(&arm.pattern, arm.pattern_span)?;
+            self.compile_pattern_check(arm_pattern, arm.pattern_span)?;
             let next_arm_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
 
             // Guard (if present) evaluated with bindings
@@ -493,7 +503,7 @@ impl BytecodeCompiler {
                     OpCode::LoadLocal,
                     Some(Operand::Local(scrutinee_local)),
                 ));
-                self.compile_match_binding(&arm.pattern, scrutinee_ct.as_ref())?;
+                self.compile_match_binding(arm_pattern, scrutinee_ct.as_ref())?;
                 self.compile_expr(guard)?;
                 guard_fail_jump = Some(self.emit_jump(OpCode::JumpIfFalse, 0));
                 self.pop_scope();
@@ -508,7 +518,7 @@ impl BytecodeCompiler {
                 OpCode::LoadLocal,
                 Some(Operand::Local(scrutinee_local)),
             ));
-            self.compile_match_binding(&arm.pattern, scrutinee_ct.as_ref())?;
+            self.compile_match_binding(arm_pattern, scrutinee_ct.as_ref())?;
             if self.current_expr_result_mode() == crate::compiler::ExprResultMode::PreserveRef {
                 self.compile_expr_preserving_refs(&arm.body)?;
             } else {

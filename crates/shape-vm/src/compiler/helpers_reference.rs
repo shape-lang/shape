@@ -778,12 +778,14 @@ impl BytecodeCompiler {
         }
 
         let fn_return_types = self.build_fn_return_type_seed();
-        let lowering = crate::mir::lowering::lower_function_detailed_with_returns(
+        let unit_variant_names = self.build_unit_variant_name_seed();
+        let lowering = crate::mir::lowering::lower_function_detailed_with_returns_and_variants(
             "__callable_expr__",
             &effective_params,
             body,
             span,
             fn_return_types,
+            unit_variant_names,
         );
         if lowering.had_fallbacks {
             return None;
