@@ -843,3 +843,83 @@ match v {
     ShapeTest::new(code)
         .expect_run_err_contains("does not belong to scrutinee type 'Option'");
 }
+
+// =========================================================================
+// R1 (v0.3.3 strict-flip): the pattern-ownership fix must NOT false-positive
+// a valid `?`-on-Option chain. A function declared `-> Option<int>` that uses
+// `?` must keep its `Option` return identity (not be re-wrapped into
+// `Result<Option<int>>`), so a downstream `match h() { Some(v) => … }` sees an
+// `Option` scrutinee and the variant-ownership check accepts the `Some`
+// pattern. Before the fix `apply_fallibility_to_return_type` re-wrapped the
+// already-Option return into Result and the match was spuriously rejected
+// ("variant pattern 'Some' does not belong to scrutinee type 'Result'").
+// =========================================================================
+
+#[test]
+fn option_try_chain_match_not_false_positive() {
+    let code = r#"
+fn g() -> Option<int> { Some(5) }
+fn h() -> Option<int> { let x = g()?; Some(x) }
+match h() { Some(v) => print(v), None => print(-1) }
+"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("5");
+}
+
+#[test]
+fn result_try_chain_match_still_works() {
+    // The sibling `?`-on-Result chain must remain valid after the R1 fix.
+    let code = r#"
+fn g() -> Result<int,string> { Ok(5) }
+fn h() -> Result<int,string> { let x = g()?; Ok(x + 10) }
+match h() { Ok(v) => print(v), Err(e) => print(-1) }
+"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("15");
+}
+
+// =========================================================================
+// R2 (v0.3.3 strict-flip): nested-inner reinterpret hole. The ownership check
+// must RECURSE into nested constructor patterns and reject a constructor
+// pattern matched against a PROVABLY non-enum payload position. Previously the
+// check returned Ok(()) for a non-enum scrutinee, so `Err(Some(n))` over a
+// `Result<int,string>` bound the inner `n` to RAW heap-pointer bits of the
+// `Err` string payload — a catastrophic reinterpret one level down.
+// =========================================================================
+
+#[test]
+fn nested_constructor_over_string_payload_rejected() {
+    // `Err(Some(n))`: `Some` against `Err`'s `string` payload (a non-enum)
+    // must be a clean compile error, never a heap-reinterpret.
+    let code = r#"
+fn get() -> Result<int,string> { Err("hello") }
+let v = get()
+match v { Ok(n) => print(n + 1), Err(Some(n)) => print(n + 1000), Err(None) => print(-1) }
+"#;
+    ShapeTest::new(code)
+        .expect_run_err_contains("requires an enum-typed value");
+}
+
+#[test]
+fn nested_constructor_over_int_payload_rejected() {
+    // Three-level: `Ok(Some(Color::Red))` where `Ok`'s payload is `int` — the
+    // inner `Some` against an `int` position must reject.
+    let code = r#"
+enum Color { Red, Blue }
+fn get() -> Result<int,string> { Ok(5) }
+let v = get()
+match v { Ok(Some(c)) => print(1), Ok(_) => print(2), Err(_) => print(3) }
+"#;
+    ShapeTest::new(code)
+        .expect_run_err_contains("requires an enum-typed value");
+}
+
+#[test]
+fn nested_constructor_over_enum_payload_valid() {
+    // The legitimate counterpart: `Ok(Some(n))` where `Ok`'s payload is
+    // `Option<int>` (an enum carrier) must still compile and run.
+    let code = r#"
+fn get() -> Result<Option<int>,string> { Ok(Some(9)) }
+let v = get()
+match v { Ok(Some(n)) => print(n), Ok(None) => print(-1), Err(e) => print(-2) }
+"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("9");
+}

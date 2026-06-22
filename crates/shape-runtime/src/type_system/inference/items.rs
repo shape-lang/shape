@@ -2245,9 +2245,116 @@ impl TypeInferenceEngine {
             }
         }
 
-        // Scrutinee identity not provable (type var, struct, primitive,
-        // union, function). Do not reject — leaves prior behaviour intact.
+        // R2 (v0.3.3 strict-flip): nested-inner reinterpret hole.
+        //
+        // This check also runs on NESTED constructor patterns: when
+        // `bind_pattern_vars_typed` recurses into a payload sub-pattern it
+        // passes the payload's resolved type as the scrutinee. A nested
+        // constructor pattern matched against a payload of NON-ENUM type is
+        // just as unsound as a foreign top-level variant — e.g.
+        // `match v { Err(Some(n)) => … }` over a `Result<int, string>` binds
+        // the inner `Some(n)` against `Err`'s `string` payload. `Some` is not
+        // a member of `string` (a non-enum), so the inner binder `n` would be
+        // bound to RAW heap-pointer bits with no type check — the same
+        // catastrophic reinterpret this check exists to close, one level down.
+        //
+        // A constructor pattern requires an ENUM-typed position. Reject only
+        // when the scrutinee is PROVABLY a non-enum type — a primitive, a
+        // structural carrier (array/tuple/object/function/union), or a known
+        // builtin collection generic. Result/Option and registered user enums
+        // are handled by the branches above and never reach here.
+        //
+        // Surface-and-stop everywhere else: an unresolved type variable, the
+        // `unknown` placeholder a lost type var renders to (`mod.rs:1194`), or
+        // a bare nominal name we cannot positively classify (it MIGHT be an
+        // enum not visible in `get_enum` at this point — the `pub enum`
+        // registration gap, a forward reference) all leave the prior fresh-var
+        // binding behaviour intact. Only positive non-enum proof rejects.
+        if self.is_provably_non_enum_scrutinee(scrutinee) {
+            return Err(TypeError::InvalidPatternType(format!(
+                "variant pattern '{variant}' requires an enum-typed value, but the matched \
+                 position has type '{}' (a constructor pattern can only match an enum; a \
+                 non-enum value cannot be destructured by a variant pattern)",
+                self.render_type_for_diag(scrutinee)
+            )));
+        }
+
+        // Scrutinee identity not positively classifiable as non-enum. Do not
+        // reject — leaves prior surface-and-stop behaviour intact.
         Ok(())
+    }
+
+    /// POSITIVE classification for R2's nested-inner reinterpret guard: true
+    /// only when `ty` is something a constructor/variant pattern can NEVER
+    /// validly match — a primitive, a structural carrier (array/tuple/object/
+    /// function/union/intersection), or a known builtin collection generic.
+    ///
+    /// This is deliberately NOT "everything that is not a registered enum":
+    /// a bare nominal name (`Visibility`, a forward-referenced user type) that
+    /// `get_enum` does not currently see — the `pub enum` registration gap —
+    /// must surface-and-stop, because it MIGHT be an enum. Only types we can
+    /// prove are non-enum drive the rejection. Result/Option and registered
+    /// user enums are handled by the branches above and never reach here.
+    fn is_provably_non_enum_scrutinee(&self, ty: &Type) -> bool {
+        match ty {
+            // Structural concrete carriers are never enums.
+            Type::Concrete(
+                TypeAnnotation::Array(_)
+                | TypeAnnotation::Tuple(_)
+                | TypeAnnotation::Object(_)
+                | TypeAnnotation::Function { .. }
+                | TypeAnnotation::Union(_)
+                | TypeAnnotation::Intersection(_),
+            ) => true,
+            Type::Function { .. } => true,
+            // A bare nominal name is provably non-enum ONLY if it is a KNOWN
+            // primitive. An unknown nominal name (incl. the `unknown`
+            // placeholder and an unregistered/pub enum) is left unprovable.
+            Type::Concrete(TypeAnnotation::Basic(name)) => Self::is_known_primitive_name(name),
+            Type::Concrete(TypeAnnotation::Reference(path)) => {
+                Self::is_known_primitive_name(path.as_str())
+            }
+            // Builtin collection generics (`Array<T>`, `HashMap<K,V>`, …) are
+            // non-enum. A generic over a registered enum is handled above; a
+            // generic over an unknown nominal base is left unprovable.
+            Type::Generic { base, .. } => match base.as_ref() {
+                Type::Concrete(ann) => Self::is_builtin_collection_name(ann.as_type_name_str()),
+                _ => false,
+            },
+            Type::Concrete(TypeAnnotation::Generic { name, .. }) => {
+                Self::is_builtin_collection_name(Some(name.as_str()))
+            }
+            _ => false,
+        }
+    }
+
+    /// Names of the built-in primitive (non-enum) types. A constructor
+    /// pattern matched against any of these is unsound.
+    fn is_known_primitive_name(name: &str) -> bool {
+        matches!(
+            name,
+            "int"
+                | "number"
+                | "bool"
+                | "string"
+                | "decimal"
+                | "bigint"
+                | "char"
+                | "byte"
+                | "void"
+                | "unit"
+                | "DateTime"
+                | "Duration"
+        )
+    }
+
+    /// Names of the built-in collection generics that a constructor pattern
+    /// can never validly match.
+    fn is_builtin_collection_name(name: Option<&str>) -> bool {
+        matches!(
+            name,
+            Some("Array" | "HashMap" | "Map" | "Set" | "Range" | "Tuple" | "List")
+        )
     }
 
     /// WS-4 4b: look up the declared `TypeAnnotation` of a field on a

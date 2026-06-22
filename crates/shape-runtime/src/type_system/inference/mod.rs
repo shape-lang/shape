@@ -756,7 +756,15 @@ impl TypeInferenceEngine {
         return_ty: Type,
         is_fallible: bool,
     ) -> Type {
-        if is_fallible && !self.is_result_type(&return_ty) {
+        // A function that uses `?` propagates through a Result OR an Option
+        // carrier. When the return type is ALREADY one of those carriers
+        // (e.g. a declared `-> Option<int>` or a body that already returns a
+        // `Result<T>`), it must NOT be re-wrapped. Re-wrapping an
+        // `Option<int>` into `Result<Option<int>>` corrupts the function's
+        // type identity: a downstream `match h() { Some(v) => … }` then sees a
+        // `Result` scrutinee and the variant-ownership check spuriously
+        // rejects the valid `Some` pattern (R1 false positive).
+        if is_fallible && !self.is_result_type(&return_ty) && !self.is_option_type(&return_ty) {
             self.wrap_result_type(return_ty)
         } else {
             return_ty
