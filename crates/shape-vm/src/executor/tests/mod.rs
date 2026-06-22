@@ -53,6 +53,7 @@ mod set_ops;
 mod string_method_aliases;
 mod soak_tests;
 mod table_iteration;
+mod hashmap_readback_kind;
 mod try_operator;
 mod type_system_integration;
 mod typed_array_ops;

@@ -37,6 +37,18 @@ fn pop_string_key(vm: &mut VirtualMachine) -> Result<Option<*mut StringObj>, VME
             let _ = Arc::into_raw(arc);
             Some(so)
         }
+        // D4 (strict-flip, 2026-06-22): a string key from a v2-raw
+        // `TypedArray<*const StringObj>` read carries `NativeKind::StringV2`
+        // (bits = a live `*const StringObj`). Recognize it so a for-in /
+        // array-indexed string key dispatches correctly through the
+        // local-slot typed-map opcodes (mirror of the `exec_v2_typed_map`
+        // `pop_string_key` StringV2 arm + `hashmap_methods::as_string_key`).
+        // SAFETY: kind == StringV2 means bits = a live `*const StringObj`.
+        NativeKind::StringV2 => {
+            let ptr = key_bits as *const StringObj;
+            let s = unsafe { StringObj::as_str(ptr) };
+            Some(StringObj::new(s))
+        }
         _ => None,
     };
     drop_with_kind(key_bits, key_kind);
