@@ -1801,7 +1801,7 @@ impl BytecodeCompiler {
     /// Known primitive (non-generic) type names. Mirrors the type-system side
     /// `is_known_primitive_name`; kept compiler-local to avoid a cross-crate
     /// pub surface just for this gate.
-    fn is_known_concrete_primitive_name(name: &str) -> bool {
+    pub(crate) fn is_known_concrete_primitive_name(name: &str) -> bool {
         matches!(
             name,
             "int" | "number"
@@ -1819,7 +1819,7 @@ impl BytecodeCompiler {
     /// True when an inferred argument type is genuinely un-inferable: an
     /// unresolved free type variable, a still-bounded constrained variable, or
     /// the `"unknown"` placeholder a lost type var renders to.
-    fn type_is_unknown(ty: &shape_runtime::type_system::Type) -> bool {
+    pub(crate) fn type_is_unknown(ty: &shape_runtime::type_system::Type) -> bool {
         use shape_ast::ast::TypeAnnotation;
         use shape_runtime::type_system::Type;
         match ty {

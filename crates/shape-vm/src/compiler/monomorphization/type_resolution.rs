@@ -2099,7 +2099,21 @@ fn function_call_return_concrete_type(
     args: &[Expr],
 ) -> Option<ConcreteType> {
     let func_def = compiler.function_defs.get(name)?;
-    let return_annotation = func_def.return_type.as_ref()?;
+    let Some(return_annotation) = func_def.return_type.as_ref() else {
+        // strict-flip S1 (call-site HOF return propagation, 2026-06-22): the
+        // callee has NO declared return annotation. Its return type is not
+        // genuinely `unknown` whenever the body's tail is a call of a
+        // function-valued parameter (`fn apply(f, x) { f(x) }`) and the actual
+        // argument passed for that parameter is a concrete callable — then the
+        // result is that callable's PROVEN return type (`apply(ret_num, 3.0)`
+        // ⇒ `number`, because `ret_num: number -> number`). Resolve it here so
+        // a downstream `let bad: int = apply(ret_num, 3.0)` fails NATURALLY
+        // (number != int) and the matched `let r: number = …` binds cleanly.
+        // Any non-HOF / unresolvable shape yields `None` — the binding then
+        // hits the let-annotation Unknown-accept guard (FIX B) instead of
+        // silently laundering `unknown` into a concrete slot.
+        return hof_unannotated_call_return_concrete_type(compiler, func_def, args);
+    };
 
     // Collect the declared (non-const) type-param names.
     let type_params: Vec<String> = func_def
@@ -2131,6 +2145,229 @@ fn function_call_return_concrete_type(
         .zip(resolution.type_args.iter().cloned())
         .collect();
     concrete_type_from_annotation(return_annotation, &bindings)
+}
+
+/// strict-flip S1 (call-site HOF return propagation, 2026-06-22): resolve the
+/// PROVEN result `ConcreteType` of a call to a function that has NO declared
+/// return annotation but whose body's tail is a call of a function-valued
+/// parameter.
+///
+/// The load-bearing shape is `fn apply(f, x) { f(x) }` invoked as
+/// `apply(ret_num, 3.0)`. `apply`'s static return is `unknown` (no annotation),
+/// but the body returns `f(x)`, `f` is bound to the concrete callable `ret_num`
+/// (a `number -> number` fn), and `x` is bound to `3.0` (number) — so `f(x)` is
+/// `ret_num(number)` = `number`. The result is therefore PROVEN `number`, not
+/// `unknown`. Recovering it lets `let bad: int = apply(ret_num, 3.0)` fail
+/// naturally (`number != int`) while `let r: number = …` binds cleanly.
+///
+/// Per ADR-006 §2.7.5 stamp-at-compile-time: the proof is the actual callable
+/// argument's return type, resolved structurally — no runtime probe, no
+/// coercion, no fabrication. Any link that is not statically provable yields
+/// `None`; the binding then meets the let-annotation Unknown-accept guard
+/// (FIX B) rather than laundering `unknown` into a concrete slot. NO silent
+/// widen, NO `int`/`number` unify.
+fn hof_unannotated_call_return_concrete_type(
+    compiler: &BytecodeCompiler,
+    callee: &shape_ast::ast::FunctionDef,
+    args: &[Expr],
+) -> Option<ConcreteType> {
+    // Generic callees route through the type-param substitution path; this
+    // helper only handles the un-annotated, value-param HOF.
+    if callee.type_params.as_ref().is_some_and(|tps| !tps.is_empty()) {
+        return None;
+    }
+
+    // Map each callee param NAME to the actual argument expression at this
+    // call site. A destructuring/rest param is not a simple HOF forwarding
+    // param — skip the whole resolution (conservative `None`).
+    let mut param_arg: HashMap<&str, &Expr> = HashMap::new();
+    for (p, a) in callee.params.iter().zip(args.iter()) {
+        let ident = p.pattern.as_identifier()?;
+        param_arg.insert(ident, a);
+    }
+    if param_arg.len() != callee.params.len() || param_arg.len() != args.len() {
+        return None;
+    }
+
+    // The callee body's tail expression must be a bare call of one of the
+    // callee's own parameters: `f(x)` where `f` is `param_arg[f]`.
+    let tail = body_tail_expr(&callee.body)?;
+    let Expr::FunctionCall {
+        name: callee_param,
+        args: inner_args,
+        ..
+    } = tail
+    else {
+        return None;
+    };
+    let forwarded_callable_arg = param_arg.get(callee_param.as_str())?;
+
+    // The forwarded callable argument must name a concrete, non-generic
+    // user function (`ret_num`). A closure-literal or unresolved callable
+    // yields `None` (the binding then meets FIX B).
+    let Expr::Identifier(callable_name, _) = forwarded_callable_arg else {
+        return None;
+    };
+    let callable_def = compiler.function_defs.get(callable_name.as_str())?;
+    if callable_def
+        .type_params
+        .as_ref()
+        .is_some_and(|tps| !tps.is_empty())
+    {
+        return None;
+    }
+
+    // Resolve the concrete types of the callable's actual arguments. Each
+    // inner-call argument is either another callee param (resolve through
+    // `param_arg` to the OUTER call-site argument expression) or a literal /
+    // already-concrete expression. Every argument must resolve concretely.
+    let mut callable_arg_cts: Vec<ConcreteType> = Vec::with_capacity(inner_args.len());
+    for ia in inner_args {
+        let resolved_expr: &Expr = match ia {
+            Expr::Identifier(n, _) => param_arg.get(n.as_str()).copied().unwrap_or(ia),
+            _ => ia,
+        };
+        callable_arg_cts.push(concrete_type_for_expr(compiler, resolved_expr)?);
+    }
+
+    // The forwarded callable's return type, given those concrete arg types.
+    unannotated_fn_return_concrete_type(compiler, callable_def, &callable_arg_cts)
+}
+
+/// Resolve the PROVEN return `ConcreteType` of a non-generic function given the
+/// concrete types of its arguments. If the function declares a return
+/// annotation, that annotation IS the proof (ADR-006 §2.7.5). Otherwise infer
+/// the body tail expression's type with each param seeded to its concrete
+/// argument type. Any un-inferable link yields `None` — no fabrication, no
+/// `int`/`number` unify.
+fn unannotated_fn_return_concrete_type(
+    compiler: &BytecodeCompiler,
+    func_def: &shape_ast::ast::FunctionDef,
+    arg_cts: &[ConcreteType],
+) -> Option<ConcreteType> {
+    if let Some(ann) = func_def.return_type.as_ref() {
+        return concrete_type_from_annotation(ann, &HashMap::new());
+    }
+    if func_def.params.len() != arg_cts.len() {
+        return None;
+    }
+    let mut param_cts: HashMap<&str, ConcreteType> = HashMap::new();
+    for (p, ct) in func_def.params.iter().zip(arg_cts.iter()) {
+        let ident = p.pattern.as_identifier()?;
+        // An explicit param annotation must AGREE with the supplied concrete
+        // type (no silent widen). When it disagrees we cannot soundly resolve
+        // — yield `None`.
+        if let Some(ann) = p.type_annotation.as_ref() {
+            let declared = concrete_type_from_annotation(ann, &HashMap::new())?;
+            if declared != *ct {
+                return None;
+            }
+        }
+        param_cts.insert(ident, ct.clone());
+    }
+    let tail = body_tail_expr(&func_def.body)?;
+    body_expr_concrete_type(compiler, &param_cts, tail)
+}
+
+/// The tail (result) expression of a function/closure body: the inner
+/// expression of a trailing `return e`, or a trailing expression statement.
+fn body_tail_expr(body: &[Statement]) -> Option<&Expr> {
+    match body.last()? {
+        Statement::Return(Some(e), _) => Some(e),
+        Statement::Expression(e, _) => Some(e),
+        _ => None,
+    }
+}
+
+/// `&`-only structural type resolution of a function body's tail expression,
+/// with each param seeded to its proven concrete type. Bounded to the scalar
+/// arithmetic / param-reference shapes that arise in un-annotated forwarding
+/// helpers; any unrecognised shape yields `None` (clean fall-through, no
+/// fabrication, no silent `int`/`number` unify).
+fn body_expr_concrete_type(
+    compiler: &BytecodeCompiler,
+    param_cts: &HashMap<&str, ConcreteType>,
+    expr: &Expr,
+) -> Option<ConcreteType> {
+    use shape_ast::ast::BinaryOp;
+    match expr {
+        Expr::Literal(lit, _) => literal_concrete_type(lit),
+        Expr::Identifier(name, _) => param_cts
+            .get(name.as_str())
+            .cloned()
+            .or_else(|| concrete_type_for_expr(compiler, expr)),
+        Expr::UnaryOp { operand, .. } => body_expr_concrete_type(compiler, param_cts, operand),
+        Expr::Return(Some(inner), _) => body_expr_concrete_type(compiler, param_cts, inner),
+        Expr::BinaryOp {
+            left, op, right, ..
+        } => match op {
+            BinaryOp::Greater
+            | BinaryOp::Less
+            | BinaryOp::GreaterEq
+            | BinaryOp::LessEq
+            | BinaryOp::Equal
+            | BinaryOp::NotEqual
+            | BinaryOp::FuzzyEqual
+            | BinaryOp::FuzzyGreater
+            | BinaryOp::FuzzyLess
+            | BinaryOp::And
+            | BinaryOp::Or => Some(ConcreteType::Bool),
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Mod
+            | BinaryOp::Pow
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::BitShl
+            | BinaryOp::BitShr => {
+                let lt = body_expr_concrete_type(compiler, param_cts, left);
+                let rt = body_expr_concrete_type(compiler, param_cts, right);
+                // Numeric-conversion §4 literal adoption (THE RULE user
+                // 2026-06-01): a BARE int literal sibling of a `number`
+                // operand IS the number literal (`x * 2.0` over `x: number`
+                // ⇒ number; `x * 2` over `x: number` ⇒ the bare `2` adopts
+                // number). A genuine `int`-typed operand keeps `int != number`
+                // (mismatch → `None`, no silent unify).
+                match (lt, rt) {
+                    (Some(l), Some(r)) if l == r => Some(l),
+                    (Some(l), Some(r)) => adopt_int_literal(&l, left, &r, right),
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Numeric-conversion §4 literal adoption for a mismatched arithmetic operand
+/// pair: when exactly one side is a bare `int` literal and the other side is
+/// `number`, the literal adopts `number` (lossless). Otherwise `None` — `int`
+/// and `number` never silently unify.
+fn adopt_int_literal(
+    lt: &ConcreteType,
+    left: &Expr,
+    rt: &ConcreteType,
+    right: &Expr,
+) -> Option<ConcreteType> {
+    use shape_ast::ast::Literal;
+    let is_int_lit = |e: &Expr| {
+        matches!(
+            e,
+            Expr::Literal(Literal::Int(_), _) | Expr::Literal(Literal::UInt(_), _)
+        )
+    };
+    let number = ConcreteType::F64;
+    if *lt == number && *rt == ConcreteType::I64 && is_int_lit(right) {
+        return Some(number);
+    }
+    if *rt == number && *lt == ConcreteType::I64 && is_int_lit(left) {
+        return Some(number);
+    }
+    None
 }
 
 /// cluster-2-cw-IC-class-c (Phase 3 cluster-2 Round 3, 2026-05-16):

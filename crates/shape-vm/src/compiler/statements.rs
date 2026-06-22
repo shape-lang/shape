@@ -133,6 +133,123 @@ impl BytecodeCompiler {
     ///     the binding falls through to the existing annotation-driven path
     ///     (a numeric annotation on an unknown-element computed result is the
     ///     caller's responsibility — this helper never fabricates a match).
+    /// strict-flip S1 (let-annotation Unknown-accept guard, FIX B,
+    /// 2026-06-22): reject `let x: <proven-concrete> = <init>` when the
+    /// initializer's type is genuinely un-inferable (`unknown` / an unresolved
+    /// free type variable). This is the binding-site mirror of
+    /// `reject_unknown_arg_into_typed_param` (function_calls.rs): an
+    /// `unknown`-typed value must NOT launder through a typed binding into a
+    /// concrete slot, where its raw bits would be reinterpreted as that slot's
+    /// `NativeKind` (the catastrophic cross-type reinterpret —
+    /// `let bad: int = apply(ret_num, 3.0)` ⇒ `6.0`'s f64 bits read as an i64
+    /// for `bad % 4`).
+    ///
+    /// NO FALSE POSITIVES after the T1 keystone + the call-site HOF return
+    /// propagation (FIX A): a legitimate dispatch result
+    /// (`let n: int = arr.map(..)[0]`, `let x: int = someTypedCall()`,
+    /// `let r: number = apply(ret_num, 3.0)`) resolves to a CONCRETE type via
+    /// `concrete_type_for_expr` / the post-solve expr-type table, so it never
+    /// reaches the `unknown` reject here. Only a genuinely-unknown result — an
+    /// un-annotated HOF whose param return type cannot be resolved — rejects,
+    /// which is correct: the user must annotate the HOF or type its parameter.
+    ///
+    /// Scope is deliberately narrow: the annotation must be a PROVEN concrete
+    /// PRIMITIVE scalar (`int`/`number`/`bool`/`string`/…). Generic, structural,
+    /// trait-object, and nominal annotations fall through (the existing
+    /// annotation-driven path owns them) so this guard never regresses a
+    /// program whose binding type the tracker legitimately could not prove
+    /// concretely.
+    fn check_let_annotation_scalar_unknown_strict(
+        &mut self,
+        type_ann: &TypeAnnotation,
+        init_expr: &Expr,
+    ) -> Result<()> {
+        // Only a bare proven-concrete primitive scalar annotation triggers the
+        // guard. (`Array<T>` element mismatch is handled by the sibling
+        // element-type check; generic/structural/nominal annotations are not
+        // "proven concrete primitive" and fall through.)
+        let prim_name = match type_ann {
+            TypeAnnotation::Basic(n) => n.as_str(),
+            TypeAnnotation::Reference(p) => p.as_str(),
+            _ => return Ok(()),
+        };
+        if !Self::is_known_concrete_primitive_name(prim_name) {
+            return Ok(());
+        }
+
+        // If the initializer resolves to a CONCRETE type by FIX-A propagation
+        // (the call-site HOF return resolver) or any other proof path, compare
+        // it to the declared annotation directly. An un-annotated HOF whose
+        // return resolves to a concrete primitive (`apply(ret_num, 3.0)` ⇒
+        // `number`) is NOT seen by the type-inference constraint solver (the
+        // callee has no return annotation, so the engine left it `unknown`),
+        // so the solver never raises the mismatch — we must catch it HERE.
+        //   - resolved == declared  → well-typed; never reject.
+        //   - resolved != declared, both proven primitives → hard mismatch
+        //     (`number` resolved into an `int` binding): `int`/`number` do not
+        //     unify (CLAUDE.md §Type-System-Rules). Reject — NO silent widen.
+        //   - resolved is a non-primitive concrete type → fall through (the
+        //     element/nominal paths + solver own it).
+        if let Some(resolved) =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                self, init_expr,
+            )
+        {
+            use shape_value::v2::ConcreteType;
+            let resolved_prim = match &resolved {
+                ConcreteType::I64 => Some("int"),
+                ConcreteType::F64 => Some("number"),
+                ConcreteType::Bool => Some("bool"),
+                ConcreteType::String => Some("string"),
+                _ => None,
+            };
+            let Some(resolved_prim) = resolved_prim else {
+                return Ok(());
+            };
+            // `int`/`uint`-family aliasing: treat the declared name's canonical
+            // primitive against the resolved one. A direct string match covers
+            // the load-bearing `int`/`number`/`bool`/`string` cases.
+            if resolved_prim == prim_name {
+                return Ok(());
+            }
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "type mismatch: binding declares '{}' but the initializer \
+                     produces '{}' — `int` and `number` do not unify, so the \
+                     type must match exactly (cast explicitly with `as` if a \
+                     conversion is intended)",
+                    prim_name, resolved_prim
+                ),
+                location: Some(self.span_to_source_location(init_expr.span())),
+            });
+        }
+
+        // No concrete proof. Reject ONLY when the post-solve inferred type is
+        // genuinely un-inferable (`unknown` / unresolved free var). An inferred
+        // CONCRETE type that simply isn't carried by `concrete_type_for_expr`
+        // falls through to the constraint solver (which raises the precise
+        // `<concrete> is not compatible with <annotation>` error).
+        let Ok(init_ty) = self.infer_expr_type(init_expr) else {
+            return Ok(());
+        };
+        if !Self::type_is_unknown(&init_ty) {
+            return Ok(());
+        }
+
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "the initializer has an un-inferable type (`unknown`), but the \
+                 binding declares the proven concrete type '{}' — an \
+                 `unknown`-typed value cannot be accepted into a typed binding \
+                 (this would reinterpret its raw bits as '{}'). Annotate the \
+                 source (e.g. give the higher-order function a return type or \
+                 type its callable parameter) so the type is proven.",
+                prim_name, prim_name
+            ),
+            location: Some(self.span_to_source_location(init_expr.span())),
+        })
+    }
+
     fn check_let_annotation_element_type_strict(
         &mut self,
         type_ann: &TypeAnnotation,
@@ -5334,6 +5451,9 @@ impl BytecodeCompiler {
                             // never reaches an `Int64` carrier.
                             if let Some(init_expr) = var_decl.value.as_ref() {
                                 self.check_let_annotation_element_type_strict(type_ann, init_expr)?;
+                                self.check_let_annotation_scalar_unknown_strict(
+                                    type_ann, init_expr,
+                                )?;
                             }
                             if let Some(type_name) =
                                 Self::tracked_type_name_from_annotation(type_ann)
@@ -5725,6 +5845,9 @@ impl BytecodeCompiler {
                             // the local slot kind.
                             if let Some(init_expr) = var_decl.value.as_ref() {
                                 self.check_let_annotation_element_type_strict(type_ann, init_expr)?;
+                                self.check_let_annotation_scalar_unknown_strict(
+                                    type_ann, init_expr,
+                                )?;
                             }
                             if let Some(type_name) =
                                 Self::tracked_type_name_from_annotation(type_ann)
