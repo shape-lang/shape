@@ -76,7 +76,38 @@ impl TypeInferenceEngine {
     }
 
     /// Infer type of an expression
+    /// T1 keystone (strict-flip, 2026-06-22): infer an expression's type AND
+    /// record the synthesized (pre-substitution) type in the per-expression
+    /// type table keyed by the expression's source span. The recorded type is
+    /// still pre-solve here — it may carry fresh `Type::Variable`s; the
+    /// post-solve pass in `infer_program_best_effort` rewrites every table
+    /// entry through the final substitution and DROPS any entry that remains a
+    /// free variable (no Unknown-default — an un-inferable expression stays
+    /// absent so the compiler boundary surfaces a genuine compile error).
+    ///
+    /// This is the ROOT fix for the static-type-erasure class: the engine
+    /// already computes these types while walking FUNCTION BODIES (via
+    /// `infer_item` -> `infer_function`), but never recorded them keyed by
+    /// span, so the bytecode-compiler bridge `infer_expr_type` re-ran inference
+    /// at module scope (empty function-local env) and erased the result. The
+    /// table captures the body-walk's own output at the site it was computed.
     pub fn infer_expr(&mut self, expr: &Expr) -> TypeResult<Type> {
+        let ty = self.infer_expr_inner(expr)?;
+        // Record under the expression's own span. Skip dummy spans (synthetic /
+        // desugared nodes with no source location): they collide on `(0,0)` and
+        // would alias unrelated expressions.
+        let span = shape_ast::ast::Spanned::span(expr);
+        if !span.is_dummy() {
+            self.expr_type_table.insert(span, ty.clone());
+        }
+        Ok(ty)
+    }
+
+    /// Inner body of `infer_expr` — the actual structural inference. Kept
+    /// separate so the public `infer_expr` can transparently record every
+    /// synthesized type into `expr_type_table` (T1 keystone) without threading
+    /// the recording through every `match` arm and early-return.
+    fn infer_expr_inner(&mut self, expr: &Expr) -> TypeResult<Type> {
         match expr {
             Expr::Literal(Literal::FormattedString { value, mode }, span) => {
                 self.infer_formatted_string_interpolations(value, *mode, *span)?;

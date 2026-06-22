@@ -1411,6 +1411,57 @@ impl BytecodeCompiler {
         use shape_ast::ast::TypeAnnotation;
         use shape_runtime::type_system::Type;
 
+        // T1 KEYSTONE (strict-flip, 2026-06-22): consult the inference engine's
+        // POST-SOLVE per-expression type table FIRST, before the per-context
+        // patch ladder below. The engine walked the FULL program — including
+        // function bodies the module-scope `infer_expr` re-run at line ~2050
+        // cannot see — and recorded the resolved type of every expression keyed
+        // by its source span. This is the ROOT fix for the recurring
+        // static-type-erasure class (`roster.map(|e| e.salary)` then `for v in
+        // sals { if v > mx }`; `match m.get(k) { Some(n) => n + 1 }`): the
+        // result type of a collection-dispatch / match-arm local reaches the use
+        // site directly instead of erasing to `unknown`.
+        //
+        // The table holds ONLY fully-resolved types (`finalize_expr_type_table`
+        // drops any entry that stayed a free variable post-solve), so a hit is a
+        // genuine proof — never an Unknown-default. A miss falls through to the
+        // existing per-context patches (kept as FALLBACK per surface-and-stop
+        // discipline; retiring them is a separate cleanup stage).
+        //
+        // SCOPE: `PropertyAccess` is DELIBERATELY excluded from the table
+        // consult. A field read is the one site where a deliberate strictness
+        // ruling (STAGE F1, `constraints.rs:1050`) rejects `rs[0].n` when `rs`'s
+        // element type is known ONLY from a `push` into an unannotated empty
+        // `[]` — the engine still incidentally unifies the field var to a
+        // concrete type post-solve, so serving it would MASK the STAGE-F1
+        // compile error. Field-type recovery is already richly handled by the
+        // Phase-3d / T1-sub-case(a) patches below (which route the un-annotatable
+        // case through the engine's STAGE-F1 constraint error). The keystone's
+        // target sites (for-in binder, match-arm binder, `.map`/`.filter`/`.pop`
+        // result identifiers) are NOT property accesses, so this exclusion does
+        // not weaken the root fix.
+        if !matches!(expr, Expr::PropertyAccess { .. }) {
+            let span = shape_ast::ast::Spanned::span(expr);
+            if !span.is_dummy() {
+                if let Some(resolved) = self.resolved_expr_types.get(&span) {
+                    // A reference (`&T` / `&mut T`) binding is read THROUGH the
+                    // reference in value position — the bytecode loads it via
+                    // `DerefLoad`, and the GapA referent-projection patch below
+                    // (`reference_referent_type_name`) supplies the projected
+                    // `T`. Serving the raw `&T` here would route `r + 1` through
+                    // a `&int + int` operand mismatch and break the auto-deref
+                    // (borrow_refs `operator_deref::*` / `ref_dispatch::*`).
+                    // Fall through to the patch ladder for a reference-typed
+                    // result so the projection runs.
+                    let is_reference =
+                        matches!(resolved, Type::Concrete(TypeAnnotation::Borrow { .. }));
+                    if !is_reference {
+                        return Ok(resolved.clone());
+                    }
+                }
+            }
+        }
+
         if let Expr::Identifier(name, _) = expr {
             // ADR-006 §2.7.30 (GapA, sibling of the `-> &T` call deref below):
             // an identifier bound to a reference value (`let r = &n`, or a

@@ -876,6 +876,21 @@ pub struct BytecodeCompiler {
     /// Type inference engine for match exhaustiveness and type checking
     pub(crate) type_inference: shape_runtime::type_system::inference::TypeInferenceEngine,
 
+    /// T1 KEYSTONE (strict-flip, 2026-06-22): POST-SOLVE per-expression type
+    /// table keyed by source span, harvested from the reference-model inference
+    /// pass (which walks the FULL program, including function bodies). This is
+    /// the ROOT fix for the recurring static-type-erasure class:
+    /// `BytecodeCompiler::infer_expr_type` consults this table FIRST (before the
+    /// per-context patch ladder), so the resolved type of a
+    /// collection-dispatch / match-arm / method-result local reaches the use
+    /// site directly instead of erasing to `unknown` when the module-scope
+    /// `type_inference.infer_expr` re-run (which has no function-body locals)
+    /// cannot see it. Holds ONLY fully-resolved types (the engine drops any
+    /// entry that stayed a free variable post-solve), so a hit is a genuine
+    /// proof — never an Unknown-default; a miss falls through to the patches.
+    pub(crate) resolved_expr_types:
+        HashMap<shape_ast::ast::Span, shape_runtime::type_system::Type>,
+
     /// Track type aliases defined in the program
     /// Maps alias name -> target type (for type validation)
     pub(crate) type_aliases: HashMap<String, String>,
@@ -1782,7 +1797,7 @@ pub fn program_has_top_level_comptime(program: &Program) -> bool {
 pub fn infer_reference_model(
     program: &Program,
 ) -> (HashMap<String, Vec<bool>>, HashMap<String, Vec<bool>>) {
-    let (inferred_ref_params, inferred_ref_mutates, _, _, _, _, _, _) =
+    let (inferred_ref_params, inferred_ref_mutates, _, _, _, _, _, _, _) =
         BytecodeCompiler::infer_reference_model(program);
     (inferred_ref_params, inferred_ref_mutates)
 }
@@ -1790,7 +1805,7 @@ pub fn infer_reference_model(
 /// Infer effective parameter pass modes (`ByValue` / `ByRefShared` / `ByRefExclusive`)
 /// keyed by function name.
 pub fn infer_param_pass_modes(program: &Program) -> HashMap<String, Vec<ParamPassMode>> {
-    let (inferred_ref_params, inferred_ref_mutates, _, _, _, _, _, _) =
+    let (inferred_ref_params, inferred_ref_mutates, _, _, _, _, _, _, _) =
         BytecodeCompiler::infer_reference_model(program);
     BytecodeCompiler::build_param_pass_mode_map(
         program,

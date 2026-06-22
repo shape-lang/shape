@@ -807,10 +807,20 @@ impl BytecodeCompiler {
         HashMap<String, Vec<Option<Vec<(String, shape_runtime::type_schema::FieldType)>>>>,
         HashMap<String, Vec<(String, shape_runtime::type_schema::FieldType)>>,
         HashMap<String, Vec<Option<Vec<shape_ast::ast::TypeAnnotation>>>>,
+        // T1 keystone: the post-solve per-expression type table (span -> resolved type).
+        HashMap<shape_ast::ast::Span, shape_runtime::type_system::Type>,
     ) {
         let funcs = Self::collect_program_functions(program);
         let mut inference = shape_runtime::type_system::inference::TypeInferenceEngine::new();
         let (types, _) = inference.infer_program_best_effort(program);
+        // T1 keystone: harvest the post-solve per-expression type table from the
+        // same reference-model pass that walked the full program (no second
+        // inference run). The table holds ONLY fully-resolved types (the engine
+        // drops any entry that stayed a free variable post-solve). The
+        // `infer_expr_type` consumer EXCLUDES `PropertyAccess` from the consult
+        // so a deliberate strictness ruling (STAGE-F1 unannotated-empty-`[]`
+        // field read) is preserved; see the scope comment there.
+        let resolved_expr_types = inference.take_expr_type_table();
         let inferred_ref_params = Self::infer_reference_params_from_types(program, &types);
         let inferred_param_type_hints = Self::infer_param_type_hints_from_types(program, &types);
         let inferred_return_type_hints = Self::infer_return_type_hints_from_types(program, &types);
@@ -908,6 +918,7 @@ impl BytecodeCompiler {
             inferred_param_object_fields,
             inferred_return_object_fields,
             inferred_param_fn_param_types,
+            resolved_expr_types,
         )
     }
 
@@ -2034,7 +2045,12 @@ impl BytecodeCompiler {
             inferred_param_object_fields,
             inferred_return_object_fields,
             inferred_param_fn_param_types,
+            resolved_expr_types,
         ) = Self::infer_reference_model(&program);
+        // T1 KEYSTONE: store the post-solve per-expression type table so
+        // `infer_expr_type` can consult it first (root fix for static
+        // type-erasure of function-body collection-dispatch / match-arm locals).
+        self.resolved_expr_types = resolved_expr_types;
         self.inferred_param_pass_modes =
             Self::build_param_pass_mode_map(&program, &inferred_ref_params, &inferred_ref_mutates);
         self.inferred_ref_params = inferred_ref_params;

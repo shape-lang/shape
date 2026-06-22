@@ -238,6 +238,18 @@ pub struct TypeInferenceEngine {
     /// established acceptance of pure kind-erased `None`. Annotated bindings and
     /// function symbols are never recorded.
     pub(crate) unannotated_let_binding_origins: HashMap<String, (Span, bool)>,
+    /// T1 keystone (strict-flip, 2026-06-22): POST-SOLVE per-expression type
+    /// table keyed by source span. Populated DURING inference by `infer_expr`
+    /// (the synthesized, pre-substitution type at every expression site,
+    /// including function-body locals the module-scope re-run cannot see), then
+    /// REWRITTEN at the end of `infer_program_best_effort`: every entry is run
+    /// through the final unifier substitution, and any entry whose resolved type
+    /// still contains a free `Type::Variable` is DROPPED (no Unknown-default —
+    /// an un-inferable expression stays absent so the bytecode-compiler boundary
+    /// surfaces a genuine compile error, per CLAUDE.md strict-typing). Read by
+    /// `BytecodeCompiler::infer_expr_type` (consulted FIRST, before the
+    /// per-context patch ladder) via `resolved_expr_type`.
+    pub(crate) expr_type_table: HashMap<Span, Type>,
 }
 
 impl Default for TypeInferenceEngine {
@@ -297,6 +309,77 @@ impl TypeInferenceEngine {
             callsite_type_args: HashMap::new(),
             comptime_depth: 0,
             unannotated_let_binding_origins: HashMap::new(),
+            expr_type_table: HashMap::new(),
+        }
+    }
+
+    /// T1 keystone: the POST-SOLVE resolved type recorded for the expression at
+    /// `span`, if inference proved a concrete (fully-resolved) type for it.
+    ///
+    /// Returns `None` when no entry exists (the engine never walked that
+    /// expression, e.g. a synthetic/desugared node) OR when the entry was
+    /// dropped post-solve because it remained a free type variable. The caller
+    /// (the bytecode-compiler `infer_expr_type` bridge) treats `None` as
+    /// "table miss, fall through to the per-context patch ladder" — never as a
+    /// license to default an un-inferable expression.
+    pub fn resolved_expr_type(&self, span: Span) -> Option<&Type> {
+        if span.is_dummy() {
+            return None;
+        }
+        self.expr_type_table.get(&span)
+    }
+
+    /// T1 keystone: take ownership of the finalized per-expression type table,
+    /// leaving the engine's table empty. Called by the bytecode compiler after
+    /// `infer_program_best_effort` so it can consult the resolved types at the
+    /// `infer_expr_type` boundary without re-running inference.
+    pub fn take_expr_type_table(&mut self) -> HashMap<Span, Type> {
+        std::mem::take(&mut self.expr_type_table)
+    }
+
+    /// T1 keystone post-solve finalization: rewrite every recorded expression
+    /// type through the final substitution and DROP entries that remain
+    /// un-inferable (still a free variable after substitution). Called once,
+    /// after the unifier has merged the solver's bindings, near the end of
+    /// `infer_program_best_effort` / `check_consumer_against_registered_interface`.
+    fn finalize_expr_type_table(&mut self) {
+        let resolved: HashMap<Span, Type> = self
+            .expr_type_table
+            .drain()
+            .filter_map(|(span, ty)| {
+                let resolved = self.unifier.apply_substitutions(&ty);
+                // No Unknown-default: a still-free variable (or a type whose
+                // structure still contains a free variable) is un-inferable —
+                // drop it so the compiler boundary surfaces the genuine error.
+                if Self::type_is_fully_resolved(&resolved) {
+                    Some((span, resolved))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.expr_type_table = resolved;
+    }
+
+    /// Whether a (post-substitution) type is fully resolved — i.e. contains no
+    /// free `Type::Variable` anywhere in its structure. Used to decide whether a
+    /// recorded expression type is concrete enough to hand to the compiler. A
+    /// type with ANY embedded free variable (e.g. `Array<?>`, `(int) -> ?`) is
+    /// NOT fully resolved and is dropped from the table.
+    fn type_is_fully_resolved(ty: &Type) -> bool {
+        match ty {
+            Type::Variable(_) => false,
+            // A constrained variable is still a variable awaiting a binding.
+            Type::Constrained { .. } => false,
+            Type::Concrete(_) => true,
+            Type::Function { params, returns } => {
+                params.iter().all(Self::type_is_fully_resolved)
+                    && Self::type_is_fully_resolved(returns)
+            }
+            Type::Generic { base, args } => {
+                Self::type_is_fully_resolved(base)
+                    && args.iter().all(Self::type_is_fully_resolved)
+            }
         }
     }
 
@@ -1510,6 +1593,7 @@ impl TypeInferenceEngine {
         self.return_scopes.clear();
         self.implicit_return_scopes.clear();
         self.unannotated_let_binding_origins.clear();
+        self.expr_type_table.clear();
 
         // Hoisting pre-pass over the consumer (mirrors production).
         self.run_hoisting_prepass(consumer);
@@ -1560,6 +1644,10 @@ impl TypeInferenceEngine {
         // Let-gen spec §4 (A-enforced): parity with `infer_program_best_effort`.
         errors.extend(self.reject_unpinnable_let_bindings(&types));
 
+        // T1 keystone: rewrite the per-expression type table through the final
+        // substitution and drop un-inferable entries (parity with production).
+        self.finalize_expr_type_table();
+
         (types, errors)
     }
 
@@ -1592,6 +1680,7 @@ impl TypeInferenceEngine {
         self.undefined_variable_origins.clear();
         self.non_exhaustive_match_origins.clear();
         self.unannotated_let_binding_origins.clear();
+        self.expr_type_table.clear();
         // Run hoisting pre-pass first
         self.run_hoisting_prepass(program);
 
@@ -1778,6 +1867,11 @@ impl TypeInferenceEngine {
         // type, reject any module-scope un-annotated `let` whose type still
         // carries an un-pinnable generic argument.
         errors.extend(self.reject_unpinnable_let_bindings(&types));
+
+        // T1 keystone (strict-flip, 2026-06-22): now that the unifier carries
+        // every solver binding, rewrite the per-expression type table through
+        // the final substitution and drop entries that remain un-inferable.
+        self.finalize_expr_type_table();
 
         (types, errors)
     }

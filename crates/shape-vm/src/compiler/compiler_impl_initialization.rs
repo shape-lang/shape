@@ -83,6 +83,7 @@ impl BytecodeCompiler {
             current_function_return_type: None,
             return_escape_drop_skip_local: None,
             type_inference: shape_runtime::type_system::inference::TypeInferenceEngine::new(),
+            resolved_expr_types: HashMap::new(),
             type_aliases: HashMap::new(),
             current_line: 1,
             current_file_id: 0,
