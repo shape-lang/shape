@@ -1985,6 +1985,23 @@ impl TypeInferenceEngine {
                 for &index in &numeric_param_indices {
                     if let Some(Type::Variable(var)) = param_types.get(index) {
                         self.deferred_closure_numeric_param_vars.insert(var.clone());
+                        // S1: record the type the closure BODY proves for this
+                        // param via an int/number literal pairing (`|x| x * 2`
+                        // ⇒ int). Consulted as a last-resort proof by
+                        // `default_unresolved_closure_numeric_params` when the
+                        // param escapes (forwarded) and no call site pins it.
+                        // A body with no literal pairing yields None ⇒ the var
+                        // stays a genuine proof-gap and is REJECTED there.
+                        if let Some(param_name) =
+                            params.get(index).and_then(|p| p.simple_name())
+                        {
+                            if let Some(hint) =
+                                Self::closure_body_literal_param_type(param_name, body)
+                            {
+                                self.deferred_closure_numeric_param_body_hint
+                                    .insert(var.clone(), hint);
+                            }
+                        }
                     }
                 }
                 let is_fallible = self.pop_fallible_scope();

@@ -147,6 +147,23 @@ pub struct TypeInferenceEngine {
     /// is NOT in this set (it escapes into no user call that could invoke it) and
     /// keeps the harmless `number` default — no value ever flows through it.
     pub(crate) escaping_closure_numeric_param_vars: std::collections::HashSet<TypeVar>,
+    /// S1 (forwarded-closure body-literal proof): for a deferred closure
+    /// numeric param var, the type its OWN BODY proves via an `int`/`number`
+    /// literal pairing (`|x| x * 2` proves `int` from the bare `2`; `|x| x /
+    /// 2.0` proves `number`). When an escaping closure's param is NEVER pinned
+    /// by a concrete call site (the forwarded `let mul = |x| x * 2;
+    /// use_it(mul)` chain — `apply`/`twice` two-level forwarding the resolver
+    /// cannot thread), `default_unresolved_closure_numeric_params` consults
+    /// this map BEFORE rejecting: the body literal IS the proof (the closure is
+    /// not genuinely polymorphic), so it binds the var to the proven type
+    /// instead of SURFACEing. A body with NO literal pairing (`|x| x * x`)
+    /// records no hint and is REJECTED — genuinely un-inferable, never
+    /// number-defaulted. This NEVER overrides a call-site: a closure the
+    /// resolver/solver pins is already concrete (not a `Type::Variable`) at the
+    /// default pass and is skipped, so §4 literal-adoption at a real call site
+    /// (`Array<number>.map(|x| x / 2)`) is untouched.
+    pub(crate) deferred_closure_numeric_param_body_hint:
+        std::collections::HashMap<TypeVar, Type>,
     /// Indirected-callable COMPLETENESS extension (full-inference ruling). Each
     /// entry records a closure LITERAL passed as a value argument to a USER
     /// function call (`applyx(|a,b| a*b,6,7)`, `id(|a,b| a*b)`,
@@ -296,6 +313,7 @@ impl TypeInferenceEngine {
             callable_param_defaults,
             callable_numeric_param_indices: HashMap::new(),
             deferred_closure_numeric_param_vars: std::collections::HashSet::new(),
+            deferred_closure_numeric_param_body_hint: std::collections::HashMap::new(),
             escaping_closure_numeric_param_vars: std::collections::HashSet::new(),
             escaping_closure_arg_sites: Vec::new(),
             deferred_constructor_literal_payload_vars: std::collections::HashSet::new(),
@@ -1593,6 +1611,7 @@ impl TypeInferenceEngine {
         self.callable_param_defaults.clear();
         self.callable_numeric_param_indices.clear();
         self.deferred_closure_numeric_param_vars.clear();
+        self.deferred_closure_numeric_param_body_hint.clear();
         self.escaping_closure_numeric_param_vars.clear();
         self.escaping_closure_arg_sites.clear();
         self.deferred_constructor_literal_payload_vars.clear();
@@ -1674,6 +1693,7 @@ impl TypeInferenceEngine {
         self.callable_param_defaults.clear();
         self.callable_numeric_param_indices.clear();
         self.deferred_closure_numeric_param_vars.clear();
+        self.deferred_closure_numeric_param_body_hint.clear();
         self.escaping_closure_numeric_param_vars.clear();
         self.escaping_closure_arg_sites.clear();
         self.deferred_constructor_literal_payload_vars.clear();
@@ -2686,6 +2706,103 @@ impl TypeInferenceEngine {
     /// var is `Type::Concrete`/`Type::Generic` after `apply_substitutions`, not
     /// `Type::Variable`/`Type::Constrained`, so it is skipped. No int VALUE is
     /// widened.
+    /// S1: scan a closure body for `<param> <arith-op> <numeric-literal>` (or
+    /// the literal-on-left form) and return the literal's natural numeric type
+    /// (`int` for an integer literal, `number` for a float literal). This is
+    /// the inference-engine mirror of the bytecode compiler's
+    /// `infer_param_type_from_body` body-literal heuristic — it gives a
+    /// FORWARDED closure whose param the call graph never pins a sound,
+    /// body-proven type (the closure is not genuinely polymorphic). Only
+    /// arithmetic / bitwise ops pair the operand by family; comparisons yield
+    /// bool and are ignored. A body with no such pairing yields `None` (the var
+    /// then stays an honest proof-gap and is rejected by the caller). Returns
+    /// the FIRST pairing found in source order — a body that pairs the same
+    /// param with conflicting literal families (`|x| x + 1 + 2.0`) is already a
+    /// same-family arithmetic error downstream, so first-wins is safe here.
+    fn closure_body_literal_param_type(
+        param_name: &str,
+        body: &[shape_ast::ast::Statement],
+    ) -> Option<Type> {
+        use shape_ast::ast::{Expr, Literal, Statement};
+
+        fn lit_numeric_type(lit: &Literal) -> Option<Type> {
+            match lit {
+                Literal::Int(_) => Some(BuiltinTypes::integer()),
+                Literal::Number(_) => Some(BuiltinTypes::number()),
+                _ => None,
+            }
+        }
+
+        fn scan_expr(name: &str, expr: &Expr) -> Option<Type> {
+            use shape_ast::ast::BinaryOp;
+            match expr {
+                Expr::BinaryOp {
+                    left, op, right, ..
+                } => {
+                    // Only arithmetic / bitwise ops pair operands numerically.
+                    let is_numeric_op = matches!(
+                        op,
+                        BinaryOp::Add
+                            | BinaryOp::Sub
+                            | BinaryOp::Mul
+                            | BinaryOp::Div
+                            | BinaryOp::Mod
+                            | BinaryOp::Pow
+                            | BinaryOp::BitAnd
+                            | BinaryOp::BitOr
+                            | BinaryOp::BitXor
+                            | BinaryOp::BitShl
+                            | BinaryOp::BitShr
+                    );
+                    if is_numeric_op {
+                        if let (Expr::Identifier(n, _), Expr::Literal(lit, _)) =
+                            (left.as_ref(), right.as_ref())
+                        {
+                            if n == name {
+                                if let Some(t) = lit_numeric_type(lit) {
+                                    return Some(t);
+                                }
+                            }
+                        }
+                        if let (Expr::Literal(lit, _), Expr::Identifier(n, _)) =
+                            (left.as_ref(), right.as_ref())
+                        {
+                            if n == name {
+                                if let Some(t) = lit_numeric_type(lit) {
+                                    return Some(t);
+                                }
+                            }
+                        }
+                    }
+                    scan_expr(name, left).or_else(|| scan_expr(name, right))
+                }
+                Expr::UnaryOp { operand, .. } => scan_expr(name, operand),
+                Expr::FunctionCall { args, .. } => {
+                    args.iter().find_map(|a| scan_expr(name, a))
+                }
+                Expr::MethodCall { receiver, args, .. } => scan_expr(name, receiver)
+                    .or_else(|| args.iter().find_map(|a| scan_expr(name, a))),
+                Expr::Array(elements, _) => elements.iter().find_map(|e| scan_expr(name, e)),
+                Expr::Return(Some(e), _) => scan_expr(name, e),
+                _ => None,
+            }
+        }
+
+        fn scan_stmt(name: &str, stmt: &Statement) -> Option<Type> {
+            match stmt {
+                Statement::Expression(expr, _) => scan_expr(name, expr),
+                Statement::Return(Some(e), _) => scan_expr(name, e),
+                Statement::VariableDecl(decl, _) => {
+                    decl.value.as_ref().and_then(|e| scan_expr(name, e))
+                }
+                Statement::Assignment(asgn, _) => scan_expr(name, &asgn.value),
+                _ => None,
+            }
+        }
+
+        body.iter().find_map(|s| scan_stmt(param_name, s))
+    }
+
     fn default_unresolved_closure_numeric_params(&mut self) -> Vec<TypeError> {
         let mut errors = Vec::new();
         let vars: Vec<TypeVar> = self
@@ -2699,6 +2816,20 @@ impl TypeInferenceEngine {
                 .apply_substitutions(&Type::Variable(var.clone()))
             {
                 Type::Variable(_) | Type::Constrained { .. } => {
+                    // S1: the closure's OWN BODY proves the param type via an
+                    // int/number literal pairing (`|x| x * 2` ⇒ int). The
+                    // closure is not genuinely polymorphic, so the body literal
+                    // IS the proof — bind the var to it instead of rejecting /
+                    // number-defaulting. This is exactly the task's "the actual
+                    // closure body proves int or number". Only reached when no
+                    // call site pinned the var (it is still a Variable here), so
+                    // §4 literal-adoption at a real call site is untouched.
+                    if let Some(hint) =
+                        self.deferred_closure_numeric_param_body_hint.get(&var).cloned()
+                    {
+                        self.unifier.bind(var, hint);
+                        continue;
+                    }
                     // Indirected-callable surface (the recurring unsoundness). A
                     // closure that ESCAPED into a user call (recorded in
                     // `escaping_closure_numeric_param_vars`) but whose numeric

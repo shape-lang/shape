@@ -724,7 +724,39 @@ impl TypeInferenceEngine {
                     // never-called closure (`let f = |x| x*3`) is never recorded
                     // because it escapes into no user call. Builtins (`print`)
                     // have no source span, so they do not trigger the surface.
-                    if matches!(arg, Expr::FunctionExpr { .. })
+                    // S1 indirected-callable extension (forwarded-by-NAME
+                    // closure): a closure bound to a `let` and then forwarded
+                    // through an untyped HOF param by IDENTIFIER (`let mul =
+                    // |x| x * 2; use_it(mul)`) escapes into the callee exactly
+                    // like an inline-literal closure arg, but `arg` is an
+                    // `Expr::Identifier`, not an `Expr::FunctionExpr`, so the
+                    // literal-only gate below missed it. The closure's numeric
+                    // param then hit the `default_unresolved_closure_numeric_
+                    // params` `number` default (silent int->number widening:
+                    // `use_it(mul)` returned `10.0`/the f64 bit-pattern, not
+                    // int `10` — the worst-class soundness leak). Widen the
+                    // gate to ALSO fire when the arg's inferred type is a
+                    // `Function` whose param vars are tracked in
+                    // `deferred_closure_numeric_param_vars` (i.e. it genuinely
+                    // came from an unannotated closure literal). The per-var
+                    // `deferred_closure_numeric_param_vars.contains(v)` check
+                    // in the body is the precise discriminator — a forwarded
+                    // ANNOTATED closure or a named-function reference carries
+                    // no such vars and is left untouched. No fabrication, no
+                    // default: the closure either gets pinned by a downstream
+                    // concrete call site (via `escaping_closure_arg_sites`
+                    // follow-the-callable) or is REJECTED cleanly.
+                    let arg_carries_deferred_closure_param = matches!(
+                        arg,
+                        Expr::Identifier(..)
+                    ) && matches!(&inferred, Type::Function { params, .. }
+                        if params.iter().any(|p| matches!(
+                            p,
+                            Type::Variable(v)
+                                if self.deferred_closure_numeric_param_vars.contains(v)
+                        )));
+                    if (matches!(arg, Expr::FunctionExpr { .. })
+                        || arg_carries_deferred_closure_param)
                         && self.lookup_callable_origin_for_name(name).is_some()
                     {
                         if let Type::Function { params, .. } = &inferred {

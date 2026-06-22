@@ -3738,3 +3738,95 @@ mod operator_trait_dispatch_completeness_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod forwarded_hof_closure_kind_soundness_tests {
+    //! S1 (strict-flip): an untyped higher-order-function param (`fn apply(f,
+    //! x) { f(x) }`) must NOT silently widen the forwarded closure's `int`
+    //! return to `number` and leak the f64 bit-pattern as raw i64. The closure
+    //! return kind is preserved through the untyped HOF param: when the
+    //! closure body proves `int`/`number` (an int/number literal pairing) the
+    //! param adopts the body-proven type; a genuinely un-inferable closure
+    //! (no literal pairing — `|x| x * x`) is a COMPILE ERROR, never a silent
+    //! number-default / bit-leak. int != number is preserved.
+    use crate::compiler::BytecodeCompiler;
+    use crate::test_utils::{eval_typed_f64, eval_typed_i64};
+    use shape_ast::parser::parse_program;
+
+    fn compiles(code: &str) -> bool {
+        let program = parse_program(code).expect("Failed to parse");
+        BytecodeCompiler::new().compile(&program).is_ok()
+    }
+
+    #[test]
+    fn int_closure_forwarded_through_untyped_hof_stays_int() {
+        // `apply(double, 21)` where `double: int -> int` must return int 42,
+        // NOT 42.0 / the f64 bit-pattern. `eval_typed_i64` decodes the result
+        // as native i64 — a leaked f64(42.0) would decode to a huge garbage
+        // integer, so an exact `42` proves no widen / no bit-leak.
+        let code = "fn apply(f, x) { f(x) }\n\
+                    fn double(n: int) -> int { n * 2 }\n\
+                    apply(double, 21)";
+        assert_eq!(eval_typed_i64(code), 42);
+    }
+
+    #[test]
+    fn int_bodied_closure_literal_forwarded_stays_int_no_bit_leak() {
+        // `let mul = |x| x * 2; use_it(mul)` — the closure is forwarded by NAME
+        // through an untyped HOF param and never called directly. Its body
+        // proves `int` via the bare literal `2`, so the result is int 10 — the
+        // pre-fix bug returned `10.0` (the f64 bits read back as i64 garbage).
+        let code = "fn use_it(f) { f(5) }\n\
+                    fn main() -> int { let mul = |x| x * 2\n use_it(mul) }\n\
+                    main()";
+        assert_eq!(eval_typed_i64(code), 10);
+    }
+
+    #[test]
+    fn number_bodied_closure_forwarded_stays_number() {
+        // The mirror case: a `number`-bodied closure (`x * 2.0`) forwarded
+        // through the same untyped HOF stays `number` — int != number is
+        // preserved in BOTH directions, no collapse to a single default.
+        let code = "fn use_it(f) { f(5.0) }\n\
+                    fn main() -> number { let mul = |x| x * 2.0\n use_it(mul) }\n\
+                    main()";
+        assert_eq!(eval_typed_f64(code), 10.0);
+    }
+
+    #[test]
+    fn two_level_forwarded_int_pipeline_no_bit_leak() {
+        // The confirmed soundness anchor: a value forwarded through TWO untyped
+        // HOFs (`apply` then `twice`) into int-bodied closures in a `-> int`
+        // fn. Pre-fix leaked the f64 bit-pattern (pipeline_5 got
+        // 4622945017495814146 = 14.0 bits). Must be exact int 14.
+        let code = "fn apply(f, x) { f(x) }\n\
+                    fn twice(f, x) { f(f(x)) }\n\
+                    fn double(n: int) -> int { n * 2 }\n\
+                    fn run_pipeline(start: int) -> int {\n\
+                      let inc = |x| x + 1\n\
+                      let dbl = |x| x * 2\n\
+                      let s1 = apply(inc, start)\n\
+                      let s2 = apply(dbl, s1)\n\
+                      let s3 = twice(inc, s2)\n\
+                      s3\n\
+                    }\n\
+                    fn main() -> int { let _ = apply(double, 21)\n run_pipeline(5) }\n\
+                    main()";
+        assert_eq!(eval_typed_i64(code), 14);
+    }
+
+    #[test]
+    fn genuinely_uninferable_forwarded_closure_is_compile_error() {
+        // `|x| x * x` has NO literal pairing — its param kind is genuinely
+        // un-inferable when forwarded. Strict typing: this MUST be a compile
+        // error (surface-and-stop), NOT a silent `number` default / bit-leak.
+        let code = "fn use_it(f) { f(5) }\n\
+                    fn main() { let sq = |x| x * x\n print(use_it(sq)) }\n\
+                    main()";
+        assert!(
+            !compiles(code),
+            "a forwarded closure whose numeric param kind cannot be proven from \
+             its body must be a compile error, not a silent number-default"
+        );
+    }
+}
