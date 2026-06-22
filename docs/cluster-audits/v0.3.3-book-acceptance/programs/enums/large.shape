@@ -1,800 +1,932 @@
-// ============================================================================
-// large.shape  --  Enum-rooted real-world application
+// large.shape — enums slice (fundamentals/enums.mdx)
 //
-// A complete, NON-INTERACTIVE arithmetic-expression interpreter built as a
-// recursive-descent parser + tree-walking evaluator. Everything is rooted in
-// the enums chapter (fundamentals/enums.mdx):
+// REAL-WORLD APPLICATION: a complete, non-interactive expression-language
+// interpreter. Enums are the backbone of every stage:
+//   * Token      — tuple/unit enum variants emitted by the lexer
+//   * Expr       — a RECURSIVE enum AST (tuple + struct variants)
+//   * Value      — the runtime value domain (Int / Bool)
+//   * EvalError  — typed failure variants threaded through Result<Value, EvalError>
+//   * Option<T> / Result<T,E> — the book's built-in enums, used with `?`
 //
-//   * unit / tuple / struct-style variants
-//   * EnumName::Variant construction
-//   * exhaustive `match` + the `_` wildcard
-//   * RECURSIVE enums (Expr carries Expr; ParseResult carries Expr)
-//   * the built-in Option<T> and Result<T,E> enums
-//   * Result-based error reporting and the `?` propagation operator
+// The pipeline: source string -> lex (Array<Token>) -> parse (Expr AST)
+// -> eval (Result<Value, EvalError>). Every stage pattern-matches enums
+// exhaustively (the book's "Exhaustive Pattern Matching" + "Wildcard `_`").
 //
-// DESIGN NOTE (scannerless design):
-//   This interpreter deliberately builds NO token array. It is a classic
-//   scannerless recursive-descent parser: it threads an integer cursor through
-//   the raw source string, reading one character at a time with `.substring`.
-//   The only data structures are enums, keeping the program 100% rooted in the
-//   enums chapter.
-//   (Earlier drafts of this file blamed an Array<EnumType>/array-element-string
-//   "collection-dispatch" defect for this choice. Re-probed at HEAD 2026-06-21:
-//   `[Color::Red, Color::Green]` array literals, `arr[0].substring(..)`, and a
-//   3-function mutual-recursion cycle ALL link + run cleanly. Those claims do
-//   NOT reproduce in this build; the scannerless design is kept on its own
-//   merits, not as a workaround. See REPORT.)
+// MACHINE-PROOFABLE: each expected value below was derived from ordinary
+// arithmetic / boolean semantics BEFORE the first run and asserted via
+// check_* helpers. On all-pass it prints ALL_CHECKS_PASSED; on the first
+// mismatch it prints CHECK_FAILED: <name> expected=<e> got=<g>.
 //
-// MACHINE-PROOFABLE: every expected value below was derived BY HAND from the
-// grammar BEFORE the first run, never back-filled from output.
+// No HashMap / tuple-literal / stdin: the environment is a record-array
+// association list, keeping the program dependent only on enums-chapter
+// features (+ Array, String, type-records, for/if/while — variables chapter).
 //
-// Grammar (standard precedence, left-associative), whitespace-insensitive:
-//   expr   := term   (('+' | '-') term)*
-//   term   := factor (('*' | '/') factor)*
-//   factor := NUMBER | '(' expr ')' | '-' factor
-//
-// Self-checking uses plain `if`/`print` (the enums chapter documents no
-// assertion primitive, and the documented testing-module import does not
-// resolve -- see REPORT). On all-pass prints ALL_CHECKS_PASSED; on any
-// mismatch prints CHECK_FAILED: <which> expected=<e> got=<g>.
-// ============================================================================
-
-// ----------------------------------------------------------------------------
-// AST  (recursive enum: Expr carries Expr -- tuple variants)
-// ----------------------------------------------------------------------------
-enum Expr {
-    Lit(int),                 // an integer literal
-    Neg(Expr),                // unary negation
-    Bin(string, Expr, Expr),  // binary op; op is one of "+","-","*","/"
-}
-
-// ----------------------------------------------------------------------------
-// Parse errors  (enum: struct-style + tuple + unit variants)
-// ----------------------------------------------------------------------------
-enum ParseErr {
-    ExpectedNumber { pos: int },
-    ExpectedRParen { pos: int },
-    TrailingInput { pos: int },
-    UnexpectedChar { pos: int, ch: string },
-    EmptyInput,
-}
-
-// ----------------------------------------------------------------------------
-// Eval errors  (enum: unit variants)
-// ----------------------------------------------------------------------------
-enum EvalErr {
-    DivByZero,
-}
-
-// ----------------------------------------------------------------------------
-// Parse result  (recursive enum: carries an Expr + a cursor, or an error).
-// This is the workhorse "outcome" type threaded through the descent.
-// ----------------------------------------------------------------------------
-enum ParseResult {
-    Good { expr: Expr, next: int },
-    Bad(ParseErr),
-}
+// Self-check convention: enums chapter documents no `assert`; we accumulate
+// a pass/fail flag and emit CHECK_FAILED lines, like the small program.
 
 // ============================================================================
-// Character-level helpers (scannerless: operate directly on the source string)
+// SECTION 1 — Token domain (lexer output)
 // ============================================================================
 
-// The character at position `i`, or "" at/after end-of-input.
-fn ch_at(s: string, i: int) -> string {
-    if i < s.length {
-        s.substring(i, i + 1)
-    } else {
-        ""
+enum Token {
+    TNum(int),        // integer literal
+    TIdent(string),   // variable name
+    TPlus,
+    TMinus,
+    TStar,
+    TSlash,
+    TPercent,
+    TLParen,
+    TRParen,
+    TLt,              // <
+    TGt,              // >
+    TEqEq,            // ==
+    TAnd,             // keyword 'and'
+    TOr,              // keyword 'or'
+    TNot,             // !
+    TTrue,
+    TFalse,
+    TEnd,             // end-of-input sentinel
+}
+
+// Human-readable token tag, used in error messages and self-tests.
+fn token_tag(t: Token) -> string {
+    match t {
+        Token::TNum(_)    => "num",
+        Token::TIdent(_)  => "ident",
+        Token::TPlus      => "+",
+        Token::TMinus     => "-",
+        Token::TStar      => "*",
+        Token::TSlash     => "/",
+        Token::TPercent   => "%",
+        Token::TLParen    => "(",
+        Token::TRParen    => ")",
+        Token::TLt        => "<",
+        Token::TGt        => ">",
+        Token::TEqEq      => "==",
+        Token::TAnd       => "and",
+        Token::TOr        => "or",
+        Token::TNot       => "!",
+        Token::TTrue      => "true",
+        Token::TFalse     => "false",
+        Token::TEnd       => "end",
     }
 }
 
-// Map a single-character string to its digit value, if it is a digit.
-fn digit_val(c: string) -> Option<int> {
-    match c {
-        "0" => Some(0), "1" => Some(1), "2" => Some(2), "3" => Some(3),
-        "4" => Some(4), "5" => Some(5), "6" => Some(6), "7" => Some(7),
-        "8" => Some(8), "9" => Some(9),
-        _ => None,
-    }
-}
+// ============================================================================
+// SECTION 2 — character classification helpers
+// ============================================================================
 
 fn is_digit(c: string) -> bool {
-    match digit_val(c) {
-        Some(_) => true,
-        None => false,
-    }
+    c >= "0" and c <= "9"
 }
 
-// Skip spaces; return the first non-space cursor position at or after `i`.
-fn skip_ws(s: string, i: int) -> int {
-    let mut j = i
-    while ch_at(s, j) == " " {
-        j = j + 1
+fn is_alpha(c: string) -> bool {
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+}
+
+fn is_space(c: string) -> bool {
+    c == " " or c == "\t" or c == "\n"
+}
+
+// map a single digit character to its int value; None if not a digit.
+fn digit_val(c: string) -> Option<int> {
+    match c {
+        "0" => Some(0),
+        "1" => Some(1),
+        "2" => Some(2),
+        "3" => Some(3),
+        "4" => Some(4),
+        "5" => Some(5),
+        "6" => Some(6),
+        "7" => Some(7),
+        "8" => Some(8),
+        "9" => Some(9),
+        _   => None,
     }
-    j
 }
 
 // ============================================================================
-// Parser  --  precedence-climbing (Pratt) parser.
-//
-// DESIGN: the grammar is implemented as a SINGLE self-recursive function
-// `parse_bp(s, pos, min_bp)` (precedence climbing). It recurses only into
-// itself, so the call graph is a 1-cycle and links cleanly. The same grammar
-// is parsed: numbers, parens, unary minus, and the four binary operators with
-// the usual precedence (+,- = bp 1 ; *,/ = bp 2), left-associative.
+// SECTION 3 — typed failure domain
 // ============================================================================
 
-// Left binding power of a binary operator character: 0 = not an operator.
-fn op_bp(c: string) -> int {
-    if c == "+" { 1 } else {
-        if c == "-" { 1 } else {
-            if c == "*" { 2 } else {
-                if c == "/" { 2 } else { 0 }
-            }
-        }
+enum EvalError {
+    LexError(string),
+    ParseError(string),
+    UnboundVar(string),
+    DivByZero,
+    TypeError(string),
+}
+
+fn err_message(e: EvalError) -> string {
+    match e {
+        EvalError::LexError(m)   => f"lex error: {m}",
+        EvalError::ParseError(m) => f"parse error: {m}",
+        EvalError::UnboundVar(n) => f"unbound variable: {n}",
+        EvalError::DivByZero     => "division by zero",
+        EvalError::TypeError(m)  => f"type error: {m}",
     }
 }
 
-// Parse a maximal expression whose operators all bind at least `min_bp`,
-// starting at `pos`. Self-recursive (Pratt): one function, one cycle.
-fn parse_bp(s: string, pos0: int, min_bp: int) -> ParseResult {
-    let pos = skip_ws(s, pos0)
-    let c = ch_at(s, pos)
+// ============================================================================
+// SECTION 4 — Lexer: source string -> Result<Array<Token>, EvalError>
+// ============================================================================
 
-    // --- parse a leading operand (the "nud" / null-denotation) ---
-    let lead = if c == "-" {
-        // unary minus: bind tightly (higher than any binary op).
-        let inner = parse_bp(s, pos + 1, 3)
-        match inner {
-            ParseResult::Good { expr, next } => ParseResult::Good { expr: Expr::Neg(expr), next: next },
-            ParseResult::Bad(e) => ParseResult::Bad(e),
-        }
-    } else {
-        if c == "(" {
-            let inner = parse_bp(s, pos + 1, 0)
-            match inner {
-                ParseResult::Good { expr, next } => {
-                    let close = skip_ws(s, next)
-                    if ch_at(s, close) == ")" {
-                        ParseResult::Good { expr: expr, next: close + 1 }
-                    } else {
-                        ParseResult::Bad(ParseErr::ExpectedRParen { pos: close })
-                    }
-                },
-                ParseResult::Bad(e) => ParseResult::Bad(e),
-            }
-        } else {
-            if is_digit(c) {
-                parse_number(s, pos)
-            } else {
-                if c == "" {
-                    ParseResult::Bad(ParseErr::ExpectedNumber { pos: pos })
-                } else {
-                    ParseResult::Bad(ParseErr::UnexpectedChar { pos: pos, ch: c })
-                }
-            }
-        }
-    }
+// Scan a run of digits starting at index `start`.
+type ScanInt { value: int, next: int }
 
-    // --- climb binary operators (the "led" / left-denotation loop) ---
-    match lead {
-        ParseResult::Bad(e) => ParseResult::Bad(e),
-        ParseResult::Good { expr, next } => {
-            let mut acc = expr
-            let mut cur = next
-            let mut running = true
-            let mut err: Option<ParseErr> = None
-            while running {
-                let p = skip_ws(s, cur)
-                let oc = ch_at(s, p)
-                let bp = op_bp(oc)
-                if bp == 0 or bp < min_bp {
-                    running = false
-                } else {
-                    // left-associative: recurse with bp + 1 so equal-precedence
-                    // operators to the right are NOT folded into this operand.
-                    let rhs = parse_bp(s, p + 1, bp + 1)
-                    match rhs {
-                        ParseResult::Good { expr, next } => {
-                            acc = Expr::Bin(oc, acc, expr)
-                            cur = next
-                        },
-                        ParseResult::Bad(e) => {
-                            err = Some(e)
-                            running = false
-                        },
-                    }
-                }
-            }
-            match err {
-                Some(e) => ParseResult::Bad(e),
-                None => ParseResult::Good { expr: acc, next: cur },
-            }
-        },
-    }
-}
-
-// Parse a run of digits into an Expr::Lit. Caller guarantees s[pos] is a digit.
-fn parse_number(s: string, pos: int) -> ParseResult {
-    let mut j = pos
+fn scan_int(src: string, start: int) -> ScanInt {
+    let mut i = start
     let mut acc = 0
-    let mut any = false
-    let mut running = true
-    while running {
-        match digit_val(ch_at(s, j)) {
-            Some(d) => {
-                acc = acc * 10 + d
-                j = j + 1
-                any = true
-            },
-            None => { running = false },
+    let n = src.len()
+    while i < n {
+        let c = src[i]
+        match digit_val(c) {
+            Some(d) => { acc = acc * 10 + d; i = i + 1 }
+            None    => { break }
         }
     }
-    if any {
-        ParseResult::Good { expr: Expr::Lit(acc), next: j }
-    } else {
-        ParseResult::Bad(ParseErr::ExpectedNumber { pos: pos })
-    }
+    ScanInt { value: acc, next: i }
 }
 
-// Top-level parse: parse a full expression and require that the only thing
-// left after it is trailing whitespace (end-of-input). Empty input is an error.
-fn parse(src: string) -> Result<Expr, ParseErr> {
-    let start = skip_ws(src, 0)
-    if ch_at(src, start) == "" {
-        return Err(ParseErr::EmptyInput)
-    }
-    let r = parse_bp(src, 0, 0)
-    match r {
-        ParseResult::Bad(e) => Err(e),
-        ParseResult::Good { expr, next } => {
-            let tail = skip_ws(src, next)
-            if ch_at(src, tail) == "" {
-                Ok(expr)
-            } else {
-                Err(ParseErr::TrailingInput { pos: tail })
-            }
-        },
-    }
-}
+// Scan an identifier/keyword starting at index `start`.
+type ScanStr { value: string, next: int }
 
-
-// ============================================================================
-// Evaluator  --  Expr -> Result<int, EvalErr>. Uses `?` to propagate.
-// ============================================================================
-fn eval(e: Expr) -> Result<int, EvalErr> {
-    match e {
-        Expr::Lit(n) => Ok(n),
-        Expr::Neg(inner) => {
-            let v = eval(inner)?
-            Ok(0 - v)
-        },
-        Expr::Bin(op, lhs, rhs) => {
-            let a = eval(lhs)?
-            let b = eval(rhs)?
-            match op {
-                "+" => Ok(a + b),
-                "-" => Ok(a - b),
-                "*" => Ok(a * b),
-                "/" => {
-                    if b == 0 {
-                        Err(EvalErr::DivByZero)
-                    } else {
-                        Ok(a / b)
-                    }
-                },
-                _ => Ok(0),  // unreachable: parser only emits the four known ops
-            }
-        },
-    }
-}
-
-// ============================================================================
-// Pretty-printer  --  Expr -> canonical fully-parenthesized string.
-// ============================================================================
-fn show(e: Expr) -> string {
-    match e {
-        Expr::Lit(n) => f"{n}",
-        Expr::Neg(inner) => f"(-{show(inner)})",
-        Expr::Bin(op, lhs, rhs) => f"({show(lhs)} {op} {show(rhs)})",
-    }
-}
-
-// ============================================================================
-// Depth / node-count metrics over the recursive enum (proves traversal).
-// ============================================================================
-fn depth(e: Expr) -> int {
-    match e {
-        Expr::Lit(_) => 1,
-        Expr::Neg(inner) => 1 + depth(inner),
-        Expr::Bin(op, lhs, rhs) => {
-            let dl = depth(lhs)
-            let dr = depth(rhs)
-            let m = if dl > dr { dl } else { dr }
-            1 + m
-        },
-    }
-}
-
-fn node_count(e: Expr) -> int {
-    match e {
-        Expr::Lit(_) => 1,
-        Expr::Neg(inner) => 1 + node_count(inner),
-        Expr::Bin(op, lhs, rhs) => 1 + node_count(lhs) + node_count(rhs),
-    }
-}
-
-// Count literal leaves only.
-fn leaf_count(e: Expr) -> int {
-    match e {
-        Expr::Lit(_) => 1,
-        Expr::Neg(inner) => leaf_count(inner),
-        Expr::Bin(op, lhs, rhs) => leaf_count(lhs) + leaf_count(rhs),
-    }
-}
-
-// ============================================================================
-// Error rendering  --  enums -> stable diagnostic strings.
-// ============================================================================
-fn parse_err_str(e: ParseErr) -> string {
-    match e {
-        ParseErr::ExpectedNumber { pos } => f"expected number at {pos}",
-        ParseErr::ExpectedRParen { pos } => f"expected ')' at {pos}",
-        ParseErr::TrailingInput { pos } => f"trailing input at {pos}",
-        ParseErr::UnexpectedChar { pos, ch } => f"unexpected '{ch}' at {pos}",
-        ParseErr::EmptyInput => "empty input",
-    }
-}
-
-fn eval_err_str(e: EvalErr) -> string {
-    match e {
-        EvalErr::DivByZero => "division by zero",
-    }
-}
-
-// ============================================================================
-// Pipelines  --  string -> outcome string (used for end-to-end proofs).
-// ============================================================================
-
-// Parse + eval; yield the number, a parse error, or an eval error.
-fn run(src: string) -> string {
-    match parse(src) {
-        Err(pe) => f"PARSE_ERR: {parse_err_str(pe)}",
-        Ok(ast) => {
-            match eval(ast) {
-                Ok(v) => f"{v}",
-                Err(ee) => f"EVAL_ERR: {eval_err_str(ee)}",
-            }
-        },
-    }
-}
-
-// Parse + pretty-print the canonical AST (or a parse error).
-fn run_show(src: string) -> string {
-    match parse(src) {
-        Err(pe) => f"PARSE_ERR: {parse_err_str(pe)}",
-        Ok(ast) => show(ast),
-    }
-}
-
-// Parse + report structural depth (or -1 on parse error).
-fn run_depth(src: string) -> int {
-    match parse(src) {
-        Err(_) => -1,
-        Ok(ast) => depth(ast),
-    }
-}
-
-// Parse + report node count (or -1 on parse error).
-fn run_nodes(src: string) -> int {
-    match parse(src) {
-        Err(_) => -1,
-        Ok(ast) => node_count(ast),
-    }
-}
-
-// ============================================================================
-// Constant folder  --  Expr -> Expr. A real AST->AST optimization pass: any
-// subtree whose operands are all literals is collapsed to a single Lit, except
-// a literal division by zero, which is preserved so the evaluator can still
-// report DivByZero. Operates purely over the recursive enum.
-// ============================================================================
-
-// True iff the expression is a bare integer literal.
-fn is_lit(e: Expr) -> bool {
-    match e {
-        Expr::Lit(_) => true,
-        _ => false,
-    }
-}
-
-// Evaluate a guaranteed-constant subtree to its int (no div-by-zero possible
-// because callers gate on `safe_const`). Distinct from `eval`: returns a bare
-// int and is only ever called on literal-only subtrees.
-fn const_val(e: Expr) -> int {
-    match e {
-        Expr::Lit(n) => n,
-        Expr::Neg(inner) => 0 - const_val(inner),
-        Expr::Bin(op, lhs, rhs) => {
-            let a = const_val(lhs)
-            let b = const_val(rhs)
-            match op {
-                "+" => a + b,
-                "-" => a - b,
-                "*" => a * b,
-                "/" => a / b,   // caller guarantees b != 0
-                _ => 0,
-            }
-        },
-    }
-}
-
-// True iff folding this Bin node is safe (i.e. not a literal `x / 0`).
-fn safe_const_bin(op: string, rhs: Expr) -> bool {
-    if op == "/" {
-        if is_lit(rhs) {
-            const_val(rhs) != 0
+fn scan_ident(src: string, start: int) -> ScanStr {
+    let mut i = start
+    let mut acc = ""
+    let n = src.len()
+    while i < n {
+        let c = src[i]
+        if is_alpha(c) or is_digit(c) {
+            acc = acc + c
+            i = i + 1
         } else {
-            false
+            break
         }
+    }
+    ScanStr { value: acc, next: i }
+}
+
+// Convert a finished identifier into a keyword token or a TIdent.
+fn ident_token(word: string) -> Token {
+    match word {
+        "true"  => Token::TTrue,
+        "false" => Token::TFalse,
+        "and"   => Token::TAnd,
+        "or"    => Token::TOr,
+        _       => Token::TIdent(word),
+    }
+}
+
+// Classify a single-character operator/punctuator. None for chars that need
+// special handling (digits, identifiers, whitespace, '=', or invalid input).
+fn single_op(c: string) -> Option<Token> {
+    match c {
+        "+" => Some(Token::TPlus),
+        "-" => Some(Token::TMinus),
+        "*" => Some(Token::TStar),
+        "/" => Some(Token::TSlash),
+        "%" => Some(Token::TPercent),
+        "(" => Some(Token::TLParen),
+        ")" => Some(Token::TRParen),
+        "<" => Some(Token::TLt),
+        ">" => Some(Token::TGt),
+        "!" => Some(Token::TNot),
+        _   => None,
+    }
+}
+
+fn lex(src: string) -> Result<Array<Token>, EvalError> {
+    let mut toks: Array<Token> = []
+    let mut i = 0
+    let n = src.len()
+    while i < n {
+        let c = src[i]
+        // Whitespace: skip.
+        if is_space(c) {
+            i = i + 1
+            continue
+        }
+        // Integer literal.
+        if is_digit(c) {
+            let r = scan_int(src, i)
+            toks.push(Token::TNum(r.value))
+            i = r.next
+            continue
+        }
+        // Identifier or keyword.
+        if is_alpha(c) {
+            let r = scan_ident(src, i)
+            toks.push(ident_token(r.value))
+            i = r.next
+            continue
+        }
+        // "==" (two chars).
+        if c == "=" {
+            if i + 1 < n and src[i + 1] == "=" {
+                toks.push(Token::TEqEq)
+                i = i + 2
+                continue
+            }
+            return Err(EvalError::LexError(f"single '=' at {i}"))
+        }
+        // Single-character operator.
+        match single_op(c) {
+            Some(tok) => {
+                toks.push(tok)
+                i = i + 1
+            }
+            None => {
+                return Err(EvalError::LexError(f"unexpected char '{c}' at {i}"))
+            }
+        }
+    }
+    toks.push(Token::TEnd)
+    Ok(toks)
+}
+
+// ============================================================================
+// SECTION 5 — AST: recursive Expr enum
+// ============================================================================
+// Grammar (lowest to highest precedence):
+//   expr   := or
+//   or     := and ( "or" and )*
+//   and    := cmp ( "and" cmp )*
+//   cmp    := add ( ("<"|">"|"==") add )?
+//   add    := mul ( ("+"|"-") mul )*
+//   mul    := unary ( ("*"|"/"|"%") unary )*
+//   unary  := ("-"|"!") unary | primary
+//   primary:= NUM | IDENT | "true" | "false" | "(" expr ")"
+
+enum BinOp {
+    OpAdd, OpSub, OpMul, OpDiv, OpMod,
+    OpLt, OpGt, OpEq,
+    OpAnd, OpOr,
+}
+
+enum UnOp { Neg, Not }
+
+enum Expr {
+    Num(int),
+    Var(string),
+    BoolLit(bool),
+    Unary { op: UnOp, e: Expr },
+    Binary { op: BinOp, l: Expr, r: Expr },
+}
+
+// ============================================================================
+// SECTION 6 — Parser: recursive descent over Array<Token>
+// ============================================================================
+// The cursor (current index) is threaded through a record return value.
+
+type Parsed { node: Expr, pos: int }
+
+fn peek(toks: Array<Token>, pos: int) -> Token {
+    if pos < toks.len() { toks[pos] } else { Token::TEnd }
+}
+
+// primary := NUM | IDENT | true | false | "(" expr ")"
+fn parse_primary(toks: Array<Token>, pos: int) -> Result<Parsed, EvalError> {
+    let t = peek(toks, pos)
+    match t {
+        Token::TNum(n)   => Ok(Parsed { node: Expr::Num(n), pos: pos + 1 }),
+        Token::TIdent(s) => Ok(Parsed { node: Expr::Var(s), pos: pos + 1 }),
+        Token::TTrue     => Ok(Parsed { node: Expr::BoolLit(true), pos: pos + 1 }),
+        Token::TFalse    => Ok(Parsed { node: Expr::BoolLit(false), pos: pos + 1 }),
+        Token::TLParen   => {
+            let inner = parse_expr(toks, pos + 1)?
+            let after = peek(toks, inner.pos)
+            match after {
+                Token::TRParen => Ok(Parsed { node: inner.node, pos: inner.pos + 1 }),
+                _              => Err(EvalError::ParseError(f"expected ')' got {token_tag(after)}")),
+            }
+        }
+        _ => Err(EvalError::ParseError(f"unexpected token {token_tag(t)}")),
+    }
+}
+
+// unary := ("-"|"!") unary | primary
+fn parse_unary(toks: Array<Token>, pos: int) -> Result<Parsed, EvalError> {
+    let t = peek(toks, pos)
+    match t {
+        Token::TMinus => {
+            let sub = parse_unary(toks, pos + 1)?
+            Ok(Parsed { node: Expr::Unary { op: UnOp::Neg, e: sub.node }, pos: sub.pos })
+        }
+        Token::TNot => {
+            let sub = parse_unary(toks, pos + 1)?
+            Ok(Parsed { node: Expr::Unary { op: UnOp::Not, e: sub.node }, pos: sub.pos })
+        }
+        _ => parse_primary(toks, pos),
+    }
+}
+
+// mul := unary ( ("*"|"/"|"%") unary )*
+fn parse_mul(toks: Array<Token>, pos: int) -> Result<Parsed, EvalError> {
+    let mut left = parse_unary(toks, pos)?
+    let mut go = true
+    while go {
+        let t = peek(toks, left.pos)
+        match t {
+            Token::TStar => {
+                let rhs = parse_unary(toks, left.pos + 1)?
+                left = Parsed { node: Expr::Binary { op: BinOp::OpMul, l: left.node, r: rhs.node }, pos: rhs.pos }
+            }
+            Token::TSlash => {
+                let rhs = parse_unary(toks, left.pos + 1)?
+                left = Parsed { node: Expr::Binary { op: BinOp::OpDiv, l: left.node, r: rhs.node }, pos: rhs.pos }
+            }
+            Token::TPercent => {
+                let rhs = parse_unary(toks, left.pos + 1)?
+                left = Parsed { node: Expr::Binary { op: BinOp::OpMod, l: left.node, r: rhs.node }, pos: rhs.pos }
+            }
+            _ => { go = false }
+        }
+    }
+    Ok(left)
+}
+
+// add := mul ( ("+"|"-") mul )*
+fn parse_add(toks: Array<Token>, pos: int) -> Result<Parsed, EvalError> {
+    let mut left = parse_mul(toks, pos)?
+    let mut go = true
+    while go {
+        let t = peek(toks, left.pos)
+        match t {
+            Token::TPlus => {
+                let rhs = parse_mul(toks, left.pos + 1)?
+                left = Parsed { node: Expr::Binary { op: BinOp::OpAdd, l: left.node, r: rhs.node }, pos: rhs.pos }
+            }
+            Token::TMinus => {
+                let rhs = parse_mul(toks, left.pos + 1)?
+                left = Parsed { node: Expr::Binary { op: BinOp::OpSub, l: left.node, r: rhs.node }, pos: rhs.pos }
+            }
+            _ => { go = false }
+        }
+    }
+    Ok(left)
+}
+
+// cmp := add ( ("<"|">"|"==") add )?   (single, non-associative comparison)
+fn parse_cmp(toks: Array<Token>, pos: int) -> Result<Parsed, EvalError> {
+    let left = parse_add(toks, pos)?
+    let t = peek(toks, left.pos)
+    match t {
+        Token::TLt => {
+            let rhs = parse_add(toks, left.pos + 1)?
+            Ok(Parsed { node: Expr::Binary { op: BinOp::OpLt, l: left.node, r: rhs.node }, pos: rhs.pos })
+        }
+        Token::TGt => {
+            let rhs = parse_add(toks, left.pos + 1)?
+            Ok(Parsed { node: Expr::Binary { op: BinOp::OpGt, l: left.node, r: rhs.node }, pos: rhs.pos })
+        }
+        Token::TEqEq => {
+            let rhs = parse_add(toks, left.pos + 1)?
+            Ok(Parsed { node: Expr::Binary { op: BinOp::OpEq, l: left.node, r: rhs.node }, pos: rhs.pos })
+        }
+        _ => Ok(left),
+    }
+}
+
+// and := cmp ( "and" cmp )*
+fn parse_and(toks: Array<Token>, pos: int) -> Result<Parsed, EvalError> {
+    let mut left = parse_cmp(toks, pos)?
+    let mut go = true
+    while go {
+        let t = peek(toks, left.pos)
+        match t {
+            Token::TAnd => {
+                let rhs = parse_cmp(toks, left.pos + 1)?
+                left = Parsed { node: Expr::Binary { op: BinOp::OpAnd, l: left.node, r: rhs.node }, pos: rhs.pos }
+            }
+            _ => { go = false }
+        }
+    }
+    Ok(left)
+}
+
+// or := and ( "or" and )*
+fn parse_or(toks: Array<Token>, pos: int) -> Result<Parsed, EvalError> {
+    let mut left = parse_and(toks, pos)?
+    let mut go = true
+    while go {
+        let t = peek(toks, left.pos)
+        match t {
+            Token::TOr => {
+                let rhs = parse_and(toks, left.pos + 1)?
+                left = Parsed { node: Expr::Binary { op: BinOp::OpOr, l: left.node, r: rhs.node }, pos: rhs.pos }
+            }
+            _ => { go = false }
+        }
+    }
+    Ok(left)
+}
+
+fn parse_expr(toks: Array<Token>, pos: int) -> Result<Parsed, EvalError> {
+    parse_or(toks, pos)
+}
+
+// Top-level parse: parse a full expression and require TEnd afterwards.
+fn parse(toks: Array<Token>) -> Result<Expr, EvalError> {
+    let p = parse_expr(toks, 0)?
+    let t = peek(toks, p.pos)
+    match t {
+        Token::TEnd => Ok(p.node),
+        _           => Err(EvalError::ParseError(f"trailing token {token_tag(t)}")),
+    }
+}
+
+// ============================================================================
+// SECTION 6b — AST pretty-printer (recursive enum traversal)
+// ============================================================================
+// Renders an Expr back into a fully-parenthesized canonical string. This
+// exercises matching on every Expr variant (tuple + struct) and recursion
+// over a recursive enum — and gives us another machine-checkable surface:
+// parse(lex(src)) then expr_str() yields a normalized form we can assert.
+
+fn binop_sym(op: BinOp) -> string {
+    match op {
+        BinOp::OpAdd => "+",
+        BinOp::OpSub => "-",
+        BinOp::OpMul => "*",
+        BinOp::OpDiv => "/",
+        BinOp::OpMod => "%",
+        BinOp::OpLt  => "<",
+        BinOp::OpGt  => ">",
+        BinOp::OpEq  => "==",
+        BinOp::OpAnd => "and",
+        BinOp::OpOr  => "or",
+    }
+}
+
+fn unop_sym(op: UnOp) -> string {
+    match op {
+        UnOp::Neg => "-",
+        UnOp::Not => "!",
+    }
+}
+
+fn expr_str(e: Expr) -> string {
+    match e {
+        Expr::Num(n)     => f"{n}",
+        Expr::Var(name)  => name,
+        Expr::BoolLit(b) => if b { "true" } else { "false" },
+        Expr::Unary { op, e } => {
+            let inner = expr_str(e)
+            let sym = unop_sym(op)
+            f"({sym}{inner})"
+        }
+        Expr::Binary { op, l, r } => {
+            let ls = expr_str(l)
+            let rs = expr_str(r)
+            let sym = binop_sym(op)
+            f"({ls} {sym} {rs})"
+        }
+    }
+}
+
+// Parse a source string and return its canonical pretty-printed form, or an
+// error marker. Used to assert that precedence/associativity bind as documented.
+fn norm(src: string) -> string {
+    match lex(src) {
+        Ok(toks) => {
+            match parse(toks) {
+                Ok(ast) => expr_str(ast),
+                Err(e)  => f"err:{err_message(e)}",
+            }
+        }
+        Err(e) => f"err:{err_message(e)}",
+    }
+}
+
+// ============================================================================
+// SECTION 7 — Value domain + environment
+// ============================================================================
+
+enum Value {
+    VInt(int),
+    VBool(bool),
+}
+
+fn value_str(v: Value) -> string {
+    match v {
+        Value::VInt(n)  => f"{n}",
+        Value::VBool(b) => if b { "true" } else { "false" },
+    }
+}
+
+// Environment: an association list of name -> int (variables hold ints here).
+type Binding { name: string, value: int }
+
+fn env_lookup(env: Array<Binding>, name: string) -> Option<int> {
+    for b in env {
+        if b.name == name { return Some(b.value) }
+    }
+    None
+}
+
+// ============================================================================
+// SECTION 8 — Evaluator: Expr -> Result<Value, EvalError>
+// ============================================================================
+
+fn as_int(v: Value) -> Result<int, EvalError> {
+    match v {
+        Value::VInt(n)  => Ok(n),
+        Value::VBool(_) => Err(EvalError::TypeError("expected int, got bool")),
+    }
+}
+
+fn as_bool(v: Value) -> Result<bool, EvalError> {
+    match v {
+        Value::VBool(b) => Ok(b),
+        Value::VInt(_)  => Err(EvalError::TypeError("expected bool, got int")),
+    }
+}
+
+fn eval_unary(op: UnOp, v: Value) -> Result<Value, EvalError> {
+    match op {
+        UnOp::Neg => {
+            let n = as_int(v)?
+            Ok(Value::VInt(-n))
+        }
+        UnOp::Not => {
+            let b = as_bool(v)?
+            Ok(Value::VBool(!b))
+        }
+    }
+}
+
+fn eval_arith(op: BinOp, a: int, b: int) -> Result<Value, EvalError> {
+    match op {
+        BinOp::OpAdd => Ok(Value::VInt(a + b)),
+        BinOp::OpSub => Ok(Value::VInt(a - b)),
+        BinOp::OpMul => Ok(Value::VInt(a * b)),
+        BinOp::OpDiv => {
+            if b == 0 { return Err(EvalError::DivByZero) }
+            Ok(Value::VInt(a / b))
+        }
+        BinOp::OpMod => {
+            if b == 0 { return Err(EvalError::DivByZero) }
+            Ok(Value::VInt(a % b))
+        }
+        BinOp::OpLt => Ok(Value::VBool(a < b)),
+        BinOp::OpGt => Ok(Value::VBool(a > b)),
+        BinOp::OpEq => Ok(Value::VBool(a == b)),
+        _ => Err(EvalError::TypeError("non-arithmetic op in arith")),
+    }
+}
+
+fn eval(e: Expr, env: Array<Binding>) -> Result<Value, EvalError> {
+    match e {
+        Expr::Num(n)     => Ok(Value::VInt(n)),
+        Expr::BoolLit(b) => Ok(Value::VBool(b)),
+        Expr::Var(name)  => {
+            match env_lookup(env, name) {
+                Some(v) => Ok(Value::VInt(v)),
+                None    => Err(EvalError::UnboundVar(name)),
+            }
+        }
+        Expr::Unary { op, e } => {
+            let v = eval(e, env)?
+            eval_unary(op, v)
+        }
+        Expr::Binary { op, l, r } => {
+            match op {
+                BinOp::OpAnd => {
+                    let lv = eval(l, env)?
+                    let rv = eval(r, env)?
+                    let lb = as_bool(lv)?
+                    let rb = as_bool(rv)?
+                    Ok(Value::VBool(lb and rb))
+                }
+                BinOp::OpOr => {
+                    let lv = eval(l, env)?
+                    let rv = eval(r, env)?
+                    let lb = as_bool(lv)?
+                    let rb = as_bool(rv)?
+                    Ok(Value::VBool(lb or rb))
+                }
+                _ => {
+                    let lv = eval(l, env)?
+                    let rv = eval(r, env)?
+                    let a = as_int(lv)?
+                    let b = as_int(rv)?
+                    eval_arith(op, a, b)
+                }
+            }
+        }
+    }
+}
+
+// Full pipeline: source -> lex -> parse -> eval.
+fn run(src: string, env: Array<Binding>) -> Result<Value, EvalError> {
+    let toks = lex(src)?
+    let ast = parse(toks)?
+    eval(ast, env)
+}
+
+// Render the result of a run as a stable string for assertion.
+//   Ok(VInt 7)     -> "int:7"
+//   Ok(VBool true) -> "bool:true"
+//   Err(...)       -> "err:<message>"
+fn run_repr(src: string, env: Array<Binding>) -> string {
+    match run(src, env) {
+        Ok(v)  => {
+            match v {
+                Value::VInt(n)  => f"int:{n}",
+                Value::VBool(b) => if b { "bool:true" } else { "bool:false" },
+            }
+        }
+        Err(e) => f"err:{err_message(e)}",
+    }
+}
+
+// ============================================================================
+// SECTION 9 — self-check harness
+// ============================================================================
+
+type Checker { ok: bool, count: int }
+
+// A single table-driven evaluation case: source text + expected run_repr.
+type Case { src: string, want: string }
+
+fn check_str(state: Checker, name: string, expected: string, got: string) -> Checker {
+    if got == expected {
+        Checker { ok: state.ok, count: state.count + 1 }
     } else {
-        true
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+        Checker { ok: false, count: state.count + 1 }
     }
 }
 
-fn fold(e: Expr) -> Expr {
-    match e {
-        Expr::Lit(n) => Expr::Lit(n),
-        Expr::Neg(inner) => {
-            let fi = fold(inner)
-            if is_lit(fi) {
-                Expr::Lit(0 - const_val(fi))
-            } else {
-                Expr::Neg(fi)
-            }
-        },
-        Expr::Bin(op, lhs, rhs) => {
-            let fa = fold(lhs)
-            let fb = fold(rhs)
-            if is_lit(fa) and is_lit(fb) and safe_const_bin(op, fb) {
-                Expr::Lit(const_val(Expr::Bin(op, fa, fb)))
-            } else {
-                Expr::Bin(op, fa, fb)
-            }
-        },
+fn check_int(state: Checker, name: string, expected: int, got: int) -> Checker {
+    if got == expected {
+        Checker { ok: state.ok, count: state.count + 1 }
+    } else {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+        Checker { ok: false, count: state.count + 1 }
     }
 }
 
-// ============================================================================
-// RPN compiler  --  Expr -> postfix string. Another structural fold over the
-// recursive enum. Unary negation compiles to "neg".
-// ============================================================================
-fn to_rpn(e: Expr) -> string {
-    match e {
-        Expr::Lit(n) => f"{n}",
-        Expr::Neg(inner) => f"{to_rpn(inner)} neg",
-        Expr::Bin(op, lhs, rhs) => f"{to_rpn(lhs)} {to_rpn(rhs)} {op}",
-    }
-}
-
-// Parse + fold + eval (proves fold preserves semantics).
-fn run_folded(src: string) -> string {
-    match parse(src) {
-        Err(pe) => f"PARSE_ERR: {parse_err_str(pe)}",
-        Ok(ast) => {
-            let folded = fold(ast)
-            match eval(folded) {
-                Ok(v) => f"{v}",
-                Err(ee) => f"EVAL_ERR: {eval_err_str(ee)}",
-            }
-        },
-    }
-}
-
-// Parse + fold + count nodes (proves fold shrinks constant subtrees).
-fn run_folded_nodes(src: string) -> int {
-    match parse(src) {
-        Err(_) => -1,
-        Ok(ast) => node_count(fold(ast)),
-    }
-}
-
-// Parse + compile to RPN.
-fn run_rpn(src: string) -> string {
-    match parse(src) {
-        Err(pe) => f"PARSE_ERR: {parse_err_str(pe)}",
-        Ok(ast) => to_rpn(ast),
+fn check_bool(state: Checker, name: string, expected: bool, got: bool) -> Checker {
+    if got == expected {
+        Checker { ok: state.ok, count: state.count + 1 }
+    } else {
+        let e = if expected { "true" } else { "false" }
+        let g = if got { "true" } else { "false" }
+        print(f"CHECK_FAILED: {name} expected={e} got={g}")
+        Checker { ok: false, count: state.count + 1 }
     }
 }
 
 // ============================================================================
-// Self-checking harness
+// SECTION 10 — main: hundreds of asserted results
 // ============================================================================
+
 fn main() {
-    let mut pass = 0
-    let mut fail = 0
+    let mut st = Checker { ok: true, count: 0 }
 
-    // ------------------------------------------------------------------
-    // GROUP 1: digit_val / is_digit (Option enum).
-    // ------------------------------------------------------------------
-    let d0 = match digit_val("0") { Some(v) => v, None => -1 }
-    if d0 == 0 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: dv0 expected=0 got={d0}") }
-    let d9 = match digit_val("9") { Some(v) => v, None => -1 }
-    if d9 == 9 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: dv9 expected=9 got={d9}") }
-    let dx = match digit_val("a") { Some(v) => v, None => -1 }
-    if dx == -1 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: dvA expected=-1 got={dx}") }
-    if is_digit("5") { pass = pass + 1 } else { fail = fail + 1; print("CHECK_FAILED: isdigit5 expected=true got=false") }
-    if is_digit("z") { fail = fail + 1; print("CHECK_FAILED: isdigitZ expected=false got=true") } else { pass = pass + 1 }
+    // Standard environment for variable tests (vars hold ints).
+    let env: Array<Binding> = [
+        Binding { name: "x", value: 10 },
+        Binding { name: "y", value: 3 },
+        Binding { name: "z", value: 0 },
+        Binding { name: "w", value: 100 },
+    ]
+    let empty: Array<Binding> = []
 
-    // ------------------------------------------------------------------
-    // GROUP 2: ch_at / skip_ws (string cursor helpers).
-    // ------------------------------------------------------------------
-    if ch_at("abc", 0) == "a" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: chat0 expected=a got={ch_at(\"abc\", 0)}") }
-    if ch_at("abc", 2) == "c" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: chat2 expected=c got={ch_at(\"abc\", 2)}") }
-    if ch_at("abc", 3) == "" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: chatEnd expected=empty got={ch_at(\"abc\", 3)}") }
-    if skip_ws("   x", 0) == 3 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: skipws expected=3 got={skip_ws(\"   x\", 0)}") }
-    if skip_ws("x", 0) == 0 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: skipws0 expected=0 got={skip_ws(\"x\", 0)}") }
+    // ---- 10.1 token_tag exhaustiveness (every variant) ----------------------
+    st = check_str(st, "tag_num",    "num",   token_tag(Token::TNum(5)))
+    st = check_str(st, "tag_ident",  "ident", token_tag(Token::TIdent("v")))
+    st = check_str(st, "tag_plus",   "+",     token_tag(Token::TPlus))
+    st = check_str(st, "tag_minus",  "-",     token_tag(Token::TMinus))
+    st = check_str(st, "tag_star",   "*",     token_tag(Token::TStar))
+    st = check_str(st, "tag_slash",  "/",     token_tag(Token::TSlash))
+    st = check_str(st, "tag_pct",    "%",     token_tag(Token::TPercent))
+    st = check_str(st, "tag_lp",     "(",     token_tag(Token::TLParen))
+    st = check_str(st, "tag_rp",     ")",     token_tag(Token::TRParen))
+    st = check_str(st, "tag_lt",     "<",     token_tag(Token::TLt))
+    st = check_str(st, "tag_gt",     ">",     token_tag(Token::TGt))
+    st = check_str(st, "tag_eqeq",   "==",    token_tag(Token::TEqEq))
+    st = check_str(st, "tag_and",    "and",   token_tag(Token::TAnd))
+    st = check_str(st, "tag_or",     "or",    token_tag(Token::TOr))
+    st = check_str(st, "tag_not",    "!",     token_tag(Token::TNot))
+    st = check_str(st, "tag_true",   "true",  token_tag(Token::TTrue))
+    st = check_str(st, "tag_false",  "false", token_tag(Token::TFalse))
+    st = check_str(st, "tag_end",    "end",   token_tag(Token::TEnd))
 
-    // ------------------------------------------------------------------
-    // GROUP 3: parse_number (digit accumulation, no array).
-    // ------------------------------------------------------------------
-    let pn1 = match parse_number("0", 0) { ParseResult::Good { expr, next } => next, ParseResult::Bad(_) => -1 }
-    if pn1 == 1 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: pn_0 next expected=1 got={pn1}") }
-    let pn2v = match parse_number("123", 0) {
-        ParseResult::Good { expr, next } => (match eval(expr) { Ok(v) => v, Err(_) => -1 }),
-        ParseResult::Bad(_) => -1,
+    // ---- 10.2 char classification -------------------------------------------
+    st = check_bool(st, "digit_5",  true,  is_digit("5"))
+    st = check_bool(st, "digit_a",  false, is_digit("a"))
+    st = check_bool(st, "alpha_a",  true,  is_alpha("a"))
+    st = check_bool(st, "alpha_Z",  true,  is_alpha("Z"))
+    st = check_bool(st, "alpha_us", true,  is_alpha("_"))
+    st = check_bool(st, "alpha_3",  false, is_alpha("3"))
+    st = check_bool(st, "space_sp", true,  is_space(" "))
+    st = check_bool(st, "space_x",  false, is_space("x"))
+
+    let dv7 = match digit_val("7") { Some(v) => v, None => -1 }
+    st = check_int(st, "digitval_7", 7, dv7)
+    let dvx = match digit_val("q") { Some(v) => v, None => -1 }
+    st = check_int(st, "digitval_q", -1, dvx)
+
+    // ---- 10.3 lexer token counts --------------------------------------------
+    // "1+2" -> [TNum 1, TPlus, TNum 2, TEnd] = 4 tokens
+    match lex("1+2") {
+        Ok(ts) => { st = check_int(st, "lex_1p2_count", 4, ts.len()) }
+        Err(_) => { st = check_bool(st, "lex_1p2_ok", true, false) }
     }
-    if pn2v == 123 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: pn_123 expected=123 got={pn2v}") }
-    let pn3v = match parse_number("1000", 0) {
-        ParseResult::Good { expr, next } => (match eval(expr) { Ok(v) => v, Err(_) => -1 }),
-        ParseResult::Bad(_) => -1,
+    // "12 * 34" -> [TNum 12, TStar, TNum 34, TEnd] = 4
+    match lex("12 * 34") {
+        Ok(ts) => { st = check_int(st, "lex_mul_count", 4, ts.len()) }
+        Err(_) => { st = check_bool(st, "lex_mul_ok", true, false) }
     }
-    if pn3v == 1000 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: pn_1000 expected=1000 got={pn3v}") }
-    // parse_number stops at first non-digit: "12x" -> value 12, next 2.
-    let pn4n = match parse_number("12x", 0) { ParseResult::Good { expr, next } => next, ParseResult::Bad(_) => -1 }
-    if pn4n == 2 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: pn_12x next expected=2 got={pn4n}") }
+    // "(x + y) * 2" -> [ ( x + y ) * 2 TEnd ] = 7 real tokens + TEnd = 8
+    match lex("(x + y) * 2") {
+        Ok(ts) => { st = check_int(st, "lex_paren_count", 8, ts.len()) }
+        Err(_) => { st = check_bool(st, "lex_paren_ok", true, false) }
+    }
+    // lex error: single '='  (the '=' is at index 2 of "1 = 2")
+    match lex("1 = 2") {
+        Ok(_)  => { st = check_bool(st, "lex_single_eq_errs", true, false) }
+        Err(e) => { st = check_str(st, "lex_single_eq_msg", "lex error: single '=' at 2", err_message(e)) }
+    }
+    // lex error: unexpected char '@' at index 2 of "1 @ 2"
+    match lex("1 @ 2") {
+        Ok(_)  => { st = check_bool(st, "lex_at_errs", true, false) }
+        Err(e) => { st = check_str(st, "lex_at_msg", "lex error: unexpected char '@' at 2", err_message(e)) }
+    }
 
-    // ------------------------------------------------------------------
-    // GROUP 4: Evaluation of valid expressions.
-    // Expected values computed by hand from the grammar's precedence.
-    // ------------------------------------------------------------------
-    if run("1+2") == "3" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_add expected=3 got={run(\"1+2\")}") }
-    // precedence: 2 + 3*4 = 2 + 12 = 14
-    if run("2+3*4") == "14" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_prec expected=14 got={run(\"2+3*4\")}") }
-    // parens: (2+3)*4 = 20
-    if run("(2+3)*4") == "20" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_paren expected=20 got={run(\"(2+3)*4\")}") }
-    // left-assoc subtraction: (10-2)-3 = 5
-    if run("10-2-3") == "5" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_lassoc expected=5 got={run(\"10-2-3\")}") }
-    // left-assoc division: (100/5)/2 = 10
-    if run("100/5/2") == "10" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_divassoc expected=10 got={run(\"100/5/2\")}") }
-    // mixed: 2*3 + 4*5 = 6 + 20 = 26
-    if run("2*3+4*5") == "26" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_mix expected=26 got={run(\"2*3+4*5\")}") }
-    // unary minus: -5 + 3 = -2
-    if run("-5+3") == "-2" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_neg expected=-2 got={run(\"-5+3\")}") }
-    // negate a paren: -(2+3) = -5
-    if run("-(2+3)") == "-5" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_negparen expected=-5 got={run(\"-(2+3)\")}") }
-    // single literal
-    if run("7") == "7" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_lit expected=7 got={run(\"7\")}") }
-    // double negation: - -4 = 4
-    if run("--4") == "4" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_dblneg expected=4 got={run(\"--4\")}") }
-    // nested: 2*(3 + 4*(1+1)) = 2*(3+8) = 22
-    if run("2*(3+4*(1+1))") == "22" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_nested expected=22 got={run(\"2*(3+4*(1+1))\")}") }
-    // integer division truncates: 20/6 = 3
-    if run("20/6") == "3" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_intdiv expected=3 got={run(\"20/6\")}") }
-    // whitespace tolerance: "  1  +  2  " = 3
-    if run("  1  +  2  ") == "3" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_ws expected=3 got={run(\"  1  +  2  \")}") }
+    // ---- 10.4 arithmetic via full pipeline ----------------------------------
+    // Expected values derived by hand from standard integer arithmetic with the
+    // documented precedence (mul/div/mod above add/sub; unary above mul).
+    st = check_str(st, "a_1p2",        "int:3",    run_repr("1+2", empty))
+    st = check_str(st, "a_2p3m4",      "int:14",   run_repr("2+3*4", empty))     // 2 + 12
+    st = check_str(st, "a_2p3_m4",     "int:20",   run_repr("(2+3)*4", empty))   // 5*4
+    st = check_str(st, "a_10m2m3",     "int:5",    run_repr("10-2-3", empty))    // (10-2)-3
+    st = check_str(st, "a_20d4d2",     "int:2",    run_repr("20/4/2", empty))    // (20/4)/2 = 5/2 = 2
+    st = check_str(st, "a_17m5",       "int:2",    run_repr("17%5", empty))      // 17 mod 5
+    st = check_str(st, "a_2m3m4",      "int:24",   run_repr("2*3*4", empty))
+    st = check_str(st, "a_neg",        "int:-7",   run_repr("-7", empty))
+    st = check_str(st, "a_negexpr",    "int:-5",   run_repr("-(2+3)", empty))
+    st = check_str(st, "a_dblneg",     "int:7",    run_repr("--7", empty))       // -(-7)
+    st = check_str(st, "a_negmul",     "int:-6",   run_repr("-2*3", empty))      // (-2)*3
+    st = check_str(st, "a_prec_chain", "int:23",   run_repr("3+4*5", empty))     // 3 + 20
+    st = check_str(st, "a_mixed",      "int:17",   run_repr("2*3+4+7", empty))   // 6+4+7
+    st = check_str(st, "a_modmix",     "int:1",    run_repr("10%3*1", empty))    // (10%3)*1
+    st = check_str(st, "a_deep_paren", "int:42",   run_repr("((((42))))", empty))
+    st = check_str(st, "a_big",        "int:1000", run_repr("10*10*10", empty))
 
-    // ------------------------------------------------------------------
-    // GROUP 5: Eval errors (Result Err path + `?` propagation).
-    // ------------------------------------------------------------------
-    if run("1/0") == "EVAL_ERR: division by zero" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_div0 expected=EVAL_ERR got={run(\"1/0\")}") }
-    // propagated through addition: 5 + 6/(3-3) -> div by zero
-    if run("5+6/(3-3)") == "EVAL_ERR: division by zero" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: eval_div0b expected=EVAL_ERR got={run(\"5+6/(3-3)\")}") }
+    // ---- 10.5 division / mod by zero -> DivByZero error ----------------------
+    st = check_str(st, "e_divzero",  "err:division by zero", run_repr("1/0", empty))
+    st = check_str(st, "e_modzero",  "err:division by zero", run_repr("5%0", empty))
+    st = check_str(st, "e_divz_sub", "err:division by zero", run_repr("1+(6/0)", empty)) // ? propagates
 
-    // ------------------------------------------------------------------
-    // GROUP 6: Parse errors (Result Err path).
-    // ------------------------------------------------------------------
-    // "1+" -> rhs missing, cursor at end pos 2 -> expected number at 2
-    if run("1+") == "PARSE_ERR: expected number at 2" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: parse_eof expected=expnum2 got={run(\"1+\")}") }
-    // "(1+2" -> missing ')' at end pos 4
-    if run("(1+2") == "PARSE_ERR: expected ')' at 4" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: parse_noclose expected=exprparen4 got={run(\"(1+2\")}") }
-    // "1 2" -> a complete expr then trailing "2" at pos 2
-    if run("1 2") == "PARSE_ERR: trailing input at 2" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: parse_trailing expected=trail2 got={run(\"1 2\")}") }
-    // "1+@" -> '@' is not a valid factor start at pos 2
-    if run("1+@") == "PARSE_ERR: unexpected '@' at 2" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: parse_bad expected=unexp@2 got={run(\"1+@\")}") }
-    // ")1" -> ')' cannot start an expr at pos 0
-    if run(")1") == "PARSE_ERR: unexpected ')' at 0" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: parse_leadrp expected=unexp)0 got={run(\")1\")}") }
-    // "" -> empty input
-    if run("") == "PARSE_ERR: empty input" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: parse_empty expected=empty got={run(\"\")}") }
-    // "   " -> whitespace only -> empty input
-    if run("   ") == "PARSE_ERR: empty input" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: parse_wsonly expected=empty got={run(\"   \")}") }
+    // ---- 10.6 variables + environment ---------------------------------------
+    st = check_str(st, "v_x",       "int:10",  run_repr("x", env))
+    st = check_str(st, "v_xy",      "int:13",  run_repr("x+y", env))      // 10+3
+    st = check_str(st, "v_xmy",     "int:30",  run_repr("x*y", env))      // 10*3
+    st = check_str(st, "v_wdivx",   "int:10",  run_repr("w/x", env))      // 100/10
+    st = check_str(st, "v_xmody",   "int:1",   run_repr("x%y", env))      // 10%3
+    st = check_str(st, "v_divz",    "err:division by zero", run_repr("x/z", env)) // 10/0
+    st = check_str(st, "v_unbound", "err:unbound variable: q", run_repr("q+1", env))
+    st = check_str(st, "v_complex", "int:130", run_repr("w + x*y", env))  // 100 + 30
 
-    // ------------------------------------------------------------------
-    // GROUP 7: Pretty-printer (canonical fully-parenthesized form).
-    // ------------------------------------------------------------------
-    // 1 + 2*3 -> (1 + (2 * 3))
-    if run_show("1+2*3") == "(1 + (2 * 3))" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: show_prec expected=(1+(2*3)) got={run_show(\"1+2*3\")}") }
-    // (1+2)*3 -> ((1 + 2) * 3)
-    if run_show("(1+2)*3") == "((1 + 2) * 3)" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: show_paren expected=((1+2)*3) got={run_show(\"(1+2)*3\")}") }
-    // 10-2-3 -> ((10 - 2) - 3)
-    if run_show("10-2-3") == "((10 - 2) - 3)" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: show_lassoc expected=((10-2)-3) got={run_show(\"10-2-3\")}") }
-    // -5 -> (-5)
-    if run_show("-5") == "(-5)" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: show_neg expected=(-5) got={run_show(\"-5\")}") }
-    // 7 -> 7
-    if run_show("7") == "7" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: show_lit expected=7 got={run_show(\"7\")}") }
-    // --4 -> (-(-4))
-    if run_show("--4") == "(-(-4))" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: show_dblneg expected=(-(-4)) got={run_show(\"--4\")}") }
-    // 1+2+3 -> ((1 + 2) + 3)
-    if run_show("1+2+3") == "((1 + 2) + 3)" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: show_chain expected=((1+2)+3) got={run_show(\"1+2+3\")}") }
+    // ---- 10.7 comparisons -> bool -------------------------------------------
+    st = check_str(st, "c_lt_t",  "bool:true",  run_repr("3<4", empty))
+    st = check_str(st, "c_lt_f",  "bool:false", run_repr("4<4", empty))
+    st = check_str(st, "c_gt_t",  "bool:true",  run_repr("5>2", empty))
+    st = check_str(st, "c_eq_t",  "bool:true",  run_repr("2+2==4", empty))  // 4==4
+    st = check_str(st, "c_eq_f",  "bool:false", run_repr("2+2==5", empty))
+    st = check_str(st, "c_var",   "bool:true",  run_repr("x>y", env))       // 10>3
 
-    // ------------------------------------------------------------------
-    // GROUP 8: Structural metrics over the recursive AST.
-    // depth("1") = 1; depth("1+2") = 2; depth("1+2*3") = 3 (Bin+ -> Bin* -> Lit)
-    // ------------------------------------------------------------------
-    if run_depth("1") == 1 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: depth_lit expected=1 got={run_depth(\"1\")}") }
-    if run_depth("1+2") == 2 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: depth_add expected=2 got={run_depth(\"1+2\")}") }
-    if run_depth("1+2*3") == 3 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: depth_prec expected=3 got={run_depth(\"1+2*3\")}") }
-    // (((7))) collapses: the AST is just Lit(7) -> depth 1
-    if run_depth("(((7)))") == 1 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: depth_paren expected=1 got={run_depth(\"(((7)))\")}") }
-    // node_count("1+2") = Bin + Lit + Lit = 3
-    if run_nodes("1+2") == 3 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: nodes_add expected=3 got={run_nodes(\"1+2\")}") }
-    // node_count("1+2*3") = Bin+ , Lit1, Bin*, Lit2, Lit3 = 5
-    if run_nodes("1+2*3") == 5 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: nodes_prec expected=5 got={run_nodes(\"1+2*3\")}") }
-    // node_count("-5") = Neg + Lit = 2
-    if run_nodes("-5") == 2 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: nodes_neg expected=2 got={run_nodes(\"-5\")}") }
+    // ---- 10.8 booleans + logical ops ----------------------------------------
+    st = check_str(st, "b_true",     "bool:true",  run_repr("true", empty))
+    st = check_str(st, "b_false",    "bool:false", run_repr("false", empty))
+    st = check_str(st, "b_not",      "bool:false", run_repr("!true", empty))
+    st = check_str(st, "b_notnot",   "bool:true",  run_repr("!!true", empty))
+    st = check_str(st, "b_and_tt",   "bool:true",  run_repr("true and true", empty))
+    st = check_str(st, "b_and_tf",   "bool:false", run_repr("true and false", empty))
+    st = check_str(st, "b_or_tf",    "bool:true",  run_repr("true or false", empty))
+    st = check_str(st, "b_or_ff",    "bool:false", run_repr("false or false", empty))
+    // and binds tighter than or: true or (false and false) = true
+    st = check_str(st, "b_prec",     "bool:true",  run_repr("true or false and false", empty))
+    // comparison feeding logic: (3<4) and (5>2) = true
+    st = check_str(st, "b_cmplogic", "bool:true",  run_repr("3<4 and 5>2", empty))
+    st = check_str(st, "b_cmplog_f", "bool:false", run_repr("3<4 and 2>5", empty))
+    st = check_str(st, "b_notcmp",   "bool:true",  run_repr("!(3>4)", empty))
 
-    // ------------------------------------------------------------------
-    // GROUP 9: Batch evaluation -- a battery of fixtures, each as a direct
-    // `run(literal)` call. Expected values hand-computed from the grammar.
-    //
-    // NOTE: fixtures are spelled out as individual literal-driven checks for
-    // readability. (An earlier draft claimed array-element strings failed
-    // `.substring` with "expected string, got string"; re-probed at HEAD
-    // 2026-06-21 and that does NOT reproduce -- arr[0].substring(..) works.)
-    // ------------------------------------------------------------------
-    if run("1+1") == "2" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: batch_1 expected=2 got={run(\"1+1\")}") }
-    if run("2*2*2") == "8" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: batch_2 expected=8 got={run(\"2*2*2\")}") }
-    if run("100-50-25") == "25" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: batch_3 expected=25 got={run(\"100-50-25\")}") }
-    if run("(5+5)/2") == "5" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: batch_4 expected=5 got={run(\"(5+5)/2\")}") }
-    if run("3*(4+5)") == "27" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: batch_5 expected=27 got={run(\"3*(4+5)\")}") }
-    if run("1+2+3+4+5") == "15" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: batch_6 expected=15 got={run(\"1+2+3+4+5\")}") }
-    if run("2*3*4*5") == "120" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: batch_7 expected=120 got={run(\"2*3*4*5\")}") }
-    if run("-10+20") == "10" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: batch_8 expected=10 got={run(\"-10+20\")}") }
-    if run("1000/10/10") == "10" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: batch_9 expected=10 got={run(\"1000/10/10\")}") }
-    if run("(((7)))") == "7" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: batch_10 expected=7 got={run(\"(((7)))\")}") }
-    if run("9-3-3-3") == "0" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: batch_11 expected=0 got={run(\"9-3-3-3\")}") }
-    if run("2+2*2+2") == "8" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: batch_12 expected=8 got={run(\"2+2*2+2\")}") }
+    // ---- 10.9 type errors ---------------------------------------------------
+    st = check_str(st, "t_addbool",  "err:type error: expected int, got bool", run_repr("1+true", empty))
+    st = check_str(st, "t_notint",   "err:type error: expected bool, got int", run_repr("!5", empty))
+    st = check_str(st, "t_andint",   "err:type error: expected bool, got int", run_repr("1 and 2", empty))
+    st = check_str(st, "t_negbool",  "err:type error: expected int, got bool", run_repr("-true", empty))
 
-    // ------------------------------------------------------------------
-    // GROUP 10: Deep nesting / recursion depth.
-    // (((((1+1)+1)+1)+1)+1) = 6 ; each '+1' adds one.
-    // ------------------------------------------------------------------
-    if run("(((((1+1)+1)+1)+1)+1)") == "6" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: deep_nest expected=6 got={run(\"(((((1+1)+1)+1)+1)+1)\")}") }
-    // even unary chain ----5 = 5 ; odd ---5 = -5
-    if run("----5") == "5" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: unary_even expected=5 got={run(\"----5\")}") }
-    if run("---5") == "-5" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: unary_odd expected=-5 got={run(\"---5\")}") }
-    // a longer arithmetic expression: 1+2*3-4/2+5*6 = 1+6-2+30 = 35
-    if run("1+2*3-4/2+5*6") == "35" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: long_expr expected=35 got={run(\"1+2*3-4/2+5*6\")}") }
+    // ---- 10.10 parse errors -------------------------------------------------
+    st = check_str(st, "p_trailing", "err:parse error: trailing token num",   run_repr("1 2", empty))
+    st = check_str(st, "p_noparen",  "err:parse error: expected ')' got end", run_repr("(1+2", empty))
+    st = check_str(st, "p_unexpect", "err:parse error: unexpected token +",   run_repr("+1", empty))
 
-    // ------------------------------------------------------------------
-    // GROUP 11: Direct AST construction + eval (bypass parser) to prove the
-    // recursive enum + Result evaluator in isolation.
-    // ------------------------------------------------------------------
-    // Bin("*", Bin("+", Lit 2, Lit 3), Lit 4) = (2+3)*4 = 20
-    let manual = Expr::Bin("*", Expr::Bin("+", Expr::Lit(2), Expr::Lit(3)), Expr::Lit(4))
-    let mv = match eval(manual) { Ok(v) => v, Err(_) => -999 }
-    if mv == 20 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: manual_eval expected=20 got={mv}") }
-    let ms = show(manual)
-    if ms == "((2 + 3) * 4)" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: manual_show expected=((2+3)*4) got={ms}") }
-    if node_count(manual) == 5 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: manual_nodes expected=5 got={node_count(manual)}") }
-    if leaf_count(manual) == 3 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: manual_leaves expected=3 got={leaf_count(manual)}") }
-    if depth(manual) == 3 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: manual_depth expected=3 got={depth(manual)}") }
+    // ---- 10.11 Value helper + Option/Result direct (book built-ins) ---------
+    st = check_str(st, "vstr_int",  "42",    value_str(Value::VInt(42)))
+    st = check_str(st, "vstr_bt",   "true",  value_str(Value::VBool(true)))
+    st = check_str(st, "vstr_bf",   "false", value_str(Value::VBool(false)))
 
-    // Neg(Lit 8) -> -8
-    let neg8 = Expr::Neg(Expr::Lit(8))
-    let nv = match eval(neg8) { Ok(v) => v, Err(_) => -999 }
-    if nv == -8 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: manual_neg expected=-8 got={nv}") }
+    let look_x = match env_lookup(env, "x") { Some(v) => v, None => -1 }
+    st = check_int(st, "lookup_x", 10, look_x)
+    let look_none = match env_lookup(env, "nope") { Some(v) => v, None => -999 }
+    st = check_int(st, "lookup_none", -999, look_none)
 
-    // DivByZero directly.
-    let dz = Expr::Bin("/", Expr::Lit(1), Expr::Lit(0))
-    let dzr = match eval(dz) { Ok(_) => "ok", Err(e) => eval_err_str(e) }
-    if dzr == "division by zero" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: manual_div0 expected=divzero got={dzr}") }
+    // ---- 10.12 longer real expressions --------------------------------------
+    // ((x + y) * (w - x)) / y  with x=10,y=3,w=100 = (13*90)/3 = 1170/3 = 390
+    st = check_str(st, "real_1", "int:390", run_repr("((x + y) * (w - x)) / y", env))
+    // x*x - y*y = 100 - 9 = 91
+    st = check_str(st, "real_2", "int:91",  run_repr("x*x - y*y", env))
+    // (x > y) and (w == 100) -> true and true -> true
+    st = check_str(st, "real_3", "bool:true", run_repr("x > y and w == 100", env))
+    // 100 % 7 = 2
+    st = check_str(st, "real_4", "int:2", run_repr("100 % 7", empty))
+    // -(3*4) + 20 = -12 + 20 = 8
+    st = check_str(st, "real_5", "int:8", run_repr("-(3*4) + 20", empty))
 
-    // ------------------------------------------------------------------
-    // GROUP 12: Auto-derived Display on enums (book "Auto-Derived Display").
-    // The book states: unit variant prints its name; tuple variant includes
-    // the payload, e.g. Circle(3.0). We test on our own enums.
-    // ------------------------------------------------------------------
-    let lit_disp = f"{Expr::Lit(42)}"
-    if lit_disp == "Lit(42)" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: disp_lit expected=Lit(42) got={lit_disp}") }
-    let dz_disp = f"{EvalErr::DivByZero}"
-    if dz_disp == "DivByZero" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: disp_unit expected=DivByZero got={dz_disp}") }
+    // ---- 10.13 operator-symbol round-trip (every BinOp / UnOp variant) ------
+    st = check_str(st, "sym_add", "+",   binop_sym(BinOp::OpAdd))
+    st = check_str(st, "sym_sub", "-",   binop_sym(BinOp::OpSub))
+    st = check_str(st, "sym_mul", "*",   binop_sym(BinOp::OpMul))
+    st = check_str(st, "sym_div", "/",   binop_sym(BinOp::OpDiv))
+    st = check_str(st, "sym_mod", "%",   binop_sym(BinOp::OpMod))
+    st = check_str(st, "sym_lt",  "<",   binop_sym(BinOp::OpLt))
+    st = check_str(st, "sym_gt",  ">",   binop_sym(BinOp::OpGt))
+    st = check_str(st, "sym_eq",  "==",  binop_sym(BinOp::OpEq))
+    st = check_str(st, "sym_and", "and", binop_sym(BinOp::OpAnd))
+    st = check_str(st, "sym_or",  "or",  binop_sym(BinOp::OpOr))
+    st = check_str(st, "sym_neg", "-",   unop_sym(UnOp::Neg))
+    st = check_str(st, "sym_not", "!",   unop_sym(UnOp::Not))
 
-    // ------------------------------------------------------------------
-    // GROUP 13: Option threading via match (built-in Option enum).
-    // ------------------------------------------------------------------
-    let maybe_d = match digit_val(ch_at("7", 0)) { Some(v) => v, None => -1 }
-    if maybe_d == 7 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: opt_digit expected=7 got={maybe_d}") }
-    let maybe_n = match digit_val(ch_at("+", 0)) { Some(v) => v, None => -1 }
-    if maybe_n == -1 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: opt_nondigit expected=-1 got={maybe_n}") }
+    // ---- 10.14 AST normalization (precedence / associativity proofs) --------
+    // Each expected canonical form is the fully-parenthesized tree the grammar
+    // must produce, derived by hand from the documented precedence ladder
+    // (or < and < cmp < add < mul < unary).
+    st = check_str(st, "n_1p2",     "(1 + 2)",                norm("1+2"))
+    st = check_str(st, "n_prec",    "(2 + (3 * 4))",          norm("2+3*4"))      // mul binds tighter
+    st = check_str(st, "n_paren",   "((2 + 3) * 4)",          norm("(2+3)*4"))
+    st = check_str(st, "n_subassoc","((10 - 2) - 3)",         norm("10-2-3"))     // sub left-assoc
+    st = check_str(st, "n_divassoc","((20 / 4) / 2)",         norm("20/4/2"))     // div left-assoc
+    st = check_str(st, "n_neg",     "(-7)",                   norm("-7"))
+    st = check_str(st, "n_dblneg",  "(-(-7))",                norm("--7"))
+    st = check_str(st, "n_negmul",  "((-2) * 3)",             norm("-2*3"))       // unary binds tighter than mul
+    st = check_str(st, "n_not",     "(!true)",                norm("!true"))
+    st = check_str(st, "n_notnot",  "(!(!true))",             norm("!!true"))
+    st = check_str(st, "n_cmp",     "((2 + 2) == 4)",         norm("2+2==4"))     // add binds tighter than ==
+    st = check_str(st, "n_cmplog",  "((3 < 4) and (5 > 2))",  norm("3<4 and 5>2"))
+    st = check_str(st, "n_logprec", "(true or (false and false))", norm("true or false and false")) // and < or
+    st = check_str(st, "n_var",     "(x + (y * z))",          norm("x+y*z"))
+    st = check_str(st, "n_chain",   "(((1 + 2) + 3) + 4)",    norm("1+2+3+4"))    // add left-assoc chain
+    st = check_str(st, "n_mixchain","((1 + (2 * 3)) - 4)",    norm("1+2*3-4"))
 
-    // ------------------------------------------------------------------
-    // GROUP 14: Constant folder preserves semantics (fold then eval == eval).
-    // Every expected value is the same number the un-folded eval produces.
-    // ------------------------------------------------------------------
-    if run_folded("2+3*4") == "14" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: fold_prec expected=14 got={run_folded(\"2+3*4\")}") }
-    if run_folded("(2+3)*4") == "20" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: fold_paren expected=20 got={run_folded(\"(2+3)*4\")}") }
-    if run_folded("10-2-3") == "5" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: fold_lassoc expected=5 got={run_folded(\"10-2-3\")}") }
-    if run_folded("-(2+3)") == "-5" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: fold_neg expected=-5 got={run_folded(\"-(2+3)\")}") }
-    if run_folded("--4") == "4" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: fold_dblneg expected=4 got={run_folded(\"--4\")}") }
-    if run_folded("1+2*3-4/2+5*6") == "35" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: fold_long expected=35 got={run_folded(\"1+2*3-4/2+5*6\")}") }
-    // fold preserves a literal div-by-zero so eval still reports it:
-    if run_folded("1/0") == "EVAL_ERR: division by zero" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: fold_div0 expected=EVAL_ERR got={run_folded(\"1/0\")}") }
-    if run_folded("5+6/(3-3)") == "EVAL_ERR: division by zero" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: fold_div0b expected=EVAL_ERR got={run_folded(\"5+6/(3-3)\")}") }
+    // ---- 10.15 table-driven evaluation batch --------------------------------
+    // A record array of (source, expected-repr) cases evaluated in a loop.
+    // Each expected value was computed by hand before running. This exercises
+    // Array<record>, the Result-returning pipeline, and enum match in bulk.
+    let cases: Array<Case> = [
+        Case { src: "1+2+3",          want: "int:6" },
+        Case { src: "2*3*4",          want: "int:24" },
+        Case { src: "100/3",          want: "int:33" },        // integer division
+        Case { src: "100%3",          want: "int:1" },
+        Case { src: "(1+2)*(3+4)",    want: "int:21" },        // 3*7
+        Case { src: "10-3-2-1",       want: "int:4" },         // ((10-3)-2)-1
+        Case { src: "2*3+4*5",        want: "int:26" },        // 6+20
+        Case { src: "-5+10",          want: "int:5" },
+        Case { src: "5<10",           want: "bool:true" },
+        Case { src: "5>10",           want: "bool:false" },
+        Case { src: "7==7",           want: "bool:true" },
+        Case { src: "true and false", want: "bool:false" },
+        Case { src: "false or true",  want: "bool:true" },
+        Case { src: "!(1==2)",        want: "bool:true" },
+        Case { src: "1/0",            want: "err:division by zero" },
+        Case { src: "foo",            want: "err:unbound variable: foo" },
+        Case { src: "1+true",         want: "err:type error: expected int, got bool" },
+        Case { src: "(1+2",           want: "err:parse error: expected ')' got end" },
+    ]
+    let mut idx = 0
+    for cs in cases {
+        let got = run_repr(cs.src, empty)
+        st = check_str(st, f"case_{idx}", cs.want, got)
+        idx = idx + 1
+    }
 
-    // ------------------------------------------------------------------
-    // GROUP 15: Constant folder collapses fully-constant trees to one node.
-    // "2+3*4" : all literals -> folds to Lit(14) -> node_count 1.
-    // "(2+3)*4" : all literals -> folds to Lit(20) -> node_count 1.
-    // ------------------------------------------------------------------
-    if run_folded_nodes("2+3*4") == 1 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: foldn_prec expected=1 got={run_folded_nodes(\"2+3*4\")}") }
-    if run_folded_nodes("(2+3)*4") == 1 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: foldn_paren expected=1 got={run_folded_nodes(\"(2+3)*4\")}") }
-    if run_folded_nodes("--4") == 1 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: foldn_dblneg expected=1 got={run_folded_nodes(\"--4\")}") }
-    // a literal x/0 is NOT folded: Bin(/) + Lit + Lit = 3 nodes.
-    if run_folded_nodes("1/0") == 3 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: foldn_div0 expected=3 got={run_folded_nodes(\"1/0\")}") }
+    // ---- 10.16 nested-error propagation depth -------------------------------
+    // Build a deeply nested division to confirm `?` propagates DivByZero from
+    // the innermost failing sub-expression all the way out.
+    st = check_str(st, "deep_ok",  "int:2",                run_repr("(((8/2)/2))", empty)) // 8/2/2 = 2
+    st = check_str(st, "deep_err", "err:division by zero", run_repr("1+(2+(3+(4/0)))", empty))
+    st = check_str(st, "deep_typ", "err:type error: expected int, got bool",
+                   run_repr("1+(2+(3+true))", empty))
 
-    // ------------------------------------------------------------------
-    // GROUP 16: Direct fold checks on hand-built ASTs (structural proof).
-    // ------------------------------------------------------------------
-    // fold( (2*3)+4 ) -> Lit(10) ; node_count 1 ; eval 10
-    let g16a = Expr::Bin("+", Expr::Bin("*", Expr::Lit(2), Expr::Lit(3)), Expr::Lit(4))
-    let g16af = fold(g16a)
-    if is_lit(g16af) { pass = pass + 1 } else { fail = fail + 1; print("CHECK_FAILED: fold16a_islit expected=true got=false") }
-    if node_count(g16af) == 1 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: fold16a_nodes expected=1 got={node_count(g16af)}") }
-    let g16av = match eval(g16af) { Ok(v) => v, Err(_) => -999 }
-    if g16av == 10 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: fold16a_eval expected=10 got={g16av}") }
-    // A tree with a literal /0 inside is partially folded but NOT collapsed:
-    // Bin("+", Lit 5, Bin("/", Lit 6, Bin("-", Lit 3, Lit 3)))
-    //   inner (3-3) folds to Lit 0 ; (6/0) is NOT folded ; outer stays Bin.
-    let g16b = Expr::Bin("+", Expr::Lit(5), Expr::Bin("/", Expr::Lit(6), Expr::Bin("-", Expr::Lit(3), Expr::Lit(3))))
-    let g16bf = fold(g16b)
-    if is_lit(g16bf) { fail = fail + 1; print("CHECK_FAILED: fold16b_notlit expected=false got=true") } else { pass = pass + 1 }
-    // after folding inner (3-3)->0 : Bin(+) , Lit5 , Bin(/) , Lit6 , Lit0 = 5 nodes
-    if node_count(g16bf) == 5 { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: fold16b_nodes expected=5 got={node_count(g16bf)}") }
-    // eval still surfaces DivByZero
-    let g16bv = match eval(g16bf) { Ok(_) => "ok", Err(e) => eval_err_str(e) }
-    if g16bv == "division by zero" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: fold16b_div0 expected=divzero got={g16bv}") }
-
-    // ------------------------------------------------------------------
-    // GROUP 17: RPN compiler (postfix structural fold over the enum).
-    // Expected postfix derived by hand from the parse tree.
-    // ------------------------------------------------------------------
-    // 1 + 2*3 -> tree (1 + (2*3)) -> "1 2 3 * +"
-    if run_rpn("1+2*3") == "1 2 3 * +" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: rpn_prec expected='1 2 3 * +' got={run_rpn(\"1+2*3\")}") }
-    // (1+2)*3 -> ((1+2)*3) -> "1 2 + 3 *"
-    if run_rpn("(1+2)*3") == "1 2 + 3 *" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: rpn_paren expected='1 2 + 3 *' got={run_rpn(\"(1+2)*3\")}") }
-    // 10-2-3 -> ((10-2)-3) -> "10 2 - 3 -"
-    if run_rpn("10-2-3") == "10 2 - 3 -" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: rpn_lassoc expected='10 2 - 3 -' got={run_rpn(\"10-2-3\")}") }
-    // -5 -> "5 neg"
-    if run_rpn("-5") == "5 neg" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: rpn_neg expected='5 neg' got={run_rpn(\"-5\")}") }
-    // --4 -> "4 neg neg"
-    if run_rpn("--4") == "4 neg neg" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: rpn_dblneg expected='4 neg neg' got={run_rpn(\"--4\")}") }
-    // 7 -> "7"
-    if run_rpn("7") == "7" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: rpn_lit expected='7' got={run_rpn(\"7\")}") }
-    // 2*3+4*5 -> ((2*3)+(4*5)) -> "2 3 * 4 5 * +"
-    if run_rpn("2*3+4*5") == "2 3 * 4 5 * +" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: rpn_mix expected='2 3 * 4 5 * +' got={run_rpn(\"2*3+4*5\")}") }
-
-    // ------------------------------------------------------------------
-    // GROUP 18: Direct RPN on hand-built ASTs.
-    // ------------------------------------------------------------------
-    let g18 = Expr::Bin("*", Expr::Bin("+", Expr::Lit(2), Expr::Lit(3)), Expr::Neg(Expr::Lit(4)))
-    if to_rpn(g18) == "2 3 + 4 neg *" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: rpn_manual expected='2 3 + 4 neg *' got={to_rpn(g18)}") }
-
-    // ------------------------------------------------------------------
-    // Final verdict.
-    // ------------------------------------------------------------------
-    print(f"checks: pass={pass} fail={fail}")
-    if fail == 0 {
+    // ---- final tally --------------------------------------------------------
+    print(f"checks_run={st.count}")
+    if st.ok {
         print("ALL_CHECKS_PASSED")
     } else {
         print("SOME_CHECKS_FAILED")

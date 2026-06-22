@@ -14,6 +14,27 @@ Determinism strategy: pure (closures + HOFs); no I/O, no time, no randomness.
 | segfault-repro.shape | 24 | 0 | 0 | byte-identical (prints 25) | PASS (was FN-REG; FIXED at HEAD) |
 | named-args-repro.shape | 37 | 0 | 0 | byte-identical (24/24/24/24/15/25) | PASS (named arguments IMPLEMENTED — STAGE T4) |
 
+**Independent re-verification 2026-06-22 (this pass, fresh first-run truth).**
+All four programs re-run under both `--mode vm` and `--mode jit` at current HEAD.
+`small.shape` (99 LOC, 19 `check()` calls) and `large.shape` (635 LOC, 115
+`check_*` assertions) both print `ALL_CHECKS_PASSED`, ec=0, stdout byte-identical
+VM vs JIT (`cmp -s` confirmed). `segfault-repro.shape` prints `25` (ec=0, both
+modes). `named-args-repro.shape` prints `24/24/24/24/15/25` (both modes,
+byte-identical) — named arguments confirmed working. Independent named-arg
+probes re-run this pass: the book's own `sma` examples now compute correctly
+(`sma(period:20,threshold:0.05)`→`1.0`, `sma(threshold:0.02)`→`0.28` [default
+period=14], `sma(20,threshold:0.02)`→`0.4`); unknown-name → clean compile error
+`Function 'g' has no parameter named 'zzz'`; duplicate positional+named → clean
+compile error `Argument for parameter 'a' ... was supplied more than once`. The
+benign `[jit-fallback]` + V2-FrameDescriptor stderr warning still appears on the
+closure-in-`.map`/`.filter` surface; it does not affect stdout/ec/byte-identity.
+NEW finding this pass: because named arguments now WORK on the shipped binary,
+the book's §"Named Arguments" prose (which still presents them as a v0.4 preview
+that "does NOT type-check on v0.3.3", lines 203-225) is now STALE / under-claims
+the binary — recorded as a BOOK-GAP (book lags the implementation). Slice
+classification this pass: PASS (deliverables); BOOK-GAP (named-args section
+stale). No FN-REG defect reproduces.
+
 **STAGE T4 (2026-06-22) — named arguments IMPLEMENTED; the BOOK-WRONG (1)
 finding is RESOLVED.** Named-argument binding now binds each `name: value`
 call argument to the matching parameter by name (any order), combinable with
@@ -222,6 +243,17 @@ a documented limitation, fixed by following the book; recorded for transparency:
    x<lo{..}}` does not. The chapter gives no rule for when a returned closure's
    param is inferable (arithmetic/single-comparison body) vs not (`if`-over-param
    body). A reader cannot predict which closure-returning functions will compile.
+6. **(NEW 2026-06-22) §"Named Arguments" is STALE — under-claims the binary.**
+   The chapter (lines 203-225) presents named arguments as a v0.4 preview that
+   "does NOT type-check on v0.3.3" and shows the `sma(period:…, threshold:…)`
+   call as `runnable=false`. The shipped binary now IMPLEMENTS named arguments:
+   all-named, out-of-order-named, positional-then-named, and default-fill all
+   bind correctly and compute the right value (verified against the book's own
+   `sma` example → 1.0 / 0.28 / 0.4), with unknown-name and duplicate-name as
+   clean compile errors. The book should flip §"Named Arguments" from a v0.4
+   preview to a documented working feature (and make the `sma` call-shape block
+   `runnable=true`). Recorded as a book_gap because the book now LAGS the
+   implementation (the inverse of a book_wrong).
 5. **The V2 `FrameDescriptor` stderr warning is undocumented.** Any closure inside
    `.map`/`.filter`/user-HOF prints a scary "V2 bytecode verification failed"
    line to stderr while still producing correct output. The chapter (and the JIT
