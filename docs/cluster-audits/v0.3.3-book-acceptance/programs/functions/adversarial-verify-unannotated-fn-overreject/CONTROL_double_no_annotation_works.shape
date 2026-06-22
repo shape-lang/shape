@@ -1,0 +1,4 @@
+fn double(x) { x * 2 }
+let r = double(21)
+let s = r + 1
+print(s)
