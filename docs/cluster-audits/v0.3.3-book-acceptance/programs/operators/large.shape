@@ -25,9 +25,11 @@
 // AND the user-type operator-overloading families Add/Sub/Mul/Neg/Eq/Ord/
 // BitAnd (SECTION S below).
 //
-// The ONE genuine slice defect: object-literal merge `+` (book 481-489) is
-// HIJACKED into a user `impl Add` when an in-scope user type structurally
-// matches the left literal's field set. Exercised + documented in SECTION T.
+// Object-literal merge `+` (book 481-489) is exercised in SECTION T including
+// the colliding-key case where an in-scope `impl Add for Vec2 {x,y}` could in
+// principle hijack `{x,y} + {...}`. VERIFIED at HEAD: the untyped object
+// literal field-MERGES per the book (right wins on conflict) and is NOT routed
+// through the user `impl Add` — no defect at HEAD.
 // ============================================================================
 
 // ----------------------------------------------------------------------------
@@ -264,13 +266,13 @@ fn check_eq_str(got: string, expected: string, label: string, fails: Array<int>)
 // ----------------------------------------------------------------------------
 // User-type operator-overloading declarations (SECTION S, book 67-303).
 //
-// ORDERING NOTE (FN-REG-CORRECTNESS defect, see REPORT.md): these declarations
-// MUST appear BEFORE `fn main`. When `main` (which uses both a built-in
-// `int & int` / `int - int` / `int * int` AND a user `Flags & Flags` /
-// `Vec2 - Vec2` / `Vec2 * Vec2`) is declared *before* these impls, the type
-// solver fails with "Flags is not compatible with int" / "Vec2 is not
-// compatible with number". Shape is documented as two-pass (register then
-// compile), so declaration order should not matter — this is a defect.
+// ORDERING NOTE: these `type` declarations appear BEFORE `fn main` because a
+// `Vec2 { ... }` struct literal used inside a function declared before the
+// `type Vec2` definition fails type resolution ("Unknown struct type 'Vec2'").
+// This is a struct-type-resolution ordering sensitivity (a known constraint,
+// orthogonal to the operators slice); it is NOT a defect in operator dispatch.
+// With the types declared first (the form used here) every overloaded operator
+// resolves correctly on VM+JIT.
 // ----------------------------------------------------------------------------
 type Vec2 { x: int, y: int }
 impl Add for Vec2 {
@@ -746,15 +748,18 @@ fn main() {
   let sneg = -sa
   check_eq_int(sneg.x, 0 - 1, "S.neg_x", fails)
   check_eq_int(sneg.y, 0 - 2, "S.neg_y", fails)
-  // NOTE: the book (lines 52-65) claims `x += y` / `x = x + y` desugars to the
-  // user `Add` impl, i.e. reassigning a `mut Vec2` via overloaded `+` should
-  // work. At HEAD it does NOT compile ("Vec2 + Vec2 is not compatible with
-  // Vec2") — recorded as book_wrong / FN-REG-CORRECTNESS in REPORT.md. We
-  // instead chain via fresh immutable bindings (the form that DOES work).
-  let sacc1 = sa + sb
-  let sacc2 = sacc1 + sa
-  check_eq_int(sacc2.x, 12, "S.chain_x", fails)   // (1+10)+1 = 12
-  check_eq_int(sacc2.y, 24, "S.chain_y", fails)   // (2+20)+2 = 24
+  // The book (lines 52-65) says `x += y` / `x = x + y` desugars to the user
+  // `Add` impl, i.e. reassigning a `mut Vec2` via overloaded `+` works.
+  // VERIFIED at HEAD on VM+JIT: both the plain reassignment AND the compound
+  // `+=` form compile and run correctly (the book is correct here).
+  let mut sacc = sa + sb        // {11,22}
+  sacc = sacc + sa              // plain reassign via overloaded + -> {12,24}
+  check_eq_int(sacc.x, 12, "S.chain_x", fails)   // (1+10)+1 = 12
+  check_eq_int(sacc.y, 24, "S.chain_y", fails)   // (2+20)+2 = 24
+  let mut scomp = sa + sb       // {11,22}
+  scomp += sa                   // compound-assign desugars to user Add -> {12,24}
+  check_eq_int(scomp.x, 12, "S.compound_add_x", fails)
+  check_eq_int(scomp.y, 24, "S.compound_add_y", fails)
   // Eq on Vec2 (book Eq half): == returns the user method result; != negates.
   let se1 = Vec2 { x: 5, y: 5 }
   let se2 = Vec2 { x: 5, y: 5 }

@@ -46,21 +46,30 @@
 // SECTION 0 — assertion + small numeric helpers.
 // =====================================================================
 
+// Module-scope failure counter so the pass banner can be gated on zero
+// failures (the self-check contract: print ALL_CHECKS_PASSED iff every check
+// holds). `let mut` at module scope + rebind is the book-documented mutable
+// binding form.
+let mut failures = 0
+
 fn check_int(name: string, got: int, expected: int) {
     if got != expected {
         print("CHECK_FAILED: " + name + " expected=" + expected.toString() + " got=" + got.toString())
+        failures = failures + 1
     }
 }
 
 fn check_bool(name: string, got: bool, expected: bool) {
     if got != expected {
         print("CHECK_FAILED: " + name + " expected=" + expected.toString() + " got=" + got.toString())
+        failures = failures + 1
     }
 }
 
 fn check_str(name: string, got: string, expected: string) {
     if got != expected {
         print("CHECK_FAILED: " + name + " expected=" + expected + " got=" + got)
+        failures = failures + 1
     }
 }
 
@@ -940,9 +949,9 @@ fn section_invariants() {
 
 // =====================================================================
 // DRIVER — top-level (script mode runs top-level statements; fn main is NOT
-// auto-invoked). Each section prints CHECK_FAILED on any mismatch; the pass
-// banner prints unconditionally at the end, so a clean run shows ONLY the
-// banner and a failing run shows the failures ABOVE the banner.
+// auto-invoked). Each section prints CHECK_FAILED on any mismatch and bumps the
+// module-scope `failures` counter; the pass banner prints ONLY when
+// failures == 0 (self-check contract honored).
 // =====================================================================
 
 section_basics()
@@ -962,4 +971,8 @@ section_sort()
 section_numeric_utils()
 section_invariants()
 
-print("ALL_CHECKS_PASSED")
+if failures == 0 {
+    print("ALL_CHECKS_PASSED")
+} else {
+    print("RUN_HAD_FAILURES: " + failures.toString())
+}

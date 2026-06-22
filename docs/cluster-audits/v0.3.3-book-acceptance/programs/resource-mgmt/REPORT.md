@@ -1,5 +1,28 @@
 # Book-Acceptance Report — slice: resource-mgmt
 
+## RE-VALIDATION 2026-06-22 (current HEAD)
+Re-ran both deliverables + both finding probes at HEAD:
+- small.shape: VM ec=0 ALL_CHECKS_PASSED, JIT ec=0 ALL_CHECKS_PASSED, stdout BYTE-IDENTICAL.
+- large.shape (980 LOC): VM ec=0 ALL_CHECKS_PASSED, JIT ec=0 ALL_CHECKS_PASSED, stdout BYTE-IDENTICAL.
+- finding_question_mark_drop: NOW PASSES — SUCCESS_PATH_DROP_OK + ERROR_PATH_DROP_OK
+  both fire. The previously-recorded `?`-short-circuit drop ELISION no longer
+  reproduces; error-propagation drops correctly at HEAD.
+- finding_double_drop: each escaping value dropped EXACTLY ONCE (id=7 once, id=8 once);
+  no double-drop. ADR-006 §2.7.30 escape-defers-drop holds.
+- D1 (break + f-string-in-both-branches hang): could NOT reproduce at HEAD with the
+  documented shape (`emit(f"break:{i}")` in break branch + `emit(f"keep:{i}")` in
+  fall-through + post-loop stmt) — ran ec=0, break-triggered drop correct. The
+  "V2 typed opcode ... has no FrameDescriptor" line is a stderr-only verification
+  warning; program completes correctly. D1 appears resolved or was narrower than recorded.
+
+Net slice classification: PASS. Documented Drop/RAII semantics (reverse order,
+block-scoped release, drop-in-loops continue+break, early-return drop-all,
+nested-scope value escape, conditional drop bodies, escape-defers-drop) all verified
+TRUE. JIT preserves VM semantics via the documented Drop-bearing [jit-fallback]
+(stderr-only diagnostic; stdout byte-identical).
+
+---
+
 Book source (PRIMARY): fundamentals/resource-management.mdx
 Worktree: shape-strict-flip-collection-dispatch (v0.3.3 cumulative strict-flip)
 Binary: target/release/shape (HEAD, prebuilt)

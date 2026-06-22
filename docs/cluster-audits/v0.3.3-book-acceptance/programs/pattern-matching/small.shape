@@ -1,11 +1,20 @@
-// Pattern Matching -- small program
+// small.shape — pattern-matching core, book-driven.
 // Book: fundamentals/pattern-matching.mdx
-// Exercises: literal/guard matching, type-based matching (union), enum matching,
-// constructor patterns (Some/None, Ok/Err), match-as-expression.
+// Exercises: match-as-expression, literal/where guards, type-based matching (union),
+// enum matching (tuple + struct + unit payloads), constructor patterns (Some/None/Ok/Err),
+// nested constructor patterns, wildcard. Every feature is taught by the chapter
+// or is a direct composition of taught features (nested constructors / enum-struct payloads).
 
-enum Status {
-  Ok(int),
-  Error(string)
+enum Token {
+  Num(int),
+  Op(string),
+  End
+}
+
+// enum with struct-payload variant (composition of "Enum Matching")
+enum Shape2 {
+  Circle { radius: int },
+  Rect { w: int, h: int }
 }
 
 let mut failures: int = 0
@@ -33,19 +42,37 @@ fn normalize(value: int | string) -> string {
   }
 }
 
-// Enum Matching with payloads (book "Enum Matching")
-fn render(status: Status) -> string {
-  match status {
-    Status::Ok(code) => f"ok({code})"
-    Status::Error(msg) => f"error({msg})"
+// Enum Matching with tuple/unit payloads (book "Enum Matching")
+fn show(t: Token) -> string {
+  match t {
+    Token::Num(n) => f"num({n})"
+    Token::Op(o) => f"op({o})"
+    Token::End => "end"
   }
 }
 
-// Constructor patterns: Some/None (book "Constructor Patterns")
+// Enum struct-payload variant matching
+fn area(s: Shape2) -> int {
+  match s {
+    Shape2::Circle { radius } => radius * radius * 3
+    Shape2::Rect { w, h } => w * h
+  }
+}
+
+// Constructor patterns: Some/None, with a nested constructor pattern (book "Constructor Patterns")
 fn unwrap_or(opt: Option<int>, default: int) -> int {
   match opt {
     Some(v) => v
     None => default
+  }
+}
+
+fn classify_opt(o: Option<Token>) -> string {
+  match o {
+    Some(Token::Num(n)) => f"some-num-{n}"
+    Some(Token::Op(_)) => "some-op"
+    Some(Token::End) => "some-end"
+    None => "none"
   }
 }
 
@@ -57,7 +84,7 @@ fn describe(result: Result<string>) -> string {
   }
 }
 
-// Match Is an Expression -- assign the result (book "Match Is an Expression")
+// Match Is an Expression — assign the result (book "Match Is an Expression")
 fn bucket(n: int) -> int {
   match n {
     x: int where x < 10 => 0
@@ -73,11 +100,20 @@ check("sign pos", sign(5) == "positive")
 check("norm int", normalize(42) == "int:42")
 check("norm str", normalize("hi") == "str:hi")
 
-check("render ok", render(Status::Ok(200)) == "ok(200)")
-check("render err", render(Status::Error("bad")) == "error(bad)")
+check("show num", show(Token::Num(42)) == "num(42)")
+check("show op", show(Token::Op("+")) == "op(+)")
+check("show end", show(Token::End) == "end")
+
+check("area circle", area(Shape2::Circle { radius: 2 }) == 12)
+check("area rect", area(Shape2::Rect { w: 3, h: 4 }) == 12)
 
 check("unwrap some", unwrap_or(Some(7), 0) == 7)
 check("unwrap none", unwrap_or(None, 99) == 99)
+
+check("nested some-num", classify_opt(Some(Token::Num(9))) == "some-num-9")
+check("nested some-op", classify_opt(Some(Token::Op("*"))) == "some-op")
+check("nested some-end", classify_opt(Some(Token::End)) == "some-end")
+check("nested none", classify_opt(None) == "none")
 
 check("desc ok", describe(Ok("yes")) == "success: yes")
 check("desc err", describe(Err("no")) == "failed: no")

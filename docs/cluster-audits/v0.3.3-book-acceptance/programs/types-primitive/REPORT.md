@@ -5,6 +5,12 @@ Chapters (book-PRIMARY): fundamentals/builtin-types.mdx, fundamentals/integer-ty
 Determinism: pure (no time/random/network; the LCG section is seeded integer-only).
 All runs memory-capped (ulimit -v 12 GiB) + timeout 30s.
 
+RE-VERIFICATION 2026-06-22: small.shape + large.shape re-run at current HEAD under
+both VM and JIT — both EC=0, both print ALL_CHECKS_PASSED, stdout BYTE-IDENTICAL
+across modes (large: `checks_run=121\nALL_CHECKS_PASSED`). LCG s1/s2, Frame-A
+timestamp bytes + checksum independently re-derived (awk bitwise) and confirmed.
+D3 re-checked and found RESOLVED (see Section). Slice verdict: PASS.
+
 ## Programs
 
 ### small.shape (84 LOC)
@@ -64,9 +70,13 @@ first run — never back-filled from program output. The asserted values encode 
 semantics, not observed behavior.
 
 ## Author-errors fixed during development (a real user would hit + fix these)
-- `assert(...)` is NOT a prelude builtin (RUNTIME: Undefined function: assert).
+- `assert(...)` is NOT a *prelude* builtin (bare `assert` -> Undefined function).
   Switched to a `check_int/check_bool` helper that prints CHECK_FAILED + counts
-  failures, reaching ALL_CHECKS_PASSED only on zero failures.
+  failures, reaching ALL_CHECKS_PASSED only on zero failures. [NOTE 2026-06-22:
+  `assert`/`assert_eq` ARE available via explicit import
+  `from std::core::utils::testing use { assert, assert_eq }` — verified working
+  at current HEAD (smoke.shape prints SMOKE_OK). So this is a discoverability
+  book_gap, not an absence; the helper approach is still valid and dependency-free.]
 - Top-level `let SCALE = 65536` is not visible inside top-level `fn` bodies
   (RUNTIME: Undefined variable: SCALE). Top-level functions do not capture module
   locals; inlined the literal. (Consistent, well-diagnosed; not a defect.)
@@ -93,14 +103,15 @@ D2. Function-local typed-array opcodes lack FrameDescriptor.
     verification warnings to stderr (result still correct under VM; this is what
     forces the JIT `[jit-fallback]`). (Outside slice: codegen.)
 
-D3. Function-returned Vec<int> bound to a module `let mut` then index-mutated hits an
-    unimplemented SURFACE stub (HARD error):
-      `Not implemented: SURFACE: SetModuleBindingIndex requires the W17-typed-carrier-
-       monomorphization replacement ... (ADR-006 §2.7.24 Q25.A). Key kind: Int64`
-    5-line repro:
+D3. [RE-VERIFIED 2026-06-22 at current HEAD — NOW RESOLVED]
+    Previously: function-returned Vec<int> bound to a module `let mut` then
+    index-mutated hit a HARD SURFACE stub (SetModuleBindingIndex, ADR-006
+    §2.7.24 Q25.A). Re-running the 5-line repro at this HEAD now SUCCEEDS:
       fn mk() -> Vec<int> { return [10,20,30] }
-      let mut a = mk(); a[1] = 99; print(a[1])   // -> Not implemented SURFACE
-    This is the known release-blocking W17 unfinished work. (Outside slice; recorded.)
+      let mut a = mk(); a[1] = 99; print(a[1])   // -> prints 99 (ec=0)
+    The only residual is the D2 FrameDescriptor verification warning on stderr
+    (correct result under VM). The W17 SURFACE stub has been retired since the
+    prior report. (Outside slice; recorded for accuracy.)
 
 ## book_gaps
 - builtin-types.mdx "Notes" states "`[]` literals infer as `Vec<T>`" but neither
@@ -109,8 +120,9 @@ D3. Function-returned Vec<int> bound to a module `let mut` then index-mutated hi
   a NESTED empty array `Vec<Vec<int>> = []` is currently rejected even WITH the
   annotation (D1). A reader following the Notes verbatim hits a SEMANTIC error.
 - Neither chapter teaches an assertion/test mechanism, so self-checking programs must
-  invent one (`assert` is not in the prelude). Minor — out of these chapters' scope —
-  but every machine-proofable program in this slice needs it.
+  either invent one or discover the import `from std::core::utils::testing use {
+  assert, assert_eq }` (verified working at HEAD, but undocumented in these chapters).
+  Minor — out of these chapters' scope — but every machine-proofable program needs it.
 - Neither chapter documents bitwise operators (&, |, ^, <<, >>) on `int`. The
   integer-types chapter leans entirely on `as` for the "bit-level" story; a reader
   doing real integer/protocol work (the natural application of width types, which the

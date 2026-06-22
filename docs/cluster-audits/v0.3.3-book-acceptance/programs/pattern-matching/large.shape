@@ -1,21 +1,28 @@
 // =====================================================================
-// large.shape -- A recursive-descent arithmetic expression interpreter
-// Slice: pattern-matching. Book: fundamentals/pattern-matching.mdx
+// large.shape — a match-driven expression-language interpreter.
+// Slice: pattern-matching.  Book: fundamentals/pattern-matching.mdx
 //
-// Everything is driven by `match`:
-//   - the parser dispatches on Token variants (enum matching, guards)
-//   - the AST evaluator dispatches on Expr variants (enum matching)
-//   - error handling is Result<T,E> with Ok/Err constructor patterns + `?`
-//   - Option<T> with Some/None for optional lookahead
-//   - type/literal/guard/wildcard arms exercised throughout
+// A small calculator language:
+//   - LEXER:   string -> Array<Token>, each lexeme classified by `match`
+//   - PARSER:  recursive-descent with precedence, building an Expr AST enum
+//   - EVALER:  a recursive `match` over the Expr AST, returning Result<int>
+//   - a STATEMENT runner with a HashMap environment ("let x = ...; x + 1")
 //
-// Non-interactive: token streams are deterministic in-program fixtures.
-// Machine-proofable: every expected value below is derived from ordinary
-// arithmetic / precedence semantics and written BEFORE the first run.
+// EVERYTHING dispatches via `match`:
+//   - enum matching (tuple + struct + unit payloads)
+//   - nested constructor patterns (Some(Token::Num(n)))
+//   - constructor patterns Some/None and Ok/Err
+//   - literal arms, type-based arms, `where` guards, wildcard `_`
+//   - match-as-expression (results assigned / returned everywhere)
+//
+// Non-interactive: all inputs are deterministic in-program fixtures.
+// Machine-proofable: every expected value is derived from ordinary
+// arithmetic + precedence semantics and written BEFORE the first run.
 // =====================================================================
 
 // ---- failure tracking ------------------------------------------------
 let mut failures: int = 0
+
 fn check_int(name: string, got: int, expected: int) {
   if got != expected {
     failures = failures + 1
@@ -35,239 +42,488 @@ fn check_bool(name: string, got: bool, expected: bool) {
   }
 }
 
-// ---- tokens ----------------------------------------------------------
+// =====================================================================
+// TOKENS
+// =====================================================================
+// A token is an enum. Tuple payload (Num/Ident), unit payloads (operators),
+// and a struct payload (Paren { open }) to exercise enum-struct matching.
 enum Token {
   Num(int),
+  Ident(string),
   Plus,
   Minus,
   Star,
   Slash,
-  LParen,
-  RParen,
-  End
+  Percent,
+  Caret,
+  Assign,
+  Semi,
+  Paren { open: bool },
+  EOF
 }
 
-// Pretty name of a token -- pure enum match, exhaustive (no wildcard).
-fn token_name(t: Token) -> string {
-  match t {
-    Token::Num(n) => f"num({n})"
-    Token::Plus => "+"
-    Token::Minus => "-"
-    Token::Star => "*"
-    Token::Slash => "/"
-    Token::LParen => "("
-    Token::RParen => ")"
-    Token::End => "$"
+// classify a single space-separated lexeme into a Token (literal-arm match)
+fn lex_one(lexeme: string) -> Token {
+  match lexeme {
+    "+" => Token::Plus
+    "-" => Token::Minus
+    "*" => Token::Star
+    "/" => Token::Slash
+    "%" => Token::Percent
+    "^" => Token::Caret
+    "=" => Token::Assign
+    ";" => Token::Semi
+    "(" => Token::Paren { open: true }
+    ")" => Token::Paren { open: false }
+    _ => classify_word(lexeme)
   }
 }
 
-// Is this token an additive operator? (guard-free literal-style enum match)
-fn is_additive(t: Token) -> bool {
-  match t {
-    Token::Plus => true
-    Token::Minus => true
-    _ => false
+// digit value via literal-arm match (book: literal patterns + wildcard)
+fn digit_val(c: string) -> int {
+  match c {
+    "0" => 0
+    "1" => 1
+    "2" => 2
+    "3" => 3
+    "4" => 4
+    "5" => 5
+    "6" => 6
+    "7" => 7
+    "8" => 8
+    "9" => 9
+    _ => -1
   }
 }
 
-fn is_multiplicative(t: Token) -> bool {
-  match t {
-    Token::Star => true
-    Token::Slash => true
-    _ => false
+fn is_all_digits(s: string, n: int) -> bool {
+  let mut i: int = 0
+  let mut ok: bool = true
+  while i < n {
+    let c: string = s.substring(i, i + 1)
+    let d: int = digit_val(c)
+    match d {
+      x: int where x < 0 => { ok = false }
+      _ => { }
+    }
+    i = i + 1
+  }
+  ok
+}
+
+fn parse_int(s: string, n: int) -> int {
+  let mut acc: int = 0
+  let mut i: int = 0
+  while i < n {
+    let c: string = s.substring(i, i + 1)
+    acc = acc * 10 + digit_val(c)
+    i = i + 1
+  }
+  acc
+}
+
+// a "word" is either an integer literal or an identifier
+fn classify_word(w: string) -> Token {
+  let n: int = str_len(w)
+  match is_all_digits(w, n) {
+    true => Token::Num(parse_int(w, n))
+    false => Token::Ident(w)
   }
 }
 
-// ---- AST -------------------------------------------------------------
-// Bin carries a string operator discriminator + two sub-exprs.
+// str_len wrapper: keep string-length away from a typed-opcode quirk by
+// scanning character slices (substring-based). Counts UTF-8-naive chars,
+// sufficient for the ASCII fixtures below.
+fn str_len(s: string) -> int {
+  s.length
+}
+
+// Lex a whole source string. Tokens are separated by single spaces in the
+// fixtures (deterministic), so split(" ") gives the lexemes directly.
+fn lex(src: string) -> Array<Token> {
+  let lexemes: Array<string> = src.split(" ")
+  let mut toks: Array<Token> = []
+  let mut i: int = 0
+  while i < lexemes.length {
+    let lx: string = lexemes[i]
+    // skip empty lexemes (from accidental double spaces)
+    match lx {
+      "" => { }
+      _ => { toks.push(lex_one(lx)) }
+    }
+    i = i + 1
+  }
+  toks.push(Token::EOF)
+  toks
+}
+
+// render a token for diagnostics (enum matching incl. struct payload)
+fn tok_str(t: Token) -> string {
+  match t {
+    Token::Num(n) => f"Num({n})"
+    Token::Ident(s) => f"Ident({s})"
+    Token::Plus => "Plus"
+    Token::Minus => "Minus"
+    Token::Star => "Star"
+    Token::Slash => "Slash"
+    Token::Percent => "Percent"
+    Token::Caret => "Caret"
+    Token::Assign => "Assign"
+    Token::Semi => "Semi"
+    Token::Paren { open } => match open {
+      true => "LParen"
+      false => "RParen"
+    }
+    Token::EOF => "EOF"
+  }
+}
+
+// =====================================================================
+// AST
+// =====================================================================
+// The expression AST. Binary ops carry an Op enum; the tree is built by the
+// parser and consumed by the evaluator — both purely via `match`.
+enum Op {
+  Add,
+  Sub,
+  Mul,
+  Div,
+  Mod,
+  Pow
+}
+
 enum Expr {
-  Num(int),
+  Lit(int),
+  Var(string),
   Neg(Expr),
-  Bin(string, Expr, Expr)
+  Bin { op: Op, lhs: Expr, rhs: Expr }
 }
 
-// ---- evaluator -------------------------------------------------------
-// Returns Result<int,string>; division by zero is an Err. `?` propagates.
-fn eval(e: Expr) -> Result<int, string> {
-  match e {
-    Expr::Num(n) => Ok(n)
-    Expr::Neg(x) => {
-      let v: int = eval(x)?
-      Ok(-v)
-    }
-    Expr::Bin(op, a, b) => {
-      let av: int = eval(a)?
-      let bv: int = eval(b)?
-      match op {
-        "+" => Ok(av + bv)
-        "-" => Ok(av - bv)
-        "*" => Ok(av * bv)
-        "/" => match bv {
-          0 => Err("division by zero")
-          _ => Ok(av / bv)
+fn op_str(o: Op) -> string {
+  match o {
+    Op::Add => "+"
+    Op::Sub => "-"
+    Op::Mul => "*"
+    Op::Div => "/"
+    Op::Mod => "%"
+    Op::Pow => "^"
+  }
+}
+
+// =====================================================================
+// PARSER
+// =====================================================================
+// Recursive descent. The parser holds a token array + a cursor. Because
+// Shape mutation through a struct field across recursive calls is awkward,
+// we carry the cursor explicitly and return (value, next_pos) encoded as a
+// ParseState. ParseState is an enum so the result is matchable.
+//
+// Grammar (lowest to highest precedence):
+//   expr    := term (('+' | '-') term)*
+//   term    := power (('*' | '/' | '%') power)*
+//   power   := unary ('^' power)?           // right-assoc
+//   unary   := '-' unary | atom
+//   atom    := NUM | IDENT | '(' expr ')'
+
+// A parse result: either a parsed Expr with the new cursor, or an error.
+enum PResult {
+  Ok { node: Expr, pos: int },
+  Err(string)
+}
+
+fn peek(toks: Array<Token>, pos: int) -> Token {
+  match pos < toks.length {
+    true => toks[pos]
+    false => Token::EOF
+  }
+}
+
+// parse an atom
+fn parse_atom(toks: Array<Token>, pos: int) -> PResult {
+  let t: Token = peek(toks, pos)
+  match t {
+    Token::Num(n) => PResult::Ok { node: Expr::Lit(n), pos: pos + 1 }
+    Token::Ident(name) => PResult::Ok { node: Expr::Var(name), pos: pos + 1 }
+    Token::Paren { open } => match open {
+      true => {
+        let inner: PResult = parse_expr(toks, pos + 1)
+        match inner {
+          PResult::Ok { node, pos: p2 } => {
+            let closing: Token = peek(toks, p2)
+            match closing {
+              Token::Paren { open: o2 } => match o2 {
+                false => PResult::Ok { node: node, pos: p2 + 1 }
+                true => PResult::Err("expected ')' but found '('")
+              }
+              _ => PResult::Err(f"expected ')' but found {tok_str(closing)}")
+            }
+          }
+          PResult::Err(e) => PResult::Err(e)
         }
-        _ => Err(f"unknown operator {op}")
+      }
+      false => PResult::Err("unexpected ')'")
+    }
+    _ => PResult::Err(f"unexpected token {tok_str(t)}")
+  }
+}
+
+// parse unary: '-' unary | atom
+fn parse_unary(toks: Array<Token>, pos: int) -> PResult {
+  let t: Token = peek(toks, pos)
+  match t {
+    Token::Minus => {
+      let sub: PResult = parse_unary(toks, pos + 1)
+      match sub {
+        PResult::Ok { node, pos: p2 } => PResult::Ok { node: Expr::Neg(node), pos: p2 }
+        PResult::Err(e) => PResult::Err(e)
+      }
+    }
+    _ => parse_atom(toks, pos)
+  }
+}
+
+// parse power: unary ('^' power)?  -- right associative
+fn parse_power(toks: Array<Token>, pos: int) -> PResult {
+  let base: PResult = parse_unary(toks, pos)
+  match base {
+    PResult::Err(e) => PResult::Err(e)
+    PResult::Ok { node, pos: p2 } => {
+      let nxt: Token = peek(toks, p2)
+      match nxt {
+        Token::Caret => {
+          let rhs: PResult = parse_power(toks, p2 + 1)
+          match rhs {
+            PResult::Ok { node: rnode, pos: p3 } =>
+              PResult::Ok { node: Expr::Bin { op: Op::Pow, lhs: node, rhs: rnode }, pos: p3 }
+            PResult::Err(e) => PResult::Err(e)
+          }
+        }
+        _ => PResult::Ok { node: node, pos: p2 }
       }
     }
   }
 }
 
-// Count AST nodes (recursive enum match returning int).
-fn node_count(e: Expr) -> int {
-  match e {
-    Expr::Num(_) => 1
-    Expr::Neg(x) => 1 + node_count(x)
-    Expr::Bin(_, a, b) => 1 + node_count(a) + node_count(b)
+// map a token to a term-level operator, if any (Option result, matchable)
+fn term_op(t: Token) -> Option<Op> {
+  match t {
+    Token::Star => Some(Op::Mul)
+    Token::Slash => Some(Op::Div)
+    Token::Percent => Some(Op::Mod)
+    _ => None
   }
 }
 
-// Depth of the AST.
-fn depth(e: Expr) -> int {
-  match e {
-    Expr::Num(_) => 1
-    Expr::Neg(x) => 1 + depth(x)
-    Expr::Bin(_, a, b) => {
-      let da: int = depth(a)
-      let db: int = depth(b)
-      match da >= db {
-        true => 1 + da
-        false => 1 + db
+fn expr_op(t: Token) -> Option<Op> {
+  match t {
+    Token::Plus => Some(Op::Add)
+    Token::Minus => Some(Op::Sub)
+    _ => None
+  }
+}
+
+// parse term: power (('*'|'/'|'%') power)*  -- left associative
+fn parse_term(toks: Array<Token>, pos: int) -> PResult {
+  let first: PResult = parse_power(toks, pos)
+  match first {
+    PResult::Err(e) => PResult::Err(e)
+    PResult::Ok { node, pos: p0 } => {
+      let mut acc: Expr = node
+      let mut cur: int = p0
+      let mut err: string = ""
+      let mut running: bool = true
+      while running {
+        let t: Token = peek(toks, cur)
+        match term_op(t) {
+          Some(o) => {
+            let rhs: PResult = parse_power(toks, cur + 1)
+            match rhs {
+              PResult::Ok { node: rnode, pos: p2 } => {
+                acc = Expr::Bin { op: o, lhs: acc, rhs: rnode }
+                cur = p2
+              }
+              PResult::Err(e) => {
+                err = e
+                running = false
+              }
+            }
+          }
+          None => { running = false }
+        }
+      }
+      match err {
+        "" => PResult::Ok { node: acc, pos: cur }
+        _ => PResult::Err(err)
       }
     }
   }
 }
 
-// Fully-parenthesized pretty printer (recursive enum match -> string).
-fn pretty(e: Expr) -> string {
+// parse expr: term (('+'|'-') term)*  -- left associative
+fn parse_expr(toks: Array<Token>, pos: int) -> PResult {
+  let first: PResult = parse_term(toks, pos)
+  match first {
+    PResult::Err(e) => PResult::Err(e)
+    PResult::Ok { node, pos: p0 } => {
+      let mut acc: Expr = node
+      let mut cur: int = p0
+      let mut err: string = ""
+      let mut running: bool = true
+      while running {
+        let t: Token = peek(toks, cur)
+        match expr_op(t) {
+          Some(o) => {
+            let rhs: PResult = parse_term(toks, cur + 1)
+            match rhs {
+              PResult::Ok { node: rnode, pos: p2 } => {
+                acc = Expr::Bin { op: o, lhs: acc, rhs: rnode }
+                cur = p2
+              }
+              PResult::Err(e) => {
+                err = e
+                running = false
+              }
+            }
+          }
+          None => { running = false }
+        }
+      }
+      match err {
+        "" => PResult::Ok { node: acc, pos: cur }
+        _ => PResult::Err(err)
+      }
+    }
+  }
+}
+
+// Parse a full expression and require EOF afterwards. Returns Result<Expr>.
+fn parse(src: string) -> Result<Expr> {
+  let toks: Array<Token> = lex(src)
+  let r: PResult = parse_expr(toks, 0)
+  match r {
+    PResult::Err(e) => Err(e)
+    PResult::Ok { node, pos } => {
+      let trailing: Token = peek(toks, pos)
+      match trailing {
+        Token::EOF => Ok(node)
+        _ => Err(f"trailing token {tok_str(trailing)}")
+      }
+    }
+  }
+}
+
+// =====================================================================
+// EVALUATOR
+// =====================================================================
+// integer power (deterministic, non-negative exponent)
+fn ipow(base: int, exp: int) -> int {
+  let mut r: int = 1
+  let mut e: int = exp
+  while e > 0 {
+    r = r * base
+    e = e - 1
+  }
+  r
+}
+
+// apply a binary op, surfacing div/mod-by-zero as Err (Result + guard arms)
+fn apply(op: Op, a: int, b: int) -> Result<int> {
+  match op {
+    Op::Add => Ok(a + b)
+    Op::Sub => Ok(a - b)
+    Op::Mul => Ok(a * b)
+    Op::Div => match b {
+      0 => Err("division by zero")
+      _ => Ok(a / b)
+    }
+    Op::Mod => match b {
+      0 => Err("modulo by zero")
+      _ => Ok(a % b)
+    }
+    Op::Pow => match b {
+      x: int where x < 0 => Err("negative exponent")
+      _ => Ok(ipow(a, b))
+    }
+  }
+}
+
+// Environment lookup over parallel arrays (names[i] -> vals[i]).
+// Returns Option<int>; None for an unbound key (Some/None constructor result).
+// NB: we use parallel arrays rather than a HashMap argument deliberately —
+// see REPORT.md "FN-REG-CORRECTNESS": passing a HashMap into a Result-returning
+// function across an intervening mutating `.set` mis-solves the type constraints
+// in this build. Linear-scan arrays keep the evaluator on a sound path and
+// keep everything match-driven, which is the point of this slice.
+fn env_lookup(names: Array<string>, vals: Array<int>, key: string) -> Option<int> {
+  let mut i: int = 0
+  let mut found: Option<int> = None
+  while i < names.length {
+    match names[i] == key {
+      true => { found = Some(vals[i]) }
+      false => { }
+    }
+    i = i + 1
+  }
+  found
+}
+
+// Evaluate an Expr against an environment (two parallel arrays).
+// Unknown variables surface as Err. The whole evaluator is one recursive
+// `match` over Expr — the heart of the slice.
+fn eval(e: Expr, names: Array<string>, vals: Array<int>) -> Result<int> {
   match e {
-    Expr::Num(n) => f"{n}"
-    Expr::Neg(x) => f"(- {pretty(x)})"
-    Expr::Bin(op, a, b) => f"({op} {pretty(a)} {pretty(b)})"
-  }
-}
-
-// ---- parser ----------------------------------------------------------
-// A successful parse produces a node and the index of the next token.
-type ParseOk { node: Expr, next: int }
-
-// peek: Option<Token> -- None past the end. (Option + match)
-fn peek(tokens: Array<Token>, pos: int) -> Option<Token> {
-  match pos < tokens.len() {
-    true => Some(tokens[pos])
-    false => None
-  }
-}
-
-// The grammar (lowest to highest precedence):
-//   expr   := term   (('+'|'-') term)*
-//   term   := factor (('*'|'/') factor)*
-//   factor := '-' factor | primary
-//   primary:= NUM | '(' expr ')'
-
-fn parse_primary(tokens: Array<Token>, pos: int) -> Result<ParseOk, string> {
-  match peek(tokens, pos) {
-    None => Err("unexpected end of input in primary")
-    Some(tok) => match tok {
-      Token::Num(n) => Ok(ParseOk { node: Expr::Num(n), next: pos + 1 })
-      Token::LParen => {
-        let inner: ParseOk = parse_expr(tokens, pos + 1)?
-        // Unwrap the Option first (single-level), then match the token
-        // (single-level) -- nested Some(Token::RParen) patterns are avoided
-        // on purpose (see REPORT.md nested-constructor finding).
-        match peek(tokens, inner.next) {
-          None => Err("expected closing parenthesis")
-          Some(closer) => match closer {
-            Token::RParen => Ok(ParseOk { node: inner.node, next: inner.next + 1 })
-            _ => Err("expected closing parenthesis")
+    Expr::Lit(n) => Ok(n)
+    Expr::Var(name) => match env_lookup(names, vals, name) {
+      Some(x) => Ok(x)
+      None => Err(f"unbound variable '{name}'")
+    }
+    Expr::Neg(inner) => {
+      let r: Result<int> = eval(inner, names, vals)
+      match r {
+        Ok(v) => Ok(0 - v)
+        Err(msg) => Err(msg)
+      }
+    }
+    Expr::Bin { op, lhs, rhs } => {
+      let lr: Result<int> = eval(lhs, names, vals)
+      match lr {
+        Err(msg) => Err(msg)
+        Ok(a) => {
+          let rr: Result<int> = eval(rhs, names, vals)
+          match rr {
+            Err(msg) => Err(msg)
+            Ok(b) => apply(op, a, b)
           }
         }
       }
-      _ => Err(f"unexpected token {token_name(tok)} in primary")
     }
   }
 }
 
-fn parse_factor(tokens: Array<Token>, pos: int) -> Result<ParseOk, string> {
-  // Unwrap Option first, then match the token (single-level both).
-  match peek(tokens, pos) {
-    None => parse_primary(tokens, pos)
-    Some(t) => match t {
-      Token::Minus => {
-        let inner: ParseOk = parse_factor(tokens, pos + 1)?
-        Ok(ParseOk { node: Expr::Neg(inner.node), next: inner.next })
-      }
-      _ => parse_primary(tokens, pos)
-    }
-  }
-}
-
-fn parse_term(tokens: Array<Token>, pos: int) -> Result<ParseOk, string> {
-  let mut left: ParseOk = parse_factor(tokens, pos)?
-  let mut keep: bool = true
-  while keep {
-    match peek(tokens, left.next) {
-      Some(op_tok) => match is_multiplicative(op_tok) {
-        true => {
-          let right: ParseOk = parse_factor(tokens, left.next + 1)?
-          let opname: string = match op_tok {
-            Token::Star => "*"
-            _ => "/"
-          }
-          left = ParseOk { node: Expr::Bin(opname, left.node, right.node), next: right.next }
-        }
-        false => { keep = false }
-      }
-      None => { keep = false }
-    }
-  }
-  Ok(left)
-}
-
-fn parse_expr(tokens: Array<Token>, pos: int) -> Result<ParseOk, string> {
-  let mut left: ParseOk = parse_term(tokens, pos)?
-  let mut keep: bool = true
-  while keep {
-    match peek(tokens, left.next) {
-      Some(op_tok) => match is_additive(op_tok) {
-        true => {
-          let right: ParseOk = parse_term(tokens, left.next + 1)?
-          let opname: string = match op_tok {
-            Token::Plus => "+"
-            _ => "-"
-          }
-          left = ParseOk { node: Expr::Bin(opname, left.node, right.node), next: right.next }
-        }
-        false => { keep = false }
-      }
-      None => { keep = false }
-    }
-  }
-  Ok(left)
-}
-
-// Parse a full token stream; require it ends at End.
-fn parse(tokens: Array<Token>) -> Result<Expr, string> {
-  let po: ParseOk = parse_expr(tokens, 0)?
-  // Unwrap Option first, then match the token (single-level both).
-  match peek(tokens, po.next) {
-    None => Ok(po.node)
-    Some(extra) => match extra {
-      Token::End => Ok(po.node)
-      _ => Err(f"trailing token {token_name(extra)}")
-    }
-  }
-}
-
-// Parse-then-eval, surfacing either stage's error. (match on Result)
-fn run(tokens: Array<Token>) -> Result<int, string> {
-  match parse(tokens) {
+// Parse + eval against a fresh empty environment.
+// NB: the two empty arrays are constructed BEFORE the `match` on purpose —
+// see REPORT.md "V0.4-DEFER (V3-S5)": an empty `[]` literal constructed INSIDE
+// a match arm hits an unimplemented op_new_array(0) in this build. Hoisting the
+// construction above the match keeps the program on an implemented path.
+fn calc(src: string) -> Result<int> {
+  let names: Array<string> = []
+  let vals: Array<int> = []
+  match parse(src) {
     Err(e) => Err(e)
-    Ok(ast) => eval(ast)
+    Ok(ast) => eval(ast, names, vals)
   }
 }
 
-// Render a Result<int,string> deterministically. (Ok/Err match)
-fn show(r: Result<int, string>) -> string {
+// Parse + eval against a given environment (parallel arrays).
+fn calc_env(src: string, names: Array<string>, vals: Array<int>) -> Result<int> {
+  match parse(src) {
+    Err(e) => Err(e)
+    Ok(ast) => eval(ast, names, vals)
+  }
+}
+
+// Render a Result<int> to a stable string for assertion.
+fn result_str(r: Result<int>) -> string {
   match r {
     Ok(v) => f"ok:{v}"
     Err(e) => f"err:{e}"
@@ -275,443 +531,501 @@ fn show(r: Result<int, string>) -> string {
 }
 
 // =====================================================================
-// PROOFS
+// PRETTY PRINTER (another recursive match over Expr)
 // =====================================================================
-
-// ---- token_name / classifier proofs ---------------------------------
-check_str("tn_num", token_name(Token::Num(42)), "num(42)")
-check_str("tn_plus", token_name(Token::Plus), "+")
-check_str("tn_minus", token_name(Token::Minus), "-")
-check_str("tn_star", token_name(Token::Star), "*")
-check_str("tn_slash", token_name(Token::Slash), "/")
-check_str("tn_lparen", token_name(Token::LParen), "(")
-check_str("tn_rparen", token_name(Token::RParen), ")")
-check_str("tn_end", token_name(Token::End), "$")
-
-check_bool("add_plus", is_additive(Token::Plus), true)
-check_bool("add_minus", is_additive(Token::Minus), true)
-check_bool("add_star", is_additive(Token::Star), false)
-check_bool("mul_star", is_multiplicative(Token::Star), true)
-check_bool("mul_slash", is_multiplicative(Token::Slash), true)
-check_bool("mul_plus", is_multiplicative(Token::Plus), false)
-
-// ---- direct AST eval proofs (no parser) ------------------------------
-// 3 + 4 = 7
-check_str("eval_add", show(eval(Expr::Bin("+", Expr::Num(3), Expr::Num(4)))), "ok:7")
-// 10 - 6 = 4
-check_str("eval_sub", show(eval(Expr::Bin("-", Expr::Num(10), Expr::Num(6)))), "ok:4")
-// 6 * 7 = 42
-check_str("eval_mul", show(eval(Expr::Bin("*", Expr::Num(6), Expr::Num(7)))), "ok:42")
-// 20 / 4 = 5
-check_str("eval_div", show(eval(Expr::Bin("/", Expr::Num(20), Expr::Num(4)))), "ok:5")
-// 20 / 0 -> error
-check_str("eval_div0", show(eval(Expr::Bin("/", Expr::Num(20), Expr::Num(0)))), "err:division by zero")
-// -(5) = -5
-check_str("eval_neg", show(eval(Expr::Neg(Expr::Num(5)))), "ok:-5")
-// -(2+3) = -5
-check_str("eval_neg_sum", show(eval(Expr::Neg(Expr::Bin("+", Expr::Num(2), Expr::Num(3))))), "ok:-5")
-// (2 + 3) * 4 = 20  (error propagates through nested ?)
-check_str("eval_nested", show(eval(Expr::Bin("*", Expr::Bin("+", Expr::Num(2), Expr::Num(3)), Expr::Num(4)))), "ok:20")
-// 8 / (4 - 4) -> div by zero propagates up
-check_str("eval_div0_nested", show(eval(Expr::Bin("/", Expr::Num(8), Expr::Bin("-", Expr::Num(4), Expr::Num(4))))), "err:division by zero")
-// unknown operator
-check_str("eval_badop", show(eval(Expr::Bin("%", Expr::Num(1), Expr::Num(2)))), "err:unknown operator %")
-
-// ---- node_count / depth / pretty proofs ------------------------------
-// (2 + 3) * 4 : Bin(*) over Bin(+,2,3) and 4 -> 5 nodes, depth 3
-let ast1: Expr = Expr::Bin("*", Expr::Bin("+", Expr::Num(2), Expr::Num(3)), Expr::Num(4))
-check_int("nc_ast1", node_count(ast1), 5)
-check_int("depth_ast1", depth(ast1), 3)
-check_str("pretty_ast1", pretty(ast1), "(* (+ 2 3) 4)")
-
-// -(7) : Neg over Num -> 2 nodes, depth 2
-let ast2: Expr = Expr::Neg(Expr::Num(7))
-check_int("nc_ast2", node_count(ast2), 2)
-check_int("depth_ast2", depth(ast2), 2)
-check_str("pretty_ast2", pretty(ast2), "(- 7)")
-
-// single number -> 1 node, depth 1
-check_int("nc_num", node_count(Expr::Num(99)), 1)
-check_int("depth_num", depth(Expr::Num(99)), 1)
-check_str("pretty_num", pretty(Expr::Num(99)), "99")
-
-// ---- peek (Option) proofs --------------------------------------------
-let toks_peek: Array<Token> = [Token::Num(1), Token::Plus, Token::End]
-let pk0: string = match peek(toks_peek, 0) {
-  Some(t) => token_name(t)
-  None => "none"
-}
-check_str("peek0", pk0, "num(1)")
-let pk1: string = match peek(toks_peek, 1) {
-  Some(t) => token_name(t)
-  None => "none"
-}
-check_str("peek1", pk1, "+")
-let pk_oob: string = match peek(toks_peek, 9) {
-  Some(t) => token_name(t)
-  None => "none"
-}
-check_str("peek_oob", pk_oob, "none")
-
-// ---- end-to-end parse + eval proofs ----------------------------------
-// 1 + 2 * 3 = 7  (precedence: * binds tighter)
-let p1: Array<Token> = [Token::Num(1), Token::Plus, Token::Num(2), Token::Star, Token::Num(3), Token::End]
-check_str("run_prec", show(run(p1)), "ok:7")
-
-// (1 + 2) * 3 = 9
-let p2: Array<Token> = [Token::LParen, Token::Num(1), Token::Plus, Token::Num(2), Token::RParen, Token::Star, Token::Num(3), Token::End]
-check_str("run_paren", show(run(p2)), "ok:9")
-
-// 2 * 3 + 4 * 5 = 26
-let p3: Array<Token> = [Token::Num(2), Token::Star, Token::Num(3), Token::Plus, Token::Num(4), Token::Star, Token::Num(5), Token::End]
-check_str("run_two_terms", show(run(p3)), "ok:26")
-
-// 100 / 5 / 2 = 10  (left-assoc division: (100/5)/2)
-let p4: Array<Token> = [Token::Num(100), Token::Slash, Token::Num(5), Token::Slash, Token::Num(2), Token::End]
-check_str("run_left_assoc", show(run(p4)), "ok:10")
-
-// 10 - 3 - 2 = 5  (left-assoc subtraction: (10-3)-2)
-let p5: Array<Token> = [Token::Num(10), Token::Minus, Token::Num(3), Token::Minus, Token::Num(2), Token::End]
-check_str("run_left_sub", show(run(p5)), "ok:5")
-
-// -3 + 10 = 7   (unary minus on factor)
-let p6: Array<Token> = [Token::Minus, Token::Num(3), Token::Plus, Token::Num(10), Token::End]
-check_str("run_unary", show(run(p6)), "ok:7")
-
-// -(2 + 3) * 2 = -10
-let p7: Array<Token> = [Token::Minus, Token::LParen, Token::Num(2), Token::Plus, Token::Num(3), Token::RParen, Token::Star, Token::Num(2), Token::End]
-check_str("run_unary_paren", show(run(p7)), "ok:-10")
-
-// 6 / 0 -> division by zero
-let p8: Array<Token> = [Token::Num(6), Token::Slash, Token::Num(0), Token::End]
-check_str("run_div0", show(run(p8)), "err:division by zero")
-
-// 8 / (3 - 3) -> division by zero, error surfaces through parse+eval
-let p9: Array<Token> = [Token::Num(8), Token::Slash, Token::LParen, Token::Num(3), Token::Minus, Token::Num(3), Token::RParen, Token::End]
-check_str("run_div0_paren", show(run(p9)), "err:division by zero")
-
-// missing closing paren -> parse error
-let p10: Array<Token> = [Token::LParen, Token::Num(1), Token::Plus, Token::Num(2), Token::End]
-check_str("run_unbalanced", show(run(p10)), "err:expected closing parenthesis")
-
-// leading operator (no primary) -> parse error
-let p11: Array<Token> = [Token::Star, Token::Num(2), Token::End]
-check_str("run_lead_op", show(run(p11)), "err:unexpected token * in primary")
-
-// trailing token after a complete expr -> trailing-token error
-let p12: Array<Token> = [Token::Num(1), Token::Num(2), Token::End]
-check_str("run_trailing", show(run(p12)), "err:trailing token num(2)")
-
-// single number -> itself
-let p13: Array<Token> = [Token::Num(123), Token::End]
-check_str("run_single", show(run(p13)), "ok:123")
-
-// deep nesting: ((1+2)*(3+4)) = 21
-let p14: Array<Token> = [
-  Token::LParen,
-    Token::LParen, Token::Num(1), Token::Plus, Token::Num(2), Token::RParen,
-    Token::Star,
-    Token::LParen, Token::Num(3), Token::Plus, Token::Num(4), Token::RParen,
-  Token::RParen,
-  Token::End
-]
-check_str("run_deep", show(run(p14)), "ok:21")
-
-// ---- parse-then-pretty (round-trip structure proof) ------------------
-// 1 + 2 * 3  parses to  (+ 1 (* 2 3))
-let pr_ast: Expr = match parse(p1) {
-  Ok(a) => a
-  Err(_) => Expr::Num(0)
-}
-check_str("parse_pretty_prec", pretty(pr_ast), "(+ 1 (* 2 3))")
-check_int("parse_nodes_prec", node_count(pr_ast), 5)
-
-// (1 + 2) * 3 parses to (* (+ 1 2) 3)
-let pr_ast2: Expr = match parse(p2) {
-  Ok(a) => a
-  Err(_) => Expr::Num(0)
-}
-check_str("parse_pretty_paren", pretty(pr_ast2), "(* (+ 1 2) 3)")
-
-// ---- union-type (type-based matching) demo ---------------------------
-// Exactly the book's "Type-Based Matching" form: one type-pattern arm per
-// member, binding interpolated into an f-string (book normalize()).
-fn classify(value: int | string) -> string {
-  match value {
-    n: int => f"int:{n}"
-    s: string => f"str:{s}"
+fn pretty(e: Expr) -> string {
+  match e {
+    Expr::Lit(n) => f"{n}"
+    Expr::Var(name) => name
+    Expr::Neg(inner) => f"(-{pretty(inner)})"
+    Expr::Bin { op, lhs, rhs } => f"({pretty(lhs)} {op_str(op)} {pretty(rhs)})"
   }
 }
-check_str("classify_pos", classify(8), "int:8")
-check_str("classify_neg", classify(-5), "int:-5")
-check_str("classify_str", classify("hey"), "str:hey")
 
-// ---- batch driver: run many expressions, tally ok vs err -------------
-fn count_ok(streams: Array<Array<Token>>) -> int {
-  let mut i: int = 0
-  let mut oks: int = 0
-  while i < streams.len() {
-    match run(streams[i]) {
-      Ok(_) => { oks = oks + 1 }
-      Err(_) => {}
+// AST node count (recursive match) — proves structural traversal.
+fn node_count(e: Expr) -> int {
+  match e {
+    Expr::Lit(_) => 1
+    Expr::Var(_) => 1
+    Expr::Neg(inner) => 1 + node_count(inner)
+    Expr::Bin { op: _, lhs, rhs } => 1 + node_count(lhs) + node_count(rhs)
+  }
+}
+
+// =====================================================================
+// STATEMENT RUNNER
+// =====================================================================
+// A tiny program is a sequence of statements separated by ';'.
+// Each statement is either an assignment "NAME = EXPR" or a bare "EXPR".
+// The value of the program is the value of its last statement.
+// Statements share one mutable environment. Statement-kind is matched.
+
+enum Stmt {
+  Assign { name: string, src: string },
+  Bare(string)
+}
+
+// Classify a raw statement string into a Stmt by detecting " = ".
+// We tokenize, and if the second token is Assign and first is Ident,
+// it's an assignment. Otherwise a bare expression.
+fn classify_stmt(raw: string) -> Stmt {
+  let toks: Array<Token> = lex(raw)
+  let t0: Token = peek(toks, 0)
+  let t1: Token = peek(toks, 1)
+  match t0 {
+    Token::Ident(name) => match t1 {
+      Token::Assign => {
+        // rhs is everything after "NAME ="
+        let rhs: string = strip_assign_prefix(raw, name)
+        Stmt::Assign { name: name, src: rhs }
+      }
+      _ => Stmt::Bare(raw)
     }
-    i = i + 1
-  }
-  oks
-}
-let batch: Array<Array<Token>> = [p1, p2, p3, p8, p10]
-// p1 ok, p2 ok, p3 ok, p8 err(div0), p10 err(paren) -> 3 ok
-check_int("batch_oks", count_ok(batch), 3)
-
-// =====================================================================
-// SECTION 2 -- RPN (postfix) evaluator over a token stack
-// Exercises Option<int> (Some/None on stack pop), enum match on Token,
-// literal match on operator strings, Result error handling.
-// =====================================================================
-
-// Pop helper: returns Option<int>, matched at the call site (book Some/None).
-fn stack_pop(stack: Array<int>) -> Option<int> {
-  match stack.len() {
-    0 => None
-    _ => stack.pop()
+    _ => Stmt::Bare(raw)
   }
 }
 
-// Evaluate a postfix token stream. A binary op pops two operands.
-// Returns Result<int,string>; underflow / div-by-zero / leftover are errors.
-fn eval_rpn(tokens: Array<Token>) -> Result<int, string> {
-  let mut stack: Array<int> = []
+// remove the leading "NAME = " from a statement source.
+// Fixtures always use the exact form "name = rhs..." with single spaces.
+fn strip_assign_prefix(raw: string, name: string) -> string {
+  // length of "name = " = len(name) + 3  ("name", space, '=', space)
+  let cut: int = str_len(name) + 3
+  raw.substring(cut, str_len(raw))
+}
+
+// Run a program: split on ';', execute each, return last value.
+// Environment is two parallel arrays. Reassignment appends a new binding;
+// env_lookup returns the LAST matching entry, so the newest value wins.
+fn run_program(src: string) -> Result<int> {
+  let stmts: Array<string> = src.split(";")
+  let mut names: Array<string> = []
+  let mut vals: Array<int> = []
+  let mut last: Result<int> = Ok(0)
   let mut i: int = 0
-  let mut err: string = ""
-  let mut halted: bool = false
-  // Loop-termination uses a boolean guard (`&& !halted`); the error path sets
-  // `halted` from inside a nested match arm.
-  while i < tokens.len() && !halted {
-    let tok: Token = tokens[i]
-    match tok {
-      Token::Num(n) => { stack.push(n) }
-      Token::End => {}
+  while i < stmts.length {
+    let raw: string = trim_spaces(stmts[i])
+    match raw {
+      "" => { }
       _ => {
-        // binary operator: pop right then left
-        match stack_pop(stack) {
-          None => { err = "stack underflow"; halted = true }
-          Some(rhs) => match stack_pop(stack) {
-            None => { err = "stack underflow"; halted = true }
-            Some(lhs) => {
-              match apply_op(tok, lhs, rhs) {
-                Ok(v) => { stack.push(v) }
-                Err(e) => { err = e; halted = true }
+        let st: Stmt = classify_stmt(raw)
+        match st {
+          Stmt::Assign { name, src: rhs } => {
+            let r: Result<int> = calc_env(rhs, names, vals)
+            match r {
+              Ok(v) => {
+                names.push(name)
+                vals.push(v)
+                last = Ok(v)
+              }
+              Err(e) => {
+                last = Err(e)
+                // stop on first error
+                i = stmts.length
               }
             }
           }
-        }
-      }
-    }
-    i = i + 1
-  }
-  // Resolve outcome via match on the accumulated error + final stack shape.
-  match halted {
-    true => Err(err)
-    false => match stack.len() {
-      1 => Ok(stack[0])
-      0 => Err("empty expression")
-      _ => Err("leftover operands")
-    }
-  }
-}
-
-// Apply a binary operator token to two ints (enum match + div0 guard).
-fn apply_op(op: Token, a: int, b: int) -> Result<int, string> {
-  match op {
-    Token::Plus => Ok(a + b)
-    Token::Minus => Ok(a - b)
-    Token::Star => Ok(a * b)
-    Token::Slash => match b {
-      0 => Err("division by zero")
-      _ => Ok(a / b)
-    }
-    _ => Err(f"not a binary operator: {token_name(op)}")
-  }
-}
-
-fn show_rpn(tokens: Array<Token>) -> string {
-  show(eval_rpn(tokens))
-}
-
-// 3 4 + = 7
-let r1: Array<Token> = [Token::Num(3), Token::Num(4), Token::Plus, Token::End]
-check_str("rpn_add", show_rpn(r1), "ok:7")
-// 5 1 2 + 4 * + 3 - = 14   ( 5 + ((1+2)*4) - 3 )
-let r2: Array<Token> = [
-  Token::Num(5), Token::Num(1), Token::Num(2), Token::Plus,
-  Token::Num(4), Token::Star, Token::Plus, Token::Num(3), Token::Minus, Token::End
-]
-check_str("rpn_complex", show_rpn(r2), "ok:14")
-// 10 2 / = 5
-let r3: Array<Token> = [Token::Num(10), Token::Num(2), Token::Slash, Token::End]
-check_str("rpn_div", show_rpn(r3), "ok:5")
-// 7 0 / -> div by zero
-let r4: Array<Token> = [Token::Num(7), Token::Num(0), Token::Slash, Token::End]
-check_str("rpn_div0", show_rpn(r4), "err:division by zero")
-// 3 + -> underflow (only one operand)
-let r5: Array<Token> = [Token::Num(3), Token::Plus, Token::End]
-check_str("rpn_underflow", show_rpn(r5), "err:stack underflow")
-// 1 2 3 -> leftover operands
-let r6: Array<Token> = [Token::Num(1), Token::Num(2), Token::Num(3), Token::End]
-check_str("rpn_leftover", show_rpn(r6), "err:leftover operands")
-// empty -> empty expression
-let r7: Array<Token> = [Token::End]
-check_str("rpn_empty", show_rpn(r7), "err:empty expression")
-// 8 2 - 3 * = 18   ( (8-2)*3 )
-let r8: Array<Token> = [Token::Num(8), Token::Num(2), Token::Minus, Token::Num(3), Token::Star, Token::End]
-check_str("rpn_chain", show_rpn(r8), "ok:18")
-
-// =====================================================================
-// SECTION 3 -- constant-folding optimizer (recursive AST rewrite via match)
-// Folds Bin/Neg over literal sub-trees into a single Num when it can be
-// evaluated without error; otherwise leaves the structure intact.
-// =====================================================================
-fn is_num(e: Expr) -> bool {
-  match e {
-    Expr::Num(_) => true
-    _ => false
-  }
-}
-
-fn num_val(e: Expr) -> int {
-  match e {
-    Expr::Num(n) => n
-    _ => 0
-  }
-}
-
-fn fold(e: Expr) -> Expr {
-  match e {
-    Expr::Num(n) => Expr::Num(n)
-    Expr::Neg(x) => {
-      let fx: Expr = fold(x)
-      match is_num(fx) {
-        true => Expr::Num(-num_val(fx))
-        false => Expr::Neg(fx)
-      }
-    }
-    Expr::Bin(op, a, b) => {
-      let fa: Expr = fold(a)
-      let fb: Expr = fold(b)
-      match is_num(fa) {
-        false => Expr::Bin(op, fa, fb)
-        true => match is_num(fb) {
-          false => Expr::Bin(op, fa, fb)
-          true => {
-            // both folded to numbers: try to evaluate
-            match eval(Expr::Bin(op, fa, fb)) {
-              Ok(v) => Expr::Num(v)
-              Err(_) => Expr::Bin(op, fa, fb)
+          Stmt::Bare(expr) => {
+            last = calc_env(expr, names, vals)
+            match last {
+              Err(_) => { i = stmts.length }
+              Ok(_) => { }
             }
           }
         }
       }
     }
+    i = i + 1
   }
+  last
 }
 
-// (2 + 3) * 4 folds to 20  (single Num node)
-let f1: Expr = fold(Expr::Bin("*", Expr::Bin("+", Expr::Num(2), Expr::Num(3)), Expr::Num(4)))
-check_str("fold_full", pretty(f1), "20")
-check_int("fold_full_nodes", node_count(f1), 1)
-// -(2 + 3) folds to -5
-let f2: Expr = fold(Expr::Neg(Expr::Bin("+", Expr::Num(2), Expr::Num(3))))
-check_str("fold_neg", pretty(f2), "-5")
-// x / 0 does NOT fold (eval errors) -> structure preserved
-let f3: Expr = fold(Expr::Bin("/", Expr::Num(8), Expr::Num(0)))
-check_str("fold_div0_keep", pretty(f3), "(/ 8 0)")
-check_int("fold_div0_nodes", node_count(f3), 3)
-// nested: (1+2) * (3+4) folds to 21
-let f4: Expr = fold(Expr::Bin("*",
-  Expr::Bin("+", Expr::Num(1), Expr::Num(2)),
-  Expr::Bin("+", Expr::Num(3), Expr::Num(4))))
-check_str("fold_nested", pretty(f4), "21")
-check_int("fold_nested_nodes", node_count(f4), 1)
-// folding then evaluating equals direct evaluation
-let big: Expr = Expr::Bin("-",
-  Expr::Bin("*", Expr::Num(6), Expr::Num(7)),
-  Expr::Bin("/", Expr::Num(20), Expr::Num(4)))
-check_str("fold_then_eval", show(eval(fold(big))), "ok:37")
-check_str("direct_eval", show(eval(big)), "ok:37")
-
-// =====================================================================
-// SECTION 4 -- boolean / comparison mini-language (more enum + guard)
-// Demonstrates match on a separate enum returning bool, with guards.
-// =====================================================================
-enum Cmp {
-  Lt(int, int),
-  Eq(int, int),
-  Gt(int, int),
-  And(Cmp, Cmp),
-  Or(Cmp, Cmp),
-  Not(Cmp)
+// trim leading/trailing single spaces (fixtures are clean; trim defensively)
+fn trim_spaces(s: string) -> string {
+  s.trim()
 }
 
-fn eval_cmp(c: Cmp) -> bool {
-  match c {
-    Cmp::Lt(a, b) => a < b
-    Cmp::Eq(a, b) => a == b
-    Cmp::Gt(a, b) => a > b
-    Cmp::And(x, y) => eval_cmp(x) && eval_cmp(y)
-    Cmp::Or(x, y) => eval_cmp(x) || eval_cmp(y)
-    Cmp::Not(x) => !eval_cmp(x)
-  }
-}
-
-check_bool("cmp_lt_t", eval_cmp(Cmp::Lt(1, 2)), true)
-check_bool("cmp_lt_f", eval_cmp(Cmp::Lt(2, 1)), false)
-check_bool("cmp_eq_t", eval_cmp(Cmp::Eq(5, 5)), true)
-check_bool("cmp_gt_t", eval_cmp(Cmp::Gt(9, 3)), true)
-check_bool("cmp_and", eval_cmp(Cmp::And(Cmp::Lt(1, 2), Cmp::Gt(4, 3))), true)
-check_bool("cmp_and_f", eval_cmp(Cmp::And(Cmp::Lt(1, 2), Cmp::Gt(2, 3))), false)
-check_bool("cmp_or", eval_cmp(Cmp::Or(Cmp::Eq(1, 2), Cmp::Eq(3, 3))), true)
-check_bool("cmp_not", eval_cmp(Cmp::Not(Cmp::Lt(5, 1))), true)
-// De Morgan check: Not(And(a,b)) == Or(Not a, Not b)
-let dm_a: Cmp = Cmp::Lt(3, 1)
-let dm_b: Cmp = Cmp::Gt(2, 9)
-let lhs_dm: bool = eval_cmp(Cmp::Not(Cmp::And(dm_a, dm_b)))
-let rhs_dm: bool = eval_cmp(Cmp::Or(Cmp::Not(dm_a), Cmp::Not(dm_b)))
-check_bool("de_morgan", lhs_dm == rhs_dm, true)
-
 // =====================================================================
-// SECTION 5 -- aggregate statistics over a batch (match in a loop)
+// TEST DRIVER
 // =====================================================================
-fn sum_oks(streams: Array<Array<Token>>) -> int {
+// Every expected value below is hand-derived from arithmetic + the grammar's
+// precedence/associativity rules, written before the first run.
+
+// ---- lexer checks ----------------------------------------------------
+fn check_lex(name: string, src: string, expected_joined: string) {
+  let toks: Array<Token> = lex(src)
+  let mut parts: Array<string> = []
   let mut i: int = 0
+  while i < toks.length {
+    parts.push(tok_str(toks[i]))
+    i = i + 1
+  }
+  let joined: string = parts.join(",")
+  check_str(name, joined, expected_joined)
+}
+
+check_lex("lex-num", "42", "Num(42),EOF")
+check_lex("lex-add", "1 + 2", "Num(1),Plus,Num(2),EOF")
+check_lex("lex-mixed", "3 * ( 4 - 1 )", "Num(3),Star,LParen,Num(4),Minus,Num(1),RParen,EOF")
+check_lex("lex-ident", "x = 5", "Ident(x),Assign,Num(5),EOF")
+check_lex("lex-ops", "% ^ /", "Percent,Caret,Slash,EOF")
+
+// ---- evaluator checks (single expressions) ---------------------------
+// Precedence: ^ > unary - > * / % > + -.  ^ right-assoc; * / % + - left.
+check_str("e-lit", result_str(calc("7")), "ok:7")
+check_str("e-add", result_str(calc("1 + 2")), "ok:3")
+check_str("e-sub", result_str(calc("10 - 3")), "ok:7")
+check_str("e-mul", result_str(calc("4 * 5")), "ok:20")
+check_str("e-div", result_str(calc("20 / 4")), "ok:5")
+check_str("e-mod", result_str(calc("17 % 5")), "ok:2")
+check_str("e-pow", result_str(calc("2 ^ 3")), "ok:8")
+
+// precedence: 1 + 2 * 3 = 1 + 6 = 7
+check_str("e-prec1", result_str(calc("1 + 2 * 3")), "ok:7")
+// (1 + 2) * 3 = 9
+check_str("e-prec2", result_str(calc("( 1 + 2 ) * 3")), "ok:9")
+// 2 ^ 3 ^ 2 = 2 ^ (3 ^ 2) = 2 ^ 9 = 512   (right assoc)
+check_str("e-pow-rassoc", result_str(calc("2 ^ 3 ^ 2")), "ok:512")
+// 100 - 10 - 5 = 85   (left assoc)
+check_str("e-sub-lassoc", result_str(calc("100 - 10 - 5")), "ok:85")
+// 2 * 3 + 4 * 5 = 6 + 20 = 26
+check_str("e-prec3", result_str(calc("2 * 3 + 4 * 5")), "ok:26")
+// unary minus: -3 + 5 = 2
+check_str("e-neg", result_str(calc("- 3 + 5")), "ok:2")
+// In THIS grammar, unary binds tighter than ^ (power := unary ('^' power)?),
+// so - 2 ^ 2 parses as (-2) ^ 2 = 4.
+check_str("e-neg-pow", result_str(calc("- 2 ^ 2")), "ok:4")
+// nested parens: ( ( 1 + 2 ) * ( 3 + 4 ) ) = 3 * 7 = 21
+check_str("e-nested", result_str(calc("( ( 1 + 2 ) * ( 3 + 4 ) )")), "ok:21")
+// 2 + 3 * 4 ^ 2 = 2 + 3 * 16 = 2 + 48 = 50
+check_str("e-bigprec", result_str(calc("2 + 3 * 4 ^ 2")), "ok:50")
+// mod precedence: 10 + 9 % 4 = 10 + 1 = 11
+check_str("e-modprec", result_str(calc("10 + 9 % 4")), "ok:11")
+// double negation: - - 5 = 5
+check_str("e-dneg", result_str(calc("- - 5")), "ok:5")
+
+// ---- error checks ----------------------------------------------------
+check_str("err-divzero", result_str(calc("5 / 0")), "err:division by zero")
+check_str("err-modzero", result_str(calc("5 % 0")), "err:modulo by zero")
+check_str("err-unbound", result_str(calc("x + 1")), "err:unbound variable 'x'")
+check_str("err-trailing", result_str(calc("1 + 2 3")), "err:trailing token Num(3)")
+check_str("err-unclosed", result_str(calc("( 1 + 2")), "err:expected ')' but found EOF")
+check_str("err-unexpected-rparen", result_str(calc(")")), "err:unexpected ')'")
+check_str("err-empty", result_str(calc("")), "err:unexpected token EOF")
+
+// ---- pretty-printer + node-count checks ------------------------------
+fn pretty_of(src: string) -> string {
+  match parse(src) {
+    Ok(ast) => pretty(ast)
+    Err(e) => f"PARSE_ERR:{e}"
+  }
+}
+fn count_of(src: string) -> int {
+  match parse(src) {
+    Ok(ast) => node_count(ast)
+    Err(_) => -1
+  }
+}
+
+check_str("pp-add", pretty_of("1 + 2"), "(1 + 2)")
+check_str("pp-prec", pretty_of("1 + 2 * 3"), "(1 + (2 * 3))")
+check_str("pp-lassoc", pretty_of("1 - 2 - 3"), "((1 - 2) - 3)")
+check_str("pp-rassoc", pretty_of("2 ^ 3 ^ 2"), "(2 ^ (3 ^ 2))")
+check_str("pp-neg", pretty_of("- 3 + 5"), "((-3) + 5)")
+check_str("pp-paren", pretty_of("( 1 + 2 ) * 3"), "((1 + 2) * 3)")
+check_str("pp-var", pretty_of("a * b + c"), "((a * b) + c)")
+
+// node counts: 1+2 => Bin + Lit + Lit = 3
+check_int("nc-add", count_of("1 + 2"), 3)
+// 1 + 2 * 3 => Bin( Lit, Bin( Lit, Lit ) ) = 1 + 1 + (1+1+1) = 5
+check_int("nc-prec", count_of("1 + 2 * 3"), 5)
+// - 3 => Neg(Lit) = 2
+check_int("nc-neg", count_of("- 3"), 2)
+// ( ( 1 + 2 ) * ( 3 + 4 ) ) => Bin( Bin(L,L), Bin(L,L) ) = 1 + 3 + 3 = 7
+check_int("nc-nested", count_of("( ( 1 + 2 ) * ( 3 + 4 ) )"), 7)
+
+// ---- statement runner / environment checks ---------------------------
+// program 1: x = 10 ; y = x * 2 ; x + y  => x=10, y=20, 10+20 = 30
+check_str("prog-1", result_str(run_program("x = 10 ; y = x * 2 ; x + y")), "ok:30")
+// program 2: a = 2 ; b = a ^ 3 ; b + 1  => a=2, b=8, 9
+check_str("prog-2", result_str(run_program("a = 2 ; b = a ^ 3 ; b + 1")), "ok:9")
+// program 3: reassignment: n = 5 ; n = n + n ; n  => 5 -> 10 -> 10
+check_str("prog-3", result_str(run_program("n = 5 ; n = n + n ; n")), "ok:10")
+// program 4: single bare expr
+check_str("prog-4", result_str(run_program("6 * 7")), "ok:42")
+// program 5: error mid-program stops, surfaces the error
+check_str("prog-5", result_str(run_program("x = 4 ; y = x / 0 ; y + 1")), "err:division by zero")
+// program 6: reference to later-undefined var
+check_str("prog-6", result_str(run_program("a = 1 ; a + z")), "err:unbound variable 'z'")
+// program 7: chained dependencies
+//   p = 3 ; q = p + 1 ; r = q * q ; r - p  => p=3,q=4,r=16, 16-3 = 13
+check_str("prog-7", result_str(run_program("p = 3 ; q = p + 1 ; r = q * q ; r - p")), "ok:13")
+// program 8: precedence inside a statement: t = 2 + 3 * 4 ; t  => 14
+check_str("prog-8", result_str(run_program("t = 2 + 3 * 4 ; t")), "ok:14")
+
+// ---- token renderer struct-payload match -----------------------------
+check_str("tok-lparen", tok_str(Token::Paren { open: true }), "LParen")
+check_str("tok-rparen", tok_str(Token::Paren { open: false }), "RParen")
+check_str("tok-eof", tok_str(Token::EOF), "EOF")
+
+// ---- apply() direct checks (op enum + guard arms) --------------------
+check_str("apply-pow-neg", result_str(apply(Op::Pow, 2, -1)), "err:negative exponent")
+check_str("apply-add", result_str(apply(Op::Add, 40, 2)), "ok:42")
+check_str("apply-div-ok", result_str(apply(Op::Div, 9, 2)), "ok:4")
+
+// ---- a slightly larger integration: evaluate a batch -----------------
+// Sum the results of several expressions, deterministic.
+fn batch_sum() -> int {
+  let exprs: Array<string> = [
+    "1 + 1",        // 2
+    "2 * 5",        // 10
+    "3 ^ 3",        // 27
+    "100 % 7",      // 2
+    "( 8 - 3 ) * 2" // 10
+  ]
   let mut total: int = 0
-  while i < streams.len() {
-    match run(streams[i]) {
+  let mut i: int = 0
+  while i < exprs.length {
+    let r: Result<int> = calc(exprs[i])
+    match r {
       Ok(v) => { total = total + v }
-      Err(_) => {}
+      Err(_) => { total = total - 1000 }
     }
     i = i + 1
   }
   total
 }
-// p1=7, p2=9, p3=26, p13=123 ; p8/p10 error (contribute 0)
-let batch2: Array<Array<Token>> = [p1, p2, p3, p13, p8, p10]
-check_int("sum_oks", sum_oks(batch2), 165)
+// 2 + 10 + 27 + 2 + 10 = 51
+check_int("batch-sum", batch_sum(), 51)
 
-fn count_errs(streams: Array<Array<Token>>) -> int {
+// =====================================================================
+// CONSTANT FOLDER  (another recursive `match` over Expr)
+// =====================================================================
+// Fold subtrees with no variables to a single Lit. Pure structural rewrite,
+// dispatched entirely by matching Expr variants. Where a child folds to a Lit
+// and the op is total (no div/mod-by-zero, no negative pow), we compute it;
+// otherwise we keep the Bin node. Division/modulo are folded only when the
+// divisor is a non-zero literal.
+
+// is this expr already a literal? (constructor-shaped match returning Option)
+fn as_lit(e: Expr) -> Option<int> {
+  match e {
+    Expr::Lit(n) => Some(n)
+    _ => None
+  }
+}
+
+fn fold(e: Expr) -> Expr {
+  match e {
+    Expr::Lit(n) => Expr::Lit(n)
+    Expr::Var(name) => Expr::Var(name)
+    Expr::Neg(inner) => {
+      let fi: Expr = fold(inner)
+      match as_lit(fi) {
+        Some(v) => Expr::Lit(0 - v)
+        None => Expr::Neg(fi)
+      }
+    }
+    Expr::Bin { op, lhs, rhs } => {
+      let fl: Expr = fold(lhs)
+      let fr: Expr = fold(rhs)
+      match as_lit(fl) {
+        None => Expr::Bin { op: op, lhs: fl, rhs: fr }
+        Some(a) => match as_lit(fr) {
+          None => Expr::Bin { op: op, lhs: fl, rhs: fr }
+          Some(b) => match apply(op, a, b) {
+            Ok(v) => Expr::Lit(v)
+            // partial op (e.g. div-by-zero) — keep the node unfolded
+            Err(_) => Expr::Bin { op: op, lhs: fl, rhs: fr }
+          }
+        }
+      }
+    }
+  }
+}
+
+fn fold_pretty(src: string) -> string {
+  match parse(src) {
+    Ok(ast) => pretty(fold(ast))
+    Err(e) => f"PARSE_ERR:{e}"
+  }
+}
+
+// "1 + 2 * 3" => fold(2*3)=6, fold(1+6)=7  => "7"
+check_str("fold-const", fold_pretty("1 + 2 * 3"), "7")
+// "2 ^ 3 ^ 2" => 3^2=9, 2^9=512 => "512"
+check_str("fold-pow", fold_pretty("2 ^ 3 ^ 2"), "512")
+// "x + 1" => x not foldable, 1 is lit => "(x + 1)"
+check_str("fold-var", fold_pretty("x + 1"), "(x + 1)")
+// "x + 2 * 3" => right child folds to 6 => "(x + 6)"
+check_str("fold-partial", fold_pretty("x + 2 * 3"), "(x + 6)")
+// "1 / 0" => apply Err keeps node => "(1 / 0)"
+check_str("fold-divzero", fold_pretty("1 / 0"), "(1 / 0)")
+// "- ( 2 + 3 )" => fold(2+3)=5, neg => "-5"  => "(-5)" ... actually Lit(-5) => "-5"
+check_str("fold-neg", fold_pretty("- ( 2 + 3 )"), "-5")
+// "( a + 1 ) * ( 2 + 2 )" => left stays, right folds to 4 => "((a + 1) * 4)"
+check_str("fold-mixed", fold_pretty("( a + 1 ) * ( 2 + 2 )"), "((a + 1) * 4)")
+
+// folding shrinks the node count: 1+2*3 (5 nodes) folds to a single Lit (1)
+fn fold_count(src: string) -> int {
+  match parse(src) {
+    Ok(ast) => node_count(fold(ast))
+    Err(_) => -1
+  }
+}
+check_int("foldnc-const", fold_count("1 + 2 * 3"), 1)
+check_int("foldnc-var", fold_count("x + 2 * 3"), 3)   // Bin(Var, Lit) = 3
+
+// =====================================================================
+// RELATIONAL LAYER  (a second tiny AST + evaluator, all match)
+// =====================================================================
+// Compare two arithmetic expressions with a relational operator and return a
+// bool. The relational op is its own enum; comparison dispatches by `match`.
+enum Rel {
+  Lt,
+  Le,
+  Gt,
+  Ge,
+  Eq,
+  Ne
+}
+
+fn rel_of(sym: string) -> Option<Rel> {
+  match sym {
+    "<" => Some(Rel::Lt)
+    "<=" => Some(Rel::Le)
+    ">" => Some(Rel::Gt)
+    ">=" => Some(Rel::Ge)
+    "==" => Some(Rel::Eq)
+    "!=" => Some(Rel::Ne)
+    _ => None
+  }
+}
+
+fn rel_apply(r: Rel, a: int, b: int) -> bool {
+  match r {
+    Rel::Lt => a < b
+    Rel::Le => a <= b
+    Rel::Gt => a > b
+    Rel::Ge => a >= b
+    Rel::Eq => a == b
+    Rel::Ne => a != b
+  }
+}
+
+// compare("3 + 4", "<", "10") -> evaluate both sides, apply Rel, return Result<bool>
+fn compare(lhs: string, sym: string, rhs: string) -> Result<bool> {
+  match rel_of(sym) {
+    None => Err(f"bad relop '{sym}'")
+    Some(r) => match calc(lhs) {
+      Err(e) => Err(e)
+      Ok(a) => match calc(rhs) {
+        Err(e) => Err(e)
+        Ok(b) => Ok(rel_apply(r, a, b))
+      }
+    }
+  }
+}
+
+fn cmp_str(r: Result<bool>) -> string {
+  match r {
+    Ok(b) => match b {
+      true => "true"
+      false => "false"
+    }
+    Err(e) => f"err:{e}"
+  }
+}
+
+// 3 + 4 = 7 < 10 => true
+check_str("cmp-lt", cmp_str(compare("3 + 4", "<", "10")), "true")
+// 2 * 5 = 10 >= 10 => true
+check_str("cmp-ge", cmp_str(compare("2 * 5", ">=", "10")), "true")
+// 9 == 3 ^ 2 => 9 == 9 => true
+check_str("cmp-eq", cmp_str(compare("9", "==", "3 ^ 2")), "true")
+// 5 != 5 => false
+check_str("cmp-ne", cmp_str(compare("5", "!=", "5")), "false")
+// 4 > 100 => false
+check_str("cmp-gt-false", cmp_str(compare("4", ">", "100")), "false")
+// bad relop
+check_str("cmp-badop", cmp_str(compare("1", "<>", "2")), "err:bad relop '<>'")
+// error propagates from the lhs
+check_str("cmp-lhs-err", cmp_str(compare("1 / 0", "<", "2")), "err:division by zero")
+// error propagates from the rhs (unbound var)
+check_str("cmp-rhs-err", cmp_str(compare("1", "<", "z + 1")), "err:unbound variable 'z'")
+
+// =====================================================================
+// TOKEN-STREAM STATISTICS  (match over every token in a stream)
+// =====================================================================
+// Count how many tokens of each broad class appear, classifying each token
+// by `match`. Proves matching across a whole heterogeneous token array.
+type TokStats { nums: int, idents: int, ops: int, parens: int, other: int }
+
+fn tok_stats(src: string) -> TokStats {
+  let toks: Array<Token> = lex(src)
+  let mut nums: int = 0
+  let mut idents: int = 0
+  let mut ops: int = 0
+  let mut parens: int = 0
+  let mut other: int = 0
   let mut i: int = 0
-  let mut errs: int = 0
-  while i < streams.len() {
-    match run(streams[i]) {
-      Ok(_) => {}
-      Err(_) => { errs = errs + 1 }
+  while i < toks.length {
+    match toks[i] {
+      Token::Num(_) => { nums = nums + 1 }
+      Token::Ident(_) => { idents = idents + 1 }
+      Token::Plus => { ops = ops + 1 }
+      Token::Minus => { ops = ops + 1 }
+      Token::Star => { ops = ops + 1 }
+      Token::Slash => { ops = ops + 1 }
+      Token::Percent => { ops = ops + 1 }
+      Token::Caret => { ops = ops + 1 }
+      Token::Assign => { ops = ops + 1 }
+      Token::Paren { open: _ } => { parens = parens + 1 }
+      _ => { other = other + 1 }
     }
     i = i + 1
   }
-  errs
+  TokStats { nums: nums, idents: idents, ops: ops, parens: parens, other: other }
 }
-check_int("count_errs", count_errs(batch2), 2)
+
+// "x = ( 3 + y ) * 2"
+//   tokens: Ident(x) Assign LParen Num(3) Plus Ident(y) RParen Star Num(2) EOF
+//   nums=2 idents=2 ops=3(Assign,Plus,Star) parens=2 other=1(EOF;Semi none)
+let st1: TokStats = tok_stats("x = ( 3 + y ) * 2")
+check_int("stat-nums", st1.nums, 2)
+check_int("stat-idents", st1.idents, 2)
+check_int("stat-ops", st1.ops, 3)
+check_int("stat-parens", st1.parens, 2)
+check_int("stat-other", st1.other, 1)
+
+// "1 + 2 - 3"
+//   Num Plus Num Minus Num EOF => nums=3 ops=2 other=1, idents=0 parens=0
+let st2: TokStats = tok_stats("1 + 2 - 3")
+check_int("stat2-nums", st2.nums, 3)
+check_int("stat2-ops", st2.ops, 2)
+check_int("stat2-other", st2.other, 1)
+check_int("stat2-idents", st2.idents, 0)
+check_int("stat2-parens", st2.parens, 0)
 
 // =====================================================================
+// END-TO-END: fold then evaluate, and fold-stability
+// =====================================================================
+// Evaluating a folded tree must agree with evaluating the original.
+fn eval_src(src: string) -> Result<int> {
+  let names: Array<string> = []
+  let vals: Array<int> = []
+  match parse(src) {
+    Err(e) => Err(e)
+    Ok(ast) => eval(fold(ast), names, vals)
+  }
+}
+check_str("e2e-1", result_str(eval_src("1 + 2 * 3")), "ok:7")
+check_str("e2e-2", result_str(eval_src("( 2 + 3 ) ^ 2")), "ok:25")
+check_str("e2e-3", result_str(eval_src("100 - 10 - 5")), "ok:85")
+check_str("e2e-divzero", result_str(eval_src("5 / 0")), "err:division by zero")
+
+// ---- final ----------------------------------------------------------
 if failures == 0 {
   print("ALL_CHECKS_PASSED")
+} else {
+  print(f"FAILURES={failures}")
 }

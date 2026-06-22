@@ -22,6 +22,15 @@ machine-checked `ck_*` assertions) and `small.shape` (107 LOC) — both PASS
 (vm+jit, ec=0, stdout byte-identical len=17 `ALL_CHECKS_PASSED`, 3/3 stable each
 under both modes).
 
+RE-VERIFIED 2026-06-22 (current pass, same worktree HEAD): both programs still
+PASS under vm AND jit, ec=0, stdout byte-identical (len=17 `ALL_CHECKS_PASSED`).
+`large.shape` = 980 LOC with **90 `ck_*` assertion call sites** (the earlier
+"93"/"111" figures counted the 3 helper `fn` defs and/or pre-trim drafts; the
+HEAD-true call-site count is 90). Stability: 3/3 vm + 3/3 jit ec=0, identical
+output. No book_wrong; book_gap #1/#2 remain RESOLVED-at-HEAD, #3 (no `assert`
+builtin) and #4 (mixed enum-variant array needs `Array<T>` annotation) remain
+accurate. Classification: PASS.
+
 RE-RE-VERIFIED 2026-06-21 (later pass, same worktree HEAD): both programs still
 PASS byte-identical. HOWEVER, the call-site return-type propagation defects that
 this report previously recorded as **book_gap #1** and **book_gap #2** are NO

@@ -1,5 +1,0 @@
-// chain inside a function with Vec<int> param
-fn ssq(xs: Vec<int>) -> int {
-  xs.filter(|x| x % 2 == 0).map(|x| x * x).reduce(|acc, e| acc + e, 0)
-}
-print(f"r={ssq([1,2,3,4,5,6])}")

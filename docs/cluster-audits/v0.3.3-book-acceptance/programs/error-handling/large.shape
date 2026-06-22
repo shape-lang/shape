@@ -85,15 +85,11 @@ fn tokenize(src: string) -> Result<Array<string>> {
 // A token that is not an integer literal yields Err with context via `!!`.
 // ---------------------------------------------------------------------------
 fn parse_number(tok: string) -> Result<int> {
-    // NOTE (book-faithful form is `(tok as int?) !! ...`): in v0.3.3 the
-    // `as int?` conversion REJECTS a string read directly from an
-    // Array<string> element (distinct internal carrier kind), even though the
-    // identical literal converts fine. See REPORT.md FN-REG-CORRECTNESS.
-    // Reconstructing a fresh string via an f-string (a core book construct,
-    // §strings) normalizes the carrier so the documented cast works. This is
-    // the SINGLE deviation from the book-literal form.
-    let fresh = f"{tok}";
-    let n = (fresh as int?) !! f"not a number: {tok}";
+    // Book-faithful fallible cast (§Typed Conversion / Fallible): `(tok as int?)`
+    // yields Result<int, AnyError>; `!!` attaches higher-level context on the Err
+    // arm (§"!! Error Context Operator"). Verified at HEAD that `as int?` works
+    // directly on a string read from an Array<string> element.
+    let n = (tok as int?) !! f"not a number: {tok}";
     return n;
 }
 

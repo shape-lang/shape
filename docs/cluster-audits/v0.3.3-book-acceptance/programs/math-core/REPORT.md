@@ -61,31 +61,32 @@ Expected-value rationale (all derived from book semantics BEFORE first run):
 
 ## Findings
 
-### BOOK-WRONG (book documents functions the shipped binary does NOT implement)
+### STALE-FINDING CORRECTION (book updated since prior run)
 
-The core/math.mdx "Function Reference" table and prose document these as working, but the
-release binary raises a runtime `Not implemented` surface (phase-1b-vm-wave-5d-intrinsic,
-"v0.4 / planned") when they are called:
+A prior run of this slice recorded BOOK-WRONG for median/percentile/spread/correlation/
+covariance/zscore on the grounds that core/math.mdx documented them as working while the
+binary raised NotImplemented. THAT FINDING IS NOW STALE: the current book HEAD fences ALL of
+median/percentile/spread/correlation/covariance/coefficient_of_variation/zscore/parallel_map/
+parallel_filter under `:::caution[v0.4 preview]` "planned for v0.4 and not available in
+v0.3.3" with `runnable=false`. A book-following user never calls them, so they are NOT
+book-wrong anymore. Re-probed at HEAD:
+- `median`/`percentile`/`spread`/`correlation`/`covariance` -> runtime `Not implemented`
+  (phase-1b-vm-wave-5d-intrinsic, v0.4/planned) — book-accurate (correctly v0.4-gated).
+- `zscore([1,2,3])` -> `TypeError: expected number, got array` — book-accurate (v0.4-gated).
 
-- `median(series)`        -> NotImplemented: IntrinsicMedian body migration pending (v0.4)
-- `percentile(series, p)` -> NotImplemented: IntrinsicPercentile (v0.4)
-- `spread(series)`        -> NotImplemented: IntrinsicMax (spread is max-min internally) (v0.4)
-- `correlation(a, b)`     -> NotImplemented: IntrinsicCorrelation (v0.4)
-- `covariance(a, b)`      -> NotImplemented: IntrinsicCovariance (v0.4)
+### BOOK-WRONG (minor — book UNDERSTATES availability; safe direction)
 
-Additionally:
-- `zscore(series)` -> NOT a NotImplemented stub but a hard `TypeError: expected number, got
-  array`. The book (core/math.mdx) shows `zscore([2.0,4.0,6.0])` returning a `Vec<number>`;
-  the shipped function rejects an array argument. BOOK-WRONG (documented signature does not
-  match shipped behavior).
+Three functions the book fences as v0.4-preview "not available in v0.3.3" actually WORK in
+the shipped binary (probed directly):
+- `coefficient_of_variation([2,4,6])` = 0.408248290463863 (= std/mean).
+- `parallel_map([1,2], |x| x*2)` = [2.0, 4.0].
+- `parallel_filter([1,2], |x| x>0)` = [1.0, 2.0].
+This is the SAFE direction — the book steers users away from something that in fact works, so
+no user hits a failure. Documentary inaccuracy only. Recommend un-fencing these three or
+confirming the v0.4 gate is intentional.
 
-Working statistical functions (book-accurate): `sum`, `mean`, `variance`, `std`,
-`coefficient_of_variation`. (`coefficient_of_variation([2,4,6])` = 0.408248290463863, matches
-std/mean = 1.632993.../4 .)
-
-The book gives NO indication that median/percentile/spread/correlation/covariance/zscore are
-unimplemented. A user following core/math.mdx verbatim hits a runtime error on the first call.
-Recommend either implementing them for v0.3.3 or annotating them in the book as "v0.4".
+Live, book-accurate statistical functions: `sum`, `mean`, `variance`, `std` (all population
+convention; see BOOK-GAP).
 
 ### BOOK-GAP
 

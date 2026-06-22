@@ -618,15 +618,12 @@ fn standup_report(week_count: int) -> string {
         if i > 0 {
             acc = acc + ";"
         }
-        // NOTE: the explicit `: DateTime` annotations below are a WORKAROUND for
-        // a strict-flip inference defect — without them, a loop-local `let`
-        // binding of a DateTime-returning method (to_utc()/to_timezone()) is
-        // inferred as `unknown`, poisoning the chained `.format()`. See
-        // REPORT.md (book_wrong / FN-REG-CORRECTNESS). The book's own
-        // multi-timezone report uses unannotated bindings and would fail here
-        // under `+` concatenation.
-        let utc: DateTime = cur.to_utc()
-        let tok: DateTime = cur.to_timezone("Asia/Tokyo")
+        // Book-idiomatic: unannotated bindings of to_utc()/to_timezone()
+        // results, exactly as the book's "Multi-timezone report" example
+        // (datetime.mdx lines 396-400). Inference resolves these to DateTime
+        // and the chained .format() works (verified: probe4.shape).
+        let utc = cur.to_utc()
+        let tok = cur.to_timezone("Asia/Tokyo")
         acc = acc + utc.format("%Y-%m-%d") + " UTC=" + utc.format("%H:%M") + " TOK=" + tok.format("%H:%M")
         cur = cur.add_days(1)
         i = i + 1

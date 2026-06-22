@@ -59,23 +59,35 @@ surface (`docs/cluster-audits/v0.3-r8w6-hashmap-key-kind-audit.md`). Programs
 still produce CORRECT stdout (ec=0). Recorded for completeness; does not affect
 classification since stdout is clean and byte-identical.
 
-## Re-verification at current HEAD (2026-06-21)
+## Re-verification at current HEAD (2026-06-22)
 
 Both deliverables were RE-RUN at the current release binary HEAD, VM + JIT:
 - small.shape: VM ec=0 / JIT ec=0 / `ALL_CHECKS_PASSED` / byte-identical.
-- large.shape: VM ec=0 / JIT ec=0 / `checks_run=233` + `ALL_CHECKS_PASSED` / byte-identical.
+- large.shape (769 LOC): VM ec=0 / JIT ec=0 / `checks_run=233` + `ALL_CHECKS_PASSED` / byte-identical.
 
-The four defects from the prior run were re-probed with minimal repros at HEAD.
-**Two are now FIXED at HEAD** (binary rebuilt since the prior write-up); two still
-reproduce. Updated truth below. The large program already carries annotation /
-local-copy workarounds for all four, so it passes regardless.
+The four defects from the original run were re-probed with minimal repros at HEAD.
+**THREE are now FIXED at HEAD** (D1, D2, D3); **only D4 still reproduces**. Updated
+truth below. The large program already carries annotation / local-copy workarounds,
+so it passes regardless.
+
+NEW at 2026-06-22: D2 (`.map()` element type not threaded to `for`/comparison
+without an `Array<T>` annotation) NO LONGER reproduces. Minimal repro
+(`roster.map(|e| e.salary)` then `for v in salaries { if v > mx { mx = v } }`,
+NO binding annotation) prints `30` under both VM and JIT (ec=0). The previously
+required `let salaries: Array<int> = ...` annotation is no longer necessary. The
+typed-closure-inference regression that surfaced D2 has been fixed at HEAD.
 
 ### D1. `Vec<int>` NumericVec sum/min/max return `number`, not `int` — **FIXED at HEAD**
 Prior run: `let s: int = v.sum()` errored (`number` not compatible with `int`).
 Re-probe at HEAD: `let v = [1,2,3]; let s: int = v.sum(); print(s)` → ec=0, prints
 `6`. The int-annotation path now type-checks. No longer a live defect.
 
-### D2. `.map()` element type not threaded to downstream `for` / comparison — **STILL LIVE at HEAD**
+### D2. `.map()` element type not threaded to downstream `for` / comparison — **FIXED at HEAD (2026-06-22)**
+Prior run: unannotated `let salaries = roster.map(|e| e.salary)` then a `for`+`>`
+comparison errored (`operand types unknown and int`). Re-probe at HEAD: same code,
+no annotation, prints `30` under VM and JIT (ec=0). FIXED. (Original prior-run
+analysis retained below for audit trail.)
+
 ```
 let salaries = roster.map(|e| e.salary)   // Vec<int>, .sum()/.first() work fine
 for v in salaries { if v > mx { } }       // see below
@@ -141,16 +153,23 @@ Workaround: copy both operands into explicitly-annotated `int` locals
   the book framing is no longer contradicted. Retained for audit trail only; not
   a live book_wrong at HEAD.
 
-## Notes on classification
+## Notes on classification (updated 2026-06-22)
 At current HEAD, BOTH deliverables PASS (ec=0, `ALL_CHECKS_PASSED`, VM==JIT
-byte-identical). Of the four originally-recorded defects, D1 and D3 are now FIXED
-at HEAD (verified by minimal repro); D2 (`.map()` element type not threaded to
-`for`/comparison without an `Array<T>` annotation) and D4 (`<hashmap-readback-int>
-+ <typedobject-field-int>` → `no method 'add' on receiver kind Int64`) still
-reproduce. Both surviving defects are real inference/dispatch regressions surfaced
-by ordinary book-rooted code, and both have clean book-faithful workarounds in the
-deliverable (annotate the mapped binding; copy operands into annotated `int`
-locals). Hence the slice classification stays FN-REG-CORRECTNESS — the programs
-themselves PASS, but writing them book-idiomatically still trips two live language
-defects. The `runnable=false` surfaces were avoided by design and are already
-tracked as v0.4 candidates by the book itself.
+byte-identical). Of the four originally-recorded defects, D1, D2 and D3 are now
+FIXED at HEAD (verified by minimal repro). Only **D4** still reproduces:
+`<hashmap-readback-int> + <typedobject-field-int>` → `no method 'add' on receiver
+kind Int64` (VM ec=1; JIT falls back to interpreter and surfaces the identical
+error). The minimal repro accumulates a per-key salary total where `cur` is read
+back from `match m.get(e.dept) { Some(v)=>v, None=>0 }` and added to a typed-object
+field `e.salary`; the add has no handler. Workaround (used in the large program):
+copy both operands into explicitly-annotated `int` locals
+(`let sal: int = e.salary; let cur: int = match ...`), after which `cur + sal`
+yields the correct accumulated totals (a=30, b=5, verified).
+
+D4 is a real dispatch regression surfaced by ordinary book-rooted code (HashMap
+accumulation of a typed-object numeric field — a natural pattern the chapter's
+HashMap + Typed-Objects material invites), with a clean book-faithful workaround.
+Hence the slice classification stays FN-REG-CORRECTNESS — the deliverables PASS,
+but writing them book-idiomatically still trips one live language defect. The
+`runnable=false` surfaces were avoided by design and are already tracked as v0.4
+candidates by the book itself.

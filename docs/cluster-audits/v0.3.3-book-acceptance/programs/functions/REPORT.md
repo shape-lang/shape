@@ -13,6 +13,38 @@ Determinism strategy: pure (closures + HOFs); no I/O, no time, no randomness.
 | large.shape | 635 | 0 | 0 | byte-identical | PASS |
 | segfault-repro.shape | 24 | 0 | 0 | byte-identical (prints 25) | PASS (was FN-REG; FIXED at HEAD) |
 | named-args-repro.shape | 37 | 0 | 0 | byte-identical (24/24/24/24/15/25) | PASS (named arguments IMPLEMENTED — STAGE T4) |
+| rangevar-closure-repro.shape | 28 | 1 | 1 | byte-identical (i64-overflow err, line 3) | minimal repro for NEW adjacent kind-tracking finding (book SILENT — not a deliverable) |
+
+**Independent re-verification 2026-06-22 (LATEST pass — fresh first-run truth).**
+All four programs re-run under both `--mode vm` and `--mode jit` at current HEAD
+(absolute binary, 12 GiB ulimit + 30s timeout). `small.shape` and `large.shape`
+(635 LOC, 115 `check_*` assertions) both print `ALL_CHECKS_PASSED`, ec=0, stdout
+byte-identical VM vs JIT (`cmp -s`). `segfault-repro.shape` → `25` (both modes);
+`named-args-repro.shape` → `24/24/24/24/15/25` (both modes, byte-identical).
+
+NAMED ARGUMENTS — fully RESOLVED and now ACCURATELY DOCUMENTED. The book's
+current §"Named Arguments" (functions.mdx lines 200-247) teaches named args as a
+WORKING v0.3.3 feature, and the shipped binary matches it exactly this pass:
+the book's own `sma` examples compute `sma(20,0.05)`→`1.0`,
+`sma(period:20,threshold:0.05)`→`1.0`, `sma(threshold:0.02)`→`0.28`,
+`sma(20,threshold:0.02)`→`0.4`; `box_vol` all-named / out-of-order /
+positional-then-named all → `24`; unknown name → clean compile error
+`Function 'box_vol' has no parameter named 'bad'`; duplicate → clean compile
+error `Argument for parameter 'w' ... was supplied more than once`. The prior
+"book is STALE on named args" book_gap (#6) is therefore ALSO RESOLVED — the book
+no longer lags the implementation. The historical BOOK-WRONG(1) and FN-REG SIGSEGV
+remain non-reproducing.
+
+NEW finding this pass (adjacent kind-tracking defect, book SILENT): a `for`-range
+loop variable passed into a let-bound closure whose result then enters INTEGER
+arithmetic loses its `int` kind — the closure result returns as a float
+bit-pattern and the int add reads garbage (`1.0` → raw `4607182418800017408`),
+tripping the i64-overflow guard. Identical under VM and JIT (VM-level, not a JIT
+divergence). NOT claimed-working by any book snippet, so it does not change the
+deliverable classification (PASS); recorded as book_gap #7. Minimal reproducer:
+`rangevar-closure-repro.shape`. The contrast — same closure applied to a
+`Vec<int>` ELEMENT — computes correctly (14), which is exactly the shape the
+deliverable `large.shape` uses, so the deliverables are unaffected.
 
 **Independent re-verification 2026-06-22 (this pass, fresh first-run truth).**
 All four programs re-run under both `--mode vm` and `--mode jit` at current HEAD.
@@ -258,6 +290,17 @@ a documented limitation, fixed by following the book; recorded for transparency:
    `.map`/`.filter`/user-HOF prints a scary "V2 bytecode verification failed"
    line to stderr while still producing correct output. The chapter (and the JIT
    chapter) should note this is benign, or the warning should be suppressed.
+7. **(NEW 2026-06-22) Range-loop-var → closure → int arithmetic loses int kind.**
+   `let sq = |x| x*x; let mut t = 0; for i in 0..4 { t = t + sq(i) }` fails at
+   runtime with an i64-overflow error (`4607182418800017408` = float bits of
+   `1.0`): the closure result, when its argument is a bare `for`-range variable,
+   comes back kinded as `number` and is mis-added as `int`. The SAME closure
+   applied to a `Vec<int>` element (`for v in xs` / `xs[i]`) is correct. The book
+   is SILENT on this combination (its HOF examples only return `f(x)` directly,
+   never `acc + f(rangevar)`), so it is an ADJACENT strict-typing kind-tracking
+   defect rather than a BOOK-WRONG. Identical under VM and JIT. Reproducer:
+   `rangevar-closure-repro.shape`. Workaround (used by the deliverables): iterate
+   over `Vec<int>` elements, which preserve the `int` kind through the closure.
 
 ## book_wrong (book DOCUMENTS something the language does NOT do)
 
@@ -335,4 +378,5 @@ any snippet, so it is FN-REG-CORRECTNESS rather than book_wrong.
 - programs/functions/large.shape
 - programs/functions/segfault-repro.shape
 - programs/functions/named-args-repro.shape
+- programs/functions/rangevar-closure-repro.shape
 - programs/functions/REPORT.md
