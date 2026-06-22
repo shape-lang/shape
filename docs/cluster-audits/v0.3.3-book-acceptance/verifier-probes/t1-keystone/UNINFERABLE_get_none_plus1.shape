@@ -1,0 +1,9 @@
+fn get_none() {
+    None
+}
+fn main() {
+    let v = get_none();
+    let w = v + 1;
+    print(w);
+}
+main();

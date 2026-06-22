@@ -1,0 +1,9 @@
+type Point { x: int, y: int }
+fn main() {
+    var a = Point { x: 1, y: 2 };
+    var b = a;
+    b.x = 100;
+    print(a.x);
+    print(b.x);
+}
+main();

@@ -1,0 +1,8 @@
+fn main() {
+    let xs: Array<number> = [1.0, 2.0, 3.0];
+    let v = xs[0];
+    let k: int = 1;
+    let w = v + k;
+    print(w);
+}
+main();

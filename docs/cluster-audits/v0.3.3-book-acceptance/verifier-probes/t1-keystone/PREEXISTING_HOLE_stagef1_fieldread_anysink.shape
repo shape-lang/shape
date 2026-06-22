@@ -1,0 +1,5 @@
+type Run { n: int }
+let mut rs = []
+rs = rs.push(Run { n: 1 })
+let z = rs[0].n + 1
+print(z)
