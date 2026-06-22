@@ -224,11 +224,61 @@ impl BytecodeCompiler {
             });
         }
 
-        // No concrete proof. Reject ONLY when the post-solve inferred type is
-        // genuinely un-inferable (`unknown` / unresolved free var). An inferred
-        // CONCRETE type that simply isn't carried by `concrete_type_for_expr`
-        // falls through to the constraint solver (which raises the precise
-        // `<concrete> is not compatible with <annotation>` error).
+        // No structural `concrete_type_for_expr` proof. The engine-level
+        // `infer_expr_type` cannot be trusted here: for an un-return-annotated
+        // user-function call (and any expression built over one) the inference
+        // engine ALREADY unified the result type with THIS very annotation, so
+        // it echoes the declared primitive back (verified: `let bad: T =
+        // apply2(id, ret_num, 3.0)` infers `T` for every `T` ∈ {int, number,
+        // string}). Accepting that echo is the laundering hole. Instead, fire
+        // the COMPREHENSIVE annotation-INDEPENDENT reject: when the init's
+        // proof rests on an un-return-annotated user function whose return is
+        // not structurally resolvable, the value is genuinely `unknown` and
+        // must NOT be accepted into a typed binding (it would reinterpret its
+        // raw bits as the declared primitive). Legit inits (`[1,2,3].sum()`,
+        // `roster.map(|e| e.salary)[0]`, a method/builtin/dispatch result) do
+        // NOT rest on such a function and are NOT rejected.
+        if self.init_rests_on_unprovable_unannotated_fn(init_expr) {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "the initializer has an un-inferable type (`unknown`), but the \
+                     binding declares the proven concrete type '{}' — an \
+                     `unknown`-typed value cannot be accepted into a typed binding \
+                     (this would reinterpret its raw bits as '{}'). Annotate the \
+                     source (e.g. give the higher-order function a return type or \
+                     type its callable parameter) so the type is proven.",
+                    prim_name, prim_name
+                ),
+                location: Some(self.span_to_source_location(init_expr.span())),
+            });
+        }
+
+        // HOLE-2: a mixed-type arithmetic binary op (`apply(ret_num, 3.0) % 4`
+        // = `number % int`). `concrete_type_for_expr` correctly yields `None`
+        // for the disagreeing operands (no fabrication), but the engine's
+        // `infer_expr_type` reads back the WRONG `int` from the integer literal
+        // operand, masking the `number`-typed result. When an operand of an
+        // arithmetic binop resolves (structurally, annotation-independently) to
+        // a concrete primitive that disagrees with the declared annotation, the
+        // result cannot be the declared type — reject. `int`/`number` do not
+        // unify; no silent widen.
+        if let Some(operand_prim) = self.binop_operand_disagreeing_primitive(init_expr, prim_name) {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "type mismatch: binding declares '{}' but an operand of the \
+                     initializer's arithmetic expression produces '{}' — `int` and \
+                     `number` do not unify, so the type must match exactly (cast \
+                     explicitly with `as` if a conversion is intended)",
+                    prim_name, operand_prim
+                ),
+                location: Some(self.span_to_source_location(init_expr.span())),
+            });
+        }
+
+        // Fall back to the post-solve inferred type for the genuinely-unknown
+        // (`Type::Variable` / `"unknown"`) case the structural detector does not
+        // cover (e.g. a bare `let x: int = some_unknown_local`). A concrete
+        // inferred type falls through to the constraint solver.
         let Ok(init_ty) = self.infer_expr_type(init_expr) else {
             return Ok(());
         };
@@ -248,6 +298,134 @@ impl BytecodeCompiler {
             ),
             location: Some(self.span_to_source_location(init_expr.span())),
         })
+    }
+
+    /// strict-flip S1 (let-annotation Unknown-accept guard, COMPREHENSIVE,
+    /// 2026-06-22): true when the init expression's type rests on a call to a
+    /// user function that has NO declared return annotation AND whose return is
+    /// NOT structurally resolvable by `concrete_type_for_expr`. Such a value is
+    /// genuinely `unknown` — the inference engine only "resolves" it by echoing
+    /// the surrounding annotation (the laundering hole). Returns `false` for any
+    /// init resting on a method/builtin/dispatch result or a return-annotated /
+    /// structurally-resolvable function (no false positive).
+    ///
+    /// Walks the small set of expression shapes that forward an un-return-typed
+    /// HOF result into a typed binding: the call itself (HOLE-3 `apply2(id,
+    /// ret_num, 3.0)`), and a binary op one of whose operands rests on such a
+    /// call (HOLE-2 `apply(ret_num, 3.0) % 4`). Conservative: any shape not in
+    /// this set yields `false` (the existing inference path owns it).
+    /// strict-flip S1 (HOLE-2, 2026-06-22): for an arithmetic binary-op init,
+    /// return the proven primitive type NAME of an operand that DISAGREES with
+    /// the declared annotation `decl_prim`. The arithmetic result must be the
+    /// operands' common type; an operand proven to a different primitive means
+    /// the binding can NEVER hold the declared type (`number % int` into an
+    /// `int` binding). Resolves each operand structurally via
+    /// `concrete_type_for_expr` (annotation-independent — the engine's
+    /// `infer_expr_type` is unreliable here, it echoes the integer literal).
+    /// Returns `None` for non-arithmetic ops, fully-agreeing operands, or
+    /// operands the resolver cannot prove (those route through the other
+    /// guards). NO fabrication.
+    fn binop_operand_disagreeing_primitive(
+        &self,
+        expr: &Expr,
+        decl_prim: &str,
+    ) -> Option<String> {
+        use shape_ast::ast::BinaryOp;
+        use shape_value::v2::ConcreteType;
+        let Expr::BinaryOp {
+            left, op, right, ..
+        } = expr
+        else {
+            return None;
+        };
+        if !matches!(
+            op,
+            BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::Div
+                | BinaryOp::Mod
+                | BinaryOp::Pow
+        ) {
+            return None;
+        }
+        let prim_name_of = |ct: &ConcreteType| -> Option<&'static str> {
+            match ct {
+                ConcreteType::I64 => Some("int"),
+                ConcreteType::F64 => Some("number"),
+                ConcreteType::Bool => Some("bool"),
+                ConcreteType::String => Some("string"),
+                _ => None,
+            }
+        };
+        for operand in [left.as_ref(), right.as_ref()] {
+            // Numeric literals adopt the surrounding context losslessly (an
+            // `int` literal in a `number` arithmetic is fine) — never the
+            // source of a genuine mismatch here. Skip them so `let r: number =
+            // x % 4` is not falsely flagged by the integer literal `4`.
+            if matches!(operand, Expr::Literal(..)) {
+                continue;
+            }
+            if let Some(ct) =
+                crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                    self, operand,
+                )
+            {
+                if let Some(op_prim) = prim_name_of(&ct) {
+                    if op_prim != decl_prim {
+                        return Some(op_prim.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn init_rests_on_unprovable_unannotated_fn(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::FunctionCall { name, args, .. } => {
+                // A user function with NO return annotation whose result
+                // `concrete_type_for_expr` cannot prove is genuinely unknown.
+                // (A return-annotated callee, or one the HOF resolver proves,
+                // returns `Some(..)` and is NOT flagged.)
+                let Some(def) = self.function_defs.get(name) else {
+                    return false;
+                };
+                if def.return_type.is_some() {
+                    return false;
+                }
+                // A closure-LITERAL argument (`apply2(|a, b| a * b, 6, 7)`)
+                // lets the inference engine GENUINELY seed the HOF's result
+                // type from the closure body + concrete sibling args — the
+                // engine then proves a real concrete type (`int` here), NOT an
+                // annotation echo (verified: a `number` annotation over the
+                // same call raises a real constraint mismatch, it does not echo
+                // `number`). The laundering hole (HOLE-3) is the case where the
+                // forwarded callables are all NAMED un-return-typed functions
+                // whose nested return the resolver cannot follow, so the engine
+                // leaves a free var and echoes the annotation. Only flag the
+                // latter: no closure-literal argument present.
+                if args
+                    .iter()
+                    .any(|a| matches!(a, Expr::FunctionExpr { .. }))
+                {
+                    return false;
+                }
+                crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                    self, expr,
+                )
+                .is_none()
+            }
+            // A binary op laundering an unprovable-HOF operand (HOLE-2). The
+            // op's own type masks the unknown operand (`number % 4` reads back
+            // `int` from the literal). Reject if EITHER operand rests on an
+            // unprovable unannotated fn.
+            Expr::BinaryOp { left, right, .. } => {
+                self.init_rests_on_unprovable_unannotated_fn(left)
+                    || self.init_rests_on_unprovable_unannotated_fn(right)
+            }
+            _ => false,
+        }
     }
 
     fn check_let_annotation_element_type_strict(
@@ -1246,7 +1424,13 @@ impl BytecodeCompiler {
                         self.track_drop_module_binding(binding_idx, is_async);
                     }
                 } else {
-                    self.compile_destructure_pattern_global(&var_decl.pattern)?;
+                    self.pending_array_destructure_element_type = var_decl
+                        .value
+                        .as_ref()
+                        .and_then(|init| self.array_destructure_element_type_name(init));
+                    let r = self.compile_destructure_pattern_global(&var_decl.pattern);
+                    self.pending_array_destructure_element_type = None;
+                    r?;
                 }
 
                 if let Some(e) = init_err {
@@ -5623,7 +5807,13 @@ impl BytecodeCompiler {
                             self.clear_callable_binding(binding_idx, false);
                         }
                     } else {
-                        self.compile_destructure_pattern_global(&var_decl.pattern)?;
+                        self.pending_array_destructure_element_type = var_decl
+                            .value
+                            .as_ref()
+                            .and_then(|init| self.array_destructure_element_type_name(init));
+                        let r = self.compile_destructure_pattern_global(&var_decl.pattern);
+                        self.pending_array_destructure_element_type = None;
+                        r?;
                     }
 
                     for (binding_name, _) in var_decl.pattern.get_bindings() {
@@ -5651,7 +5841,13 @@ impl BytecodeCompiler {
                     );
                 } else {
                     // Inside function: create local variable
-                    self.compile_destructure_pattern(&var_decl.pattern)?;
+                    self.pending_array_destructure_element_type = var_decl
+                        .value
+                        .as_ref()
+                        .and_then(|init| self.array_destructure_element_type_name(init));
+                    let r = self.compile_destructure_pattern(&var_decl.pattern);
+                    self.pending_array_destructure_element_type = None;
+                    r?;
 
                     // Patch StoreLocal → StoreLocalTyped for width-typed simple bindings.
                     // compile_destructure_pattern emits StoreLocal(idx) for Identifier patterns;
@@ -7986,5 +8182,122 @@ mod tests {
         // emit a synthesized FunctionDef when the impl block is empty;
         // that's fine — the test asserts the negative space (no
         // fabricated annotation).
+    }
+
+    // ── strict-flip S1: let-annotation Unknown-accept guard (STRUCTURAL) ──
+    //
+    // Three confirmed laundering holes — each previously ran rc=0 WRONG with
+    // VM==JIT — now reject CLEANLY at compile time, plus the no-FP cases that
+    // must keep compiling. See the two-angle fix:
+    //   (A) `check_let_annotation_scalar_unknown_strict` comprehensive reject
+    //       (`init_rests_on_unprovable_unannotated_fn` +
+    //       `binop_operand_disagreeing_primitive`);
+    //   (B) array-destructure element-kind stamping
+    //       (`stamp_array_destructure_element_binding`).
+
+    fn compile_fails(source: &str) -> bool {
+        let Ok(program) = parse_program(source) else {
+            return true;
+        };
+        BytecodeCompiler::new().compile(&program).is_err()
+    }
+
+    #[test]
+    fn strict_flip_s1_hole1_array_destructure_then_int_annotation_rejected() {
+        // HOLE-1: `let [a, b] = pair` over `Array<number>` binds a,b to number
+        // (angle B); `let bad: int = a` then mismatches (number != int).
+        assert!(
+            compile_fails(
+                "let pair = [3.0, 4.0]\nlet [a, b] = pair\nlet bad: int = a\nbad"
+            ),
+            "HOLE-1: number array element accepted into int binding"
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_hole2_inline_hof_arith_into_int_rejected() {
+        // HOLE-2: `apply(ret_num, 3.0) % 4` = `number % int`; the number-typed
+        // left operand disagrees with the `int` annotation.
+        assert!(
+            compile_fails(
+                "fn apply(f, x) { f(x) }\nfn ret_num(x) { x * 2.0 }\n\
+                 let bad: int = apply(ret_num, 3.0) % 4\nbad"
+            ),
+            "HOLE-2: number-operand arithmetic accepted into int binding"
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_hole3_id_wrap_two_level_into_int_rejected() {
+        // HOLE-3: `apply2(id, ret_num, 3.0)` — id-wrap re-erases to unknown;
+        // the engine echoes the `int` annotation. Caught as un-inferable.
+        assert!(
+            compile_fails(
+                "fn apply2(g, f, x) { g(f(x)) }\nfn id(x) { x }\n\
+                 fn ret_num(x) { x * 2.0 }\nlet bad: int = apply2(id, ret_num, 3.0)\nbad"
+            ),
+            "HOLE-3: id-wrapped unannotated-HOF result accepted into int binding"
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_valid_int_array_destructure_compiles() {
+        // No-FP (angle B): a homogeneous int array destructure binds a,b to
+        // `int`, so `let s: int = a + b` type-checks and runs to 7.
+        use crate::test_utils::eval_typed_i64;
+        assert_eq!(
+            eval_typed_i64("let [a, b] = [3, 4]\nlet s: int = a + b\ns"),
+            7,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_nofp_closure_hof_result_binds_int() {
+        // No-FP (angle A): a closure-literal HOF arg genuinely proves `int`
+        // (NOT an annotation echo) — must keep compiling and run to 42.
+        use crate::test_utils::eval_typed_i64;
+        assert_eq!(
+            eval_typed_i64(
+                "fn apply2(f, x, y) { f(x, y) }\nlet r: int = apply2(|a, b| a * b, 6, 7)\nr"
+            ),
+            42,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_nofp_hof_number_return_binds_number() {
+        // No-FP (angle A): a resolvable-HOF result (`apply(ret_num, 3.0)` ->
+        // number via the HOF resolver) binds cleanly into a `number`.
+        use crate::test_utils::eval_typed_f64;
+        assert_eq!(
+            eval_typed_f64(
+                "fn apply(f, x) { f(x) }\nfn ret_num(x) { x * 2.0 }\n\
+                 let r: number = apply(ret_num, 3.0)\nr"
+            ),
+            6.0,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_nofp_number_var_mod_int_literal_compiles() {
+        // No-FP (angle A): `number % <int literal>` into a `number` binding —
+        // the int literal adopts the number context losslessly; must compile.
+        use crate::test_utils::eval_typed_f64;
+        assert_eq!(
+            eval_typed_f64("let x: number = 3.0\nlet r: number = x % 4\nr"),
+            3.0,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_nofp_dispatch_result_into_int_compiles() {
+        // No-FP (angle A): a concrete method-dispatch result (`[1,2,3].sum()`
+        // -> int via the method registry) is NOT an un-provable HOF and must
+        // bind cleanly into `int` — the guard must not over-fire on it.
+        use crate::test_utils::compile_with_prelude;
+        assert!(
+            compile_with_prelude("let s: int = [1, 2, 3].sum()\ns").is_ok(),
+            "no-FP: concrete dispatch result `.sum()` rejected into int binding"
+        );
     }
 }

@@ -315,6 +315,64 @@ impl BytecodeCompiler {
         }
     }
 
+    /// strict-flip S1 (array-destructure element-kind, 2026-06-22): stamp a
+    /// freshly-bound array-element identifier with the array's PROVEN element
+    /// type name. The element type name is supplied by the VariableDecl
+    /// destructure site in `pending_array_destructure_element_type` (resolved
+    /// there from `concrete_type_for_expr(init) == Array(elem)` — the same
+    /// structural proof the operator path consumes; ADR-006 §2.7.5 stamp-at-
+    /// compile-time). When the receiver is not a proven concrete `Array<T>`
+    /// the pending slot is `None` and nothing is stamped — the binding keeps
+    /// its prior (possibly `unknown`) kind exactly as before, and a later
+    /// `let x: <concrete> = a` over an un-provable element meets the
+    /// let-annotation Unknown-accept guard (FIX A). NO fabrication, NO
+    /// `int`/`number` unify.
+    /// strict-flip S1 (array-destructure element-kind, 2026-06-22): resolve the
+    /// PROVEN element type NAME of the array produced by `init_expr`, for a
+    /// `let [a, b] = init_expr` destructure. Returns the primitive/nominal name
+    /// (`"int"` / `"number"` / `"string"` / a struct name / …) when
+    /// `concrete_type_for_expr(init)` proves a concrete `Array<T>`; `None`
+    /// otherwise (genuinely-untyped or non-array receiver — no fabrication).
+    pub(in crate::compiler) fn array_destructure_element_type_name(
+        &self,
+        init_expr: &shape_ast::ast::Expr,
+    ) -> Option<String> {
+        use shape_value::v2::ConcreteType;
+        let ct = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+            self, init_expr,
+        )?;
+        let ConcreteType::Array(elem) = ct else {
+            return None;
+        };
+        let ann = crate::compiler::expressions::closures::concrete_type_to_type_annotation(&elem)?;
+        match ann {
+            shape_ast::ast::TypeAnnotation::Basic(n) => Some(n),
+            shape_ast::ast::TypeAnnotation::Reference(p) => Some(p.to_string()),
+            _ => None,
+        }
+    }
+
+    fn stamp_array_destructure_element_binding(
+        &mut self,
+        pat: &shape_ast::ast::DestructurePattern,
+        is_global: bool,
+    ) {
+        use shape_ast::ast::DestructurePattern;
+        let DestructurePattern::Identifier(name, _) = pat else {
+            return;
+        };
+        let Some(elem_type) = self.pending_array_destructure_element_type.clone() else {
+            return;
+        };
+        if is_global {
+            if let Some(slot) = self.module_bindings.get(name).copied() {
+                self.set_module_binding_type_info(slot, &elem_type);
+            }
+        } else if let Some(local_idx) = self.resolve_local(name) {
+            self.set_local_type_info(local_idx, &elem_type);
+        }
+    }
+
     /// Compile destructuring pattern for value on stack
     /// Assumes value is already on the stack
     pub(in crate::compiler) fn compile_destructure_pattern(
@@ -417,6 +475,15 @@ impl BytecodeCompiler {
                     ));
                     self.emit(Instruction::simple(OpCode::GetProp));
                     self.compile_destructure_pattern(pat)?;
+                    // strict-flip S1 (array-destructure element-kind,
+                    // 2026-06-22): stamp the freshly-bound element identifier
+                    // with the array's PROVEN element type (set at the
+                    // VariableDecl site from `concrete_type_for_expr(init)`).
+                    // Without this the binding kept an `unknown` kind and a
+                    // later `let bad: int = a` (a: number) was silently
+                    // accepted (HOLE-1). NO fabrication: only stamps when the
+                    // receiver resolved to a concrete `Array<T>`.
+                    self.stamp_array_destructure_element_binding(pat, false);
                 }
 
                 Ok(())
@@ -652,6 +719,9 @@ impl BytecodeCompiler {
                     ));
                     self.emit(Instruction::simple(OpCode::GetProp));
                     self.compile_destructure_pattern_global(pat)?;
+                    // strict-flip S1 (array-destructure element-kind,
+                    // 2026-06-22): module-scope twin of the local-path stamp.
+                    self.stamp_array_destructure_element_binding(pat, true);
                 }
 
                 Ok(())

@@ -126,6 +126,7 @@ impl BytecodeCompiler {
             comprehension_push_sites: Vec::new(),
             empty_array_accumulators: HashMap::new(),
             pending_empty_array_alloc_idx: None,
+            pending_array_destructure_element_type: None,
             pending_variable_typed_map_kind: None,
             v2_typed_map_locals: HashMap::new(),
             v2_typed_map_module_bindings: HashMap::new(),

@@ -1165,6 +1165,18 @@ pub struct BytecodeCompiler {
     /// annotated, or otherwise resolved a kind directly.
     pub(crate) pending_empty_array_alloc_idx: Option<usize>,
 
+    /// strict-flip S1 (array-destructure element-kind, 2026-06-22): the proven
+    /// element type NAME (`"int"` / `"number"` / `"string"` / …) of the array
+    /// being destructured by the enclosing `let [a, b] = <Array<T>>`. Set from
+    /// `concrete_type_for_expr(init).Array(elem)` at the VariableDecl
+    /// destructure site immediately before `compile_destructure_pattern*`, read
+    /// by the `DestructurePattern::Array` arm to stamp each element binding's
+    /// tracker type to the proven element type. Without it the binding kept an
+    /// `unknown` kind and `let bad: int = a` (a: number) was silently accepted.
+    /// `None` when the destructured receiver is not a proven concrete
+    /// `Array<T>` (the binding then carries no element hint — same as before).
+    pub(crate) pending_array_destructure_element_type: Option<String>,
+
     /// v2 Phase 3.2: when the enclosing `let m: HashMap<K, V> = HashMap()`
     /// declares an explicit `HashMap<K, V>` annotation whose key/value pair
     /// maps to a [`v2_typed_map_emission::TypedMapKind`], stash the kind here
