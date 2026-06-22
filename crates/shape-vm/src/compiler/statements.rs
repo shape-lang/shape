@@ -621,11 +621,31 @@ impl BytecodeCompiler {
                         impl_name,
                         &impl_block.target_type,
                     )?;
+                    // Async `Drop::drop` is registered under the
+                    // disambiguated symbol name `drop_async` (mirrors the
+                    // `func_def.name` disambiguation in
+                    // `desugar_impl_method`). Registering both the sync and
+                    // async variant under the bare `drop` key would let the
+                    // last-declared impl overwrite the first — making
+                    // drop-variant selection DECLARATION-ORDER dependent
+                    // (a sync `DropCall` would resolve to whichever variant
+                    // happened to be declared last). The runtime
+                    // (`op_drop_call_impl`) looks up `drop_async` for the
+                    // async opcode and `drop` for the sync opcode, so the
+                    // symbol key must carry the same distinction.
+                    let symbol_method_name = if trait_basename == "Drop"
+                        && method.name == "drop"
+                        && method.is_async
+                    {
+                        "drop_async"
+                    } else {
+                        method.name.as_str()
+                    };
                     self.program.register_trait_method_symbol(
                         &trait_basename,
                         type_name,
                         impl_name,
-                        &method.name,
+                        symbol_method_name,
                         &func_def.name,
                     );
                     self.register_function(&func_def)?;

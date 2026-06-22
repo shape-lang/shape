@@ -532,3 +532,64 @@ n
         "plain break with f-string arg must terminate at attempt==2"
     );
 }
+
+/// Drop-variant selection must follow the EXECUTION CONTEXT, not the
+/// DECLARATION ORDER of the sync/async `impl Drop` methods.
+///
+/// Book `fundamentals/resource-management.mdx` (the variant-selection table):
+///   "Both sync and async" + "Sync context" => `DropCall` (sync fallback).
+///
+/// Pre-fix bug (declaration-order dependence): the impl-block lowering
+/// registered BOTH the sync `drop` and the async `drop_async` under the same
+/// trait-method symbol key (`Drop::<Type>::__default__::drop`, using
+/// `method.name == "drop"` for both). The second-declared variant overwrote
+/// the first, so a sync `DropCall` would resolve to whichever drop body
+/// happened to be declared LAST. With the sync impl declared first, the async
+/// drop body wrongly ran in a sync context.
+///
+/// The fix registers the async variant under `drop_async` (matching
+/// `func_def.name` and the runtime `op_drop_call_impl` lookup), so the sync
+/// `DropCall` always resolves to the sync `drop`. This test runs the program
+/// in BOTH declaration orders and asserts the SYNC drop body fires (marker
+/// `1`), never the async one (marker `2`).
+#[test]
+fn sync_context_runs_sync_drop_regardless_of_decl_order() {
+    // Sync drop sets WHICH=1, async drop sets WHICH=2. A SYNC function uses
+    // the resource, so the sync drop MUST run -> WHICH == 1.
+    // `{SYNC_FIRST}` / `{ASYNC_FIRST}` toggles which impl method is declared
+    // first; the result must be identical (1) for both.
+    fn run(decl_order: &str) -> i64 {
+        let src = format!(
+            r#"
+let mut WHICH: int = 0
+fn mark(v: int) {{ WHICH = v }}
+type Res {{ id: int }}
+impl Drop for Res {{
+{decl_order}
+}}
+fn use_it() {{
+  let r = Res {{ id: 1 }}
+}}
+use_it()
+let w: int = WHICH
+w
+"#
+        );
+        crate::test_utils::eval_typed_i64(&src)
+    }
+
+    let sync_first = "  method drop() { mark(1) }\n  async method drop() { mark(2) }";
+    let async_first = "  async method drop() { mark(2) }\n  method drop() { mark(1) }";
+
+    assert_eq!(
+        run(sync_first),
+        1,
+        "sync context with sync-declared-first must run the SYNC drop (got async)"
+    );
+    assert_eq!(
+        run(async_first),
+        1,
+        "sync context with async-declared-first must run the SYNC drop \
+         (declaration order must not change variant selection)"
+    );
+}
