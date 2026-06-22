@@ -1,0 +1,7 @@
+fn apply(f, x) { f(x) }
+fn main() {
+  let inc = |x| x + 1
+  let r = apply(inc, 41)
+  print(r + 1.0)
+}
+main()

@@ -1,0 +1,7 @@
+fn use_it(f) { f(5) }
+fn main() {
+  let mul = |x| x * 2
+  let r = use_it(mul)
+  print(r + 1.0)
+}
+main()
