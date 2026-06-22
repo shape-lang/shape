@@ -1016,3 +1016,83 @@ print(s)
 "#;
     ShapeTest::new(code).expect_run_ok().expect_output("6");
 }
+
+// =========================================================================
+// STAGE-Fix (v0.3.3 strict-flip): RETURN/TAIL-POSITION reinterpret hole.
+// The bidirectional `check_against` Match arm (an annotated fn's tail/return
+// position) previously INFERRED the scrutinee but DISCARDED it and called the
+// scrutinee-LESS `bind_pattern_vars`, so a foreign constructor pattern in the
+// match arm reached `check_constructor_pattern_ownership(None, …)` — which
+// surfaces-and-stops on a `None` scrutinee and accepts the foreign pattern.
+// The payload binder then bound to a fresh unknown that flowed past FIX-B and
+// was coerced to the declared return type at the boundary: a raw heap-pointer
+// reinterpret (VM == JIT both leak, nondeterministic). The fix threads the
+// substituted scrutinee into `bind_pattern_vars_typed`, mirroring the
+// `infer_expr` Match path, so the ownership check gets the type it needs.
+// =========================================================================
+
+#[test]
+fn return_position_constructor_over_struct_payload_rejected() {
+    // The CONFIRMED return-position repro: the match is the TAIL expression of
+    // an annotated `fn use_it() -> int`. `Some(n)` over `Ok`'s `Point` payload
+    // must reject cleanly, not reinterpret the raw struct pointer.
+    let code = r#"
+type Point { x: int, y: int }
+fn sink(v: int) -> int { v + 100 }
+fn g() -> Result<Point,string> { Ok(Point { x: 7, y: 9 }) }
+fn use_it() -> int { match g() { Ok(Some(n)) => sink(n), Err(e) => -1 } }
+print(use_it())
+"#;
+    ShapeTest::new(code).expect_run_err_contains("requires an enum-typed value");
+}
+
+#[test]
+fn return_position_constructor_over_int_payload_rejected() {
+    // int-payload variant in return/tail position: `Some(n)` over `Ok`'s `int`
+    // payload (a primitive) must reject.
+    let code = r#"
+fn g() -> Result<int,string> { Ok(5) }
+fn use_it() -> int { match g() { Ok(Some(n)) => n + 1, Err(e) => -1 } }
+print(use_it())
+"#;
+    ShapeTest::new(code).expect_run_err_contains("requires an enum-typed value");
+}
+
+#[test]
+fn explicit_return_match_constructor_over_struct_payload_rejected() {
+    // The `return <match>` syntactic form must reject identically to the
+    // bare-tail form — both route through the bidirectional `check_against`
+    // Match arm.
+    let code = r#"
+type Point { x: int, y: int }
+fn sink(v: int) -> int { v + 100 }
+fn g() -> Result<Point,string> { Ok(Point { x: 7, y: 9 }) }
+fn use_it() -> int { return match g() { Ok(Some(n)) => sink(n), Err(e) => -1 } }
+print(use_it())
+"#;
+    ShapeTest::new(code).expect_run_err_contains("requires an enum-typed value");
+}
+
+#[test]
+fn return_position_legit_option_payload_still_passes() {
+    // No-FP: `Result<Option<int>,string>` matched in RETURN position. `Ok`'s
+    // payload IS an enum carrier (`Option<int>`), so `Ok(Some(n))` is valid and
+    // the threaded scrutinee must NOT reject it. Returns 107 (7 + 100).
+    let code = r#"
+fn g() -> Result<Option<int>,string> { Ok(Some(7)) }
+fn use_it() -> int { match g() { Ok(Some(n)) => n + 100, Ok(None) => -2, Err(e) => -1 } }
+print(use_it())
+"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("107");
+}
+
+#[test]
+fn return_position_valid_nested_ok_some_still_passes() {
+    // No-FP: valid `Ok(Some(9))` in return position binds `n = 9` and returns 9.
+    let code = r#"
+fn g() -> Result<Option<int>,string> { Ok(Some(9)) }
+fn use_it() -> int { match g() { Ok(Some(n)) => n, Ok(None) => -2, Err(e) => -1 } }
+print(use_it())
+"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("9");
+}

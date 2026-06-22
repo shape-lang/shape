@@ -139,13 +139,29 @@ impl TypeInferenceEngine {
 
             // Match: propagate expected to arms
             Expr::Match(match_expr, _) => {
-                let _scrutinee_type = self.infer_expr(&match_expr.scrutinee)?;
+                let raw_scrutinee_type = self.infer_expr(&match_expr.scrutinee)?;
+                // Zonk the scrutinee through the unifier's substitution store
+                // BEFORE binding pattern vars, then thread it into
+                // `bind_pattern_vars_typed`. This mirrors the `infer_expr` Match
+                // path (expressions.rs:1291-1302). The bidirectional / tail
+                // (return-position) path previously DISCARDED the scrutinee and
+                // called the scrutinee-less `bind_pattern_vars`, which routed to
+                // `check_constructor_pattern_ownership(None, variant)` — that
+                // cannot prove a foreign constructor pattern (e.g. `Some(n)`
+                // against a `Result<Point,…>` scrutinee) is non-enum, so it
+                // surfaced-and-stopped, accepted the foreign pattern, and bound
+                // the payload to a fresh unknown. The unknown then flowed past
+                // FIX-B and got coerced to the concrete declared return type at
+                // the boundary, producing a heap-pointer reinterpret. Threading
+                // the real scrutinee gives the ownership check the type it needs
+                // to reject the foreign pattern.
+                let scrutinee_type = self.unifier.apply_substitutions(&raw_scrutinee_type);
 
                 let mut arm_types = Vec::new();
 
                 for arm in &match_expr.arms {
                     self.env.push_scope();
-                    self.bind_pattern_vars(&arm.pattern)?;
+                    self.bind_pattern_vars_typed(&arm.pattern, Some(&scrutinee_type))?;
 
                     let arm_type = self.check_against(&arm.body, expected)?;
                     arm_types.push(arm_type);

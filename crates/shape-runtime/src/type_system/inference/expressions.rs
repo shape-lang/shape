@@ -2511,6 +2511,37 @@ impl TypeInferenceEngine {
         self.bind_pattern_vars_typed(pattern, None)
     }
 
+    /// Element type of an array-shaped scrutinee, in any of the three
+    /// representations the inference engine produces (`Concrete(Array)`,
+    /// `Concrete(Generic{"Array"|"Vec"})`, or `Generic{base: Array|Vec, args}`).
+    /// Used to thread the element type into array-element sub-patterns so a
+    /// constructor sub-pattern there still reaches the ownership check with a
+    /// real scrutinee. Returns `None` for non-array shapes (recursion then keeps
+    /// the prior `None` surface-and-stop behaviour).
+    fn pattern_array_element_type(ty: &Type) -> Option<Type> {
+        match ty {
+            Type::Concrete(TypeAnnotation::Array(inner)) => {
+                Some(Type::Concrete((**inner).clone()))
+            }
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if (name == "Array" || name == "Vec") && args.len() == 1 =>
+            {
+                Some(Type::Concrete(args[0].clone()))
+            }
+            Type::Generic { base, args }
+                if args.len() == 1
+                    && matches!(
+                        base.as_ref(),
+                        Type::Concrete(ann)
+                            if matches!(ann.as_type_name_str(), Some("Array") | Some("Vec"))
+                    ) =>
+            {
+                Some(args[0].clone())
+            }
+            _ => None,
+        }
+    }
+
     /// WS-4 4b: scrutinee-aware variant of [`bind_pattern_vars`]. When
     /// `scrutinee` resolves to a registered struct, an `Object` or
     /// struct-`Constructor` pattern binds each field to that field's
@@ -2544,8 +2575,18 @@ impl TypeInferenceEngine {
                 // Wildcards don't bind variables
             }
             Pattern::Array(patterns) => {
+                // Thread the scrutinee's ELEMENT type into each element
+                // sub-pattern. Without this, a constructor sub-pattern in
+                // array-element position (e.g. `match arr { [Some(n), _] => … }`
+                // over an `Array<Result<Point,…>>`) would reach
+                // `check_constructor_pattern_ownership(None, variant)`, which
+                // surfaces-and-stops on a `None` scrutinee and accepts the
+                // foreign pattern — the same reinterpret hole as the
+                // return-position Match arm, one structural level in. Resolving
+                // the element type gives the ownership check the type it needs.
+                let elem_ty = scrutinee.and_then(Self::pattern_array_element_type);
                 for p in patterns {
-                    self.bind_pattern_vars_typed(p, None)?;
+                    self.bind_pattern_vars_typed(p, elem_ty.as_ref())?;
                 }
             }
             Pattern::Object(fields) => {
