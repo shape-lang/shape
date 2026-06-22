@@ -2568,6 +2568,15 @@ impl TypeInferenceEngine {
                 variant,
                 fields,
             } => {
+                // STAGE-Fix (v0.3.3 strict-flip): pattern-variant-ownership.
+                // BEFORE binding any payload var, verify the variant belongs
+                // to the scrutinee enum type. A foreign variant (e.g. a
+                // `Some`/`None` pattern over a `Result` scrutinee) would
+                // otherwise structurally collide by discriminant slot and bind
+                // its payload binder to RAW heap-pointer bits without a type
+                // check — a catastrophic reinterpret. Reject cleanly here.
+                self.check_constructor_pattern_ownership(scrutinee, variant)?;
+
                 // R8 W7: resolve the enum's `EnumDef` from the scrutinee
                 // type so enum-payload binders carry the variant's
                 // declared payload types instead of unconstrained fresh

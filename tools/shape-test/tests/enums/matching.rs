@@ -726,3 +726,120 @@ fn test_match_object_destructuring() {
     )
     .expect_string("x wins");
 }
+
+// =========================================================================
+// STAGE-Fix (v0.3.3 strict-flip): pattern-variant-ownership.
+//
+// A constructor/variant pattern must BELONG to the scrutinee enum type. A
+// foreign variant (e.g. an `Option` `Some`/`None` pattern over a `Result`
+// scrutinee, or a `Color` variant over a `Shape` scrutinee) previously
+// collided by discriminant slot, binding the payload binder to RAW heap-
+// pointer bits without a type check — a catastrophic reinterpret (VM != JIT,
+// ASLR-nondeterministic). These assert the now-clean compile-error, and that
+// valid same-enum matches still work.
+// =========================================================================
+
+#[test]
+fn cross_enum_some_pattern_over_result_scrutinee_rejected() {
+    // The catastrophic heap-reinterpret repro: Some/None (Option) over a
+    // Result scrutinee. Must be a clean compile error, never a structural
+    // discriminant-slot match.
+    let code = r#"
+let v: Result<int,string> = Ok(42)
+match v { Some(n) => print(n + 1), None => print(-1) }
+"#;
+    ShapeTest::new(code)
+        .expect_run_err_contains("does not belong to scrutinee type 'Result'");
+}
+
+#[test]
+fn cross_enum_some_over_result_err_value_rejected() {
+    // Same rejection regardless of the runtime variant carried by the
+    // Result value (Err here) — the check is at type-check time.
+    let code = r#"
+let v: Result<int,string> = Err("boom")
+match v { Some(n) => print(n + 1), None => print(-1) }
+"#;
+    ShapeTest::new(code)
+        .expect_run_err_contains("does not belong to scrutinee type 'Result'");
+}
+
+#[test]
+fn cross_enum_foreign_user_variant_over_user_enum_rejected() {
+    let code = r#"
+enum Shape { Circle(number), Square(number) }
+enum Color { Red, Green }
+let s: Shape = Shape::Circle(2.0)
+match s {
+  Color::Red => print(1),
+  Shape::Square(side) => print(side),
+  Shape::Circle(r) => print(r)
+}
+"#;
+    ShapeTest::new(code)
+        .expect_run_err_contains("does not belong to enum 'Shape'");
+}
+
+#[test]
+fn valid_option_match_still_works() {
+    let code = r#"
+let v: Option<int> = Some(5)
+match v { Some(n) => print(n + 1), None => print(0) }
+"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("6");
+}
+
+#[test]
+fn valid_result_match_still_works() {
+    let code = r#"
+let v: Result<int,string> = Ok(7)
+match v { Ok(x) => print(x), Err(e) => print(-1) }
+"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("7");
+}
+
+#[test]
+fn valid_user_enum_match_still_works() {
+    let code = r#"
+enum Shape { Circle(number), Square(number) }
+let s: Shape = Shape::Circle(2.0)
+match s { Shape::Circle(r) => print(r), Shape::Square(side) => print(side) }
+"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("2.0");
+}
+
+#[test]
+fn nested_constructor_pattern_still_works() {
+    // The G1 S3 nested-constructor fix must survive: Ok(Some(n)).
+    let code = r#"
+let v: Result<Option<int>, string> = Ok(Some(9))
+match v { Ok(Some(n)) => print(n), Ok(None) => print(-1), Err(e) => print(-2) }
+"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("9");
+}
+
+#[test]
+fn nested_foreign_inner_variant_rejected() {
+    // A foreign variant in the INNER position (Color::Red where the inner
+    // payload type is Option<int>) must reject too.
+    let code = r#"
+enum Color { Red, Green }
+let v: Result<Option<int>, string> = Ok(Some(9))
+match v {
+  Ok(Color::Red) => print(0),
+  Ok(Some(n)) => print(n),
+  Ok(None) => print(-1),
+  Err(e) => print(-2)
+}
+"#;
+    ShapeTest::new(code)
+        .expect_run_err_contains("does not belong to scrutinee type 'Option'");
+}

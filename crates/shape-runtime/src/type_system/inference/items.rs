@@ -2165,6 +2165,91 @@ impl TypeInferenceEngine {
         }
     }
 
+    /// STAGE-Fix (v0.3.3 strict-flip): pattern-variant-ownership.
+    ///
+    /// A constructor/variant pattern (`Some`/`None`, `Ok`/`Err`, or a user
+    /// enum variant) must BELONG to the scrutinee enum type. Without this
+    /// check, `match v { Some(n) => … }` over a `Result<int,string>`
+    /// scrutinee is NOT rejected: `Some(n)` structurally collides with
+    /// `Result::Ok` by discriminant slot, binds `n` to the payload slot
+    /// WITHOUT a type check, and `n + 1` then does arithmetic on raw
+    /// heap-pointer bits (a catastrophic reinterpret; VM ≠ JIT, ASLR-
+    /// nondeterministic). This validates ownership at type-check time, so a
+    /// foreign-variant pattern is a clean compile error instead of a
+    /// structural / discriminant-slot match.
+    ///
+    /// Resolves the scrutinee to a known enum IDENTITY:
+    ///   - builtin `Result<T,E>`  → owns `Ok`, `Err`
+    ///   - builtin `Option<T>`    → owns `Some`, `None`
+    ///   - a registered user enum → owns its declared member names
+    ///
+    /// When the scrutinee identity cannot be proven (an unresolved type
+    /// variable from an unannotated parameter, a function/primitive/union,
+    /// etc.) this does NOT reject — surface-and-stop, not force. Returning
+    /// `Ok(())` there leaves the existing fresh-var binding behaviour intact
+    /// and does not introduce a false positive.
+    pub(crate) fn check_constructor_pattern_ownership(
+        &self,
+        scrutinee: Option<&Type>,
+        variant: &str,
+    ) -> TypeResult<()> {
+        let Some(scrutinee) = scrutinee else {
+            return Ok(());
+        };
+
+        // Builtin Result/Option scrutinee: identity drives the owned-variant
+        // set directly. `Result`/`Option` are not registered user enums
+        // (`get_enum` → None), so detect them by their generic base name.
+        let builtin_name = match scrutinee {
+            Type::Generic { base, .. } => match base.as_ref() {
+                Type::Concrete(ann) => ann.as_type_name_str().and_then(|n| match n {
+                    "Result" | "Option" => Some(n.to_string()),
+                    _ => None,
+                }),
+                _ => None,
+            },
+            Type::Concrete(ann) => ann.as_type_name_str().and_then(|n| match n {
+                "Result" | "Option" => Some(n.to_string()),
+                _ => None,
+            }),
+            _ => None,
+        };
+
+        if let Some(name) = builtin_name {
+            let owned = match name.as_str() {
+                "Result" => matches!(variant, "Ok" | "Err"),
+                "Option" => matches!(variant, "Some" | "None"),
+                _ => true,
+            };
+            if owned {
+                return Ok(());
+            }
+            return Err(TypeError::InvalidPatternType(format!(
+                "variant pattern '{variant}' does not belong to scrutinee type '{name}' \
+                 (a '{name}' value can only be matched with its own variants)"
+            )));
+        }
+
+        // Registered user enum scrutinee: the variant must be one of its
+        // declared members.
+        if let Some(enum_name) = self.enum_name_of_type(scrutinee) {
+            if let Some(def) = self.env.get_enum(&enum_name) {
+                let owned = def.members.iter().any(|m| m.name == variant);
+                if owned {
+                    return Ok(());
+                }
+                return Err(TypeError::InvalidPatternType(format!(
+                    "variant pattern '{variant}' does not belong to enum '{enum_name}' \
+                     (an '{enum_name}' value can only be matched with its own variants)"
+                )));
+            }
+        }
+
+        // Scrutinee identity not provable (type var, struct, primitive,
+        // union, function). Do not reject — leaves prior behaviour intact.
+        Ok(())
+    }
+
     /// WS-4 4b: look up the declared `TypeAnnotation` of a field on a
     /// registered struct. Used to bind destructured field patterns to
     /// their real types.
