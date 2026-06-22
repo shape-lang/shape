@@ -10,6 +10,7 @@
 
 mod blocks;
 mod combined;
+mod diverging_branch;
 mod functions;
 mod if_else;
 mod loops;

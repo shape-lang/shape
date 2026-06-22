@@ -659,6 +659,19 @@ impl TypeInferenceEngine {
                     self.env
                         .define(var_name, TypeScheme::mono(narrowed_type.clone()));
                 }
+                // A branch body that DIVERGES (its last statement is — or is
+                // dominated by — a `return`/`break`/`continue`) is the
+                // NEVER/bottom type: it produces no value and must be EXCLUDED
+                // from the branch-type unification. We still INFER the branch
+                // (so a `return Err(...)`'s value is checked against the fn
+                // return type), but we do NOT unify a diverging branch's type
+                // against the other branch, and the diverging branch does not
+                // become the if-statement's type. This is the ROOT fix for
+                // `if cond { acc = v } else { return Err(...) }`: the else body
+                // ends in `return Err(...)` (typed as the fn's `Result<…>`),
+                // which previously unified against the void then-branch and
+                // wrongly rejected.
+                let then_diverges = Self::body_diverges(&if_stmt.then_body);
                 let then_type = self.infer_statements(&if_stmt.then_body)?;
                 self.env.pop_scope();
                 self.env.exit_conditional();
@@ -672,14 +685,31 @@ impl TypeInferenceEngine {
                         self.env
                             .define(var_name, TypeScheme::mono(narrowed_type.clone()));
                     }
+                    let else_diverges = Self::body_diverges(else_body);
                     let else_type = self.infer_statements(else_body)?;
                     self.env.pop_scope();
                     self.env.exit_conditional();
-                    // Both branches should have compatible types
-                    self.constraints.push((then_type.clone(), else_type));
-                }
 
-                Ok(then_type)
+                    match (then_diverges, else_diverges) {
+                        // Both diverge → the whole if/else is Never.
+                        (true, true) => Ok(Type::Concrete(TypeAnnotation::Never)),
+                        // Only else diverges → if-statement type is the then body.
+                        (false, true) => Ok(then_type),
+                        // Only then diverges → if-statement type is the else body.
+                        (true, false) => Ok(else_type),
+                        // Neither diverges → ordinary branch-type unification.
+                        (false, false) => {
+                            self.constraints.push((then_type.clone(), else_type));
+                            Ok(then_type)
+                        }
+                    }
+                } else if then_diverges {
+                    // then-only `if` whose body diverges: still falls through
+                    // when the condition is false, so the statement is void.
+                    Ok(BuiltinTypes::void())
+                } else {
+                    Ok(then_type)
+                }
             }
             Statement::For(for_loop, _) => {
                 self.env.push_scope();

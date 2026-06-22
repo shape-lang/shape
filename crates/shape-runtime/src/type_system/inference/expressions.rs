@@ -47,6 +47,75 @@ impl TypeInferenceEngine {
         )
     }
 
+    /// Whether an expression DIVERGES — i.e. control flow never falls through
+    /// past it, so it produces no value of any ordinary type. A diverging
+    /// branch is the NEVER/bottom type and must be EXCLUDED from if/else and
+    /// match-arm expression-type unification (it unifies with anything).
+    ///
+    /// Concretely (strict-flip, 2026-06-22): `if v > 0 { acc = v } else {
+    /// return Err("neg") }` — the `else` body ends in `return Err(...)`, whose
+    /// inferred type is the function's `Result<…>` return. Unifying that into
+    /// the if-expression type (against the void then-branch) wrongly rejects.
+    /// The else-branch DIVERGES, so it contributes NOTHING to the if-expression
+    /// type; only the non-diverging then-branch (void) remains.
+    ///
+    /// A `Return`/`Break`/`Continue` diverges. A block diverges iff its LAST
+    /// item diverges (an earlier diverging item makes later items dead, but the
+    /// established walk types them anyway; we key on the tail). An `if`
+    /// diverges iff BOTH branches diverge. A `match` diverges iff ALL arms
+    /// diverge.
+    pub(crate) fn expr_diverges(expr: &Expr) -> bool {
+        use shape_ast::ast::BlockItem;
+        match expr {
+            Expr::Return(_, _) | Expr::Break(_, _) | Expr::Continue(_) => true,
+            Expr::Block(block, _) => match block.items.last() {
+                Some(BlockItem::Expression(e)) => Self::expr_diverges(e),
+                Some(BlockItem::Statement(stmt)) => Self::stmt_diverges(stmt),
+                _ => false,
+            },
+            Expr::If(if_expr, _) => match &if_expr.else_branch {
+                Some(else_branch) => {
+                    Self::expr_diverges(&if_expr.then_branch)
+                        && Self::expr_diverges(else_branch)
+                }
+                None => false,
+            },
+            Expr::Match(match_expr, _) => {
+                !match_expr.arms.is_empty()
+                    && match_expr.arms.iter().all(|arm| Self::expr_diverges(&arm.body))
+            }
+            _ => false,
+        }
+    }
+
+    /// Statement-level divergence companion to `expr_diverges` — a block's tail
+    /// item may be a `Statement` rather than an `Expression`.
+    pub(crate) fn stmt_diverges(stmt: &shape_ast::ast::Statement) -> bool {
+        use shape_ast::ast::Statement;
+        match stmt {
+            Statement::Return(_, _) | Statement::Break(_) | Statement::Continue(_) => true,
+            Statement::Expression(e, _) => Self::expr_diverges(e),
+            // A statement-form `if` diverges iff it has an else branch AND both
+            // branch BODIES diverge (a then-only `if` always falls through).
+            Statement::If(if_stmt, _) => match &if_stmt.else_body {
+                Some(else_body) => {
+                    Self::body_diverges(&if_stmt.then_body) && Self::body_diverges(else_body)
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// A statement BODY (sequence of statements) diverges iff its LAST
+    /// statement diverges — control never falls through past it.
+    pub(crate) fn body_diverges(stmts: &[shape_ast::ast::Statement]) -> bool {
+        match stmts.last() {
+            Some(last) => Self::stmt_diverges(last),
+            None => false,
+        }
+    }
+
     /// SC1: whether `namespace.member` is a known style-spec member access
     /// (`Color.red`, `Border.rounded`, `ChartType.line`, …). These lower to
     /// a `string` carrier; the call-form `Color.rgb(r,g,b)` is handled via
@@ -572,15 +641,45 @@ impl TypeInferenceEngine {
                 let cond_type = self.infer_expr(condition)?;
                 self.constraints.push((cond_type, BuiltinTypes::boolean()));
 
+                // A branch that DIVERGES (its body ends in / is dominated by a
+                // `return`/`break`/`continue`) is the NEVER/bottom type: it
+                // produces no value of any ordinary type and must be EXCLUDED
+                // from the branch-type unification. We still INFER the branch
+                // (so its inner `return Err(...)` value is checked against the
+                // fn return type), but a diverging branch's type does NOT unify
+                // against the other branch and does NOT become the conditional
+                // type. ROOT fix for `if v > 0 { acc = v } else { return
+                // Err("neg") }` parsed as `Expr::Conditional` (each branch an
+                // `Expr::Block`): the else block ends in `return Err(...)`,
+                // typed as the fn's `Result<…>`, which previously unified
+                // against the void then-block and wrongly rejected.
+                let then_diverges = Self::expr_diverges(then_expr);
                 let then_type = self.infer_expr(then_expr)?;
 
                 if let Some(else_expr) = else_expr {
+                    let else_diverges = Self::expr_diverges(else_expr);
                     let else_type = self.infer_expr(else_expr)?;
-                    // Both branches should have the same type
-                    self.constraints.push((then_type.clone(), else_type));
-                }
 
-                Ok(then_type)
+                    match (then_diverges, else_diverges) {
+                        // Both diverge → the whole if/else is Never.
+                        (true, true) => Ok(Type::Concrete(TypeAnnotation::Never)),
+                        // Only else diverges → conditional type is the then branch.
+                        (false, true) => Ok(then_type),
+                        // Only then diverges → conditional type is the else branch.
+                        (true, false) => Ok(else_type),
+                        // Neither diverges → ordinary branch-type unification.
+                        (false, false) => {
+                            self.constraints.push((then_type.clone(), else_type));
+                            Ok(then_type)
+                        }
+                    }
+                } else if then_diverges {
+                    // then-only conditional whose body diverges: still falls
+                    // through when the condition is false, so the value is void.
+                    Ok(BuiltinTypes::void())
+                } else {
+                    Ok(then_type)
+                }
             }
 
             Expr::TypeAssertion {
@@ -1290,10 +1389,19 @@ impl TypeInferenceEngine {
                 // already-registered constraint.
                 let scrutinee_type = self.unifier.apply_substitutions(&raw_scrutinee_type);
 
-                // Collect all arm return types
+                // Collect arm return types. A DIVERGING arm (one whose body
+                // ends in / is dominated by `return`/`break`/`continue`) is the
+                // NEVER/bottom type — it produces no value and is EXCLUDED from
+                // the arm-type unification below (it unifies with anything). We
+                // still INFER it (so its inner constraints are recorded), but
+                // its type does not enter `arm_types`. If EVERY arm diverges,
+                // the match is Never.
                 let mut arm_types: Vec<Type> = Vec::new();
+                let mut any_arm = false;
+                let mut all_diverge = true;
 
                 for arm in &match_expr.arms {
+                    any_arm = true;
                     self.env.push_scope();
 
                     // Bind pattern variables. WS-4 4b: pass the scrutinee
@@ -1307,7 +1415,13 @@ impl TypeInferenceEngine {
                         self.constraints.push((guard_type, BuiltinTypes::boolean()));
                     }
 
+                    let arm_diverges = Self::expr_diverges(&arm.body);
                     let body_type = self.infer_expr(&arm.body)?;
+                    if arm_diverges {
+                        self.env.pop_scope();
+                        continue;
+                    }
+                    all_diverge = false;
                     arm_types.push(body_type);
 
                     self.env.pop_scope();
@@ -1447,6 +1561,13 @@ impl TypeInferenceEngine {
                     return Ok(common);
                 }
 
+                // Every arm diverges → the match is Never (bottom). Only reach
+                // here when there was at least one arm and all of them diverged;
+                // a genuinely empty `match` (no arms) keeps the fresh-var path.
+                if any_arm && all_diverge {
+                    return Ok(Type::Concrete(TypeAnnotation::Never));
+                }
+
                 // Determine result type: unify if same, create nominal union if different
                 let result_type = if arm_types.is_empty() {
                     self.fresh_type_var()
@@ -1466,14 +1587,53 @@ impl TypeInferenceEngine {
                 let cond_type = self.infer_expr(&if_expr.condition)?;
                 self.constraints.push((cond_type, BuiltinTypes::boolean()));
 
+                // A branch that DIVERGES (its body ends in / is dominated by a
+                // `return`/`break`/`continue`) is the NEVER/bottom type: it
+                // produces no value of any ordinary type and must be EXCLUDED
+                // from the branch-type unification. We still INFER the branch
+                // (so its inner constraints — e.g. the `return Err(...)` value
+                // against the fn return type — are recorded), but we do NOT
+                // unify a diverging branch's type into the if-expression type,
+                // and we do NOT adopt it as the result.
+                //
+                // Result:
+                //   then diverges, else valued  → else's type
+                //   then valued, else diverges  → then's type
+                //   neither diverges            → then ↔ else unified (= then)
+                //   both diverge / no else+then-diverges → Never
+                let then_diverges = Self::expr_diverges(&if_expr.then_branch);
                 let then_type = self.infer_expr(&if_expr.then_branch)?;
 
                 if let Some(else_branch) = &if_expr.else_branch {
+                    let else_diverges = Self::expr_diverges(else_branch);
                     let else_type = self.infer_expr(else_branch)?;
-                    self.constraints.push((then_type.clone(), else_type));
-                }
 
-                Ok(then_type)
+                    match (then_diverges, else_diverges) {
+                        // Both branches diverge → the whole if/else is Never.
+                        (true, true) => {
+                            Ok(Type::Concrete(TypeAnnotation::Never))
+                        }
+                        // Only the else diverges → the if-expression type is the
+                        // (non-diverging) then-branch type; no unification.
+                        (false, true) => Ok(then_type),
+                        // Only the then diverges → result is the else-branch type.
+                        (true, false) => Ok(else_type),
+                        // Neither diverges → ordinary branch-type unification.
+                        (false, false) => {
+                            self.constraints.push((then_type.clone(), else_type));
+                            Ok(then_type)
+                        }
+                    }
+                } else {
+                    // No else branch. A then-only `if` is a statement-position
+                    // void either way; if the then-branch diverges there is no
+                    // value to surface, so the if itself is Never.
+                    if then_diverges {
+                        Ok(Type::Concrete(TypeAnnotation::Never))
+                    } else {
+                        Ok(then_type)
+                    }
+                }
             }
 
             // While expression

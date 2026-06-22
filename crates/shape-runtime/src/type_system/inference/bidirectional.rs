@@ -127,14 +127,29 @@ impl TypeInferenceEngine {
                 let cond_type = self.infer_expr(condition)?;
                 self.constraints.push((cond_type, BuiltinTypes::boolean()));
 
+                // A DIVERGING branch (`return`/`break`/`continue`) is NEVER and
+                // is EXCLUDED from the branch-type unification — same rule as
+                // the `Expr::Conditional` / `Statement::If` inference paths.
+                let then_diverges = Self::expr_diverges(then_expr);
                 let then_type = self.check_against(then_expr, expected)?;
 
                 if let Some(else_e) = else_expr {
+                    let else_diverges = Self::expr_diverges(else_e);
                     let else_type = self.check_against(else_e, expected)?;
-                    self.constraints.push((then_type.clone(), else_type));
+                    match (then_diverges, else_diverges) {
+                        (true, true) => Ok(Type::Concrete(TypeAnnotation::Never)),
+                        (false, true) => Ok(then_type),
+                        (true, false) => Ok(else_type),
+                        (false, false) => {
+                            self.constraints.push((then_type.clone(), else_type));
+                            Ok(then_type)
+                        }
+                    }
+                } else if then_diverges {
+                    Ok(BuiltinTypes::void())
+                } else {
+                    Ok(then_type)
                 }
-
-                Ok(then_type)
             }
 
             // Match: propagate expected to arms
@@ -158,18 +173,34 @@ impl TypeInferenceEngine {
                 let scrutinee_type = self.unifier.apply_substitutions(&raw_scrutinee_type);
 
                 let mut arm_types = Vec::new();
+                let mut any_arm = false;
+                let mut all_diverge = true;
 
                 for arm in &match_expr.arms {
+                    any_arm = true;
                     self.env.push_scope();
                     self.bind_pattern_vars_typed(&arm.pattern, Some(&scrutinee_type))?;
 
+                    // A DIVERGING arm (`return`/`break`/`continue`) is NEVER and
+                    // is EXCLUDED from the arm-type unification (still inferred
+                    // so its inner constraints are recorded).
+                    let arm_diverges = Self::expr_diverges(&arm.body);
                     let arm_type = self.check_against(&arm.body, expected)?;
+                    if arm_diverges {
+                        self.env.pop_scope();
+                        continue;
+                    }
+                    all_diverge = false;
                     arm_types.push(arm_type);
 
                     self.env.pop_scope();
                 }
 
-                // All arms should have the same type (the expected type)
+                if any_arm && all_diverge {
+                    return Ok(Type::Concrete(TypeAnnotation::Never));
+                }
+
+                // All non-diverging arms should have the same type (the expected type)
                 if !arm_types.is_empty() {
                     let first = arm_types[0].clone();
                     for ty in &arm_types[1..] {

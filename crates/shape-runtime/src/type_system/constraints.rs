@@ -259,6 +259,17 @@ impl ConstraintSolver {
                 Ok(())
             }
 
+            // Never is the BOTTOM type: a diverging branch
+            // (`return`/`break`/`continue`) produces no value, so its type
+            // unifies with anything. The if/else + match-arm inference already
+            // EXCLUDES a diverging branch from forming the expression type, but
+            // an all-diverging if/match yields `Never` directly; when that
+            // result lands in a value position (e.g. `let x = if c { return }
+            // else { return }`) the constraint against the expected type must
+            // succeed rather than mismatch.
+            (Type::Concrete(TypeAnnotation::Never), _)
+            | (_, Type::Concrete(TypeAnnotation::Never)) => Ok(()),
+
             // Concrete type constraints
             (Type::Concrete(ann1), Type::Concrete(ann2)) => {
                 if self.unify_annotations(ann1, ann2)? {
