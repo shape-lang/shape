@@ -1,3 +1,0 @@
-use math::stats
-let m = stats::mean([2.0, 4.0, 6.0])
-print(f"m={m}")

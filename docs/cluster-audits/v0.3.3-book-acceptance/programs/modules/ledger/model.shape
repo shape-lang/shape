@@ -1,0 +1,41 @@
+// ledger/model.shape  -> importable as "ledger::model"
+//
+// Core data model for the ledger analytics engine. Demonstrates `pub type`
+// and `pub enum` exports (book: "Exports" + "Module File Layout").
+//
+// Money is represented in INTEGER CENTS throughout the whole library so that
+// every arithmetic result is exact and machine-proofable — no float rounding.
+//
+// Category is modelled as an enum so downstream modules pattern-match on it.
+
+pub enum Category {
+    Food,
+    Rent,
+    Transport,
+    Fun,
+    Income,
+}
+
+// A single ledger entry. `cents` is signed: credits (income) are positive,
+// debits (spending) are negative.
+pub type Txn {
+    id: int,
+    cents: int,
+    cat: Category,
+    memo: string,
+}
+
+// A named account that transactions post against.
+pub type Account {
+    name: string,
+    opening_cents: int,
+}
+
+// Constructor helper so call sites stay short and uniform.
+pub fn make_txn(id: int, cents: int, cat: Category, memo: string) -> Txn {
+    Txn { id: id, cents: cents, cat: cat, memo: memo }
+}
+
+pub fn make_account(name: string, opening_cents: int) -> Account {
+    Account { name: name, opening_cents: opening_cents }
+}

@@ -1,5 +1,0 @@
-fn bad() {
-    let x = 42
-    return &x
-}
-print(bad())

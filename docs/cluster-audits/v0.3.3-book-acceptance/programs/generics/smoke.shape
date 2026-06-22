@@ -1,0 +1,40 @@
+// Smoke: book runnable=true generic/trait surface
+fn first_int(items: Vec<int>) -> int {
+  items[0]
+}
+print(first_int([1, 2, 3]))
+
+// extend block (traits.mdx runnable=true)
+type Point { x: int, y: int }
+extend Point {
+  method magnitude_sq() -> int { self.x * self.x + self.y * self.y }
+  method sum() -> int { self.x + self.y }
+}
+let p = Point { x: 3, y: 4 }
+print(p.magnitude_sq())
+print(p.sum())
+
+// impl trait direct dispatch (traits.mdx runnable=true)
+trait Display {
+  fn display() -> string;
+}
+type User { name: string }
+impl Display for User {
+  method display() -> string { self.name }
+}
+let u = User { name: "Alice" }
+print(u.display())
+
+// Vec<dyn Display> monomorphic (traits.mdx claims end-to-end)
+fn print_all(items: Vec<dyn Display>) {
+  for item in items {
+    print(item.display())
+  }
+}
+let users = [User { name: "Alice" }, User { name: "Bob" }]
+print_all(users)
+
+// adder closure-return bind to let (functions.mdx runnable=true)
+fn adder(a) { |b| a + b }
+let plus10 = adder(10)
+print(plus10(5))

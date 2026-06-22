@@ -1,3 +1,0 @@
-from bounds use { Bounds, make }
-let b = make(1, 10)
-print(f"lo={b.lo} hi={b.hi}")

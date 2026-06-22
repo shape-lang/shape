@@ -1,0 +1,61 @@
+// ledger/stats.shape  -> importable as "ledger::stats"
+//
+// Aggregate statistics over transaction amounts. Pure integer math over
+// `Array<Txn>` via explicit `for` loops. Demonstrates a stats module that
+// downstream report code imports (book: "Two-File Library Example" shape).
+
+from ledger::model use { Txn }
+
+// Number of transactions.
+pub fn count(txns: Array<Txn>) -> int {
+    let mut n = 0
+    for t in txns {
+        n = n + 1
+    }
+    n
+}
+
+// Largest single amount (signed cents). Returns 0 for an empty list.
+pub fn max_amount(txns: Array<Txn>) -> int {
+    let mut seen = false
+    let mut best = 0
+    for t in txns {
+        if !seen || t.cents > best {
+            best = t.cents
+            seen = true
+        }
+    }
+    best
+}
+
+// Smallest single amount (signed cents). Returns 0 for an empty list.
+pub fn min_amount(txns: Array<Txn>) -> int {
+    let mut seen = false
+    let mut best = 0
+    for t in txns {
+        if !seen || t.cents < best {
+            best = t.cents
+            seen = true
+        }
+    }
+    best
+}
+
+// Integer mean amount (truncated toward zero). Returns 0 for empty input.
+pub fn mean_amount(txns: Array<Txn>) -> int {
+    let n = count(txns)
+    if n == 0 {
+        0
+    } else {
+        let mut sum = 0
+        for t in txns {
+            sum = sum + t.cents
+        }
+        sum / n
+    }
+}
+
+// Spread = max - min over the amounts.
+pub fn spread(txns: Array<Txn>) -> int {
+    max_amount(txns) - min_amount(txns)
+}

@@ -1,4 +1,0 @@
-from mylib::statz use { zqxmean }
-pub fn midpoint(a: int, b: int) -> int {
-    zqxmean(a, b)
-}

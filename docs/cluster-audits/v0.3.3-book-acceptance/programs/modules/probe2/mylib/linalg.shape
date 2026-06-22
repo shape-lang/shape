@@ -1,5 +1,0 @@
-from mylib::stats use { mean }
-
-pub fn midpoint(a: int, b: int) -> int {
-    mean(a, b)
-}

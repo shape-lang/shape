@@ -6,6 +6,11 @@
 //
 // Self-check uses plain `if` + `print` -- the enums chapter documents no
 // assert primitive.
+//
+// NOTE: block-arm match over a `?`-using Result function works correctly in
+// this build (independently probed). The `?` operator forces a documented
+// JIT->interpreter fallback ([jit-fallback], ADR-006 c4-4B SURFACE) that
+// preserves VM==JIT *output*; results are correct.
 
 // --- Unit variants (book "Basic Syntax" / "Unit Variants") ---
 enum Direction { North, South, East, West }
@@ -114,23 +119,16 @@ fn main() {
     if is_active(Status::Pending) != "not active" { ok = false; print("CHECK_FAILED: pending") }
     if is_active(Status::Banned)  != "not active" { ok = false; print("CHECK_FAILED: banned") }
 
-    // Result + `?`
-    // (Match arms extract a value which is compared *after* the match. A
-    //  block-arm body of the form `Some(v) => { if v != N ... }` over a value
-    //  produced by a `?`-using function mis-infers the binder as Option<int>
-    //  in this build -- see REPORT book_wrong / FN-REG defect. We use the
-    //  bare-expression arm shape the book itself uses.)
-    let ok_port = match double_check(8080) {
-        Ok(v)  => v,
-        Err(_) => -1,
+    // Result + `?` (block-arm form, as the book's handle()/match examples use)
+    match double_check(8080) {
+        Ok(v)  => { if v != 8080 { ok = false; print("CHECK_FAILED: ok_port") } }
+        Err(_) => { ok = false; print("CHECK_FAILED: ok_port_was_err") }
     }
-    if ok_port != 8080 { ok = false; print("CHECK_FAILED: ok_port") }
 
-    let bad_msg = match double_check(99999) {
-        Ok(_)  => "unexpected-ok",
-        Err(e) => e,
+    match double_check(99999) {
+        Ok(_)  => { ok = false; print("CHECK_FAILED: err_was_ok") }
+        Err(e) => { if e != "port out of range: 99999" { ok = false; print("CHECK_FAILED: err_msg") } }
     }
-    if bad_msg != "port out of range: 99999" { ok = false; print("CHECK_FAILED: err_msg") }
 
     // Option + `?`
     let some_sum = match sum_first_evens([1, 2, 3], [5, 4, 3]) {

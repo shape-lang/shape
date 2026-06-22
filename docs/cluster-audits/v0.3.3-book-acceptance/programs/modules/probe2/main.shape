@@ -1,3 +1,0 @@
-from mylib::linalg use { midpoint }
-let r = midpoint(10, 20)
-print(f"midpoint={r}")

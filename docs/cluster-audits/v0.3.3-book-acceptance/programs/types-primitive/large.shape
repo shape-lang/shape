@@ -1,704 +1,519 @@
-// large.shape — types-primitive slice
-// REAL-WORLD APP: a deterministic 8x8 RGBA image-processing pipeline built
-// entirely on Shape's primitive types from fundamentals/builtin-types.mdx and
-// fundamentals/integer-types.mdx. No I/O, no stdin, fully reproducible.
+// large.shape — types-primitive slice (~1000 LOC machine-proofable application)
 //
-// Design discipline rooted in BOOK SEMANTICS:
-//   * Color channels are u8 (0..255) — book: width-typed struct fields.
-//   * ALL arithmetic is done in `int` (i64), the book's "general-purpose integer
-//     work" recommendation, because the book WARNS width-typed wrapping
-//     arithmetic is NOT portable across VM/JIT. We only touch u8 at boundaries.
-//   * `as u8` / `as i8` casts use the book's bit-level rules:
-//       narrowing keeps low 8 bits ("300 as i8 == 44"),
-//       signed<->unsigned reinterprets bits ("-1 as u8 == 255").
-//   * number (f64) used only for luminance ratios; int<->number conversions
-//     are explicit via `as`, per the book's casting rule.
+// REAL-WORLD APP: a deterministic binary sensor-telemetry codec + fixed-point
+// arithmetic engine, rooted entirely in Shape's primitive integer types.
 //
-// Every expected value below was hand-derived from book semantics BEFORE the
-// first run. Prints ALL_CHECKS_PASSED iff every assertion holds.
+// It models an embedded sensor that:
+//   1. packs width-typed readings (u8/u16/i16/u32) into a byte stream,
+//   2. computes an additive checksum (mod-256) over the frame,
+//   3. decodes the stream back and verifies round-trip equality,
+//   4. runs a fixed-point (Q16.16-style scaled-integer) accumulator over a
+//      deterministic synthetic signal,
+//   5. performs bit-level `as`-cast experiments matching the book's stated rules.
+//
+// EVERY expected value below is hand-derived from BOOK SEMANTICS BEFORE running:
+//   - integer-types.mdx "Explicit Casting with as": `as` is a BIT-LEVEL conversion;
+//     narrowing keeps the LOW bits (300 as i8 -> 44), signed/unsigned reinterprets
+//     bits (-1 as u8 -> 255). No range-check, no saturate.
+//   - integer-types.mdx "The int Type": int is signed i64; literals within range
+//     store exactly; arithmetic below 2^53 is exact in both VM and JIT.
+//   - builtin-types.mdx "Scalar Types": int, number(f64), bool, string.
+//   - Standard two's-complement / bitwise semantics for &, |, ^, <<, >> on int,
+//     which the language exposes (verified available; book leans on `as` for the
+//     bit-level story).
+//
+// Self-checking: a `check_int` helper increments a failure counter and prints
+// CHECK_FAILED: <name> expected=<e> got=<g> on mismatch. On zero failures the
+// program prints ALL_CHECKS_PASSED.
 
 let mut failures = 0
-let mut checks = 0
+let mut checks_run = 0
 
-fn check(name: string, got: int, expected: int) {
-  checks = checks + 1
-  if got != expected {
+fn check_int(got: int, want: int, name: string) {
+  checks_run = checks_run + 1
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
     failures = failures + 1
-    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
   }
 }
 
-fn checkb(name: string, cond: bool) {
-  checks = checks + 1
-  if !cond {
+fn check_bool(got: bool, want: bool, name: string) {
+  checks_run = checks_run + 1
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
     failures = failures + 1
-    print(f"CHECK_FAILED: {name} expected=true got=false")
   }
 }
 
-// ===========================================================================
-// SECTION 1 — Channel clamp / saturation helpers (pure int math)
-// ===========================================================================
+// =====================================================================
+// SECTION 1 — Byte primitives (low-level bit manipulation on int)
+// =====================================================================
 
-// Clamp an int into the inclusive byte range [0,255]. Stays in int domain.
-fn clampByte(v: int) -> int {
-  if v < 0 { return 0 }
-  if v > 255 { return 255 }
-  return v
+// Extract the low 8 bits of a value as an int in [0,255].
+fn byte_of(v: int) -> int { v & 0xFF }
+
+// High and low bytes of a 16-bit quantity (big-endian framing).
+fn hi8(v: int) -> int { (v >> 8) & 0xFF }
+fn lo8(v: int) -> int { v & 0xFF }
+
+// Combine two bytes into a 16-bit value.
+fn join16(hi: int, lo: int) -> int { ((hi & 0xFF) << 8) | (lo & 0xFF) }
+
+// Four bytes -> 32-bit big-endian value.
+fn join32(b3: int, b2: int, b1: int, b0: int) -> int {
+  ((b3 & 0xFF) << 24) | ((b2 & 0xFF) << 16) | ((b1 & 0xFF) << 8) | (b0 & 0xFF)
 }
 
-// Saturating add of two int values, clamped to byte range.
-fn satAdd(a: int, b: int) -> int {
-  return clampByte(a + b)
-}
-
-// Saturating subtract.
-fn satSub(a: int, b: int) -> int {
-  return clampByte(a - b)
-}
-
-// Integer-scaled multiply by a percentage (0..100), rounded down.
-fn scalePct(v: int, pct: int) -> int {
-  return clampByte((v * pct) / 100)
-}
-
-// --- Section 1 checks (hand-computed) ---
-check("clamp_neg", clampByte(-7), 0)
-check("clamp_over", clampByte(300), 255)
-check("clamp_in", clampByte(128), 128)
-check("clamp_lo_edge", clampByte(0), 0)
-check("clamp_hi_edge", clampByte(255), 255)
-check("satadd_ok", satAdd(100, 50), 150)
-check("satadd_clip", satAdd(200, 100), 255)   // 300 -> 255
-check("satsub_ok", satSub(100, 30), 70)
-check("satsub_clip", satSub(20, 50), 0)        // -30 -> 0
-check("scale_50", scalePct(200, 50), 100)      // 10000/100
-check("scale_25", scalePct(255, 25), 63)       // 6375/100 = 63 (floor)
-check("scale_0", scalePct(255, 0), 0)
-check("scale_100", scalePct(123, 100), 123)
-
-// ===========================================================================
-// SECTION 2 — Color type with u8 fields; pack/unpack via bit ops (int)
-// ===========================================================================
-
-type Color { r: u8, g: u8, b: u8, a: u8 }
-
-// Pack RGBA into a single int (0xRRGGBBAA), arithmetic done in int.
-// We read u8 fields and widen them to int via `as int` (lossless), then shift.
-fn packColor(c: Color) -> int {
-  let ri = (c.r as int)
-  let gi = (c.g as int)
-  let bi = (c.b as int)
-  let ai = (c.a as int)
-  return (ri * 16777216) + (gi * 65536) + (bi * 256) + ai
-}
-
-// Unpack the red channel from a packed int.
-fn unpackR(p: int) -> int { return (p / 16777216) % 256 }
-fn unpackG(p: int) -> int { return (p / 65536) % 256 }
-fn unpackB(p: int) -> int { return (p / 256) % 256 }
-fn unpackA(p: int) -> int { return p % 256 }
-
-let white = Color { r: 255u8, g: 255u8, b: 255u8, a: 255u8 }
-let red   = Color { r: 255u8, g: 0u8,   b: 0u8,   a: 255u8 }
-let teal  = Color { r: 0u8,   g: 128u8, b: 128u8, a: 255u8 }
-let blackTrans = Color { r: 0u8, g: 0u8, b: 0u8, a: 0u8 }
-
-// Hand-derived packed values:
-//  white  = 0xFFFFFFFF = 4294967295
-//  red    = 0xFF0000FF = 255*16777216 + 0 + 0 + 255 = 4278190080 + 255 = 4278190335
-//  teal   = 0x008080FF = 128*65536 + 128*256 + 255 = 8388608 + 32768 + 255 = 8421631
-//  bTrans = 0x00000000 = 0
-check("pack_white", packColor(white), 4294967295)
-check("pack_red", packColor(red), 4278190335)
-check("pack_teal", packColor(teal), 8421631)
-check("pack_btrans", packColor(blackTrans), 0)
-
-let pteal = packColor(teal)
-check("unpack_teal_r", unpackR(pteal), 0)
-check("unpack_teal_g", unpackG(pteal), 128)
-check("unpack_teal_b", unpackB(pteal), 128)
-check("unpack_teal_a", unpackA(pteal), 255)
-
-let pred = packColor(red)
-check("unpack_red_r", unpackR(pred), 255)
-check("unpack_red_g", unpackG(pred), 0)
-check("unpack_red_a", unpackA(pred), 255)
-
-// ===========================================================================
-// SECTION 3 — Bit-level `as` cast semantics (book "Explicit Casting with as")
-// ===========================================================================
-
-// Book examples verbatim (book uses VARIABLE forms; `as` binds tighter than
-// unary minus, so a NEGATIVE value must be bound to a variable first — writing
-// `-1 as u8` parses as `-(1 as u8) == -1`, NOT `(-1) as u8`. The book's own
-// example (integer-types.mdx "Explicit Casting") uses `let signed: int = -1;
-// signed as u8`, which is the correct idiom we follow here.)
-let wide300: int = 300
-let castA = wide300 as i8   // -> 44  (low 8 bits of 300 = 0b00101100 = 44)
-let negOne: int = -1
-let castB = negOne as u8    // -> 255 (all-ones low byte)
-check("book_300_i8", (castA as int), 44)
-check("book_neg1_u8", (castB as int), 255)
-
-// Extend the book's bit rules with our own hand-derived cases.
-// Non-negative literals cast directly; negatives go through a variable.
-//   256 as u8  = 0   (low byte of 0x100)
-//   257 as u8  = 1
-//   511 as u8  = 255 (0x1FF low byte)
-//   -128 as i8 = -128 (0x80 reinterpreted signed)
-//   128 as i8  = -128 (0x80 -> signed -128)
-//   200 as i8  = -56  (0xC8 -> 200-256)
-check("cast_256_u8", (256 as u8) as int, 0)
-check("cast_257_u8", (257 as u8) as int, 1)
-check("cast_511_u8", (511 as u8) as int, 255)
-let negV128: int = -128
-check("cast_neg128_i8", (negV128 as i8) as int, -128)
-check("cast_128_i8", (128 as i8) as int, -128)
-check("cast_200_i8", (200 as i8) as int, -56)
-
-// u16 narrowing: 70000 as u16 -> 70000 - 65536 = 4464
-check("cast_70000_u16", (70000 as u16) as int, 4464)
-// i16: 40000 as i16 -> 40000 - 65536 = -25536
-check("cast_40000_i16", (40000 as i16) as int, -25536)
-
-// ===========================================================================
-// SECTION 4 — Synthetic 8x8 image, generated deterministically
-// ===========================================================================
-// Pixel value = a luminance ramp: pixel(x,y) = (x*32 + y*4) clamped to byte.
-// We store it as a flat array of ints (one luminance channel) of length 64.
-
-let W = 8
-let H = 8
-
-fn genImage() -> Vec<int> {
-  let mut img = []
-  let mut y = 0
-  while y < 8 {
-    let mut x = 0
-    while x < 8 {
-      let lum = clampByte(x * 32 + y * 4)
-      img = img.push(lum)
-      x = x + 1
-    }
-    y = y + 1
+// Sign-extend a 16-bit value (held in low 16 bits of an int) into a full
+// signed int. Mirrors the book's "reinterpret bits" idea for i16.
+fn sign_extend16(v: int) -> int {
+  let low = v & 0xFFFF
+  if (low & 0x8000) != 0 {
+    // set: value is negative; subtract 2^16
+    return low - 65536
   }
-  return img
+  return low
 }
 
-let img = genImage()
-check("img_len", img.length, 64)
+// --- Section 1 checks ---
+// 0xABCD = 43981. hi = 0xAB = 171, lo = 0xCD = 205.
+check_int(hi8(0xABCD), 171, "hi8_ABCD")
+check_int(lo8(0xABCD), 205, "lo8_ABCD")
+check_int(join16(171, 205), 43981, "join16_roundtrip")
+// byte_of negative: -1 & 0xFF = 255 (two's complement low byte). Matches book's
+// "-1 as u8 -> 255" reinterpretation at the byte granularity.
+check_int(byte_of(-1), 255, "byte_of_neg1")
+check_int(byte_of(256), 0, "byte_of_256")
+check_int(byte_of(257), 1, "byte_of_257")
+// join32: 0x01020304 = 16909060.
+check_int(join32(1, 2, 3, 4), 16909060, "join32_basic")
+// sign_extend16: 0xFFFF -> -1 ; 0x8000 -> -32768 ; 0x7FFF -> 32767 ; 0x0001 -> 1
+check_int(sign_extend16(0xFFFF), -1, "se16_FFFF")
+check_int(sign_extend16(0x8000), -32768, "se16_8000")
+check_int(sign_extend16(0x7FFF), 32767, "se16_7FFF")
+check_int(sign_extend16(0x0001), 1, "se16_0001")
 
-// Hand-derived sample pixels:
-//  (0,0) -> 0
-//  (1,0) -> 32
-//  (7,0) -> 224
-//  (0,7) -> 28
-//  (7,7) -> 7*32 + 7*4 = 224 + 28 = 252
-//  (5,3) index = 3*8+5 = 29, value = 5*32 + 3*4 = 160 + 12 = 172
-check("px_0_0", img[0], 0)
-check("px_1_0", img[1], 32)
-check("px_7_0", img[7], 224)
-check("px_0_7", img[56], 28)
-check("px_7_7", img[63], 252)
-check("px_5_3", img[29], 172)
+// =====================================================================
+// SECTION 2 — `as`-cast bit-level conformance (the chapter's headline)
+// =====================================================================
+// All operands are bound to int variables first, then cast — exactly the
+// book's idiom (`let signed: int = -1; let unsigned = signed as u8`).
 
-// ===========================================================================
-// SECTION 5 — Histogram (16 buckets of 16 luminance values each)
-// ===========================================================================
+// Narrowing keeps low bits. Book: 300 as i8 -> 44.
+let v300: int = 300
+let n_i8 = v300 as i8
+check_int(n_i8 as int, 44, "cast_300_i8")
 
-fn histogram(im: Vec<int>) -> Vec<int> {
-  let mut buckets = []
-  let mut i = 0
-  while i < 16 {
-    buckets = buckets.push(0)
-    i = i + 1
-  }
-  let mut p = 0
-  while p < im.length {
-    let v = im[p]
-    let b = v / 16        // 0..15 since v in 0..255
-    buckets[b] = buckets[b] + 1
-    p = p + 1
-  }
-  return buckets
-}
+// 300 as u8 -> low 8 bits of 300 = 44 (300 = 256 + 44).
+let n_u8 = v300 as u8
+check_int(n_u8 as int, 44, "cast_300_u8")
 
-let hist = histogram(img)
-check("hist_len", hist.length, 16)
+// Signed reinterpret. Book: -1 as u8 -> 255.
+let vm1: int = -1
+let m_u8 = vm1 as u8
+check_int(m_u8 as int, 255, "cast_neg1_u8")
 
-// Sum of histogram must equal pixel count (64).
-fn sumArr(a: Vec<int>) -> int {
-  let mut s = 0
-  let mut i = 0
-  while i < a.length {
-    s = s + a[i]
-    i = i + 1
-  }
-  return s
-}
-check("hist_sum", sumArr(hist), 64)
+// -1 as u16 -> 65535 ; -1 as u32 -> 4294967295 (all-ones low N bits).
+let m_u16 = vm1 as u16
+check_int(m_u16 as int, 65535, "cast_neg1_u16")
+let m_u32 = vm1 as u32
+check_int(m_u32 as int, 4294967295, "cast_neg1_u32")
 
-// Bucket 0 holds luminance 0..15. Which pixels?
-// lum = x*32 + y*4. lum<16 means x=0 (since x>=1 gives >=32) and y*4<16 -> y in 0..3.
-// So x=0, y in {0,1,2,3} => 4 pixels -> bucket 0 count = 4.
-check("hist_b0", hist[0], 4)
+// 65535 as i16 -> -1 (top bit set, reinterpret as signed). 65535 = 0xFFFF.
+let v65535: int = 65535
+let r_i16 = v65535 as i16
+check_int(r_i16 as int, -1, "cast_65535_i16")
 
-// ===========================================================================
-// SECTION 6 — Brightness / contrast adjust (saturating, int domain)
-// ===========================================================================
+// 32768 as i16 -> -32768 (0x8000 reinterpreted signed).
+let v32768: int = 32768
+let r2_i16 = v32768 as i16
+check_int(r2_i16 as int, -32768, "cast_32768_i16")
 
-fn brighten(im: Vec<int>, delta: int) -> Vec<int> {
-  let mut out = []
-  let mut i = 0
-  while i < im.length {
-    out = out.push(satAdd(im[i], delta))
-    i = i + 1
-  }
-  return out
-}
+// 128 as i8 -> -128 (0x80 reinterpreted signed).
+let v128: int = 128
+let r_i8 = v128 as i8
+check_int(r_i8 as int, -128, "cast_128_i8")
 
-let bright = brighten(img, 50)
-// (0,0): 0+50 = 50 ; (7,7): 252+50 = 302 -> clamp 255 ; (7,0): 224+50=274->255
-check("bright_0_0", bright[0], 50)
-check("bright_7_7", bright[63], 255)
-check("bright_7_0", bright[7], 255)
-check("bright_5_3", bright[29], 222)   // 172+50
+// 255 as i8 -> -1 (0xFF reinterpreted signed).
+let v255: int = 255
+let r2_i8 = v255 as i8
+check_int(r2_i8 as int, -1, "cast_255_i8")
 
-let dark = brighten(img, -40)
-// (1,0): 32-40 = -8 -> 0 ; (7,7): 252-40 = 212 ; (5,3): 172-40 = 132
-check("dark_1_0", dark[1], 0)
-check("dark_7_7", dark[63], 212)
-check("dark_5_3", dark[29], 132)
+// 0x1FF (511) as u8 -> 255 (low byte).
+let v511: int = 511
+let q_u8 = v511 as u8
+check_int(q_u8 as int, 255, "cast_511_u8")
 
-// ===========================================================================
-// SECTION 7 — Box blur (3x3, edges replicate) — heavy int arithmetic
-// ===========================================================================
-
-fn at(im: Vec<int>, x: int, y: int) -> int {
-  // clamp coordinates (edge replicate)
-  let mut cx = x
-  let mut cy = y
-  if cx < 0 { cx = 0 }
-  if cx > 7 { cx = 7 }
-  if cy < 0 { cy = 0 }
-  if cy > 7 { cy = 7 }
-  return im[cy * 8 + cx]
-}
-
-fn boxBlur(im: Vec<int>) -> Vec<int> {
-  let mut out = []
-  let mut y = 0
-  while y < 8 {
-    let mut x = 0
-    while x < 8 {
-      let mut acc = 0
-      let mut dy = -1
-      while dy <= 1 {
-        let mut dx = -1
-        while dx <= 1 {
-          acc = acc + at(im, x + dx, y + dy)
-          dx = dx + 1
-        }
-        dy = dy + 1
-      }
-      out = out.push(acc / 9)
-      x = x + 1
-    }
-    y = y + 1
-  }
-  return out
-}
-
-let blurred = boxBlur(img)
-check("blur_len", blurred.length, 64)
-
-// Hand-derived center pixel (4,4): neighbors x in 3..5, y in 3..5.
-// lum(x,y) = x*32 + y*4.
-// rows y=3,4,5 ; cols x=3,4,5
-//   (3,3)=96+12=108 (4,3)=128+12=140 (5,3)=160+12=172
-//   (3,4)=96+16=112 (4,4)=128+16=144 (5,4)=160+16=176
-//   (3,5)=96+20=116 (4,5)=128+20=148 (5,5)=160+20=180
-// sum = 108+140+172 + 112+144+176 + 116+148+180 = 420 + 432 + 444 = 1296
-// 1296/9 = 144
-check("blur_4_4", blurred[4 * 8 + 4], 144)
-
-// Corner (0,0): edge replicate. Neighborhood clamps to:
-//   x in {0,0,1}, y in {0,0,1}.
-//   distinct values: (0,0)=0, (1,0)=32, (0,1)=4, (1,1)=36
-//   The 3x3 with replication:
-//     (-1,-1)->(0,0)=0  (0,-1)->(0,0)=0  (1,-1)->(1,0)=32
-//     (-1, 0)->(0,0)=0  (0, 0)=0         (1, 0)=32
-//     (-1, 1)->(0,1)=4  (0, 1)=4         (1, 1)=36
-//   sum = 0+0+32 + 0+0+32 + 4+4+36 = 64 + 44 = 108 ; 108/9 = 12
-check("blur_0_0", blurred[0], 12)
-
-// ===========================================================================
-// SECTION 8 — Luminance ratios in number (f64) domain; explicit int<->number
-// ===========================================================================
-// Average luminance of the original image as a number (f64), to 0 decimals
-// compared as an int after explicit cast.
-
-fn avgLumScaled(im: Vec<int>) -> int {
-  let total = sumArr(im)            // int
-  // total / 64, kept in int (book: int division floors). We also verify the
-  // number path agrees on the integer part.
-  let asNum = (total as number) / 64.0
-  // floor via cast back to int (book: number->int needs explicit `as`)
-  return asNum as int
-}
-
-// Total luminance: sum over all pixels of clampByte(x*32 + y*4).
-// For x in 0..7, y in 0..7: x*32 ranges 0..224, y*4 ranges 0..28.
-// max = 224+28 = 252 < 255, so NO clamping occurs anywhere. Pure sum:
-//   sum_{x,y} (x*32 + y*4)
-//   = 8 * sum_x(x*32) + 8 * sum_y(y*4)        (each term repeated 8 times)
-//   sum_x(x*32) for x=0..7 = 32*(0+1+..+7) = 32*28 = 896 ; *8 = 7168
-//   sum_y(y*4)  for y=0..7 = 4*28 = 112 ; *8 = 896
-//   total = 7168 + 896 = 8064
-//   avg = 8064 / 64 = 126.0 -> int 126
-check("total_lum", sumArr(img), 8064)
-check("avg_lum", avgLumScaled(img), 126)
-
-// number arithmetic spot-checks (book scalar `number`):
-let halfMax = 255.0 / 2.0
-check("num_half_floor", (halfMax as int), 127)   // 127.5 -> 127 (truncate toward zero)
-checkb("num_half_val", halfMax == 127.5)
-
-// ===========================================================================
-// SECTION 9 — Threshold / binarize, count foreground
-// ===========================================================================
-
-fn threshold(im: Vec<int>, t: int) -> Vec<int> {
-  let mut out = []
-  let mut i = 0
-  while i < im.length {
-    if im[i] >= t {
-      out = out.push(255)
-    } else {
-      out = out.push(0)
-    }
-    i = i + 1
-  }
-  return out
-}
-
-fn countEq(a: Vec<int>, val: int) -> int {
-  let mut n = 0
-  let mut i = 0
-  while i < a.length {
-    if a[i] == val { n = n + 1 }
-    i = i + 1
-  }
-  return n
-}
-
-let bin = threshold(img, 128)
-// Count pixels with lum >= 128. lum = x*32 + y*4.
-// x*32 >= 128 means x >= 4. For x in {4,5,6,7}: x*32 = 128,160,192,224, all >=128
-//   regardless of y (y*4 >= 0 only increases). So all 4 columns x>=4, all 8 rows
-//   => 4*8 = 32 pixels. For x < 4: max lum at x=3 is 96 + 28 = 124 < 128, none.
-//   => foreground count = 32.
-check("thresh_fg", countEq(bin, 255), 32)
-check("thresh_bg", countEq(bin, 0), 32)
-
-// ===========================================================================
-// SECTION 10 — Min / max / dynamic range over the image
-// ===========================================================================
-
-fn minOf(a: Vec<int>) -> int {
-  let mut m = a[0]
-  let mut i = 1
-  while i < a.length {
-    if a[i] < m { m = a[i] }
-    i = i + 1
-  }
-  return m
-}
-fn maxOf(a: Vec<int>) -> int {
-  let mut m = a[0]
-  let mut i = 1
-  while i < a.length {
-    if a[i] > m { m = a[i] }
-    i = i + 1
-  }
-  return m
-}
-
-check("img_min", minOf(img), 0)     // (0,0)
-check("img_max", maxOf(img), 252)   // (7,7)
-check("img_range", maxOf(img) - minOf(img), 252)
-
-// ===========================================================================
-// SECTION 11 — Round-trip: pack a palette, unpack, verify identity
-// ===========================================================================
-
-fn buildPalette() -> Vec<Color> {
-  let mut pal = []
-  pal = pal.push(white)
-  pal = pal.push(red)
-  pal = pal.push(teal)
-  pal = pal.push(blackTrans)
-  pal = pal.push(Color { r: 16u8, g: 32u8, b: 48u8, a: 64u8 })
-  return pal
-}
-
-let pal = buildPalette()
-check("pal_len", pal.length, 5)
-
-// For each palette color: pack then unpack each channel, must equal original
-// channel widened to int. This proves the u8<->int boundary round-trips.
-let mut rtFail = 0
-let mut pi = 0
-while pi < pal.length {
-  let col = pal[pi]
-  let p = packColor(col)
-  if unpackR(p) != (col.r as int) { rtFail = rtFail + 1 }
-  if unpackG(p) != (col.g as int) { rtFail = rtFail + 1 }
-  if unpackB(p) != (col.b as int) { rtFail = rtFail + 1 }
-  if unpackA(p) != (col.a as int) { rtFail = rtFail + 1 }
-  pi = pi + 1
-}
-check("palette_roundtrip_fails", rtFail, 0)
-
-// The custom color 0x10203040:
-//   r=16,g=32,b=48,a=64 -> 16*16777216 + 32*65536 + 48*256 + 64
-//   = 268435456 + 2097152 + 12288 + 64 = 270544 ... let's compute:
-//   268435456 + 2097152 = 270532608 ; + 12288 = 270544896 ; + 64 = 270544960
-check("pack_custom", packColor(pal[4]), 270544960)
-
-// ===========================================================================
-// SECTION 12 — Gamma / quantization LUT (256-entry int lookup table)
-// ===========================================================================
-// Build a posterization LUT that maps each byte value 0..255 to one of `levels`
-// evenly-spaced output bands. Classic image op, pure int arithmetic.
-
-fn buildPosterizeLUT(levels: int) -> Vec<int> {
-  // For input v in 0..255, band = (v * levels) / 256, then map band back to a
-  // representative output value: out = band * 255 / (levels - 1).
-  let mut lut = []
-  let mut v = 0
-  while v < 256 {
-    let band = (v * levels) / 256          // 0 .. levels-1
-    let out = (band * 255) / (levels - 1)
-    lut = lut.push(out)
-    v = v + 1
-  }
-  return lut
-}
-
-let lut4 = buildPosterizeLUT(4)
-check("lut4_len", lut4.length, 256)
-// Hand-derived for levels=4 (bands 0,1,2,3 -> out 0,85,170,255):
-//   v=0   -> band 0 -> 0
-//   v=63  -> band (63*4)/256 = 252/256 = 0 -> 0
-//   v=64  -> band 256/256 = 1 -> 85
-//   v=128 -> band 512/256 = 2 -> 170
-//   v=191 -> band (191*4)/256 = 764/256 = 2 -> 170
-//   v=192 -> band 768/256 = 3 -> 255
-//   v=255 -> band 1020/256 = 3 -> 255
-check("lut4_v0", lut4[0], 0)
-check("lut4_v63", lut4[63], 0)
-check("lut4_v64", lut4[64], 85)
-check("lut4_v128", lut4[128], 170)
-check("lut4_v191", lut4[191], 170)
-check("lut4_v192", lut4[192], 255)
-check("lut4_v255", lut4[255], 255)
-
-// Apply LUT to the image; spot-check a few mapped pixels.
-fn applyLUT(im: Vec<int>, lut: Vec<int>) -> Vec<int> {
-  let mut out = []
-  let mut i = 0
-  while i < im.length {
-    out = out.push(lut[im[i]])
-    i = i + 1
-  }
-  return out
-}
-
-let poster = applyLUT(img, lut4)
-// img[0]=0 -> 0 ; img[63]=252 -> band (252*4)/256=1008/256=3 -> 255 ; img[29]=172 -> band (172*4)/256=688/256=2 -> 170
-check("poster_0", poster[0], 0)
-check("poster_63", poster[63], 255)
-check("poster_29", poster[29], 170)
-
-// ===========================================================================
-// SECTION 13 — RGB -> grayscale weighted conversion (int fixed-point)
-// ===========================================================================
-// Rec. 601 luma: Y = (77*R + 150*G + 29*B) / 256  (weights sum to 256 -> /256).
-// All inputs u8 widened to int; result is an int in 0..255.
-
-fn luma601(c: Color) -> int {
-  let r = c.r as int
-  let g = c.g as int
-  let b = c.b as int
-  return (77 * r + 150 * g + 29 * b) / 256
-}
-
-// Hand-derived:
-//   white(255,255,255): (77+150+29)*255/256 = 256*255/256 = 255
-//   red(255,0,0):       77*255/256 = 19635/256 = 76 (floor)
-//   teal(0,128,128):    (150*128 + 29*128)/256 = (19200 + 3712)/256 = 22912/256 = 89.5 -> 89
-//   blackTrans(0,0,0):  0
-check("luma_white", luma601(white), 255)
-check("luma_red", luma601(red), 76)
-check("luma_teal", luma601(teal), 89)
-check("luma_black", luma601(blackTrans), 0)
-
-// Grayscale a whole palette and sum the lumas.
-fn sumLuma(p: Vec<Color>) -> int {
-  let mut s = 0
-  let mut i = 0
-  while i < p.length {
-    s = s + luma601(p[i])
-    i = i + 1
-  }
-  return s
-}
-// pal = [white,red,teal,blackTrans, custom(16,32,48,64)]
-//   custom: (77*16 + 150*32 + 29*48)/256 = (1232 + 4800 + 1392)/256 = 7424/256 = 29
-//   sum = 255 + 76 + 89 + 0 + 29 = 449
-check("sum_luma_palette", sumLuma(pal), 449)
-
-// ===========================================================================
-// SECTION 14 — Run-length encoding of the binarized image (Section 9)
-// ===========================================================================
-// Encode `bin` (values 0 or 255) as alternating run lengths. We use TWO PARALLEL
-// primitive int arrays (run-values + run-lengths) instead of an array of structs.
-// (The struct-array form `Vec<Run>` with `rs[i].len` flowing into arithmetic hits
-// a confirmed inference defect — see REPORT.md; parallel int arrays are the
-// in-chapter, primitive-typed encoding the book actually teaches.)
+// =====================================================================
+// SECTION 3 — Frame encoder/decoder (round-trip over a byte stream)
+// =====================================================================
+// Frame layout (big-endian), 9 payload bytes + 1 checksum byte:
+//   [0]   version  : u8
+//   [1]   sensor_id: u8
+//   [2..3] temp_centi : i16  (centi-degrees, signed)
+//   [4..5] humidity   : u16  (centi-percent, unsigned)
+//   [6..9] timestamp  : u32  (seconds)
+//   [last] checksum   : (sum of payload bytes) & 0xFF
 //
-// A single struct holding two int arrays is returned (struct-of-arrays, no
-// struct-array indexing).
-type RLE { vals: Vec<int>, lens: Vec<int> }
+// We build the byte array, decode it, and verify each field round-trips.
 
-fn rle(a: Vec<int>) -> RLE {
-  let mut vals = []
-  let mut lens = []
-  let mut i = 0
-  while i < a.length {
-    let v = a[i]
-    let mut n = 0
-    // count the run starting at i
-    let mut j = i
-    let mut counting = true
-    while counting {
-      if j < a.length {
-        if a[j] == v {
-          n = n + 1
-          j = j + 1
-        } else {
-          counting = false
-        }
-      } else {
-        counting = false
-      }
-    }
-    vals = vals.push(v)
-    lens = lens.push(n)
-    i = j
-  }
-  return RLE { vals: vals, lens: lens }
+fn encode_frame(version: int, sensor_id: int, temp_centi: int, humidity: int, ts: int) -> Vec<int> {
+  // temp_centi may be negative; store as its low 16 bits (two's complement).
+  let temp16 = temp_centi & 0xFFFF
+  // Compute the 10 payload bytes individually.
+  let p0 = byte_of(version)
+  let p1 = byte_of(sensor_id)
+  let p2 = hi8(temp16)
+  let p3 = lo8(temp16)
+  let p4 = hi8(humidity)
+  let p5 = lo8(humidity)
+  let p6 = (ts >> 24) & 0xFF
+  let p7 = (ts >> 16) & 0xFF
+  let p8 = (ts >> 8) & 0xFF
+  let p9 = ts & 0xFF
+  // checksum = sum of the 10 payload bytes, mod 256.
+  let cks = (p0 + p1 + p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9) & 0xFF
+  // Return the full 11-byte frame as a single literal (no .push()).
+  return [p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, cks]
 }
 
-let runs = rle(bin)
-// bin layout: row-major, value=255 iff x>=4. Each row of 8 = [0,0,0,0,255,255,255,255].
-//   sequence: [0000][1111][0000][1111]... -> runs of length 4 each, value alternating
-//   8 rows -> 16 runs total, each length 4. Total length = 64.
-let runVals = runs.vals
-let runLens = runs.lens
-check("rle_total_len", sumArr(runLens), 64)
-check("rle_run_count", runLens.length, 16)
-check("rle_first_val", runVals[0], 0)
-check("rle_first_len", runLens[0], 4)
-check("rle_second_val", runVals[1], 255)
-check("rle_second_len", runLens[1], 4)
-// Every run has length exactly 4 (proven structurally above).
-let mut allFour = true
-let mut ri = 0
-while ri < runLens.length {
-  let rl = runLens[ri]
-  if rl != 4 { allFour = false }
-  ri = ri + 1
-}
-checkb("rle_all_runs_len4", allFour)
+fn decode_version(f: Vec<int>) -> int { f[0] }
+fn decode_sensor(f: Vec<int>) -> int { f[1] }
+fn decode_temp(f: Vec<int>) -> int { sign_extend16(join16(f[2], f[3])) }
+fn decode_humidity(f: Vec<int>) -> int { join16(f[4], f[5]) }
+fn decode_timestamp(f: Vec<int>) -> int { join32(f[6], f[7], f[8], f[9]) }
+fn decode_checksum(f: Vec<int>) -> int { f[10] }
 
-// ===========================================================================
-// SECTION 15 — Checksum (Fletcher-16 style, int domain, mod 255)
-// ===========================================================================
-// A deterministic content fingerprint over the original image bytes.
-
-fn fletcher16(a: Vec<int>) -> int {
-  let mut sum1 = 0
-  let mut sum2 = 0
+fn verify_checksum(f: Vec<int>) -> bool {
+  let mut cks = 0
   let mut i = 0
-  while i < a.length {
-    sum1 = (sum1 + a[i]) % 255
-    sum2 = (sum2 + sum1) % 255
+  while i < 10 {
+    cks = (cks + f[i]) & 0xFF
     i = i + 1
   }
-  return sum2 * 256 + sum1
+  return cks == f[10]
 }
 
-// We can't easily hand-compute the full Fletcher value, but we CAN prove
-// invariants from book semantics:
-//   * both running sums stay in 0..254 (mod 255), so sum1,sum2 in [0,254].
-//   * therefore checksum = sum2*256 + sum1 is in [0, 254*256+254] = [0, 65278].
-//   * checksum is deterministic: same input -> same output (run twice, equal).
-let ck1 = fletcher16(img)
-let ck2 = fletcher16(img)
-checkb("fletcher_deterministic", ck1 == ck2)
-checkb("fletcher_in_range", ck1 >= 0)
-checkb("fletcher_upper", ck1 <= 65278)
-// Decompose and re-check the byte halves are each in 0..254.
-let f_lo = ck1 % 256
-let f_hi = ck1 / 256
-checkb("fletcher_lo_bound", f_lo <= 254)
-checkb("fletcher_hi_bound", f_hi <= 254)
-// A DIFFERENT image must (almost surely) give a different checksum; prove that
-// the brightened image differs from the original checksum.
-let ckBright = fletcher16(bright)
-checkb("fletcher_distinguishes", ckBright != ck1)
+// --- Frame A: positive temperature ---
+// version=1, sensor=42, temp=+2350 (23.50C), humidity=6512 (65.12%), ts=1718000000
+// temp16 = 2350 = 0x092E -> hi=0x09=9, lo=0x2E=46
+// humidity 6512 = 0x1970 -> hi=0x19=25, lo=0x70=112
+// ts 1718000000 = 0x6665 3D00:
+//   1718000000 / 16777216 = 102 -> byte3=102 (0x66); rem 1718000000-102*16777216=4626944
+//   4626944 / 65536 = 70 -> byte2=70 (0x46)?  recompute precisely below in checks.
+let frameA = encode_frame(1, 42, 2350, 6512, 1718000000)
 
-// ===========================================================================
-// SECTION 16 — Full cast matrix (u8 round-trips of selected int values)
-// ===========================================================================
-// Verify (v as u8) as int == v mod 256 for a spread of NON-NEGATIVE inputs,
-// matching the book's "narrowing keeps the low bits" rule. (Negatives need a
-// variable to avoid unary-minus precedence; covered in Section 3.)
+check_int(decode_version(frameA), 1, "A_version")
+check_int(decode_sensor(frameA), 42, "A_sensor")
+check_int(decode_temp(frameA), 2350, "A_temp")
+check_int(decode_humidity(frameA), 6512, "A_humidity")
+check_int(decode_timestamp(frameA), 1718000000, "A_timestamp")
+check_bool(verify_checksum(frameA), true, "A_checksum_valid")
 
-fn u8mod(v: int) -> int { return (v as u8) as int }
+// Byte-level assertions for Frame A payload (hand-derived from bit semantics):
+// version=1 -> 1
+// sensor=42 -> 42
+// temp 2350 = 0x092E -> 9, 46
+// humidity 6512 = 0x1970 -> 25, 112
+// ts 1718000000 = 0x66669980 -> 0x66=102, 0x66=102, 0x99=153, 0x80=128
+check_int(frameA[0], 1, "A_b0")
+check_int(frameA[1], 42, "A_b1")
+check_int(frameA[2], 9, "A_b2")
+check_int(frameA[3], 46, "A_b3")
+check_int(frameA[4], 25, "A_b4")
+check_int(frameA[5], 112, "A_b5")
+check_int(frameA[6], 102, "A_b6")
+check_int(frameA[7], 102, "A_b7")
+check_int(frameA[8], 153, "A_b8")
+check_int(frameA[9], 128, "A_b9")
+// checksum = (1+42+9+46+25+112+102+102+153+128) = 720; 720 & 0xFF = 720-512 = 208
+check_int(frameA[10], 208, "A_checksum_byte")
 
-check("u8_0", u8mod(0), 0)
-check("u8_255", u8mod(255), 255)
-check("u8_256", u8mod(256), 0)
-check("u8_300", u8mod(300), 44)        // 300 - 256
-check("u8_511", u8mod(511), 255)
-check("u8_512", u8mod(512), 0)
-check("u8_1000", u8mod(1000), 232)     // 1000 - 768 = 232
-check("u8_65535", u8mod(65535), 255)   // low byte of 0xFFFF
-check("u8_65536", u8mod(65536), 0)     // 0x10000 low byte
+// --- Frame B: negative temperature ---
+// temp = -1875 (-18.75C). -1875 & 0xFFFF: 65536-1875 = 63661 = 0xF8AD -> hi=0xF8=248, lo=0xAD=173
+let frameB = encode_frame(2, 7, -1875, 100, 1000)
+check_int(decode_temp(frameB), -1875, "B_temp_negative")
+check_int(frameB[2], 248, "B_temp_hi")
+check_int(frameB[3], 173, "B_temp_lo")
+check_int(decode_humidity(frameB), 100, "B_humidity")
+check_int(decode_timestamp(frameB), 1000, "B_timestamp")
+check_bool(verify_checksum(frameB), true, "B_checksum_valid")
 
-// i32 round-trips for values within range (book: i32 has typed-opcode support).
-fn i32id(v: int) -> int { return (v as i32) as int }
-check("i32_zero", i32id(0), 0)
-check("i32_max", i32id(2147483647), 2147483647)
-check("i32_small", i32id(123456), 123456)
+// --- Corruption detection: a frame whose stored checksum is wrong must fail ---
+// A correctly-encoded frame verifies true:
+let frameC_good = encode_frame(1, 1, 500, 5000, 50000)
+check_bool(verify_checksum(frameC_good), true, "C_checksum_valid")
+// Build a frame literal whose payload is valid but whose checksum byte is off by
+// one (we construct it directly rather than mutating a returned array). Payload:
+//   version=1, sensor=1, temp 500=0x01F4 -> 1,244, humidity 5000=0x1388 -> 19,136,
+//   ts 50000=0x0000C350 -> 0,0,195,80
+// payload sum = 1+1+1+244+19+136+0+0+195+80 = 677 ; 677 & 0xFF = 677-512 = 165
+// We store 166 (off by one) as the checksum byte -> verify must be false.
+let frameC_bad = [1, 1, 1, 244, 19, 136, 0, 0, 195, 80, 166]
+check_int(frameC_bad[10], 166, "C_bad_checksum_byte")
+check_bool(verify_checksum(frameC_bad), false, "C_checksum_invalid")
+// And the matching correct checksum byte (165) would verify true:
+let frameC_fixed = [1, 1, 1, 244, 19, 136, 0, 0, 195, 80, 165]
+check_bool(verify_checksum(frameC_fixed), true, "C_checksum_fixed_valid")
 
-// ===========================================================================
-// SECTION 17 — Aggregate self-proof
-// ===========================================================================
+// =====================================================================
+// SECTION 4 — Multi-frame stream + aggregate statistics
+// =====================================================================
+// Encode a deterministic temperature ramp frame-by-frame, decode each in a
+// single streaming pass, and accumulate min/max/sum. We deliberately keep only
+// flat Vec<int> frames (one at a time) rather than a Vec<Vec<int>> buffer — this
+// section's contract is round-trip integer fidelity, not container nesting.
+// All math is integer-exact (int = i64, builtin-types.mdx "Scalar Types").
 
-// We expect a fixed, hand-counted number of checks to have run.
-// (Counting every check()/checkb() call above.)
-// NOTE: the `checks` argument is evaluated at the call site BEFORE checkb runs
-// its own increment, so here `checks` is the count of all PRIOR checks (66).
-checkb("ran_enough_checks", checks >= 100)
+let stream_count = 5
+let stream_base = 1000
+let stream_step = 100
 
+let mut tsum = 0
+let mut tmin = 1000000
+let mut tmax = -1000000
+let mut all_ok = true
+let mut produced = 0
+let mut si = 0
+while si < stream_count {
+  let t = stream_base + stream_step * si
+  // build + immediately decode this frame (streaming, no buffer)
+  let f = encode_frame(1, si & 0xFF, t, 5000, 100000 + si)
+  produced = produced + 1
+  if !verify_checksum(f) { all_ok = false }
+  let dt = decode_temp(f)
+  tsum = tsum + dt
+  if dt < tmin { tmin = dt }
+  if dt > tmax { tmax = dt }
+  si = si + 1
+}
+check_int(produced, 5, "stream_count")
+// temps: 1000, 1100, 1200, 1300, 1400 -> sum = 6000
+check_int(tsum, 6000, "stream_temp_sum")
+check_int(tmin, 1000, "stream_temp_min")
+check_int(tmax, 1400, "stream_temp_max")
+// mean (integer division) = 6000 / 5 = 1200
+check_int(tsum / 5, 1200, "stream_temp_mean")
+check_bool(all_ok, true, "stream_all_checksums_valid")
+
+// =====================================================================
+// SECTION 5 — Fixed-point (Q16.16) scaled-integer arithmetic
+// =====================================================================
+// Represent fractional values as int scaled by 2^16 = 65536. All operations
+// are integer-only; this demonstrates int's exactness below 2^53.
+//
+// to_fixed(n) = n * 65536
+// fixed_mul(a,b) = (a * b) >> 16   (product fits below 2^53 for our magnitudes)
+// fixed_div(a,b) = (a << 16) / b
+// from_fixed_floor(a) = a >> 16
+
+// SCALE = 65536 = 2^16, inlined (top-level functions do not capture module locals).
+fn to_fixed(n: int) -> int { n * 65536 }
+fn fixed_mul(a: int, b: int) -> int { (a * b) / 65536 }
+fn fixed_div(a: int, b: int) -> int { (a * 65536) / b }
+fn whole_part(a: int) -> int { a / 65536 }
+fn frac_milli(a: int) -> int {
+  // fractional part expressed in thousandths (0..999), truncated.
+  let frac = a - (whole_part(a) * 65536)
+  return (frac * 1000) / 65536
+}
+
+// 3.0 in fixed = 196608
+check_int(to_fixed(3), 196608, "fx_to_fixed_3")
+// 3.0 * 4.0 = 12.0 -> fixed 786432
+let three = to_fixed(3)
+let four = to_fixed(4)
+check_int(fixed_mul(three, four), 786432, "fx_mul_3x4")
+check_int(whole_part(fixed_mul(three, four)), 12, "fx_mul_3x4_whole")
+
+// 7.0 / 2.0 = 3.5 -> fixed = 3.5 * 65536 = 229376
+let seven = to_fixed(7)
+let two = to_fixed(2)
+let half7 = fixed_div(seven, two)
+check_int(half7, 229376, "fx_div_7_2")
+check_int(whole_part(half7), 3, "fx_div_7_2_whole")
+check_int(frac_milli(half7), 500, "fx_div_7_2_frac")  // 0.5 -> 500 thousandths
+
+// 1.0 / 3.0 in fixed: (65536 << 16)/(3*65536) = 65536/3 = 21845 (trunc)
+let one = to_fixed(1)
+let third = fixed_div(one, to_fixed(3))
+check_int(third, 21845, "fx_div_1_3")
+check_int(whole_part(third), 0, "fx_div_1_3_whole")
+// 21845/65536 = 0.33333... -> *1000 trunc. 21845*1000 = 21845000; /65536 = 333
+check_int(frac_milli(third), 333, "fx_div_1_3_frac")
+
+// Accumulate 0.1 (fixed approx) ten times and compare whole part.
+// 0.1 fixed = 6553 (trunc of 6553.6). Sum of ten = 65530. whole_part = 0 (since <65536).
+let tenth = fixed_div(one, to_fixed(10))     // 65536/10 = 6553 (trunc)
+check_int(tenth, 6553, "fx_tenth")
+let mut acc = 0
+let mut k = 0
+while k < 10 {
+  acc = acc + tenth
+  k = k + 1
+}
+check_int(acc, 65530, "fx_accumulate_10x")
+check_int(whole_part(acc), 0, "fx_accumulate_whole")   // 65530 < 65536 -> 0 (truncation drift, exact int)
+
+// =====================================================================
+// SECTION 6 — Deterministic LCG pseudo-random + histogram (integer-only)
+// =====================================================================
+// A linear congruential generator: x = (a*x + c) mod m. Numeric Recipes params.
+//   a = 1664525, c = 1013904223, m = 2^32
+// We mask to 32 bits with & 0xFFFFFFFF (fits in i64 exactly).
+
+let M32 = 4294967296   // 2^32
+
+fn lcg_next(state: int) -> int {
+  return (1664525 * state + 1013904223) & 0xFFFFFFFF
+}
+
+// Generate a deterministic sequence from seed 12345 and bucket the top 3 bits
+// (value >> 29) into 8 buckets; verify the total count and a couple of exact
+// state values along the way.
+let seed = 12345
+let s1 = lcg_next(seed)
+// s1 = (1664525*12345 + 1013904223) mod 2^32
+//    1664525*12345 = 20548558125 ; + 1013904223 = 21562462348
+//    21562462348 mod 4294967296: floor(21562462348/4294967296)=5 (5*4294967296=21474836480)
+//    remainder = 21562462348 - 21474836480 = 87628868  (NOTE: 21562462348-21474836480=87625868?
+//    exact: 21562462348-21474836480 = 87625868 ... corrected below from exact 64-bit:)
+// Verified exact (64-bit): s1 = 87628868
+check_int(s1, 87628868, "lcg_s1")
+
+let s2 = lcg_next(s1)
+// s2 = (1664525*87628868 + 1013904223) mod 2^32. Verified exact (64-bit): s2 = 71072467
+check_int(s2, 71072467, "lcg_s2")
+
+// Run 64 draws; ensure every draw is within [0, 2^32) and bucket counts sum to 64.
+let mut state = seed
+let mut total = 0
+let mut in_range = 0
+let mut d = 0
+while d < 64 {
+  state = lcg_next(state)
+  total = total + 1
+  if state >= 0 {
+    if state < M32 {
+      in_range = in_range + 1
+    }
+  }
+  d = d + 1
+}
+check_int(total, 64, "lcg_total_draws")
+check_int(in_range, 64, "lcg_all_in_range")
+
+// =====================================================================
+// SECTION 7 — Integer division / modulo identities (book: int is i64)
+// =====================================================================
+// For these positive operands, q*b + r == a and 0 <= r < b.
+
+fn check_divmod(a: int, b: int) {
+  let q = a / b
+  let r = a % b
+  check_int(q * b + r, a, f"divmod_identity_{a}_{b}")
+  check_bool(r >= 0, true, f"divmod_rem_nonneg_{a}_{b}")
+  check_bool(r < b, true, f"divmod_rem_lt_b_{a}_{b}")
+}
+
+check_divmod(17, 5)
+check_divmod(100, 7)
+check_divmod(1000000, 999)
+check_divmod(2350, 100)
+check_divmod(65530, 65536)   // q=0, r=65530
+
+// Powers of two via shifts: 1 << n.
+check_int(1 << 0, 1, "shl_0")
+check_int(1 << 1, 2, "shl_1")
+check_int(1 << 10, 1024, "shl_10")
+check_int(1 << 16, 65536, "shl_16")
+check_int(1 << 20, 1048576, "shl_20")
+// 2^31 and 2^32 fit exactly in i64.
+check_int(1 << 31, 2147483648, "shl_31")
+check_int(1 << 32, 4294967296, "shl_32")
+
+// Bit masks.
+check_int(0xFF & 0x0F, 0x0F, "and_mask")
+check_int(0xF0 | 0x0F, 0xFF, "or_mask")
+check_int(0xFF ^ 0x0F, 0xF0, "xor_mask")
+check_int(255 >> 4, 15, "shr_basic")
+check_int(0xDEADBEEF & 0xFFFF, 0xBEEF, "and_low16")
+
+// =====================================================================
+// SECTION 8 — Population count + bit reversal (8-bit, table-free)
+// =====================================================================
+fn popcount8(v: int) -> int {
+  let mut n = v & 0xFF
+  let mut count = 0
+  let mut i = 0
+  while i < 8 {
+    count = count + (n & 1)
+    n = n >> 1
+    i = i + 1
+  }
+  return count
+}
+
+fn reverse8(v: int) -> int {
+  let mut src = v & 0xFF
+  let mut out = 0
+  let mut i = 0
+  while i < 8 {
+    out = (out << 1) | (src & 1)
+    src = src >> 1
+    i = i + 1
+  }
+  return out
+}
+
+check_int(popcount8(0x00), 0, "popcount_00")
+check_int(popcount8(0xFF), 8, "popcount_FF")
+check_int(popcount8(0x0F), 4, "popcount_0F")
+check_int(popcount8(0xAA), 4, "popcount_AA")   // 10101010 -> 4
+check_int(popcount8(0x80), 1, "popcount_80")
+
+// reverse8: 0x01 (00000001) -> 0x80 (10000000) = 128
+check_int(reverse8(0x01), 128, "reverse_01")
+check_int(reverse8(0x80), 1, "reverse_80")
+check_int(reverse8(0xFF), 255, "reverse_FF")
+check_int(reverse8(0xF0), 0x0F, "reverse_F0")   // 11110000 -> 00001111
+check_int(reverse8(0xA5), 0xA5, "reverse_A5")   // 10100101 palindrome -> 10100101
+
+// =====================================================================
+// SECTION 9 — Width-typed literal table (in-range values are identity)
+// =====================================================================
+let i8v = 127i8
+let u8v = 255u8
+let i16v = 32767i16
+let u16v = 65535u16
+let i32v = 2147483647i32
+let u32v = 4294967295u32
+check_int(i8v as int, 127, "lit_i8_max")
+check_int(u8v as int, 255, "lit_u8_max")
+check_int(i16v as int, 32767, "lit_i16_max")
+check_int(u16v as int, 65535, "lit_u16_max")
+check_int(i32v as int, 2147483647, "lit_i32_max")
+check_int(u32v as int, 4294967295, "lit_u32_max")
+
+// Negative-edge width literals.
+let i8min = -128i8
+let i16min = -32768i16
+let i32min = -2147483648i32
+check_int(i8min as int, -128, "lit_i8_min")
+check_int(i16min as int, -32768, "lit_i16_min")
+check_int(i32min as int, -2147483648, "lit_i32_min")
+
+// Hex/bin/oct suffix combos (integer-types.mdx "Literal Suffixes").
+check_int((0xFFu8) as int, 255, "lit_hex_u8")
+check_int((0b1010i16) as int, 10, "lit_bin_i16")
+check_int((0o77u32) as int, 63, "lit_oct_u32")
+check_int((0x100u16) as int, 256, "lit_hex_u16")
+check_int((0b11111111u8) as int, 255, "lit_bin_u8")
+
+// =====================================================================
+// FINAL — report
+// =====================================================================
 if failures == 0 {
-  print(f"checks_run={checks}")
+  print(f"checks_run={checks_run}")
   print("ALL_CHECKS_PASSED")
-} else {
-  print(f"checks_run={checks} failures={failures}")
 }

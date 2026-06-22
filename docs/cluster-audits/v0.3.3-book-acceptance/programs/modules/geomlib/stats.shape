@@ -1,4 +1,7 @@
-// geomlib/stats.shape — basic statistics over numeric arrays
+// geomlib/stats.shape  -> importable as "geomlib::stats"
+// Pure numeric helpers. Demonstrates `pub fn` exports and the int->number
+// `as` cast the book calls out (v.length is int, v.sum() is number).
+
 pub fn mean(v: Array<number>) -> number {
     v.sum() / (v.length as number)
 }

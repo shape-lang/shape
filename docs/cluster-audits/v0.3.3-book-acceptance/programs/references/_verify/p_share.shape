@@ -1,4 +1,0 @@
-fn append(xs) { xs.push(4) }
-let data = [1, 2, 3]
-append(data)
-print(data.len())

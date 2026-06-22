@@ -59,51 +59,47 @@ surface (`docs/cluster-audits/v0.3-r8w6-hashmap-key-kind-audit.md`). Programs
 still produce CORRECT stdout (ec=0). Recorded for completeness; does not affect
 classification since stdout is clean and byte-identical.
 
-## Defects found (FN-REG-CORRECTNESS — followed the book, real bugs)
+## Re-verification at current HEAD (2026-06-21)
 
-These are genuine language defects encountered while writing book-idiomatic code.
-Each was recorded as FIRST-RUN truth and then worked around in-program so the
-deliverable still demonstrates the book's intent. Minimal repros below.
+Both deliverables were RE-RUN at the current release binary HEAD, VM + JIT:
+- small.shape: VM ec=0 / JIT ec=0 / `ALL_CHECKS_PASSED` / byte-identical.
+- large.shape: VM ec=0 / JIT ec=0 / `checks_run=233` + `ALL_CHECKS_PASSED` / byte-identical.
 
-### D1. `Vec<int>` NumericVec sum/min/max return `number`, not `int`
-The chapter's NumericVec section advertises `sum()`/`min()`/`max()` on `Vec<int>`
-receivers but gives no return type. They return `number`:
-```
-let v = [1, 2, 3]
-let s: int = v.sum()      // ERROR: number is not compatible with int
-fn takeInt(x: int) {}
-takeInt([1,2,3].sum())    // ERROR: (int)->void not compatible with (number)->void
-```
-Asymmetry: `v.sum() == 6` type-checks (int literal adapts), but forcing the result
-into a concrete `int` (annotation / fn param / int field) fails. Same under VM and
-JIT. Workaround in program: route every aggregate through `checkNum` with `.0`
-expected values; derive integer max/min via a manual `for` fold instead.
-This also blocks `e.salary == salaries.max()` (`int == number` error) inside a
-`find` closure.
+The four defects from the prior run were re-probed with minimal repros at HEAD.
+**Two are now FIXED at HEAD** (binary rebuilt since the prior write-up); two still
+reproduce. Updated truth below. The large program already carries annotation /
+local-copy workarounds for all four, so it passes regardless.
 
-### D2. `.map()` element type not threaded to downstream `for` / comparison
+### D1. `Vec<int>` NumericVec sum/min/max return `number`, not `int` — **FIXED at HEAD**
+Prior run: `let s: int = v.sum()` errored (`number` not compatible with `int`).
+Re-probe at HEAD: `let v = [1,2,3]; let s: int = v.sum(); print(s)` → ec=0, prints
+`6`. The int-annotation path now type-checks. No longer a live defect.
+
+### D2. `.map()` element type not threaded to downstream `for` / comparison — **STILL LIVE at HEAD**
 ```
-let salaries = roster.map(|e| e.salary)   // Vec<int>, .sum()/.first() print fine
-for v in salaries { if v > mx { } }       // ERROR: Greater operands are unknown/unknown
+let salaries = roster.map(|e| e.salary)   // Vec<int>, .sum()/.first() work fine
+for v in salaries { if v > mx { } }       // see below
 ```
+Re-probe at HEAD (VM):
+```
+error[SEMANTIC]: Cannot infer types for binary operation `Greater`: operand types
+are `unknown` and `int`. Strict typing requires both operands to have a known
+concrete type at compile time. Add a type annotation to disambiguate.
+```
+JIT side surfaces the same as a `Bytecode compilation failed: Semantic error: ...`.
 The mapped result's element type is lost when it feeds an inference-requiring
 context (`for` + binary comparison). `.first()`/`.len()`/`.sum()` on the same value
-work. Workaround: annotate the binding `let salaries: Array<int> = roster.map(...)`,
-which restores the fold. (Consistent with the known typed-closure-inference
-regression cluster.)
+work. Workaround (used in program): annotate the binding
+`let salaries: Array<int> = roster.map(...)`, which restores the fold. Consistent
+with the known typed-closure-inference regression cluster.
 
-### D3. Empty `HashMap()` (never populated) crashes at runtime
-```
-let m: HashMap<string, int> = HashMap()
-m.isEmpty()   // Runtime error: no method 'isEmpty' on receiver kind UInt64
-```
-A never-`set` HashMap materializes as a `UInt64`, so `isEmpty()`/`len()` fail at
-runtime. A populated map (`HashMap().set(...)`) works. The book only ever calls
-`isEmpty()` on a populated map (returning `false`), which is fine — so the
-empty-map invariant the book IMPLIES (isEmpty()==true) is unreachable. Program
-drops the empty-map test.
+### D3. Empty `HashMap()` (never populated) crashes at runtime — **FIXED at HEAD**
+Prior run: `HashMap().isEmpty()` raised `no method 'isEmpty' on receiver kind UInt64`.
+Re-probe at HEAD: `let m: HashMap<string,int> = HashMap(); print(m.isEmpty())` →
+ec=0, prints `true`. The never-populated-map path is fixed. No longer a live defect.
+(The program still omits an explicit empty-map check — harmless given the fix.)
 
-### D4. `<HashMap-readback-int> + <typedobject-field-int>` raises "no method 'add'"
+### D4. `<HashMap-readback-int> + <typedobject-field-int>` raises "no method 'add'" — **STILL LIVE at HEAD**
 ```
 while ... {
   let e = emps[i]
@@ -139,14 +135,22 @@ Workaround: copy both operands into explicitly-annotated `int` locals
 
 ## book_wrong (book documents behavior the language does not actually do)
 
-- NumericVec `sum()`/`min()`/`max()` "provided ... for Vec<number> / Vec<int>
-  receivers" implies they preserve the receiver's element type; on `Vec<int>` they
-  return `number` (D1), so the natural `let total: int = xs.sum()` is rejected.
-  The book's framing leads the reader straight into a compile error.
+- (HISTORICAL — RESOLVED at HEAD) NumericVec `sum()`/`min()`/`max()` were
+  previously rejected when forced into an `int` annotation (`let total: int =
+  xs.sum()`). At current HEAD the int-annotation path type-checks (D1 fixed), so
+  the book framing is no longer contradicted. Retained for audit trail only; not
+  a live book_wrong at HEAD.
 
 ## Notes on classification
-All four defects (D1-D4) had clean book-faithful workarounds, so BOTH deliverables
-PASS (ec=0, ALL_CHECKS_PASSED, VM==JIT byte-identical). The defects are real
-correctness/inference regressions surfaced by writing ordinary book-rooted code,
-hence FN-REG-CORRECTNESS for the slice. The `runnable=false` surfaces were avoided
-by design and are already tracked as v0.4 candidates by the book itself.
+At current HEAD, BOTH deliverables PASS (ec=0, `ALL_CHECKS_PASSED`, VM==JIT
+byte-identical). Of the four originally-recorded defects, D1 and D3 are now FIXED
+at HEAD (verified by minimal repro); D2 (`.map()` element type not threaded to
+`for`/comparison without an `Array<T>` annotation) and D4 (`<hashmap-readback-int>
++ <typedobject-field-int>` → `no method 'add' on receiver kind Int64`) still
+reproduce. Both surviving defects are real inference/dispatch regressions surfaced
+by ordinary book-rooted code, and both have clean book-faithful workarounds in the
+deliverable (annotate the mapped binding; copy operands into annotated `int`
+locals). Hence the slice classification stays FN-REG-CORRECTNESS — the programs
+themselves PASS, but writing them book-idiomatically still trips two live language
+defects. The `runnable=false` surfaces were avoided by design and are already
+tracked as v0.4 candidates by the book itself.

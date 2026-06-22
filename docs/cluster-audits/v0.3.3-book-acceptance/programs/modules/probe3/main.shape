@@ -1,3 +1,0 @@
-from mylib::linalg2 use { midpoint2 }
-let r = midpoint2(10, 20)
-print(f"mid2={r}")

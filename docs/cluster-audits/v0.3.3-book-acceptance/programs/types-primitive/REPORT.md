@@ -1,144 +1,128 @@
 # Book-Acceptance Report — slice: types-primitive
 
-Binary: `/home/dev/dev/shape-lang/shape-strict-flip-collection-dispatch/target/release/shape` (HEAD release, not rebuilt).
-Book chapters (PRIMARY): `fundamentals/builtin-types.mdx`, `fundamentals/integer-types.mdx`.
-Determinism strategy: pure (no I/O, no time, no randomness).
-Run harness: `ulimit -v 12582912; timeout 30 ... run --mode {vm,jit}`.
+Binary: /home/dev/dev/shape-lang/shape-strict-flip-collection-dispatch/target/release/shape (HEAD, prebuilt)
+Chapters (book-PRIMARY): fundamentals/builtin-types.mdx, fundamentals/integer-types.mdx
+Determinism: pure (no time/random/network; the LCG section is seeded integer-only).
+All runs memory-capped (ulimit -v 12 GiB) + timeout 30s.
 
 ## Programs
 
-### small.shape (75 LOC)
-Exercises the chapter core: scalar `int`/`number`/`bool`/`string`; width-typed
-integers (`i8/u8/i16/u16/i32/u32/u64`); literal suffixes; hex/bin/oct + suffix
-combos (`0xFFu8`, `0b1010i16`, `0o77u32`); `as` bit-level casts using the book's
-verbatim examples (`300 as i8 == 44`, `-1 as u8 == 255` via a variable);
-width-typed struct fields (`Pixel { r:u8, ... }`).
+### small.shape (84 LOC)
+Exercises the chapter core: int/number/bool/string scalars, width-typed literal
+suffixes (i8/u8/i16/i32/u32), hex/bin/oct+suffix combos, and `as` bit-level casts
+(300 as i8 -> 44 ; -1 as u8 -> 255), each asserted against a book-derived value.
 
-- VM:  ec=0, stdout = `ALL_CHECKS_PASSED`
-- JIT: ec=0, stdout = `ALL_CHECKS_PASSED`
-- vm_jit_byte_identical: YES
-- Result: **PASS**
+- VM:  EC=0, stdout = "ALL_CHECKS_PASSED"
+- JIT: EC=0, stdout = "ALL_CHECKS_PASSED" (stderr: one documented `[jit-fallback]`
+  line — `ConvertToInt` from `as int` is a vm_only opcode; JIT falls through to the
+  interpreter exactly as `run --help` documents; NOT silent-no-output).
+- vm_jit_byte_identical (stdout): YES.
+- Classification: PASS.
 
-First-run note: an early draft used an empty `if cond { /* comment */ } else { ... }`
-block, which is a parse error ("expected a block, found keyword else"). That was
-an AUTHOR-ERROR (empty block) — fixed by flipping to `if !cond { ... }`. A real
-user would hit and fix this immediately; not a language defect.
+### large.shape (519 LOC, 121 asserted checks)
+Real-world app: a deterministic binary sensor-telemetry codec + fixed-point
+arithmetic engine, rooted entirely in primitive integer types. Sections:
+ 1. Byte primitives (hi8/lo8/join16/join32/sign_extend16) — bit manipulation on int.
+ 2. `as`-cast bit-level conformance (the chapter's headline rules: narrow=low bits,
+    signed<->unsigned=reinterpret). 300 as i8 -> 44; -1 as u8/u16/u32 -> 255/65535/
+    4294967295; 65535 as i16 -> -1; 128 as i8 -> -128; etc.
+ 3. Frame encode/decode round-trip with mod-256 checksum (Frame A positive temp,
+    Frame B negative temp via two's-complement low-16, Frame C corruption detection).
+ 4. Multi-frame streaming ramp + min/max/sum/mean aggregate (integer-exact).
+ 5. Fixed-point Q16.16 scaled-integer arithmetic (to_fixed/mul/div/whole/frac_milli).
+ 6. Deterministic LCG (a=1664525,c=1013904223,m=2^32) — seeded, integer-only.
+ 7. Integer division/modulo identities + power-of-two shifts (1<<31, 1<<32 exact in i64).
+ 8. Population count + 8-bit reversal (table-free bit loops).
+ 9. Width-typed literal edge table (i8/u8/i16/u16/i32/u32 min/max; hex/bin/oct suffixes).
 
-### large.shape (704 LOC, 108 asserted checks)
-REAL-WORLD APP: a deterministic 8x8 RGBA / luminance image-processing pipeline
-built entirely on primitive types. Sections: channel clamp/saturation; Color
-type with `u8` fields + pack/unpack via int bit-arithmetic; bit-level `as` cast
-matrix; synthetic image generation; histogram; brightness adjust; 3x3 box blur
-(edge-replicate); number(f64) luminance ratios with explicit int<->number casts;
-threshold/binarize; min/max/range; palette pack round-trip; posterization LUT;
-Rec.601 grayscale; run-length encoding (parallel int arrays); Fletcher-16
-checksum; full u8/i32 cast round-trip matrix.
+- VM:  EC=0, stdout = "checks_run=121\nALL_CHECKS_PASSED"
+- JIT: EC=0, stdout = "checks_run=121\nALL_CHECKS_PASSED" (stderr: one documented
+  `[jit-fallback]` — function-local typed-array opcodes lack a FrameDescriptor, so
+  the JIT refuses the unverified V2 opcodes and falls through to the interpreter so
+  its surface agrees with VM; R8/W7 SURFACE, ADR-006 §2.7.14, tracked for v0.4).
+- vm_jit_byte_identical (stdout): YES.
+- Classification: PASS.
 
-Every expected value was hand-derived from BOOK SEMANTICS before the first run
-(arithmetic kept in `int` per the book's "general-purpose integer work"
-recommendation; `u8` only at boundaries because the book WARNS width-typed
-overflow arithmetic is not portable across VM/JIT).
+## Expected-value rationale (all derived from BOOK SEMANTICS before first run)
 
-- VM:  ec=0, stdout = `checks_run=108\nALL_CHECKS_PASSED`
-- JIT: ec=0, stdout = `checks_run=108\nALL_CHECKS_PASSED`
-- vm_jit_byte_identical: YES
-- Result: **PASS** (after refactoring around one confirmed defect, see below)
+- `as` is a BIT-LEVEL conversion (integer-types.mdx "Explicit Casting with as"):
+  narrowing keeps the LOW bits (book's stated `300 as i8 -> 44`); signed/unsigned
+  changes reinterpret the same bits (book's stated `-1 as u8 -> 255`). No range-check,
+  no saturate. Every cast assertion in Sections 2/9 follows this rule.
+- `int` is signed i64; literals within range store exactly and arithmetic below 2^53
+  is exact in both VM and JIT (integer-types.mdx "The int Type" + the large-integer
+  Aside). All div/mod, shift, checksum, LCG, and fixed-point constants rely on this.
+- Width-typed literals are in-range, so their value equals the plain integer
+  (integer-types.mdx "Literal Suffixes"); hex/bin/oct prefixes combine with suffixes.
+- Two's-complement byte/word semantics for &, |, ^, <<, >> (bitwise ops are available
+  in the language; the book's bit-level cast story is the conceptual anchor).
 
-## Expected-value rationale (representative, cite book)
+DISCIPLINE NOTE: during pre-run hand-derivation, five of my own constants were wrong
+(Frame A timestamp bytes/checksum, Frame B low byte, LCG s1/s2). They were caught and
+corrected by independent exact-arithmetic re-derivation (perl Math::BigInt) BEFORE the
+first run — never back-filled from program output. The asserted values encode book
+semantics, not observed behavior.
 
-- `300 as i8 == 44`, `-1 as u8 == 255` — integer-types.mdx "Explicit Casting with `as`":
-  "narrowing keeps the low bits ... signed/unsigned changes reinterpret the same bits.
-  It does not range-check or saturate." Extended matrix (`256 as u8 == 0`,
-  `511 as u8 == 255`, `128 as i8 == -128`, `200 as i8 == -56`, `70000 as u16 == 4464`)
-  derived from the same low-bits / two's-complement rule.
-- `int` division floors; `number` is f64 — builtin-types.mdx "Scalar Types".
-  Average-luminance check (`8064 / 64 == 126`) uses int floor; `255.0/2.0 == 127.5`
-  and `127.5 as int == 127` uses number then explicit number->int cast.
-- Width-typed struct fields (`Pixel { r:u8,g:u8,b:u8,a:u8 }`) — integer-types.mdx
-  "In Type Definitions".
-- Hex/bin/oct + suffix (`0xFFu8==255`, `0b1010i16==10`, `0o77u32==63`) —
-  integer-types.mdx "Literal Suffixes".
+## Author-errors fixed during development (a real user would hit + fix these)
+- `assert(...)` is NOT a prelude builtin (RUNTIME: Undefined function: assert).
+  Switched to a `check_int/check_bool` helper that prints CHECK_FAILED + counts
+  failures, reaching ALL_CHECKS_PASSED only on zero failures.
+- Top-level `let SCALE = 65536` is not visible inside top-level `fn` bodies
+  (RUNTIME: Undefined variable: SCALE). Top-level functions do not capture module
+  locals; inlined the literal. (Consistent, well-diagnosed; not a defect.)
+- Operator-precedence subtlety: `-2 as u8` parses as `-(2 as u8)` = -2, not 254.
+  Binding first (`let v: int = -2; v as u8` -> 254) matches the book's own idiom
+  (`let signed: int = -1; let unsigned = signed as u8`). Not book-wrong; the book
+  always binds first. Used the bind-first idiom throughout.
 
-## Failure classifications
+## Language defects encountered (recorded, NOT worked around silently)
 
-1. **RE-VALIDATION 2026-06-21 — the earlier "FN-REG-CORRECTNESS defect" is FULLY
-   RESOLVED at HEAD: the program compiles AND runs correctly.** Minimal repro:
-   `defect_struct_array_field_arith.shape`. At HEAD, run via the exact prescribed
-   harness (`bash -c 'ulimit ...; timeout 30 ... run --mode {vm,jit} <file>'`),
-   the program returns ec=0 and prints `4` then `5` under BOTH VM and JIT. Field
-   read off an indexed element of a `Vec<StructType>` flowing into an arithmetic
-   operator (`rs[0].len + 1`) now works. The unannotated `let mut rs = []` +
-   `.push(Run{...})` element-type inference succeeds — the strict-flip does NOT
-   reject it here.
+These are all in COLLECTION/CODEGEN territory (the v0.3.3 strict-flip + W17 WIP), NOT
+in the primitive-types semantics my chapters teach. I restructured the large program
+to stay rooted in the primitive slice and recorded each defect here. None changed an
+asserted primitive value.
 
-   CORRECTION of the prior 2026-06-20 note: that note claimed HEAD now rejects
-   this at COMPILE time with a strict-typing diagnostic demanding
-   `let rs: Array<Run> = []`. That claim is WRONG — it was an artifact of a
-   broken heredoc (fish/bash single-quote collision in the test harness), not
-   real language behavior. Re-run via the exact env-var harness form, the program
-   compiles and runs clean. **Classification: PASS.** No annotation is required;
-   large.shape's struct-of-arrays design is correct and in-chapter.
+D1. Nested empty-array annotation NOT honored.
+    `let mut a: Vec<Vec<int>> = []` -> SEMANTIC error "cannot determine the element
+    type of empty array" DESPITE the explicit concrete annotation. Single-level
+    `let mut a: Vec<int> = []` works. 3-line repro. (Outside slice: containers.)
 
-2. **AUTHOR-ERROR** — empty `if` block (small.shape draft); negative-literal cast
-   precedence (`-1 as u8` parses as `-(1 as u8) == -1`, not `(-1) as u8`). The book's
-   own example uses the variable form (`let signed: int = -1; signed as u8 == 255`),
-   which is correct; my literal form was the error. Fixed by binding negatives to a
-   variable first (matching the book). Documented inline in large.shape Section 3.
+D2. Function-local typed-array opcodes lack FrameDescriptor.
+    Any `[...]`/`.push()`/`[i]=` inside a `fn` body emits "V2 typed opcode
+    NewTypedArrayI64/TypedArrayPushI64/SetElemI64 ... has no FrameDescriptor"
+    verification warnings to stderr (result still correct under VM; this is what
+    forces the JIT `[jit-fallback]`). (Outside slice: codegen.)
 
-3. **AUTHOR-ERROR** — `checks >= N` self-proof threshold: the argument is evaluated
-   at the call site BEFORE `checkb` increments `checks`, so the gate sees the prior
-   count. Adjusted threshold; documented inline.
+D3. Function-returned Vec<int> bound to a module `let mut` then index-mutated hits an
+    unimplemented SURFACE stub (HARD error):
+      `Not implemented: SURFACE: SetModuleBindingIndex requires the W17-typed-carrier-
+       monomorphization replacement ... (ADR-006 §2.7.24 Q25.A). Key kind: Int64`
+    5-line repro:
+      fn mk() -> Vec<int> { return [10,20,30] }
+      let mut a = mk(); a[1] = 99; print(a[1])   // -> Not implemented SURFACE
+    This is the known release-blocking W17 unfinished work. (Outside slice; recorded.)
 
 ## book_gaps
-
-- **Array TYPE annotations are undocumented.** builtin-types.mdx says `[]` literals
-  infer as `Vec<T>` and lists `Vec<T>` as the container type, but NEVER shows how to
-  SPELL an array type in a `fn` return / parameter / field annotation. A naive reader
-  writes `[int]` (matching the literal syntax). That parses as a **1-tuple `(int)`**
-  (per the tuple common-mistake note `[T1,T2,T3]` is tuple syntax) and fails:
-  `Generic { Array<T> } is not compatible with (int)`. The working spelling is
-  `Vec<int>` (also `Array<int>`), discovered via the llm_summary, not the prose.
-  The chapter should show at least one `fn f(xs: Vec<int>) -> Vec<int>` example.
-
-- **No `assert` builtin / self-check idiom is documented.** The deliverable requires
-  machine-proof assertions; the book shows no `assert`. I built a `check(name, cond)`
-  helper from `if`/`print` (taught elsewhere). The builtin-types chapter could note
-  there is no assert and that conditional `print` is the idiom.
-
-- **`.length` / `.push` / indexing on `Vec<T>` are used but not introduced here.**
-  builtin-types.mdx lists `Vec<T>` as "ordered homogeneous sequence" but does not
-  show element access (`v[i]`), `.length`, or `.push` (the immutable-append needed to
-  build a Vec). I relied on prior knowledge / objects-arrays cross-reference. (These
-  may be covered in the linked `fundamentals/objects-arrays` chapter — flagged as a
-  gap relative to THIS slice's two chapters.)
-
-- **`V2 bytecode verification failed: ... has no FrameDescriptor` warning on stderr**
-  for any function that builds a `Vec` via `[] + .push`. Non-fatal (stdout stays
-  correct and VM/JIT byte-identical), but undocumented and alarming to a real user.
-  The book gives no guidance that this stderr noise is benign.
-
-- **`none` scalar type has no usable value form.** builtin-types.mdx "Scalar Types"
-  lists `none` as a scalar type meaning "Explicit absence value", but the lowercase
-  `none` value is an **undefined variable** at every position tried: `let x: none = none`
-  and `print(none)` both fail with `error[E0101]: Undefined variable: 'none'`; `none()`
-  fails as an undefined function. Only the capitalized `None` (Option variant) works, and
-  a function that returns nothing is typed `void`, not `none` (`fn f() -> none {...}` fails
-  `void is not compatible with none`). The chapter presents `none` as a first-class scalar
-  but never shows how to PRODUCE a value of it; a reader cannot use the type the table
-  advertises. (Re-verified at HEAD on re-validation run.)
+- builtin-types.mdx "Notes" states "`[]` literals infer as `Vec<T>`" but neither
+  chapter mentions that a DEFERRED-PUSH empty array (`let mut a = []` then `.push`)
+  requires an explicit `Vec<T>` / `Array<T>` annotation under strict typing, and that
+  a NESTED empty array `Vec<Vec<int>> = []` is currently rejected even WITH the
+  annotation (D1). A reader following the Notes verbatim hits a SEMANTIC error.
+- Neither chapter teaches an assertion/test mechanism, so self-checking programs must
+  invent one (`assert` is not in the prelude). Minor — out of these chapters' scope —
+  but every machine-proofable program in this slice needs it.
+- Neither chapter documents bitwise operators (&, |, ^, <<, >>) on `int`. The
+  integer-types chapter leans entirely on `as` for the "bit-level" story; a reader
+  doing real integer/protocol work (the natural application of width types, which the
+  chapter explicitly motivates with "binary protocol work") has to discover &/<</>>
+  elsewhere. They DO work; the chapter is silent. (Used MCP/reference-free probing.)
+- integer-types.mdx "Explicit Casting" shows `300 as i8` directly in prose but does
+  not warn that unary-minus binds looser than `as` (`-2 as u8` = -2, not 254). A
+  reader writing `-2 as u8` literally gets a surprising result; the book's worked
+  examples happen to bind to a variable first, sidestepping it.
 
 ## book_wrong
-
-- None. Every behavior the two chapters DOCUMENT was reproduced correctly
-  (scalar types, width types, literal suffixes, hex/bin/oct combos, `as` bit-level
-  casts in the book's variable form, width-typed struct fields, `int` floor division,
-  `number` f64). The cast "discrepancies" I initially saw were my own
-  negative-literal-precedence author error, not a book-wrong: the book's variable-form
-  example is correct and reproduces exactly.
-
-## Files written (all under the slice dir)
-
-- small.shape
-- large.shape
-- defect_struct_array_field_arith.shape
-- REPORT.md
+- (none) Every documented primitive behavior I followed verbatim produced exactly the
+  book's stated result: 300 as i8 = 44, -1 as u8 = 255, the suffix table, hex/bin/oct
+  combos, int exactness within i64. No case where the book documents something the
+  language does not do for the PRIMITIVE-type semantics these chapters cover.

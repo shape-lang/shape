@@ -1,3 +1,0 @@
-pub annotation traced(tag) {
-  targets: [function]
-}

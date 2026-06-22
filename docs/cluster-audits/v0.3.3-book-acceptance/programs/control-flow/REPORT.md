@@ -4,6 +4,10 @@ Worktree: shape-strict-flip-collection-dispatch (v0.3.3 cumulative strict-flip)
 Binary: target/release/shape (HEAD, prebuilt)
 Book source (PRIMARY): fundamentals/control-flow.mdx
 Determinism strategy: pure (no clocks/network/random; LCG seeded with fixed constants)
+Independently re-verified 2026-06-21 at HEAD: both programs PASS vm+jit byte-identical;
+all large-program hand-derived expected values re-confirmed via an independent
+recomputation (Collatz, LCG sequence/stats, Rule-90 trajectory); negative control
+fires; the prior keyword-prefix book_wrong finding RETRACTED (not reproducible).
 
 ## Programs
 
@@ -71,33 +75,22 @@ Both deliverables: PASS. vm_jit_byte_identical = true for both.
 
 ## book_wrong (book followed correctly, language disagrees)
 
-1. KEYWORD-PREFIXED IDENTIFIER IN A SAME-KEYWORD CONDITION FAILS TO PARSE.
-   The chapter teaches `if <cond> { }` and `while <cond> { }` with arbitrary
-   condition expressions and gives no naming restriction on variables. But an
-   identifier whose prefix is the SAME control-flow keyword as the enclosing
-   construct, used in that construct's CONDITION position, derails the parser:
-     var whileCount = 3
-     if whileCount != 3 { print("a") }   // condition uses `whileCount` -> ok here
-   Actually the trigger is the identifier appearing as the condition head of the
-   matching keyword. Confirmed minimal cases (all on this binary, vm AND jit,
-   parse stage so mode-independent):
-     - `while whileX < 3 { ... }`  -> error[E0001] "expected a block { }, found
-        identifier `print`" (the loop body is mis-attached).
-     - `if ifX > 1 { ... }`        -> same family of error.
-     - `if whileCount != 3 { ... }` (whileCount in an `if` condition) -> error
-        "expected a block, found keyword `var`/`else`".
-   Cross-keyword is FINE: `for forX in ...` ok; `if forCount > 1 { }` ok;
-   `if breakX != 3 { }` ok. A bare `let z = whileCount + 1` (non-condition
-   expression position) is ALSO ok. So the lexer fails maximal-munch /
-   word-boundary checking for the keyword that introduces the current construct
-   when scanning its condition expression: `while`/`if` are matched as a keyword
-   prefix inside `whileX`/`ifX`, and the grammar then never sees the block.
-   IMPACT on a real book reader: natural variable names like `whileCount`,
-   `ifCount`, `whileLeft` used directly in the loop/branch that bears the same
-   name produce a confusing parse error the chapter gives no reason to expect.
-   Classification: FN-REG-CORRECTNESS (parser/lexer correctness defect). Worked
-   around in the deliverables by avoiding keyword-prefixed identifiers in
-   condition positions (documented inline). First-run truth recorded above.
+NONE at current HEAD.
+
+NOTE / CORRECTION (independent re-verification 2026-06-21): a PRIOR draft of
+this report claimed a parser defect — "keyword-prefixed identifier in a
+same-keyword condition fails to parse" (e.g. `while whileX < 3 { }`). That
+finding is NOT REPRODUCIBLE on the binary at current HEAD and has been retracted.
+Exact re-probes, all ec=0 under BOTH vm and jit:
+  - `var whileX = 0; while whileX < 3 { print(whileX); whileX = whileX + 1 }` -> prints 0,1,2
+  - `var ifX = 5; if ifX > 1 { print(ifX) }` -> prints 5
+  - `var whileCount = 3; if whileCount != 3 { print("a") }; print("done")` -> prints done
+The lexer applies word-boundary munching correctly; keyword-prefixed identifiers
+in condition positions parse fine. The prior claim was likely an author-error in
+the earlier probe (or an older binary). The deliverables retain a harmless inline
+comment referencing the now-retracted concern, but no code depends on it — both
+programs are valid book-only Shape and pass. Net classification for this slice
+on the book_wrong axis: none.
 
 ## book_gaps (book silent; had to reach outside the chapter)
 

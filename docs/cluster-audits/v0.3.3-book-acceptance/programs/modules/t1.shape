@@ -1,4 +1,0 @@
-from math_utils use { clamp }
-
-let a = clamp(5, 0, 10)
-print(f"a={a}")

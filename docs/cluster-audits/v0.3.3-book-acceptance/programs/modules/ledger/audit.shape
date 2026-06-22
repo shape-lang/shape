@@ -1,0 +1,69 @@
+// ledger/audit.shape  -> importable as "ledger::audit"
+//
+// Reconciliation + overdraft auditing. Imports the engine (running balances,
+// closing) and the model. Demonstrates a deeper composition: audit sits above
+// engine, which itself sits above model/money — a 3-level dependency chain
+// resolved purely through `from ... use`.
+
+from ledger::model use { Txn, Account }
+from ledger::engine use { running, closing_balance, net }
+
+// The lowest balance reached at any point during the month (including the
+// opening balance). Useful for overdraft detection.
+pub fn low_water(acct: Account, txns: Array<Txn>) -> int {
+    let bals: Array<int> = running(acct, txns)
+    let mut lo = 0
+    let mut seen = false
+    for b in bals {
+        if !seen || b < lo {
+            lo = b
+            seen = true
+        }
+    }
+    lo
+}
+
+// The highest balance reached at any point during the month.
+pub fn high_water(acct: Account, txns: Array<Txn>) -> int {
+    let bals: Array<int> = running(acct, txns)
+    let mut hi = 0
+    let mut seen = false
+    for b in bals {
+        if !seen || b > hi {
+            hi = b
+            seen = true
+        }
+    }
+    hi
+}
+
+// True if the account ever went negative (overdraft) during the month.
+pub fn had_overdraft(acct: Account, txns: Array<Txn>) -> bool {
+    low_water(acct, txns) < 0
+}
+
+// Reconciliation proof: the closing balance computed two independent ways
+// (opening+net vs the last running balance) must agree. Returns true iff so.
+pub fn reconciles(acct: Account, txns: Array<Txn>) -> bool {
+    let bals: Array<int> = running(acct, txns)
+    let last = bals[bals.length - 1]
+    last == closing_balance(acct, txns)
+}
+
+// Count how many distinct points the running balance crosses below `threshold`
+// (i.e. the number of running-balance samples strictly under the threshold).
+pub fn dips_below(acct: Account, txns: Array<Txn>, threshold: int) -> int {
+    let bals: Array<int> = running(acct, txns)
+    let mut n = 0
+    for b in bals {
+        if b < threshold {
+            n = n + 1
+        }
+    }
+    n
+}
+
+// Net change as computed by audit (sanity bridge back to engine::net).
+pub fn audited_net(txns: Array<Txn>) -> int {
+    net(txns)
+}

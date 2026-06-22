@@ -42,12 +42,26 @@ Result:
   VM==JIT stdout: IDENTICAL (byte-for-byte).
 
 Classification: PASS.
-  - C1 satisfied (byte-identical).
+  - C1 satisfied (byte-identical; `cmp /tmp/small_vm.out /tmp/small_jit.out` clean).
   - C2 satisfied (399 calls > T1, result unchanged).
-  - C3 satisfied: the toplevel `for`/`while` trips the JIT preflight; whole-program
-    fall-through fires and the diagnostic matches the book's documented format
-    (mdx line 229: `[jit-fallback] function main failed JIT compile: <reason>;
-    running under interpreter`). Result is identical and correct → NOT a defect.
+  - C3 satisfied: a toplevel `for n in 1..400` range loop trips the JIT preflight
+    (`JIT execution error (code: -1)`); whole-program fall-through fires and the
+    diagnostic matches the book's documented format (mdx line 229:
+    `[jit-fallback] function main failed JIT compile: <reason>; running under
+    interpreter`). Result is identical and correct → NOT a defect.
+
+  INDEPENDENT RE-VERIFICATION (2026-06-21, this session):
+  - Re-ran both modes: VM ec=0 / JIT ec=0, stdout byte-identical (cmp clean).
+  - Bisected the fallback trigger precisely: a minimal pure-int fn called once
+    (`fn add3(...); print(add3(1,2,3))`) JIT-compiles with NO `[jit-fallback]`
+    on stderr (stdout=6) — so the JIT path DOES engage on simple programs. A
+    toplevel `while` loop with `var` accumulators ALSO compiles clean (no
+    fallback). It is specifically the toplevel `for ... in <range>` loop that
+    trips the preflight (`code: -1`). This refines (does not contradict) C3:
+    fall-through is construct-specific, not "all toplevel loops". Observable
+    contract (NOT silent-no-output, identical result) holds either way.
+  - Negative control: asserting collatz_steps(27)==999 printed
+    `CHECK_FAILED: collatz_wrong expected=999 got=111` → harness non-vacuous.
 
 ---
 
@@ -97,12 +111,25 @@ DID print `CHECK_FAILED: gcd_wrong expected=999 got=6`, proving the harness catc
 mismatches — the ALL_CHECKS_PASSED is not a vacuous pass.
 
 Classification: PASS.
-  - C1 satisfied (byte-identical, all 76 asserts pass in both modes).
+  - C1 satisfied (byte-identical, all 76 asserts pass in both modes;
+    `cmp /tmp/large_vm.out /tmp/large_jit.out` clean).
   - C2 satisfied: two loops cross T2=10,000 (12k and 11k iterations); results
     573588 and 1007985000 unchanged across the tier boundary.
   - C3 satisfied: array-kernel opcodes (NewTypedArrayI64/F64) trip the V2 verifier,
     whole-program fall-through fires, the book's documented diagnostic appears on
     stderr, and the result is identical to VM. NOT a defect.
+
+  INDEPENDENT RE-VERIFICATION (2026-06-21, this session):
+  - Re-ran both modes: VM ec=0 / JIT ec=0, stdout byte-identical (cmp clean).
+  - ALL EIGHT hot-accumulator constants re-derived by an independent external
+    oracle (awk, this session) and matched exactly:
+    collatz_sum_1_399=20114, hot_sum_gcd_i_360=10278, hot_sum_digit_sum=13500,
+    hot_sum_isqrt_1_999=20584, hot_sum_horner_1_100=77179650,
+    hot_t2_cube_mod_12k=573588, hot_t2_horner_float_11k=1007985000.0,
+    hot_sum_fibmod1000_1_30=9308. Confirms expected values are oracle-derived,
+    not back-filled from Shape output.
+  - book_gap #5 (VM stderr also carries the V2-verification warning for
+    typed-array programs) independently confirmed on /tmp/large_vm.err.
 
 ---
 

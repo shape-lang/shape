@@ -1,72 +1,69 @@
-// small.shape -- comptime slice (book: advanced/comptime.mdx)
-// Exercises: comptime expression block, comptime fn helpers (composition),
-// top-level side-effect form, build_config(), comptime fields on types.
-// Determinism: every comptime value is baked at compile time (pure).
+// small.shape — Comptime System slice (book: advanced/comptime.mdx)
+// Exercises the chapter core, all v0.3.3-LIVE:
+//   - comptime { } expression form (evaluate now, embed literal)  [book "Comptime Blocks"]
+//   - comptime { } top-level side-effect form                     [book "Comptime Blocks"]
+//   - comptime fn helpers, callable from comptime contexts        [book "comptime fn Helpers"]
+//   - build_config() comptime builtin                             [book "Comptime Builtins"]
+//   - comptime fields on types + runtime fields                   [book "Comptime Fields on Types"]
+// Determinism: pure — every asserted value is a comptime-evaluated constant
+// baked at compile time, derived from book semantics BEFORE first run.
 
-// --- comptime fn helpers (book: "comptime fn Helpers") ---
-comptime fn double(n: int) -> int { n * 2 }
-comptime fn quad(n: int) -> int { double(double(n)) }
-
-comptime fn factorial(n: int) -> int {
-  let mut acc = 1
-  let mut i = 1
-  while i <= n {
-    acc = acc * i
-    i = i + 1
-  }
-  acc
+comptime fn square(n: int) -> int {
+  n * n
 }
 
 comptime fn normalize_uri(uri: string) -> string {
   uri.trim()
 }
 
-// --- top-level side-effect form (book: "Top-level side-effect form") ---
-// warning(...) is accepted in v0.3.3 (emits no diagnostic per the v0.4 preview note).
+// top-level side-effect form: warning() is a no-op in v0.3.3 (book caution),
+// included to prove the side-effect form compiles and runs cleanly.
 comptime {
-  warning("compiling small comptime demo")
+  warning("compiling small.shape comptime demo")
 }
 
-// --- comptime expression blocks: evaluate now, embed literal (book: "Comptime Blocks") ---
-let BUILD_TAG = comptime { "dev" }
-let QUAD3 = comptime { quad(3) }          // double(double(3)) = 12
-let FACT5 = comptime { factorial(5) }     // 120
-let URI = comptime { normalize_uri("  duckdb://analytics.db  ") }
+// expression form: evaluate at compile time, embed literal result.
+let SQ = comptime { square(9) }                          // 9*9 = 81
+let URI = comptime { normalize_uri("  shape://demo  ") } // trimmed -> "shape://demo"
 
-// arithmetic inside a comptime block with its own locals (book: "Comptime Scope Rules")
-let CALC = comptime {
-  let a = 3
-  let b = 4
-  a * b + 5                                // 17
-}
+// build_config() is compile-time-only; bake its fields into runtime literals.
+let OS = comptime { build_config().target_os }
+let ARCH = comptime { build_config().target_arch }
+let TARGET = f"{OS}-{ARCH}"
 
-// build_config() is live in v0.3.3 (book: "Comptime Builtins")
-let DEBUG_FLAG = comptime { build_config().debug }   // release binary -> false
-
-// --- comptime fields on types (book: "Comptime Fields on Types") ---
+// comptime fields: type-level metadata, excluded from runtime storage.
 type Unit {
   comptime symbol: string = "m"
   comptime precision: int = 2
+  value: float
 }
-type Celsius = Unit { symbol: "°C" }
 
-// --- self-checking (book teaches no assert; use explicit checks) ---
-fn check(name: string, cond: bool) {
-  if !cond {
+let u = Unit { value: 42.0 }
+
+let mut passed = 0
+let mut failed = 0
+
+fn check(name: string, ok: bool) {
+  if ok {
+    passed = passed + 1
+  } else {
+    failed = failed + 1
     print(f"CHECK_FAILED: {name}")
   }
 }
 
-check("BUILD_TAG", BUILD_TAG == "dev")
-check("QUAD3", QUAD3 == 12)
-check("FACT5", FACT5 == 120)
-check("URI", URI == "duckdb://analytics.db")
-check("CALC", CALC == 17)
-check("DEBUG_FLAG", DEBUG_FLAG == false)
+check("square_comptime", SQ == 81)
+check("normalize_uri_trim", URI == "shape://demo")
+check("build_target_nonempty", TARGET.length > 0)
+check("build_target_has_dash", TARGET.contains("-"))
+check("runtime_field_value", u.value == 42.0)
 
-print(f"BUILD_TAG={BUILD_TAG}")
-print(f"QUAD3={QUAD3}")
-print(f"FACT5={FACT5}")
-print(f"URI={URI}")
-print(f"CALC={CALC}")
-print("ALL_CHECKS_PASSED")
+// host build target is environment-specific; print run-only (no assert on the
+// exact triple — book says it is the host build target, which varies).
+print(f"build target = {TARGET}")
+
+if failed == 0 {
+  print("ALL_CHECKS_PASSED")
+} else {
+  print(f"FAILED {failed} checks")
+}

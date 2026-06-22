@@ -1,5 +1,0 @@
-// Book lines 49-54: v0.3.3 by-value share — binding usable after call, mutation caller-visible.
-fn append(xs) { xs.push(4) }
-let data = [1, 2, 3]
-append(data)
-print(data.len())   // book says 4

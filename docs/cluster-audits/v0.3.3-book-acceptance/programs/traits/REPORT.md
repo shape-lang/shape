@@ -17,13 +17,20 @@ bytecode-verification diagnostic and (under jit) a `[jit-fallback]` line to
 Determinism strategy for this slice: pure (impl, supertraits, dyn). No clocks,
 no randomness, no I/O beyond `print`; all fixtures are literals.
 
-Re-verified 2026-06-21 at worktree HEAD: `large.shape` extended to 980 LOC /
-111 machine-checked assertions — PASS (vm+jit, ec=0, byte-identical, 3/3
-stable). `small.shape`
-required an AUTHOR-ERROR correction on re-verification (an earlier draft used
-`+` concatenation of a method result → hard compile error; rewritten to the
-book's f-string / annotation-bound idiom → PASS vm+jit byte-identical). Details
-under DELIVERABLE 1.
+Re-verified 2026-06-21 at worktree HEAD: `large.shape` (980 LOC / 93
+machine-checked `ck_*` assertions) and `small.shape` (107 LOC) — both PASS
+(vm+jit, ec=0, stdout byte-identical len=17 `ALL_CHECKS_PASSED`, 3/3 stable each
+under both modes).
+
+RE-RE-VERIFIED 2026-06-21 (later pass, same worktree HEAD): both programs still
+PASS byte-identical. HOWEVER, the call-site return-type propagation defects that
+this report previously recorded as **book_gap #1** and **book_gap #2** are NO
+LONGER reproducible at HEAD — the strict-flip work has resolved them. They are
+re-classified as RESOLVED below (the programs were written conservatively to
+avoid those patterns, so their PASS status is unaffected; only the gap findings
+are corrected). book_gap #3 (no `assert` builtin) and book_gap #4 (mixed
+enum-variant array needs `Array<T>` annotation) remain accurate. See the
+"book_gaps" section for the corrected, HEAD-true status.
 
 ---
 
@@ -198,33 +205,30 @@ the book presents as runnable failed.
 
 ## book_gaps (book SILENT — fallback/workaround needed)
 
-1. **Trait/extend method results need an explicit type annotation to retain
-   their declared return type at the call site.** The book's runnable examples
-   only feed a method result straight into `print(...)` or an f-string. The
-   natural `u.display() + " and " + v.display()` is a hard compile error
-   (`Cannot apply '+' to a 'string' and a 'unknown'`). Worse, `let a = p.sum();
-   a + a` for an `extend method sum() -> int` evaluates to **`14.0` (a float)**,
-   not `14` — the declared `-> int` is not propagated to the call-site
-   inferencer, so the result is mis-typed as `number`. With an explicit
-   annotation (`let a: int = p.sum()`) the result is the correct `int` (`14`).
-   Both programs annotation-bind every method result for this reason. The book
-   gives no hint this annotation is required. (Root: trait/extend method
-   return-type not propagated to the call-site inferencer — same W14.2-E
-   trait-method dispatch family the book cites for its `runnable=false`
-   snippets, but here it surfaces for a pattern the book presents as ordinary.
-   Verified: `/tmp/traits_probe/g1.shape`, `g3.shape`.)
+1. **[RESOLVED at HEAD — was a real gap in an earlier worktree state].**
+   Previously: trait/extend method results needed an explicit type annotation to
+   retain their declared return type at the call site, and `let a = p.sum(); a +
+   a` for an `extend method sum() -> int` evaluated to `14.0`. **Re-verified
+   2026-06-21 at HEAD: this NO LONGER reproduces.** `let a = p.sum(); print(a +
+   a)` now prints `14` (correct `int`), and `u.display() + " and " +
+   v.display()` now compiles and prints `Alice and Bob` (no `unknown`-type
+   error). The strict-flip return-type propagation work has closed this. Kept in
+   the report as a corrected/RESOLVED entry rather than deleted so the
+   trajectory is auditable. The programs still annotation-bind method results
+   (harmless, and matches the book's own f-string idiom); their PASS status was
+   never dependent on the gap.
 
-2. **A function-returning a concrete `Vec<Struct>` does not coerce to a
-   `Vec<dyn Trait>` parameter.** The book's "Trait Objects" example passes a
-   local array literal (`let users = [...]; print_all(users)`), which works. A
-   `fn build() -> Vec<User>` whose result is passed to
-   `print_all(items: Vec<dyn Display>)` fails type-checking
-   (`Vec<dyn Display> ... not compatible with Vec<{ name: string }>`). The book
-   does not cover dyn-coercion of function-return collections; both programs
-   construct every dyn collection as a direct array-literal / annotated local
-   (the exact book idiom). Verified: `/tmp/traits_probe/g4.shape`.
+2. **[RESOLVED at HEAD — was a real gap in an earlier worktree state].**
+   Previously: a function returning a concrete `Vec<Struct>` did not coerce to a
+   `Vec<dyn Trait>` parameter. **Re-verified 2026-06-21 at HEAD: this NO LONGER
+   reproduces.** `fn build() -> Vec<User>` passed to `print_all(items: Vec<dyn
+   Display>)` now type-checks and runs (prints the elements; ec=0). The book's
+   "Trait Objects" idiom now extends to function-return collections too. The
+   programs still construct dyn collections as array-literals (the exact book
+   idiom), so PASS status is unaffected.
 
-3. **No `assert` builtin is documented for self-checking.** The chapter (and the
+3. **No `assert` builtin is documented for self-checking** (STILL ACCURATE at
+   HEAD — `assert(...)` → `Undefined function: assert`). The chapter (and the
    acceptance methodology, which asks programs to assert results) gives no
    assertion primitive; hand-written check helpers are required. Minor, but the
    reader who wants to self-verify must invent their own.
@@ -246,11 +250,7 @@ the book is SILENT on (book_gaps), not territory it mis-describes.
 
 ## Incidental defects observed (recorded, not slice-root; not in final programs)
 
-- **`let a = p.sum(); a + a` ⇒ `14.0` for an `int`-returning extend method.**
-  Strictly a correctness defect (an `int`-declared method result mis-typed as
-  `number` when the call site is un-annotated). It is the visible symptom of
-  book_gap #1's root (call-site return-type non-propagation). Both programs
-  avoid it via annotation, per the compiler's own steering toward annotated
-  bindings. Tracked under the W14.2-E trait-method dispatch family; not a
-  traits-book-wrong because the book never shows the un-annotated-arithmetic
-  pattern. (`/tmp/traits_probe/g3.shape`.)
+- **`let a = p.sum(); a + a` ⇒ `14.0` for an `int`-returning extend method —
+  RESOLVED at HEAD.** This was recorded as the visible symptom of (now-resolved)
+  book_gap #1's root. Re-verified 2026-06-21 at HEAD: `let a = p.sum(); print(a
+  + a)` now prints `14`. No longer a live defect on this slice.

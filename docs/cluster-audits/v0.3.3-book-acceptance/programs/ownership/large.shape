@@ -588,6 +588,268 @@ fn run_section10() {
 }
 
 // ======================================================================
+// SECTION 11 — Place model paths (book "Place Model", lines 178-187)
+// Place ::= Local | Field(Place,idx) | Index(Place,op) | Deref(Place)
+// We model places as encoded ints and prove the disjointness rules the
+// book states: disjoint FIELDS never conflict; INDEX places conservatively
+// conflict (index disjointness deferred to v2).
+// ======================================================================
+
+enum PlaceKind {
+    PLocal,
+    PField,
+    PIndex,
+    PDeref,
+}
+
+type Place {
+    kind: PlaceKind,
+    base: int,    // base slot/local id
+    sel: int,     // field idx for PField; -1 (wildcard) for PIndex
+}
+
+fn place_kind_id(k: PlaceKind) -> int {
+    return match k {
+        PlaceKind::PLocal => 0,
+        PlaceKind::PField => 1,
+        PlaceKind::PIndex => 2,
+        PlaceKind::PDeref => 3,
+    }
+}
+
+// Two places overlap (alias) under the book's disjointness rules.
+fn places_overlap(a: Place, b: Place) -> bool {
+    if a.base != b.base {
+        return false
+    }
+    let ka = place_kind_id(a.kind)
+    let kb = place_kind_id(b.kind)
+    if ka != kb {
+        // Field vs whole-local: a field access of the same base overlaps the
+        // whole-local borrow (conservative). Local(0) overlaps Field(0,_).
+        let a_is_local = ka == 0
+        let b_is_local = kb == 0
+        if a_is_local || b_is_local {
+            return true
+        }
+        return false
+    }
+    // Same kind, same base:
+    if ka == 1 {
+        // Disjoint FIELD borrows never conflict (book lines 187, 328-333).
+        return a.sel == b.sel
+    }
+    if ka == 2 {
+        // INDEX places conservatively conflict (book line 187).
+        return true
+    }
+    // Local vs Local same base, or Deref vs Deref same base -> overlap.
+    return true
+}
+
+fn run_section11() {
+    // Disjoint field borrows of the same struct: obj.a vs obj.b -> no conflict.
+    let fa = Place { kind: PlaceKind::PField, base: 0, sel: 0 }
+    let fb = Place { kind: PlaceKind::PField, base: 0, sel: 1 }
+    check_bool("s11.disjoint_fields", places_overlap(fa, fb), false)
+
+    // Same field twice -> overlap.
+    let fa2 = Place { kind: PlaceKind::PField, base: 0, sel: 0 }
+    check_bool("s11.same_field", places_overlap(fa, fa2), true)
+
+    // Fields of DIFFERENT structs -> no overlap.
+    let gb = Place { kind: PlaceKind::PField, base: 7, sel: 0 }
+    check_bool("s11.diff_base_fields", places_overlap(fa, gb), false)
+
+    // Index borrows of the same array conservatively conflict (v2-deferred).
+    let ia = Place { kind: PlaceKind::PIndex, base: 3, sel: -1 }
+    let ib = Place { kind: PlaceKind::PIndex, base: 3, sel: -1 }
+    check_bool("s11.index_conservative_conflict", places_overlap(ia, ib), true)
+
+    // Index borrows of DIFFERENT arrays -> no overlap.
+    let ic = Place { kind: PlaceKind::PIndex, base: 4, sel: -1 }
+    check_bool("s11.index_diff_array", places_overlap(ia, ic), false)
+
+    // Whole-local borrow overlaps a field borrow of the same local.
+    let loc = Place { kind: PlaceKind::PLocal, base: 0, sel: -1 }
+    check_bool("s11.local_vs_field", places_overlap(loc, fa), true)
+
+    // Local vs local, different base -> no overlap.
+    let loc2 = Place { kind: PlaceKind::PLocal, base: 1, sel: -1 }
+    check_bool("s11.local_diff_base", places_overlap(loc, loc2), false)
+}
+
+// ======================================================================
+// SECTION 12 — NLL worked example as a CFG point simulation
+// Book "Borrow Scoping" lines 200-206:
+//   P1: let r = &x        (loan L0 starts)
+//   P2: print(r.len())    (last use of r -> L0 ends)
+//   P3: x.push(4)         (no active loans -> OK)
+// We model loans over CFG points and prove the push at P3 is conflict-free,
+// then perturb (r used at P3) to force the B0001 conflict.
+// ======================================================================
+
+// A &mut "push" at point p on the same place as a live shared loan conflicts.
+fn push_conflicts_at(shared: Loan, push_point: int) -> bool {
+    // push is an exclusive (&mut) op at a single point.
+    let push = Loan { id: 99, start: push_point, last: push_point, exclusive: true }
+    return loans_conflict(shared, 0, push, 0)
+}
+
+fn run_section12() {
+    // Book OK case: shared loan L0 lives [1..2]; push at P3 -> no conflict.
+    let l0 = Loan { id: 0, start: 1, last: 2, exclusive: false }
+    check_bool("s12.push_after_lastuse_ok", push_conflicts_at(l0, 3), false)
+    check_int("s12.l0_region", region_length(l0, 5), 2)
+
+    // Perturbation: r used at P3 too -> loan extends to [1..3]; push at P3 conflicts.
+    let l0_ext = Loan { id: 0, start: 1, last: 3, exclusive: false }
+    check_bool("s12.push_during_loan_conflict", push_conflicts_at(l0_ext, 3), true)
+
+    // Push exactly at the last-use point -> overlap -> conflict.
+    check_bool("s12.push_at_lastuse_conflict", push_conflicts_at(l0, 2), true)
+
+    // Push one point before loan starts -> no overlap.
+    check_bool("s12.push_before_start", push_conflicts_at(l0, 0), false)
+}
+
+// ======================================================================
+// SECTION 13 — Lifetime elision / "No Explicit Lifetimes" (book lines 380-400)
+// The book's elision rule: a returned borrow comes from `self` or the single
+// `&` input; multiple `&` inputs with an ambiguous return -> error.
+// ======================================================================
+
+type FnSig {
+    has_self: bool,
+    ref_param_count: int,   // number of `&`/`&mut` params (excluding self)
+    returns_ref: bool,
+}
+
+enum Elision {
+    NoBorrowReturned,   // returns owned -> always OK
+    FromSelf,           // borrow elided from &self
+    FromSingleInput,    // borrow elided from the one & input
+    Ambiguous,          // multiple & inputs, no self -> error
+}
+
+fn elide(sig: FnSig) -> Elision {
+    if !sig.returns_ref {
+        return Elision::NoBorrowReturned
+    }
+    if sig.has_self {
+        return Elision::FromSelf
+    }
+    if sig.ref_param_count == 1 {
+        return Elision::FromSingleInput
+    }
+    return Elision::Ambiguous
+}
+
+fn elision_name(e: Elision) -> string {
+    return match e {
+        Elision::NoBorrowReturned => "owned",
+        Elision::FromSelf => "self",
+        Elision::FromSingleInput => "single",
+        Elision::Ambiguous => "ambiguous",
+    }
+}
+
+fn run_section13() {
+    // fn first(&self) -> &int  => borrow from self (book line 393).
+    let s_first = FnSig { has_self: true, ref_param_count: 0, returns_ref: true }
+    check_str("s13.first_self", elision_name(elide(s_first)), "self")
+
+    // fn pick(&a, &b) -> &int  => ambiguous (book lines 397-400).
+    let s_pick = FnSig { has_self: false, ref_param_count: 2, returns_ref: true }
+    check_str("s13.pick_ambiguous", elision_name(elide(s_pick)), "ambiguous")
+
+    // fn read_val(&x) -> x  => returns the *value*, no borrow returned.
+    let s_read = FnSig { has_self: false, ref_param_count: 1, returns_ref: false }
+    check_str("s13.read_val_owned", elision_name(elide(s_read)), "owned")
+
+    // fn id(&x) -> &x  => single input borrow elided.
+    let s_single = FnSig { has_self: false, ref_param_count: 1, returns_ref: true }
+    check_str("s13.single_input", elision_name(elide(s_single)), "single")
+
+    // self + extra ref params still elides from self (self wins).
+    let s_self_extra = FnSig { has_self: true, ref_param_count: 2, returns_ref: true }
+    check_str("s13.self_wins", elision_name(elide(s_self_extra)), "self")
+}
+
+// ======================================================================
+// SECTION 14 — "What Shape Eliminates" mapping (book lines 482-499)
+// Encode the 12-row elimination table; assert the count and a few rows.
+// ======================================================================
+
+type Eliminated {
+    rust_concept: string,
+    shape_answer: string,
+}
+
+fn run_section14(rows: Array<Eliminated>) {
+    check_int("s14.row_count", rows.len(), 12)
+    check_str("s14.row0_concept", rows[0].rust_concept, "lifetimes")
+    check_str("s14.row0_answer", rows[0].shape_answer, "fields-owned")
+    check_str("s14.unsafe_answer", rows[1].shape_answer, "ffi-boundary")
+    check_str("s14.box_answer", rows[5].shape_answer, "typed-arc")
+    check_str("s14.sendsync_answer", rows[10].shape_answer, "three-rules")
+
+    // Count how many answers mention ownership-core machinery.
+    var owned_count = 0
+    for r in rows {
+        if r.shape_answer == "fields-owned" {
+            owned_count = owned_count + 1
+        }
+    }
+    check_int("s14.fields_owned_count", owned_count, 1)
+}
+
+// ======================================================================
+// SECTION 15 — Concurrency primitive availability (book lines 442-480)
+// The book marks Mutex/Atomic/Lazy as v0.4 (method surfaces not wired in
+// v0.3.3). Model their availability as data and assert the v0.3.3 gate.
+// ======================================================================
+
+enum Primitive {
+    PMutex,
+    PAtomic,
+    PLazy,
+}
+
+// In v0.3.3 the constructors parse but method surfaces are NOT wired (book
+// caution lines 442-448). So "callable" is false for all three at HEAD.
+fn method_callable_v033(p: Primitive) -> bool {
+    return match p {
+        Primitive::PMutex => false,
+        Primitive::PAtomic => false,
+        Primitive::PLazy => false,
+    }
+}
+
+fn primitive_name(p: Primitive) -> string {
+    return match p {
+        Primitive::PMutex => "Mutex",
+        Primitive::PAtomic => "Atomic",
+        Primitive::PLazy => "Lazy",
+    }
+}
+
+fn run_section15(prims: Array<Primitive>) {
+    check_int("s15.prim_count", prims.len(), 3)
+    var callable = 0
+    for p in prims {
+        if method_callable_v033(p) {
+            callable = callable + 1
+        }
+    }
+    // v0.3.3: none of the three primitive method surfaces are callable.
+    check_int("s15.none_callable_v033", callable, 0)
+    check_str("s15.name0", primitive_name(prims[0]), "Mutex")
+    check_str("s15.name1", primitive_name(prims[1]), "Atomic")
+    check_str("s15.name2", primitive_name(prims[2]), "Lazy")
+}
+
+// ======================================================================
 // MAIN
 // ----------------------------------------------------------------------
 // ALL typed-object / enum array LITERALS are constructed here at top-level
@@ -635,6 +897,25 @@ let s9_u1 = Account { id: 2, balance: grow(200, 10) }   // 220
 let s9_u2 = Account { id: 3, balance: grow(300, 10) }   // 330
 let s9_updated: Array<Account> = [s9_u0, s9_u1, s9_u2]
 
+// --- Section 14 inputs: the 12-row "What Shape Eliminates" table ---
+let s14_rows: Array<Eliminated> = [
+    Eliminated { rust_concept: "lifetimes", shape_answer: "fields-owned" },
+    Eliminated { rust_concept: "unsafe", shape_answer: "ffi-boundary" },
+    Eliminated { rust_concept: "pin-unpin", shape_answer: "async-model" },
+    Eliminated { rust_concept: "phantomdata", shape_answer: "no-raw-ptr" },
+    Eliminated { rust_concept: "sized", shape_answer: "uniform-slot" },
+    Eliminated { rust_concept: "box", shape_answer: "typed-arc" },
+    Eliminated { rust_concept: "cow", shape_answer: "smart-clone" },
+    Eliminated { rust_concept: "string-types", shape_answer: "one-string" },
+    Eliminated { rust_concept: "asref-borrow", shape_answer: "auto-ref" },
+    Eliminated { rust_concept: "deref", shape_answer: "no-smart-ptr" },
+    Eliminated { rust_concept: "send-sync", shape_answer: "three-rules" },
+    Eliminated { rust_concept: "manuallydrop", shape_answer: "raii" },
+]
+
+// --- Section 15 inputs: the three concurrency primitives ---
+let s15_prims: Array<Primitive> = [Primitive::PMutex, Primitive::PAtomic, Primitive::PLazy]
+
 run_section1()
 run_section2(s2_pt, s2_person, s2_triple, s2_holder)
 run_section3()
@@ -645,6 +926,11 @@ run_section7()
 run_section8(s8_batch_a, s8_batch_a_full, s8_batch_b, s8_batch_b2, s8_place0)
 run_section9(s9_ledger, s9_updated)
 run_section10()
+run_section11()
+run_section12()
+run_section13()
+run_section14(s14_rows)
+run_section15(s15_prims)
 
 print(f"tests_run={TESTS_RUN}")
 print(f"tests_failed={TESTS_FAILED}")

@@ -1,9 +1,0 @@
-// mathlib/transforms.shape  -> importable as "mathlib::transforms"
-// Demonstrates a module importing ANOTHER module (book: "Two-File Library Example").
-
-from mathlib::stats use { mean }
-
-pub fn normalize(v: Array<number>) -> Array<number> {
-  let mu = mean(v)
-  v.map(|x| x - mu)
-}

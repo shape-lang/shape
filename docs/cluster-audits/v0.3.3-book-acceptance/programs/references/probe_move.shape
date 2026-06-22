@@ -1,4 +1,0 @@
-// Book lines 30-39: use-after-move B0005 is SHIPPED in v0.3.3 for binding moves.
-let a = [1, 2, 3]
-let b = a
-print(a)

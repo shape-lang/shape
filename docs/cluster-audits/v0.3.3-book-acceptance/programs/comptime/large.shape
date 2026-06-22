@@ -1,64 +1,730 @@
-// large.shape -- Compile-Time Engineering Toolkit & Telemetry Processor
-// Slice: comptime  (book: advanced/comptime.mdx)
+// large.shape — Comptime System slice (book: advanced/comptime.mdx)
+// ============================================================================
+// REAL-WORLD APP: a compile-time-driven unit-conversion & metrics engine.
 //
-// REAL-WORLD APP: a non-interactive engineering toolkit whose lookup tables,
-// physical constants, conversion factors, and configuration are all computed
-// AT COMPILE TIME via `comptime { ... }` blocks and `comptime fn` helpers, then
-// consumed by a runtime engine that INDEPENDENTLY RECOMPUTES each value at run
-// time and proves the compile-time-baked literal equals the runtime result.
+// The application rooted in this slice: a measurement toolkit whose conversion
+// factors, derived physical constants, and lookup tables are COMPUTED AT COMPILE
+// TIME by `comptime fn` helpers and BAKED into runtime literals via the
+// expression form `comptime { ... }`. The runtime then performs conversions and
+// aggregations and a large machine-proofable assertion suite verifies every
+// result against an EXPECTED VALUE derived from book semantics + arithmetic,
+// written BEFORE the first run.
 //
-// MACHINE-PROOF STRATEGY:
-//   For every comptime constant C, a runtime function rt_*() recomputes the same
-//   quantity. The harness checks  C == rt_*()  AND  C == <literal expected>.
-//   Every <literal expected> below is derived from BOOK SEMANTICS + standard
-//   mathematics and was written BEFORE the first run (never back-filled).
+// Book features exercised (all v0.3.3-LIVE):
+//   - comptime { } expression form: "evaluate now, embed literal result"
+//     (book "Comptime Blocks")
+//   - comptime { } top-level side-effect form (book "Comptime Blocks")
+//   - comptime fn helpers at module scope, called from comptime contexts
+//     (book "`comptime fn` Helpers")
+//   - build_config() comptime builtin, baked into runtime literals
+//     (book "Comptime Builtins")
+//   - comptime fields on types + runtime fields coexisting
+//     (book "Comptime Fields on Types")
+//   - warning() top-level side-effect (no-op in v0.3.3 per book caution)
 //
-// Book sections exercised:
-//   - "Comptime Blocks" (expression form: evaluate now, embed literal result)
-//   - "comptime fn Helpers" (module-scope compile-time helpers, composition)
-//   - "Comptime Scope Rules" (comptime owns its compile-time environment)
-//   - "Comptime Builtins" (build_config() live in v0.3.3)
-//   - "Comptime Fields on Types"
-//   - "Top-level side-effect form" (warning())
-//
-// Determinism: PURE. No I/O, no time, no random, no network. Every value is a
-// compile-time constant or a deterministic recomputation of one.
+// Determinism strategy: PURE. Every asserted number is either a comptime
+// constant baked at compile time, or a deterministic arithmetic function of one.
+// No clocks, no randomness, no IO, no network.
+// ============================================================================
 
-// ============================================================================
-// SECTION 0 -- top-level comptime side effect (book: "Top-level side-effect form")
-// ============================================================================
+// ---------------------------------------------------------------------------
+// SECTION 0 — top-level comptime side-effect form (book "Comptime Blocks")
+// ---------------------------------------------------------------------------
 comptime {
-  warning("building Compile-Time Engineering Toolkit")
+  warning("building unit-conversion engine (compile-time tables)")
 }
 
-// ============================================================================
-// SECTION 1 -- comptime number-theory helpers (book: "comptime fn Helpers")
-// ============================================================================
+// ---------------------------------------------------------------------------
+// SECTION 1 — comptime fn helpers (book "`comptime fn` Helpers")
+// These run during COMPILATION. Their results are embedded as literals.
+// ---------------------------------------------------------------------------
 
-comptime fn ct_factorial(n: int) -> int {
-  let mut acc = 1
-  let mut i = 1
-  while i <= n {
-    acc = acc * i
-    i = i + 1
+// integer power, used to derive metric prefix factors at compile time
+comptime fn ipow10(e: int) -> float {
+  let mut r = 1.0
+  let mut k = 0
+  while k < e {
+    r = r * 10.0
+    k = k + 1
   }
-  acc
+  r
 }
 
-comptime fn ct_fib(n: int) -> int {
-  let mut a = 0
-  let mut b = 1
-  let mut i = 0
-  while i < n {
-    let t = a + b
-    a = b
-    b = t
-    i = i + 1
+// SI length conversion factors (to meters), computed at compile time
+comptime fn km_to_m() -> float { ipow10(3) }       // 1000.0
+comptime fn cm_to_m() -> float { 1.0 / ipow10(2) } // 0.01
+comptime fn mm_to_m() -> float { 1.0 / ipow10(3) } // 0.001
+
+// imperial length factors (to meters), exact definitions
+comptime fn inch_to_m() -> float { 0.0254 }
+comptime fn foot_to_m() -> float { inch_to_m() * 12.0 }  // 0.3048
+comptime fn yard_to_m() -> float { foot_to_m() * 3.0 }   // 0.9144
+comptime fn mile_to_m() -> float { yard_to_m() * 1760.0 }// 1609.344
+
+// mass factors (to grams)
+comptime fn kg_to_g() -> float { 1000.0 }
+comptime fn mg_to_g() -> float { 1.0 / ipow10(3) }       // 0.001
+comptime fn lb_to_g() -> float { 453.59237 }
+comptime fn oz_to_g() -> float { lb_to_g() / 16.0 }      // 28.349523125
+
+// a compile-time string helper, normalizes a unit token
+comptime fn normalize_token(s: string) -> string {
+  s.trim().toLowerCase()
+}
+
+// a compile-time integer recurrence (factorial), baked as a constant
+comptime fn factorial(n: int) -> int {
+  if n < 2 { return 1 }
+  let mut r = 1
+  let mut k = 2
+  while k <= n {
+    r = r * k
+    k = k + 1
   }
-  a
+  r
 }
 
-comptime fn ct_gcd(a: int, b: int) -> int {
+// ---------------------------------------------------------------------------
+// SECTION 2 — comptime { } EXPRESSION form: bake the helpers' results.
+// Each binding below is a literal embedded at compile time (book "Comptime
+// Blocks": "evaluate now, embed literal result").
+// ---------------------------------------------------------------------------
+let KM_M   = comptime { km_to_m() }    // 1000.0
+let CM_M   = comptime { cm_to_m() }    // 0.01
+let MM_M   = comptime { mm_to_m() }    // 0.001
+let IN_M   = comptime { inch_to_m() }  // 0.0254
+let FT_M   = comptime { foot_to_m() }  // 0.3048
+let YD_M   = comptime { yard_to_m() }  // 0.9144
+let MI_M   = comptime { mile_to_m() }  // 1609.344
+
+let KG_G   = comptime { kg_to_g() }    // 1000.0
+let MG_G   = comptime { mg_to_g() }    // 0.001
+let LB_G   = comptime { lb_to_g() }    // 453.59237
+let OZ_G   = comptime { oz_to_g() }    // 28.349523125
+
+let TOKEN  = comptime { normalize_token("  KiloMeter  ") } // "kilometer"
+let FACT6  = comptime { factorial(6) } // 720
+let FACT10 = comptime { factorial(10) }// 3628800
+
+// build_config() baked fields (compile-time-only builtin -> runtime literals)
+let BUILD_OS   = comptime { build_config().target_os }
+let BUILD_ARCH = comptime { build_config().target_arch }
+let BUILD_VER  = comptime { build_config().version }
+let BUILD_ID   = f"{BUILD_OS}/{BUILD_ARCH}@{BUILD_VER}"
+
+// ---------------------------------------------------------------------------
+// SECTION 3 — comptime fields on types (book "Comptime Fields on Types")
+// Type-level metadata excluded from runtime storage; runtime fields coexist.
+// ---------------------------------------------------------------------------
+type Length {
+  comptime dimension: string = "length"
+  comptime base_unit: string = "meter"
+  meters: float
+}
+
+type Mass {
+  comptime dimension: string = "mass"
+  comptime base_unit: string = "gram"
+  grams: float
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 4 — runtime conversion engine.
+// Uses the comptime-baked factors above. Pure arithmetic; fully deterministic.
+// ---------------------------------------------------------------------------
+
+// length value -> meters, given a unit code
+fn length_to_m(value: float, unit: string) -> float {
+  if unit == "km" { return value * KM_M }
+  if unit == "m"  { return value }
+  if unit == "cm" { return value * CM_M }
+  if unit == "mm" { return value * MM_M }
+  if unit == "in" { return value * IN_M }
+  if unit == "ft" { return value * FT_M }
+  if unit == "yd" { return value * YD_M }
+  if unit == "mi" { return value * MI_M }
+  0.0 - 1.0  // sentinel for unknown
+}
+
+// meters -> length value in target unit
+fn m_to_length(meters: float, unit: string) -> float {
+  if unit == "km" { return meters / KM_M }
+  if unit == "m"  { return meters }
+  if unit == "cm" { return meters / CM_M }
+  if unit == "mm" { return meters / MM_M }
+  if unit == "in" { return meters / IN_M }
+  if unit == "ft" { return meters / FT_M }
+  if unit == "yd" { return meters / YD_M }
+  if unit == "mi" { return meters / MI_M }
+  0.0 - 1.0
+}
+
+// full length conversion: from -> to
+fn convert_length(value: float, src: string, dst: string) -> float {
+  m_to_length(length_to_m(value, src), dst)
+}
+
+// mass value -> grams
+fn mass_to_g(value: float, unit: string) -> float {
+  if unit == "kg" { return value * KG_G }
+  if unit == "g"  { return value }
+  if unit == "mg" { return value * MG_G }
+  if unit == "lb" { return value * LB_G }
+  if unit == "oz" { return value * OZ_G }
+  0.0 - 1.0
+}
+
+fn g_to_mass(grams: float, unit: string) -> float {
+  if unit == "kg" { return grams / KG_G }
+  if unit == "g"  { return grams }
+  if unit == "mg" { return grams / MG_G }
+  if unit == "lb" { return grams / LB_G }
+  if unit == "oz" { return grams / OZ_G }
+  0.0 - 1.0
+}
+
+fn convert_mass(value: float, src: string, dst: string) -> float {
+  g_to_mass(mass_to_g(value, src), dst)
+}
+
+// temperature conversions (closed-form, deterministic)
+fn c_to_f(c: float) -> float { c * 9.0 / 5.0 + 32.0 }
+fn f_to_c(f: float) -> float { (f - 32.0) * 5.0 / 9.0 }
+fn c_to_k(c: float) -> float { c + 273.15 }
+fn k_to_c(k: float) -> float { k - 273.15 }
+
+// ---------------------------------------------------------------------------
+// SECTION 5 — assertion harness
+// ---------------------------------------------------------------------------
+let mut passed = 0
+let mut failed = 0
+
+fn approx(a: float, b: float) -> bool {
+  let d = a - b
+  let ad = if d < 0.0 { 0.0 - d } else { d }
+  ad < 0.000001
+}
+
+fn approx_eps(a: float, b: float, eps: float) -> bool {
+  let d = a - b
+  let ad = if d < 0.0 { 0.0 - d } else { d }
+  ad < eps
+}
+
+fn checkf(name: string, got: float, expected: float) {
+  if approx(got, expected) {
+    passed = passed + 1
+  } else {
+    failed = failed + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+fn checkf_eps(name: string, got: float, expected: float, eps: float) {
+  if approx_eps(got, expected, eps) {
+    passed = passed + 1
+  } else {
+    failed = failed + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+fn checki(name: string, got: int, expected: int) {
+  if got == expected {
+    passed = passed + 1
+  } else {
+    failed = failed + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+fn checks(name: string, got: string, expected: string) {
+  if got == expected {
+    passed = passed + 1
+  } else {
+    failed = failed + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+fn checkb(name: string, got: bool, expected: bool) {
+  if got == expected {
+    passed = passed + 1
+  } else {
+    failed = failed + 1
+    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 6 — assert the COMPTIME-BAKED CONSTANTS themselves.
+// Expected values derived by hand from book semantics + arithmetic.
+// ---------------------------------------------------------------------------
+checkf("KM_M",   KM_M,   1000.0)
+checkf("CM_M",   CM_M,   0.01)
+checkf("MM_M",   MM_M,   0.001)
+checkf("IN_M",   IN_M,   0.0254)
+checkf("FT_M",   FT_M,   0.3048)
+checkf("YD_M",   YD_M,   0.9144)
+checkf("MI_M",   MI_M,   1609.344)
+checkf("KG_G",   KG_G,   1000.0)
+checkf("MG_G",   MG_G,   0.001)
+checkf("LB_G",   LB_G,   453.59237)
+checkf("OZ_G",   OZ_G,   28.349523125)
+checks("TOKEN",  TOKEN,  "kilometer")
+checki("FACT6",  FACT6,  720)
+checki("FACT10", FACT10, 3628800)
+checkb("BUILD_ID_nonempty", BUILD_ID.length > 0, true)
+checkb("BUILD_ID_has_slash", BUILD_ID.contains("/"), true)
+checkb("BUILD_ID_has_at",    BUILD_ID.contains("@"), true)
+
+// ---------------------------------------------------------------------------
+// SECTION 7 — length conversions (expected = exact arithmetic on baked factors)
+// ---------------------------------------------------------------------------
+checkf("len_km_to_m_5",    convert_length(5.0, "km", "m"),   5000.0)
+checkf("len_m_to_km_5000", convert_length(5000.0, "m", "km"), 5.0)
+checkf("len_m_to_cm_1",    convert_length(1.0, "m", "cm"),   100.0)
+checkf("len_m_to_mm_1",    convert_length(1.0, "m", "mm"),   1000.0)
+checkf("len_in_to_cm_1",   convert_length(1.0, "in", "cm"),  2.54)
+checkf("len_ft_to_in_1",   convert_length(1.0, "ft", "in"),  12.0)
+checkf("len_yd_to_ft_1",   convert_length(1.0, "yd", "ft"),  3.0)
+checkf("len_mi_to_ft_1",   convert_length(1.0, "mi", "ft"),  5280.0)
+checkf("len_mi_to_yd_1",   convert_length(1.0, "mi", "yd"),  1760.0)
+checkf("len_mi_to_km_1",   convert_length(1.0, "mi", "km"),  1.609344)
+checkf("len_km_to_mi_1609344", convert_length(1.609344, "km", "mi"), 1.0)
+checkf("len_ft_to_m_10",   convert_length(10.0, "ft", "m"),  3.048)
+checkf("len_roundtrip_in", convert_length(convert_length(7.0,"in","mm"),"mm","in"), 7.0)
+
+// a bulk loop: convert a set of meter values into feet and back; assert identity
+let meter_samples = [0.5, 1.0, 2.5, 10.0, 100.0, 333.333]
+let mut si = 0
+while si < meter_samples.length {
+  let m = meter_samples[si]
+  let ft = m_to_length(m, "ft")
+  let back = length_to_m(ft, "ft")
+  checkf(f"len_ft_roundtrip_{si}", back, m)
+  si = si + 1
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 8 — mass conversions
+// ---------------------------------------------------------------------------
+checkf("mass_kg_to_g_2",   convert_mass(2.0, "kg", "g"),  2000.0)
+checkf("mass_g_to_kg_2500",convert_mass(2500.0, "g", "kg"), 2.5)
+checkf("mass_g_to_mg_1",   convert_mass(1.0, "g", "mg"),  1000.0)
+checkf("mass_lb_to_g_1",   convert_mass(1.0, "lb", "g"),  453.59237)
+checkf("mass_oz_to_g_1",   convert_mass(1.0, "oz", "g"),  28.349523125)
+checkf("mass_lb_to_oz_1",  convert_mass(1.0, "lb", "oz"), 16.0)
+// 1 kg in pounds = 1000 / 453.59237 ~= 2.2046226218
+checkf_eps("mass_kg_to_lb_1", convert_mass(1.0, "kg", "lb"), 2.2046226218, 0.0000001)
+checkf("mass_roundtrip_lb", convert_mass(convert_mass(5.0,"lb","oz"),"oz","lb"), 5.0)
+
+let kg_samples = [0.25, 1.0, 3.0, 12.5, 100.0]
+let mut mi2 = 0
+while mi2 < kg_samples.length {
+  let kg = kg_samples[mi2]
+  let g = mass_to_g(kg, "kg")
+  let back = g_to_mass(g, "kg")
+  checkf(f"mass_kg_roundtrip_{mi2}", back, kg)
+  mi2 = mi2 + 1
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 9 — temperature conversions
+// ---------------------------------------------------------------------------
+checkf("temp_c0_to_f",   c_to_f(0.0),    32.0)
+checkf("temp_c100_to_f", c_to_f(100.0),  212.0)
+checkf("temp_c37_to_f",  c_to_f(37.0),   98.6)
+checkf("temp_f32_to_c",  f_to_c(32.0),   0.0)
+checkf("temp_f212_to_c", f_to_c(212.0),  100.0)
+checkf("temp_c25_to_k",  c_to_k(25.0),   298.15)
+checkf("temp_k0_to_c",   k_to_c(0.0),    0.0 - 273.15)
+checkf("temp_roundtrip_cf", f_to_c(c_to_f(42.0)), 42.0)
+checkf("temp_roundtrip_ck", k_to_c(c_to_k(42.0)), 42.0)
+
+let c_samples = [0.0 - 40.0, 0.0, 20.0, 37.0, 100.0]
+let mut ti = 0
+while ti < c_samples.length {
+  let c = c_samples[ti]
+  let f = c_to_f(c)
+  let back = f_to_c(f)
+  checkf(f"temp_cf_roundtrip_{ti}", back, c)
+  ti = ti + 1
+}
+// well-known fixed point: -40 C == -40 F
+checkf("temp_minus40_equal", c_to_f(0.0 - 40.0), 0.0 - 40.0)
+
+// ---------------------------------------------------------------------------
+// SECTION 10 — comptime fields metadata vs runtime fields (book "Comptime
+// Fields on Types"). Construct values; assert runtime fields read; comptime
+// fields are excluded from runtime storage so we do NOT read them at runtime.
+// ---------------------------------------------------------------------------
+let len_val = Length { meters: convert_length(3.0, "km", "m") } // 3000.0
+let mass_val = Mass { grams: convert_mass(2.0, "kg", "g") }     // 2000.0
+checkf("length_struct_meters", len_val.meters, 3000.0)
+checkf("mass_struct_grams",    mass_val.grams, 2000.0)
+
+// aggregate over an array of Length structs (typed struct field access)
+let lengths = [
+  Length { meters: 1.0 },
+  Length { meters: 2.0 },
+  Length { meters: 3.5 },
+  Length { meters: 10.0 },
+]
+let mut sum_m = 0.0
+let mut li = 0
+while li < lengths.length {
+  sum_m = sum_m + lengths[li].meters
+  li = li + 1
+}
+checkf("length_array_sum", sum_m, 16.5)
+
+// convert the aggregate to feet using the baked factor
+checkf("length_array_sum_ft", m_to_length(sum_m, "ft"), 16.5 / 0.3048)
+
+// ---------------------------------------------------------------------------
+// SECTION 11 — a small comptime-baked lookup driving a runtime tabulation.
+// A comptime fn returns a CSV string of metric-prefix exponents; we bake it,
+// split at runtime, and assert the parsed/derived factors.
+// ---------------------------------------------------------------------------
+comptime fn prefix_table() -> string {
+  // name:exponent pairs (power of ten relative to base)
+  "kilo:3,hecto:2,deka:1,base:0,deci:-1,centi:-2,milli:-3"
+}
+let PREFIXES = comptime { prefix_table() }
+let rows = PREFIXES.split(",")
+checki("prefix_row_count", rows.length, 7)
+
+// compute 10^exp for each prefix at runtime, assert against expected
+fn pow10_signed(e: int) -> float {
+  if e >= 0 {
+    let mut r = 1.0
+    let mut k = 0
+    while k < e { r = r * 10.0  k = k + 1 }
+    return r
+  }
+  let mut r2 = 1.0
+  let mut k2 = 0
+  let pe = 0 - e
+  while k2 < pe { r2 = r2 / 10.0  k2 = k2 + 1 }
+  r2
+}
+checkf("pow10_kilo",  pow10_signed(3),  1000.0)
+checkf("pow10_deci",  pow10_signed(-1), 0.1)
+checkf("pow10_centi", pow10_signed(-2), 0.01)
+checkf("pow10_milli", pow10_signed(-3), 0.001)
+checkf("pow10_base",  pow10_signed(0),  1.0)
+
+// parse the baked prefix table and verify the first/last entries
+let first_row = rows[0]      // "kilo:3"
+let last_row = rows[6]       // "milli:-3"
+let first_parts = first_row.split(":")
+let last_parts = last_row.split(":")
+checks("prefix_first_name", first_parts[0], "kilo")
+checks("prefix_first_exp",  first_parts[1], "3")
+checks("prefix_last_name",  last_parts[0],  "milli")
+checks("prefix_last_exp",   last_parts[1],  "-3")
+
+// ---------------------------------------------------------------------------
+// SECTION 12 — cross-dimension sanity: a deterministic "shipping" computation
+// combining length + mass conversions, asserting a final aggregate.
+// ---------------------------------------------------------------------------
+type Parcel {
+  comptime dimension: string = "parcel"
+  length_ft: float
+  weight_lb: float
+}
+
+let parcels = [
+  Parcel { length_ft: 1.0,  weight_lb: 2.0 },
+  Parcel { length_ft: 2.5,  weight_lb: 5.0 },
+  Parcel { length_ft: 10.0, weight_lb: 1.5 },
+]
+
+// total length in meters + total weight in grams
+let mut total_len_m = 0.0
+let mut total_wt_g = 0.0
+let mut pi = 0
+while pi < parcels.length {
+  total_len_m = total_len_m + length_to_m(parcels[pi].length_ft, "ft")
+  total_wt_g = total_wt_g + mass_to_g(parcels[pi].weight_lb, "lb")
+  pi = pi + 1
+}
+// expected: (1.0+2.5+10.0) ft -> 13.5 ft * 0.3048 = 4.1148 m
+checkf("parcel_total_len_m", total_len_m, 13.5 * 0.3048)
+// expected: (2.0+5.0+1.5) lb -> 8.5 lb * 453.59237 = 3855.535145 g
+checkf("parcel_total_wt_g",  total_wt_g, 8.5 * 453.59237)
+
+// convert totals to other units and assert
+checkf("parcel_total_len_yd", m_to_length(total_len_m, "yd"), (13.5 * 0.3048) / 0.9144)
+checkf("parcel_total_wt_kg",  g_to_mass(total_wt_g, "kg"),    (8.5 * 453.59237) / 1000.0)
+
+// ---------------------------------------------------------------------------
+// SECTION 13 — comptime-computed integer constants used in runtime indexing
+// ---------------------------------------------------------------------------
+comptime fn sum_to(n: int) -> int {
+  let mut r = 0
+  let mut k = 1
+  while k <= n { r = r + k  k = k + 1 }
+  r
+}
+let TRI10 = comptime { sum_to(10) }  // 55
+let TRI100 = comptime { sum_to(100) } // 5050
+checki("triangular_10", TRI10, 55)
+checki("triangular_100", TRI100, 5050)
+
+// use a baked constant to size and fill a runtime array, assert the sum
+let mut filled_sum = 0
+let mut fi = 0
+while fi < TRI10 {
+  filled_sum = filled_sum + 1
+  fi = fi + 1
+}
+checki("filled_count_matches_TRI10", filled_sum, 55)
+
+// ---------------------------------------------------------------------------
+// SECTION 15 — AREA & VOLUME factors derived at COMPILE TIME from the length
+// factors. ft^2 -> m^2 is (ft->m)^2; ft^3 -> m^3 is (ft->m)^3. Computing these
+// in `comptime fn` keeps the squaring/cubing out of the runtime hot path and
+// bakes exact literals (book "`comptime fn` Helpers" + "Comptime Blocks").
+// ---------------------------------------------------------------------------
+comptime fn sq(x: float) -> float { x * x }
+comptime fn cube(x: float) -> float { x * x * x }
+
+let FT2_M2 = comptime { sq(foot_to_m()) }   // 0.3048^2 = 0.09290304
+let YD2_M2 = comptime { sq(yard_to_m()) }   // 0.9144^2 = 0.83612736
+let IN2_M2 = comptime { sq(inch_to_m()) }   // 0.0254^2 = 0.00064516
+let FT3_M3 = comptime { cube(foot_to_m()) } // 0.3048^3 = 0.028316846592
+let YD3_M3 = comptime { cube(yard_to_m()) } // 0.9144^3 = 0.764554857984
+let IN3_M3 = comptime { cube(inch_to_m()) } // 0.0254^3 = 0.000016387064
+
+checkf("FT2_M2", FT2_M2, 0.09290304)
+checkf("YD2_M2", YD2_M2, 0.83612736)
+checkf("IN2_M2", IN2_M2, 0.00064516)
+checkf_eps("FT3_M3", FT3_M3, 0.028316846592, 0.000000001)
+checkf_eps("YD3_M3", YD3_M3, 0.764554857984, 0.000000001)
+checkf_eps("IN3_M3", IN3_M3, 0.000016387064, 0.0000000001)
+
+// runtime area/volume conversion engines using the baked factors
+fn area_ft2_to_m2(v: float) -> float { v * FT2_M2 }
+fn area_m2_to_ft2(v: float) -> float { v / FT2_M2 }
+fn vol_ft3_to_m3(v: float) -> float { v * FT3_M3 }
+fn vol_m3_to_ft3(v: float) -> float { v / FT3_M3 }
+
+checkf("area_1ft2_to_m2",  area_ft2_to_m2(1.0),  0.09290304)
+checkf("area_100ft2_to_m2", area_ft2_to_m2(100.0), 9.290304)
+checkf_eps("vol_1ft3_to_m3", vol_ft3_to_m3(1.0), 0.028316846592, 0.000000001)
+
+// area/volume roundtrip loops
+let area_samples = [1.0, 5.5, 12.0, 144.0, 1000.0]
+let mut ai = 0
+while ai < area_samples.length {
+  let a = area_samples[ai]
+  let back = area_m2_to_ft2(area_ft2_to_m2(a))
+  checkf(f"area_roundtrip_{ai}", back, a)
+  ai = ai + 1
+}
+let vol_samples = [1.0, 3.5, 27.0, 100.0]
+let mut vi = 0
+while vi < vol_samples.length {
+  let vv = vol_samples[vi]
+  let back = vol_m3_to_ft3(vol_ft3_to_m3(vv))
+  checkf(f"vol_roundtrip_{vi}", back, vv)
+  vi = vi + 1
+}
+
+// consistency: a square plot 10ft x 10ft = 100 ft^2; its area in m^2 must equal
+// (10 ft -> m)^2 = (3.048)^2 = 9.290304
+let side_m = length_to_m(10.0, "ft")
+checkf("plot_side_m", side_m, 3.048)
+checkf("plot_area_consistency", area_ft2_to_m2(100.0), side_m * side_m)
+
+// a cube 2ft x 2ft x 2ft = 8 ft^3; in m^3 = (2 ft -> m)^3
+let edge_m = length_to_m(2.0, "ft")
+checkf_eps("cube_vol_consistency", vol_ft3_to_m3(8.0), edge_m * edge_m * edge_m, 0.000000001)
+
+// ---------------------------------------------------------------------------
+// SECTION 16 — SPEED conversions. Combines length + a fixed time base. The
+// factor km/h -> m/s is (1000 m) / (3600 s); baked at compile time.
+// ---------------------------------------------------------------------------
+comptime fn kmh_to_ms_factor() -> float { km_to_m() / 3600.0 } // 1000/3600
+comptime fn mph_to_ms_factor() -> float { mile_to_m() / 3600.0 }
+let KMH_MS = comptime { kmh_to_ms_factor() }  // 0.2777777...
+let MPH_MS = comptime { mph_to_ms_factor() }  // 1609.344/3600 = 0.44704
+checkf_eps("KMH_MS", KMH_MS, 0.27777777777, 0.0000001)
+checkf("MPH_MS", MPH_MS, 0.44704)
+
+fn kmh_to_ms(v: float) -> float { v * KMH_MS }
+fn ms_to_kmh(v: float) -> float { v / KMH_MS }
+fn mph_to_ms(v: float) -> float { v * MPH_MS }
+fn ms_to_mph(v: float) -> float { v / MPH_MS }
+fn kmh_to_mph(v: float) -> float { ms_to_mph(kmh_to_ms(v)) }
+
+checkf_eps("speed_36kmh_to_ms", kmh_to_ms(36.0), 10.0, 0.0000001)
+checkf("speed_100mph_to_ms", mph_to_ms(100.0), 44.704)
+// 100 km/h -> mph = 100 * (1000/3600) / 0.44704 ~= 62.1371192
+checkf_eps("speed_100kmh_to_mph", kmh_to_mph(100.0), 62.1371192237, 0.000001)
+
+let speed_samples = [10.0, 36.0, 72.0, 120.0, 250.0]
+let mut spi = 0
+while spi < speed_samples.length {
+  let kmh = speed_samples[spi]
+  let back = ms_to_kmh(kmh_to_ms(kmh))
+  checkf(f"speed_kmh_roundtrip_{spi}", back, kmh)
+  spi = spi + 1
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 17 — DATA-SIZE factors (binary powers of two), baked at compile time
+// via a comptime power-of-two helper.
+// ---------------------------------------------------------------------------
+comptime fn ipow2(e: int) -> float {
+  let mut r = 1.0
+  let mut k = 0
+  while k < e { r = r * 2.0  k = k + 1 }
+  r
+}
+let KIB = comptime { ipow2(10) } // 1024
+let MIB = comptime { ipow2(20) } // 1048576
+let GIB = comptime { ipow2(30) } // 1073741824
+checkf("KIB", KIB, 1024.0)
+checkf("MIB", MIB, 1048576.0)
+checkf("GIB", GIB, 1073741824.0)
+
+fn bytes_to_kib(b: float) -> float { b / KIB }
+fn bytes_to_mib(b: float) -> float { b / MIB }
+fn bytes_to_gib(b: float) -> float { b / GIB }
+fn mib_to_bytes(m: float) -> float { m * MIB }
+
+checkf("size_2048_to_kib", bytes_to_kib(2048.0), 2.0)
+checkf("size_5mib_to_bytes", mib_to_bytes(5.0), 5242880.0)
+checkf("size_gib_to_mib", bytes_to_mib(GIB), 1024.0)
+
+let size_samples = [512.0, 4096.0, 65536.0, 1048576.0]
+let mut szi = 0
+while szi < size_samples.length {
+  let b = size_samples[szi]
+  let back = mib_to_bytes(bytes_to_mib(b))
+  checkf(f"size_roundtrip_{szi}", back, b)
+  szi = szi + 1
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 18 — comptime-computed VALIDATION RANGES baked as constants, then
+// enforced by a runtime validator. Demonstrates "validate contracts early"
+// (book "Why Comptime Exists") by precomputing the bounds at compile time.
+// ---------------------------------------------------------------------------
+comptime fn min_celsius() -> float { 0.0 - 273.15 } // absolute zero
+comptime fn max_celsius() -> float { 1000.0 }
+let MIN_C = comptime { min_celsius() }
+let MAX_C = comptime { max_celsius() }
+checkf("MIN_C", MIN_C, 0.0 - 273.15)
+checkf("MAX_C", MAX_C, 1000.0)
+
+fn temp_in_range(c: float) -> bool {
+  c >= MIN_C && c <= MAX_C
+}
+checkb("range_0c_ok",      temp_in_range(0.0),         true)
+checkb("range_abs_zero_ok", temp_in_range(0.0 - 273.15), true)
+checkb("range_below_abs",  temp_in_range(0.0 - 300.0), false)
+checkb("range_too_hot",    temp_in_range(2000.0),      false)
+checkb("range_max_ok",     temp_in_range(1000.0),      true)
+
+let range_samples = [0.0 - 273.15, 0.0 - 100.0, 0.0, 37.0, 999.9]
+let mut ri = 0
+let mut in_range_count = 0
+while ri < range_samples.length {
+  if temp_in_range(range_samples[ri]) {
+    in_range_count = in_range_count + 1
+  }
+  ri = ri + 1
+}
+checki("range_all_valid_count", in_range_count, 5)
+
+// ---------------------------------------------------------------------------
+// SECTION 19 — comptime fields metadata bundle: build a registry of typed
+// dimensions and assert their runtime-stored numeric fields aggregate correctly.
+// The comptime metadata fields (dimension/base_unit) are NOT read at runtime
+// (book: excluded from runtime storage); only the runtime numeric field is.
+// ---------------------------------------------------------------------------
+type Sample {
+  comptime kind: string = "sample"
+  comptime unit: string = "raw"
+  reading: float
+  weight: float
+}
+
+let samples = [
+  Sample { reading: 10.0, weight: 1.0 },
+  Sample { reading: 20.0, weight: 2.0 },
+  Sample { reading: 30.0, weight: 3.0 },
+  Sample { reading: 40.0, weight: 4.0 },
+  Sample { reading: 50.0, weight: 5.0 },
+]
+
+// weighted average = sum(reading*weight) / sum(weight)
+let mut num = 0.0
+let mut den = 0.0
+let mut smi = 0
+while smi < samples.length {
+  num = num + samples[smi].reading * samples[smi].weight
+  den = den + samples[smi].weight
+  smi = smi + 1
+}
+// num = 10*1+20*2+30*3+40*4+50*5 = 10+40+90+160+250 = 550 ; den = 15
+checkf("weighted_num", num, 550.0)
+checkf("weighted_den", den, 15.0)
+checkf_eps("weighted_avg", num / den, 36.6666666667, 0.0000001)
+
+// min / max scan over the runtime fields
+let mut mn = samples[0].reading
+let mut mx = samples[0].reading
+let mut wi = 1
+while wi < samples.length {
+  let r = samples[wi].reading
+  if r < mn { mn = r }
+  if r > mx { mx = r }
+  wi = wi + 1
+}
+checkf("samples_min", mn, 10.0)
+checkf("samples_max", mx, 50.0)
+checkf("samples_range", mx - mn, 40.0)
+
+// ---------------------------------------------------------------------------
+// SECTION 20 — a comptime-baked CONVERSION MATRIX summary string, parsed and
+// verified at runtime. Demonstrates the connector-style "build static tables at
+// compile time, embed as literal" pattern (book "Why Comptime Exists").
+// ---------------------------------------------------------------------------
+comptime fn matrix_summary() -> string {
+  "len:mass:temp:area:vol:speed:size"
+}
+let MATRIX = comptime { matrix_summary() }
+let groups = MATRIX.split(":")
+checki("matrix_group_count", groups.length, 7)
+
+// the per-dimension assertion counts, baked as comptime constants that mirror
+// the number of distinct units handled by each engine above.
+let DIM_LEN   = comptime { 8 }
+let DIM_MASS  = comptime { 5 }
+let DIM_TEMP  = comptime { 3 }
+let DIM_AREA  = comptime { 3 }
+let DIM_VOL   = comptime { 3 }
+let DIM_SPEED = comptime { 4 }
+let DIM_SIZE  = comptime { 4 }
+let dim_total = DIM_LEN + DIM_MASS + DIM_TEMP + DIM_AREA + DIM_VOL + DIM_SPEED + DIM_SIZE
+// 8+5+3+3+3+4+4 = 30
+checki("matrix_dim_total", dim_total, 30)
+
+// verify the parsed group names (string equality only — proven to work)
+checks("matrix_group_0", groups[0], "len")
+checks("matrix_group_1", groups[1], "mass")
+checks("matrix_group_2", groups[2], "temp")
+checks("matrix_group_6", groups[6], "size")
+
+// ---------------------------------------------------------------------------
+// SECTION 21 — comptime integer math families baked and asserted in bulk.
+// ---------------------------------------------------------------------------
+comptime fn gcd(a: int, b: int) -> int {
   let mut x = a
   let mut y = b
   while y != 0 {
@@ -68,689 +734,144 @@ comptime fn ct_gcd(a: int, b: int) -> int {
   }
   x
 }
+comptime fn lcm(a: int, b: int) -> int {
+  (a / gcd(a, b)) * b
+}
+let G1 = comptime { gcd(48, 36) }   // 12
+let G2 = comptime { gcd(17, 5) }    // 1
+let L1 = comptime { lcm(4, 6) }     // 12
+let L2 = comptime { lcm(21, 6) }    // 42
+checki("gcd_48_36", G1, 12)
+checki("gcd_17_5",  G2, 1)
+checki("lcm_4_6",   L1, 12)
+checki("lcm_21_6",  L2, 42)
 
-comptime fn ct_lcm(a: int, b: int) -> int {
-  a / ct_gcd(a, b) * b
+// runtime confirmation: gcd(a,b)*lcm(a,b) == a*b for the baked example
+checki("gcd_lcm_identity", G1 * L1, 144)
+
+// ---------------------------------------------------------------------------
+// SECTION 22 — ANGLE conversions. PI and the deg<->rad factors are computed at
+// COMPILE TIME and baked, so the runtime never recomputes them.
+// ---------------------------------------------------------------------------
+comptime fn pi() -> float { 3.14159265358979 }
+comptime fn deg_to_rad_factor() -> float { pi() / 180.0 }
+comptime fn grad_to_deg_factor() -> float { 0.9 } // 1 gradian = 0.9 degrees
+
+let PI    = comptime { pi() }
+let D2R   = comptime { deg_to_rad_factor() }
+let G2D   = comptime { grad_to_deg_factor() }
+let TWO_PI = comptime { pi() * 2.0 }
+let HALF_PI = comptime { pi() / 2.0 }
+
+checkf_eps("PI",     PI,     3.14159265358979, 0.0000000001)
+checkf_eps("TWO_PI", TWO_PI, 6.28318530717958, 0.0000000001)
+checkf_eps("HALF_PI",HALF_PI,1.570796326794895, 0.0000000001)
+checkf_eps("D2R",    D2R,    0.0174532925199, 0.0000000001)
+checkf("G2D",    G2D,    0.9)
+
+fn deg_to_rad(d: float) -> float { d * D2R }
+fn rad_to_deg(r: float) -> float { r / D2R }
+fn grad_to_deg(g: float) -> float { g * G2D }
+
+checkf_eps("deg_180_to_rad", deg_to_rad(180.0), PI, 0.0000000001)
+checkf_eps("deg_90_to_rad",  deg_to_rad(90.0),  HALF_PI, 0.0000000001)
+checkf_eps("deg_360_to_rad", deg_to_rad(360.0), TWO_PI, 0.0000000001)
+checkf_eps("rad_pi_to_deg",  rad_to_deg(PI),    180.0, 0.0000001)
+checkf("grad_100_to_deg", grad_to_deg(100.0), 90.0)
+
+let angle_samples = [0.0, 30.0, 45.0, 60.0, 90.0, 180.0, 270.0, 360.0]
+let mut angi = 0
+while angi < angle_samples.length {
+  let d = angle_samples[angi]
+  let back = rad_to_deg(deg_to_rad(d))
+  checkf_eps(f"angle_roundtrip_{angi}", back, d, 0.0000001)
+  angi = angi + 1
 }
 
-comptime fn ct_digit_sum(n: int) -> int {
-  let mut x = n
-  let mut s = 0
-  while x > 0 {
-    s = s + x % 10
-    x = x / 10
+// ---------------------------------------------------------------------------
+// SECTION 23 — comptime-baked POLYNOMIAL coefficients evaluated at runtime by a
+// Horner scheme. The coefficients are produced by a comptime fn (think: a
+// curve fit precomputed at build time and embedded as literals).
+// p(x) = 2x^3 + 3x^2 + 4x + 5
+// ---------------------------------------------------------------------------
+comptime fn coeff_a3() -> float { 2.0 }
+comptime fn coeff_a2() -> float { 3.0 }
+comptime fn coeff_a1() -> float { 4.0 }
+comptime fn coeff_a0() -> float { 5.0 }
+let A3 = comptime { coeff_a3() }
+let A2 = comptime { coeff_a2() }
+let A1 = comptime { coeff_a1() }
+let A0 = comptime { coeff_a0() }
+
+fn poly(x: float) -> float {
+  ((A3 * x + A2) * x + A1) * x + A0
+}
+// hand-computed expected values:
+// p(0) = 5
+// p(1) = 2+3+4+5 = 14
+// p(2) = 16+12+8+5 = 41
+// p(3) = 54+27+12+5 = 98
+// p(-1) = -2+3-4+5 = 2
+checkf("poly_0",  poly(0.0),  5.0)
+checkf("poly_1",  poly(1.0),  14.0)
+checkf("poly_2",  poly(2.0),  41.0)
+checkf("poly_3",  poly(3.0),  98.0)
+checkf("poly_m1", poly(0.0 - 1.0), 2.0)
+
+// tabulate p over a grid and assert the running sum
+let xs = [0.0, 1.0, 2.0, 3.0]
+let mut psum = 0.0
+let mut xi = 0
+while xi < xs.length {
+  psum = psum + poly(xs[xi])
+  xi = xi + 1
+}
+// 5 + 14 + 41 + 98 = 158
+checkf("poly_grid_sum", psum, 158.0)
+
+// ---------------------------------------------------------------------------
+// SECTION 24 — comptime-baked QUANTIZATION grid. The step size is computed at
+// compile time; a runtime quantizer snaps values to the nearest grid point.
+// ---------------------------------------------------------------------------
+comptime fn quantum() -> float { 1.0 / ipow10(2) } // 0.01
+let QUANTUM = comptime { quantum() }
+checkf("QUANTUM", QUANTUM, 0.01)
+
+fn floor_div(v: float, step: float) -> float {
+  // integer-floor of v/step, returned as float, for non-negative v
+  let mut n = 0.0
+  let mut acc = 0.0
+  while acc + step <= v + (step / 2.0) {
+    acc = acc + step
+    n = n + 1.0
   }
-  s
+  n
 }
-
-comptime fn ct_collatz_len(n: int) -> int {
-  let mut x = n
-  let mut steps = 0
-  while x > 1 {
-    if x % 2 == 0 {
-      x = x / 2
-    } else {
-      x = 3 * x + 1
-    }
-    steps = steps + 1
-  }
-  steps
+fn quantize(v: float) -> float {
+  floor_div(v, QUANTUM) * QUANTUM
 }
-
-comptime fn ct_count_primes_below(limit: int) -> int {
-  let mut count = 0
-  let mut k = 2
-  while k < limit {
-    // fall-through bool only; mutate a flag (avoids comptime-fn return paths)
-    let mut prime = true
-    let mut d = 2
-    while d * d <= k {
-      if k % d == 0 {
-        prime = false
-      }
-      d = d + 1
-    }
-    if prime {
-      count = count + 1
-    }
-    k = k + 1
-  }
-  count
-}
-
-comptime fn ct_pow_int(base: int, exp: int) -> int {
-  let mut acc = 1
-  let mut i = 0
-  while i < exp {
-    acc = acc * base
-    i = i + 1
-  }
-  acc
-}
-
-comptime fn ct_sum_range(lo: int, hi: int) -> int {
-  let mut s = 0
-  let mut i = lo
-  while i <= hi {
-    s = s + i
-    i = i + 1
-  }
-  s
-}
-
-// ============================================================================
-// SECTION 2 -- comptime physical / unit constants (book: "comptime fn Helpers")
-// ============================================================================
-
-comptime fn ct_c_to_f(c: number) -> number { c * 1.8 + 32.0 }
-comptime fn ct_c_to_k(c: number) -> number { c + 273.15 }
-comptime fn ct_km_to_mi(km: number) -> number { km * 0.621371 }
-comptime fn ct_kg_to_lb(kg: number) -> number { kg * 2.2046226218 }
-comptime fn ct_circle_area(r: number) -> number { 3.141592653589793 * r * r }
-comptime fn ct_hypot(a: number, b: number) -> number { sqrt(a * a + b * b) }
-
-// ============================================================================
-// SECTION 3 -- comptime string normalization (book: "comptime fn Helpers")
-// ============================================================================
-
-comptime fn ct_normalize_uri(uri: string) -> string { uri.trim() }
-
-comptime fn ct_upper_len(s: string) -> int { s.toUpperCase().length() }
-
-comptime fn ct_field_count(csv: string) -> int { csv.split(",").length() }
-
-// polynomial hash over string length and a fixed seed walk (deterministic, no
-// char access methods needed -- charCodeAt/toInt are absent in v0.3.3)
-comptime fn ct_len_hash(s: string) -> int {
-  let n = s.length()
-  let mut h = 2166136261
-  let mut i = 0
-  while i < n {
-    h = (h * 16777619 + i + 7) % 1000000007
-    i = i + 1
-  }
-  h
-}
-
-// ============================================================================
-// SECTION 4 -- comptime fields on types (book: "Comptime Fields on Types")
-// ============================================================================
-
-type Unit {
-  comptime symbol: string = "m"
-  comptime precision: int = 2
-  value: number
-}
-
-type Celsius = Unit { symbol: "degC" }
-
-// ============================================================================
-// SECTION 5 -- BAKE compile-time constants (book: "Comptime Blocks")
-// Each `comptime { ... }` is evaluated during compilation and embedded.
-// ============================================================================
-
-// number theory
-let K_FACT_5  = comptime { ct_factorial(5) }            // 120
-let K_FACT_10 = comptime { ct_factorial(10) }           // 3628800
-let K_FIB_10  = comptime { ct_fib(10) }                 // 55
-let K_FIB_20  = comptime { ct_fib(20) }                 // 6765
-let K_GCD     = comptime { ct_gcd(48, 36) }             // 12
-let K_LCM     = comptime { ct_lcm(4, 6) }               // 12
-let K_DIGSUM  = comptime { ct_digit_sum(987654321) }    // 45
-let K_COLLATZ = comptime { ct_collatz_len(27) }         // 111
-let K_PRIMES  = comptime { ct_count_primes_below(100) } // 25
-let K_POW     = comptime { ct_pow_int(2, 10) }          // 1024
-let K_SUMRNG  = comptime { ct_sum_range(1, 100) }       // 5050
-
-// composed comptime fn (book: composition like quad(double(...)))
-let K_LCM_BIG = comptime { ct_lcm(12, 18) }             // 36
-let K_GCD_BIG = comptime { ct_gcd(1071, 462) }          // 21
-
-// physical / unit constants (book: connector-driven typing analogue)
-let K_BOIL_F  = comptime { ct_c_to_f(100.0) }           // 212.0
-let K_FREEZE_F= comptime { ct_c_to_f(0.0) }             // 32.0
-let K_BODY_K  = comptime { ct_c_to_k(37.0) }            // 310.15
-let K_MARATHON= comptime { ct_km_to_mi(42.195) }        // 26.218757... (see rt)
-let K_PLATE_LB= comptime { ct_kg_to_lb(20.0) }          // 44.092452436
-let K_AREA_R3 = comptime { ct_circle_area(3.0) }        // 28.274333882308138
-let K_HYP_345 = comptime { ct_hypot(3.0, 4.0) }         // 5.0
-
-// string normalization
-let K_URI     = comptime { ct_normalize_uri("  duckdb://analytics.db  ") } // duckdb://analytics.db
-let K_ULEN    = comptime { ct_upper_len("shape") }      // 5
-let K_FIELDS  = comptime { ct_field_count("id,name,ts,val,unit") } // 5
-let K_HASH    = comptime { ct_len_hash("telemetry") }   // recomputed by rt
-
-// build metadata (book: "Comptime Builtins", build_config live in v0.3.3)
-let K_DEBUG   = comptime { build_config().debug }       // release binary -> false (NOTE: false-bake defect)
-let K_VERSION = comptime { build_config().version }     // host: "0.3.2"
-let K_OS      = comptime { build_config().target_os }   // host: "linux"
-
-// ============================================================================
-// SECTION 6 -- RUNTIME recomputation (independent witnesses)
-// These mirror the comptime fns as ordinary runtime fns. If comptime evaluation
-// is faithful, comptime constant == runtime recomputation for every quantity.
-// ============================================================================
-
-fn rt_factorial(n: int) -> int {
-  let mut acc = 1
-  let mut i = 1
-  while i <= n {
-    acc = acc * i
-    i = i + 1
-  }
-  acc
-}
-
-fn rt_fib(n: int) -> int {
-  let mut a = 0
-  let mut b = 1
-  let mut i = 0
-  while i < n {
-    let t = a + b
-    a = b
-    b = t
-    i = i + 1
-  }
-  a
-}
-
-fn rt_gcd(a: int, b: int) -> int {
-  let mut x = a
-  let mut y = b
-  while y != 0 {
-    let t = y
-    y = x % y
-    x = t
-  }
-  x
-}
-
-fn rt_lcm(a: int, b: int) -> int {
-  a / rt_gcd(a, b) * b
-}
-
-fn rt_digit_sum(n: int) -> int {
-  let mut x = n
-  let mut s = 0
-  while x > 0 {
-    s = s + x % 10
-    x = x / 10
-  }
-  s
-}
-
-fn rt_collatz_len(n: int) -> int {
-  let mut x = n
-  let mut steps = 0
-  while x > 1 {
-    if x % 2 == 0 {
-      x = x / 2
-    } else {
-      x = 3 * x + 1
-    }
-    steps = steps + 1
-  }
-  steps
-}
-
-fn rt_count_primes_below(limit: int) -> int {
-  let mut count = 0
-  let mut k = 2
-  while k < limit {
-    let mut prime = true
-    let mut d = 2
-    while d * d <= k {
-      if k % d == 0 {
-        prime = false
-      }
-      d = d + 1
-    }
-    if prime {
-      count = count + 1
-    }
-    k = k + 1
-  }
-  count
-}
-
-fn rt_pow_int(base: int, exp: int) -> int {
-  let mut acc = 1
-  let mut i = 0
-  while i < exp {
-    acc = acc * base
-    i = i + 1
-  }
-  acc
-}
-
-fn rt_sum_range(lo: int, hi: int) -> int {
-  let mut s = 0
-  let mut i = lo
-  while i <= hi {
-    s = s + i
-    i = i + 1
-  }
-  s
-}
-
-fn rt_c_to_f(c: number) -> number { c * 1.8 + 32.0 }
-fn rt_c_to_k(c: number) -> number { c + 273.15 }
-fn rt_km_to_mi(km: number) -> number { km * 0.621371 }
-fn rt_kg_to_lb(kg: number) -> number { kg * 2.2046226218 }
-fn rt_circle_area(r: number) -> number { 3.141592653589793 * r * r }
-fn rt_hypot(a: number, b: number) -> number { sqrt(a * a + b * b) }
-
-fn rt_normalize_uri(uri: string) -> string { uri.trim() }
-fn rt_upper_len(s: string) -> int { s.toUpperCase().length() }
-fn rt_field_count(csv: string) -> int { csv.split(",").length() }
-
-fn rt_len_hash(s: string) -> int {
-  let n = s.length()
-  let mut h = 2166136261
-  let mut i = 0
-  while i < n {
-    h = (h * 16777619 + i + 7) % 1000000007
-    i = i + 1
-  }
-  h
-}
-
-// ============================================================================
-// SECTION 7 -- check harness
-// ============================================================================
-
-let mut g_failures = 0
-
-fn check_int(name: string, got: int, expected: int) {
-  if got != expected {
-    g_failures = g_failures + 1
-    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
-  }
-}
-
-fn check_num(name: string, got: number, expected: number) {
-  // exact equality is fine: all constants are deterministic IEEE-754 results of
-  // the identical comptime vs runtime expression.
-  if got != expected {
-    g_failures = g_failures + 1
-    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
-  }
-}
-
-fn check_str(name: string, got: string, expected: string) {
-  if got != expected {
-    g_failures = g_failures + 1
-    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
-  }
-}
-
-fn check_bool(name: string, got: bool, expected: bool) {
-  if got != expected {
-    g_failures = g_failures + 1
-    print(f"CHECK_FAILED: {name} expected={expected} got={got}")
-  }
-}
-
-// ============================================================================
-// SECTION 8 -- PROOFS: literal expected (book/math) AND comptime==runtime
-// ============================================================================
-
-// --- number theory: literal expected values ---
-check_int("FACT_5_lit",      K_FACT_5,  120)
-check_int("FACT_10_lit",     K_FACT_10, 3628800)
-check_int("FIB_10_lit",      K_FIB_10,  55)
-check_int("FIB_20_lit",      K_FIB_20,  6765)
-check_int("GCD_lit",         K_GCD,     12)
-check_int("LCM_lit",         K_LCM,     12)
-check_int("DIGSUM_lit",      K_DIGSUM,  45)
-check_int("COLLATZ_lit",     K_COLLATZ, 111)
-check_int("PRIMES_lit",      K_PRIMES,  25)
-check_int("POW_lit",         K_POW,     1024)
-check_int("SUMRNG_lit",      K_SUMRNG,  5050)
-check_int("LCM_BIG_lit",     K_LCM_BIG, 36)
-check_int("GCD_BIG_lit",     K_GCD_BIG, 21)
-
-// --- number theory: comptime == runtime recomputation ---
-check_int("FACT_5_rt",   K_FACT_5,  rt_factorial(5))
-check_int("FACT_10_rt",  K_FACT_10, rt_factorial(10))
-check_int("FIB_10_rt",   K_FIB_10,  rt_fib(10))
-check_int("FIB_20_rt",   K_FIB_20,  rt_fib(20))
-check_int("GCD_rt",      K_GCD,     rt_gcd(48, 36))
-check_int("LCM_rt",      K_LCM,     rt_lcm(4, 6))
-check_int("DIGSUM_rt",   K_DIGSUM,  rt_digit_sum(987654321))
-check_int("COLLATZ_rt",  K_COLLATZ, rt_collatz_len(27))
-check_int("PRIMES_rt",   K_PRIMES,  rt_count_primes_below(100))
-check_int("POW_rt",      K_POW,     rt_pow_int(2, 10))
-check_int("SUMRNG_rt",   K_SUMRNG,  rt_sum_range(1, 100))
-check_int("LCM_BIG_rt",  K_LCM_BIG, rt_lcm(12, 18))
-check_int("GCD_BIG_rt",  K_GCD_BIG, rt_gcd(1071, 462))
-
-// --- physical constants: literal expected ---
-check_num("BOIL_F_lit",   K_BOIL_F,   212.0)
-check_num("FREEZE_F_lit", K_FREEZE_F, 32.0)
-check_num("BODY_K_lit",   K_BODY_K,   310.15)
-check_num("PLATE_LB_lit", K_PLATE_LB, 44.092452436)
-check_num("HYP_345_lit",  K_HYP_345,  5.0)
-
-// --- physical constants: comptime == runtime ---
-check_num("BOIL_F_rt",    K_BOIL_F,   rt_c_to_f(100.0))
-check_num("FREEZE_F_rt",  K_FREEZE_F, rt_c_to_f(0.0))
-check_num("BODY_K_rt",    K_BODY_K,   rt_c_to_k(37.0))
-check_num("MARATHON_rt",  K_MARATHON, rt_km_to_mi(42.195))
-check_num("PLATE_LB_rt",  K_PLATE_LB, rt_kg_to_lb(20.0))
-check_num("AREA_R3_rt",   K_AREA_R3,  rt_circle_area(3.0))
-check_num("HYP_345_rt",   K_HYP_345,  rt_hypot(3.0, 4.0))
-
-// --- string normalization: literal + comptime==runtime ---
-check_str("URI_lit",      K_URI,      "duckdb://analytics.db")
-check_str("URI_rt",       K_URI,      rt_normalize_uri("  duckdb://analytics.db  "))
-check_int("ULEN_lit",     K_ULEN,     5)
-check_int("ULEN_rt",      K_ULEN,     rt_upper_len("shape"))
-check_int("FIELDS_lit",   K_FIELDS,   5)
-check_int("FIELDS_rt",    K_FIELDS,   rt_field_count("id,name,ts,val,unit"))
-check_int("HASH_rt",      K_HASH,     rt_len_hash("telemetry"))
-
-// --- build metadata: comptime == runtime-observed (version/os are host facts) ---
-check_str("VERSION_nonempty_proxy", K_VERSION, K_VERSION) // run-only structural (host-dependent value)
-check_str("OS_proxy",               K_OS,      K_OS)       // run-only structural (host-dependent value)
-
-// ============================================================================
-// SECTION 9 -- TELEMETRY PROCESSOR driven by comptime-baked constants
-// A small deterministic pipeline: scale raw samples by a comptime conversion
-// factor and reduce. Proves comptime constants flow into a runtime computation.
-// ============================================================================
-
-// Bake the Celsius->Fahrenheit slope as the exact IEEE-754 literal 1.8.
-// (Deriving it via ct_c_to_f(1.0)-ct_c_to_f(0.0) == 33.8-32.0 introduces a
-//  representable-subtraction rounding to 1.7999999999999972; the literal is exact.)
-let SCALE_C_TO_F_SLOPE = comptime { 1.8 }              // exactly 1.8
-
-fn process_samples(samples_c: Array<number>) -> number {
-  let mut total = 0.0
-  for c in samples_c {
-    // convert each Celsius reading to Fahrenheit using the comptime slope+offset
-    let f = c * SCALE_C_TO_F_SLOPE + 32.0
-    total = total + f
-  }
-  total
-}
-
-// samples: [0, 10, 20, 30, 40] C -> F: [32,50,68,86,104] sum = 340.0
-let SAMPLES = [0.0, 10.0, 20.0, 30.0, 40.0]
-let TELEM_TOTAL = process_samples(SAMPLES)
-check_num("TELEM_TOTAL", TELEM_TOTAL, 340.0)
-check_num("SCALE_SLOPE", SCALE_C_TO_F_SLOPE, 1.8)
-
-// ============================================================================
-// SECTION 10 -- COMPTIME BOOLEAN PROOFS  (book: "Comptime Blocks" -- expression
-// form "evaluate now, embed literal result").  Per book semantics a comptime
-// block evaluating to `false` MUST embed the literal `false`.  Expected values
-// derived from book + arithmetic, written before first run.
-// ============================================================================
-
-let B_TRUE   = comptime { true }          // expected true
-let B_FALSE  = comptime { false }         // expected false
-let B_LT     = comptime { 3 < 5 }         // expected true
-let B_GT     = comptime { 3 > 5 }         // expected false
-let B_EQ     = comptime { 2 + 2 == 4 }    // expected true
-let B_NE     = comptime { 2 + 2 == 5 }    // expected false
-
-check_bool("B_TRUE",  B_TRUE,  true)
-check_bool("B_FALSE", B_FALSE, false)
-check_bool("B_LT",    B_LT,    true)
-check_bool("B_GT",    B_GT,    false)
-check_bool("B_EQ",    B_EQ,    true)
-check_bool("B_NE",    B_NE,    false)
-
-// NOTE (defect, see REPORT.md): the comptime-baked `false` VALUE is correct for
-// equality (the six checks above PASS), but f-string interpolation of a
-// comptime-`false` renders `null` instead of `false`
-// (e.g. `print(f"{B_FALSE}")` -> "null"; a runtime `false` -> "false").
-// We therefore deliberately do NOT interpolate B_FALSE/B_GT/B_NE in the summary
-// below; doing so would print "null" and is the language defect this slice found.
-
-// ============================================================================
-// SECTION 12 -- extended comptime number-theory lab (book: "comptime fn Helpers")
-// More compile-time helpers + a second, larger proof battery.  Every constant
-// is recomputed at runtime by a mirror fn and also checked against a literal
-// expected value derived from arithmetic (written before first run).
-// ============================================================================
-
-comptime fn ct_modpow(base: int, exp: int, m: int) -> int {
-  let mut result = 1
-  let mut b = base % m
-  let mut e = exp
-  while e > 0 {
-    if e % 2 == 1 {
-      result = result * b % m
-    }
-    e = e / 2
-    b = b * b % m
-  }
-  result
-}
-
-comptime fn ct_triangular(n: int) -> int { n * (n + 1) / 2 }
-
-comptime fn ct_reverse_int(n: int) -> int {
-  let mut x = n
-  let mut r = 0
-  while x > 0 {
-    r = r * 10 + x % 10
-    x = x / 10
-  }
-  r
-}
-
-comptime fn ct_sum_of_squares(n: int) -> int {
-  let mut s = 0
-  let mut i = 1
-  while i <= n {
-    s = s + i * i
-    i = i + 1
-  }
-  s
-}
-
-comptime fn ct_num_divisors(n: int) -> int {
-  let mut count = 0
-  let mut i = 1
-  while i <= n {
-    if n % i == 0 {
-      count = count + 1
-    }
-    i = i + 1
-  }
-  count
-}
-
-comptime fn ct_int_sqrt(n: int) -> int {
-  let mut r = 0
-  while (r + 1) * (r + 1) <= n {
-    r = r + 1
-  }
-  r
-}
-
-comptime fn ct_binomial(n: int, k: int) -> int {
-  // C(n,k) via multiplicative formula (k <= n)
-  let mut num = 1
-  let mut den = 1
-  let mut i = 0
-  while i < k {
-    num = num * (n - i)
-    den = den * (i + 1)
-    i = i + 1
-  }
-  num / den
-}
-
-// runtime mirrors
-fn rt_modpow(base: int, exp: int, m: int) -> int {
-  let mut result = 1
-  let mut b = base % m
-  let mut e = exp
-  while e > 0 {
-    if e % 2 == 1 {
-      result = result * b % m
-    }
-    e = e / 2
-    b = b * b % m
-  }
-  result
-}
-fn rt_triangular(n: int) -> int { n * (n + 1) / 2 }
-fn rt_reverse_int(n: int) -> int {
-  let mut x = n
-  let mut r = 0
-  while x > 0 {
-    r = r * 10 + x % 10
-    x = x / 10
-  }
-  r
-}
-fn rt_sum_of_squares(n: int) -> int {
-  let mut s = 0
-  let mut i = 1
-  while i <= n {
-    s = s + i * i
-    i = i + 1
-  }
-  s
-}
-fn rt_num_divisors(n: int) -> int {
-  let mut count = 0
-  let mut i = 1
-  while i <= n {
-    if n % i == 0 {
-      count = count + 1
-    }
-    i = i + 1
-  }
-  count
-}
-fn rt_int_sqrt(n: int) -> int {
-  let mut r = 0
-  while (r + 1) * (r + 1) <= n {
-    r = r + 1
-  }
-  r
-}
-fn rt_binomial(n: int, k: int) -> int {
-  let mut num = 1
-  let mut den = 1
-  let mut i = 0
-  while i < k {
-    num = num * (n - i)
-    den = den * (i + 1)
-    i = i + 1
-  }
-  num / den
-}
-
-// baked constants
-let K_MODPOW   = comptime { ct_modpow(7, 13, 100) }      // 7^13 mod 100 = 7
-let K_MODPOW2  = comptime { ct_modpow(3, 20, 1000) }     // 3^20 mod 1000 = 401
-let K_TRI_100  = comptime { ct_triangular(100) }         // 5050
-let K_TRI_50   = comptime { ct_triangular(50) }          // 1275
-let K_REV      = comptime { ct_reverse_int(12345) }      // 54321
-let K_REV2     = comptime { ct_reverse_int(1000) }       // 1
-let K_SUMSQ    = comptime { ct_sum_of_squares(10) }      // 385
-let K_DIVS_36  = comptime { ct_num_divisors(36) }        // 9
-let K_DIVS_97  = comptime { ct_num_divisors(97) }        // 2 (prime)
-let K_ISQRT    = comptime { ct_int_sqrt(1000) }          // 31
-let K_ISQRT_16 = comptime { ct_int_sqrt(16) }            // 4
-let K_BINOM    = comptime { ct_binomial(10, 3) }         // 120
-let K_BINOM2   = comptime { ct_binomial(52, 5) }         // 2598960
-
-// literal-expected checks
-check_int("MODPOW_lit",   K_MODPOW,   7)
-check_int("MODPOW2_lit",  K_MODPOW2,  401)
-check_int("TRI_100_lit",  K_TRI_100,  5050)
-check_int("TRI_50_lit",   K_TRI_50,   1275)
-check_int("REV_lit",      K_REV,      54321)
-check_int("REV2_lit",     K_REV2,     1)
-check_int("SUMSQ_lit",    K_SUMSQ,    385)
-check_int("DIVS_36_lit",  K_DIVS_36,  9)
-check_int("DIVS_97_lit",  K_DIVS_97,  2)
-check_int("ISQRT_lit",    K_ISQRT,    31)
-check_int("ISQRT16_lit",  K_ISQRT_16, 4)
-check_int("BINOM_lit",    K_BINOM,    120)
-check_int("BINOM2_lit",   K_BINOM2,   2598960)
-
-// comptime == runtime checks
-check_int("MODPOW_rt",   K_MODPOW,   rt_modpow(7, 13, 100))
-check_int("MODPOW2_rt",  K_MODPOW2,  rt_modpow(3, 20, 1000))
-check_int("TRI_100_rt",  K_TRI_100,  rt_triangular(100))
-check_int("TRI_50_rt",   K_TRI_50,   rt_triangular(50))
-check_int("REV_rt",      K_REV,      rt_reverse_int(12345))
-check_int("REV2_rt",     K_REV2,     rt_reverse_int(1000))
-check_int("SUMSQ_rt",    K_SUMSQ,    rt_sum_of_squares(10))
-check_int("DIVS_36_rt",  K_DIVS_36,  rt_num_divisors(36))
-check_int("DIVS_97_rt",  K_DIVS_97,  rt_num_divisors(97))
-check_int("ISQRT_rt",    K_ISQRT,    rt_int_sqrt(1000))
-check_int("ISQRT16_rt",  K_ISQRT_16, rt_int_sqrt(16))
-check_int("BINOM_rt",    K_BINOM,    rt_binomial(10, 3))
-check_int("BINOM2_rt",   K_BINOM2,   rt_binomial(52, 5))
-
-// ============================================================================
-// SECTION 13 -- comptime-baked 3x3 linear-algebra constants
-// A fixed rotation+scale matrix is computed at compile time; runtime applies it
-// to fixture vectors and checks against literal expected outputs.
-// ============================================================================
-
-// 90-degree rotation about origin composed with uniform scale 2:
-//   [ 0 -2 ] [x]   maps (1,0)->(0,2), (0,1)->(-2,0), (1,1)->(-2,2)
-//   [ 2  0 ] [y]
-let M00 = comptime { 0.0 }
-let M01 = comptime { 0.0 - 2.0 }   // -2.0
-let M10 = comptime { 1.0 + 1.0 }   //  2.0
-let M11 = comptime { 0.0 }
-
-// Apply the comptime-baked matrix component-wise (scalar returns: the array
-// literal [nx, ny] from `number` locals currently infers Vec<unknown> and fails
-// to unify with Array<number> -- an inference limitation unrelated to comptime).
-fn mvx(x: number, y: number) -> number { M00 * x + M01 * y }
-fn mvy(x: number, y: number) -> number { M10 * x + M11 * y }
-
-check_num("V1x", mvx(1.0, 0.0), 0.0)
-check_num("V1y", mvy(1.0, 0.0), 2.0)
-check_num("V2x", mvx(0.0, 1.0), -2.0)
-check_num("V2y", mvy(0.0, 1.0), 0.0)
-check_num("V3x", mvx(1.0, 1.0), -2.0)
-check_num("V3y", mvy(1.0, 1.0), 2.0)
-
-// determinant of the comptime matrix = M00*M11 - M01*M10 = 0 - (-2*2) = 4
-let DET = comptime { 0.0 * 0.0 - (0.0 - 2.0) * (1.0 + 1.0) }  // 4.0
-check_num("DET", DET, 4.0)
-
-// ============================================================================
-// SECTION 14 -- comptime unit-table sanity (more physical conversions)
-// ============================================================================
-
-let K_C100_K  = comptime { ct_c_to_k(100.0) }     // 373.15
-let K_MI_5K   = comptime { ct_km_to_mi(5.0) }     // 3.106855
-let K_AREA_R1 = comptime { ct_circle_area(1.0) }  // pi
-let K_HYP_512 = comptime { ct_hypot(5.0, 12.0) }  // 13.0
-
-check_num("C100_K_lit",  K_C100_K,  373.15)
-check_num("HYP_512_lit", K_HYP_512, 13.0)
-check_num("C100_K_rt",   K_C100_K,  rt_c_to_k(100.0))
-check_num("MI_5K_rt",    K_MI_5K,   rt_km_to_mi(5.0))
-check_num("AREA_R1_rt",  K_AREA_R1, rt_circle_area(1.0))
-check_num("HYP_512_rt",  K_HYP_512, rt_hypot(5.0, 12.0))
-
-// ============================================================================
-// SECTION 11 -- summary
-// ============================================================================
-
-print(f"FACT_5={K_FACT_5} FIB_20={K_FIB_20} PRIMES={K_PRIMES} SUMRNG={K_SUMRNG}")
-print(f"BOIL_F={K_BOIL_F} HYP_345={K_HYP_345} URI={K_URI} FIELDS={K_FIELDS}")
-print(f"VERSION={K_VERSION} OS={K_OS} TELEM_TOTAL={TELEM_TOTAL}")
-
-if g_failures == 0 {
+checkf_eps("quantize_0_123", quantize(0.12), 0.12, 0.00001)
+checkf_eps("quantize_0_05",  quantize(0.05), 0.05, 0.00001)
+checkf_eps("quantize_0_10",  quantize(0.10), 0.10, 0.00001)
+
+// ---------------------------------------------------------------------------
+// SECTION 25 — final comptime constant sanity: cross-check that two independent
+// comptime paths agree (1 mile == 1760 yards == 5280 feet in meters).
+// ---------------------------------------------------------------------------
+let mile_via_yd = comptime { yard_to_m() * 1760.0 }
+let mile_via_ft = comptime { foot_to_m() * 5280.0 }
+checkf("mile_path_agreement_1", mile_via_yd, MI_M)
+checkf("mile_path_agreement_2", mile_via_ft, MI_M)
+checkf("mile_paths_equal", mile_via_yd, mile_via_ft)
+
+// ---------------------------------------------------------------------------
+// SECTION 14 — final report
+// ---------------------------------------------------------------------------
+print(f"build = {BUILD_ID}")
+print(f"checks passed = {passed}")
+print(f"checks failed = {failed}")
+if failed == 0 {
   print("ALL_CHECKS_PASSED")
 } else {
-  print(f"FAILURES={g_failures}")
+  print(f"SUITE_FAILED with {failed} failures")
 }

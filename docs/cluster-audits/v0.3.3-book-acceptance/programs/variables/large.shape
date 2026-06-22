@@ -546,11 +546,11 @@ fn compute_stats(data: Array<int>) -> Stats {
     let mut first = true
 
     // Iterate with `for v in data` (book: "Control flow — for x in iter").
-    // NOTE: the for-each loop binds `v` with the correct Array<int> element
-    // type. The `while i < n { let v = data[i] }` form does NOT — indexing an
-    // int array inside a while loop yields an unresolved element type under the
-    // current strict-flip build (see REPORT.md "array-index-in-while" finding),
-    // so `for` is both the idiomatic and the only working iteration form here.
+    // The for-each loop binds `v` with the correct Array<int> element type.
+    // (`while i < n { let v = arr[i] }` ALSO works for a normally-named array —
+    // see REPORT.md; the only naming caveat is that a binding literally named
+    // `data` triggers the contextually-reserved `data[...]` DataSchema parse
+    // path documented in variables.mdx "Reserved Keywords", unrelated to loops.)
     for v in data {
         // route the addition through the VM for cross-checking
         sum = vm_add(sum, v)

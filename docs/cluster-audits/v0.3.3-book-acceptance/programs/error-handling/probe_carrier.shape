@@ -1,0 +1,28 @@
+from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
+
+// Isolate the carrier difference for `as int?` on string.
+
+// (1) literal
+match ("123" as int?) { Ok(v) => print(f"literal {v}"), Err(e) => print("literal ERR") }
+
+// (2) plain let-bound string
+let s = "123";
+match (s as int?) { Ok(v) => print(f"letvar {v}"), Err(e) => print("letvar ERR") }
+
+// (3) function param string
+fn p(x: string) { match (x as int?) { Ok(v) => print(f"param {v}"), Err(e) => print("param ERR") } }
+p("123");
+
+// (4) string read from Array<string>
+let arr: Array<string> = ["123"];
+let e0 = arr[0];
+match (e0 as int?) { Ok(v) => print(f"arrelem {v}"), Err(e) => print("arrelem ERR") }
+
+// (5) param that was passed an array element
+let arr2: Array<string> = ["123"];
+p(arr2[0]);
+
+// (6) f-string reconstruction of array element
+let fr = f"{arr[0]}";
+match (fr as int?) { Ok(v) => print(f"fstr {v}"), Err(e) => print("fstr ERR") }
+print("DONE");

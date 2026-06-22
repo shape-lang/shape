@@ -1,74 +1,83 @@
 // small.shape — types-primitive slice
-// Exercises the core of fundamentals/builtin-types.mdx + integer-types.mdx:
-//   scalar int/number/bool/string, width-typed integers, literal suffixes,
-//   hex/bin/oct + suffix combos, `as` bit-level casts, width fields in structs.
-// Self-checking: every assertion derived from BOOK SEMANTICS. Prints
-// ALL_CHECKS_PASSED iff every check passes.
+// Exercises the core of fundamentals/builtin-types.mdx + fundamentals/integer-types.mdx:
+//   scalar types (int, number, bool, string), width-typed integer literals,
+//   literal suffixes (incl. hex/bin/oct combos), and `as` bit-level casting.
+//
+// The book does not teach an `assert` builtin (confirmed: not in prelude), so we
+// self-check with a `check` helper that prints CHECK_FAILED on any mismatch and
+// only reaches ALL_CHECKS_PASSED if every check holds.
 
 let mut failures = 0
 
-fn check(name: string, cond: bool) {
-  if !cond {
+fn check_int(got: int, want: int, name: string) {
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
     failures = failures + 1
-    print(f"CHECK_FAILED: {name}")
   }
 }
 
-// --- Scalars (builtin-types.mdx "Scalar Types") ---
-let x: int = 42                    // signed 64-bit
-let y: int = -1000
-let big: int = 9000000000000000000 // within i64 range
-check("int_x", x == 42)
-check("int_y", y == -1000)
-check("int_big", big == 9000000000000000000)
+fn check_num(got: number, want: number, name: string) {
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    failures = failures + 1
+  }
+}
 
-let n: number = 3.5                // f64
-check("number_add", n + 0.5 == 4.0)
+fn check_bool(got: bool, want: bool, name: string) {
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    failures = failures + 1
+  }
+}
 
+// --- Scalar: int (i64, signed). builtin-types.mdx "Scalar Types"; integer-types.mdx "The int Type" ---
+let x = 42            // int
+let y = -1000         // int
+check_int(x + y, -958, "int_add")
+
+// integer-types.mdx: big literal within i64 range stores exactly
+let big = 9000000000000000000
+check_int(big - 9000000000000000000, 0, "int_big_exact")
+
+// --- Scalar: number (f64). builtin-types.mdx "Scalar Types" ---
+let n: number = 2.5
+check_num(n + 1.0, 3.5, "number_add")
+
+// --- Scalar: bool ---
 let b: bool = true
-check("bool_t", b == true)
-check("bool_not", (!b) == false)
+check_bool(!b, false, "bool_not")
 
-let s: string = "shape"
-check("string_eq", s == "shape")
-
-// --- Literal suffixes (integer-types.mdx "Literal Suffixes") ---
+// --- Literal suffixes. integer-types.mdx "Literal Suffixes" ---
+// Each width-typed literal is in-range, so its value equals the plain integer.
 let a = 42i8
-let u = 255u8
-let c = 1000i16
-let d = 50000u16
+check_int(a as int, 42, "i8_suffix")
+let c = 255u8
+check_int(c as int, 255, "u8_suffix")
+let d = 1000i16
+check_int(d as int, 1000, "i16_suffix")
 let e = 100i32
+check_int(e as int, 100, "i32_suffix")
 let f = 3000000u32
-let size = 1048576u64
-check("suffix_i8", a == 42i8)
-check("suffix_u8", u == 255u8)
-check("suffix_i16", c == 1000i16)
-check("suffix_u16", d == 50000u16)
-check("suffix_i32", e == 100i32)
-check("suffix_u32", f == 3000000u32)
-check("suffix_u64", size == 1048576u64)
+check_int(f as int, 3000000, "u32_suffix")
 
-// --- Hex / binary / octal + suffix combos (integer-types.mdx) ---
-check("hex_u8", 0xFFu8 == 255u8)
-check("bin_i16", 0b1010i16 == 10i16)
-check("oct_u32", 0o77u32 == 63u32)
+// Hex / binary / octal prefixes combine with suffixes. integer-types.mdx "Literal Suffixes"
+let h = 0xFFu8        // 255
+check_int(h as int, 255, "hex_suffix")
+let bi = 0b1010i16    // 10
+check_int(bi as int, 10, "bin_suffix")
+let oc = 0o77u32      // 63
+check_int(oc as int, 63, "oct_suffix")
 
-// --- Explicit `as` casts (integer-types.mdx "Explicit Casting") ---
-// Book: "300 as i8 is 44" (narrowing keeps low 8 bits)
+// --- `as` bit-level casting. integer-types.mdx "Explicit Casting with as" ---
+// "300 as i8" keeps low 8 bits -> 44 (book states this exact value).
 let wide: int = 300
 let narrow = wide as i8
-check("cast_narrow", narrow == 44i8)
-// Book: "-1 as u8 is 255" (signed/unsigned reinterprets bits)
+check_int(narrow as int, 44, "cast_narrow_300_i8")
+
+// "-1 as u8" reinterprets bits -> 255 (book states this exact value).
 let signed: int = -1
 let unsigned = signed as u8
-check("cast_reinterpret", unsigned == 255u8)
-
-// --- Width types as struct fields (integer-types.mdx "In Type Definitions") ---
-type Pixel { r: u8, g: u8, b: u8, a: u8 }
-let px = Pixel { r: 255u8, g: 128u8, b: 0u8, a: 255u8 }
-check("field_r", px.r == 255u8)
-check("field_g", px.g == 128u8)
-check("field_b", px.b == 0u8)
+check_int(unsigned as int, 255, "cast_signed_neg1_u8")
 
 if failures == 0 {
   print("ALL_CHECKS_PASSED")

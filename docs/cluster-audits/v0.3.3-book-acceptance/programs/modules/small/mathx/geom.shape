@@ -1,5 +1,0 @@
-// mathx/geom.shape -- importable as mathx::geom
-pub type Rect { w: int, h: int }
-
-pub fn area(r: Rect) -> int { r.w * r.h }
-pub fn perimeter(r: Rect) -> int { 2 * (r.w + r.h) }

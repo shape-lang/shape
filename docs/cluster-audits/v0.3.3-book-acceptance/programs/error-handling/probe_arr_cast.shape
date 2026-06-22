@@ -1,0 +1,31 @@
+from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
+
+// Book §Fallible: `as int?` on a string yields Result<int>.
+// Probe: does it work on a string read out of an Array<string> element
+// WITHOUT the f-string reconstruction the large.shape used?
+
+fn parse_direct(tok: string) -> Result<int> {
+    let n = (tok as int?) !! f"not a number: {tok}";
+    return n;
+}
+
+let arr: Array<string> = ["123", "x", "0"];
+
+// direct element -> as int?
+match parse_direct(arr[0]) {
+    Ok(v) => print(f"arr0 ok {v}"),
+    Err(e) => print("arr0 err"),
+}
+match parse_direct(arr[1]) {
+    Ok(v) => print(f"arr1 ok {v}"),
+    Err(e) => print("arr1 err"),
+}
+
+// also: iterate and cast
+for tok in arr {
+    match (tok as int?) {
+        Ok(v) => print(f"iter ok {v}"),
+        Err(e) => print("iter err"),
+    }
+}
+print("DONE");

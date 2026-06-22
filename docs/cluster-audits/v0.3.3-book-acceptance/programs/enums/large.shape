@@ -12,16 +12,18 @@
 //   * the built-in Option<T> and Result<T,E> enums
 //   * Result-based error reporting and the `?` propagation operator
 //
-// DESIGN NOTE (collection-dispatch avoidance):
-//   The strict-flip build of this worktree has a broken Array<EnumType>
-//   subsystem: `.map`/`.filter` over a split result, the `+` array-concat
-//   operator, array literals of distinct enum variants, and even an annotated
-//   empty `Array<EnumType> = []` followed by `.push` all fail (see REPORT).
-//   So this interpreter deliberately builds NO token array. It is a classic
+// DESIGN NOTE (scannerless design):
+//   This interpreter deliberately builds NO token array. It is a classic
 //   scannerless recursive-descent parser: it threads an integer cursor through
 //   the raw source string, reading one character at a time with `.substring`.
-//   The only data structures are enums. This keeps the program 100% rooted in
-//   the enums chapter and side-steps the in-flight collection subsystem.
+//   The only data structures are enums, keeping the program 100% rooted in the
+//   enums chapter.
+//   (Earlier drafts of this file blamed an Array<EnumType>/array-element-string
+//   "collection-dispatch" defect for this choice. Re-probed at HEAD 2026-06-21:
+//   `[Color::Red, Color::Green]` array literals, `arr[0].substring(..)`, and a
+//   3-function mutual-recursion cycle ALL link + run cleanly. Those claims do
+//   NOT reproduce in this build; the scannerless design is kept on its own
+//   merits, not as a workaround. See REPORT.)
 //
 // MACHINE-PROOFABLE: every expected value below was derived BY HAND from the
 // grammar BEFORE the first run, never back-filled from output.
@@ -115,14 +117,7 @@ fn skip_ws(s: string, i: int) -> int {
 // ============================================================================
 // Parser  --  precedence-climbing (Pratt) parser.
 //
-// IMPORTANT (linker-defect avoidance): a textbook recursive-descent parser
-// has THREE mutually-recursive functions (factor -> expr -> term -> factor),
-// forming a dependency CYCLE of length 3. Under this build the
-// content-addressed bytecode linker PANICS on any function-call cycle of
-// length >= 3 ("Missing function blob"); a 1-cycle (self-recursion) and a
-// 2-cycle both link fine. See REPORT (linker / content-addressed-bytecode).
-//
-// So the grammar is implemented as a SINGLE self-recursive function
+// DESIGN: the grammar is implemented as a SINGLE self-recursive function
 // `parse_bp(s, pos, min_bp)` (precedence climbing). It recurses only into
 // itself, so the call graph is a 1-cycle and links cleanly. The same grammar
 // is parsed: numbers, parens, unary minus, and the four binary operators with
@@ -652,14 +647,10 @@ fn main() {
     // GROUP 9: Batch evaluation -- a battery of fixtures, each as a direct
     // `run(literal)` call. Expected values hand-computed from the grammar.
     //
-    // NOTE: this group was originally a loop over an `Array<string>` of
-    // fixtures, but under the strict-flip build a string VALUE read out of an
-    // `Array<string>` by index and then passed into a string method (here,
-    // through run -> parse -> ch_at -> substring) fails at runtime with
-    // "TypeError: expected string, got string" -- an array-element string
-    // carries a runtime string-kind that `.substring` rejects. So the fixtures
-    // are spelled out as individual literal-driven checks instead. See REPORT
-    // (collection-dispatch / runtime-v2 string kind).
+    // NOTE: fixtures are spelled out as individual literal-driven checks for
+    // readability. (An earlier draft claimed array-element strings failed
+    // `.substring` with "expected string, got string"; re-probed at HEAD
+    // 2026-06-21 and that does NOT reproduce -- arr[0].substring(..) works.)
     // ------------------------------------------------------------------
     if run("1+1") == "2" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: batch_1 expected=2 got={run(\"1+1\")}") }
     if run("2*2*2") == "8" { pass = pass + 1 } else { fail = fail + 1; print(f"CHECK_FAILED: batch_2 expected=8 got={run(\"2*2*2\")}") }

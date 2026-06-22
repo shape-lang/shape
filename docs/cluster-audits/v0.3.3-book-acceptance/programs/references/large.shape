@@ -1,826 +1,474 @@
-// large.shape — Immutable Sales Analytics Report Engine
-// Book chapter: fundamentals/references-borrowing.mdx
+// large.shape — Reference-Driven Directed-Graph Analysis Engine
+// =============================================================================
+// Slice: fundamentals/references-borrowing.mdx
 //
-// THEME (references-rooted): every analysis function takes its dataset by
-// INFERRED SHARED REFERENCE (book §"Inferred Reference Mode": "the compiler sees
-// items is only read => infers &items (shared)"). The dataset is built once,
-// then borrowed read-only by many pure functions that return OWNED results.
-// We use `clone` to keep a source valid (book §"Move and Clone"), `move` to
-// transfer a Copy scalar, and auto-ref method calls (book §"Auto-Referencing"):
-// `arr.push(...)` desugars to `(&mut arr).push(...)`, `arr.len()` to `(&arr).len()`.
+// A non-interactive, deterministic, machine-proofable graph engine built
+// entirely around the chapter's reference model:
+//   * Read-only traversals take a SHARED borrow:    fn f(&g)        (book §References as Function Parameters)
+//   * In-place mutations take an EXCLUSIVE borrow:   fn f(&mut s)    (book §Reference Rules)
+//   * Helpers return the dereferenced VALUE through a reference     (book §"return the VALUE through a reference")
+//   * clone keeps an independent copy live                          (book §Move and Clone)
+//   * let mut accumulators mutate directly, zero copy               (book §let and let mut)
+//   * NLL lets a borrow end at last use before a later mutation     (book §Non-Lexical Lifetimes)
 //
-// MACHINE-PROOFABLE: every expected value below is computed BY HAND from book
-// semantics and the fixed dataset, written BEFORE the first run. On all-pass we
-// print ALL_CHECKS_PASSED; any mismatch prints CHECK_FAILED: <which> expected/got.
+// GRAPH STORAGE — Compressed-Sparse-Row (CSR), two FLAT int arrays:
+//   * `adj`     : every neighbor list concatenated, in node visitOrder
+//   * `offsets` : offsets[i]..offsets[i+1] is the slice of `adj` for node i
+//   CSR is used (instead of array-of-arrays) so the whole program stays in
+//   flat `Array<int>` territory — see REPORT.md for why nested/empty arrays
+//   are avoided in this WIP build. Both flat arrays are passed by SHARED
+//   reference into every query; per-node work state (dist / visited / indeg)
+//   lives in flat `Array<int>` mutated through &mut params.
 //
-// Determinism: no stdin, no clock, no network, no RNG. Fixed in-memory fixtures.
+// All reference parameters are EXPLICITLY typed `Array<int>` and all helpers
+// carry explicit return types — required so indexing-through-a-reference yields
+// a proven `int` rather than `unknown` (see REPORT.md book-gap note).
+//
+// Every computed result is asserted against an expected value derived BY HAND
+// from the fixed graph BEFORE the first run (see GROUND TRUTH). On success
+// prints ALL_CHECKS_PASSED.
+// =============================================================================
 
-// ============================================================================
-//  Domain types
-// ============================================================================
-
-type Sale {
-    id: int,
-    region: int,      // 0=North 1=South 2=East 3=West
-    units: int,
-    price: int,       // price per unit, in whole currency units
-}
-
-type Region {
-    code: int,
-    total_units: int,
-    total_revenue: int,
-}
-
-type Stat {
-    min: int,
-    max: int,
-    sum: int,
-    count: int,
-}
-
-// ============================================================================
-//  Pure helpers — each takes its collection by inferred SHARED reference
-//  (read-only) and returns an OWNED value. No &mut params (book marks those
-//  examples runnable=false; the reachable idiom is inferred shared refs).
-// ============================================================================
-
-fn sum_ints(items) -> int {
-    var s = 0
-    for x in items { s = s + x }
-    return s
-}
-
-fn count_ints(items) -> int {
-    var c = 0
-    for x in items { c = c + 1 }
-    return c
-}
-
-// Max via literal sentinel accumulator (a plain local `var`, not a
-// reference-indexed binding). Loop var compared to the accumulator.
-fn max_int(items) -> int {
-    var m = -2147483647
-    for x in items { if x > m { m = x } }
-    return m
-}
-
-fn min_int(items) -> int {
-    var m = 2147483647
-    for x in items { if x < m { m = x } }
-    return m
-}
-
-fn count_over(items, threshold) -> int {
-    var c = 0
-    for x in items { if x > threshold { c = c + 1 } }
-    return c
-}
-
-// Build a NEW owned array of doubled values (annotated return — strict-flip
-// requires a concrete element type for empty-array-seeded builders).
-fn doubled(items) -> Array<int> {
-    let mut out: Array<int> = []
-    for x in items { out.push(x * 2) }
-    return out
-}
-
-// Count of strictly-increasing steps. Uses a plain `var prev` accumulator
-// rebound to each loop value, then compares the next loop value to it.
-fn ascending_steps(items) -> int {
-    var prev = -2147483647
-    var c = 0
-    for x in items {
-        if x > prev { c = c + 1 }
-        prev = x
+// ----------------------------------------------------------------------------
+// Test harness
+// ----------------------------------------------------------------------------
+var failures = 0
+fn check_int(name: string, got: int, want: int) {
+    if got != want {
+        print(f"CHECK_FAILED: {name} expected={want} got={got}")
+        failures = failures + 1
     }
-    return c
 }
-
-// ============================================================================
-//  Sale-level analysis — borrow the array of Sale read-only
-// ============================================================================
-
-fn sale_revenue(s: Sale) -> int {
-    return s.units * s.price
-}
-
-fn total_units(sales: Array<Sale>) -> int {
-    var u = 0
-    for s in sales { u = u + s.units }
-    return u
-}
-
-fn total_revenue(sales: Array<Sale>) -> int {
-    var r = 0
-    for s in sales { r = r + sale_revenue(s) }
-    return r
-}
-
-fn region_units(sales: Array<Sale>, code) -> int {
-    var u = 0
-    for s in sales { if s.region == code { u = u + s.units } }
-    return u
-}
-
-fn region_revenue(sales: Array<Sale>, code) -> int {
-    var r = 0
-    for s in sales { if s.region == code { r = r + sale_revenue(s) } }
-    return r
-}
-
-fn region_count(sales: Array<Sale>, code) -> int {
-    var c = 0
-    for s in sales { if s.region == code { c = c + 1 } }
-    return c
-}
-
-fn top_sale_revenue(sales: Array<Sale>) -> int {
-    var m = -2147483647
-    for s in sales {
-        let rev = sale_revenue(s)
-        if rev > m { m = rev }
+fn check_bool(name: string, got: bool, want: bool) {
+    if got != want {
+        print(f"CHECK_FAILED: {name} expected={want} got={got}")
+        failures = failures + 1
     }
-    return m
 }
 
-fn top_sale_id(sales: Array<Sale>) -> int {
-    var m = -2147483647
-    var id = -1
-    for s in sales {
-        let rev = sale_revenue(s)
-        if rev > m { m = rev; id = s.id }
-    }
-    return id
-}
+// ----------------------------------------------------------------------------
+// GROUND TRUTH — fixed directed graph (8 nodes 0..7)
+// Edges (directed, listed neighbor visitOrder):
+//   0 -> 1, 0 -> 2
+//   1 -> 3, 1 -> 4
+//   2 -> 4, 2 -> 5
+//   3 -> 6
+//   4 -> 6, 4 -> 7
+//   5 -> 7
+//   6 -> 7
+//   7 -> (sink)
+//
+// CSR encoding (verified):
+//   adj     = [1,2, 3,4, 4,5, 6, 6,7, 7, 7]   (11 entries)
+//   offsets = [0, 2, 4, 6, 7, 9, 10, 11, 11]
+//
+// Hand-computed facts (expected values):
+//   out-degree: [2,2,2,1,2,1,1,0]   sum = 11 edges
+//   in-degree : [0,1,1,1,2,1,2,3]   sum = 11
+//   Sources (indeg 0): {0} -> 1 ; Sinks (outdeg 0): {7} -> 1
+//   BFS visitOrder from 0 (mark on enqueue, FIFO) = [0,1,2,3,4,5,6,7]
+//   BFS hop distance from 0          = [0,1,1,2,2,2,3,3]
+//   Reachable from 0 = 8 ; from 7 = 1 ; from 3 ({3,6,7}) = 3
+//   DFS preorder from 0 (recursive, listed visitOrder) = [0,1,3,6,7,4,2,5]
+//   Topological visitOrder (Kahn, smallest-ready-id) = [0,1,2,3,4,5,6,7]
+//   Longest path (edges) from 0: L=[0,1,1,2,2,2,3,4]
+//     L[7]=max(L[4],L[5],L[6])+1 = max(2,2,3)+1 = 4   (e.g. 0-1-3-6-7)
+//   Edge (1,4)=true ; (4,1)=false ; (7,0)=false
+// ----------------------------------------------------------------------------
 
-fn summarize_regions(sales: Array<Sale>, codes) -> Array<Region> {
-    let mut out: Array<Region> = []
-    for code in codes {
-        let u = region_units(sales, code)
-        let r = region_revenue(sales, code)
-        out.push(Region { code: code, total_units: u, total_revenue: r })
-    }
-    return out
-}
+let NODES = 8
 
-fn revenues(sales: Array<Sale>) -> Array<int> {
-    let mut out: Array<int> = []
-    for s in sales { out.push(sale_revenue(s)) }
-    return out
-}
+// ---- flat-array helpers -----------------------------------------------------
 
-fn ids_over(sales: Array<Sale>, threshold) -> Array<int> {
-    let mut out: Array<int> = []
-    for s in sales {
-        if sale_revenue(s) > threshold { out.push(s.id) }
-    }
-    return out
-}
-
-fn stats_of(items) -> Stat {
-    var mn = 2147483647
-    var mx = -2147483647
-    var sm = 0
-    var ct = 0
-    for x in items {
-        if x < mn { mn = x }
-        if x > mx { mx = x }
-        sm = sm + x
-        ct = ct + 1
-    }
-    return Stat { min: mn, max: mx, sum: sm, count: ct }
-}
-
-fn mean_floor(items) -> int {
-    let st = stats_of(items)
-    if st.count == 0 { return 0 }
-    return st.sum / st.count
-}
-
-fn mean_number(items) -> number {
-    let st = stats_of(items)
-    if st.count == 0 { return 0.0 }
-    return (st.sum as number) / (st.count as number)
-}
-
-// ============================================================================
-//  Region-array reducers
-// ============================================================================
-
-fn count_ints_regions(regions: Array<Region>) -> int {
-    var c = 0
-    for r in regions { c = c + 1 }
-    return c
-}
-
-fn regions_units_sum(regions: Array<Region>) -> int {
-    var s = 0
-    for r in regions { s = s + r.total_units }
-    return s
-}
-
-fn regions_rev_sum(regions: Array<Region>) -> int {
-    var s = 0
-    for r in regions { s = s + r.total_revenue }
-    return s
-}
-
-// ============================================================================
-//  Index-based reductions — borrow the array, drive a `while` over indices.
-//  Demonstrates that a shared borrow supports random access (book §"Index
-//  borrowing is supported: &arr[0]") as well as sequential iteration.
-// ============================================================================
-
-fn idx_sum(items: Array<int>) -> int {
-    var s = 0
-    var i = 0
-    let n = items.len()                  // auto-ref (&items).len()
-    while i < n {
-        s = s + items[i]
-        i = i + 1
-    }
-    return s
-}
-
-// Dot product of two equal-length int arrays, both borrowed read-only.
-fn dot(a: Array<int>, b: Array<int>) -> int {
-    var s = 0
-    var i = 0
-    let n = a.len()
-    while i < n {
-        s = s + a[i] * b[i]
-        i = i + 1
-    }
-    return s
-}
-
-// Owned reversed copy (read source by index, build a new owned array).
-fn reversed(items: Array<int>) -> Array<int> {
-    let mut out: Array<int> = []
-    var i = items.len()
-    while i > 0 {
-        i = i - 1
-        out.push(items[i])
-    }
-    return out
-}
-
-// Owned prefix-sum array. out[k] = sum of items[0..=k].
-fn prefix_sums(items: Array<int>) -> Array<int> {
-    let mut out: Array<int> = []
-    var run = 0
-    for x in items {
-        run = run + x
-        out.push(run)
-    }
-    return out
-}
-
-// ============================================================================
-//  Bucketing / histogram — borrow read-only, return an owned 3-bucket array.
-//  Buckets: [ <40, 40..<80, >=80 ].
-// ============================================================================
-
-fn bucket_counts(items: Array<int>) -> Array<int> {
-    let mut b: Array<int> = [0, 0, 0]
-    for x in items {
-        if x < 40 {
-            b[0] = b[0] + 1
-        } else {
-            if x < 80 { b[1] = b[1] + 1 } else { b[2] = b[2] + 1 }
-        }
-    }
-    return b
-}
-
-// ============================================================================
-//  Selection sort returning an OWNED sorted copy. The input is borrowed
-//  read-only; we first clone it into a mutable local, then sort in place.
-//  (Mutation happens on the locally-owned copy, never on the borrowed source —
-//  book §"For single-owner cases, prefer let/let mut".)
-// ============================================================================
-
-fn sorted_asc(items: Array<int>) -> Array<int> {
-    let mut a: Array<int> = []
-    for x in items { a.push(x) }          // owned working copy
-    let n = a.len()
+fn filled(n: int, fill: int) -> Array<int> {
+    var a = []
     var i = 0
     while i < n {
-        var min_idx = i
-        var j = i + 1
-        while j < n {
-            if a[j] < a[min_idx] { min_idx = j }
-            j = j + 1
-        }
-        // swap a[i] and a[min_idx]
-        let tmp = a[i]
-        a[i] = a[min_idx]
-        a[min_idx] = tmp
+        a.push(fill)
         i = i + 1
     }
     return a
 }
 
-// Median of an odd-length array, computed from an owned sorted copy.
-fn median_odd(items: Array<int>) -> int {
-    let s = sorted_asc(items)
-    let n = s.len()
-    return s[n / 2]
+// single-level index-assign through an EXCLUSIVE borrow
+fn set_at(&mut a: Array<int>, i: int, v: int) {
+    a[i] = v
 }
 
-// Count of elements equal to a target (owned int passed by value).
-fn count_eq(items: Array<int>, target: int) -> int {
-    var c = 0
-    for x in items { if x == target { c = c + 1 } }
-    return c
+// ---- CSR read-only queries (SHARED borrows) ---------------------------------
+
+// out-degree of node n — returns the dereferenced VALUE through &offsets
+fn out_degree(&offsets: Array<int>, n: int) -> int {
+    return offsets[n + 1] - offsets[n]
 }
 
-// ============================================================================
-//  Running-balance ledger over an array of signed deltas (borrow read-only).
-//  Returns the final balance; never mutates the source.
-// ============================================================================
-
-fn final_balance(deltas: Array<int>, opening: int) -> int {
-    var bal = opening
-    for d in deltas { bal = bal + d }
-    return bal
+// k-th neighbor of node n
+fn neighbor_at(&offsets: Array<int>, &adj: Array<int>, n: int, k: int) -> int {
+    let base = offsets[n]
+    return adj[base + k]
 }
 
-// Lowest balance reached at any point (owned int result).
-fn low_water(deltas: Array<int>, opening: int) -> int {
-    var bal = opening
-    var lo = opening
-    for d in deltas {
-        bal = bal + d
-        if bal < lo { lo = bal }
+fn edge_count(&offsets: Array<int>) -> int {
+    // last offset = total neighbor entries = edge count
+    return offsets[NODES]
+}
+
+// directed edge u->v exists?
+fn has_edge(&offsets: Array<int>, &adj: Array<int>, u: int, v: int) -> bool {
+    let deg = out_degree(&offsets, u)
+    var k = 0
+    while k < deg {
+        if neighbor_at(&offsets, &adj, u, k) == v { return true }
+        k = k + 1
     }
-    return lo
+    return false
 }
 
-// ============================================================================
-//  String reporting — borrow read-only, return owned strings
-// ============================================================================
-
-fn region_name(code) -> string {
-    if code == 0 { return "North" }
-    if code == 1 { return "South" }
-    if code == 2 { return "East" }
-    if code == 3 { return "West" }
-    return "Unknown"
+fn in_degree(&offsets: Array<int>, &adj: Array<int>, n: int) -> int {
+    var cnt = 0
+    var u = 0
+    while u < NODES {
+        if has_edge(&offsets, &adj, u, n) { cnt = cnt + 1 }
+        u = u + 1
+    }
+    return cnt
 }
 
-fn name_join(regions: Array<Region>) -> string {
-    var acc = ""
-    var first = true
-    for r in regions {
-        if first {
-            acc = acc + region_name(r.code)
-            first = false
-        } else {
-            acc = acc + "," + region_name(r.code)
+fn count_sources(&offsets: Array<int>, &adj: Array<int>) -> int {
+    var cnt = 0
+    var n = 0
+    while n < NODES {
+        if in_degree(&offsets, &adj, n) == 0 { cnt = cnt + 1 }
+        n = n + 1
+    }
+    return cnt
+}
+
+fn count_sinks(&offsets: Array<int>) -> int {
+    var cnt = 0
+    var n = 0
+    while n < NODES {
+        if out_degree(&offsets, n) == 0 { cnt = cnt + 1 }
+        n = n + 1
+    }
+    return cnt
+}
+
+// ---- BFS --------------------------------------------------------------------
+
+fn bfs_order(&offsets: Array<int>, &adj: Array<int>, start: int) -> Array<int> {
+    var enqueued = filled(NODES, 0)
+    var visitOrder = []
+    var queue = []
+    queue.push(start)
+    set_at(&mut enqueued, start, 1)
+    var head = 0
+    while head < queue.len() {
+        let node = queue[head]
+        head = head + 1
+        visitOrder.push(node)
+        let deg = out_degree(&offsets, node)
+        var k = 0
+        while k < deg {
+            let nb = neighbor_at(&offsets, &adj, node, k)
+            if enqueued[nb] == 0 {
+                set_at(&mut enqueued, nb, 1)
+                queue.push(nb)
+            }
+            k = k + 1
         }
     }
-    return acc
+    return visitOrder
 }
 
-// ============================================================================
-//  Matrix (nested-array) transforms — borrow the matrix read-only and return
-//  owned vectors / scalars. Nested `Array<Array<int>>` is still a single shared
-//  borrow at the call boundary (book §"Inferred Reference Mode").
-// ============================================================================
-
-fn mat_row_sums(m: Array<Array<int>>) -> Array<int> {
-    let mut out: Array<int> = []
-    for row in m {
-        var s = 0
-        for x in row { s = s + x }
-        out.push(s)
-    }
-    return out
-}
-
-// Column sums of a rectangular matrix (assumes >= 1 row, all rows equal width).
-// Iterates rows with `for row in m` (sequential borrow), accumulating per-column
-// into an owned result array indexed by position.
-fn mat_col_sums(m: Array<Array<int>>) -> Array<int> {
-    let mut out: Array<int> = []
-    let rows = m.len()
-    if rows == 0 { return out }
-    let width = m[0].len()
-    // seed the accumulator with `width` zeros
-    var w = 0
-    while w < width {
-        out.push(0)
-        w = w + 1
-    }
-    for row in m {
-        var c = 0
-        for x in row {
-            out[c] = out[c] + x
-            c = c + 1
+fn bfs_distances(&offsets: Array<int>, &adj: Array<int>, start: int) -> Array<int> {
+    var dist = filled(NODES, -1)
+    var queue = []
+    queue.push(start)
+    set_at(&mut dist, start, 0)
+    var head = 0
+    while head < queue.len() {
+        let node = queue[head]
+        head = head + 1
+        let d = dist[node]
+        let deg = out_degree(&offsets, node)
+        var k = 0
+        while k < deg {
+            let nb = neighbor_at(&offsets, &adj, node, k)
+            if dist[nb] == -1 {
+                set_at(&mut dist, nb, d + 1)
+                queue.push(nb)
+            }
+            k = k + 1
         }
     }
-    return out
+    return dist
 }
 
-// Trace = sum of the main diagonal (square matrix). Iterate rows sequentially
-// and pick the diagonal element via a single index into the (locally bound) row.
-fn mat_trace(m: Array<Array<int>>) -> int {
-    var s = 0
+fn reachable_count(&offsets: Array<int>, &adj: Array<int>, start: int) -> int {
+    let dist = bfs_distances(&offsets, &adj, start)
+    var cnt = 0
     var i = 0
-    for row in m {
-        var c = 0
-        for x in row {
-            if c == i { s = s + x }
-            c = c + 1
-        }
+    while i < dist.len() {
+        if dist[i] != -1 { cnt = cnt + 1 }
         i = i + 1
     }
-    return s
+    return cnt
 }
 
-// Grand total of every element.
-fn mat_total(m: Array<Array<int>>) -> int {
-    var s = 0
-    for row in m {
-        for x in row { s = s + x }
-    }
-    return s
+fn is_reachable(&offsets: Array<int>, &adj: Array<int>, start: int, target: int) -> bool {
+    let dist = bfs_distances(&offsets, &adj, start)
+    return dist[target] != -1
 }
 
-// ============================================================================
-//  CSV / record rendering — borrow read-only, build owned strings via
-//  f-string interpolation (the book's recommended conversion path).
-// ============================================================================
-
-fn join_ints(items: Array<int>) -> string {
-    var acc = ""
-    var first = true
-    for x in items {
-        if first {
-            acc = f"{x}"
-            first = false
-        } else {
-            acc = f"{acc},{x}"
+// ---- DFS preorder (iterative LIFO, neighbors pushed in reverse) -------------
+fn dfs_preorder(&offsets: Array<int>, &adj: Array<int>, start: int) -> Array<int> {
+    var visited = filled(NODES, 0)
+    var visitOrder = []
+    var stack = []
+    stack.push(start)
+    while stack.len() > 0 {
+        let node = stack[stack.len() - 1]
+        stack.pop()
+        if visited[node] == 0 {
+            set_at(&mut visited, node, 1)
+            visitOrder.push(node)
+            // push neighbors in reverse listed visitOrder so first neighbor is on top
+            let deg = out_degree(&offsets, node)
+            var k = deg - 1
+            while k >= 0 {
+                let nb = neighbor_at(&offsets, &adj, node, k)
+                if visited[nb] == 0 {
+                    stack.push(nb)
+                }
+                k = k - 1
+            }
         }
     }
-    return acc
+    return visitOrder
 }
 
-fn render_regions_csv(regions: Array<Region>) -> string {
-    var acc = ""
-    var first = true
-    for r in regions {
-        let cell = f"{r.code}:{r.total_units}:{r.total_revenue}"
-        if first {
-            acc = cell
-            first = false
-        } else {
-            acc = f"{acc}|{cell}"
+// ---- Topological sort (Kahn, smallest-ready-id first) -----------------------
+fn topo_order(&offsets: Array<int>, &adj: Array<int>) -> Array<int> {
+    var indeg = filled(NODES, 0)
+    var u = 0
+    while u < NODES {
+        let deg = out_degree(&offsets, u)
+        var k = 0
+        while k < deg {
+            let v = neighbor_at(&offsets, &adj, u, k)
+            // read BEFORE the exclusive borrow (book §Reference Rules: owner
+            // cannot be read while &mut is active — sequence the read first).
+            let cur = indeg[v]
+            set_at(&mut indeg, v, cur + 1)
+            k = k + 1
+        }
+        u = u + 1
+    }
+    var visitOrder = []
+    var emitted = filled(NODES, 0)
+    var produced = 0
+    while produced < NODES {
+        var pick = -1
+        var i = 0
+        while i < NODES {
+            if emitted[i] == 0 {
+                if indeg[i] == 0 {
+                    if pick == -1 {
+                        pick = i
+                    }
+                }
+            }
+            i = i + 1
+        }
+        if pick == -1 {
+            return visitOrder
+        }
+        set_at(&mut emitted, pick, 1)
+        visitOrder.push(pick)
+        produced = produced + 1
+        let deg = out_degree(&offsets, pick)
+        var k = 0
+        while k < deg {
+            let v = neighbor_at(&offsets, &adj, pick, k)
+            let cur = indeg[v]
+            set_at(&mut indeg, v, cur - 1)
+            k = k + 1
         }
     }
-    return acc
+    return visitOrder
 }
 
-// Repeat a string n times (owned result), driven by a `while` over an owned int.
-fn repeat_str(s: string, n: int) -> string {
-    var acc = ""
+// ---- Longest path length (edges) from start on a DAG, via topo DP -----------
+fn longest_path_to(&offsets: Array<int>, &adj: Array<int>, start: int, target: int) -> int {
+    let topo = topo_order(&offsets, &adj)
+    var best = filled(NODES, -1)
+    set_at(&mut best, start, 0)
+    var t = 0
+    while t < topo.len() {
+        let u = topo[t]
+        if best[u] != -1 {
+            let deg = out_degree(&offsets, u)
+            var k = 0
+            while k < deg {
+                let v = neighbor_at(&offsets, &adj, u, k)
+                let cand = best[u] + 1
+                if cand > best[v] {
+                    set_at(&mut best, v, cand)
+                }
+                k = k + 1
+            }
+        }
+        t = t + 1
+    }
+    return best[target]
+}
+
+// compare two int arrays for equality (two SHARED borrows)
+fn arrays_equal(&a: Array<int>, &b: Array<int>) -> bool {
+    // results from indexing/.len() through a shared-ref param need an explicit
+    // type binding before use in a comparison (see REPORT.md book-gap note).
+    let la: int = a.len()
+    let lb: int = b.len()
+    if la != lb { return false }
     var i = 0
-    while i < n {
-        acc = acc + s
+    while i < la {
+        let ai: int = a[i]
+        let bi: int = b[i]
+        if ai != bi { return false }
         i = i + 1
     }
-    return acc
+    return true
 }
 
-// ============================================================================
-//  EXPLICIT reference parameters — the chapter's central teaching
-//  (book §"References as Function Parameters": "the most common use of
-//  references is passing values to functions"). These exercise &param (shared
-//  read) and &mut param (exclusive mutation in place), plus read_val (returning
-//  the dereferenced VALUE through a shared ref) and a scalar &mut mutation.
-// ============================================================================
+// =============================================================================
+// MAIN — build the CSR graph once, run every query through references, assert.
+// =============================================================================
 
-// Shared borrow for a read: returns arr[0] without taking ownership.
-fn ref_first(&arr) -> int {
-    return arr[0]
+let offsets = [0, 2, 4, 6, 7, 9, 10, 11, 11]
+let adj = [1, 2, 3, 4, 4, 5, 6, 6, 7, 7, 7]
+
+// --- structural facts ---
+check_int("num_nodes", NODES, 8)
+check_int("edge_count", edge_count(&offsets), 11)
+
+// out-degrees: [2,2,2,1,2,1,1,0]
+check_int("outdeg_0", out_degree(&offsets, 0), 2)
+check_int("outdeg_1", out_degree(&offsets, 1), 2)
+check_int("outdeg_2", out_degree(&offsets, 2), 2)
+check_int("outdeg_3", out_degree(&offsets, 3), 1)
+check_int("outdeg_4", out_degree(&offsets, 4), 2)
+check_int("outdeg_5", out_degree(&offsets, 5), 1)
+check_int("outdeg_6", out_degree(&offsets, 6), 1)
+check_int("outdeg_7", out_degree(&offsets, 7), 0)
+
+// in-degrees: [0,1,1,1,2,1,2,3]
+check_int("indeg_0", in_degree(&offsets, &adj, 0), 0)
+check_int("indeg_1", in_degree(&offsets, &adj, 1), 1)
+check_int("indeg_2", in_degree(&offsets, &adj, 2), 1)
+check_int("indeg_3", in_degree(&offsets, &adj, 3), 1)
+check_int("indeg_4", in_degree(&offsets, &adj, 4), 2)
+check_int("indeg_5", in_degree(&offsets, &adj, 5), 1)
+check_int("indeg_6", in_degree(&offsets, &adj, 6), 2)
+check_int("indeg_7", in_degree(&offsets, &adj, 7), 3)
+
+// edge existence
+check_bool("edge_1_4", has_edge(&offsets, &adj, 1, 4), true)
+check_bool("edge_4_1", has_edge(&offsets, &adj, 4, 1), false)
+check_bool("edge_7_0", has_edge(&offsets, &adj, 7, 0), false)
+check_bool("edge_0_1", has_edge(&offsets, &adj, 0, 1), true)
+check_bool("edge_6_7", has_edge(&offsets, &adj, 6, 7), true)
+
+// sources / sinks
+check_int("num_sources", count_sources(&offsets, &adj), 1)
+check_int("num_sinks", count_sinks(&offsets), 1)
+
+// --- BFS visitOrder from 0 = [0,1,2,3,4,5,6,7] ---
+let bfs = bfs_order(&offsets, &adj, 0)
+let bfs_expected = [0, 1, 2, 3, 4, 5, 6, 7]
+check_bool("bfs_order", arrays_equal(&bfs, &bfs_expected), true)
+check_int("bfs_len", bfs.len(), 8)
+
+// --- BFS distances from 0 = [0,1,1,2,2,2,3,3] ---
+let dist = bfs_distances(&offsets, &adj, 0)
+let dist_expected = [0, 1, 1, 2, 2, 2, 3, 3]
+check_bool("bfs_distances", arrays_equal(&dist, &dist_expected), true)
+check_int("dist_to_7", dist[7], 3)
+check_int("dist_to_6", dist[6], 3)
+check_int("dist_to_3", dist[3], 2)
+
+// --- reachability ---
+check_int("reachable_from_0", reachable_count(&offsets, &adj, 0), 8)
+check_bool("reach_0_to_7", is_reachable(&offsets, &adj, 0, 7), true)
+check_int("reachable_from_7", reachable_count(&offsets, &adj, 7), 1)
+check_bool("reach_7_to_0", is_reachable(&offsets, &adj, 7, 0), false)
+check_int("reachable_from_3", reachable_count(&offsets, &adj, 3), 3)
+check_bool("reach_3_to_7", is_reachable(&offsets, &adj, 3, 7), true)
+check_bool("reach_3_to_0", is_reachable(&offsets, &adj, 3, 0), false)
+
+// --- DFS preorder from 0 = [0,1,3,6,7,4,2,5] ---
+let dfs = dfs_preorder(&offsets, &adj, 0)
+let dfs_expected = [0, 1, 3, 6, 7, 4, 2, 5]
+check_bool("dfs_preorder", arrays_equal(&dfs, &dfs_expected), true)
+check_int("dfs_len", dfs.len(), 8)
+check_int("dfs_first", dfs[0], 0)
+check_int("dfs_last", dfs[7], 5)
+
+// --- topological visitOrder = [0,1,2,3,4,5,6,7] ---
+let topo = topo_order(&offsets, &adj)
+let topo_expected = [0, 1, 2, 3, 4, 5, 6, 7]
+check_bool("topo_order", arrays_equal(&topo, &topo_expected), true)
+check_int("topo_len", topo.len(), 8)
+check_int("topo_first", topo[0], 0)
+check_int("topo_last", topo[7], 7)
+
+// --- longest path lengths (edges) on the DAG ---
+check_int("longest_0_to_7", longest_path_to(&offsets, &adj, 0, 7), 4)
+check_int("longest_0_to_6", longest_path_to(&offsets, &adj, 0, 6), 3)
+check_int("longest_0_to_4", longest_path_to(&offsets, &adj, 0, 4), 2)
+check_int("longest_0_to_1", longest_path_to(&offsets, &adj, 0, 1), 1)
+check_int("longest_0_to_0", longest_path_to(&offsets, &adj, 0, 0), 0)
+check_int("longest_7_to_0", longest_path_to(&offsets, &adj, 7, 0), -1)
+
+// --- ownership: clone gives an independent copy; original stays usable -------
+let original = bfs_order(&offsets, &adj, 0)
+let copy = clone original
+check_int("clone_len_orig", original.len(), 8)
+check_int("clone_len_copy", copy.len(), 8)
+check_bool("clone_equal", arrays_equal(&original, &copy), true)
+
+// --- let mut accumulator: direct mutation, single owner ----------------------
+let mut deg_sum = 0
+var node = 0
+while node < NODES {
+    deg_sum = deg_sum + out_degree(&offsets, node)
+    node = node + 1
 }
+check_int("degree_sum_equals_edges", deg_sum, 11)
 
-// Return the dereferenced VALUE through a shared reference (book §Limits:
-// "return the VALUE through a reference"). The reference does not escape.
-fn ref_val(&x) -> int {
-    return x
-}
-
-// Exclusive borrow: append in place (book §"References as Function Parameters").
-fn ref_append(&mut arr, value) {
-    arr.push(value)
-}
-
-// Exclusive borrow: scale every element in place through index writes.
-fn ref_scale(&mut arr, factor) {
+// --- &mut mutation visible to caller -----------------------------------------
+var counters = filled(8, 0)
+fn bump_all(&mut a: Array<int>) {
     var i = 0
-    let n = arr.len()
-    while i < n {
-        arr[i] = arr[i] * factor
+    while i < a.len() {
+        a[i] = a[i] + 1
         i = i + 1
     }
 }
+bump_all(&mut counters)
+bump_all(&mut counters)
+check_int("counters_0", counters[0], 2)
+check_int("counters_7", counters[7], 2)
 
-// Exclusive borrow of a scalar: mutate through the deref.
-fn ref_bump(&mut n) {
-    n = n + 1
-}
+// --- NLL: a shared read ends, then we mutate the owner -----------------------
+var live = filled(3, 5)
+let snap0 = live[0]
+check_int("nll_snap0", snap0, 5)
+live.push(9)
+check_int("nll_after_push", live.len(), 4)
+check_int("nll_pushed", live[3], 9)
 
-// Accumulator struct mutated in place through a &mut reference, fed one value
-// at a time from a borrowed source array (read via &).
-type Acc { sum: int, count: int }
-
-fn acc_add(&mut acc, v) {
-    acc.sum = acc.sum + v
-    acc.count = acc.count + 1
-}
-
-fn acc_sum(&acc) -> int {
-    return acc.sum
-}
-
-fn acc_count(&acc) -> int {
-    return acc.count
-}
-
-// ============================================================================
-//  Fixture builder — the single owned dataset
-// ============================================================================
-
-fn build_sales() -> Array<Sale> {
-    let mut s: Array<Sale> = []
-    // id, region, units, price                       revenue = units*price
-    s.push(Sale { id: 1, region: 0, units: 10, price: 5 })   // North  50
-    s.push(Sale { id: 2, region: 1, units: 4,  price: 20 })  // South  80
-    s.push(Sale { id: 3, region: 0, units: 7,  price: 9 })   // North  63
-    s.push(Sale { id: 4, region: 2, units: 12, price: 3 })   // East   36
-    s.push(Sale { id: 5, region: 3, units: 6,  price: 15 })  // West   90
-    s.push(Sale { id: 6, region: 1, units: 9,  price: 11 })  // South  99
-    s.push(Sale { id: 7, region: 2, units: 5,  price: 8 })   // East   40
-    s.push(Sale { id: 8, region: 3, units: 3,  price: 25 })  // West   75
-    return s
-}
-
-// ============================================================================
-//  Assertion plumbing (module-scope mutable counter via `var`)
-// ============================================================================
-
-var FAILS = 0
-
-fn check_int(name, expected, got) {
-    if got != expected {
-        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
-        FAILS = FAILS + 1
-    }
-}
-
-fn check_str(name, expected, got) {
-    if got != expected {
-        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
-        FAILS = FAILS + 1
-    }
-}
-
-// ============================================================================
-//  Main: build once, then BORROW the dataset read-only across many analyses
-// ============================================================================
-
-let sales = build_sales()
-
-// --- Basic int-array reference reads -----------------------------------------
-// nums fixed: [3, 7, 2, 9, 4]  => sum=25, count=5, max=9, min=2, over5=2, asc=3
-let nums = [3, 7, 2, 9, 4]
-check_int("sum_ints", 25, sum_ints(nums))
-check_int("count_ints", 5, count_ints(nums))
-check_int("max_int", 9, max_int(nums))
-check_int("min_int", 2, min_int(nums))
-check_int("count_over_5", 2, count_over(nums, 5))
-// ascending_steps: 3>sentinel(+1), 7>3(+1), 2<7(no), 9>2(+1), 4<9(no) => 3
-check_int("ascending_steps", 3, ascending_steps(nums))
-
-// --- clone keeps the source valid (book §Move and Clone) ---------------------
-let nums_clone = clone nums
-check_int("clone_src_sum", 25, sum_ints(nums))        // source still valid
-check_int("clone_dst_sum", 25, sum_ints(nums_clone))  // clone equal
-
-// --- doubled builds a new owned array, source untouched ----------------------
-let dbl = doubled(nums)
-// doubled => [6,14,4,18,8] sum=50; source still [3,7,2,9,4] sum=25
-check_int("doubled_sum", 50, sum_ints(dbl))
-check_int("doubled_len", 5, count_ints(dbl))
-check_int("doubled_first", 6, dbl[0])
-check_int("doubled_last", 8, dbl[4])
-check_int("source_after_doubled", 25, sum_ints(nums))
-
-// --- explicit move of a Copy scalar (book Quick Reference: let y = move x) ----
-let base = 100
-let moved = move base
-check_int("move_copy", 100, moved)
-
-// --- Sale-level analysis (borrow `sales` read-only repeatedly) ----------------
-// total units = 10+4+7+12+6+9+5+3 = 56
-check_int("total_units", 56, total_units(sales))
-// revenues = 50+80+63+36+90+99+40+75 = 533
-check_int("total_revenue", 533, total_revenue(sales))
-
-// per-region units:
-//  North(0): 10+7   = 17
-//  South(1): 4+9    = 13
-//  East(2):  12+5   = 17
-//  West(3):  6+3    = 9
-check_int("units_north", 17, region_units(sales, 0))
-check_int("units_south", 13, region_units(sales, 1))
-check_int("units_east",  17, region_units(sales, 2))
-check_int("units_west",   9, region_units(sales, 3))
-
-// per-region revenue:
-//  North: 50+63 = 113
-//  South: 80+99 = 179
-//  East:  36+40 = 76
-//  West:  90+75 = 165
-check_int("rev_north", 113, region_revenue(sales, 0))
-check_int("rev_south", 179, region_revenue(sales, 1))
-check_int("rev_east",   76, region_revenue(sales, 2))
-check_int("rev_west",  165, region_revenue(sales, 3))
-
-// per-region count: North 2, South 2, East 2, West 2
-check_int("cnt_north", 2, region_count(sales, 0))
-check_int("cnt_west",  2, region_count(sales, 3))
-
-// top sale: revenues [50,80,63,36,90,99,40,75]; max=99 at id 6
-check_int("top_sale_revenue", 99, top_sale_revenue(sales))
-check_int("top_sale_id", 6, top_sale_id(sales))
-
-// --- Owned derived arrays ----------------------------------------------------
-let revs = revenues(sales)
-check_int("revs_len", 8, count_ints(revs))
-check_int("revs_sum", 533, sum_ints(revs))
-check_int("revs_max", 99, max_int(revs))
-check_int("revs_min", 36, min_int(revs))
-// ids with revenue > 70: id2(80),id5(90),id6(99),id8(75) => 4 ids, sum of ids=2+5+6+8=21
-let big_ids = ids_over(sales, 70)
-check_int("big_ids_len", 4, count_ints(big_ids))
-check_int("big_ids_sum", 21, sum_ints(big_ids))
-
-// --- Stat record over revenues ------------------------------------------------
-// revenues: min=36 max=99 sum=533 count=8
-let st = stats_of(revs)
-check_int("stat_min", 36, st.min)
-check_int("stat_max", 99, st.max)
-check_int("stat_sum", 533, st.sum)
-check_int("stat_count", 8, st.count)
-// mean floor = 533/8 = 66 (integer division truncates toward zero)
-check_int("mean_floor_revs", 66, mean_floor(revs))
-
-// number mean of [2,4,6] = 4.0 (exercise as-number cast path)
-let mn = mean_number([2, 4, 6])
-// floor(4.0)=4 keeps the assertion integer-exact
-check_int("mean_number_floor", 4, (mn as int))
-
-// --- Owned per-region summary array + string report --------------------------
-let codes = [0, 1, 2, 3]
-let regions = summarize_regions(sales, codes)
-check_int("regions_len", 4, count_ints_regions(regions))
-// summed total_units across regions must equal 56 (conservation)
-check_int("regions_units_sum", 56, regions_units_sum(regions))
-// summed total_revenue across regions must equal 533 (conservation)
-check_int("regions_rev_sum", 533, regions_rev_sum(regions))
-// name join in code order
-check_str("name_join", "North,South,East,West", name_join(regions))
-
-// --- Index-based reductions over borrowed arrays -----------------------------
-// idx_sum(revs) == sum_ints(revs) == 533 (sequential vs index agreement)
-check_int("idx_sum_revs", 533, idx_sum(revs))
-// dot([1,2,3],[4,5,6]) = 4+10+18 = 32
-check_int("dot", 32, dot([1, 2, 3], [4, 5, 6]))
-
-// reversed(nums): nums=[3,7,2,9,4] => [4,9,2,7,3]
-let rev_nums = reversed(nums)
-check_int("reversed_len", 5, count_ints(rev_nums))
-check_int("reversed_first", 4, rev_nums[0])
-check_int("reversed_last", 3, rev_nums[4])
-check_int("reversed_sum", 25, sum_ints(rev_nums))   // permutation preserves sum
-check_int("source_after_reversed", 25, sum_ints(nums))  // source untouched
-
-// prefix_sums(nums) = [3,10,12,21,25]
-let pre = prefix_sums(nums)
-check_int("prefix_len", 5, count_ints(pre))
-check_int("prefix_1", 10, pre[1])
-check_int("prefix_3", 21, pre[3])
-check_int("prefix_last", 25, pre[4])
-
-// --- Bucketing over revenues -------------------------------------------------
-// revs=[50,80,63,36,90,99,40,75]; <40:{36}=1, 40..<80:{50,63,40,75}=4, >=80:{80,90,99}=3
-let buckets = bucket_counts(revs)
-check_int("bucket_low", 1, buckets[0])
-check_int("bucket_mid", 4, buckets[1])
-check_int("bucket_high", 3, buckets[2])
-// buckets partition all 8 elements
-check_int("bucket_total", 8, sum_ints(buckets))
-
-// --- Selection sort: owned sorted copy, borrowed source untouched ------------
-// sorted_asc(revs) = [36,40,50,63,75,80,90,99]
-let srt = sorted_asc(revs)
-check_int("sorted_len", 8, count_ints(srt))
-check_int("sorted_first", 36, srt[0])
-check_int("sorted_last", 99, srt[7])
-check_int("sorted_3", 63, srt[3])
-check_int("sorted_sum", 533, sum_ints(srt))         // sort preserves sum
-check_int("source_after_sort", 533, sum_ints(revs)) // borrowed source untouched
-// median of odd-length nums: sorted [2,3,4,7,9], middle = 4
-check_int("median_nums", 4, median_odd(nums))
-
-// count_eq: one revenue equals 90, none equals 100
-check_int("count_eq_90", 1, count_eq(revs, 90))
-check_int("count_eq_100", 0, count_eq(revs, 100))
-
-// --- Running-balance ledger over signed deltas (borrowed read-only) ----------
-// deltas=[-50,30,-100,200,-20], opening=100
-// running: 50, 80, -20, 180, 160 => final 160, low-water -20
-let deltas = [-50, 30, -100, 200, -20]
-check_int("final_balance", 160, final_balance(deltas, 100))
-check_int("low_water", -20, low_water(deltas, 100))
-// deltas array still intact after both borrows
-check_int("deltas_sum_after", 60, sum_ints(deltas))  // -50+30-100+200-20 = 60
-
-// --- Matrix transforms over a borrowed nested array --------------------------
-// M = [[1,2,3],[4,5,6],[7,8,9]]
-let matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
-// row sums = [6,15,24]
-let rs = mat_row_sums(matrix)
-check_int("mat_rs_0", 6, rs[0])
-check_int("mat_rs_1", 15, rs[1])
-check_int("mat_rs_2", 24, rs[2])
-check_int("mat_rs_sum", 45, sum_ints(rs))
-// col sums = [12,15,18]
-let cs = mat_col_sums(matrix)
-check_int("mat_cs_0", 12, cs[0])
-check_int("mat_cs_1", 15, cs[1])
-check_int("mat_cs_2", 18, cs[2])
-check_int("mat_cs_sum", 45, sum_ints(cs))
-// trace = 1+5+9 = 15 ; total = 45
-check_int("mat_trace", 15, mat_trace(matrix))
-check_int("mat_total", 45, mat_total(matrix))
-// row-sum total and col-sum total must agree (conservation)
-check_int("mat_conservation", sum_ints(rs), sum_ints(cs))
-
-// --- CSV / string rendering --------------------------------------------------
-// join_ints([1,22,333]) = "1,22,333"
-check_str("join_ints", "1,22,333", join_ints([1, 22, 333]))
-// join over the (sorted) revenue array
-check_str("join_sorted_revs", "36,40,50,63,75,80,90,99", join_ints(srt))
-// render regions: "0:17:113|1:13:179|2:17:76|3:9:165"
-check_str("render_csv", "0:17:113|1:13:179|2:17:76|3:9:165", render_regions_csv(regions))
-// repeat_str
-check_str("repeat_str", "ababab", repeat_str("ab", 3))
-check_str("repeat_zero", "", repeat_str("x", 0))
-
-// --- Explicit &/&mut reference parameters (chapter's central teaching) -------
-// Shared borrow read: first element of revs = 50 (explicit & at call site,
-// matching book §"References as Function Parameters": read_first(&data)).
-check_int("ref_first_revs", 50, ref_first(&revs))
-// Return value through a shared ref (& on a named binding).
-let probe_val = 99
-check_int("ref_val", 99, ref_val(&probe_val))
-
-// Exclusive borrow appends in place. Start from an owned working array.
-let mut work: Array<int> = [1, 2, 3]
-ref_append(&mut work, 4)
-ref_append(&mut work, 5)
-check_int("ref_append_len", 5, work.len())     // auto-ref (&work).len()
-check_int("ref_append_sum", 15, sum_ints(work))  // 1+2+3+4+5
-
-// Exclusive borrow scales every element in place: [1,2,3,4,5]*10 => [10..50], sum 150.
-ref_scale(&mut work, 10)
-check_int("ref_scale_first", 10, ref_first(&work))
-check_int("ref_scale_sum", 150, sum_ints(work))
-
-// Scalar &mut mutation.
-let mut counter = 41
-ref_bump(&mut counter)
-check_int("ref_bump", 42, counter)
-
-// Accumulate a borrowed source through a &mut struct: sum of nums=[3,7,2,9,4]=25, count=5.
-let mut acc = Acc { sum: 0, count: 0 }
-for x in nums { acc_add(&mut acc, x) }
-check_int("acc_sum", 25, acc_sum(&acc))
-check_int("acc_count", 5, acc_count(&acc))
-// Source array untouched by the read-borrow loop.
-check_int("acc_source_after", 25, sum_ints(nums))
-
-// ============================================================================
-//  Final verdict
-// ============================================================================
-
-if FAILS == 0 {
+// --- final tally -------------------------------------------------------------
+if failures == 0 {
     print("ALL_CHECKS_PASSED")
-} else {
-    print(f"FAILS={FAILS}")
 }

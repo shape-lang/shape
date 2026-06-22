@@ -1,3 +1,0 @@
-use mylib::stats
-let r = stats::zqxmean(10, 20)
-print(f"ns={r}")

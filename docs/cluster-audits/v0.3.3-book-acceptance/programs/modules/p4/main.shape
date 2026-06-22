@@ -1,3 +1,0 @@
-from mylib::stats use { zqxmean }
-let r = zqxmean(10, 20)
-print(f"direct={r}")

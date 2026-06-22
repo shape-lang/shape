@@ -1,6 +1,0 @@
-let mut x = 10
-let r1 = &x
-let r2 = &x
-let m = &mut x
-print(r1)
-print(m)

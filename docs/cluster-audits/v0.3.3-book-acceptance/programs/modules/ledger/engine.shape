@@ -1,0 +1,92 @@
+// ledger/engine.shape  -> importable as "ledger::engine"
+//
+// Posting engine: folds transactions onto an opening balance. Imports the
+// model (cross-module) and money helpers. All iteration is via explicit
+// `for` loops over `Array<Txn>` so struct field types are fully resolved.
+
+from ledger::model use { Txn, Account, Category }
+from ledger::money use { total }
+
+// Net of all transaction amounts (signed cents).
+pub fn net(txns: Array<Txn>) -> int {
+    let mut b = 0
+    for t in txns {
+        b = b + t.cents
+    }
+    b
+}
+
+// Closing balance = opening + net.
+pub fn closing_balance(acct: Account, txns: Array<Txn>) -> int {
+    acct.opening_cents + net(txns)
+}
+
+// Sum of all credits (positive amounts).
+pub fn total_credits(txns: Array<Txn>) -> int {
+    let mut s = 0
+    for t in txns {
+        if t.cents > 0 {
+            s = s + t.cents
+        }
+    }
+    s
+}
+
+// Sum of all debits (negative amounts), returned as a positive magnitude.
+pub fn total_debits(txns: Array<Txn>) -> int {
+    let mut s = 0
+    for t in txns {
+        if t.cents < 0 {
+            s = s + t.cents
+        }
+    }
+    0 - s
+}
+
+// Count transactions in a given category.
+pub fn count_in(txns: Array<Txn>, cat: Category) -> int {
+    let mut n = 0
+    for t in txns {
+        let hit = match cat {
+            Category::Food => match t.cat { Category::Food => true, _ => false },
+            Category::Rent => match t.cat { Category::Rent => true, _ => false },
+            Category::Transport => match t.cat { Category::Transport => true, _ => false },
+            Category::Fun => match t.cat { Category::Fun => true, _ => false },
+            Category::Income => match t.cat { Category::Income => true, _ => false },
+        }
+        if hit {
+            n = n + 1
+        }
+    }
+    n
+}
+
+// Sum of amounts (signed cents) in a given category.
+pub fn sum_in(txns: Array<Txn>, cat: Category) -> int {
+    let mut s = 0
+    for t in txns {
+        let hit = match cat {
+            Category::Food => match t.cat { Category::Food => true, _ => false },
+            Category::Rent => match t.cat { Category::Rent => true, _ => false },
+            Category::Transport => match t.cat { Category::Transport => true, _ => false },
+            Category::Fun => match t.cat { Category::Fun => true, _ => false },
+            Category::Income => match t.cat { Category::Income => true, _ => false },
+        }
+        if hit {
+            s = s + t.cents
+        }
+    }
+    s
+}
+
+// Running balances: produces the closing balance after each successive txn.
+pub fn running(acct: Account, txns: Array<Txn>) -> Array<int> {
+    let start: int = acct.opening_cents
+    let mut out: Array<int> = [start]
+    let mut b: int = start
+    for t in txns {
+        b = b + t.cents
+        out.push(b)
+    }
+    out
+}
