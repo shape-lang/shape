@@ -371,6 +371,39 @@ impl BytecodeCompiler {
         }
     }
 
+    /// STAGE-P1 (v0.3.3 strict-flip): recover a match scrutinee's `ConcreteType`
+    /// from the keystone expr-type-table when the structural
+    /// `concrete_type_for_expr` resolver declines.
+    ///
+    /// The structural resolver does not project a function CALL's declared
+    /// return type, so `match g() { Ok(p) => p.x + p.y }` (where `g() ->
+    /// Result<Point,string>`) reaches `compile_match_binding` with no scrutinee
+    /// ConcreteType, the `Ok(p)` payload binder is never stamped with `Point`,
+    /// and `p.x` / `p.y` erase to `unknown` at the binop. The inference engine
+    /// already proved the scrutinee's type and recorded it in
+    /// `resolved_expr_types` keyed by span (the T1 keystone). Read that proven
+    /// type back and convert it to a `ConcreteType` via the same declared-
+    /// annotation projection the explicit-annotation path uses
+    /// (`declared_annotation_concrete_type`). No fabrication: the table holds
+    /// only fully-resolved types (free vars are dropped by
+    /// `finalize_expr_type_table`), and a type that does not project to a
+    /// `ConcreteType` (or a dummy span) yields `None`, preserving the prior
+    /// surface-and-stop behaviour.
+    fn keystone_scrutinee_concrete_type(
+        &self,
+        scrutinee: &Expr,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        let span = shape_ast::ast::Spanned::span(scrutinee);
+        if span.is_dummy() {
+            return None;
+        }
+        let resolved = self.resolved_expr_types.get(&span)?;
+        let ann = resolved.to_annotation()?;
+        crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+            self, &ann,
+        )
+    }
+
     /// Compile a match expression
     pub(super) fn compile_expr_match(
         &mut self,
@@ -388,7 +421,21 @@ impl BytecodeCompiler {
             crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
                 self,
                 &match_expr.scrutinee,
-            );
+            )
+            // STAGE-P1 (v0.3.3 strict-flip): when the structural
+            // `concrete_type_for_expr` declines (e.g. the scrutinee is a CALL —
+            // `match g() { Ok(p) => p.x + p.y }` — whose declared
+            // `Result<Point,string>` return type the structural resolver does
+            // not project), fall back to the keystone expr-type-table. The
+            // inference engine walked the full program and recorded `g()`'s
+            // resolved type (`Result<Point,string>`) keyed by the scrutinee's
+            // source span; converting that proven type to a `ConcreteType` lets
+            // `compile_match_binding` thread the payload (`Point`) onto the
+            // `Ok(p)` binder so `p.x` / `p.y` resolve instead of erasing to
+            // `unknown` at the binop. This reads inference's own output — no
+            // fabrication: a miss (free var dropped by `finalize_expr_type_table`)
+            // leaves `scrutinee_ct` None and the prior surface-and-stop behaviour.
+            .or_else(|| self.keystone_scrutinee_concrete_type(&match_expr.scrutinee));
         self.compile_expr(&match_expr.scrutinee)?;
         let scrutinee_local = self.declare_local("__match_scrutinee")?;
         if let Some(schema_id) = self.last_expr_schema {
