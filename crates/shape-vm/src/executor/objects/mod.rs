@@ -222,6 +222,18 @@ fn typed_array_method_registry(
         // `array_aggregation::*` / `array_basic::*` handlers in
         // ARRAY_METHODS now cover len/length/push/pop/first/last/get/set/
         // sum/avg/mean/min/max/clone uniformly.
+        //
+        // strict-flip c7 SURFACE-AND-STOP (2026-06-22): the numeric-transform
+        // surface (cumsum/diff/abs/dot/norm/normalize/sqrt/ln/exp/std/variance)
+        // is NOT restored here. Routing F64→FLOAT_ARRAY_METHODS reaches only
+        // `typed_array_methods::*` ckpt3_surface STUBS — every entry in that
+        // module is `Err(ckpt3_surface(...))` pending the V3-S5 ckpt-6 v2-raw
+        // `TypedArray<T>` per-T carrier migration (~40 entry points). Worse,
+        // FLOAT_ARRAY_METHODS's `sum`/`avg`/`min`/`max` are ALSO stubs, so
+        // routing there REGRESSES the working kind-generic
+        // `array_aggregation::handle_{sum,avg,min,max}_v2` in ARRAY_METHODS.
+        // Restoring real numeric transforms requires the ckpt-6 carrier, not
+        // a routing flip — surfaced, not forced.
         V2ElemType::I64
         | V2ElemType::I32
         | V2ElemType::I8

@@ -96,10 +96,54 @@ fn read_as_i64(slot: &KindedSlot) -> Result<i64, VMError> {
             s.parse::<i64>()
                 .map_err(|_| VMError::RuntimeError(format!("cannot convert string '{s}' to int")))
         }
+        // strict-flip c4: Array-element strings flow as the v2-raw
+        // `*const StringObj` carrier (kind=StringV2), distinct from the
+        // let-bound/literal `Arc<String>` carrier (kind=String). Both are
+        // `string` values; recognize the proven carrier and parse its
+        // UTF-8 bytes — no bit-reinterpret, the kind label drives the read.
+        NativeKind::StringV2 => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "cannot convert null string to int".to_string(),
+                ));
+            }
+            // SAFETY: kind=StringV2 => bits = `*const StringObj` with a
+            // bumped refcount owned by the carrier (§2.7.5 construction
+            // contract). Borrow the UTF-8 bytes without consuming the share.
+            let s = unsafe {
+                shape_value::v2::string_obj::StringObj::as_str(
+                    bits as *const shape_value::v2::string_obj::StringObj,
+                )
+            };
+            s.parse::<i64>()
+                .map_err(|_| VMError::RuntimeError(format!("cannot convert string '{s}' to int")))
+        }
         NativeKind::Ptr(HeapKind::Decimal) => {
             let bits = slot.slot.raw();
             // SAFETY: `Ptr(Decimal)` bits are `Arc::into_raw::<Decimal>`.
             let d: &rust_decimal::Decimal = unsafe { &*(bits as *const rust_decimal::Decimal) };
+            use rust_decimal::prelude::ToPrimitive;
+            d.to_i64().ok_or_else(|| {
+                VMError::RuntimeError(format!("cannot convert decimal '{d}' to int"))
+            })
+        }
+        // strict-flip c4: v2-raw `*const DecimalObj` carrier (kind=DecimalV2),
+        // sibling to the `Ptr(HeapKind::Decimal)` arm above.
+        NativeKind::DecimalV2 => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "cannot convert null decimal to int".to_string(),
+                ));
+            }
+            // SAFETY: kind=DecimalV2 => bits = `*const DecimalObj` with a
+            // bumped refcount (§2.7.5). `value(ptr)` returns a copy.
+            let d = unsafe {
+                shape_value::v2::decimal_obj::DecimalObj::value(
+                    bits as *const shape_value::v2::decimal_obj::DecimalObj,
+                )
+            };
             use rust_decimal::prelude::ToPrimitive;
             d.to_i64().ok_or_else(|| {
                 VMError::RuntimeError(format!("cannot convert decimal '{d}' to int"))
@@ -161,10 +205,48 @@ fn read_as_f64(slot: &KindedSlot) -> Result<f64, VMError> {
                 VMError::RuntimeError(format!("cannot convert string '{s}' to number"))
             })
         }
+        // strict-flip c4: v2-raw `*const StringObj` carrier (kind=StringV2)
+        // — Array-element string sibling of the `Arc<String>` arm above.
+        NativeKind::StringV2 => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "cannot convert null string to number".to_string(),
+                ));
+            }
+            // SAFETY: kind=StringV2 => bits = `*const StringObj` (§2.7.5).
+            let s = unsafe {
+                shape_value::v2::string_obj::StringObj::as_str(
+                    bits as *const shape_value::v2::string_obj::StringObj,
+                )
+            };
+            s.parse::<f64>().map_err(|_| {
+                VMError::RuntimeError(format!("cannot convert string '{s}' to number"))
+            })
+        }
         NativeKind::Ptr(HeapKind::Decimal) => {
             let bits = slot.slot.raw();
             // SAFETY: `Ptr(Decimal)` => `Arc::into_raw::<Decimal>` bits.
             let d: &rust_decimal::Decimal = unsafe { &*(bits as *const rust_decimal::Decimal) };
+            use rust_decimal::prelude::ToPrimitive;
+            d.to_f64().ok_or_else(|| {
+                VMError::RuntimeError(format!("cannot convert decimal '{d}' to number"))
+            })
+        }
+        // strict-flip c4: v2-raw `*const DecimalObj` carrier (kind=DecimalV2).
+        NativeKind::DecimalV2 => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(VMError::RuntimeError(
+                    "cannot convert null decimal to number".to_string(),
+                ));
+            }
+            // SAFETY: kind=DecimalV2 => bits = `*const DecimalObj` (§2.7.5).
+            let d = unsafe {
+                shape_value::v2::decimal_obj::DecimalObj::value(
+                    bits as *const shape_value::v2::decimal_obj::DecimalObj,
+                )
+            };
             use rust_decimal::prelude::ToPrimitive;
             d.to_f64().ok_or_else(|| {
                 VMError::RuntimeError(format!("cannot convert decimal '{d}' to number"))
@@ -837,6 +919,57 @@ mod tests {
     fn read_as_f64_from_bool() {
         let s = KindedSlot::from_bool(true);
         assert_eq!(read_as_f64(&s).unwrap(), 1.0);
+    }
+
+    // ── strict-flip c4: v2-raw StringV2 / DecimalV2 carrier conversion ───
+    // Array-element strings flow as the v2-raw `*const StringObj` carrier
+    // (kind=StringV2), not the `Arc<String>` carrier. `read_as_i64` /
+    // `read_as_f64` must recognize the proven carrier and parse its bytes.
+
+    // NOTE: the constructed `KindedSlot` owns the one strong-count share
+    // minted by `StringObj::new` / `DecimalObj::new` (refcount=1); its
+    // `KindedSlot::Drop` impl releases that share via `release_elem` at end
+    // of scope. No manual `*::drop` here — that would double-free.
+
+    #[test]
+    fn read_as_i64_from_string_v2_parses() {
+        use shape_value::v2::string_obj::StringObj;
+        let ptr = StringObj::new("42");
+        let s = KindedSlot::new(ValueSlot::from_raw(ptr as u64), NativeKind::StringV2);
+        assert_eq!(read_as_i64(&s).unwrap(), 42);
+    }
+
+    #[test]
+    fn read_as_i64_from_string_v2_non_numeric_errors() {
+        use shape_value::v2::string_obj::StringObj;
+        let ptr = StringObj::new("not-a-number");
+        let s = KindedSlot::new(ValueSlot::from_raw(ptr as u64), NativeKind::StringV2);
+        assert!(read_as_i64(&s).is_err());
+    }
+
+    #[test]
+    fn read_as_f64_from_string_v2_parses() {
+        use shape_value::v2::string_obj::StringObj;
+        let ptr = StringObj::new("3.14");
+        let s = KindedSlot::new(ValueSlot::from_raw(ptr as u64), NativeKind::StringV2);
+        assert_eq!(read_as_f64(&s).unwrap(), 3.14);
+    }
+
+    #[test]
+    fn read_as_i64_from_decimal_v2() {
+        use shape_value::v2::decimal_obj::DecimalObj;
+        let ptr = DecimalObj::new(rust_decimal::Decimal::from(123));
+        let s = KindedSlot::new(ValueSlot::from_raw(ptr as u64), NativeKind::DecimalV2);
+        assert_eq!(read_as_i64(&s).unwrap(), 123);
+    }
+
+    #[test]
+    fn read_as_f64_from_decimal_v2() {
+        use rust_decimal::prelude::FromPrimitive;
+        use shape_value::v2::decimal_obj::DecimalObj;
+        let ptr = DecimalObj::new(rust_decimal::Decimal::from_f64(2.5).unwrap());
+        let s = KindedSlot::new(ValueSlot::from_raw(ptr as u64), NativeKind::DecimalV2);
+        assert_eq!(read_as_f64(&s).unwrap(), 2.5);
     }
 
     #[test]
