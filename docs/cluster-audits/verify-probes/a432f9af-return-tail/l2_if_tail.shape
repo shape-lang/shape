@@ -1,0 +1,13 @@
+type Point { x: int, y: int }
+fn g() -> Result<Point, string> { Ok(Point { x: 1, y: 2 }) }
+fn use_it(c: bool) -> int {
+  if c {
+    match g() {
+      Ok(Some(n)) => n + 1,
+      _ => 0,
+    }
+  } else {
+    0
+  }
+}
+fn main() { print(use_it(true)) }

@@ -1,0 +1,9 @@
+fn g() -> Result<int, string> { Ok(5) }
+fn sink(n: int) -> int { n + 1 }
+fn use_it() -> int {
+  match g() {
+    Ok(Some(n)) => sink(n),
+    _ => 0,
+  }
+}
+fn main() { print(use_it()) }
