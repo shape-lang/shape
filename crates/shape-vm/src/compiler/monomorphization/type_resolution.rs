@@ -2166,72 +2166,165 @@ fn function_call_return_concrete_type(
 /// `None`; the binding then meets the let-annotation Unknown-accept guard
 /// (FIX B) rather than laundering `unknown` into a concrete slot. NO silent
 /// widen, NO `int`/`number` unify.
-fn hof_unannotated_call_return_concrete_type(
-    compiler: &BytecodeCompiler,
-    callee: &shape_ast::ast::FunctionDef,
-    args: &[Expr],
+fn hof_unannotated_call_return_concrete_type<'c>(
+    compiler: &'c BytecodeCompiler,
+    callee: &'c shape_ast::ast::FunctionDef,
+    args: &'c [Expr],
 ) -> Option<ConcreteType> {
     // Generic callees route through the type-param substitution path; this
     // helper only handles the un-annotated, value-param HOF.
     if callee.type_params.as_ref().is_some_and(|tps| !tps.is_empty()) {
         return None;
     }
+    if callee.params.len() != args.len() {
+        return None;
+    }
 
-    // Map each callee param NAME to the actual argument expression at this
-    // call site. A destructuring/rest param is not a simple HOF forwarding
-    // param — skip the whole resolution (conservative `None`).
-    let mut param_arg: HashMap<&str, &Expr> = HashMap::new();
+    // Build the resolution environment: each callee param NAME maps to either
+    // the concrete TYPE of its scalar call-site argument, or — when the argument
+    // names a concrete non-generic user function — that callable's definition.
+    // A destructuring/rest param is not a simple forwarding param; the whole
+    // resolution bails (conservative `None`).
+    let mut env: HashMap<&str, ParamBinding<'c>> = HashMap::new();
     for (p, a) in callee.params.iter().zip(args.iter()) {
         let ident = p.pattern.as_identifier()?;
-        param_arg.insert(ident, a);
-    }
-    if param_arg.len() != callee.params.len() || param_arg.len() != args.len() {
-        return None;
-    }
-
-    // The callee body's tail expression must be a bare call of one of the
-    // callee's own parameters: `f(x)` where `f` is `param_arg[f]`.
-    let tail = body_tail_expr(&callee.body)?;
-    let Expr::FunctionCall {
-        name: callee_param,
-        args: inner_args,
-        ..
-    } = tail
-    else {
-        return None;
-    };
-    let forwarded_callable_arg = param_arg.get(callee_param.as_str())?;
-
-    // The forwarded callable argument must name a concrete, non-generic
-    // user function (`ret_num`). A closure-literal or unresolved callable
-    // yields `None` (the binding then meets FIX B).
-    let Expr::Identifier(callable_name, _) = forwarded_callable_arg else {
-        return None;
-    };
-    let callable_def = compiler.function_defs.get(callable_name.as_str())?;
-    if callable_def
-        .type_params
-        .as_ref()
-        .is_some_and(|tps| !tps.is_empty())
-    {
-        return None;
-    }
-
-    // Resolve the concrete types of the callable's actual arguments. Each
-    // inner-call argument is either another callee param (resolve through
-    // `param_arg` to the OUTER call-site argument expression) or a literal /
-    // already-concrete expression. Every argument must resolve concretely.
-    let mut callable_arg_cts: Vec<ConcreteType> = Vec::with_capacity(inner_args.len());
-    for ia in inner_args {
-        let resolved_expr: &Expr = match ia {
-            Expr::Identifier(n, _) => param_arg.get(n.as_str()).copied().unwrap_or(ia),
-            _ => ia,
+        let binding = match a {
+            // A bare identifier argument MAY name a concrete callable
+            // (function-valued param: `apply2(id, ret_num, 3.0)` passes `id`
+            // and `ret_num` as callables). Prefer the callable binding; fall
+            // back to a concrete-type resolution (the identifier may be a
+            // value-typed local).
+            Expr::Identifier(arg_name, _) => {
+                if let Some(callable) = resolvable_callable(compiler, arg_name) {
+                    ParamBinding::Callable(callable)
+                } else {
+                    ParamBinding::Type(concrete_type_for_expr(compiler, a)?)
+                }
+            }
+            _ => ParamBinding::Type(concrete_type_for_expr(compiler, a)?),
         };
-        callable_arg_cts.push(concrete_type_for_expr(compiler, resolved_expr)?);
+        env.insert(ident, binding);
+    }
+    if env.len() != callee.params.len() {
+        return None;
     }
 
-    // The forwarded callable's return type, given those concrete arg types.
-    unannotated_fn_return_concrete_type(compiler, callable_def, &callable_arg_cts)
+    // Resolve the callee body's tail expression under this environment. The
+    // tail may be `f(x)` (1-level forward) or `g(f(x))` (nested HOF) — both
+    // resolve structurally through the param-callable bindings, never a runtime
+    // probe (ADR-006 §2.7.5). Any unresolvable link yields `None`.
+    let tail = body_tail_expr(&callee.body)?;
+    hof_body_expr_concrete_type(compiler, &env, tail)
+}
+
+/// A callee parameter's resolution binding inside a HOF body: either the
+/// concrete TYPE of a scalar argument, or a concrete callable function the
+/// argument names (a function-valued parameter).
+enum ParamBinding<'c> {
+    Type(ConcreteType),
+    Callable(&'c shape_ast::ast::FunctionDef),
+}
+
+/// `name` resolves to a concrete, non-generic user function (not a local
+/// variable / module binding shadowing it). Returns its definition, or `None`.
+fn resolvable_callable<'c>(
+    compiler: &'c BytecodeCompiler,
+    name: &str,
+) -> Option<&'c shape_ast::ast::FunctionDef> {
+    if compiler.resolve_local(name).is_some() {
+        return None;
+    }
+    let def = compiler.function_defs.get(name)?;
+    if def.type_params.as_ref().is_some_and(|tps| !tps.is_empty()) {
+        return None;
+    }
+    Some(def)
+}
+
+/// Resolve the `ConcreteType` of a HOF body-tail expression under an
+/// environment mapping the enclosing fn's params to scalar types or callable
+/// definitions. A `FunctionCall` whose name is a callable-bound param (or a
+/// global concrete fn) is resolved by recovering each inner-argument type in
+/// the same environment, then resolving that callable's PROVEN return type
+/// (recursively — the callable may itself be un-annotated, e.g. `id`). Scalar
+/// shapes (literals, param refs, arithmetic) resolve as before. Any
+/// unresolvable shape yields `None` — no fabrication, no `int`/`number` unify.
+fn hof_body_expr_concrete_type(
+    compiler: &BytecodeCompiler,
+    env: &HashMap<&str, ParamBinding<'_>>,
+    expr: &Expr,
+) -> Option<ConcreteType> {
+    use shape_ast::ast::BinaryOp;
+    match expr {
+        Expr::Literal(lit, _) => literal_concrete_type(lit),
+
+        Expr::Identifier(name, _) => match env.get(name.as_str()) {
+            Some(ParamBinding::Type(ct)) => Some(ct.clone()),
+            // A param bound to a callable used in value position is not a
+            // scalar — unresolvable here.
+            Some(ParamBinding::Callable(_)) => None,
+            None => concrete_type_for_expr(compiler, expr),
+        },
+
+        Expr::UnaryOp { operand, .. } => hof_body_expr_concrete_type(compiler, env, operand),
+        Expr::Return(Some(inner), _) => hof_body_expr_concrete_type(compiler, env, inner),
+
+        // The load-bearing arm: a call whose callee NAME is either a
+        // callable-bound param (`g(...)`, `f(...)` inside the HOF) or a global
+        // concrete fn. Resolve each inner-arg type in this environment, then
+        // the callable's proven return type with those arg types.
+        Expr::FunctionCall {
+            name, args: inner, ..
+        } => {
+            let callable: &shape_ast::ast::FunctionDef = match env.get(name.as_str()) {
+                Some(ParamBinding::Callable(def)) => def,
+                Some(ParamBinding::Type(_)) => return None, // scalar called as fn
+                None => resolvable_callable(compiler, name)?,
+            };
+            let mut inner_cts: Vec<ConcreteType> = Vec::with_capacity(inner.len());
+            for ia in inner {
+                inner_cts.push(hof_body_expr_concrete_type(compiler, env, ia)?);
+            }
+            unannotated_fn_return_concrete_type(compiler, callable, &inner_cts)
+        }
+
+        Expr::BinaryOp {
+            left, op, right, ..
+        } => match op {
+            BinaryOp::Greater
+            | BinaryOp::Less
+            | BinaryOp::GreaterEq
+            | BinaryOp::LessEq
+            | BinaryOp::Equal
+            | BinaryOp::NotEqual
+            | BinaryOp::FuzzyEqual
+            | BinaryOp::FuzzyGreater
+            | BinaryOp::FuzzyLess
+            | BinaryOp::And
+            | BinaryOp::Or => Some(ConcreteType::Bool),
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Mod
+            | BinaryOp::Pow
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::BitShl
+            | BinaryOp::BitShr => {
+                let lt = hof_body_expr_concrete_type(compiler, env, left);
+                let rt = hof_body_expr_concrete_type(compiler, env, right);
+                match (lt, rt) {
+                    (Some(l), Some(r)) if l == r => Some(l),
+                    (Some(l), Some(r)) => adopt_int_literal(&l, left, &r, right),
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Resolve the PROVEN return `ConcreteType` of a non-generic function given the

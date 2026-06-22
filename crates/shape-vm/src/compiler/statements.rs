@@ -8113,11 +8113,16 @@ mod tests {
     //   (A) angle-A REVERTED (2026-06-22): the prior
     //       `init_rests_on_unprovable_unannotated_fn` reject over-rejected the
     //       idiomatic `let x: int = f(5)` class (un-return-typed fn genuinely
-    //       returning int) and is removed. HOLE-3's `apply2(id, ret_num, 3.0)`
-    //       echo case is therefore now ACCEPTED (it cannot be distinguished from
-    //       the valid class without a real return-type proof).
-    //       `binop_operand_disagreeing_primitive` (HOLE-2) is KEPT — it only
-    //       fires on a structurally-PROVEN disagreeing operand (no over-reject).
+    //       returning int) and is removed. Replaced (S1 body-return inference,
+    //       2026-06-22) by a REAL return-type proof: `hof_unannotated_call_
+    //       return_concrete_type` resolves an un-annotated fn's return from its
+    //       body tail (params seeded to call-site arg types, callable-valued
+    //       params resolved through their own bodies — `apply2(id, ret_num,
+    //       3.0)` ⇒ `number`). HOLE-3 now REJECTS cleanly into an `int` binding
+    //       (number != int) and BINDS cleanly into a `number` binding — no
+    //       over-reject, no bit-leak. `binop_operand_disagreeing_primitive`
+    //       (HOLE-2) is KEPT — it only fires on a structurally-PROVEN
+    //       disagreeing operand (no over-reject).
     //   (B) array-destructure element-kind stamping
     //       (`stamp_destructure_element_binding`), now RECURSING into nested
     //       `[[a,b],[c,d]]` patterns (peels one `Array<…>` layer per level).
@@ -8287,6 +8292,88 @@ mod tests {
         assert!(
             compile_with_prelude("let s: int = [1, 2, 3].sum()\ns").is_ok(),
             "no-FP: concrete dispatch result `.sum()` rejected into int binding"
+        );
+    }
+
+    // ── strict-flip S1 body-return inference (2026-06-22) ──
+    // The un-annotated fn's return type is RESOLVED from its body tail (the HM
+    // let-gen the user ruled), including the nested HOF `apply2(g, f, x){g(f(x))}`
+    // shape. Three properties: resolved-accept, resolved-mismatch-reject, and
+    // HOF-indirection-no-leak (the mismatch is a CLEAN compile error, NEVER a
+    // raw-bits reinterpret of `6.0`'s f64 into an i64).
+
+    #[test]
+    fn strict_flip_s1_hof_nested_number_resolved_accepts_into_number() {
+        // Resolved-accept: `apply2(id, ret_num, 3.0)` resolves to `number`
+        // (g=id passthrough, f=ret_num : number->number, x=3.0). A matching
+        // `number` annotation binds cleanly and runs to 6.0.
+        use crate::test_utils::eval_typed_f64;
+        assert_eq!(
+            eval_typed_f64(
+                "fn id(x) { x }\nfn ret_num(x) { x * 2.0 }\n\
+                 fn apply2(g, f, x) { g(f(x)) }\n\
+                 let r: number = apply2(id, ret_num, 3.0)\nr"
+            ),
+            6.0,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_hof_nested_int_resolved_accepts_into_int() {
+        // Resolved-accept (int twin): `apply2(id, ret_int, 5)` resolves to
+        // `int` (f=ret_int : int->int). A matching `int` annotation binds
+        // cleanly and runs to 6.
+        use crate::test_utils::eval_typed_i64;
+        assert_eq!(
+            eval_typed_i64(
+                "fn id(x) { x }\nfn ret_int(x) { x + 1 }\n\
+                 fn apply2(g, f, x) { g(f(x)) }\n\
+                 let r: int = apply2(id, ret_int, 5)\nr"
+            ),
+            6,
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_hof_nested_number_into_int_rejected_no_leak() {
+        // Resolved-mismatch-reject + HOF-indirection-no-leak: the SAME
+        // `apply2(id, ret_num, 3.0)` resolved to `number` must REJECT cleanly
+        // into an `int` binding (number != int) — NEVER reinterpret `6.0`'s
+        // f64 bits as the i64 `4618441417868443649`.
+        assert!(
+            compile_fails(
+                "fn id(x) { x }\nfn ret_num(x) { x * 2.0 }\n\
+                 fn apply2(g, f, x) { g(f(x)) }\n\
+                 let bad: int = apply2(id, ret_num, 3.0)\nbad"
+            ),
+            "HOF-indirection: number-returning nested HOF accepted into int binding (bit-leak)"
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_hof_onelevel_number_into_int_rejected() {
+        // Resolved-mismatch-reject (1-level): `apply(ret_num, 3.0)` resolves to
+        // `number`; an `int` binding rejects cleanly.
+        assert!(
+            compile_fails(
+                "fn apply(f, x) { f(x) }\nfn ret_num(x) { x * 2.0 }\n\
+                 let bad: int = apply(ret_num, 3.0)\nbad"
+            ),
+            "1-level HOF: number-returning HOF accepted into int binding"
+        );
+    }
+
+    #[test]
+    fn strict_flip_s1_hof_closure_callable_unresolvable_rejects() {
+        // Genuinely-unresolvable (closure-literal callable): `apply(|y| y*2.0,
+        // 3.0)` into `int` cannot be statically resolved through a named
+        // callable; it must still REJECT (via the constraint solver / FIX B),
+        // NEVER leak. The point is no acceptance of an unproven HOF into int.
+        assert!(
+            compile_fails(
+                "fn apply(f, x) { f(x) }\nlet bad: int = apply(|y| y * 2.0, 3.0)\nbad"
+            ),
+            "closure-callable HOF: unresolved number result accepted into int binding"
         );
     }
 }
