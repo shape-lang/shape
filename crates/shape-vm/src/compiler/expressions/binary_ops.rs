@@ -3509,20 +3509,68 @@ mod s4_type_erasure_dispatch_tests {
         assert_eq!(eval_typed_i64(code), 6);
     }
 
+    // STAGE T4 (2026-06-22): named call arguments are now SUPPORTED on free
+    // functions — they bind to parameters by name. The former S4 reject test
+    // is rebaselined to assert the bound value.
     #[test]
-    fn s4_functions_named_args_on_free_fn_are_compile_error() {
-        let code = "fn bv(w: int = 1, h: int = 1, d: int = 1) -> int { return w * h * d }\n\
-                    print(bv(w: 2, h: 3, d: 4))";
+    fn t4_named_args_on_free_fn_bind_by_name() {
+        let code = "fn bv(w: int, h: int, d: int) -> int { return w * h * d }\n\
+                    bv(w: 2, h: 3, d: 4)";
+        assert_eq!(eval_typed_i64(code), 24);
+    }
+
+    #[test]
+    fn t4_named_args_out_of_order_bind_by_name() {
+        let code = "fn bv(w: int, h: int, d: int) -> int { return w * h * d }\n\
+                    bv(d: 4, w: 2, h: 3)";
+        assert_eq!(eval_typed_i64(code), 24);
+    }
+
+    #[test]
+    fn t4_leading_positional_then_named() {
+        let code = "fn bv(w: int, h: int, d: int) -> int { return w * h * d }\n\
+                    bv(2, d: 4, h: 3)";
+        assert_eq!(eval_typed_i64(code), 24);
+    }
+
+    #[test]
+    fn t4_named_arg_fills_default_for_omitted_param() {
+        let code = "fn f(x: int, y: int = 10) -> int { return x + y }\nf(x: 5)";
+        assert_eq!(eval_typed_i64(code), 15);
+    }
+
+    #[test]
+    fn t4_named_arg_overrides_default() {
+        let code = "fn f(x: int, y: int = 10) -> int { return x + y }\nf(5, y: 20)";
+        assert_eq!(eval_typed_i64(code), 25);
+    }
+
+    #[test]
+    fn t4_unknown_named_arg_is_clean_compile_error() {
+        let code = "fn bv(w: int, h: int, d: int) -> int { return w * h * d }\n\
+                    print(bv(w: 2, bad: 3))";
         let program = parse_program(code).expect("Failed to parse");
         let result = BytecodeCompiler::new().compile(&program);
         assert!(
             result.is_err(),
-            "named call arguments on a free function must be a clean compile error"
+            "an unknown named argument must be a clean compile error"
         );
     }
 
     #[test]
-    fn s4_functions_positional_args_still_work() {
+    fn t4_duplicate_positional_and_named_is_clean_compile_error() {
+        let code = "fn bv(w: int, h: int, d: int) -> int { return w * h * d }\n\
+                    print(bv(2, w: 5, h: 3, d: 4))";
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_err(),
+            "a parameter supplied positionally and by name must be a clean compile error"
+        );
+    }
+
+    #[test]
+    fn t4_functions_positional_args_still_work() {
         let code = "fn bv(w: int = 1, h: int = 1, d: int = 1) -> int { return w * h * d }\nbv(2, 3, 4)";
         assert_eq!(eval_typed_i64(code), 24);
     }

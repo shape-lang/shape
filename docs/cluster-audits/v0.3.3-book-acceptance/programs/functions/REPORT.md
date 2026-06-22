@@ -9,12 +9,49 @@ Determinism strategy: pure (closures + HOFs); no I/O, no time, no randomness.
 
 | Program | LOC | VM ec | JIT ec | VM==JIT stdout | Result |
 |---------|-----|-------|--------|----------------|--------|
-| small.shape | 78 | 0 | 0 | byte-identical | PASS |
-| large.shape | 866 | 0 | 0 | byte-identical | PASS |
+| small.shape | 99 | 0 | 0 | byte-identical | PASS |
+| large.shape | 635 | 0 | 0 | byte-identical | PASS |
 | segfault-repro.shape | 24 | 0 | 0 | byte-identical (prints 25) | PASS (was FN-REG; FIXED at HEAD) |
-| named-args-repro.shape | 41 | 0 (active) | 0 | byte-identical | BOOK-WRONG (commented blocks reproduce errors) |
+| named-args-repro.shape | 37 | 0 | 0 | byte-identical (24/24/24/24/15/25) | PASS (named arguments IMPLEMENTED — STAGE T4) |
 
-**Independent re-verification 2026-06-20 (this pass, fresh first-run truth):**
+**STAGE T4 (2026-06-22) — named arguments IMPLEMENTED; the BOOK-WRONG (1)
+finding is RESOLVED.** Named-argument binding now binds each `name: value`
+call argument to the matching parameter by name (any order), combinable with
+leading positional args, with defaults filled for omitted params; an unknown
+named arg or a duplicate positional+named for the same param is a clean compile
+error. Implemented as a single AST rewrite
+(`shape_ast::transform::rebind_named_args`) that runs after desugaring and
+before inference/codegen, so inference, the bytecode compiler, and MIR lowering
+all see the rebound positional call. `named-args-repro.shape` is rewritten to a
+positive acceptance program: all-positional / all-named / out-of-order-named /
+positional-then-named all print `24`; `f(x:5)` (default-fill) → `15`;
+`f(5,y:20)` → `25` — byte-identical VM vs JIT. The reject path
+(`resolve_named_function_args` in `expressions/mod.rs`) is retained for named
+args on a non-user-function callee (builtin / enum ctor / local callable value).
+
+**Independent re-verification 2026-06-21 (this pass, fresh first-run truth):**
+All four programs re-run under both `--mode vm` and `--mode jit` at current HEAD.
+`small.shape` (99 LOC, 19 `check()` calls) and `large.shape` (635 LOC, 114
+`check_*` assertions across 12 parts) both print `ALL_CHECKS_PASSED`, ec=0,
+stdout byte-identical VM vs JIT (`cmp -s` confirmed). `segfault-repro.shape`
+prints `25` (ec=0, both modes) — the historical FN-REG SIGSEGV does NOT
+reproduce. `named-args-repro.shape` active line prints `24` (both modes).
+BOOK-WRONG (named arguments) re-confirmed live via isolated probes, with one
+CHANGED detail vs the 2026-06-20 pass: the **defaults+named** case no longer
+silently returns the all-defaults value — it is now a HARD COMPILE ERROR:
+`error[SEMANTIC]: Named call arguments are not supported on functions: `sma`
+was called with named argument(s) (period, threshold). Pass arguments
+positionally.` (and likewise for `sma(20, threshold: 0.02)`). The no-default
+cases are unchanged: all-named `box_vol(w:2,h:3,d:4)` → `expects between 3 and
+3 arguments, got 0`; positional-then-named `box_vol(2,h:3,d:4)` → `...got 1`.
+Net: named arguments remain fully non-functional (BOOK-WRONG stands), but the
+silent-wrong-answer subcase has been upgraded to an explicit rejection — a
+correctness improvement. The `named-args-repro.shape` comments were updated this
+pass to reflect the explicit-rejection behavior. Slice classification: BOOK-WRONG
+(named arguments). Slice exit-codes for the structured result are taken from the
+two DELIVERABLE programs (small + large), both ec=0 / byte-identical.
+
+**Independent re-verification 2026-06-20 (prior pass, fresh first-run truth):**
 All four programs re-run under both `--mode vm` and `--mode jit` at current HEAD.
 small.shape (78 LOC, 19 `check()` calls) and large.shape (869 LOC, 151
 `check_*` assertions across 12 parts) both print `ALL_CHECKS_PASSED`, ec=0,
@@ -192,7 +229,16 @@ a documented limitation, fixed by following the book; recorded for transparency:
 
 ## book_wrong (book DOCUMENTS something the language does NOT do)
 
-### BOOK-WRONG (1) — Named arguments are documented as working but are fully broken
+### (RESOLVED at HEAD — STAGE T4 2026-06-22) BOOK-WRONG (1) — Named arguments
+
+**Status: RESOLVED.** Named arguments are now implemented (see the STAGE T4
+note in the Summary). The historical analysis below describes the pre-T4
+behavior and is retained for the record. Current behavior: all-named,
+out-of-order-named, and positional-then-named all bind by name and compute the
+correct result; default-valued params are filled for omitted names; unknown /
+duplicate names are clean compile errors.
+
+#### Historical (pre-T4) analysis
 
 Book `fundamentals/functions.mdx` §"Named Arguments" (lines 194-218) presents
 named arguments as a supported feature and lists, under "The supported call
@@ -213,13 +259,16 @@ Measured behavior (binary: v0.3.3 strict-flip-collection-dispatch, both modes):
 - `box_vol(2, h: 3, d: 4)` (positional-then-named) → COMPILE ERROR
   `...expects between 3 and 3 arguments, got 1`. Only the positional `2` is
   counted; the named pair is dropped.
-- With default-valued params the failure is SILENT (no error, wrong value):
-  `sma(period: 20, threshold: 0.05)` returns `0.14` (= `0.01 * 14`, i.e. BOTH
-  defaults — the names are ignored) where the book's own §"Named Arguments"
-  example (line 208) annotates this exact call `// both named — works`.
-  `sma(20, threshold: 0.02)` returns `0.2` (= `0.01 * 20`; positional `period`
-  applied, named `threshold` ignored) where line 210 annotates it
-  `// positional + named mix — works`.
+- With default-valued params (UPDATED 2026-06-21): the failure is now an
+  EXPLICIT COMPILE ERROR rather than a silent wrong value. `sma(period: 20,
+  threshold: 0.05)` and `sma(20, threshold: 0.02)` both report
+  `error[SEMANTIC]: Named call arguments are not supported on functions: `sma`
+  was called with named argument(s) (...). Pass arguments positionally.` This
+  REPLACES the earlier silent-default behavior (the 2026-06-20 pass observed
+  `0.14` / `0.2` with names silently dropped). The book's own §"Named Arguments"
+  example (line 208) annotates `sma(period: 20, threshold: 0.05)` as
+  `// both named — works`, and line 210 annotates `sma(20, threshold: 0.02)` as
+  `// positional + named mix — works`; both now hard-fail to compile.
 
 The book DOES hedge the *default-fill-for-a-non-trailing-name* case in the
 "caution" Aside (lines 84-92) and in the `runnable=false` block at 198-211 —

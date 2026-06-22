@@ -906,33 +906,147 @@ impl BytecodeCompiler {
         self.current_expr_result_mode
     }
 
-    /// functions (S4): reject a free-function call that supplies named
-    /// arguments. The call-lowering path compiles only the positional `args`
-    /// and silently drops `named_args`, so `bv(w: 2, h: 3, d: 4)` computes with
-    /// every parameter at its default and returns a wrong result. Shape does
-    /// not support named arguments on functions; such a call must REJECT
-    /// cleanly (ADR-006 surface-and-stop) rather than miscompute.
-    pub(super) fn reject_named_function_args(
+    /// Named arguments (STAGE T4, 2026-06-22): bind a free-function call's
+    /// `name: value` arguments to the callee's parameters BY NAME, producing a
+    /// fully positional `Vec<Expr>` that the existing call-lowering path
+    /// (`compile_expr_function_call`) compiles unchanged.
+    ///
+    /// Returns `Ok(None)` when there are no named args (the caller keeps its
+    /// original positional `args` slice — zero behavioural change). Returns
+    /// `Ok(Some(positional))` when named args were present and successfully
+    /// rebound: `positional[i]` is the supplied (positional or named) argument
+    /// for parameter `i`, or that parameter's declared `default_value` when it
+    /// was omitted. The vec is dense — trailing omitted params WITHOUT a
+    /// default are left off, so the downstream arity check still produces its
+    /// "expects between X and Y" diagnostic.
+    ///
+    /// Clean compile-errors (ADR-006 surface-and-stop, never silent
+    /// miscompute):
+    ///  - named args on a non-user function (builtin / enum ctor / local
+    ///    callable): named binding is unsupported there;
+    ///  - an unknown named arg (no matching parameter name);
+    ///  - a parameter bound twice (positional+named, or duplicate named).
+    ///
+    /// `name` is the surface call name; param names + defaults come from
+    /// `self.function_defs` (monomorphization/const-specialization never
+    /// renames parameters, so the surface name is the correct key).
+    pub(super) fn resolve_named_function_args(
         &self,
         name: &str,
+        args: &[Expr],
         named_args: &[(String, Expr)],
         span: shape_ast::ast::Span,
-    ) -> Result<()> {
+    ) -> Result<Option<Vec<Expr>>> {
         if named_args.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
-        let names = named_args
+
+        // Named binding is only defined for user functions whose parameter
+        // names are statically known. Anything else (builtins, enum
+        // constructors, local callable values) cannot resolve names → reject.
+        let Some(def) = self.function_defs.get(name) else {
+            let names = named_args
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Named call arguments are not supported on `{name}` \
+                     (named argument(s): {names}). Pass arguments positionally."
+                ),
+                location: Some(self.span_to_source_location(span)),
+            });
+        };
+
+        let params = def.params.clone();
+        let param_names: Vec<Option<String>> = params
             .iter()
-            .map(|(n, _)| n.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        Err(ShapeError::SemanticError {
-            message: format!(
-                "Named call arguments are not supported on functions: `{name}` was \
-                 called with named argument(s) ({names}). Pass arguments positionally."
-            ),
-            location: Some(self.span_to_source_location(span)),
-        })
+            .map(|p| p.simple_name().map(|s| s.to_string()))
+            .collect();
+        let n_params = params.len();
+
+        // Slot per parameter; filled from positional first, then named.
+        let mut slots: Vec<Option<Expr>> = vec![None; n_params];
+
+        if args.len() > n_params {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Function '{}' expects at most {} positional argument(s), got {}",
+                    name,
+                    n_params,
+                    args.len()
+                ),
+                location: Some(self.span_to_source_location(span)),
+            });
+        }
+        for (i, arg) in args.iter().enumerate() {
+            slots[i] = Some(arg.clone());
+        }
+
+        for (arg_name, arg_expr) in named_args {
+            let Some(idx) = param_names
+                .iter()
+                .position(|p| p.as_deref() == Some(arg_name.as_str()))
+            else {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Function '{name}' has no parameter named '{arg_name}'"
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            };
+            if slots[idx].is_some() {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Argument for parameter '{arg_name}' of function '{name}' \
+                         was supplied more than once (positional and/or named)"
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            }
+            slots[idx] = Some(arg_expr.clone());
+        }
+
+        // Fill omitted parameters that carry a `default_value`. Leave a
+        // trailing run of unfilled-without-default slots OFF the end so the
+        // downstream arity check reports the missing required arguments; an
+        // INTERIOR hole with no default (a later slot is filled) is a clean
+        // error here — the positional path could not express it.
+        for (idx, slot) in slots.iter_mut().enumerate() {
+            if slot.is_none() {
+                if let Some(default_expr) = params[idx].default_value.clone() {
+                    *slot = Some(default_expr);
+                }
+            }
+        }
+
+        // Highest filled index — everything up to it must be present.
+        let last_filled = slots.iter().rposition(|s| s.is_some());
+        let mut positional: Vec<Expr> = Vec::with_capacity(n_params);
+        if let Some(last) = last_filled {
+            for (idx, slot) in slots.into_iter().enumerate().take(last + 1) {
+                match slot {
+                    Some(expr) => positional.push(expr),
+                    None => {
+                        let pname = param_names
+                            .get(idx)
+                            .and_then(|p| p.clone())
+                            .unwrap_or_else(|| format!("#{}", idx + 1));
+                        return Err(ShapeError::SemanticError {
+                            message: format!(
+                                "Function '{name}' is missing a value for parameter \
+                                 '{pname}' (it has no default and was not supplied \
+                                 positionally or by name)"
+                            ),
+                            location: Some(self.span_to_source_location(span)),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(Some(positional))
     }
 
     pub(super) fn compile_expr_preserving_refs(&mut self, expr: &Expr) -> Result<()> {
@@ -951,7 +1065,9 @@ impl BytecodeCompiler {
                 span,
                 ..
             } => {
-                self.reject_named_function_args(name, named_args, *span)?;
+                let rebound =
+                    self.resolve_named_function_args(name, args, named_args, *span)?;
+                let args: &[Expr] = rebound.as_deref().unwrap_or(args);
                 self.compile_expr_function_call(name, args, *span)
             }
             Expr::QualifiedFunctionCall {
@@ -1100,7 +1216,9 @@ impl BytecodeCompiler {
                 span,
                 ..
             } => {
-                self.reject_named_function_args(name, named_args, *span)?;
+                let rebound =
+                    self.resolve_named_function_args(name, args, named_args, *span)?;
+                let args: &[Expr] = rebound.as_deref().unwrap_or(args);
                 self.compile_expr_function_call(name, args, *span)
             }
             Expr::QualifiedFunctionCall {

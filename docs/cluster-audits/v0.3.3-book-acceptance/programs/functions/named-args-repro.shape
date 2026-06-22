@@ -1,38 +1,38 @@
-// NAMED-ARGUMENTS BOOK-WRONG reproducer.
+// NAMED-ARGUMENTS acceptance program.
 //
-// Book fundamentals/functions.mdx §"Named Arguments" (lines 194-218) documents
-// named arguments as a supported feature and lists three "supported call shapes
-// at HEAD":
-//   - All-positional:        f(a, b, c)              -- works
-//   - All-named:             f(a: 1, b: 2, c: 3)     -- claimed working
-//   - Positional-then-named: f(1, b: 2, c: 3)        -- claimed working
+// Book fundamentals/functions.mdx §"Named Arguments" documents named arguments
+// as supported. STAGE T4 (2026-06-22) implemented named-argument binding: a
+// call with `name: value` arguments binds each to the matching parameter by
+// NAME (in any order), combinable with leading positional args, with defaults
+// filled for omitted params. An unknown named arg / a duplicate positional+named
+// for the same param is a clean compile error.
 //
-// ACTUAL behavior in the v0.3.3 strict-flip-collection-dispatch binary:
-//   - All-positional        -> works (correct).
-//   - All-named             -> COMPILE ERROR: "expects between 3 and 3
-//                              arguments, got 0" (named args counted as zero).
-//   - Positional-then-named -> COMPILE ERROR: "...got 1" (named args dropped).
-//   - With default-valued params, named values are SILENTLY IGNORED and the
-//     default is used instead (no error), producing a wrong result.
-//
-// Each block below is commented out so the file's first ACTIVE line documents
-// the only shape that actually works. Uncomment any one block to reproduce the
-// corresponding error.
+// This program exercises every now-working call shape; all outputs hold under
+// both `--mode vm` and `--mode jit`.
 
 fn box_vol(w: int, h: int, d: int) -> int { w * h * d }
 
-// (A) all-positional — WORKS, prints 24
+// (A) all-positional — 24
 print(box_vol(2, 3, 4))
 
-// (B) all-named — book says works; ACTUALLY: error "got 0"
-//   print(box_vol(w: 2, h: 3, d: 4))
+// (B) all-named — binds by name — 24
+print(box_vol(w: 2, h: 3, d: 4))
 
-// (C) positional-then-named — book says works; ACTUALLY: error "got 1"
-//   print(box_vol(2, h: 3, d: 4))
+// (C) out-of-order all-named — binds by name — 24
+print(box_vol(d: 4, w: 2, h: 3))
 
-// (D) default-valued params + named override — silently ignored:
-//   fn sma(period: int = 14, threshold: number = 0.01) -> number {
-//     threshold * (period as number)
-//   }
-//   print(sma(period: 20, threshold: 0.05))  // book: 1.0 ; ACTUAL: 0.14 (both defaults)
-//   print(sma(20, threshold: 0.02))          // book: 0.4 ; ACTUAL: 0.2  (named dropped)
+// (D) positional-then-named — 24
+print(box_vol(2, h: 3, d: 4))
+
+// (E) default-valued param, omitted → default filled.
+fn f(x: int, y: int = 10) -> int { x + y }
+print(f(x: 5))     // 15
+print(f(5, y: 20)) // 25
+
+// EXPECT:
+// 24
+// 24
+// 24
+// 24
+// 15
+// 25

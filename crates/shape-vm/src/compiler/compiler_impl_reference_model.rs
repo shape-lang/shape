@@ -1916,6 +1916,16 @@ impl BytecodeCompiler {
         // runtime coercion opcode. See `shape_ast::transform::numeric_literal_adopt`.
         shape_ast::transform::widen_numeric_literals(&mut program);
 
+        // Named arguments (STAGE T4, 2026-06-22): rebind `name: value` call
+        // arguments to positional form against the callee's parameter list,
+        // BEFORE inference and codegen. Every downstream pass (type-inference
+        // call-shape constraint, bytecode compiler, MIR lowering) reads only
+        // the positional `args` slice; this single AST rewrite makes named and
+        // out-of-order arguments + default-filled omitted params bind by name
+        // everywhere at once. Unknown / duplicate named args surface as a clean
+        // compile error here. See `shape_ast::transform::named_args_rebind`.
+        shape_ast::transform::rebind_named_args(&mut program)?;
+
         // Wave 1a PART A: bidirectional inference for let-bound closures.
         // A `let f = |a, b| a + b` compiles the closure body EAGERLY at the
         // let-site (before any `f(2, 3)` call site is seen), so the call-site
