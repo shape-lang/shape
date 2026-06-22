@@ -1175,7 +1175,16 @@ pub struct BytecodeCompiler {
     /// `unknown` kind and `let bad: int = a` (a: number) was silently accepted.
     /// `None` when the destructured receiver is not a proven concrete
     /// `Array<T>` (the binding then carries no element hint — same as before).
-    pub(crate) pending_array_destructure_element_type: Option<String>,
+    ///
+    /// strict-flip S1 (nested-destructure extension, 2026-06-22): carries the
+    /// proven ELEMENT `ConcreteType` of the array currently being destructured
+    /// (not a flattened name) so the destructure recursion can peel one
+    /// `Array<…>` layer per nesting level — `let [[a,b],[c,d]] = <Array<Array<T>>>`
+    /// stamps a,b,c,d to the innermost proven element type `T`. A leaf
+    /// identifier is stamped with this element type's name; a nested `Array`
+    /// sub-pattern descends with the peeled inner element type.
+    pub(crate) pending_array_destructure_element_type:
+        Option<shape_value::v2::ConcreteType>,
 
     /// v2 Phase 3.2: when the enclosing `let m: HashMap<K, V> = HashMap()`
     /// declares an explicit `HashMap<K, V>` annotation whose key/value pair

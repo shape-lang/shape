@@ -327,16 +327,18 @@ impl BytecodeCompiler {
     /// `let x: <concrete> = a` over an un-provable element meets the
     /// let-annotation Unknown-accept guard (FIX A). NO fabrication, NO
     /// `int`/`number` unify.
-    /// strict-flip S1 (array-destructure element-kind, 2026-06-22): resolve the
-    /// PROVEN element type NAME of the array produced by `init_expr`, for a
-    /// `let [a, b] = init_expr` destructure. Returns the primitive/nominal name
-    /// (`"int"` / `"number"` / `"string"` / a struct name / …) when
-    /// `concrete_type_for_expr(init)` proves a concrete `Array<T>`; `None`
-    /// otherwise (genuinely-untyped or non-array receiver — no fabrication).
-    pub(in crate::compiler) fn array_destructure_element_type_name(
+    /// strict-flip S1 (array-destructure element-kind, 2026-06-22; nested
+    /// extension 2026-06-22): resolve the PROVEN ELEMENT `ConcreteType` of the
+    /// array produced by `init_expr`, for a `let [a, b] = init_expr` (or nested
+    /// `let [[a,b],[c,d]] = init_expr`) destructure. Returns
+    /// `concrete_type_for_expr(init).Array(elem) => *elem` when the receiver
+    /// proves a concrete `Array<T>`; `None` otherwise (genuinely-untyped or
+    /// non-array receiver — no fabrication). The destructure recursion peels one
+    /// `Array<…>` layer per nesting level from this element type.
+    pub(in crate::compiler) fn array_destructure_element_concrete_type(
         &self,
         init_expr: &shape_ast::ast::Expr,
-    ) -> Option<String> {
+    ) -> Option<shape_value::v2::ConcreteType> {
         use shape_value::v2::ConcreteType;
         let ct = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
             self, init_expr,
@@ -344,7 +346,15 @@ impl BytecodeCompiler {
         let ConcreteType::Array(elem) = ct else {
             return None;
         };
-        let ann = crate::compiler::expressions::closures::concrete_type_to_type_annotation(&elem)?;
+        Some(*elem)
+    }
+
+    /// Map a proven element `ConcreteType` to the type-info NAME used to stamp a
+    /// destructured leaf binding (`"int"` / `"number"` / `"string"` / struct
+    /// name / …). `None` for shapes `concrete_type_to_type_annotation` cannot
+    /// render to a `Basic`/`Reference` name (no fabrication).
+    fn destructure_element_type_name(ct: &shape_value::v2::ConcreteType) -> Option<String> {
+        let ann = crate::compiler::expressions::closures::concrete_type_to_type_annotation(ct)?;
         match ann {
             shape_ast::ast::TypeAnnotation::Basic(n) => Some(n),
             shape_ast::ast::TypeAnnotation::Reference(p) => Some(p.to_string()),
@@ -352,24 +362,55 @@ impl BytecodeCompiler {
         }
     }
 
-    fn stamp_array_destructure_element_binding(
+    /// strict-flip S1 (nested array-destructure element-kind, 2026-06-22):
+    /// stamp the bindings introduced by one element sub-pattern of an array
+    /// destructure. `elem_ct` is the PROVEN element `ConcreteType` of the array
+    /// at THIS nesting level (peeled one `Array<…>` layer per level by the
+    /// caller). Three sub-pattern shapes are handled:
+    ///   - leaf `Identifier(name)` — stamp `name` with `elem_ct`'s type name.
+    ///   - nested `Array(inner_pats)` — the element is itself an array; peel one
+    ///     more layer (`elem_ct == Array(inner) => *inner`) and recurse per
+    ///     inner sub-pattern, so `let [[a,b],..]` stamps a,b to the innermost
+    ///     proven element type. When `elem_ct` is not a proven `Array<…>` the
+    ///     nested level carries no hint (binding keeps its prior kind — same as
+    ///     before; a later `let x: <concrete> = a` meets the let-annotation
+    ///     Unknown-accept guard).
+    ///   - anything else (Object / Rest / …) — not stamped (owned by its own
+    ///     path).
+    /// NO fabrication, NO `int`/`number` unify.
+    fn stamp_destructure_element_binding(
         &mut self,
         pat: &shape_ast::ast::DestructurePattern,
+        elem_ct: &shape_value::v2::ConcreteType,
         is_global: bool,
     ) {
         use shape_ast::ast::DestructurePattern;
-        let DestructurePattern::Identifier(name, _) = pat else {
-            return;
-        };
-        let Some(elem_type) = self.pending_array_destructure_element_type.clone() else {
-            return;
-        };
-        if is_global {
-            if let Some(slot) = self.module_bindings.get(name).copied() {
-                self.set_module_binding_type_info(slot, &elem_type);
+        use shape_value::v2::ConcreteType;
+        match pat {
+            DestructurePattern::Identifier(name, _) => {
+                let Some(elem_type) = Self::destructure_element_type_name(elem_ct) else {
+                    return;
+                };
+                if is_global {
+                    if let Some(slot) = self.module_bindings.get(name).copied() {
+                        self.set_module_binding_type_info(slot, &elem_type);
+                    }
+                } else if let Some(local_idx) = self.resolve_local(name) {
+                    self.set_local_type_info(local_idx, &elem_type);
+                }
             }
-        } else if let Some(local_idx) = self.resolve_local(name) {
-            self.set_local_type_info(local_idx, &elem_type);
+            DestructurePattern::Array(inner_pats) => {
+                // Nested array element — peel one `Array<…>` layer and stamp
+                // each inner sub-pattern with the inner element type. Only
+                // when `elem_ct` proves a concrete `Array<inner>`.
+                let ConcreteType::Array(inner) = elem_ct else {
+                    return;
+                };
+                for inner_pat in inner_pats {
+                    self.stamp_destructure_element_binding(inner_pat, inner, is_global);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -474,16 +515,28 @@ impl BytecodeCompiler {
                         Some(Operand::Const(idx_const)),
                     ));
                     self.emit(Instruction::simple(OpCode::GetProp));
+                    // strict-flip S1 (nested array-destructure element-kind,
+                    // 2026-06-22): the parent owns ALL element-kind stamping for
+                    // this array (via `stamp_destructure_element_binding`, which
+                    // has its own peeling recursion). Suppress the pending
+                    // element type across the bytecode recursion so a nested
+                    // `compile_destructure_pattern` does NOT stamp inner leaves
+                    // with the un-peeled OUTER element type.
+                    let saved_pending = self.pending_array_destructure_element_type.take();
                     self.compile_destructure_pattern(pat)?;
-                    // strict-flip S1 (array-destructure element-kind,
-                    // 2026-06-22): stamp the freshly-bound element identifier
-                    // with the array's PROVEN element type (set at the
-                    // VariableDecl site from `concrete_type_for_expr(init)`).
-                    // Without this the binding kept an `unknown` kind and a
-                    // later `let bad: int = a` (a: number) was silently
-                    // accepted (HOLE-1). NO fabrication: only stamps when the
-                    // receiver resolved to a concrete `Array<T>`.
-                    self.stamp_array_destructure_element_binding(pat, false);
+                    self.pending_array_destructure_element_type = saved_pending;
+                    // Stamp the freshly-bound element sub-pattern with the
+                    // array's PROVEN element type (set at the VariableDecl site
+                    // from `concrete_type_for_expr(init)`). Recurses into nested
+                    // `Array` sub-patterns, peeling one `Array<…>` layer per
+                    // level so `let [[a,b],..]` stamps a,b to the innermost
+                    // proven element type. Without this the binding kept an
+                    // `unknown` kind and a later `let bad: int = a` (a: number)
+                    // was silently accepted (HOLE-1). NO fabrication: only
+                    // stamps when the receiver resolved to a concrete `Array<T>`.
+                    if let Some(elem_ct) = self.pending_array_destructure_element_type.clone() {
+                        self.stamp_destructure_element_binding(pat, &elem_ct, false);
+                    }
                 }
 
                 Ok(())
@@ -718,10 +771,20 @@ impl BytecodeCompiler {
                         Some(Operand::Const(idx_const)),
                     ));
                     self.emit(Instruction::simple(OpCode::GetProp));
+                    // strict-flip S1 (nested array-destructure element-kind,
+                    // 2026-06-22): module-scope twin of the local-path
+                    // pending-suppression — the parent owns all element-kind
+                    // stamping for this array.
+                    let saved_pending = self.pending_array_destructure_element_type.take();
                     self.compile_destructure_pattern_global(pat)?;
-                    // strict-flip S1 (array-destructure element-kind,
-                    // 2026-06-22): module-scope twin of the local-path stamp.
-                    self.stamp_array_destructure_element_binding(pat, true);
+                    self.pending_array_destructure_element_type = saved_pending;
+                    // Stamp the freshly-bound element sub-pattern with the
+                    // array's PROVEN element type, recursing into nested
+                    // `Array` sub-patterns peeling one `Array<…>` layer per
+                    // level.
+                    if let Some(elem_ct) = self.pending_array_destructure_element_type.clone() {
+                        self.stamp_destructure_element_binding(pat, &elem_ct, true);
+                    }
                 }
 
                 Ok(())
