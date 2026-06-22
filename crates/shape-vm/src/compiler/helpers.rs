@@ -2949,7 +2949,7 @@ impl BytecodeCompiler {
     /// shape for which a bare `[]` argument is type-correct)? Used to decide
     /// whether an unprovable-element bare-`[]` arg gets a clean array-construction
     /// compile-error vs. falls through to the generic empty-array handling.
-    fn annotation_is_array_shaped(ann: &TypeAnnotation) -> bool {
+    pub(crate) fn annotation_is_array_shaped(ann: &TypeAnnotation) -> bool {
         matches!(
             ann,
             TypeAnnotation::Array(_)

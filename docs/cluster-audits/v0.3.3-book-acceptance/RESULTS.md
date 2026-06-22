@@ -92,10 +92,20 @@ backends).
 ### SCOPE-RECLAIM (release-blocking per TAXONOMY 2026-05-18 W16.2-C pull-in)
 
 4. **pattern-matching — empty `[]` literal as a match-arm result value hits
-   unimplemented `op_new_array(0)` (NotImplemented SURFACE, ec=1).** Reproduced
-   independently. Per the W16.2-C empty-literal construction-cascade pull-in
-   this is release-blocking SCOPE-RECLAIM, not v0.4-deferrable. Avoided in the
-   program by hoisting `[]` construction above the match.
+   unimplemented `op_new_array(0)` (NotImplemented SURFACE, ec=1).** FIXED
+   (STAGE S3, 2026-06-22). The match's RESULT element kind is now threaded into
+   the empty-`[]` arm from (a) the enclosing `let xs: Array<T> =` / `Array<T>`
+   return annotation's pending typed-array kind, or (b) a sibling arm whose body
+   is a non-empty array literal proving the element type — the empty arm then
+   constructs a valid typed empty `TypedArray<T>` (`NewTypedArrayI64(0)` etc.)
+   instead of the placeholder `NewArray(0)`. A genuinely-unprovable empty
+   match-arm (e.g. `Array<Array<int>>` from a bare `[]`) is a CLEAN compile-error,
+   never a mid-program runtime SURFACE. Mirrors the T4 empty-call-arg /
+   let-annotation fixes (ADR-006 §2.7.5 producer-side stamp; no bit-reinterpret,
+   no TypedArrayData, no Bool-default). Repro + regression:
+   `programs/pattern-matching/probe_empty_match_arm.shape` (`ALL_CHECKS_PASSED`
+   both modes); unit tests `compiler::expressions::advanced::tests::
+   test_match_arm_empty_array_*` (3).
 
 ### BOOK-WRONG (shipped book mismatches runtime)
 

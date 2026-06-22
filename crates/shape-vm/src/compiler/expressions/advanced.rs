@@ -404,6 +404,92 @@ impl BytecodeCompiler {
         )
     }
 
+    /// STAGE S3 (strict-flip, 2026-06-22): resolve the element [`TypedArrayKind`]
+    /// for a bare empty-array (`[]`) RESULT value of a match ARM.
+    ///
+    /// A bare `[]` carries no element type of its own. In `let / call-arg`
+    /// position the element kind is threaded from the annotation via
+    /// `pending_variable_typed_array_kind` (consumed by the empty-array branch of
+    /// `compile_expr_array`). In match-ARM-result position (`match c { 1 => [1,2],
+    /// _ => [] }`) the empty `[]` had no such hand-off, so it fell through to the
+    /// placeholder `NewArray(0)` which SURFACEs `op_new_array(0)` NotImplemented
+    /// at runtime (V3-S5 ckpt-5). This mirrors the T4 empty-call-arg /
+    /// let-annotation fixes: derive the match's RESULT element kind from context,
+    /// in priority order:
+    ///
+    ///   1. The pending typed-array kind already in scope — the enclosing
+    ///      `let xs: Array<T> = match ...` annotation stamps
+    ///      `pending_variable_typed_array_kind` BEFORE compiling the match.
+    ///   2. A SIBLING arm whose body is a non-empty array literal that proves the
+    ///      element kind (`match c { 1 => [1,2], _ => [] }` — `[1,2]` proves int).
+    ///   3. The enclosing function's `Array<T>` return annotation (the binding the
+    ///      match feeds — `fn pick() -> Array<int> { match ... }`).
+    ///
+    /// Per ADR-006 §2.7.5 each source is a producer-side proof (annotation or
+    /// statically-typed sibling literal), never decoded from runtime bits. When
+    /// no source proves the element kind the result is `None` and the bare `[]`
+    /// arm surfaces a CLEAN compile-error (never a mid-program runtime SURFACE).
+    fn match_arm_empty_array_typed_kind(
+        &self,
+        match_expr: &shape_ast::ast::MatchExpr,
+    ) -> Option<crate::compiler::v2_typed_emission::TypedArrayKind> {
+        // Source 1: an enclosing `let xs: Array<T> = match ...` (or call-arg)
+        // already stamped the pending kind before compiling the match.
+        if let Some(kind) = self.pending_variable_typed_array_kind {
+            return Some(kind);
+        }
+        // Source 2: a sibling arm whose body is a non-empty array literal proves
+        // the element kind structurally.
+        for arm in &match_expr.arms {
+            if let Expr::Array(elements, _) = &*arm.body {
+                if !elements.is_empty() {
+                    if let Some(slot_kind) =
+                        crate::compiler::v2_array_emission::infer_array_element_type(
+                            elements,
+                            &self.type_tracker,
+                        )
+                    {
+                        if let Some(kind) =
+                            crate::compiler::v2_typed_emission::should_use_typed_array_from_slot_kind(
+                                slot_kind,
+                            )
+                        {
+                            return Some(kind);
+                        }
+                    }
+                }
+            }
+        }
+        // Source 3: the enclosing function's `Array<T>` return annotation — the
+        // binding the match feeds when it is the function body's tail expression.
+        if let Some(ann) = self.current_function_return_type.clone() {
+            if let Some(kind) = self.resolve_typed_array_kind_from_annotation(&ann) {
+                return Some(kind);
+            }
+        }
+        None
+    }
+
+    /// STAGE S3: does this match expression have a bare empty-array (`[]`) ARM
+    /// whose element type is array-shaped (so the empty `[]` must construct a
+    /// typed array) but UNPROVABLE? Used to surface a clean compile-error instead
+    /// of letting the placeholder `NewArray(0)` SURFACE at runtime. The result
+    /// must be array-shaped — proven by a sibling non-empty array-literal arm or
+    /// an `Array<T>` return annotation — so a non-array match (where `[]` would
+    /// itself be a type error caught elsewhere) is NOT misclassified here.
+    fn match_result_is_array_shaped(&self, match_expr: &shape_ast::ast::MatchExpr) -> bool {
+        let sibling_array = match_expr.arms.iter().any(|arm| {
+            matches!(&*arm.body, Expr::Array(elements, _) if !elements.is_empty())
+        });
+        if sibling_array {
+            return true;
+        }
+        self.current_function_return_type
+            .as_ref()
+            .map(Self::annotation_is_array_shaped)
+            .unwrap_or(false)
+    }
+
     /// Compile a match expression
     pub(super) fn compile_expr_match(
         &mut self,
@@ -519,11 +605,53 @@ impl BytecodeCompiler {
                 Some(Operand::Local(scrutinee_local)),
             ));
             self.compile_match_binding(arm_pattern, scrutinee_ct.as_ref())?;
-            if self.current_expr_result_mode() == crate::compiler::ExprResultMode::PreserveRef {
-                self.compile_expr_preserving_refs(&arm.body)?;
-            } else {
-                self.compile_expr(&arm.body)?;
+            // STAGE S3 (strict-flip, 2026-06-22): a bare empty-array ARM result
+            // (`match c { 1 => [1,2], _ => [] }`) carries no element type of its
+            // own. Thread the match's RESULT element kind (from a sibling
+            // non-empty array-literal arm / the enclosing `Array<T>` return /
+            // let-annotation pending kind) into the empty `[]` so it constructs a
+            // valid typed empty `TypedArray<T>` instead of falling through to the
+            // placeholder `NewArray(0)` that SURFACEs `op_new_array(0)` at
+            // runtime. Save / restore so the hand-off does not leak. When the
+            // result IS array-shaped but the element kind is unprovable, surface a
+            // CLEAN compile-error — never a mid-program runtime SURFACE.
+            let arm_body_is_bare_empty_array = matches!(
+                &*arm.body,
+                Expr::Array(elements, _) if elements.is_empty()
+            );
+            let saved_pending_typed_array_kind = self.pending_variable_typed_array_kind;
+            if arm_body_is_bare_empty_array {
+                match self.match_arm_empty_array_typed_kind(match_expr) {
+                    Some(kind) => {
+                        self.pending_variable_typed_array_kind = Some(kind);
+                    }
+                    None if self.match_result_is_array_shaped(match_expr) => {
+                        return Err(shape_ast::error::ShapeError::SemanticError {
+                            message: format!(
+                                "cannot construct an empty array for this `match` arm: the \
+                                 match result's element type has no typed-array carrier the \
+                                 compiler can construct from a bare `[]`. Annotate the binding \
+                                 the match feeds (`let xs: Array<T> = match ...`), give it an \
+                                 `Array<T>` return type, or have another arm produce a \
+                                 non-empty array literal proving the element type."
+                            ),
+                            location: Some(self.span_to_source_location(
+                                shape_ast::ast::Spanned::span(&*arm.body),
+                            )),
+                        });
+                    }
+                    None => {}
+                }
             }
+            let arm_compile = if self.current_expr_result_mode()
+                == crate::compiler::ExprResultMode::PreserveRef
+            {
+                self.compile_expr_preserving_refs(&arm.body)
+            } else {
+                self.compile_expr(&arm.body)
+            };
+            self.pending_variable_typed_array_kind = saved_pending_typed_array_kind;
+            arm_compile?;
             arm_reference_results.push(self.capture_last_expr_reference_result());
             self.pop_scope();
 
@@ -1002,6 +1130,86 @@ mod tests {
             msg.contains("Non-exhaustive match"),
             "Expected non-exhaustive diagnostic, got: {}",
             msg
+        );
+    }
+
+    /// STAGE S3 (strict-flip, 2026-06-22): a bare empty-array (`[]`) match-arm
+    /// RESULT value must NOT lower to the generic `NewArray(0)` placeholder (which
+    /// SURFACEs `op_new_array(0)` at runtime). The element kind is threaded from
+    /// the enclosing `Array<int>` return annotation, so the empty arm emits the
+    /// typed `NewTypedArrayI64(0)` allocator.
+    #[test]
+    fn test_match_arm_empty_array_uses_return_annotation_typed_allocator() {
+        let code = r#"
+            fn pick(c: int) -> Array<int> {
+                match c { 1 => [1, 2], _ => [] }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        let compiled = result.expect("empty match-arm should compile");
+        let has_generic_new_array = compiled.instructions.iter().any(|ins| {
+            matches!(ins.opcode, OpCode::NewArray)
+                && matches!(ins.operand, Some(Operand::Count(0)))
+        });
+        assert!(
+            !has_generic_new_array,
+            "empty match-arm `[]` must NOT emit the generic NewArray(0) placeholder \
+             that SURFACEs op_new_array(0) — it should construct a typed empty array"
+        );
+        let has_typed_i64_alloc = compiled
+            .instructions
+            .iter()
+            .any(|ins| matches!(ins.opcode, OpCode::NewTypedArrayI64));
+        assert!(
+            has_typed_i64_alloc,
+            "empty match-arm `[]` should emit the typed NewTypedArrayI64 allocator \
+             from the `Array<int>` return annotation"
+        );
+    }
+
+    /// STAGE S3: a SIBLING arm whose body is a non-empty array literal proves the
+    /// empty arm's element kind — no annotation required.
+    #[test]
+    fn test_match_arm_empty_array_uses_sibling_arm_element_kind() {
+        let code = r#"
+            fn pick(c: int) -> Array<int> {
+                match c { 1 => [10, 20], _ => [] }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let compiled = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("sibling-proven empty match-arm should compile");
+        assert!(
+            !compiled.instructions.iter().any(|ins| {
+                matches!(ins.opcode, OpCode::NewArray)
+                    && matches!(ins.operand, Some(Operand::Count(0)))
+            }),
+            "sibling-proven empty match-arm must not emit the generic NewArray(0) placeholder"
+        );
+    }
+
+    /// STAGE S3: when the match result IS array-shaped but the element type has no
+    /// typed-array carrier constructible from a bare `[]` (e.g. `Array<Array<int>>`),
+    /// surface a CLEAN compile-error — never a mid-program runtime SURFACE.
+    #[test]
+    fn test_match_arm_empty_array_unprovable_element_is_clean_compile_error() {
+        let code = r#"
+            fn pick(c: int) -> Array<Array<int>> {
+                match c { _ => [] }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_err(),
+            "unprovable empty match-arm element type should be a clean compile-error"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("cannot construct an empty array for this `match` arm"),
+            "expected the clean empty-array construction diagnostic, got: {msg}"
         );
     }
 
