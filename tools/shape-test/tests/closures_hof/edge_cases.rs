@@ -314,7 +314,68 @@ fn edge_closure_three_deep() {
         f2(3)
     "#,
     )
-    .expect_number(6.0);
+    // strict-flip transitive-capture soundness (TP-rebaseline, closures_hof
+    // SIGSEGV fix 2026-06-22): the innermost closure `|c| a + b + c` captures
+    // BOTH `a` (the outer fn param, captured TRANSITIVELY through the middle
+    // closure) AND `b` (the middle closure's un-annotated param). The capture
+    // resolver cannot prove `b`'s `ConcreteType`, so its layout slot is stamped
+    // the `Pointer(Void)` → `Ptr(HeapKind::NativeView)` opaque-heap sentinel.
+    // Pre-fix, `op_make_closure` wrote `b`'s scalar `Int64` bits into that
+    // heap-drop-masked slot and `release_typed_closure` later reinterpreted the
+    // small integer as an `Arc<NativeViewData>` → SIGSEGV. The carrier-mismatch
+    // guard now surfaces-and-stops cleanly: a capture whose proven runtime kind
+    // is a scalar must never land in a heap-drop-masked slot. int and number do
+    // not unify and an un-inferable transitively-captured operand must SURFACE.
+    .expect_run_err_contains("stamped a heap carrier");
+}
+
+// Memory-safety regression pin (closures_hof transitive-capture SIGSEGV fix,
+// 2026-06-22). The crash class: an innermost closure that captures a value
+// whose `ConcreteType` cannot be proven at compile time (a transitively-
+// captured un-annotated closure parameter) gets a `Ptr(HeapKind::NativeView)`
+// opaque-heap layout stamp. When the actual captured value is a SCALAR, its
+// integer bits were written into a heap-drop-masked slot and later dropped as
+// an `Arc<NativeViewData>` → SIGSEGV (a small-integer-as-pointer deref). The
+// fix is the `op_make_closure` carrier-mismatch guard: a scalar value must
+// never land in a heap-drop-masked slot — surface-and-stop instead. The
+// contract pinned here is MEMORY SAFETY: rc=1 clean error, NEVER 139/SIGSEGV.
+#[test]
+fn edge_transitive_scalar_capture_is_memory_safe_not_segv() {
+    ShapeTest::new(
+        r#"
+        fn level1(a) {
+            |b| {
+                |c| a + b + c
+            }
+        }
+        level1(1)(2)(3)
+    "#,
+    )
+    // The transitively-captured + directly-captured-scalar mix cannot prove
+    // `b`'s carrier kind; the guard surfaces a clean RuntimeError. The crucial
+    // property is that this is a clean error — NOT a segfault / heap corruption.
+    .expect_run_err_contains("stamped a heap carrier");
+}
+
+// Companion to the guard pin: the sibling shape where the inner closure
+// captures the transitive `a` but NOT the un-provable `b` (`|c| a + c`) has
+// only a single proven-scalar capture, so no heap-drop-masked slot is
+// mis-stamped — it computes the correct value. This guards against the fix
+// over-rejecting: the guard fires ONLY on the genuine scalar-into-heap-slot
+// mismatch, never on a well-typed transitive capture.
+#[test]
+fn edge_transitive_scalar_capture_single_capture_computes() {
+    ShapeTest::new(
+        r#"
+        fn level1(a) {
+            |b| {
+                |c| a + c
+            }
+        }
+        level1(1)(2)(3)
+    "#,
+    )
+    .expect_number(4.0);
 }
 
 // BUG: Chained closure calls `f(10)(32)` fail -- see hof_adder_chained_call

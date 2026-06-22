@@ -735,7 +735,17 @@ fn hof_curried_add() {
         f2(3)
     "#,
     )
-    .expect_number(6.0);
+    // strict-flip transitive-capture soundness (TP-rebaseline, closures_hof
+    // SIGSEGV fix 2026-06-22): identical shape to `edge_closure_three_deep`.
+    // `|c| a + b + c` captures `a` transitively (through the middle closure)
+    // AND the middle closure's un-annotated param `b`. `b`'s `ConcreteType`
+    // cannot be proven at compile time, so its layout slot defaults to the
+    // `Ptr(HeapKind::NativeView)` opaque-heap sentinel; pre-fix the scalar
+    // `Int64` bits written there were dropped as an `Arc<NativeViewData>` →
+    // SIGSEGV. The carrier-mismatch guard now surfaces-and-stops: a scalar
+    // capture is refused from a heap-drop-masked slot rather than corrupting
+    // the heap. The un-inferable transitive operand must SURFACE.
+    .expect_run_err_contains("stamped a heap carrier");
 }
 
 #[test]

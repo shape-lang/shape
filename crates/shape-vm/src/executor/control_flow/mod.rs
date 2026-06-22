@@ -674,6 +674,67 @@ impl VirtualMachine {
                                 }
                             }
                         } else {
+                            // Carrier-mismatch guard (closures_hof transitive-
+                            // capture SIGSEGV fix, 2026-06-22). The layout's
+                            // `capture_native_kind(i)` is the compile-time stamp
+                            // from `resolve_capture_concrete_type`. When a
+                            // capture's `ConcreteType` could NOT be proven at
+                            // compile time (e.g. a transitively-captured outer
+                            // closure param — `|c| a + b + c` where `b` is the
+                            // enclosing closure's unannotated param), the
+                            // resolver falls to the `Pointer(Void)` "opaque
+                            // heap slot" sentinel → `Ptr(HeapKind::NativeView)`.
+                            // That stamp puts the slot in `heap_capture_mask`,
+                            // so `release_typed_closure` will
+                            // `drop_with_kind(bits, Ptr(NativeView))` it on the
+                            // closure's last drop — i.e. reinterpret the bits as
+                            // an `Arc<NativeViewData>`. But the value that
+                            // actually arrived here is a scalar (the body proves
+                            // `b: int` via `a + b` and reads it as `Int64`); its
+                            // bits are an integer, not a heap pointer. Writing
+                            // them verbatim and later dropping them as an `Arc`
+                            // dereferences a small integer as a pointer →
+                            // SIGSEGV (the exact closures_hof crash class).
+                            //
+                            // The popped runtime `kind` is the single source of
+                            // truth (ADR-006 §2.7.7 — no fabrication, no
+                            // Bool-default). When the layout stamps a heap `Ptr`
+                            // carrier for this slot but the value arrived with a
+                            // non-`Ptr` scalar kind, that is a construction-side
+                            // classification mismatch the compiler could not
+                            // prove away. We refuse to write a scalar into a
+                            // heap-drop-masked slot (which would corrupt the heap
+                            // on drop) and surface-and-stop with a clean
+                            // RuntimeError — never a garbage Arc drop. This is
+                            // the same discipline as the R1 named-fn `bad =>`
+                            // arm above.
+                            //
+                            // The partially-built block (slot `i` still zeroed)
+                            // is intentionally NOT reclaimed via
+                            // `release_typed_closure`: walking the masks would
+                            // `drop_with_kind(0, Ptr(..))` on the null slot and
+                            // segfault. We leak the raw allocation on this fatal
+                            // terminating path — a one-shot leak is the safe
+                            // choice over a null deref.
+                            if matches!(
+                                layout.capture_native_kind(i),
+                                NativeKind::Ptr(_)
+                            ) && !matches!(*kind, NativeKind::Ptr(_))
+                            {
+                                return Err(VMError::RuntimeError(format!(
+                                    "op_make_closure: capture {} is stamped a \
+                                     heap carrier ({:?}) but the captured value \
+                                     arrived with scalar kind {:?}; the closure \
+                                     captures a value whose type could not be \
+                                     proven at compile time (e.g. a \
+                                     transitively-captured un-annotated closure \
+                                     parameter). Annotate the capture's source \
+                                     binding so its type is statically known.",
+                                    i,
+                                    layout.capture_native_kind(i),
+                                    *kind
+                                )));
+                            }
                             // Write the popped bits verbatim. For `Ptr`
                             // captures the popped share transfers into the
                             // block's slot; `release_typed_closure` walks
