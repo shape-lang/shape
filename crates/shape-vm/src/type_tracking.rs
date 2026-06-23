@@ -41,7 +41,9 @@ use serde::{Deserialize, Serialize};
 use shape_ast::ast::TypeAnnotation;
 use shape_runtime::type_schema::{FieldType, SchemaId, TypeSchema, TypeSchemaRegistry};
 use shape_runtime::type_system::{BuiltinTypes, StorageType};
+use shape_value::v2::closure_layout::native_kind_from_concrete_type;
 use shape_value::v2::struct_layout::{FieldKind, StructLayout};
+use shape_value::v2::ConcreteType;
 
 /// Numeric type known at compile time for typed opcode emission.
 ///
@@ -1229,36 +1231,69 @@ impl std::fmt::Display for ProofGap {
 
 impl std::error::Error for ProofGap {}
 
-/// Prove that the given slot's content is a specific [`NativeKind`] at
-/// emission time, or surface a [`ProofGap`].
+/// Prove that a claimed [`NativeKind`] at an emission site is a faithful
+/// projection of the **proven static type** at that site, or surface a
+/// [`ProofGap`].
 ///
-/// # Phase 2 contract (current)
+/// # Real check (SB-8b / U2 — no pass-through)
 ///
-/// Phase 2 wires call sites to call this predicate. Until Phase 3, the
-/// predicate is a no-op that returns the supplied `claimed_kind` —
-/// callers can run end-to-end. Phase 3 hardens to debug-panic; Phase 5
-/// hardens to release compile-error.
+/// This is NOT a stub. The predicate projects `proven` through the single
+/// canonical, total `ConcreteType → NativeKind` map
+/// ([`native_kind_from_concrete_type`]) and requires the `claimed_kind` to
+/// EXACTLY equal that projection. A carrier that stamps a kind which does
+/// not match the proven static type is a hard surface-and-stop — the caller
+/// converts the returned `ProofGap` into a clean compile error
+/// (`E_TYPED_OPCODE_WITHOUT_PROOF`) per CLAUDE.md §Type System Rules ("if the
+/// type can't be proven, it is a compile error").
 ///
-/// # Future strict mode (Phases 3-5)
+/// There is deliberately NO relaxation:
+/// - no `int`↔`number` unification (CLAUDE.md: "int and number are separate"),
+/// - no width-narrowing,
+/// - no `Bool`-default on the unknown path (forbidden #9 per ADR-006 §2.7.7),
+/// - no `UInt64`-for-`Ptr(..)` allowance (that is exactly the SB-10 lie),
+/// - no pass-through "fallback" (that was the old theatrical stub).
 ///
-/// The body will inspect the compiler's slot-kind tracker for the
-/// declared kind at the source location and compare against
-/// `claimed_kind`. Mismatch or unknown → `ProofGap`.
+/// The only accepted relationship is exact equality of the claimed kind with
+/// the canonical projection of the proven type. `ProofGap`'s constructor is
+/// module-private (`ProofGapSeal`), so emit code cannot fabricate a pass —
+/// only this body can mint one.
 #[inline]
-// `site` is reserved for the Phase 3+ proof check (see doc above); the Phase 2
-// stub does not yet inspect it. Keeping the public param name documented.
-#[allow(unused_variables)]
 pub fn prove_native_kind(
     site: &'static str,
+    proven: &ConcreteType,
     claimed_kind: NativeKind,
 ) -> Result<NativeKind, ProofGap> {
-    // Phase 2 stub: pass-through. Phase 3+ replaces with real proof check.
-    Ok(claimed_kind)
+    let expected = native_kind_from_concrete_type(proven);
+    if kinds_consistent(expected, claimed_kind) {
+        Ok(claimed_kind)
+    } else {
+        Err(proof_gap(
+            site,
+            format!(
+                "claimed {claimed_kind:?} but proven static type {proven:?} \
+                 projects to {expected:?} (no relaxation: int≠number, no \
+                 width-narrow, no Bool-default, no UInt64-for-Ptr)"
+            ),
+        ))
+    }
 }
 
-/// Construct a `ProofGap` from inside this module only. Used by the
-/// predicate (Phase 3+) when proof fails.
-#[allow(dead_code)]
+/// Exact-equality consistency check between the canonical projection of the
+/// proven static type (`expected`) and the `claimed` carrier kind.
+///
+/// This is intentionally *exact*. The whole point of SB-8b is to make carrier
+/// lies visible, so any relaxation here would re-open the silent-corruption
+/// path. `int`/`number` do not unify; `UInt64` does not stand in for any
+/// `Ptr(..)`; there is no Bool-default. The ONE allowance is `expected ==
+/// claimed`.
+#[inline]
+fn kinds_consistent(expected: NativeKind, claimed: NativeKind) -> bool {
+    expected == claimed
+}
+
+/// Construct a `ProofGap` from inside this module only. Used by
+/// [`prove_native_kind`] (the real carrier-projection check) and by
+/// [`proof_gap_unresolved_operand`] when proof fails.
 fn proof_gap(site: &'static str, detail: impl Into<String>) -> ProofGap {
     ProofGap {
         site,
@@ -1286,6 +1321,75 @@ pub fn proof_gap_unresolved_operand(site: &'static str, detail: impl Into<String
 mod tests {
     use super::*;
     use shape_runtime::type_schema::TypeSchemaBuilder;
+    use shape_value::HeapKind;
+
+    // ── SB-8b: prove_native_kind is a REAL check, not a pass-through ──────
+
+    #[test]
+    fn prove_native_kind_accepts_faithful_scalar_projection() {
+        // I64 proven type with an Int64 claim: the canonical projection
+        // matches exactly, so the gate passes.
+        assert_eq!(
+            prove_native_kind("test_scalar_ok", &ConcreteType::I64, NativeKind::Int64).unwrap(),
+            NativeKind::Int64
+        );
+        assert_eq!(
+            prove_native_kind("test_f64_ok", &ConcreteType::F64, NativeKind::Float64).unwrap(),
+            NativeKind::Float64
+        );
+        assert_eq!(
+            prove_native_kind("test_str_ok", &ConcreteType::String, NativeKind::String).unwrap(),
+            NativeKind::String
+        );
+    }
+
+    #[test]
+    fn prove_native_kind_accepts_faithful_heap_projection() {
+        // HashMap proven type with the canonical Ptr(HeapKind::HashMap) claim.
+        let map_ty = ConcreteType::HashMap(
+            Box::new(ConcreteType::String),
+            Box::new(ConcreteType::I64),
+        );
+        assert_eq!(
+            prove_native_kind("test_map_ok", &map_ty, NativeKind::Ptr(HeapKind::HashMap)).unwrap(),
+            NativeKind::Ptr(HeapKind::HashMap)
+        );
+    }
+
+    #[test]
+    fn prove_native_kind_rejects_sb10_uint64_for_hashmap() {
+        // SB-10: a HashMap alloc stamped UInt64 (no refcount) is the lie.
+        // The real gate refuses it — silent corruption becomes a ProofGap.
+        let map_ty = ConcreteType::HashMap(
+            Box::new(ConcreteType::String),
+            Box::new(ConcreteType::I64),
+        );
+        let err = prove_native_kind("test_sb10", &map_ty, NativeKind::UInt64)
+            .expect_err("UInt64 claim on a HashMap proven type must be refused");
+        assert_eq!(err.site(), "test_sb10");
+        assert!(err.detail().contains("UInt64"));
+        assert!(err.detail().contains("HashMap"));
+    }
+
+    #[test]
+    fn prove_native_kind_rejects_sb12_bool_for_null() {
+        // SB-12: a None-arm stamped (0, Bool) instead of Null. A Bool claim
+        // against an Option proven type (which projects to a heap Ptr, never
+        // Bool) is refused — the (0,Bool)⇔false sentinel collision is gone.
+        let opt_ty = ConcreteType::Option(Box::new(ConcreteType::I64));
+        prove_native_kind("test_sb12", &opt_ty, NativeKind::Bool)
+            .expect_err("Bool claim on an Option proven type must be refused");
+    }
+
+    #[test]
+    fn prove_native_kind_does_not_unify_int_and_number() {
+        // CLAUDE.md: int and number are separate. A Float64 claim on a proven
+        // I64 (and vice versa) is a hard reject — no implicit numeric coercion.
+        prove_native_kind("test_int_num", &ConcreteType::I64, NativeKind::Float64)
+            .expect_err("Float64 claim on a proven I64 must be refused (int≠number)");
+        prove_native_kind("test_num_int", &ConcreteType::F64, NativeKind::Int64)
+            .expect_err("Int64 claim on a proven F64 must be refused (number≠int)");
+    }
 
     #[test]
     fn test_basic_type_tracking() {
