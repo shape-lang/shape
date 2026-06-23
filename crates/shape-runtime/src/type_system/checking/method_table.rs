@@ -525,18 +525,33 @@ impl MethodTable {
         // receiver's ELEMENT type, not an unconditional `number`. `Array<int>
         // .sum()/.min()/.max()` must be `int` (the typed-array method registry
         // returns `KindedSlot::from_<elem>` per receiver-element kind); only
-        // `Array<number>` returns `number`. `ElementOf(ReceiverParam(0))`
-        // projects `Vec<int>`→`int` / `Vec<number>`→`number` per-receiver.
+        // `Array<number>` returns `number`.
+        //
+        // U4-2 FIX: the element type IS `ReceiverParam(0)` directly. For a
+        // `Vec`/`Array` receiver, `extract_receiver_info` returns the receiver
+        // PARAMS = `[T]` (the element), so `ReceiverParam(0)` already resolves
+        // to `int`/`number` — exactly like `first`/`last`/`pop` above (line 330,
+        // "receiver param 0 = T"). The previous `ElementOf(ReceiverParam(0))`
+        // DOUBLE-projected: `ReceiverParam(0)` gave the element `int`, then
+        // `ElementOf(int)` tried to project the element OF `int` → no element →
+        // an `_oob` placeholder var that stayed free post-solve and was DROPPED
+        // by `finalize_expr_type_table`, so `a.sum()` never reached the span
+        // table (the g1 regression surfaced when U4-2 deleted the closure
+        // mini-inferencer's hand-rolled `.sum()→int` arm). `ElementOf` is for a
+        // receiver-param that is itself a CONTAINER (`flatten`'s
+        // `Iterator<Vec<int>>`), not for a flat `Vec<int>` element accessor.
         // `avg`/`mean`/`std`/`variance`/`norm` are genuine `number`-producing
         // reductions regardless of element type (division / sqrt), so they stay
         // `num()`.
-        let elem_of_recv = || E::ElementOf(Box::new(E::ReceiverParam(0)));
+        // The element type T of a `Vec<T>`/`Array<T>` receiver IS receiver-param
+        // 0 (see line 330 "receiver param 0 = T"); `sum`/`min`/`max` return it.
+        let elem_t = || E::ReceiverParam(0);
         let vec_numeric: Vec<(&str, Vec<E>, E)> = vec![
-            ("sum", vec![], elem_of_recv()),
+            ("sum", vec![], elem_t()),
             ("avg", vec![], num()),
             ("mean", vec![], num()),
-            ("min", vec![], elem_of_recv()),
-            ("max", vec![], elem_of_recv()),
+            ("min", vec![], elem_t()),
+            ("max", vec![], elem_t()),
             ("std", vec![], num()),
             ("variance", vec![], num()),
             ("dot", vec![vec_of(num())], num()),

@@ -612,62 +612,6 @@ pub(crate) fn infer_param_type_from_body(
     body.iter().find_map(|s| scan_stmt(param_name, s))
 }
 
-/// Sweep phase 3c.x: scan a closure body for `param_name op outer_ident`
-/// where `outer_ident` has a known type in `known_outer_types`, and
-/// propagate that type back to `param_name`. Returns the propagated type
-/// name as a `String` (e.g. "int") or `None` if no such pairing is found.
-fn infer_param_type_from_outer_pairing(
-    param_name: &str,
-    body: &[shape_ast::ast::Statement],
-    known_outer_types: &std::collections::HashMap<String, String>,
-) -> Option<String> {
-    use shape_ast::ast::Statement;
-    fn scan(
-        name: &str,
-        expr: &Expr,
-        known: &std::collections::HashMap<String, String>,
-    ) -> Option<String> {
-        match expr {
-            Expr::BinaryOp { left, right, .. } => {
-                if let (Expr::Identifier(ln, _), Expr::Identifier(rn, _)) =
-                    (left.as_ref(), right.as_ref())
-                {
-                    if ln == name {
-                        if let Some(t) = known.get(rn) {
-                            return Some(t.clone());
-                        }
-                    }
-                    if rn == name {
-                        if let Some(t) = known.get(ln) {
-                            return Some(t.clone());
-                        }
-                    }
-                }
-                scan(name, left, known).or_else(|| scan(name, right, known))
-            }
-            Expr::UnaryOp { operand, .. } => scan(name, operand, known),
-            Expr::Return(Some(e), _) => scan(name, e, known),
-            Expr::FunctionCall { args, .. } => args.iter().find_map(|a| scan(name, a, known)),
-            Expr::MethodCall { receiver, args, .. } => scan(name, receiver, known)
-                .or_else(|| args.iter().find_map(|a| scan(name, a, known))),
-            _ => None,
-        }
-    }
-    fn scan_stmt(
-        name: &str,
-        stmt: &Statement,
-        known: &std::collections::HashMap<String, String>,
-    ) -> Option<String> {
-        match stmt {
-            Statement::Expression(e, _) => scan(name, e, known),
-            Statement::Return(Some(e), _) => scan(name, e, known),
-            _ => None,
-        }
-    }
-    body.iter()
-        .find_map(|s| scan_stmt(param_name, s, known_outer_types))
-}
-
 /// Strict-typing-sweep (Cluster 1): convert a `ConcreteType` (the v2 typed
 /// value-representation type) back into an AST `TypeAnnotation` so it can be
 /// attached to a synthetic capture parameter. Returning `None` falls back to
@@ -745,27 +689,32 @@ pub(crate) fn type_display_name_for_closure_inference(
     }
 }
 
-/// Sweep phase 3c.1: infer a return-type name for a closure expression
-/// based on its body, params, and the outer scope (via `compiler`).
+/// U4-2: closure-body return-type name, SERVED BY THE ENGINE SPAN-TABLE.
 ///
-/// Conservative; returns `None` when any operand or sub-expression cannot
-/// be statically resolved. Used by `update_callable_binding_from_expr` to
-/// populate `local_callable_return_types` so a `FunctionCall` against a
-/// `let f = |…|` binding can recover `f`'s return type for strict-typing
-/// binop dispatch (`f(5) + f(7)` etc.).
+/// The hand-written `expr_type` mini-inferencer (a FOURTH stringly inference
+/// engine, with its own `strip_prefix("Vec<")` re-parse and NO `PropertyAccess`
+/// arm → `|p: Emp| { p.salary }` erased to `None`, the live U4 bug) is DELETED.
+/// The closure return type now comes from the post-solve span table
+/// (`resolved_expr_types`) at the closure body's terminal-expression span — the
+/// engine already walks every closure body (U4-0 / P2 made closure-body field
+/// reads resolve to their declared field type and survive finalization).
 ///
-/// The helper:
-/// 1. Honours an explicit `-> T` return annotation when present.
-/// 2. Otherwise builds a `HashMap<String, String>` of param-name → tracked
-///    type-name from the closure's params (using their annotations or the
-///    body-level literal-pairing heuristic the closure compiler itself
-///    relies on).
-/// 3. Walks the body's terminal expression and resolves identifiers via
-///    that map first, then falls back to outer-scope resolution via
-///    `concrete_type_for_expr` (which recognises `let base = 100` as I64).
-/// 4. Recurses into binary ops, requiring both operand types to agree
-///    (and to be one of the primitive scalar names) for the result to be
-///    inferred.
+/// 1. An explicit `-> T` return annotation is honoured verbatim (it is a
+///    declared proof, not an inference result).
+/// 2. Otherwise the body's terminal expression span is looked up in the engine
+///    table and its resolved `Type` is rendered to the side-table's `String`
+///    name shape via `tracked_type_name_from_annotation`.
+///
+/// FORWARD BINDER (U4-0 skeptic): a generic `|p: T| p.field` records a
+/// `Basic("unknown")` sentinel that survives finalization (structurally a
+/// `Type::Concrete`). It is NOT a real type — treat it as un-inferable (return
+/// `None`, same as a table miss), so the call site stays a genuine miss and the
+/// strict checker surfaces the error rather than serving the type "unknown".
+///
+/// `caller_arg_type_names` / `enclosing_params` are retained for ABI
+/// compatibility with the call sites but are no longer consulted: the engine
+/// resolved the closure body against the closure's declared param types during
+/// the whole-program walk, so no caller-context re-seeding is needed here.
 pub(crate) fn infer_closure_body_return_type_name(
     compiler: &mut BytecodeCompiler,
     params: &[shape_ast::ast::FunctionParameter],
@@ -775,12 +724,7 @@ pub(crate) fn infer_closure_body_return_type_name(
     infer_closure_body_return_type_name_with_outer(compiler, params, body, explicit_return, &[])
 }
 
-/// Sweep phase 3c.x: variant that also accepts a list of enclosing-scope
-/// parameters whose names should resolve to their declared types when
-/// scanning the closure body. Used by `update_callable_binding_from_expr`
-/// for the `let f = make(...)` → `f(arg) + f(arg)` pattern, where `make`'s
-/// returned closure captures `make`'s parameters by name and we want to
-/// recover their declared types without actually compiling `make`'s body.
+/// ABI-compatible wrapper; delegates to the engine-served implementation.
 pub(crate) fn infer_closure_body_return_type_name_with_outer(
     compiler: &mut BytecodeCompiler,
     params: &[shape_ast::ast::FunctionParameter],
@@ -798,355 +742,84 @@ pub(crate) fn infer_closure_body_return_type_name_with_outer(
     )
 }
 
-/// cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-ratified):
-/// caller-context-aware variant of the closure-body return-type inference.
-///
-/// `caller_arg_type_names[i]` is the type name (e.g. `"Vec<int>"`,
-/// `"int"`, `"string"`) of the i-th argument the closure is being called
-/// with at the call site. This seeds `param_types[params[i].name]` when
-/// the closure param has no explicit annotation AND no body-literal
-/// pairing — i.e. the case where the closure's param is inferred-typed
-/// at the call site rather than declared.
-///
-/// Class B fixture (inventory §B.2):
-///   `let xs: Array<int> = [1,2,3,4,5]`
-///   `let f = |inner| inner.sum()`
-///   `print(f(xs))`
-///
-/// At `f(xs)`, `caller_arg_type_names[0] = Some("Vec<int>")` (derived
-/// from `concrete_type_for_expr(xs)` → `Array(I64)` →
-/// `concrete_type_to_type_annotation` → `Generic("Vec", [int])` →
-/// `tracked_type_name_from_annotation` → `"Vec<int>"`). The body's
-/// terminal expression `inner.sum()` then resolves via the extended
-/// `expr_type` MethodCall arm: receiver `inner` has type
-/// `"Vec<int>"`; method `sum` on `Vec<scalar>` returns the element
-/// scalar `"int"`.
-///
-/// ADR-006 §2.7.5 stamp-at-compile-time: the caller-supplied arg type
-/// IS the proof of the closure param's type at the call site — no
-/// runtime probe, no fabricated Bool-default. The inference returns
-/// `None` when the body's terminal expression cannot be resolved
-/// against the seeded param_types.
+/// The engine-served closure-body return-type lookup (U4-2). See the doc on
+/// `infer_closure_body_return_type_name` for the design.
 pub(crate) fn infer_closure_body_return_type_name_with_caller_context(
     compiler: &mut BytecodeCompiler,
-    params: &[shape_ast::ast::FunctionParameter],
+    _params: &[shape_ast::ast::FunctionParameter],
     body: &[shape_ast::ast::Statement],
     explicit_return: Option<&TypeAnnotation>,
-    enclosing_params: &[shape_ast::ast::FunctionParameter],
-    caller_arg_type_names: &[Option<String>],
+    _enclosing_params: &[shape_ast::ast::FunctionParameter],
+    _caller_arg_type_names: &[Option<String>],
 ) -> Option<String> {
-    use shape_ast::ast::{BinaryOp as Op, Literal, Statement};
-    use std::collections::HashMap;
-
+    // 1. Explicit `-> T` annotation is a declared proof — honour it verbatim.
     if let Some(ann) = explicit_return {
         if let Some(name) = BytecodeCompiler::tracked_type_name_from_annotation(ann) {
             return Some(name);
         }
     }
 
-    // Build param-type map. Start with the enclosing-scope params (e.g.
-    // the captured `n: int` from `fn make(n: int) -> any { return |x| x + n }`)
-    // so the closure body can resolve free identifiers that came from the
-    // outer function. Closure-local params override on name collision.
-    let mut param_types: HashMap<String, String> = HashMap::new();
-    for p in enclosing_params {
-        let Some(ident) = p.pattern.as_identifier() else {
-            continue;
-        };
-        if let Some(ann) = &p.type_annotation {
-            if let Some(tn) = BytecodeCompiler::tracked_type_name_from_annotation(ann) {
-                param_types.insert(ident.to_string(), tn);
-            }
-        }
+    // 2. Engine span-table lookup at the body's terminal-expression span.
+    let terminal = closure_body_terminal_expr(body)?;
+    let span = shape_ast::ast::Spanned::span(terminal);
+    if span.is_dummy() {
+        return None;
     }
-    for (param_idx, p) in params.iter().enumerate() {
-        let Some(ident) = p.pattern.as_identifier() else {
-            continue;
-        };
-        if let Some(ann) = &p.type_annotation {
-            if let Some(tn) = BytecodeCompiler::tracked_type_name_from_annotation(ann) {
-                param_types.insert(ident.to_string(), tn);
-                continue;
-            }
-        }
-        // Numeric-conversion §4 literal adoption (THE RULE user 2026-06-01),
-        // closure-body parity with the operand-compile widen.
-        //
-        // The caller-context arg type IS the authoritative proof of the
-        // unannotated param's type (it is the receiver element type at the
-        // `.map(|x| …)` call site, resolved via `concrete_type_for_expr`),
-        // whereas the body-literal-pairing heuristic below is only a
-        // SYNTACTIC guess that reads the param's type off a sibling LITERAL.
-        // For `Array<number>.map(|x| x / 2)` the heuristic would mis-read
-        // `x` as `int` from the bare literal `2` — but under §4 it is the
-        // bare literal `2` that ADOPTS the param's `number` (it IS `2.0`),
-        // not the param that adopts the literal's `int`. So when the
-        // call-site supplies a concrete arg type, it takes precedence: the
-        // param resolves `number`, the op is number/number, and this return-
-        // type inference (which names the map's output-element monomorph)
-        // resolves `number` — agreeing with the operand-compile widen so the
-        // result-array element carrier stamps Float64 instead of mis-stamping
-        // Int64 over f64 bits. NOT a return-type constraint and NOT a change
-        // to the element-stamp machinery: only the param-type precedence is
-        // corrected, and only when the call-site actually proved a type
-        // (otherwise the body-literal heuristic still governs, unchanged —
-        // so `|x| x + 1` with no call-site context keeps its `int`, and
-        // comparator/void closures over `Array<int>` keep `int`).
-        let mut resolved_from_caller = false;
-        if let Some(Some(caller_tn)) = caller_arg_type_names.get(param_idx) {
-            param_types.insert(ident.to_string(), caller_tn.clone());
-            resolved_from_caller = true;
-        }
-        // Fallback: same body-literal-pairing heuristic the closure
-        // compiler uses for unannotated params (`|x| x + 1`). Only when the
-        // call-site did not already supply a concrete arg type.
-        if !resolved_from_caller {
-            if let Some(ann) = infer_param_type_from_body(ident, body) {
-                if let Some(tn) = BytecodeCompiler::tracked_type_name_from_annotation(&ann) {
-                    param_types.insert(ident.to_string(), tn);
-                }
-            }
-        }
-        // Sweep phase 3c.x: when the param has no annotation and no
-        // body-literal pairing, but the body uses it in a binary op
-        // against an enclosing-param that IS typed, infer the closure
-        // param's type from the enclosing param's type. Covers
-        // `|x| x + n` over `fn make(n: int) ...`.
-        if !param_types.contains_key(ident) {
-            if let Some(tn) = infer_param_type_from_outer_pairing(ident, body, &param_types) {
-                param_types.insert(ident.to_string(), tn);
-            }
-        }
+    let resolved = compiler.resolved_expr_types.get(&span)?;
+
+    // FORWARD BINDER: an unknown-sentinel survives finalization but is NOT a
+    // real type — treat it as un-inferable so the call site stays a genuine
+    // miss → strict surface-and-stop, never the type literally named "unknown".
+    if matches!(
+        resolved,
+        shape_runtime::type_system::Type::Concrete(TypeAnnotation::Basic(n)) if n == "unknown"
+    ) {
+        return None;
     }
 
-    fn lit_type(lit: &Literal) -> Option<String> {
-        Some(
-            match lit {
-                Literal::Int(_) => "int",
-                Literal::Number(_) => "number",
-                Literal::Bool(_) => "bool",
-                Literal::String(_) | Literal::FormattedString { .. } => "string",
-                Literal::Decimal(_) => "decimal",
-                _ => return None,
-            }
-            .to_string(),
-        )
+    // Render the resolved `Type` to the side-table's `String` name shape. The
+    // table stores `Type::Concrete(TypeAnnotation)`; project it through the same
+    // `tracked_type_name_from_annotation` the rest of the side-table plumbing
+    // uses (so `int`/`number`/`Vec<int>`/struct names all round-trip exactly as
+    // before). A non-Concrete resolved type (still-generic, function-shaped)
+    // yields `None` → genuine miss.
+    match resolved {
+        shape_runtime::type_system::Type::Concrete(ann) => {
+            BytecodeCompiler::tracked_type_name_from_annotation(ann)
+        }
+        _ => None,
     }
+}
 
-    fn expr_type(
-        compiler: &mut BytecodeCompiler,
-        param_types: &HashMap<String, String>,
-        expr: &Expr,
-    ) -> Option<String> {
+/// Find a closure body's terminal expression — the expression whose type IS the
+/// closure's return type. Mirrors the terminal-finding logic the deleted
+/// mini-inferencer used: the last statement; an explicit `Return(Some(e))` uses
+/// `e`; a trailing expression statement uses its expr; a trailing `Block`
+/// recurses into the block's last item.
+fn closure_body_terminal_expr(body: &[shape_ast::ast::Statement]) -> Option<&Expr> {
+    use shape_ast::ast::{BlockItem, Statement};
+
+    fn expr_terminal(expr: &Expr) -> Option<&Expr> {
         match expr {
-            Expr::Literal(lit, _) => lit_type(lit),
-            Expr::Identifier(name, _) => {
-                if let Some(tn) = param_types.get(name) {
-                    return Some(tn.clone());
-                }
-                // Outer-scope resolution: try `concrete_type_for_expr`
-                // first (covers tracker-recorded primitives + array
-                // element types), then fall back to the compiler's
-                // `infer_expr_type` (which consults the type-inference
-                // engine that ran on the program AST and can see
-                // `let base = 100` even when the type tracker has no
-                // entry for `base`).
-                let ident_expr = Expr::Identifier(name.clone(), Span::DUMMY);
-                if let Some(ct) = concrete_type_for_expr(compiler, &ident_expr) {
-                    if let Some(tn) = concrete_type_to_type_annotation(&ct)
-                        .and_then(|ann| BytecodeCompiler::tracked_type_name_from_annotation(&ann))
-                    {
-                        return Some(tn);
-                    }
-                }
-                if let Ok(ty) = compiler.infer_expr_type(&ident_expr) {
-                    let display = type_display_name_for_closure_inference(&ty);
-                    if BytecodeCompiler::tracker_type_name_is_primitive(&display) {
-                        return Some(display);
-                    }
-                }
-                None
-            }
-            Expr::BinaryOp {
-                left, right, op, ..
-            } => {
-                let lt = expr_type(compiler, param_types, left)?;
-                let rt = expr_type(compiler, param_types, right)?;
-                match op {
-                    // Arithmetic on matching primitive scalar types
-                    // preserves the type. Comparison/logical ops yield
-                    // bool.
-                    Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => {
-                        // Numeric-conversion §4 literal adoption (THE RULE
-                        // user 2026-06-01), closure-body parity with the
-                        // operand-compile widen at `binary_ops.rs` (the
-                        // `expr_proves_float` path). When one operand is a
-                        // BARE int literal and the SIBLING resolves to the
-                        // `number`/f64 family (e.g. the closure param `x` of
-                        // `Array<number>.map(|x| x / 2)`, proven `number`
-                        // from the receiver element type), the literal `2`
-                        // IS the number literal `2.0`: the op is
-                        // number/number and the result resolves `number`.
-                        // This MUST agree with the operand-compile widen —
-                        // there the bare-int operand is re-lowered to a
-                        // `Number` constant so the body computes f64; here
-                        // the return-type inference (which names the map's
-                        // output element monomorph) must resolve the SAME
-                        // `number` so the result-array element carrier
-                        // stamps Float64 instead of mis-stamping Int64 over
-                        // f64 bits. A LOCAL LITERAL adoption, NOT a return-
-                        // type constraint and NOT a change to the element-
-                        // stamp machinery: only a bare int literal adopts;
-                        // a genuine `int`-typed operand keeps `int != number`
-                        // (mismatch → `None`, no silent unify).
-                        if lt != rt {
-                            let lit_left = matches!(
-                                left.as_ref(),
-                                Expr::Literal(Literal::Int(_), _)
-                                    | Expr::Literal(Literal::UInt(_), _)
-                            );
-                            let lit_right = matches!(
-                                right.as_ref(),
-                                Expr::Literal(Literal::Int(_), _)
-                                    | Expr::Literal(Literal::UInt(_), _)
-                            );
-                            if lit_right && lt == "number" && rt == "int" {
-                                return Some("number".to_string());
-                            }
-                            if lit_left && rt == "number" && lt == "int" {
-                                return Some("number".to_string());
-                            }
-                        }
-                        if lt == rt && BytecodeCompiler::tracker_type_name_is_primitive(&lt) {
-                            Some(lt)
-                        } else {
-                            None
-                        }
-                    }
-                    Op::Equal
-                    | Op::NotEqual
-                    | Op::Less
-                    | Op::LessEq
-                    | Op::Greater
-                    | Op::GreaterEq
-                    | Op::And
-                    | Op::Or => Some("bool".to_string()),
-                    _ => None,
-                }
-            }
-            Expr::UnaryOp { operand, .. } => expr_type(compiler, param_types, operand),
-            Expr::Return(Some(inner), _) => expr_type(compiler, param_types, inner),
-            Expr::Block(block, _) => {
-                let last = block.items.last()?;
-                match last {
-                    shape_ast::ast::BlockItem::Expression(e) => expr_type(compiler, param_types, e),
-                    shape_ast::ast::BlockItem::Statement(s) => stmt_type(compiler, param_types, s),
-                    _ => None,
-                }
-            }
-            // cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-
-            // ratified): MethodCall arm. Mirrors the JIT-side
-            // `well_known_method_return_kind` +
-            // `parametric_method_return_kind_from_receiver` classifier shape
-            // (`crates/shape-jit/src/mir_compiler/types.rs:818-1019`) — the
-            // single source of truth for kind-classification across both
-            // bytecode-emission and JIT-MIR layers.
-            //
-            // Class B fixture (inventory §B.2): `let f = |inner| inner.sum()`
-            // with `inner` resolved (via caller-context arg type) to
-            // `"Vec<int>"`. `inner.sum()` matches the parametric
-            // `("sum"|..., Array(elem))` arm and returns the element
-            // scalar `"int"`. The downstream conduit value-call
-            // destination-stamping pass then stamps the Call-terminator's
-            // destination slot with `ConcreteType::I64`, and the JIT-MIR
-            // `slot_kinds` projection picks up `NativeKind::Int64`, closing
-            // the `print(f(xs))` chain.
-            //
-            // Invariant-return methods (size/len/length/count → int,
-            // isEmpty/contains/has → bool) are receiver-shape-agnostic
-            // and matched first. Parametric methods consult the
-            // receiver's resolved type name — supports `Vec<scalar>`
-            // shape recognition (i.e. element-typed accessors on typed
-            // arrays).
-            //
-            // No tag-bit decode, no Bool-default fallback, no fabricated
-            // default — when the receiver type isn't recognised or the
-            // method name isn't in either classifier, returns `None` so
-            // the outer caller's value-call stamping stays Void per
-            // §2.7.5.1 / §2.7.7 #9.
-            Expr::MethodCall {
-                receiver,
-                method,
-                args,
-                ..
-            } => {
-                // Invariant-across-receiver methods: classify from name
-                // alone without needing the receiver's type.
-                let invariant_kind: Option<&'static str> = match method.as_str() {
-                    "size" | "len" | "length" | "count" => Some("int"),
-                    "isEmpty" | "is_empty" | "has" | "contains" => Some("bool"),
-                    _ => None,
-                };
-                if let Some(kind) = invariant_kind {
-                    return Some(kind.to_string());
-                }
-
-                // Parametric methods: receiver's resolved type name
-                // determines the return type. Resolve the receiver via
-                // the same expr_type walker (so `inner` resolves to its
-                // seeded param_types entry like "Vec<int>").
-                let recv_ty = expr_type(compiler, param_types, receiver)?;
-
-                // `Vec<T>` element-typed accessors. The element name
-                // strips the `Vec<...>` wrapper. Matches the JIT-side
-                // `("sum" | "mean" | "min" | "max", ConcreteType::Array
-                // (elem))` arm at `types.rs:976-981`.
-                if let Some(elem) = recv_ty
-                    .strip_prefix("Vec<")
-                    .and_then(|s| s.strip_suffix('>'))
-                {
-                    match method.as_str() {
-                        "sum" | "mean" | "min" | "max" | "get" => {
-                            // .get(i) returns element T directly per the
-                            // JIT-side classifier; .sum/.mean/.min/.max
-                            // also return element T (the typed-array
-                            // method registry returns
-                            // `KindedSlot::from_<elem>` per receiver-
-                            // element kind).
-                            if BytecodeCompiler::tracker_type_name_is_primitive(elem) {
-                                return Some(elem.to_string());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                // Receiver-type-specific arms for built-in scalar types
-                // can be added here as needed; bounded to the same set
-                // the JIT-side classifier supports to avoid drift.
-                let _ = args;
-                None
-            }
-            _ => None,
+            Expr::Return(Some(inner), _) => expr_terminal(inner),
+            Expr::Block(block, _) => match block.items.last()? {
+                BlockItem::Expression(e) => expr_terminal(e),
+                BlockItem::Statement(s) => stmt_terminal(s),
+                _ => None,
+            },
+            other => Some(other),
         }
     }
 
-    fn stmt_type(
-        compiler: &mut BytecodeCompiler,
-        param_types: &HashMap<String, String>,
-        stmt: &Statement,
-    ) -> Option<String> {
+    fn stmt_terminal(stmt: &Statement) -> Option<&Expr> {
         match stmt {
-            Statement::Expression(e, _) => expr_type(compiler, param_types, e),
-            Statement::Return(Some(e), _) => expr_type(compiler, param_types, e),
+            Statement::Expression(e, _) => expr_terminal(e),
+            Statement::Return(Some(e), _) => expr_terminal(e),
             _ => None,
         }
     }
 
-    // Find body's terminal expression: prefer last statement; if it's a
-    // `Return(e)` use e, else if it's an expression statement use it.
-    let last = body.last()?;
-    stmt_type(compiler, &param_types, last)
+    stmt_terminal(body.last()?)
 }
 
 impl BytecodeCompiler {

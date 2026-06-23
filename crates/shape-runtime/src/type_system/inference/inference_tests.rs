@@ -3236,3 +3236,47 @@ for r in rs { r.n + 1 }
         );
     }
 }
+
+#[test]
+fn u42_typed_array_sum_resolves_to_element_type() {
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    // g1 regression guard (U4-2): deleting the closure-body mini-inferencer made
+    // the engine span-table the sole source for `|a: Array<int>| { a.sum() }`'s
+    // return type. The `Vec.sum`/`min`/`max` method-table return was registered
+    // as `ElementOf(ReceiverParam(0))`, which DOUBLE-projected — `ReceiverParam(0)`
+    // already IS the element `int`, so `ElementOf(int)` minted an `_oob` var that
+    // `finalize_expr_type_table` DROPPED, leaving `a.sum()` absent from the table.
+    // The fix returns `ReceiverParam(0)` directly. Assert the span table now
+    // resolves `a.sum()` / `f(xs)` to the element type so the strict binop check
+    // and the engine-served closure-return both succeed.
+    let code = r#"
+let xs = [1, 2, 3]
+let f = |a: Array<int>| { a.sum() }
+let r = f(xs) + 1
+"#;
+    let program = parse_program(code).expect("parse");
+    let (engine, _types, errors) = u40_infer(code);
+    assert!(errors.is_empty(), "g1 should infer cleanly, got {:?}", errors);
+
+    let sum_span = u40_find_expr_span(&program, &|e| {
+        matches!(e, Expr::MethodCall { method, .. } if method == "sum")
+    })
+    .expect("a.sum() must exist");
+    assert!(
+        engine.resolved_expr_type(sum_span).is_some_and(u40_is_int),
+        "g1: a.sum() span must resolve to `int`, got {:?}",
+        engine.resolved_expr_type(sum_span)
+    );
+
+    let call_span = u40_find_expr_span(&program, &|e| {
+        matches!(e, Expr::FunctionCall { name, .. } if name == "f")
+    })
+    .expect("f(xs) must exist");
+    assert!(
+        engine.resolved_expr_type(call_span).is_some_and(u40_is_int),
+        "g1: f(xs) call-result span must resolve to `int`, got {:?}",
+        engine.resolved_expr_type(call_span)
+    );
+}
