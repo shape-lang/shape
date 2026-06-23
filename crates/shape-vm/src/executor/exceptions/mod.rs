@@ -496,12 +496,20 @@ impl VirtualMachine {
         if let NativeKind::Ptr(HeapKind::TypedObject) = payload.kind() {
             let bits = payload.slot().raw();
             if bits != 0 {
-                // SAFETY: kind says Ptr(TypedObject); bits are
-                // `Arc::into_raw::<TypedObjectStorage>`; carrier owns one
-                // strong-count share. Borrow transiently to read schema_id.
-                let arc: Arc<TypedObjectStorage> = unsafe { Arc::from_raw(bits as *const _) };
-                let is_any_error = arc.schema_id == self.builtin_schemas.any_error as u64;
-                let _ = Arc::into_raw(arc);
+                // R5 soundness (2026-06-23): `bits` is a v2-raw
+                // `TypedObjectStorage::_new` pointer (HeapHeader at offset 0),
+                // NOT `Arc::into_raw`. Recovering it via `Arc::from_raw`
+                // steps `byte_sub(16)` into a non-ArcInner allocation → Miri
+                // UB. Mirror `uncaught_error_message` (~:201): read schema_id
+                // through a transient read-only `&TypedObjectStorage` — no
+                // `Arc::from_raw`, no refcount touch (the `payload` carrier
+                // keeps owning its single share).
+                // SAFETY: kind says Ptr(TypedObject); `bits` is a live `_new`
+                // pointer (non-null, checked above) owned by `payload`; the
+                // borrow is a read-only `schema_id` read that does not escape.
+                let obj: &TypedObjectStorage =
+                    unsafe { &*(bits as *const TypedObjectStorage) };
+                let is_any_error = obj.schema_id == self.builtin_schemas.any_error as u64;
                 if is_any_error {
                     return Ok(payload);
                 }
@@ -1467,11 +1475,13 @@ mod build_any_error_tests {
         let bits = result.slot().raw();
         assert!(bits != 0, "AnyError TypedObject pointer should be non-null");
 
-        // SAFETY: kind says Ptr(TypedObject); bits are Arc::into_raw of
-        // an Arc<TypedObjectStorage>. We claim ownership of the share
-        // for the duration of the test (the `result` carrier still owns
-        // its share — we reconstruct without bumping).
-        let storage: Arc<TypedObjectStorage> = unsafe { Arc::from_raw(bits as *const _) };
+        // R5 soundness (2026-06-23): TypedObject is a `_new`/HeapHeader
+        // carrier — `bits` is NOT `Arc::into_raw`. Read through a transient
+        // `&TypedObjectStorage` (no `Arc::from_raw`, no refcount touch). The
+        // `result` carrier keeps owning its single share.
+        // SAFETY: kind == Ptr(TypedObject); `bits` is a live `_new` pointer
+        // (non-null, checked above) owned by `result`.
+        let storage: &TypedObjectStorage = unsafe { &*(bits as *const TypedObjectStorage) };
 
         // Schema ID matches AnyError.
         assert_eq!(storage.schema_id, vm.builtin_schemas.any_error as u64);
@@ -1501,9 +1511,8 @@ mod build_any_error_tests {
         assert_eq!(storage.slots()[ANYERROR_CAUSE].raw(), 0);
         assert_eq!((storage.heap_mask >> ANYERROR_CAUSE) & 1, 0);
 
-        // Re-into_raw to balance the temporary Arc; the original
-        // `result` carrier's Drop will release the storage share.
-        let _ = Arc::into_raw(storage);
+        // No Arc to balance (transient `&` borrow). The `result` carrier's
+        // Drop releases the storage share.
         drop(result);
     }
 
@@ -1518,11 +1527,13 @@ mod build_any_error_tests {
 
         assert_eq!(wrapped.kind(), NativeKind::Ptr(HeapKind::TypedObject));
         let bits = wrapped.slot().raw();
-        let storage: Arc<TypedObjectStorage> = unsafe { Arc::from_raw(bits as *const _) };
+        // R5 soundness (2026-06-23): `_new` carrier — transient `&` read,
+        // no `Arc::from_raw`. `wrapped` keeps owning its share.
+        // SAFETY: kind == Ptr(TypedObject); `bits` is a live `_new` pointer.
+        let storage: &TypedObjectStorage = unsafe { &*(bits as *const TypedObjectStorage) };
         let msg_bits = storage.slots()[ANYERROR_MESSAGE].raw();
         let msg_str: &String = unsafe { &*(msg_bits as *const String) };
         assert_eq!(msg_str.as_str(), "oops");
-        let _ = Arc::into_raw(storage);
         drop(wrapped);
     }
 

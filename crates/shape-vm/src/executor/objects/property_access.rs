@@ -117,16 +117,29 @@ impl VirtualMachine {
                         "GetProp on null TypedObject".to_string(),
                     ));
                 }
-                // SAFETY: kind says `Ptr(HeapKind::TypedObject)`, so
-                // `obj_bits` is `Arc::into_raw::<TypedObjectStorage>` and
-                // the popped slot owns one strong-count share. Borrow via
-                // a transient `Arc` (does NOT add a refcount because we
-                // pair `Arc::from_raw` with `Arc::into_raw` immediately).
-                let storage_arc: Arc<shape_value::heap_value::TypedObjectStorage> =
-                    unsafe { Arc::from_raw(obj_bits as *const _) };
-                let result = self.read_typed_object_field(&storage_arc, ks);
-                let _ = Arc::into_raw(storage_arc);
-                result
+                // R5 soundness (2026-06-23): `obj_bits` is a v2-raw
+                // `TypedObjectStorage::_new` pointer (HeapHeader at offset 0),
+                // NOT `Arc::into_raw`. The production carrier for
+                // `Ptr(HeapKind::TypedObject)` is the `_new`/`_drop` path —
+                // `clone_with_kind`/`drop_with_kind` operate on the HeapHeader
+                // refcount via `v2_retain`/`release_elem`, never an
+                // `Arc<TypedObjectStorage>` (vm_impl/stack.rs). Recovering the
+                // share via `Arc::from_raw` was wrong-type recovery: its
+                // `byte_sub(16)` ArcInner offset stepped into a non-ArcInner
+                // allocation → Miri UB ("dangling pointer / no provenance").
+                // Reproduced live under Miri on every `point.x` field read.
+                // Same defect class as R3 (`op_set_prop`) / R4 (`op_length`).
+                // Mirror their raw-pointer discipline: form a transient
+                // read-only `&TypedObjectStorage` from the raw `_new` pointer
+                // — no `Arc::from_raw`, no refcount touch (the popped share is
+                // retired exactly once by `drop_with_kind(obj_bits, obj_kind)`
+                // in `op_get_prop` after dispatch).
+                // SAFETY: `obj_bits` is a live `_new` pointer (non-null,
+                // checked above) owned by the popped slot; the borrow is a
+                // read-only field read that does not escape and forms no `&mut`.
+                let storage: &shape_value::heap_value::TypedObjectStorage =
+                    unsafe { &*(obj_bits as *const shape_value::heap_value::TypedObjectStorage) };
+                self.read_typed_object_field(storage, ks)
             }
 
             // ── v2 typed array (raw `*mut TypedArray<T>` pointer) ────────
@@ -972,6 +985,99 @@ mod tests {
         assert_eq!(storage_back.slots()[0].raw(), 42u64);
         // Release the popped share through the v2-raw drop dispatch.
         crate::executor::vm_impl::stack::drop_with_kind(obj_bits_back, obj_kind_back);
+    }
+
+    /// R5 soundness (2026-06-23): `op_get_prop` field read on a v2-raw
+    /// `_new` TypedObject must NOT route the receiver bits through
+    /// `Arc::from_raw`. Under Miri (SB + TB) the pre-fix `Arc::from_raw`
+    /// stepped `byte_sub(16)` into a non-ArcInner allocation → "dangling
+    /// pointer / no provenance". This test builds a real `_new` carrier
+    /// (HeapHeader at offset 0, refcount=1) and reads a field, exercising
+    /// the transient-`&TypedObjectStorage` path in `dispatch_get_prop`.
+    #[test]
+    fn get_prop_typed_object_int_field_reads_via_raw() {
+        use shape_runtime::type_schema::{FieldType, TypeSchema};
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        // Build a single-field schema (`x: int`) and register it.
+        let schema = TypeSchema::new("Probe".to_string(), vec![("x".to_string(), FieldType::I64)]);
+        let schema_id = schema.id;
+        vm.program.type_schema_registry.register(schema);
+
+        // Construct a `_new` storage with x = 99.
+        let slot = ValueSlot::from_raw(99u64);
+        let ptr = TypedObjectStorage::_new(
+            schema_id as u64,
+            vec![slot].into_boxed_slice(),
+            0, // heap_mask: no heap fields
+            Arc::from(vec![NativeKind::Int64].into_boxed_slice()),
+        );
+        let recv_bits = ptr as u64;
+
+        // Push (recv, key) to match `op_get_prop`'s pop order (obj first,
+        // key second on the stack — popped key then obj).
+        vm.push_kinded(recv_bits, NativeKind::Ptr(HeapKind::TypedObject))
+            .unwrap();
+        let key_arc: Arc<String> = Arc::new("x".to_string());
+        let key_bits = Arc::into_raw(key_arc) as u64;
+        vm.push_kinded(key_bits, NativeKind::String).unwrap();
+
+        vm.op_get_prop(None).unwrap();
+
+        // The field read pushes the int field value back (retain-on-read
+        // bumped no refcount for an inline scalar).
+        let (val_bits, val_kind) = vm.pop_kinded().unwrap();
+        assert_eq!(val_kind, NativeKind::Int64);
+        assert_eq!(val_bits, 99u64);
+        // op_get_prop already retired the popped receiver + key shares via
+        // drop_with_kind; the `_new` carrier's last share (refcount=1) is
+        // released by that dispatch (release_elem → _drop).
+    }
+
+    /// R5 soundness: a string-field read on a `_new` TypedObject. Exercises
+    /// the transient-`&` path AND the heap-field retain-on-read (the popped
+    /// receiver is retired by `op_get_prop`; the returned `Arc<String>`
+    /// share is retired here).
+    #[test]
+    fn get_prop_typed_object_string_field_reads_via_raw() {
+        use shape_runtime::type_schema::{FieldType, TypeSchema};
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        let schema = TypeSchema::new(
+            "Named".to_string(),
+            vec![("name".to_string(), FieldType::String)],
+        );
+        let schema_id = schema.id;
+        vm.program.type_schema_registry.register(schema);
+
+        // name field holds an Arc<String> raw pointer; heap_mask bit 0 set.
+        let name_arc: Arc<String> = Arc::new("hi".to_string());
+        let name_bits = Arc::into_raw(name_arc) as u64;
+        let slot = ValueSlot::from_raw(name_bits);
+        let ptr = TypedObjectStorage::_new(
+            schema_id as u64,
+            vec![slot].into_boxed_slice(),
+            1, // heap_mask: field 0 is heap
+            Arc::from(vec![NativeKind::String].into_boxed_slice()),
+        );
+        let recv_bits = ptr as u64;
+
+        vm.push_kinded(recv_bits, NativeKind::Ptr(HeapKind::TypedObject))
+            .unwrap();
+        let key_arc: Arc<String> = Arc::new("name".to_string());
+        let key_bits = Arc::into_raw(key_arc) as u64;
+        vm.push_kinded(key_bits, NativeKind::String).unwrap();
+
+        vm.op_get_prop(None).unwrap();
+
+        let (val_bits, val_kind) = vm.pop_kinded().unwrap();
+        assert_eq!(val_kind, NativeKind::String);
+        // SAFETY: val_kind == String ⇒ val_bits is an Arc::into_raw<String>;
+        // the retain-on-read in read_typed_object_field bumped the share, so
+        // we own this one and retire it via drop_with_kind below.
+        let s: &String = unsafe { &*(val_bits as *const String) };
+        assert_eq!(s.as_str(), "hi");
+        crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
     }
 
     /// `op_set_prop` on a TypedObject with a non-string key returns a
