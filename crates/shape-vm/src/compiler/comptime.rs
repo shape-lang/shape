@@ -1395,7 +1395,18 @@ fn read_typed_object_field(
                     shape_value::v2::refcount::v2_retain(hdr);
                 }
                 HeapKind::TypedObject => {
-                    Arc::increment_strong_count(bits as *const shape_value::TypedObjectStorage);
+                    // R6 carrier-convention soundness (2026-06): TypedObject
+                    // slot bits are the v2-raw `*const TypedObjectStorage`
+                    // produced by `TypedObjectStorage::_new` (HeapHeader at
+                    // offset 0), NOT `Arc::into_raw(Arc::new(...))`. The
+                    // refcount lives on the HeapHeader; an `Arc::increment_
+                    // strong_count` here would `byte_sub(16)` into non-ArcInner
+                    // memory (the same UB the adjacent TypedArray arm avoids).
+                    // Retain via `v2_retain` against the HeapHeader — pairs
+                    // with the `TypedObjectStorage::release_elem` drop arm in
+                    // vm_impl/stack.rs.
+                    let hdr = bits as *const shape_value::v2::heap_header::HeapHeader;
+                    shape_value::v2::refcount::v2_retain(hdr);
                 }
                 HeapKind::Decimal => {
                     Arc::increment_strong_count(bits as *const rust_decimal::Decimal);
@@ -2499,6 +2510,53 @@ const X = comptime {
              must parse (future-proofing for recursive FieldInfo): {:?}",
             program.err()
         );
+    }
+
+    // R6 carrier-convention soundness (2026-06): `read_typed_object_field`
+    // retains a TypedObject heap field on read. TypedObject slot bits are
+    // the v2-raw `*const TypedObjectStorage` produced by
+    // `TypedObjectStorage::_new` (HeapHeader at offset 0). The pre-fix code
+    // applied an `Arc` strong-count bump to those raw `_new` bits, whose
+    // `byte_sub(16)` to reach the (non-existent) ArcInner header is
+    // out-of-allocation UB on a `_new` carrier. The fix retains via
+    // `v2_retain` against the HeapHeader. This test builds a parent
+    // TypedObject with a nested `_new` TypedObject heap field, reads the
+    // field (retain), then drops both the read-out KindedSlot and the parent
+    // via the canonical `release_elem`/Drop path — Miri (SB + TB) flags the
+    // byte_sub(16) UB if the Arc op ever returns.
+    #[test]
+    fn r6_read_typed_object_field_retains_nested_typed_object_via_header() {
+        use super::read_typed_object_field;
+        use shape_value::v2::heap_element::HeapElement;
+        use shape_value::{HeapKind, NativeKind, TypedObjectStorage, ValueSlot};
+        use std::sync::Arc;
+
+        // Nested child: an empty-field `_new` TypedObject (schema 7000).
+        let child_ptr = TypedObjectStorage::_new(
+            7000,
+            Box::new([]),
+            0,
+            Arc::from(Vec::<NativeKind>::new()),
+        );
+        // Parent: one heap field (idx 0) pointing at the child, heap_mask bit 0.
+        let parent_slot = ValueSlot::from_raw(child_ptr as u64);
+        let field_kind = NativeKind::Ptr(HeapKind::TypedObject);
+
+        // Read the field — the fixed retain path bumps the child's HeapHeader
+        // refcount (1 -> 2) via v2_retain. Pre-fix this was the byte_sub(16)
+        // Arc::increment UB.
+        let read_out = read_typed_object_field(parent_slot, field_kind, /*heap_mask*/ 1, 0);
+        assert_eq!(read_out.kind, field_kind);
+
+        // Drop the read-out KindedSlot: canonical Drop -> drop_with_kind ->
+        // release_elem on the HeapHeader (2 -> 1). Balanced against the retain.
+        drop(read_out);
+
+        // Now release the original share (1 -> 0) -> _drop deallocates via the
+        // `_new` Layout. A double-free / wrong-allocator free here is Miri UB.
+        unsafe {
+            TypedObjectStorage::release_elem(child_ptr as *const TypedObjectStorage);
+        }
     }
 }
 

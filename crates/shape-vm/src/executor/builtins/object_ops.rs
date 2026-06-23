@@ -140,7 +140,19 @@ impl VirtualMachine {
                                 shape_value::v2::refcount::v2_retain(hdr);
                             }
                             NativeKind::Ptr(HeapKind::TypedObject) => {
-                                Arc::increment_strong_count(bits as *const TypedObjectStorage);
+                                // R6 carrier-convention soundness (2026-06):
+                                // TypedObject slot bits are the v2-raw
+                                // `*const TypedObjectStorage` from
+                                // `TypedObjectStorage::_new` (HeapHeader at
+                                // offset 0), NOT `Arc::into_raw`. An
+                                // `Arc::increment_strong_count` here would
+                                // `byte_sub(16)` into non-ArcInner memory (the
+                                // same UB the adjacent TypedArray arm avoids).
+                                // Retain via `v2_retain` against the HeapHeader
+                                // — pairs with the `release_elem` drop arm.
+                                let hdr =
+                                    bits as *const shape_value::v2::heap_header::HeapHeader;
+                                shape_value::v2::refcount::v2_retain(hdr);
                             }
                             NativeKind::Ptr(HeapKind::HashMap) => {
                                 // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
@@ -187,5 +199,61 @@ impl VirtualMachine {
             Arc::from(new_kinds.into_boxed_slice()),
         );
         Ok(KindedSlot::from_typed_object_raw(ptr))
+    }
+}
+
+#[cfg(test)]
+mod r6_carrier_soundness_tests {
+    //! R6 carrier-convention soundness (2026-06): the Object spread/exclude
+    //! subset builder (`derive_subset_schema` retain loop) bumps the refcount
+    //! of every kept heap field before re-stamping it into the new
+    //! TypedObject. For a `NativeKind::Ptr(HeapKind::TypedObject)` field the
+    //! slot bits are the v2-raw `*const TypedObjectStorage` from
+    //! `TypedObjectStorage::_new` (HeapHeader at offset 0). The pre-fix code
+    //! applied an `Arc` strong-count bump to those raw `_new` bits, whose
+    //! `byte_sub(16)` to reach a (non-existent) ArcInner header is
+    //! out-of-allocation UB on a `_new` carrier. The fix retains via
+    //! `v2_retain` against the HeapHeader. This test replicates the exact
+    //! retain (for a nested-TypedObject field) + rebuild + balanced
+    //! release; Miri (SB + TB) flags the byte_sub(16) UB if the Arc op
+    //! ever returns.
+    use super::*;
+    use shape_value::v2::heap_element::HeapElement;
+    use shape_value::ValueSlot;
+
+    #[test]
+    fn r6_subset_builder_retains_nested_typed_object_field_via_header() {
+        // Nested child TypedObject (empty fields), `_new`-allocated.
+        let child_ptr =
+            TypedObjectStorage::_new(8000, Box::new([]), 0, Arc::from(Vec::<NativeKind>::new()));
+
+        // The retain the subset builder performs for a kept TypedObject field
+        // (mirror of object_ops.rs line ~143 fixed arm):
+        let bits = child_ptr as u64;
+        unsafe {
+            let hdr = bits as *const shape_value::v2::heap_header::HeapHeader;
+            shape_value::v2::refcount::v2_retain(hdr); // 1 -> 2
+        }
+
+        // Build the new subset object holding the same field pointer (one of
+        // the two shares now lives in `new_obj`).
+        let new_obj_ptr = TypedObjectStorage::_new(
+            8001,
+            Box::new([ValueSlot::from_raw(bits)]),
+            1, // heap_mask: field 0 is heap
+            Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject)].into_boxed_slice()),
+        );
+
+        // Drop the new object: release_elem walks heap_mask and releases the
+        // child field share (2 -> 1) via the HeapHeader path.
+        unsafe {
+            TypedObjectStorage::release_elem(new_obj_ptr as *const TypedObjectStorage);
+        }
+
+        // Release the original child share (1 -> 0) -> _drop frees via _new
+        // Layout. Wrong-allocator free / double-free here is Miri UB.
+        unsafe {
+            TypedObjectStorage::release_elem(child_ptr as *const TypedObjectStorage);
+        }
     }
 }

@@ -6832,10 +6832,15 @@ mod trait_object_storage {
 
     #[test]
     fn slot_bits_recover_to_typed_arc_via_canonical_pattern() {
-        // The canonical recovery pattern (per `3ac2f11` precedent):
-        // bits = slot.raw(), Arc::from_raw, clone, into_raw. Verify
-        // that round-tripping the raw bits through Arc::from_raw
-        // recovers an Arc with the expected vtable identity.
+        // R6 carrier-convention soundness (2026-06): production trait
+        // objects are v2-raw `_new`/HeapHeader carriers (see
+        // trait_object_ops.rs `TraitObjectStorage::_new` producers +
+        // the `release_elem` drop arm). Recovery for a read is a
+        // transient raw `&TraitObjectStorage`, NOT `Arc::from_raw`
+        // (which would `byte_sub(16)` into non-ArcInner memory on a
+        // `_new` carrier). This test pins that raw-read recovery
+        // round-trips the vtable identity without touching the
+        // refcount header.
         let obj = make_object(7);
         let vt = make_vtable("Animal", 100, "name");
         let storage = Arc::new(TraitObjectStorage::new(obj, vt));
@@ -6843,21 +6848,18 @@ mod trait_object_storage {
         let slot = KindedSlot::from_trait_object(Arc::clone(&storage));
         let bits = slot.slot().raw();
 
-        // SAFETY: bits came from KindedSlot::from_trait_object which
-        // stores `Arc::into_raw(Arc<TraitObjectStorage>)`. The slot
-        // owns the share; we leak the recovered Arc back to keep the
-        // slot's share intact for normal drop discipline.
-        let recovered: Arc<TraitObjectStorage> =
-            unsafe { Arc::from_raw(bits as *const TraitObjectStorage) };
-        let cloned = Arc::clone(&recovered);
-        let _ = Arc::into_raw(recovered); // restore slot's share
+        // SAFETY: bits point at a live TraitObjectStorage kept alive by
+        // `storage` + the slot's share. Borrow it transiently as a
+        // shared reference for the read — no refcount touch, no
+        // `Arc::from_raw`/`byte_sub(16)`.
+        let recovered: &TraitObjectStorage =
+            unsafe { &*(bits as *const TraitObjectStorage) };
 
-        // Recovered Arc points to the same storage — same vtable Arc.
-        assert!(Arc::ptr_eq(&cloned.vtable, &storage.vtable));
+        // Recovered borrow points to the same storage — same vtable Arc.
+        assert!(Arc::ptr_eq(&recovered.vtable, &storage.vtable));
         // Pointer-equality on the inner vtable's raw pointer matches.
-        assert_eq!(Arc::as_ptr(&cloned.vtable), original_vt_ptr);
+        assert_eq!(Arc::as_ptr(&recovered.vtable), original_vt_ptr);
 
-        drop(cloned);
         drop(slot);
         drop(storage);
     }
