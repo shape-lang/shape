@@ -37,5 +37,5 @@
 0	\bdispatch_value_call_handler_raw\b	W7 transitional shim name — refuse on sight
 0	\bcall_value_with_u64_slice\b	W7 transitional shim name — refuse on sight
 0	unwrap_or\(\(0,\s*NativeKind::Bool\)\)	Bool-default slot fabrication — ADR-006 §2.7.7 forbidden
-0	Arc::(from_raw|increment_strong_count|decrement_strong_count)\s*\(\s*bits\s+as\s+\*const\s+(shape_value::)?TypedObjectStorage	R6 carrier-UB: Arc ptr-op on _new TypedObjectStorage carrier (use v2_retain/release_elem on HeapHeader)
-0	Arc::(from_raw|increment_strong_count|decrement_strong_count)\s*\(\s*bits\s+as\s+\*const\s+(shape_value::heap_value::)?TraitObjectStorage	R6 carrier-UB: Arc ptr-op on _new TraitObjectStorage carrier (use v2_retain/release_elem on HeapHeader)
+0	Arc::(from_raw|increment_strong_count|decrement_strong_count)\s*\(\s*[^;]*?\bas\s+\*(const|mut)\s+(\w+::)*TypedObjectStorage	R6 carrier-UB: Arc ptr-op on _new TypedObjectStorage carrier (use v2_retain/release_elem on HeapHeader)
+0	Arc::(from_raw|increment_strong_count|decrement_strong_count)\s*\(\s*[^;]*?\bas\s+\*(const|mut)\s+(\w+::)*TraitObjectStorage	R6 carrier-UB: Arc ptr-op on _new TraitObjectStorage carrier (use v2_retain/release_elem on HeapHeader)
