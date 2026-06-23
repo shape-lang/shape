@@ -883,11 +883,15 @@ pub struct BytecodeCompiler {
     /// `BytecodeCompiler::infer_expr_type` consults this table FIRST (before the
     /// per-context patch ladder), so the resolved type of a
     /// collection-dispatch / match-arm / method-result local reaches the use
-    /// site directly instead of erasing to `unknown` when the module-scope
-    /// `type_inference.infer_expr` re-run (which has no function-body locals)
-    /// cannot see it. Holds ONLY fully-resolved types (the engine drops any
-    /// entry that stayed a free variable post-solve), so a hit is a genuine
-    /// proof — never an Unknown-default; a miss falls through to the patches.
+    /// site directly instead of erasing to `unknown`. Holds ONLY fully-resolved
+    /// types (the engine drops any entry that stayed a free variable
+    /// post-solve), so a hit is a genuine proof — never an Unknown-default.
+    ///
+    /// U4-3 (2026-06-23): this table + the per-context proof patches are now the
+    /// SOLE L3 inference authority. The fallback `type_inference.infer_expr`
+    /// re-derivation (module-scope, blind to function-body locals) is DELETED:
+    /// a span-table MISS that no patch proves is a surface-and-stop compile
+    /// error, never a re-derivation.
     pub(crate) resolved_expr_types: HashMap<shape_ast::ast::Span, shape_runtime::type_system::Type>,
 
     /// Track type aliases defined in the program

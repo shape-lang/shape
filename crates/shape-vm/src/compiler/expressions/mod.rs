@@ -2141,31 +2141,38 @@ impl BytecodeCompiler {
             }
         }
 
-        // U4-3 MEASURE/pre toggle: when `U43_SIMULATE_DELETE=1`, simulate the
-        // U4-3 deletion of this fallback re-derivation engine — instead of
-        // re-running Engine B (module-scope env, blind to function-body locals),
-        // return a surface-and-stop so a span-table MISS is the compile error the
-        // post-deletion world will make it. This lets U4-3pre verify the
-        // engine-completeness gap is closed: a program that used to need this
-        // fallback must now compile WITHOUT it because the engine recorded the
-        // child's type into the span table (consulted FIRST, above). Off by
-        // default — production keeps the fallback until U4-3 deletes it.
-        if std::env::var("U43_SIMULATE_DELETE").as_deref() == Ok("1") {
-            return Err(shape_ast::error::ShapeError::SemanticError {
-                message: format!(
-                    "U43_SIMULATE_DELETE: span-table miss for expr at {:?} \
-                     (fallback re-derivation engine simulated-deleted)",
-                    shape_ast::ast::Spanned::span(expr)
-                ),
-                location: None,
-            });
-        }
-
-        self.type_inference.infer_expr(expr).map_err(|e| {
-            shape_ast::error::ShapeError::SemanticError {
-                message: format!("Type inference failed: {:?}", e),
-                location: None,
-            }
+        // U4-3 KEYSTONE (strict-flip, 2026-06-23): the fallback re-derivation
+        // engine is DELETED. There is now exactly ONE L3 inference authority —
+        // the engine span-table (`resolved_expr_types`, consulted FIRST at the
+        // top of this function) plus the per-context proof patches above. When
+        // none of those proved a concrete type, the expression is genuinely
+        // un-inferable: a span-table MISS is a LOUD surface-and-stop compile
+        // error, NEVER a re-derivation.
+        //
+        // The deleted fallback (`self.type_inference.infer_expr(expr)`) re-ran
+        // Engine B — the module-scope inference env, blind to function-body
+        // locals — and papered over genuine erasure by returning `unknown` (or a
+        // mis-derived module-scope type) for any body-local expression. That is
+        // the dynamic-fallback shape CLAUDE.md §Forbidden Patterns refuses: it
+        // masked real type-erasure bugs (the `f8`/`h1`/`h2`/`h4b` closure-field
+        // class) behind a second, weaker engine. U4-3pre closed the last
+        // engine-completeness gap (resilient span-table recording), so the
+        // §5(A) zero-OK_RESOLVED-miss property holds and the fallback can go.
+        //
+        // NOTE: `self.type_inference` (the FIELD) survives — it still backs the
+        // env LOOKUP sites (trait dispatch / enum + alias resolution) at
+        // `binary_ops.rs`, `type_ops.rs`, `helpers.rs`, etc. Only the
+        // `infer_expr` re-derivation CALL is gone.
+        Err(shape_ast::error::ShapeError::SemanticError {
+            message: format!(
+                "Could not infer the type of this expression at compile time. \
+                 Strict typing requires every expression to have a known \
+                 concrete type; annotate the binding or value (e.g. \
+                 `let x: T = ...`), or rewrite so the type is inferable. \
+                 (expr span: {:?})",
+                shape_ast::ast::Spanned::span(expr)
+            ),
+            location: None,
         })
     }
 
