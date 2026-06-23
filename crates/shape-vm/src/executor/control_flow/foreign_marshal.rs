@@ -275,7 +275,7 @@ fn typed_object_storage_to_msgpack(
     let mut entries = Vec::with_capacity(schema.fields.len());
     let use_field_kinds = !storage.field_kinds.is_empty();
     for (i, field) in schema.fields.iter().enumerate() {
-        let slot_bits = storage.slots[i].raw();
+        let slot_bits = storage.slots()[i].raw();
         let kind: NativeKind = if use_field_kinds && i < storage.field_kinds.len() {
             storage.field_kinds[i]
         } else {

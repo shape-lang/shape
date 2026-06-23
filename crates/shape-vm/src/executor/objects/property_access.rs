@@ -279,12 +279,12 @@ impl VirtualMachine {
             .get_field(key)
             .ok_or_else(|| VMError::UndefinedProperty(key.to_string()))?;
         let idx = field.index as usize;
-        if idx >= storage.slots.len() {
+        if idx >= storage.slots().len() {
             return Err(VMError::RuntimeError(format!(
                 "Field '{}' index {} exceeds slot count {}",
                 key,
                 idx,
-                storage.slots.len()
+                storage.slots().len()
             )));
         }
         if idx >= storage.field_kinds.len() {
@@ -296,7 +296,7 @@ impl VirtualMachine {
             )));
         }
 
-        let bits = storage.slots[idx].raw();
+        let bits = storage.slots()[idx].raw();
         let kind = storage.field_kinds[idx];
 
         // WB2.4 retain-on-read.
@@ -410,13 +410,13 @@ impl VirtualMachine {
             return Err(VMError::UndefinedProperty(key.to_string()));
         };
         let idx = field.index as usize;
-        if idx >= storage.slots.len() {
+        if idx >= storage.slots().len() {
             drop_with_kind(val_bits, val_kind);
             return Err(VMError::RuntimeError(format!(
                 "Field '{}' index {} exceeds slot count {}",
                 key,
                 idx,
-                storage.slots.len()
+                storage.slots().len()
             )));
         }
         if idx >= storage.field_kinds.len() {
@@ -453,7 +453,7 @@ impl VirtualMachine {
             });
         }
 
-        let prior_bits = storage.slots[idx].raw();
+        let prior_bits = storage.slots()[idx].raw();
         crate::memory::write_barrier_slot(prior_bits, val_bits);
 
         // SAFETY: per `TypedObjectStorage::write_slot_in_place` contract.
@@ -605,7 +605,7 @@ impl VirtualMachine {
                     // construction-side contract. Borrow transiently.
                     let storage: Arc<shape_value::heap_value::TypedObjectStorage> =
                         unsafe { Arc::from_raw(bits as *const _) };
-                    let len = storage.slots.len() as i64;
+                    let len = storage.slots().len() as i64;
                     let _ = Arc::into_raw(storage);
                     self.push_kinded(len as u64, NativeKind::Int64)
                 }
@@ -907,7 +907,7 @@ mod tests {
         // changing its allocator provenance.
         let storage_back: &TypedObjectStorage =
             unsafe { &*(obj_bits_back as *const TypedObjectStorage) };
-        assert_eq!(storage_back.slots[0].raw(), 42u64);
+        assert_eq!(storage_back.slots()[0].raw(), 42u64);
         // Release the popped share through the v2-raw drop dispatch.
         crate::executor::vm_impl::stack::drop_with_kind(obj_bits_back, obj_kind_back);
     }

@@ -434,10 +434,10 @@ pub fn create_csv_module() -> ModuleExports {
                             // field list. Empty cell when the record's
                             // schema doesn't have the requested header.
                             let cell = match schema.fields.iter().position(|f| f.name == *header) {
-                                Some(idx) if idx < storage.slots.len() => {
+                                Some(idx) if idx < storage.slots().len() => {
                                     // Slot is a string per parse_records'
                                     // construction; read via the kind table.
-                                    let bits = storage.slots[idx].raw();
+                                    let bits = storage.slots()[idx].raw();
                                     if bits == 0 {
                                         String::new()
                                     } else {

@@ -440,7 +440,7 @@ impl TypedObjectOps for super::VirtualMachine {
             unsafe { &*(recv_bits as *const shape_value::heap_value::TypedObjectStorage) };
 
         let schema_id = storage.schema_id;
-        let field_count = storage.slots.len();
+        let field_count = storage.slots().len();
 
         // Schema mismatch: the operand's `type_id` doesn't match the
         // receiver's `schema_id`. Falls back to name-based field lookup
@@ -471,11 +471,11 @@ impl TypedObjectOps for super::VirtualMachine {
                     {
                         push_field_value_with_kind(
                             self,
-                            &storage.slots[src_idx],
+                            &storage.slots()[src_idx],
                             storage.field_kinds[src_idx],
                         )
                     } else {
-                        push_field_value(self, &storage.slots[src_idx], is_heap, hit.field_type_tag)
+                        push_field_value(self, &storage.slots()[src_idx], is_heap, hit.field_type_tag)
                     };
                     return result;
                 }
@@ -529,13 +529,13 @@ impl TypedObjectOps for super::VirtualMachine {
                         {
                             push_field_value_with_kind(
                                 self,
-                                &storage.slots[src_idx],
+                                &storage.slots()[src_idx],
                                 storage.field_kinds[src_idx],
                             )
                         } else {
                             push_field_value(
                                 self,
-                                &storage.slots[src_idx],
+                                &storage.slots()[src_idx],
                                 is_heap,
                                 hit.field_type_tag,
                             )
@@ -579,11 +579,11 @@ impl TypedObjectOps for super::VirtualMachine {
                     {
                         push_field_value_with_kind(
                             self,
-                            &storage.slots[src_idx],
+                            &storage.slots()[src_idx],
                             storage.field_kinds[src_idx],
                         )
                     } else {
-                        push_field_value(self, &storage.slots[src_idx], is_heap, tag)
+                        push_field_value(self, &storage.slots()[src_idx], is_heap, tag)
                     };
                     return result;
                 }
@@ -629,11 +629,11 @@ impl TypedObjectOps for super::VirtualMachine {
             {
                 push_field_value_with_kind(
                     self,
-                    &storage.slots[field_index],
+                    &storage.slots()[field_index],
                     storage.field_kinds[field_index],
                 )
             } else {
-                push_field_value(self, &storage.slots[field_index], is_heap, *field_type_tag)
+                push_field_value(self, &storage.slots()[field_index], is_heap, *field_type_tag)
             };
             return result;
         }
@@ -775,7 +775,7 @@ impl super::VirtualMachine {
         value_kind: NativeKind,
     ) -> Result<(), VMError> {
         let schema_id = storage.schema_id;
-        let field_count = storage.slots.len();
+        let field_count = storage.slots().len();
 
         // Schema-match path: direct field index from the operand's
         // pre-baked offset.
@@ -902,7 +902,7 @@ fn write_field_at_idx(
     value_bits: u64,
     value_kind: NativeKind,
 ) -> Result<(), VMError> {
-    debug_assert!(idx < storage.slots.len());
+    debug_assert!(idx < storage.slots().len());
     debug_assert!(idx < storage.field_kinds.len());
 
     let stored_kind = storage.field_kinds[idx];
@@ -973,7 +973,7 @@ fn write_field_at_idx(
 
     // Pre-read prior bits for the write barrier; the in-place writer
     // returns the same value so we record it before the call.
-    let prior_bits = storage.slots[idx].raw();
+    let prior_bits = storage.slots()[idx].raw();
     crate::memory::write_barrier_slot(prior_bits, value_bits);
 
     // SAFETY: per `TypedObjectStorage::write_slot_in_place` contract —
@@ -1059,8 +1059,8 @@ mod tests {
         // without changing its allocator provenance.
         let storage_back: &TypedObjectStorage =
             unsafe { &*(obj_bits_back as *const TypedObjectStorage) };
-        assert_eq!(storage_back.slots[0].raw(), 1u64);
-        assert_eq!(storage_back.slots[1].raw(), 99u64);
+        assert_eq!(storage_back.slots()[0].raw(), 1u64);
+        assert_eq!(storage_back.slots()[1].raw(), 99u64);
         // Retire the popped share through the v2-raw drop dispatch.
         crate::executor::vm_impl::stack::drop_with_kind(obj_bits_back, obj_kind_back);
     }

@@ -99,7 +99,7 @@ impl VirtualMachine {
         // copies the source bits; for heap slots we bump the matching Arc
         // strong-count via per-FieldType clone (the new TypedObjectStorage
         // owns its own share).
-        let orig_slots = &receiver_storage.slots;
+        let orig_slots = &receiver_storage.slots();
         let orig_mask = receiver_storage.heap_mask;
         let orig_kinds = &receiver_storage.field_kinds;
 

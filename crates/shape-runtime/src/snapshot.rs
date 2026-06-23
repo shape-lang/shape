@@ -1366,10 +1366,11 @@ fn slot_heap_to_serializable(
                 unsafe { &*(bits as *const shape_value::heap_value::TypedObjectStorage) };
             let schema_id = storage.schema_id;
             let heap_mask = storage.heap_mask;
-            let n = storage.slots.len();
+            let slots = storage.slots();
+            let n = slots.len();
             let mut slot_data: Vec<SerializableVMValue> = Vec::with_capacity(n);
             for i in 0..n {
-                let field_bits = storage.slots[i].raw();
+                let field_bits = slots[i].raw();
                 let field_kind = storage.field_kinds[i];
                 let sv = slot_to_serializable_ctx(field_bits, field_kind, store, ctx)?;
                 slot_data.push(sv);

@@ -826,7 +826,7 @@ macro_rules! define_heap_types {
                     HeapValue::IoHandle(_v) => _v.is_open(),
                     HeapValue::NativeScalar(_v) => _v.is_truthy(),
                     HeapValue::NativeView(_v) => _v.ptr != 0,
-                    HeapValue::TypedObject(s) => !s.slots.is_empty(),
+                    HeapValue::TypedObject(s) => !s.slots().is_empty(),
                     HeapValue::ClosureRaw(..) => true,
                     HeapValue::TaskGroup(..) => true,
                     // V3-S5 ckpt-4: `HeapValue::TypedArray(ta) => ta.is_truthy()`

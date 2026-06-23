@@ -215,7 +215,7 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         // TypedObject schema-aware (1)
         HeapValue::TypedObject(storage) => typed_object_to_json_value(
             storage.schema_id,
-            &storage.slots,
+            storage.slots(),
             storage.heap_mask,
         ),
 

@@ -755,7 +755,7 @@ impl<'a> ValueFormatter<'a> {
                 return self.format_enum_typed_object(s, storage, depth);
             }
         }
-        let n = storage.slots.len().min(storage.field_kinds.len());
+        let n = storage.slots().len().min(storage.field_kinds.len());
         let mut out = String::with_capacity(2 + n * 8);
         out.push('{');
         for i in 0..n {
@@ -778,7 +778,7 @@ impl<'a> ValueFormatter<'a> {
             // formatter call. This carrier never owns a strong-count share
             // — it is dropped via `mem::forget` at the end of the loop
             // iteration so the parent storage retains every payload.
-            let slot = ValueSlot::from_raw(storage.slots[i].raw());
+            let slot = ValueSlot::from_raw(storage.slots()[i].raw());
             let kinded = KindedSlot::new(slot, storage.field_kinds[i]);
             let rendered = self.format_kinded_inner(&kinded, depth + 1, true);
             out.push_str(&rendered);
@@ -811,12 +811,12 @@ impl<'a> ValueFormatter<'a> {
         storage: &TypedObjectStorage,
         depth: usize,
     ) -> String {
-        let n = storage.slots.len().min(storage.field_kinds.len());
+        let n = storage.slots().len().min(storage.field_kinds.len());
         // Slot 0 is `__variant` (I64) per `new_enum`'s layout.
         if n == 0 {
             return schema.name.clone();
         }
-        let variant_id = storage.slots[0].raw() as i64;
+        let variant_id = storage.slots()[0].raw() as i64;
         let info = schema
             .get_enum_info()
             .and_then(|ei| ei.variant_by_id(variant_id as u16));
@@ -835,7 +835,7 @@ impl<'a> ValueFormatter<'a> {
                 out.push_str("?");
                 return;
             }
-            let slot = ValueSlot::from_raw(storage.slots[slot_idx].raw());
+            let slot = ValueSlot::from_raw(storage.slots()[slot_idx].raw());
             let kinded = KindedSlot::new(slot, storage.field_kinds[slot_idx]);
             let rendered = self.format_kinded_inner(&kinded, depth + 1, true);
             out.push_str(&rendered);
@@ -891,7 +891,7 @@ impl<'a> ValueFormatter<'a> {
         storage: &TypedObjectStorage,
         depth: usize,
     ) -> String {
-        let n = storage.slots.len().min(storage.field_kinds.len());
+        let n = storage.slots().len().min(storage.field_kinds.len());
         let mut out = String::with_capacity(2 + n * 8);
         out.push('{');
         for i in 0..n {
@@ -905,7 +905,7 @@ impl<'a> ValueFormatter<'a> {
                 out.push_str(name);
             }
             out.push_str(": ");
-            let slot = ValueSlot::from_raw(storage.slots[i].raw());
+            let slot = ValueSlot::from_raw(storage.slots()[i].raw());
             let kinded = KindedSlot::new(slot, storage.field_kinds[i]);
             let rendered = self.format_kinded_inner(&kinded, depth + 1, true);
             out.push_str(&rendered);

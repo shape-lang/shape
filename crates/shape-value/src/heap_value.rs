@@ -3636,7 +3636,32 @@ pub struct TypedObjectStorage {
     /// Registry key for the TypeSchema describing each slot's `FieldType`.
     pub schema_id: u64,
     /// Per-field 8-byte storage. Length matches the schema's field count.
-    pub slots: Box<[crate::slot::ValueSlot]>,
+    ///
+    /// **Interior mutability (soundness fix, 2026-06-23).** Each element is
+    /// wrapped in `UnsafeCell` so that the Q14 in-place projection write
+    /// (`write_slot_in_place(&self, ...)`) can mutate a slot through a SHARED
+    /// `&TypedObjectStorage` (the receiver `Arc` has refcount > 1 by
+    /// construction; `Arc::get_mut`/`make_mut` cannot apply). Writing through
+    /// a `*mut` narrowed from `Box::as_ptr()` (a `&[ValueSlot]`,
+    /// `SharedReadOnly` under Stacked/Tree Borrows) is UB — Miri flags it as
+    /// "retag for SharedReadWrite from a SharedReadOnly tag". `UnsafeCell` is
+    /// the only sound way to obtain `&self`-reachable write permission: the
+    /// writer does `*cell.get() = ...` (raw `*mut ValueSlot` carrying the
+    /// cell's own interior-mutable provenance, NOT a shared-ref tag).
+    ///
+    /// `UnsafeCell<ValueSlot>` is `repr(transparent)` over `ValueSlot` (itself
+    /// `repr(transparent)` over `u64`), so the layout, size, alignment and
+    /// per-slot bit semantics are byte-for-byte identical to the prior
+    /// `Box<[ValueSlot]>` — the JIT/marshal/snapshot field offsets and the
+    /// `heap_mask` Drop walk are unchanged. Shared reads go through the
+    /// `slots()` accessor, which casts `&[UnsafeCell<ValueSlot>]` to
+    /// `&[ValueSlot]` (sound: transparent newtype, read-only borrow).
+    ///
+    /// Renamed from `slots` to `slot_cells` so the type change surfaces a
+    /// compile error at every former direct `.slots` reader; readers migrate
+    /// to the `slots()` accessor (shared read) and writers to
+    /// `write_slot_in_place` (interior-mutable write).
+    pub slot_cells: Box<[std::cell::UnsafeCell<crate::slot::ValueSlot>]>,
     /// Bit `i` set ⇔ slot `i` holds a heap pointer that participates in
     /// Arc refcount discipline. Bits beyond `slots.len()` must be zero.
     pub heap_mask: u64,
@@ -3686,9 +3711,46 @@ impl TypedObjectStorage {
                 crate::v2::heap_header::HEAP_KIND_V2_TYPED_OBJECT,
             ),
             schema_id,
-            slots,
+            slot_cells: Self::wrap_slot_cells(slots),
             heap_mask,
             field_kinds,
+        }
+    }
+
+    /// Convert an owned `Box<[ValueSlot]>` (the public constructor param) into
+    /// the interior-mutable `Box<[UnsafeCell<ValueSlot>]>` carrier without
+    /// reallocating or copying. `UnsafeCell<ValueSlot>` is `repr(transparent)`
+    /// over `ValueSlot`, so the slice layout is identical; we transmute the
+    /// box's element type in place.
+    #[inline]
+    fn wrap_slot_cells(
+        slots: Box<[crate::slot::ValueSlot]>,
+    ) -> Box<[std::cell::UnsafeCell<crate::slot::ValueSlot>]> {
+        let raw = Box::into_raw(slots) as *mut [std::cell::UnsafeCell<crate::slot::ValueSlot>];
+        // SAFETY: `UnsafeCell<ValueSlot>` is `repr(transparent)` over
+        // `ValueSlot` — same size/align/layout. Reconstituting the Box with
+        // the cell element type over the same allocation is sound; ownership
+        // (and the original allocation) transfers unchanged.
+        unsafe { Box::from_raw(raw) }
+    }
+
+    /// Shared read view of the slots as `&[ValueSlot]`.
+    ///
+    /// SAFETY of the cast: `UnsafeCell<ValueSlot>` is `repr(transparent)`
+    /// over `ValueSlot`, so `&[UnsafeCell<ValueSlot>]` and `&[ValueSlot]`
+    /// have identical layout. The returned borrow is read-only; concurrent
+    /// in-place writes are forbidden by the single-threaded VM contract that
+    /// `write_slot_in_place` documents (no `&self` read borrow may overlap an
+    /// in-flight projection write).
+    #[inline]
+    pub fn slots(&self) -> &[crate::slot::ValueSlot] {
+        let cells: &[std::cell::UnsafeCell<crate::slot::ValueSlot>] = &self.slot_cells;
+        // SAFETY: transparent newtype; read-only reborrow of the same bytes.
+        unsafe {
+            std::slice::from_raw_parts(
+                cells.as_ptr() as *const crate::slot::ValueSlot,
+                cells.len(),
+            )
         }
     }
 
@@ -3742,7 +3804,7 @@ impl TypedObjectStorage {
                 ),
             );
             std::ptr::write(&mut (*ptr).schema_id, schema_id);
-            std::ptr::write(&mut (*ptr).slots, slots);
+            std::ptr::write(&mut (*ptr).slot_cells, Self::wrap_slot_cells(slots));
             std::ptr::write(&mut (*ptr).heap_mask, heap_mask);
             std::ptr::write(&mut (*ptr).field_kinds, field_kinds);
         }
@@ -3776,7 +3838,7 @@ impl TypedObjectStorage {
             // payloads so their allocations are freed. The `header`,
             // `schema_id`, and `heap_mask` fields are POD (`Copy` or
             // primitive) — no Drop work owed.
-            std::ptr::drop_in_place(&mut (*ptr).slots);
+            std::ptr::drop_in_place(&mut (*ptr).slot_cells);
             std::ptr::drop_in_place(&mut (*ptr).field_kinds);
             // Deallocate the struct's heap memory.
             let layout = std::alloc::Layout::new::<Self>();
@@ -3806,7 +3868,8 @@ impl TypedObjectStorage {
         // Defensive: if construction left a length mismatch (debug_assert
         // catches it earlier), drop only the prefix where both bookkeeping
         // structures agree. Better a leak than UB.
-        let n = self.slots.len().min(self.field_kinds.len());
+        let slots = self.slots();
+        let n = slots.len().min(self.field_kinds.len());
         for i in 0..n {
             // heap_mask is u64; bits beyond 63 cannot be addressed today.
             if i >= 64 {
@@ -3815,7 +3878,7 @@ impl TypedObjectStorage {
             if (self.heap_mask >> i) & 1 == 0 {
                 continue;
             }
-            let bits = self.slots[i].raw();
+            let bits = slots[i].raw();
             if bits == 0 {
                 continue;
             }
@@ -4105,25 +4168,31 @@ impl TypedObjectStorage {
     #[inline]
     pub unsafe fn write_slot_in_place(&self, idx: usize, new_bits: u64) -> u64 {
         debug_assert!(
-            idx < self.slots.len(),
+            idx < self.slot_cells.len(),
             "TypedObjectStorage::write_slot_in_place: idx {} out of bounds (slots.len = {})",
             idx,
-            self.slots.len(),
+            self.slot_cells.len(),
         );
         // SAFETY: see method contract. Single-threaded VM; refs cannot
         // escape across task boundaries; no aliased `&mut ValueSlot`
-        // outstanding by construction; `Box<[ValueSlot]>` is `Sized`-laid-
-        // out and the slot's `u64` is naturally aligned. We cast through
-        // `&[ValueSlot]` -> `*const ValueSlot` -> `*mut ValueSlot` to
-        // perform the single-word write. The slot's `field_kinds[idx]`
-        // is the kind invariant; the caller already debug_asserted kind
-        // equality, so the slot's heap-mask bit (if set) still applies
-        // to the new bits.
-        // SAFETY (Rust-2024 unsafe_op_in_unsafe_fn): the pointer arithmetic,
-        // deref, and single-word write are all guarded by the method contract
-        // documented above; `idx` is in-bounds per the debug_assert.
+        // outstanding by construction; the slot's `u64` is naturally aligned.
+        //
+        // SOUNDNESS (2026-06-23): the write goes through `UnsafeCell::get()`,
+        // which yields a `*mut ValueSlot` carrying the cell's INTERIOR-MUTABLE
+        // provenance — NOT a pointer narrowed from a shared `&[ValueSlot]`.
+        // The prior code did `self.slots.as_ptr() as *mut ...`, which first
+        // formed a `&[ValueSlot]` (`SharedReadOnly` under Stacked/Tree
+        // Borrows) and wrote through a `*mut` derived from it — UB ("retag for
+        // SharedReadWrite from a SharedReadOnly tag"). `UnsafeCell` is the
+        // only sound way to obtain `&self`-reachable write permission.
+        //
+        // SAFETY (Rust-2024 unsafe_op_in_unsafe_fn): `idx` is in-bounds per
+        // the debug_assert; the single-word write/read are guarded by the
+        // method contract documented above.
         unsafe {
-            let slot_ptr = self.slots.as_ptr().add(idx) as *mut crate::slot::ValueSlot;
+            let cell: &std::cell::UnsafeCell<crate::slot::ValueSlot> =
+                self.slot_cells.get_unchecked(idx);
+            let slot_ptr: *mut crate::slot::ValueSlot = cell.get();
             let prior = (*slot_ptr).raw();
             *slot_ptr = crate::slot::ValueSlot::from_raw(new_bits);
             prior
@@ -4874,19 +4943,20 @@ impl HeapValue {
                 if a.as_ptr() == b.as_ptr() {
                     return true;
                 }
+                let (a_slots, b_slots) = (a.slots(), b.slots());
                 if a.schema_id != b.schema_id
-                    || a.slots.len() != b.slots.len()
+                    || a_slots.len() != b_slots.len()
                     || a.heap_mask != b.heap_mask
                 {
                     return false;
                 }
-                for i in 0..a.slots.len() {
+                for i in 0..a_slots.len() {
                     // Both heap-mask and primitive-mask: compare raw bits
                     // for primitives. For heap slots, raw-bit equality is
                     // also conservatively correct since `ValueSlot` heap
                     // payloads are typed pointers — pointer-equality
                     // implies value-equality for shared Arc'd payloads.
-                    if a.slots[i].raw() != b.slots[i].raw() {
+                    if a_slots[i].raw() != b_slots[i].raw() {
                         return false;
                     }
                 }
@@ -5247,11 +5317,60 @@ mod typed_object_storage_drop {
             );
             assert_eq!((*ptr).header.get_refcount(), 1);
             assert_eq!((*ptr).schema_id, 7);
-            assert_eq!((&(*ptr).slots).len(), 1);
-            assert_eq!((&(*ptr).slots)[0].as_i64(), 42);
+            assert_eq!((*ptr).slots().len(), 1);
+            assert_eq!((*ptr).slots()[0].as_i64(), 42);
             TypedObjectStorage::_drop(ptr);
             // ptr is dangling; cannot dereference further.
         }
+    }
+
+    /// MIRI/Stacked+Tree-Borrows anchor (in-place-write soundness fix,
+    /// 2026-06-23).
+    ///
+    /// Drives `write_slot_in_place(&self, ...)` through an
+    /// `Arc<TypedObjectStorage>` whose `strong_count >= 2` (a genuinely
+    /// SHARED allocation — exactly the Q14 projection-write shape), with a
+    /// shared read of the SAME storage interleaved before and after the
+    /// write. The pre-fix body did `self.slots.as_ptr() as *mut ValueSlot`
+    /// and wrote through it: `Box::as_ptr()` first forms a `&[ValueSlot]`
+    /// (`SharedReadOnly` under Stacked/Tree Borrows), and writing through a
+    /// `*mut` derived from it is UB ("retag for SharedReadWrite from a
+    /// SharedReadOnly tag") — Miri flags this. Post-fix the write goes
+    /// through `UnsafeCell::get()` (interior-mutable provenance), so this
+    /// test is CLEAN under both `cargo miri test` (Stacked Borrows, default)
+    /// and `MIRIFLAGS=-Zmiri-tree-borrows cargo miri test`.
+    #[test]
+    fn write_slot_in_place_on_shared_arc_no_write_via_shared_ref_provenance() {
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64, NativeKind::Int64]);
+        let arc: Arc<TypedObjectStorage> = Arc::new(TypedObjectStorage::new(
+            5,
+            vec![ValueSlot::from_int(10), ValueSlot::from_int(20)].into_boxed_slice(),
+            0, // no heap slots — scalar fields; isolates the write-provenance UB
+            kinds,
+        ));
+        // Second owner — strong_count == 2; `arc` is now a genuinely shared
+        // allocation. Mutating inline data through a pointer narrowed from a
+        // shared `&` borrow would be UB.
+        let alias = Arc::clone(&arc);
+        assert_eq!(Arc::strong_count(&arc), 2);
+
+        // Shared read interleaved with the in-place write — the exact shape
+        // that makes Stacked/Tree Borrows reject a SharedReadOnly->Write retag.
+        assert_eq!(arc.slots()[0].as_i64(), 10);
+
+        // In-place write through &self (UnsafeCell::get provenance post-fix).
+        let prior = unsafe { arc.write_slot_in_place(0, 99u64) };
+        assert_eq!(prior, 10u64);
+
+        // Shared read again — observes the written value.
+        assert_eq!(arc.slots()[0].as_i64(), 99);
+        // The untouched sibling slot is unchanged.
+        assert_eq!(arc.slots()[1].as_i64(), 20);
+        // Read through the aliasing Arc owner too.
+        assert_eq!(alias.slots()[0].as_i64(), 99);
+
+        drop(alias);
+        drop(arc);
     }
 
     #[test]

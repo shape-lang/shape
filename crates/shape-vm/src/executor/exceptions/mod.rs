@@ -1358,7 +1358,7 @@ fn anyerror_message_field(obj: &TypedObjectStorage) -> Option<String> {
     if (obj.heap_mask >> idx) & 1 == 0 {
         return None;
     }
-    let bits = obj.slots.get(idx)?.raw();
+    let bits = obj.slots().get(idx)?.raw();
     if bits == 0 {
         return None;
     }
@@ -1380,7 +1380,7 @@ fn anyerror_cause_field(obj: &TypedObjectStorage) -> Option<String> {
     if (obj.heap_mask >> idx) & 1 == 0 {
         return None;
     }
-    let bits = obj.slots.get(idx)?.raw();
+    let bits = obj.slots().get(idx)?.raw();
     if bits == 0 {
         return None;
     }
@@ -1475,7 +1475,7 @@ mod build_any_error_tests {
 
         // Schema ID matches AnyError.
         assert_eq!(storage.schema_id, vm.builtin_schemas.any_error as u64);
-        assert_eq!(storage.slots.len(), 6);
+        assert_eq!(storage.slots().len(), 6);
         assert_eq!(storage.field_kinds.len(), 6);
 
         // All field_kinds are NativeKind::String per the schema's
@@ -1485,7 +1485,7 @@ mod build_any_error_tests {
         }
 
         // The message field's bits are an Arc<String> raw pointer.
-        let msg_bits = storage.slots[ANYERROR_MESSAGE].raw();
+        let msg_bits = storage.slots()[ANYERROR_MESSAGE].raw();
         assert!(msg_bits != 0);
         // SAFETY: field_kinds[ANYERROR_MESSAGE] = NativeKind::String;
         // slot bits are Arc::into_raw::<String>; storage owns the share.
@@ -1493,12 +1493,12 @@ mod build_any_error_tests {
         assert_eq!(msg_str.as_str(), "boom");
 
         // The category field is "RuntimeError".
-        let cat_bits = storage.slots[ANYERROR_CATEGORY].raw();
+        let cat_bits = storage.slots()[ANYERROR_CATEGORY].raw();
         let cat_str: &String = unsafe { &*(cat_bits as *const String) };
         assert_eq!(cat_str.as_str(), "RuntimeError");
 
         // The cause field is None (zero-bits + heap_mask bit clear).
-        assert_eq!(storage.slots[ANYERROR_CAUSE].raw(), 0);
+        assert_eq!(storage.slots()[ANYERROR_CAUSE].raw(), 0);
         assert_eq!((storage.heap_mask >> ANYERROR_CAUSE) & 1, 0);
 
         // Re-into_raw to balance the temporary Arc; the original
@@ -1519,7 +1519,7 @@ mod build_any_error_tests {
         assert_eq!(wrapped.kind(), NativeKind::Ptr(HeapKind::TypedObject));
         let bits = wrapped.slot().raw();
         let storage: Arc<TypedObjectStorage> = unsafe { Arc::from_raw(bits as *const _) };
-        let msg_bits = storage.slots[ANYERROR_MESSAGE].raw();
+        let msg_bits = storage.slots()[ANYERROR_MESSAGE].raw();
         let msg_str: &String = unsafe { &*(msg_bits as *const String) };
         assert_eq!(msg_str.as_str(), "oops");
         let _ = Arc::into_raw(storage);

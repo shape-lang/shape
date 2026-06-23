@@ -494,7 +494,7 @@ pub(crate) unsafe fn copy_typed_object_for_bind(
     use crate::executor::vm_impl::stack::clone_with_kind;
     let storage = unsafe { &*src };
     // Clone the slot bits verbatim (ValueSlot is Copy).
-    let slots: Box<[shape_value::slot::ValueSlot]> = storage.slots.clone();
+    let slots: Box<[shape_value::slot::ValueSlot]> = Box::from(storage.slots());
     let heap_mask = storage.heap_mask;
     let field_kinds = storage.field_kinds.clone();
     // Bump one share per heap-kinded slot — the copy now owns its own share,
@@ -3254,7 +3254,7 @@ unsafe fn typed_object_deep_eq(a: &TypedObjectStorage, b: &TypedObjectStorage) -
     if a.schema_id != b.schema_id {
         return false;
     }
-    if a.slots.len() != b.slots.len() {
+    if a.slots().len() != b.slots().len() {
         return false;
     }
     // field_kinds is `Arc<[NativeKind]>` shared per-schema; equal
@@ -3268,9 +3268,9 @@ unsafe fn typed_object_deep_eq(a: &TypedObjectStorage, b: &TypedObjectStorage) -
             return false;
         }
     }
-    for i in 0..a.slots.len() {
-        let bits_a = a.slots[i].raw();
-        let bits_b = b.slots[i].raw();
+    for i in 0..a.slots().len() {
+        let bits_a = a.slots()[i].raw();
+        let bits_b = b.slots()[i].raw();
         let kind = a.field_kinds[i];
         // Map the per-field NativeKind back to the V2ElemType the
         // primitive dispatches on. Fields whose kind lies outside the

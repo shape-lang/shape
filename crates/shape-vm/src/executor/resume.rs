@@ -428,7 +428,7 @@ fn decode_vmstate_typed_object(
 
     // Read schema + slots through the borrow.
     let schema_id = reader.schema_id;
-    let slots = &reader.slots;
+    let slots = &reader.slots();
     let field_kinds = &reader.field_kinds;
     let heap_mask = reader.heap_mask;
 

@@ -220,7 +220,7 @@ fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
         let storage: &shape_value::TypedObjectStorage =
             unsafe { &*(bits as *const shape_value::TypedObjectStorage) };
         let schema_id = storage.schema_id;
-        let slots = &storage.slots;
+        let slots = storage.slots();
         let heap_mask = storage.heap_mask;
         let schema = ctx
             .type_schema_registry()
@@ -348,7 +348,7 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
             // slot bits + schema; no intermediate HeapValue materialization
             // on deserialization).
             let schema_id = storage.schema_id;
-            let slots = &storage.slots;
+            let slots = storage.slots();
             let schema = ctx
                 .type_schema_registry()
                 .get_by_id(schema_id as u32)

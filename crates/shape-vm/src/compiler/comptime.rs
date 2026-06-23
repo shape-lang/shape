@@ -613,7 +613,7 @@ fn rebind_typed_object_bindings_to_bytecode_schemas(
                 break;
             };
             let src_idx = src_field.index as usize;
-            if src_idx >= src_storage.slots.len() || src_idx >= src_storage.field_kinds.len() {
+            if src_idx >= src_storage.slots().len() || src_idx >= src_storage.field_kinds.len() {
                 bail = true;
                 break;
             }
@@ -623,7 +623,7 @@ fn rebind_typed_object_bindings_to_bytecode_schemas(
             // shape), `to_native_kind()` refuses; we trust the
             // construction-side parallel kind table (§2.7.7 / Q9).
             let src_kind = src_storage.field_kinds[src_idx];
-            let src_slot = src_storage.slots[src_idx];
+            let src_slot = src_storage.slots()[src_idx];
             let kinded =
                 read_typed_object_field(src_slot, src_kind, src_storage.heap_mask, src_idx);
 
@@ -1288,26 +1288,26 @@ fn typed_object_to_object_expr(
                 schema_id
             )
         })?;
-    if storage.slots.len() != storage.field_kinds.len() {
+    if storage.slots().len() != storage.field_kinds.len() {
         return Err(format!(
             "TypedObject storage slots/field_kinds length mismatch \
              (slots={}, field_kinds={}) — corrupt carrier",
-            storage.slots.len(),
+            storage.slots().len(),
             storage.field_kinds.len()
         ));
     }
     let mut entries = Vec::with_capacity(schema.fields.len());
     for field_def in schema.fields.iter() {
         let idx = field_def.index as usize;
-        if idx >= storage.slots.len() {
+        if idx >= storage.slots().len() {
             return Err(format!(
                 "TypedObject slot index {} out of bounds (len={}) — \
                  schema/storage mismatch",
                 idx,
-                storage.slots.len()
+                storage.slots().len()
             ));
         }
-        let slot = storage.slots[idx];
+        let slot = storage.slots()[idx];
         // Authoritative per-slot kind from the storage carrier (§2.7.5),
         // not the predeclared schema's `FieldType::Any`.
         let kind = storage.field_kinds[idx];

@@ -884,7 +884,7 @@ mod stage_k1_tests {
         assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
         let obj = slot.raw() as *const TypedObjectStorage;
         let storage = unsafe { &*obj };
-        assert_eq!(storage.slots.len(), 2);
+        assert_eq!(storage.slots().len(), 2);
     }
 
     #[test]

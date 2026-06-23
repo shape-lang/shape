@@ -372,17 +372,18 @@ fn write_typed_object_node(
     // Match field order from `XML_NODE_FIELDS`. The construction side
     // writes slots in this exact order; the schema registration uses
     // the same field list, so positional access is sound.
-    if storage.slots.len() != XML_NODE_FIELDS.len() {
+    let slots = storage.slots();
+    if slots.len() != XML_NODE_FIELDS.len() {
         return Err(format!(
             "xml.stringify(): child TypedObject has {} slots, expected {}",
-            storage.slots.len(),
+            slots.len(),
             XML_NODE_FIELDS.len()
         ));
     }
-    let name_slot = &storage.slots[0];
-    let attrs_slot = &storage.slots[1];
-    let children_slot = &storage.slots[2];
-    let text_slot = &storage.slots[3];
+    let name_slot = &slots[0];
+    let attrs_slot = &slots[1];
+    let children_slot = &slots[2];
+    let text_slot = &slots[3];
 
     // SAFETY for each slot: the construction-side contract in
     // `ElementData::into_typed_object_arc` writes each slot as

@@ -2756,11 +2756,11 @@ impl VirtualMachine {
         // decrements it).
         drop(base_arc);
         // Bounds check against the receiver's slot count.
-        if (field_idx as usize) >= receiver.slots.len() {
+        if (field_idx as usize) >= receiver.slots().len() {
             return Err(VMError::RuntimeError(format!(
                 "MakeFieldRef field_idx {} out of bounds (slot count {})",
                 field_idx,
-                receiver.slots.len()
+                receiver.slots().len()
             )));
         }
         // R3 carrier-authoritative ref kind: for a heap-backed field, the
@@ -3215,7 +3215,7 @@ impl VirtualMachine {
                         kind
                     )));
                 }
-                let bits = receiver.slots[*field_offset as usize].raw();
+                let bits = receiver.slots()[*field_offset as usize].raw();
                 let ptr = bits as *const TypedObjectStorage;
                 // SAFETY: as above — the chained-projection field slot
                 // holds a v2-raw `_new` `*const TypedObjectStorage`; the
@@ -3306,7 +3306,7 @@ impl VirtualMachine {
                 field_offset,
                 kind,
             } => {
-                let bits = receiver.slots[*field_offset as usize].raw();
+                let bits = receiver.slots()[*field_offset as usize].raw();
                 Ok((bits, *kind))
             }
             // ADR-006 §2.7.30 (R3): read the promoted referent through the
@@ -3452,13 +3452,13 @@ impl VirtualMachine {
                 // — prior occupant returned for caller release, new
                 // occupant transferred in.
                 let field_idx = *field_offset as usize;
-                if field_idx >= receiver.slots.len() {
+                if field_idx >= receiver.slots().len() {
                     crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
                     return Err(VMError::RuntimeError(format!(
                         "DerefStore: TypedField field_offset {} out of bounds \
                          (slot count {})",
                         field_idx,
-                        receiver.slots.len()
+                        receiver.slots().len()
                     )));
                 }
                 // Kind invariance contract (§2.7.5.1 post-proof): the
@@ -3476,7 +3476,7 @@ impl VirtualMachine {
                     field_idx, receiver.field_kinds[field_idx], kind,
                 );
                 // Pre-read the prior bits for the write-barrier helper.
-                let prior_bits = receiver.slots[field_idx].raw();
+                let prior_bits = receiver.slots()[field_idx].raw();
                 write_barrier_slot(prior_bits, val_bits);
                 // SAFETY: single-threaded VM; refs cannot escape across
                 // task boundaries (§3.1); no aliased `&mut ValueSlot`
@@ -4095,7 +4095,7 @@ mod typedfield_ref_tests {
                 "resolve_typed_object_receiver must bump refcount exactly once"
             );
             // Reading a field through the receiver works via Deref.
-            assert_eq!(receiver.slots[0].raw(), 9u64);
+            assert_eq!(receiver.slots()[0].raw(), 9u64);
             // `receiver` drops here — TypedObjectPtr::Drop retires its share.
         }
         assert_eq!(
@@ -4176,7 +4176,7 @@ mod typedfield_ref_tests {
             "&mut typed-field-ref write must be observable through the ref"
         );
         // The write is also visible on the underlying storage.
-        assert_eq!(unsafe { (*ptr).slots[0].raw() }, 10u64);
+        assert_eq!(unsafe { (*ptr).slots()[0].raw() }, 10u64);
 
         drop(projected);
         vm.module_binding_write_kinded(0, 0u64, NativeKind::Bool);

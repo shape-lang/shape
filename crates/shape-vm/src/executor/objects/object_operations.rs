@@ -109,8 +109,8 @@ impl VirtualMachine {
 
         // Slot counts capped by both the operand byte counts and the
         // actual storage length — schema mismatches would otherwise UB.
-        let left_count = left.slots.len().min(left_size / 8);
-        let right_count = right.slots.len().min(right_size / 8);
+        let left_count = left.slots().len().min(left_size / 8);
+        let right_count = right.slots().len().min(right_size / 8);
 
         let merged_ptr = build_concat_merged_storage(
             target_schema_id as u64,
@@ -211,7 +211,7 @@ impl VirtualMachine {
             target,
             &keep_left_indices,
             source,
-            right_count.min(source.slots.len()),
+            right_count.min(source.slots().len()),
         );
 
         unsafe {
@@ -316,7 +316,7 @@ fn build_named_merged_storage(
     )
 }
 
-/// Append `src.slots[idx]` for each `idx` in `indices` to the merged
+/// Append `src.slots()[idx]` for each `idx` in `indices` to the merged
 /// builders, preserving per-slot bits + kind + heap-mask. For
 /// heap-bearing slots, bumps the matching `Arc<T>` strong-count via
 /// `clone_with_kind` so the merged storage owns its own share.
@@ -332,7 +332,7 @@ fn append_kept_slots(
     merged_kinds: &mut Vec<NativeKind>,
     merged_mask: &mut u64,
 ) {
-    let src_slots = &src.slots;
+    let src_slots = &src.slots();
     let src_mask = src.heap_mask;
     let src_kinds = &src.field_kinds;
 
@@ -401,14 +401,14 @@ fn append_kept_slots(
 pub(crate) fn deep_clone_typed_object(
     src: &TypedObjectStorage,
 ) -> Result<*mut TypedObjectStorage, VMError> {
-    let n = src.slots.len();
+    let n = src.slots().len();
     let src_mask = src.heap_mask;
     let src_kinds = &src.field_kinds;
 
     let mut new_slots: Vec<ValueSlot> = Vec::with_capacity(n);
 
     for i in 0..n {
-        let bits = src.slots[i].raw();
+        let bits = src.slots()[i].raw();
         let is_heap_slot = i < 64 && (src_mask & (1u64 << i) != 0);
 
         if !is_heap_slot || bits == 0 {
@@ -417,7 +417,7 @@ pub(crate) fn deep_clone_typed_object(
             // here (the raw `u64` is copied as-is), so a missing kind entry
             // is harmless for non-heap slots — only the live-heap-pointer
             // arms below dispatch on `kind`.
-            new_slots.push(src.slots[i]);
+            new_slots.push(src.slots()[i]);
             continue;
         }
 
@@ -476,7 +476,7 @@ pub(crate) fn deep_clone_typed_object(
                             i
                         );
                         clone_with_kind(bits, kind);
-                        new_slots.push(src.slots[i]);
+                        new_slots.push(src.slots()[i]);
                     }
                 }
             }
@@ -486,7 +486,7 @@ pub(crate) fn deep_clone_typed_object(
             // refcount bump gives the clone its own balanced reference.
             _ => {
                 clone_with_kind(bits, kind);
-                new_slots.push(src.slots[i]);
+                new_slots.push(src.slots()[i]);
             }
         }
     }
