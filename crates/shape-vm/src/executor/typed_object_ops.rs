@@ -726,11 +726,17 @@ impl TypedObjectOps for super::VirtualMachine {
             bits: recv_bits,
             kind: recv_kind,
         };
-        let storage: &shape_value::heap_value::TypedObjectStorage =
-            unsafe { &*(recv_bits as *const shape_value::heap_value::TypedObjectStorage) };
+        // R1 soundness (2026-06-23): hold the receiver as a RAW
+        // `*mut TypedObjectStorage`. We must NOT form `&*(recv_bits as
+        // *const TypedObjectStorage)` anywhere on the write path — forming
+        // `&TypedObjectStorage` freezes the allocation (SharedReadOnly /
+        // Frozen) and forbids the interior-mutable slot write that
+        // `write_slot_in_place` performs, even through the `UnsafeCell`.
+        let storage_ptr: *mut shape_value::heap_value::TypedObjectStorage =
+            recv_bits as *mut shape_value::heap_value::TypedObjectStorage;
 
         let result = self.write_typed_object_field(
-            storage,
+            storage_ptr,
             *type_id,
             *field_idx,
             *field_type_tag,
@@ -767,15 +773,25 @@ impl super::VirtualMachine {
     /// `TypedObjectStorage::write_slot_in_place`.
     fn write_typed_object_field(
         &mut self,
-        storage: &shape_value::heap_value::TypedObjectStorage,
+        storage: *mut shape_value::heap_value::TypedObjectStorage,
         type_id: u16,
         field_idx: u16,
         field_type_tag: u16,
         value_bits: u64,
         value_kind: NativeKind,
     ) -> Result<(), VMError> {
-        let schema_id = storage.schema_id;
-        let field_count = storage.slots().len();
+        // R1 soundness: read scalar header fields via RAW place projection —
+        // no `&TypedObjectStorage` is formed (which would freeze the
+        // allocation and forbid the downstream interior-mutable slot write).
+        // SAFETY: `storage` is a valid, aligned `*mut TypedObjectStorage`
+        // recovered from `recv_bits` (a live `_new`-allocated v2-raw
+        // pointer, kept alive by the ReceiverGuard share in the caller).
+        let schema_id = unsafe { (*storage).schema_id };
+        let field_count = unsafe {
+            let cells_ptr: *const [std::cell::UnsafeCell<shape_value::slot::ValueSlot>] =
+                &raw const *(*storage).slot_cells;
+            cells_ptr.len()
+        };
 
         // Schema-match path: direct field index from the operand's
         // pre-baked offset.
@@ -896,16 +912,35 @@ impl super::VirtualMachine {
 /// value's kind (post-proof §2.7.5.1 contract), write through
 /// `write_slot_in_place`, drop the prior occupant's share.
 fn write_field_at_idx(
-    storage: &shape_value::heap_value::TypedObjectStorage,
+    storage: *mut shape_value::heap_value::TypedObjectStorage,
     idx: usize,
     field_type_tag: u16,
     value_bits: u64,
     value_kind: NativeKind,
 ) -> Result<(), VMError> {
-    debug_assert!(idx < storage.slots().len());
-    debug_assert!(idx < storage.field_kinds.len());
-
-    let stored_kind = storage.field_kinds[idx];
+    // R1 soundness: NO `&TypedObjectStorage` is formed anywhere in this
+    // function — all field reads use raw place projection through the
+    // `*mut Self`, and the slot write goes through
+    // `TypedObjectStorage::write_slot_in_place(storage, ...)`. Forming a
+    // shared `&` here would freeze the allocation and forbid the write.
+    // SAFETY: `storage` is a valid, aligned `*mut TypedObjectStorage` kept
+    // alive by the caller's receiver share.
+    // Raw reads through the `*mut Self` — `&raw const *Box`/`*Arc` takes the
+    // deref'd place address WITHOUT forming any reference (no `&Self`, no
+    // `&[_]`; avoids both the freeze and the `implicit_autoref` lint).
+    let stored_kind = unsafe {
+        let cells_ptr: *const [std::cell::UnsafeCell<shape_value::slot::ValueSlot>] =
+            &raw const *(*storage).slot_cells;
+        debug_assert!(idx < cells_ptr.len());
+        // `field_kinds` is an `Arc<[NativeKind]>`; its element read is a Copy
+        // value that completes BEFORE any slot write, so a transient `&Arc`
+        // (which does not reach the separate slice allocation the write
+        // targets) is sound. Make the autoref explicit to satisfy the
+        // `dangerous_implicit_autorefs` lint.
+        let kinds: &[NativeKind] = &(*storage).field_kinds;
+        debug_assert!(idx < kinds.len());
+        kinds[idx]
+    };
 
     // Kind invariance check (release form). The post-proof contract
     // forbids mid-life kind changes for typed fields; if a divergent
@@ -971,20 +1006,35 @@ fn write_field_at_idx(
         }
     }
 
-    // Pre-read prior bits for the write barrier; the in-place writer
-    // returns the same value so we record it before the call.
-    let prior_bits = storage.slots()[idx].raw();
+    // Pre-read prior bits for the write barrier via the SAME raw cell
+    // pointer the writer uses — no `&self`/`slots()` read borrow is formed.
+    // SAFETY: `idx` in-bounds (debug_assert above); `storage` valid/aligned;
+    // `UnsafeCell::raw_get` yields interior-mutable provenance, never a
+    // shared-ref tag.
+    let prior_bits = unsafe {
+        let cells_ptr: *const [std::cell::UnsafeCell<shape_value::slot::ValueSlot>] =
+            &raw const *(*storage).slot_cells;
+        let cell_ptr = (cells_ptr
+            as *const std::cell::UnsafeCell<shape_value::slot::ValueSlot>)
+            .add(idx);
+        let slot_ptr = std::cell::UnsafeCell::raw_get(cell_ptr);
+        (*slot_ptr).raw()
+    };
     crate::memory::write_barrier_slot(prior_bits, value_bits);
 
     // SAFETY: per `TypedObjectStorage::write_slot_in_place` contract —
-    // single-threaded VM, no aliased `&mut ValueSlot` outstanding (this
-    // function holds only `&storage`; the in-place writer reaches the
-    // slot through `*const ValueSlot` cast), kind invariance verified
-    // above against the storage's `field_kinds` track. `value_bits`
-    // ownership (one strong-count share for heap kinds) transfers to
-    // the slot; the returned `_returned_prior` is the same bits we
-    // pre-read.
-    let _returned_prior = unsafe { storage.write_slot_in_place(idx, value_bits) };
+    // single-threaded VM, no aliased `&mut ValueSlot` and (R1) NO live
+    // `&TypedObjectStorage` outstanding (this function holds only the raw
+    // `*mut storage`; the in-place writer reaches the slot through
+    // `UnsafeCell::raw_get` provenance), kind invariance verified above
+    // against the storage's `field_kinds` track. `value_bits` ownership
+    // (one strong-count share for heap kinds) transfers to the slot; the
+    // returned `_returned_prior` is the same bits we pre-read.
+    let _returned_prior = unsafe {
+        shape_value::heap_value::TypedObjectStorage::write_slot_in_place(
+            storage, idx, value_bits,
+        )
+    };
     debug_assert_eq!(
         _returned_prior, prior_bits,
         "op_set_field_typed: write_slot_in_place prior_bits mismatch — \

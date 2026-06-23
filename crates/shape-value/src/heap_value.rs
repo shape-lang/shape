@@ -4113,8 +4113,11 @@ impl TypedObjectStorage {
         }
     }
 
-    /// In-place write of slot `idx` through a shared `&TypedObjectStorage`
-    /// (i.e. through an `Arc<TypedObjectStorage>` with refcount > 1).
+    /// In-place write of slot `idx` through a raw `*mut Self`
+    /// (the storage is reached from an `Arc<TypedObjectStorage>` with
+    /// refcount > 1, but NO shared `&TypedObjectStorage` is formed — see the
+    /// Safety section; forming `&TypedObjectStorage` would freeze the
+    /// allocation and forbid the interior-mutable write).
     /// Returns the prior `(bits, kind)` so the caller can run
     /// `drop_with_kind` on the released share. The caller transfers
     /// ownership of `new_bits` (one strong-count share for heap kinds) to
@@ -4141,11 +4144,14 @@ impl TypedObjectStorage {
     ///    `NonSendableAcrossTaskBoundary`). No other thread may hold an
     ///    `&Arc<TypedObjectStorage>` to the same storage at the same
     ///    time the write executes.
-    /// 2. **No aliased `&mut ValueSlot`**: callers must NOT mint a
-    ///    `&mut ValueSlot` to slot `idx` from any path while this write
-    ///    is in flight. The Q14 dispatch in `op_deref_store` /
-    ///    `op_set_index_ref` is the only caller, and it operates on
-    ///    `&TypedObjectStorage` exclusively.
+    /// 2. **No aliased `&mut ValueSlot` AND no live `&TypedObjectStorage`**:
+    ///    callers must NOT mint a `&mut ValueSlot` to slot `idx`, NOR hold any
+    ///    `&TypedObjectStorage` (or `&`-narrowed pointer to the storage) live
+    ///    across this write. The receiver is a raw `*mut Self` precisely so
+    ///    the storage allocation is never frozen by a shared retag; forming
+    ///    `&TypedObjectStorage` on the write path reintroduces the
+    ///    SharedReadOnly/Frozen UB this signature exists to prevent. Callers
+    ///    pass `recv_bits as *mut TypedObjectStorage` directly.
     /// 3. **Kind invariance**: `new_kind` must equal
     ///    `self.field_kinds[idx]`. The Q14 RefTarget carries the
     ///    projected slot's kind at construction (`MakeFieldRef` sources
@@ -4166,33 +4172,56 @@ impl TypedObjectStorage {
     /// `module_binding_write_kinded` already encapsulate this pattern
     /// for non-projected places; this is the projected-place mirror).
     #[inline]
-    pub unsafe fn write_slot_in_place(&self, idx: usize, new_bits: u64) -> u64 {
-        debug_assert!(
-            idx < self.slot_cells.len(),
-            "TypedObjectStorage::write_slot_in_place: idx {} out of bounds (slots.len = {})",
-            idx,
-            self.slot_cells.len(),
-        );
+    pub unsafe fn write_slot_in_place(this: *mut Self, idx: usize, new_bits: u64) -> u64 {
         // SAFETY: see method contract. Single-threaded VM; refs cannot
         // escape across task boundaries; no aliased `&mut ValueSlot`
         // outstanding by construction; the slot's `u64` is naturally aligned.
         //
-        // SOUNDNESS (2026-06-23): the write goes through `UnsafeCell::get()`,
-        // which yields a `*mut ValueSlot` carrying the cell's INTERIOR-MUTABLE
-        // provenance — NOT a pointer narrowed from a shared `&[ValueSlot]`.
-        // The prior code did `self.slots.as_ptr() as *mut ...`, which first
-        // formed a `&[ValueSlot]` (`SharedReadOnly` under Stacked/Tree
-        // Borrows) and wrote through a `*mut` derived from it — UB ("retag for
-        // SharedReadWrite from a SharedReadOnly tag"). `UnsafeCell` is the
-        // only sound way to obtain `&self`-reachable write permission.
+        // SOUNDNESS (2026-06-23, raw-*mut completion of 32e9800a): the
+        // receiver is a raw `*mut Self`. A shared `&TypedObjectStorage` is
+        // NEVER formed on the write path — forming `&TypedObjectStorage`
+        // FREEZES the whole reachable allocation (SharedReadOnly / Frozen),
+        // which then forbids ALL child writes, even ones routed through an
+        // `UnsafeCell`. (The prior `&self` receiver, combined with the outer
+        // `&*(recv_bits as *const TypedObjectStorage)` retag at the caller,
+        // was UB under both Stacked Borrows "tag only grants SharedReadOnly"
+        // and Tree Borrows "tag has state Frozen which forbids this child
+        // write access" — Miri proved it on the shape-vm caller path.)
         //
-        // SAFETY (Rust-2024 unsafe_op_in_unsafe_fn): `idx` is in-bounds per
-        // the debug_assert; the single-word write/read are guarded by the
-        // method contract documented above.
+        // We reach the slot via RAW place projection: `(*this).slot_cells`
+        // reads the Box *pointer field* (which points to a SEPARATE slice
+        // allocation), then `.get_unchecked(idx).get()` yields a
+        // `*mut ValueSlot` whose provenance comes from that separate slice
+        // allocation with interior-mutable (`UnsafeCell`) access. No
+        // `&Self` / `&[ValueSlot]` narrowing happens anywhere. The prior
+        // value is read through the SAME raw cell pointer (no `&self`/`slots()`
+        // read borrow is formed).
+        //
+        // SAFETY (Rust-2024 unsafe_op_in_unsafe_fn): `this` is a valid,
+        // aligned, dereferenceable `*mut Self`; `idx` is in-bounds per the
+        // debug_assert; the single-word write/read are guarded by the method
+        // contract documented above.
         unsafe {
-            let cell: &std::cell::UnsafeCell<crate::slot::ValueSlot> =
-                self.slot_cells.get_unchecked(idx);
-            let slot_ptr: *mut crate::slot::ValueSlot = cell.get();
+            // Raw place projection: `&raw const *(*this).slot_cells` takes the
+            // address of the deref'd Box place WITHOUT forming any reference
+            // (no `&Self`, no `&[UnsafeCell<ValueSlot>]` — both would freeze /
+            // trigger the `implicit_autoref` lint). The resulting fat raw slice
+            // pointer carries the SEPARATE slice allocation's provenance.
+            let cells_ptr: *const [std::cell::UnsafeCell<crate::slot::ValueSlot>] =
+                &raw const *(*this).slot_cells;
+            debug_assert!(
+                idx < cells_ptr.len(),
+                "TypedObjectStorage::write_slot_in_place: idx {} out of bounds (slots.len = {})",
+                idx,
+                cells_ptr.len(),
+            );
+            // Index by raw pointer arithmetic — still no reference formed.
+            let cell_ptr: *const std::cell::UnsafeCell<crate::slot::ValueSlot> =
+                (cells_ptr as *const std::cell::UnsafeCell<crate::slot::ValueSlot>).add(idx);
+            // `UnsafeCell::raw_get` yields a `*mut ValueSlot` carrying the
+            // cell's interior-mutable provenance — never a shared-ref tag.
+            let slot_ptr: *mut crate::slot::ValueSlot =
+                std::cell::UnsafeCell::raw_get(cell_ptr);
             let prior = (*slot_ptr).raw();
             *slot_ptr = crate::slot::ValueSlot::from_raw(new_bits);
             prior
@@ -5327,18 +5356,21 @@ mod typed_object_storage_drop {
     /// MIRI/Stacked+Tree-Borrows anchor (in-place-write soundness fix,
     /// 2026-06-23).
     ///
-    /// Drives `write_slot_in_place(&self, ...)` through an
+    /// Drives `write_slot_in_place(this: *mut Self, ...)` through an
     /// `Arc<TypedObjectStorage>` whose `strong_count >= 2` (a genuinely
     /// SHARED allocation — exactly the Q14 projection-write shape), with a
     /// shared read of the SAME storage interleaved before and after the
-    /// write. The pre-fix body did `self.slots.as_ptr() as *mut ValueSlot`
-    /// and wrote through it: `Box::as_ptr()` first forms a `&[ValueSlot]`
-    /// (`SharedReadOnly` under Stacked/Tree Borrows), and writing through a
-    /// `*mut` derived from it is UB ("retag for SharedReadWrite from a
-    /// SharedReadOnly tag") — Miri flags this. Post-fix the write goes
-    /// through `UnsafeCell::get()` (interior-mutable provenance), so this
-    /// test is CLEAN under both `cargo miri test` (Stacked Borrows, default)
-    /// and `MIRIFLAGS=-Zmiri-tree-borrows cargo miri test`.
+    /// write. The receiver is reached via `Arc::as_ptr` (a raw `*const`, no
+    /// `&TypedObjectStorage` formed). The pre-fix body did
+    /// `self.slots.as_ptr() as *mut ValueSlot` and wrote through it; the
+    /// 32e9800a interim took a `&self` receiver (the outer caller retag still
+    /// froze the allocation). Both were UB ("SharedReadOnly->Write retag" /
+    /// "tag has state Frozen which forbids this child write access") — Miri
+    /// flagged it on the shape-vm caller path. Post-fix the write goes through
+    /// a raw `*mut Self` + `UnsafeCell::raw_get()` (interior-mutable
+    /// provenance, no freeze), so this test is CLEAN under both `cargo miri
+    /// test` (Stacked Borrows, default) and
+    /// `MIRIFLAGS=-Zmiri-tree-borrows cargo miri test`.
     #[test]
     fn write_slot_in_place_on_shared_arc_no_write_via_shared_ref_provenance() {
         let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64, NativeKind::Int64]);
@@ -5358,8 +5390,11 @@ mod typed_object_storage_drop {
         // that makes Stacked/Tree Borrows reject a SharedReadOnly->Write retag.
         assert_eq!(arc.slots()[0].as_i64(), 10);
 
-        // In-place write through &self (UnsafeCell::get provenance post-fix).
-        let prior = unsafe { arc.write_slot_in_place(0, 99u64) };
+        // In-place write through a raw `*mut Self` (UnsafeCell::raw_get
+        // provenance post-fix) — `Arc::as_ptr` yields a `*const` WITHOUT
+        // forming a `&TypedObjectStorage`, so no freeze of the allocation.
+        let raw: *mut TypedObjectStorage = Arc::as_ptr(&arc) as *mut TypedObjectStorage;
+        let prior = unsafe { TypedObjectStorage::write_slot_in_place(raw, 0, 99u64) };
         assert_eq!(prior, 10u64);
 
         // Shared read again — observes the written value.

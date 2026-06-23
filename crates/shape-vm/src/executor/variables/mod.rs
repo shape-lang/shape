@@ -3475,17 +3475,44 @@ impl VirtualMachine {
                      RefTarget captured kind {:?} — ADR-006 §2.7.13 / Q14",
                     field_idx, receiver.field_kinds[field_idx], kind,
                 );
-                // Pre-read the prior bits for the write-barrier helper.
-                let prior_bits = receiver.slots()[field_idx].raw();
+                // R1 soundness (2026-06-23): the write goes through a RAW
+                // `*mut TypedObjectStorage` (no `&TypedObjectStorage` live
+                // across the write — forming one freezes the allocation and
+                // forbids the interior-mutable store). `TypedObjectPtr::as_ptr`
+                // returns the raw pointer WITHOUT forming a `&` (no Deref).
+                // The `.slots()` / `.field_kinds[..]` reads above completed
+                // before this point (their Deref `&` temporaries are dead).
+                let storage_ptr: *mut shape_value::heap_value::TypedObjectStorage =
+                    receiver.as_ptr() as *mut shape_value::heap_value::TypedObjectStorage;
+                // Pre-read prior bits via the SAME raw cell pointer the writer
+                // uses — no `&self`/`slots()` read borrow is formed here.
+                // SAFETY: `field_idx` in-bounds (checked above); `storage_ptr`
+                // valid/aligned (kept alive by the `receiver` wrapper's share);
+                // `UnsafeCell::raw_get` yields interior-mutable provenance.
+                let prior_bits = unsafe {
+                    let cells_ptr: *const [std::cell::UnsafeCell<shape_value::slot::ValueSlot>] =
+                        &raw const *(*storage_ptr).slot_cells;
+                    let cell_ptr = (cells_ptr
+                        as *const std::cell::UnsafeCell<shape_value::slot::ValueSlot>)
+                        .add(field_idx);
+                    let slot_ptr = std::cell::UnsafeCell::raw_get(cell_ptr);
+                    (*slot_ptr).raw()
+                };
                 write_barrier_slot(prior_bits, val_bits);
                 // SAFETY: single-threaded VM; refs cannot escape across
-                // task boundaries (§3.1); no aliased `&mut ValueSlot`
-                // outstanding (this is the only mutator path in the VM
-                // for typed-object slots, gated by Q14 dispatch); kind
-                // invariance debug_asserted above. Per
-                // `TypedObjectStorage::write_slot_in_place` contract,
-                // returns the same `prior_bits` we just read.
-                let _returned_prior = unsafe { receiver.write_slot_in_place(field_idx, val_bits) };
+                // task boundaries (§3.1); no aliased `&mut ValueSlot` and
+                // (R1) NO live `&TypedObjectStorage` outstanding (this is the
+                // only mutator path in the VM for typed-object slots, gated by
+                // Q14 dispatch); kind invariance debug_asserted above. Per
+                // `TypedObjectStorage::write_slot_in_place` contract, returns
+                // the same `prior_bits` we just read.
+                let _returned_prior = unsafe {
+                    shape_value::heap_value::TypedObjectStorage::write_slot_in_place(
+                        storage_ptr,
+                        field_idx,
+                        val_bits,
+                    )
+                };
                 debug_assert_eq!(
                     _returned_prior, prior_bits,
                     "DerefStore: write_slot_in_place prior_bits mismatch — \

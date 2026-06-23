@@ -345,23 +345,29 @@ impl VirtualMachine {
                 ));
             }
 
-            // SAFETY: kind says `Ptr(HeapKind::TypedObject)`; obj_bits is
-            // `Arc::into_raw::<TypedObjectStorage>` with one share owned
-            // by the popped slot.
-            let storage_arc: Arc<shape_value::heap_value::TypedObjectStorage> =
-                unsafe { Arc::from_raw(obj_bits as *const _) };
+            // R1 soundness (2026-06-23): `obj_bits` is a v2-raw
+            // `TypedObjectStorage::_new` pointer (HeapHeader at offset 0),
+            // NOT `Arc::into_raw` — recovering it via `Arc::from_raw` is
+            // wrong-type recovery (the prior code did `byte_sub(offset)` into
+            // a non-ArcInner allocation → Miri UB "dangling pointer / no
+            // provenance"). Mirror the `op_set_field_typed` ReceiverGuard
+            // discipline: keep `obj_bits` as the owned share and hand the
+            // writer a RAW `*mut TypedObjectStorage` — no `Arc::from_raw`,
+            // and (R1) no `&TypedObjectStorage` live across the slot write.
+            let storage_ptr: *mut shape_value::heap_value::TypedObjectStorage =
+                obj_bits as *mut shape_value::heap_value::TypedObjectStorage;
 
             let write_result =
-                self.write_typed_object_field_by_name(&storage_arc, ks, val_bits, val_kind);
-
-            let obj_bits_back = Arc::into_raw(storage_arc) as u64;
+                self.write_typed_object_field_by_name(storage_ptr, ks, val_bits, val_kind);
 
             drop_with_kind(key_bits, key_kind);
 
             return match write_result {
-                Ok(()) => self.push_kinded(obj_bits_back, obj_kind),
+                // The popped receiver share (`obj_bits`) transfers onto the
+                // result stack slot.
+                Ok(()) => self.push_kinded(obj_bits, obj_kind),
                 Err(e) => {
-                    drop_with_kind(obj_bits_back, obj_kind);
+                    drop_with_kind(obj_bits, obj_kind);
                     Err(e)
                 }
             };
@@ -383,26 +389,39 @@ impl VirtualMachine {
     }
 
     /// Write a named field on a `TypedObjectStorage`.
+    ///
+    /// R1 soundness (2026-06-23): receiver is a RAW `*mut TypedObjectStorage`
+    /// (NOT `Arc`-wrapped — the v2-raw receiver is a `_new` pointer, not
+    /// `Arc::into_raw`, so an `Arc<TypedObjectStorage>` recovery is wrong-type
+    /// UB). All header/schema reads below complete BEFORE the slot write and
+    /// no `&TypedObjectStorage` is held live across the write.
     fn write_typed_object_field_by_name(
         &mut self,
-        storage: &Arc<shape_value::heap_value::TypedObjectStorage>,
+        storage: *mut shape_value::heap_value::TypedObjectStorage,
         key: &str,
         val_bits: u64,
         val_kind: NativeKind,
     ) -> Result<(), VMError> {
+        // Direct scalar field read — no autoref.
+        let schema_id = unsafe { (*storage).schema_id };
+        // Slice lengths via raw slice pointers (no `&Self` formed).
+        let (slot_count, kinds_count) = unsafe {
+            let cells_ptr: *const [std::cell::UnsafeCell<shape_value::slot::ValueSlot>] =
+                &raw const *(*storage).slot_cells;
+            let kinds: &[NativeKind] = &(*storage).field_kinds;
+            (cells_ptr.len(), kinds.len())
+        };
         let schema_owned = self
             .program
             .type_schema_registry
-            .get_by_id(storage.schema_id as u32)
+            .get_by_id(schema_id as u32)
             .cloned()
-            .or_else(|| {
-                shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
-            });
+            .or_else(|| shape_runtime::type_schema::lookup_schema_by_id_public(schema_id as u32));
         let Some(schema) = schema_owned.as_ref() else {
             drop_with_kind(val_bits, val_kind);
             return Err(VMError::RuntimeError(format!(
                 "Schema {} not found in registry",
-                storage.schema_id
+                schema_id
             )));
         };
         let Some(field) = schema.get_field(key) else {
@@ -410,26 +429,26 @@ impl VirtualMachine {
             return Err(VMError::UndefinedProperty(key.to_string()));
         };
         let idx = field.index as usize;
-        if idx >= storage.slots().len() {
+        if idx >= slot_count {
             drop_with_kind(val_bits, val_kind);
             return Err(VMError::RuntimeError(format!(
                 "Field '{}' index {} exceeds slot count {}",
-                key,
-                idx,
-                storage.slots().len()
+                key, idx, slot_count
             )));
         }
-        if idx >= storage.field_kinds.len() {
+        if idx >= kinds_count {
             drop_with_kind(val_bits, val_kind);
             return Err(VMError::RuntimeError(format!(
                 "Field '{}' index {} exceeds field_kinds length {}",
-                key,
-                idx,
-                storage.field_kinds.len()
+                key, idx, kinds_count
             )));
         }
 
-        let stored_kind = storage.field_kinds[idx];
+        // `field_kinds[idx]` is a Copy read that completes before the write.
+        let stored_kind = unsafe {
+            let kinds: &[NativeKind] = &(*storage).field_kinds;
+            kinds[idx]
+        };
         let kind_compatible = val_kind == stored_kind
             || matches!(
                 (stored_kind, val_kind),
@@ -453,11 +472,36 @@ impl VirtualMachine {
             });
         }
 
-        let prior_bits = storage.slots()[idx].raw();
+        // R1 soundness (2026-06-23): the write goes through the RAW
+        // `*mut TypedObjectStorage` receiver — NO `&TypedObjectStorage` is
+        // live across the write (forming one freezes the allocation and
+        // forbids the interior-mutable slot store). All header/schema reads
+        // above completed before this point.
+        let storage_ptr = storage;
+        // Pre-read prior bits via the SAME raw cell pointer the writer uses.
+        // SAFETY: `idx` in-bounds (checked above); `storage_ptr` valid/aligned
+        // (kept alive by the borrowed `Arc`); `UnsafeCell::raw_get` provenance.
+        let prior_bits = unsafe {
+            let cells_ptr: *const [std::cell::UnsafeCell<shape_value::slot::ValueSlot>] =
+                &raw const *(*storage_ptr).slot_cells;
+            let cell_ptr = (cells_ptr
+                as *const std::cell::UnsafeCell<shape_value::slot::ValueSlot>)
+                .add(idx);
+            let slot_ptr = std::cell::UnsafeCell::raw_get(cell_ptr);
+            (*slot_ptr).raw()
+        };
         crate::memory::write_barrier_slot(prior_bits, val_bits);
 
-        // SAFETY: per `TypedObjectStorage::write_slot_in_place` contract.
-        let _returned_prior = unsafe { storage.write_slot_in_place(idx, val_bits) };
+        // SAFETY: per `TypedObjectStorage::write_slot_in_place` contract —
+        // raw `*mut` receiver, no `&TypedObjectStorage` formed on the write
+        // path (R1).
+        let _returned_prior = unsafe {
+            shape_value::heap_value::TypedObjectStorage::write_slot_in_place(
+                storage_ptr,
+                idx,
+                val_bits,
+            )
+        };
         debug_assert_eq!(
             _returned_prior, prior_bits,
             "SetProp: write_slot_in_place prior_bits mismatch — \
