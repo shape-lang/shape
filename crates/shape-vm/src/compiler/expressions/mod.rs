@@ -1543,19 +1543,19 @@ impl BytecodeCompiler {
         // existing per-context patches (kept as FALLBACK per surface-and-stop
         // discipline; retiring them is a separate cleanup stage).
         //
-        // SCOPE: `PropertyAccess` is DELIBERATELY excluded from the table
-        // consult. A field read is the one site where a deliberate strictness
-        // ruling (STAGE F1, `constraints.rs:1050`) rejects `rs[0].n` when `rs`'s
-        // element type is known ONLY from a `push` into an unannotated empty
-        // `[]` — the engine still incidentally unifies the field var to a
-        // concrete type post-solve, so serving it would MASK the STAGE-F1
-        // compile error. Field-type recovery is already richly handled by the
-        // Phase-3d / T1-sub-case(a) patches below (which route the un-annotatable
-        // case through the engine's STAGE-F1 constraint error). The keystone's
-        // target sites (for-in binder, match-arm binder, `.map`/`.filter`/`.pop`
-        // result identifiers) are NOT property accesses, so this exclusion does
-        // not weaken the root fix.
-        if !matches!(expr, Expr::PropertyAccess { .. }) {
+        // U4-1: `PropertyAccess` is NO LONGER excluded from the table consult.
+        // The engine (post-U4-0) records every resolvable field read — including
+        // closure-body and derived-object field reads — into the span table, so
+        // a resolvable `rs[0].n` / `self.count` / `p.salary` hits the table
+        // directly here. The previous PropertyAccess exclusion + the field-read
+        // re-derivation ladder arms (#13/#14) that it guarded are DELETED:
+        // STAGE-F1 (the engine's `TypeError::ConstraintViolation` in
+        // `inference/access.rs`) is now the SOLE field-read strictness gate. An
+        // un-annotatable field read (`f1`: `rs[0].n` where `rs`'s element type is
+        // known only from a `push` into an unannotated `[]`) is rejected by the
+        // engine BEFORE finalization, so it never enters the table — a genuine
+        // miss here, which surfaces as the strict compile error. Nothing to mask.
+        {
             let span = shape_ast::ast::Spanned::span(expr);
             if !span.is_dummy() {
                 if let Some(resolved) = self.resolved_expr_types.get(&span) {
@@ -1570,7 +1570,19 @@ impl BytecodeCompiler {
                     // result so the projection runs.
                     let is_reference =
                         matches!(resolved, Type::Concrete(TypeAnnotation::Borrow { .. }));
-                    if !is_reference {
+                    // FORWARD BINDER (U4-0 skeptic): a generic `|p: T| p.field`
+                    // records a `Basic("unknown")` sentinel that is structurally
+                    // a `Type::Concrete`, so `type_is_fully_resolved` keeps it and
+                    // it SURVIVES finalization — it is NOT a table MISS. But it is
+                    // not a real concrete type: consuming it would route the
+                    // operand through as the type literally named "unknown".
+                    // Treat the unknown-sentinel as un-inferable (fall through to
+                    // the genuine surface-and-stop) rather than serving it.
+                    let is_unknown_sentinel = matches!(
+                        resolved,
+                        Type::Concrete(TypeAnnotation::Basic(n)) if n == "unknown"
+                    );
+                    if !is_reference && !is_unknown_sentinel {
                         return Ok(resolved.clone());
                     }
                 }
@@ -1894,75 +1906,15 @@ impl BytecodeCompiler {
             }
         }
 
-        // Phase 3d: TypedObject self-field type propagation.
-        // For `expr.field`, when the receiver is an identifier with a known
-        // schema in the tracker (e.g. `self` in a trait method body, or any
-        // typed local), look up the field type in the schema registry and
-        // map it to a concrete type annotation. This plugs a strict-typing
-        // hole where `infer_expr_type` for `self.name` would fall through
-        // to the runtime inference engine — which doesn't know `self`'s
-        // type — and return Unknown.
-        if let Expr::PropertyAccess {
-            object,
-            property,
-            optional,
-            ..
-        } = expr
-        {
-            if !*optional {
-                if let Some(schema_id) = self.tracker_schema_id_for_expr(object) {
-                    if let Some(field_ty) = self
-                        .type_tracker
-                        .schema_registry()
-                        .get_by_id(schema_id)
-                        .and_then(|schema| schema.get_field(property))
-                        .map(|field| field.field_type.clone())
-                    {
-                        if let Some(ann) = field_type_to_annotation(&field_ty) {
-                            return Ok(Type::Concrete(ann));
-                        }
-                    }
-                    // An anonymous-object schema stores every field as
-                    // `FieldType::Any` (the schema layout is Any-uniform);
-                    // the precise per-field type lives in the parallel
-                    // field-contract side table. Consult it so `a.min` on a
-                    // `let a = {min: 1, ...}` / a factory result resolves to
-                    // the proven field type rather than `unknown`.
-                    if let Some(contract) = self
-                        .type_tracker
-                        .get_object_field_contract(schema_id, property)
-                        .cloned()
-                    {
-                        return Ok(Type::Concrete(contract));
-                    }
-                }
-                // T1 sub-case (a) (strict-flip, 2026-06-20): the schema-id path
-                // above only resolves an OBJECT that is an identifier with a
-                // tracked schema. A field read off a derived object —
-                // `rs[0].len` where `rs: Vec<Run>` — has an `IndexAccess`
-                // object, for which `tracker_schema_id_for_expr` returns None,
-                // so the field-result type erased and `rs[0].len + 1` rejected
-                // as `unknown + int`. Fall to the structural
-                // `concrete_type_for_expr`, whose `PropertyAccess` arm unwraps
-                // the object's `ConcreteType::Struct(Run)` and maps the schema
-                // field type. The recovered ConcreteType IS the proof (ADR-006
-                // §2.7.5); a non-struct object / unmappable field yields None
-                // and falls through to the engine (no fabrication).
-                if let Some(ct) =
-                    crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
-                        self, expr,
-                    )
-                {
-                    if let Some(ann) =
-                        crate::compiler::expressions::closures::concrete_type_to_type_annotation(
-                            &ct,
-                        )
-                    {
-                        return Ok(Type::Concrete(ann));
-                    }
-                }
-            }
-        }
+        // U4-1: ladder arms #13/#14 (PropertyAccess field-read re-derivation)
+        // DELETED. They re-derived field-result types two ways — the schema-id /
+        // object-field-contract lookup (arm #13) and the derived-object
+        // `concrete_type_for_expr` projection (arm #14) — to recover a field type
+        // the span-table consult above was deliberately skipping. With the
+        // PropertyAccess exclusion removed, every resolvable field read hits
+        // `resolved_expr_types` at the top of this function; an un-annotatable one
+        // is a genuine miss and surfaces the engine's STAGE-F1 strictness error
+        // (the SOLE field-read gate). No structural re-derivation remains.
 
         // WS-9: element type of `arr[i]` for a tracked-array receiver.
         //
@@ -2330,46 +2282,3 @@ impl BytecodeCompiler {
     }
 }
 
-/// Phase 3d helper: map a `FieldType` to a `TypeAnnotation` concrete enough
-/// for `infer_expr_type` consumers (string-concat path, numeric coercion,
-/// etc.). Returns None when the field type doesn't have a useful primitive
-/// annotation (e.g. arrays / objects / Any), in which case the caller falls
-/// back to the inference engine.
-fn field_type_to_annotation(
-    ft: &shape_runtime::type_schema::FieldType,
-) -> Option<shape_ast::ast::TypeAnnotation> {
-    use shape_ast::ast::TypeAnnotation;
-    use shape_runtime::type_schema::FieldType;
-    match ft {
-        FieldType::String => Some(TypeAnnotation::Basic("string".to_string())),
-        FieldType::I64 => Some(TypeAnnotation::Basic("int".to_string())),
-        FieldType::F64 => Some(TypeAnnotation::Basic("number".to_string())),
-        FieldType::Bool => Some(TypeAnnotation::Basic("bool".to_string())),
-        FieldType::Decimal => Some(TypeAnnotation::Basic("decimal".to_string())),
-        FieldType::Timestamp => Some(TypeAnnotation::Basic("DateTime".to_string())),
-        FieldType::Object(name) => Some(TypeAnnotation::Basic(name.clone())),
-        FieldType::I8 => Some(TypeAnnotation::Basic("i8".to_string())),
-        FieldType::U8 => Some(TypeAnnotation::Basic("u8".to_string())),
-        FieldType::I16 => Some(TypeAnnotation::Basic("i16".to_string())),
-        FieldType::U16 => Some(TypeAnnotation::Basic("u16".to_string())),
-        FieldType::I32 => Some(TypeAnnotation::Basic("i32".to_string())),
-        FieldType::U32 => Some(TypeAnnotation::Basic("u32".to_string())),
-        FieldType::U64 => Some(TypeAnnotation::Basic("u64".to_string())),
-        // W17.2-B: Option<T> projects to None at the annotation layer
-        // (mirrors Array/Any refusal-shape — the bidirectional inference
-        // engine handles Option-typed expression contexts via narrowing,
-        // not via TypeAnnotation projection). Per ADR-006 §2.7.5 +
-        // §2.7.7/Q9 — slot kind lives in the parallel-`field_kinds` track.
-        //
-        // W17.3-4.1: HashMap<K, V> / Set<T> share the same refusal shape
-        // here — the inference engine handles container-typed
-        // expression contexts via per-element narrowing, not via flat
-        // TypeAnnotation projection. Consumer integration (full
-        // bidirectional inference threading) is W17.3-4.2 territory.
-        FieldType::Array(_)
-        | FieldType::Any
-        | FieldType::Option(_)
-        | FieldType::HashMap { .. }
-        | FieldType::Set(_) => None,
-    }
-}

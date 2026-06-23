@@ -3004,6 +3004,28 @@ impl BytecodeCompiler {
 
         self.module_scope_stack.push(module_path.clone());
 
+        // U4-1: per-module span-table for the engine-served field-read consult.
+        //
+        // The T1 keystone span-table (`self.resolved_expr_types`) is populated
+        // in `compile()` (Phase 2) over the ROOT program ONLY — dependency
+        // modules compile HERE in Phase 1, before that table exists, so an
+        // imported module body (`pub fn area(r: Rect) -> int { r.w * r.h }`) had
+        // NO span-table coverage. Before U4-1 the deleted field-read ladder arms
+        // (#13/#14) re-derived `r.w`'s type from the type-tracker schema; with
+        // those gone, the engine must serve imported field reads too — exactly
+        // the U4 "one source of truth" invariant, extended to imported modules.
+        //
+        // Run the inference engine over THIS module's own AST and install its
+        // post-solve span table for the duration of this module's body
+        // compilation, then restore. `Span` carries no module discriminator
+        // (it is `{start, end}` byte offsets), so the table is module-scoped to
+        // its compile window — never merged across modules — which avoids any
+        // cross-module span aliasing. This is an engine re-point, NOT the deleted
+        // re-derivation ladder: a field read the engine cannot resolve stays a
+        // genuine miss → STAGE-F1 surface-and-stop, identical to the root path.
+        let (.., module_expr_types) = Self::infer_reference_model(&ast);
+        let saved_expr_types = std::mem::replace(&mut self.resolved_expr_types, module_expr_types);
+
         // 1. Register this module's imports from the graph
         self.register_graph_imports_for_module(module_id, graph)?;
 
@@ -3039,6 +3061,11 @@ impl BytecodeCompiler {
             Ok(())
         })();
         self.non_function_mir_context_stack.pop();
+        // U4-1: restore the caller's span-table (the per-module table was active
+        // only across this module's body compilation; see the swap above). On an
+        // error path `compile_result?` aborts the whole compilation, so the
+        // not-yet-restored table is discarded with the compiler instance.
+        self.resolved_expr_types = saved_expr_types;
         compile_result?;
 
         // 5. Build module object and store in canonical binding
