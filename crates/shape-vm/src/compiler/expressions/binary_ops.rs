@@ -320,8 +320,10 @@ impl BytecodeCompiler {
         {
             let name = schema.name.clone();
             self.last_expr_schema = Some(result_schema_id);
-            self.last_expr_type_info =
-                Some(crate::type_tracking::VariableTypeInfo::known(result_schema_id, name));
+            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::known(
+                result_schema_id,
+                name,
+            ));
         }
     }
 
@@ -1207,11 +1209,7 @@ impl BytecodeCompiler {
                 }
                 // Tracker type-name wrapper: `tracked_type_name_from_annotation`
                 // stamps a declared `T?` local as the lowercased `"option"`.
-                if self
-                    .tracker_type_name_for_identifier(name)
-                    .as_deref()
-                    == Some("option")
-                {
+                if self.tracker_type_name_for_identifier(name).as_deref() == Some("option") {
                     return true;
                 }
                 false
@@ -2283,35 +2281,35 @@ impl BytecodeCompiler {
                 // literal re-typing, NOT a runtime coercion opcode.
                 let widen_l;
                 let widen_r;
-                let (left, right): (&Expr, &Expr) =
-                    if is_strict_arithmetic(op) || is_ordered_comparison(op) {
-                        let left = if self.expr_proves_float(right) {
-                            match crate::compiler::literal_widen::widen_int_literal_to_number(left) {
-                                Some(w) => {
-                                    widen_l = w;
-                                    &widen_l
-                                }
-                                None => left,
+                let (left, right): (&Expr, &Expr) = if is_strict_arithmetic(op)
+                    || is_ordered_comparison(op)
+                {
+                    let left = if self.expr_proves_float(right) {
+                        match crate::compiler::literal_widen::widen_int_literal_to_number(left) {
+                            Some(w) => {
+                                widen_l = w;
+                                &widen_l
                             }
-                        } else {
-                            left
-                        };
-                        let right = if self.expr_proves_float(left) {
-                            match crate::compiler::literal_widen::widen_int_literal_to_number(right)
-                            {
-                                Some(w) => {
-                                    widen_r = w;
-                                    &widen_r
-                                }
-                                None => right,
-                            }
-                        } else {
-                            right
-                        };
-                        (left, right)
+                            None => left,
+                        }
                     } else {
-                        (left, right)
+                        left
                     };
+                    let right = if self.expr_proves_float(left) {
+                        match crate::compiler::literal_widen::widen_int_literal_to_number(right) {
+                            Some(w) => {
+                                widen_r = w;
+                                &widen_r
+                            }
+                            None => right,
+                        }
+                    } else {
+                        right
+                    };
+                    (left, right)
+                } else {
+                    (left, right)
+                };
 
                 // ── Compile operands, capture numeric types and schemas ──
                 self.compile_expr(left)?;
@@ -2886,8 +2884,11 @@ impl BytecodeCompiler {
         // runtime `op_merge_object` / `build_named_merged_storage` order —
         // left fields whose name is NOT in the right schema (in left order),
         // then ALL right fields (in right order).
-        let right_names: std::collections::HashSet<&str> =
-            right_schema.fields.iter().map(|f| f.name.as_str()).collect();
+        let right_names: std::collections::HashSet<&str> = right_schema
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
         let mut merged_fields: Vec<(String, FieldType)> = Vec::new();
         for f in &left_schema.fields {
             if !right_names.contains(f.name.as_str()) {
@@ -3470,8 +3471,14 @@ mod s4_type_erasure_dispatch_tests {
     #[test]
     fn s4_d1_array_int_sum_min_max_return_int() {
         assert_eq!(eval_typed_i64("let s: int = [1, 2, 3].sum()\ns"), 6);
-        assert_eq!(eval_typed_i64("let v = [4, 1, 9]\nlet m: int = v.min()\nm"), 1);
-        assert_eq!(eval_typed_i64("let v = [4, 1, 9]\nlet m: int = v.max()\nm"), 9);
+        assert_eq!(
+            eval_typed_i64("let v = [4, 1, 9]\nlet m: int = v.min()\nm"),
+            1
+        );
+        assert_eq!(
+            eval_typed_i64("let v = [4, 1, 9]\nlet m: int = v.max()\nm"),
+            9
+        );
     }
 
     #[test]
@@ -3571,7 +3578,8 @@ mod s4_type_erasure_dispatch_tests {
 
     #[test]
     fn t4_functions_positional_args_still_work() {
-        let code = "fn bv(w: int = 1, h: int = 1, d: int = 1) -> int { return w * h * d }\nbv(2, 3, 4)";
+        let code =
+            "fn bv(w: int = 1, h: int = 1, d: int = 1) -> int { return w * h * d }\nbv(2, 3, 4)";
         assert_eq!(eval_typed_i64(code), 24);
     }
 }

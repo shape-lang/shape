@@ -187,9 +187,9 @@ impl BytecodeCompiler {
             ));
             self.last_expr_schema = None;
             self.last_expr_numeric_type = None;
-            self.last_expr_type_info = Some(
-                crate::type_tracking::VariableTypeInfo::named("string".to_string()),
-            );
+            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
+                "string".to_string(),
+            ));
             self.clear_last_expr_reference_result();
             let _ = span;
             return Ok(());

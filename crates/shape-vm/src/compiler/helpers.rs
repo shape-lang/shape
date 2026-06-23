@@ -2950,14 +2950,12 @@ impl BytecodeCompiler {
     /// whether an unprovable-element bare-`[]` arg gets a clean array-construction
     /// compile-error vs. falls through to the generic empty-array handling.
     pub(crate) fn annotation_is_array_shaped(ann: &TypeAnnotation) -> bool {
-        matches!(
-            ann,
-            TypeAnnotation::Array(_)
-        ) || matches!(
-            ann,
-            TypeAnnotation::Generic { name, args }
-                if name.as_str() == "Array" && args.len() == 1
-        )
+        matches!(ann, TypeAnnotation::Array(_))
+            || matches!(
+                ann,
+                TypeAnnotation::Generic { name, args }
+                    if name.as_str() == "Array" && args.len() == 1
+            )
     }
 
     /// STAGE F4 (strict-flip, 2026-06-20): variant of [`Self::compile_call_args`]
@@ -3037,9 +3035,8 @@ impl BytecodeCompiler {
                             let param_ann = expected_param_annotations
                                 .and_then(|anns| anns.get(idx))
                                 .and_then(|ann| ann.as_ref());
-                            let param_kind = param_ann.and_then(|ann| {
-                                self.resolve_typed_array_kind_from_annotation(ann)
-                            });
+                            let param_kind = param_ann
+                                .and_then(|ann| self.resolve_typed_array_kind_from_annotation(ann));
                             if let Some(kind) = param_kind {
                                 let saved = self.pending_variable_typed_array_kind;
                                 self.pending_variable_typed_array_kind = Some(kind);
@@ -3069,9 +3066,7 @@ impl BytecodeCompiler {
                                          (`let xs: Array<T> = []`) and pass `xs`, or pass a \
                                          non-empty literal.",
                                         idx + 1,
-                                        param_ann
-                                            .map(|a| a.to_type_string())
-                                            .unwrap_or_default(),
+                                        param_ann.map(|a| a.to_type_string()).unwrap_or_default(),
                                     ),
                                     location: Some(self.span_to_source_location(arg.span())),
                                 })
@@ -3425,8 +3420,7 @@ impl BytecodeCompiler {
         match info.type_name.as_deref() {
             // A monomorphized name `Box<int>` for base `Box` — keep it.
             Some(existing_name) => {
-                existing_name == base_name
-                    || existing_name.starts_with(&format!("{base_name}<"))
+                existing_name == base_name || existing_name.starts_with(&format!("{base_name}<"))
             }
             None => false,
         }
@@ -4120,12 +4114,13 @@ impl BytecodeCompiler {
         name: &str,
         pushed: &shape_ast::ast::Expr,
     ) {
-        let elem_ct = match crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
-            self, pushed,
-        ) {
-            Some(ct) => ct,
-            None => return,
-        };
+        let elem_ct =
+            match crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                self, pushed,
+            ) {
+                Some(ct) => ct,
+                None => return,
+            };
         let tracker_name = crate::compiler::patterns::binding::concrete_type_tracker_name(&elem_ct)
             .map(|inner| format!("Vec<{inner}>"));
         // The empty-array accumulator finalizer may already have stamped a
@@ -4151,7 +4146,8 @@ impl BytecodeCompiler {
             match self.local_array_element_types.get(&local_idx) {
                 Some(existing) if !more_informative || elem_ct_carries_name(existing) => {}
                 _ => {
-                    self.local_array_element_types.insert(local_idx, elem_ct.clone());
+                    self.local_array_element_types
+                        .insert(local_idx, elem_ct.clone());
                 }
             }
             if self
@@ -4220,15 +4216,16 @@ impl BytecodeCompiler {
                 // (no partial record).
                 return;
             };
-            let ann = match crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
-                self, value,
-            )
-            .and_then(|ct| {
-                crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
-            }) {
-                Some(a) => a,
-                None => TypeAnnotation::Basic("unknown".to_string()),
-            };
+            let ann =
+                match crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                    self, value,
+                )
+                .and_then(|ct| {
+                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
+                }) {
+                    Some(a) => a,
+                    None => TypeAnnotation::Basic("unknown".to_string()),
+                };
             fields.push(ObjectTypeField {
                 name: key.clone(),
                 optional: false,
@@ -5756,9 +5753,10 @@ impl BytecodeCompiler {
     /// `emit_drops_for_early_exit` would emit a `DropCall` for (the
     /// `track_drop_local` push happens only for Drop-bearing bindings).
     pub(super) fn has_failure_drop_locals(&self, skip_local: Option<u16>) -> bool {
-        self.drop_locals.iter().flatten().any(|&(local_idx, _)| {
-            Some(local_idx) != skip_local
-        })
+        self.drop_locals
+            .iter()
+            .flatten()
+            .any(|&(local_idx, _)| Some(local_idx) != skip_local)
     }
 
     pub(super) fn emit_drops_for_early_exit(&mut self, scopes_to_exit: usize) -> Result<()> {

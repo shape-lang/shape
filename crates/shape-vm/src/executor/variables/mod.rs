@@ -2706,17 +2706,16 @@ impl VirtualMachine {
         // block, corrupting the heap. Below (after the receiver is resolved)
         // we override the heap-field kind with the receiver's authoritative
         // `field_kinds[field_idx]` (ADR-006 §2.7.7).
-        let tag_kind =
-            crate::executor::typed_object_ops::field_tag_to_native_kind(field_type_tag)
-                .ok_or_else(|| {
-                    VMError::NotImplemented(format!(
-                        "MakeFieldRef SURFACE: field_type_tag {} (FIELD_TAG_ANY / \
+        let tag_kind = crate::executor::typed_object_ops::field_tag_to_native_kind(field_type_tag)
+            .ok_or_else(|| {
+                VMError::NotImplemented(format!(
+                    "MakeFieldRef SURFACE: field_type_tag {} (FIELD_TAG_ANY / \
                  FIELD_TAG_UNKNOWN) has no statically-sourceable NativeKind \
                  — ADR-006 §2.7.13 / Q14 forbids fabrication. Producing emitter \
                  must stamp a concrete tag.",
-                        field_type_tag
-                    ))
-                })?;
+                    field_type_tag
+                ))
+            })?;
         // Pop the base-ref carrier. The stack transfers one
         // `Arc<RefTarget>` strong-count share to us via `pop_kinded`.
         let (base_bits, base_kind) = self.pop_kinded()?;
@@ -2772,9 +2771,7 @@ impl VirtualMachine {
         // right carrier. Inline-scalar fields (heap_mask bit clear) keep the
         // tag kind, which already matches their slot representation.
         let field_is_heap = (receiver.heap_mask & (1u64 << field_idx)) != 0;
-        let projected_kind = if field_is_heap
-            && (field_idx as usize) < receiver.field_kinds.len()
-        {
+        let projected_kind = if field_is_heap && (field_idx as usize) < receiver.field_kinds.len() {
             receiver.field_kinds[field_idx as usize]
         } else {
             tag_kind

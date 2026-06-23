@@ -1808,12 +1808,7 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
                 if recv_name == "DateTime"
                     && matches!(
                         method.as_str(),
-                        "now"
-                            | "utc"
-                            | "parse"
-                            | "from_epoch"
-                            | "from_parts"
-                            | "from_unix_secs"
+                        "now" | "utc" | "parse" | "from_epoch" | "from_parts" | "from_unix_secs"
                     )
                     && compiler.resolve_local(recv_name).is_none()
                     && !compiler.module_bindings.contains_key(recv_name.as_str())
@@ -1845,14 +1840,13 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
             ) {
                 match method.as_str() {
                     // Component / day-info / timestamp accessors — `-> int`.
-                    "year" | "month" | "day" | "hour" | "minute" | "second"
-                    | "millisecond" | "microsecond" | "day_of_week" | "day_of_year"
-                    | "week_of_year" | "unix_timestamp" | "to_unix_millis" => {
+                    "year" | "month" | "day" | "hour" | "minute" | "second" | "millisecond"
+                    | "microsecond" | "day_of_week" | "day_of_year" | "week_of_year"
+                    | "unix_timestamp" | "to_unix_millis" => {
                         return Some(ConcreteType::I64);
                     }
                     // Day-info / comparison predicates — `-> bool`.
-                    "is_weekday" | "is_weekend" | "is_before" | "is_after"
-                    | "is_same_day" => {
+                    "is_weekday" | "is_weekend" | "is_before" | "is_after" | "is_same_day" => {
                         return Some(ConcreteType::Bool);
                     }
                     // Formatting / timezone-name / offset — `-> string`.
@@ -2173,7 +2167,11 @@ fn hof_unannotated_call_return_concrete_type<'c>(
 ) -> Option<ConcreteType> {
     // Generic callees route through the type-param substitution path; this
     // helper only handles the un-annotated, value-param HOF.
-    if callee.type_params.as_ref().is_some_and(|tps| !tps.is_empty()) {
+    if callee
+        .type_params
+        .as_ref()
+        .is_some_and(|tps| !tps.is_empty())
+    {
         return None;
     }
     if callee.params.len() != args.len() {
@@ -2547,9 +2545,9 @@ pub fn method_call_receiver_derived_concrete_type(
     receiver: &Expr,
     method: &str,
 ) -> Option<ConcreteType> {
-    use shape_runtime::type_system::checking::TypeParamExpr;
     use shape_ast::ast::TypeAnnotation;
     use shape_runtime::type_system::Type;
+    use shape_runtime::type_system::checking::TypeParamExpr;
 
     // The receiver's type must be proven.
     let receiver_ct = concrete_type_for_expr(compiler, receiver)?;
@@ -2560,7 +2558,10 @@ pub fn method_call_receiver_derived_concrete_type(
         // Drive off the method's REGISTERED return shape — never a hardcoded
         // list. Builtin array methods register under the `"Vec"` receiver name
         // (same key the inference engine resolves against).
-        if let Some(sig) = compiler.method_table.lookup_generic_signature("Vec", method) {
+        if let Some(sig) = compiler
+            .method_table
+            .lookup_generic_signature("Vec", method)
+        {
             return match &sig.return_type {
                 // `Self` → the receiver array type unchanged (sort/reverse/take/…).
                 TypeParamExpr::SelfType => Some(receiver_ct),
@@ -2768,10 +2769,9 @@ fn field_type_to_concrete(ft: &shape_runtime::type_schema::FieldType) -> Option<
         }
         // Pointer-backed / dynamic field kinds have no static scalar
         // projection (ADR-006 §2.7.5) — fall through.
-        FieldType::Any
-        | FieldType::Option(_)
-        | FieldType::HashMap { .. }
-        | FieldType::Set(_) => return None,
+        FieldType::Any | FieldType::Option(_) | FieldType::HashMap { .. } | FieldType::Set(_) => {
+            return None;
+        }
     })
 }
 

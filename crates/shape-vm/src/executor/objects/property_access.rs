@@ -209,9 +209,7 @@ impl VirtualMachine {
             // `StringV2` `*const StringObj`) via `borrow_string_for_index`,
             // which copies bytes and does NOT consume the share the popped
             // slot owns (the caller's `drop_with_kind` releases it).
-            NativeKind::String
-            | NativeKind::Ptr(HeapKind::String)
-            | NativeKind::StringV2 => {
+            NativeKind::String | NativeKind::Ptr(HeapKind::String) | NativeKind::StringV2 => {
                 let s = match borrow_string_for_index(obj_bits, obj_kind) {
                     Some(s) => s,
                     None => {

@@ -506,10 +506,7 @@ fn kinded_to_slot(
     // struct-array → row build.
     let is_heap = matches!(
         kind,
-        NativeKind::String
-            | NativeKind::StringV2
-            | NativeKind::DecimalV2
-            | NativeKind::Ptr(_)
+        NativeKind::String | NativeKind::StringV2 | NativeKind::DecimalV2 | NativeKind::Ptr(_)
     );
     if is_heap {
         return (ValueSlot::from_raw(bits), true, kind);

@@ -720,11 +720,7 @@ impl BytecodeCompiler {
             // the middle of a multibyte UTF-8 char (e.g. an em-dash in a
             // comment), and slicing there would panic and mask the real error.
             let clamped = clamp_to_char_boundary(source, span.start);
-            let line = source[..clamped]
-                .chars()
-                .filter(|c| *c == '\n')
-                .count() as u32
-                + 1;
+            let line = source[..clamped].chars().filter(|c| *c == '\n').count() as u32 + 1;
             self.current_line = line;
         }
     }

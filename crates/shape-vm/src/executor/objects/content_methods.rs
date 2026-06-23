@@ -177,7 +177,7 @@ fn parse_color(s: &str) -> Result<shape_value::content::Color, VMError> {
                 "Content color: unknown color '{}' — expected red / green / \
                  blue / yellow / magenta / cyan / white / default or rgb(r,g,b)",
                 other
-            )))
+            )));
         }
     };
     Ok(Color::Named(named))
@@ -1028,7 +1028,11 @@ mod sc2_style_chain_tests {
         // TerminalRenderer; assert the body text survives.
         let v = eval(r#"Content.text("boldtext").bold().toString()"#);
         let s = v.as_str().expect("toString returns a string");
-        assert!(s.contains("boldtext"), "rendered string must contain the body, got {:?}", s);
+        assert!(
+            s.contains("boldtext"),
+            "rendered string must contain the body, got {:?}",
+            s
+        );
     }
 
     #[test]
@@ -1168,10 +1172,9 @@ mod chart_builder_tests {
 
     #[test]
     fn chart_add_float_pairs_builds_content() {
-        let v = eval_result(
-            r#"Content.chart(ChartType.scatter).add("S", [[1.5, 2.5], [3.0, 4.0]])"#,
-        )
-        .expect(".add with float [x,y] pairs must succeed");
+        let v =
+            eval_result(r#"Content.chart(ChartType.scatter).add("S", [[1.5, 2.5], [3.0, 4.0]])"#)
+                .expect(".add with float [x,y] pairs must succeed");
         assert_eq!(v.kind, NativeKind::Ptr(HeapKind::Content));
     }
 

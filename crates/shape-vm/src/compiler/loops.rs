@@ -499,8 +499,11 @@ impl BytecodeCompiler {
                     {
                         if let Some(struct_name) = layout.name.as_ref().map(|n| n.to_string()) {
                             for f in fields {
-                                let binder =
-                                    f.pattern.as_identifier().unwrap_or(f.key.as_str()).to_string();
+                                let binder = f
+                                    .pattern
+                                    .as_identifier()
+                                    .unwrap_or(f.key.as_str())
+                                    .to_string();
                                 if let Some(local_idx) = self.resolve_local(&binder) {
                                     if let Some(tn) =
                                         self.struct_field_tracker_type_name(&struct_name, &f.key)
@@ -513,12 +516,13 @@ impl BytecodeCompiler {
                         }
                     }
                     if !named_done {
-                        if let Some(elem_fields) =
-                            self.anonymous_object_element_fields(iter)
-                        {
+                        if let Some(elem_fields) = self.anonymous_object_element_fields(iter) {
                             for f in fields {
-                                let binder =
-                                    f.pattern.as_identifier().unwrap_or(f.key.as_str()).to_string();
+                                let binder = f
+                                    .pattern
+                                    .as_identifier()
+                                    .unwrap_or(f.key.as_str())
+                                    .to_string();
                                 if let Some(local_idx) = self.resolve_local(&binder) {
                                     if let Some(tn) = elem_fields
                                         .iter()
@@ -896,9 +900,7 @@ impl BytecodeCompiler {
             {
                 if let Some(struct_name) = layout.name.as_ref().map(|n| n.to_string()) {
                     for (key, local) in &destructure_fields {
-                        if let Some(tn) =
-                            self.struct_field_tracker_type_name(&struct_name, key)
-                        {
+                        if let Some(tn) = self.struct_field_tracker_type_name(&struct_name, key) {
                             self.set_local_type_info(*local, &tn);
                         }
                     }
@@ -917,14 +919,15 @@ impl BytecodeCompiler {
             // SITE-ARM, int != number preserved (the field value's own kind).
             if !stamped_via_named {
                 let af = self.anonymous_object_element_fields(&for_expr.iterable);
-                if let Some(elem_fields) = af
-                {
+                if let Some(elem_fields) = af {
                     for (key, local) in &destructure_fields {
-                        if let Some(tn) = elem_fields.iter().find(|f| f.name == *key).and_then(|f| {
-                            crate::compiler::loops::type_annotation_scalar_tracker_name(
-                                &f.type_annotation,
-                            )
-                        }) {
+                        if let Some(tn) =
+                            elem_fields.iter().find(|f| f.name == *key).and_then(|f| {
+                                crate::compiler::loops::type_annotation_scalar_tracker_name(
+                                    &f.type_annotation,
+                                )
+                            })
+                        {
                             self.set_local_type_info(*local, &tn);
                         }
                     }
@@ -2218,9 +2221,8 @@ mod tests {
     fn root2_inline_user_fn_inferred_return_in_binop() {
         // An unannotated user function's inferred return type flows into an
         // inline binop operand (`dbl(n) + 1`) without an intervening `let`.
-        let result = compile_and_run_i64(
-            "fn dbl(x: int) { x * 2 } fn t() { let n = 5; dbl(n) + 1 } t()",
-        );
+        let result =
+            compile_and_run_i64("fn dbl(x: int) { x * 2 } fn t() { let n = 5; dbl(n) + 1 } t()");
         assert_eq!(result, 11);
     }
 

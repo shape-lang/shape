@@ -46,14 +46,14 @@ mod mutation_writeback;
 // smoke tests for the tuple-return `&mut self` ABI variant covering
 // pop-shaped methods (Array.pop / Deque.popBack / popFront /
 // PriorityQueue.pop / HashMap.remove).
+mod hashmap_readback_kind;
 mod pop_mutation;
 mod priority_queue_ops;
 mod seam_c_for_loop;
 mod set_ops;
-mod string_method_aliases;
 mod soak_tests;
+mod string_method_aliases;
 mod table_iteration;
-mod hashmap_readback_kind;
 mod try_operator;
 mod type_system_integration;
 mod typed_array_ops;

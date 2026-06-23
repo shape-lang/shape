@@ -1279,16 +1279,15 @@ fn typed_object_to_object_expr(
     span: Span,
 ) -> std::result::Result<Expr, String> {
     let schema_id = storage.schema_id as u32;
-    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(schema_id).ok_or_else(
-        || {
+    let schema =
+        shape_runtime::type_schema::lookup_schema_by_id_public(schema_id).ok_or_else(|| {
             format!(
                 "TypedObject schema id {} not found while materializing \
                  comptime literal — playbook §7 surface, ADR-006 §2.7.4 \
                  (schema rebind deferred)",
                 schema_id
             )
-        },
-    )?;
+        })?;
     if storage.slots.len() != storage.field_kinds.len() {
         return Err(format!(
             "TypedObject storage slots/field_kinds length mismatch \
@@ -1322,10 +1321,7 @@ fn typed_object_to_object_expr(
         // field IS a Bool here, so project it directly. Other kinds keep the
         // shared `nb_to_expr` path.
         let value_expr = if matches!(kind, NativeKind::Bool) {
-            Expr::Literal(
-                shape_ast::ast::Literal::Bool(kinded_slot.raw() != 0),
-                span,
-            )
+            Expr::Literal(shape_ast::ast::Literal::Bool(kinded_slot.raw() != 0), span)
         } else {
             nb_to_expr(&kinded_slot, span)?
         };
@@ -1476,8 +1472,7 @@ mod tests {
             other => panic!("expected Bool(false) literal, got {:?}", other),
         }
 
-        let none_expr =
-            super::nb_to_expr_public(&KindedSlot::none(), Span::DUMMY).expect("ok");
+        let none_expr = super::nb_to_expr_public(&KindedSlot::none(), Span::DUMMY).expect("ok");
         match none_expr {
             Expr::Literal(Literal::None, _) => {}
             other => panic!("expected None literal for none sentinel, got {:?}", other),
@@ -1632,9 +1627,7 @@ mod tests {
         for entry in &entries {
             if let shape_ast::ast::ObjectEntry::Field { key, value, .. } = entry {
                 match (key.as_str(), value) {
-                    ("target_os", Expr::Literal(Literal::String(s), _)) => {
-                        os_val = Some(s.clone())
-                    }
+                    ("target_os", Expr::Literal(Literal::String(s), _)) => os_val = Some(s.clone()),
                     ("target_arch", Expr::Literal(Literal::String(s), _)) => {
                         arch_val = Some(s.clone())
                     }

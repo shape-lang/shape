@@ -629,29 +629,26 @@ impl BytecodeCompiler {
         // p-var `int`-is-not-`number` rejection stays a compile error. Only the
         // direct-named-user-function path resolves param annotations here; the
         // indirect-callable path keeps the raw args.
-        let widened_args: Option<Vec<Expr>> =
-            self.function_defs.get(name).and_then(|def| {
-                let params = &def.params;
-                let mut changed = false;
-                let mut out: Vec<Expr> = Vec::with_capacity(args.len());
-                for (i, arg) in args.iter().enumerate() {
-                    let widened = params.get(i).and_then(|p| {
-                        p.type_annotation.as_ref().and_then(|ann| {
-                            crate::compiler::literal_widen::widen_int_literal_for_annotation(
-                                arg, ann,
-                            )
-                        })
-                    });
-                    match widened {
-                        Some(w) => {
-                            changed = true;
-                            out.push(w);
-                        }
-                        None => out.push(arg.clone()),
+        let widened_args: Option<Vec<Expr>> = self.function_defs.get(name).and_then(|def| {
+            let params = &def.params;
+            let mut changed = false;
+            let mut out: Vec<Expr> = Vec::with_capacity(args.len());
+            for (i, arg) in args.iter().enumerate() {
+                let widened = params.get(i).and_then(|p| {
+                    p.type_annotation.as_ref().and_then(|ann| {
+                        crate::compiler::literal_widen::widen_int_literal_for_annotation(arg, ann)
+                    })
+                });
+                match widened {
+                    Some(w) => {
+                        changed = true;
+                        out.push(w);
                     }
+                    None => out.push(arg.clone()),
                 }
-                if changed { Some(out) } else { None }
-            });
+            }
+            if changed { Some(out) } else { None }
+        });
         let args: &[Expr] = widened_args.as_deref().unwrap_or(args);
 
         // W7 (2026-05-17): `type_info(T)` is a comptime-only builtin per
@@ -1804,7 +1801,8 @@ impl BytecodeCompiler {
     pub(crate) fn is_known_concrete_primitive_name(name: &str) -> bool {
         matches!(
             name,
-            "int" | "number"
+            "int"
+                | "number"
                 | "bool"
                 | "string"
                 | "decimal"
@@ -4141,9 +4139,7 @@ impl BytecodeCompiler {
         // `None` => module not in the graph (legacy inlining / native): keep
         // prior behavior.
         let member_exported = self.module_member_is_exported(&canonical_module, method);
-        if !self.is_native_module_export(namespace_name, method)
-            && member_exported != Some(false)
-        {
+        if !self.is_native_module_export(namespace_name, method) && member_exported != Some(false) {
             if self.find_function(&canonical_scoped_name).is_some() {
                 return self.compile_expr_function_call(
                     &canonical_scoped_name,

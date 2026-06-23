@@ -52,7 +52,6 @@ fn is_number_name(name: &str) -> bool {
     matches!(name.trim(), "number" | "Number" | "f64" | "float" | "Float")
 }
 
-
 fn parse_single_arg_generic<'a>(name: &'a str, base: &str) -> Option<&'a str> {
     let name = name.trim();
     let rest = name.strip_prefix(base)?.strip_prefix('<')?;

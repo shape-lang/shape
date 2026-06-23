@@ -69,8 +69,8 @@ mod functions_foreign;
 mod helpers;
 mod helpers_binding;
 mod helpers_reference;
-mod literals;
 pub(crate) mod literal_widen;
+mod literals;
 mod loops;
 pub(crate) mod mir_schema_threading;
 pub(crate) mod monomorphization;
@@ -888,8 +888,7 @@ pub struct BytecodeCompiler {
     /// cannot see it. Holds ONLY fully-resolved types (the engine drops any
     /// entry that stayed a free variable post-solve), so a hit is a genuine
     /// proof — never an Unknown-default; a miss falls through to the patches.
-    pub(crate) resolved_expr_types:
-        HashMap<shape_ast::ast::Span, shape_runtime::type_system::Type>,
+    pub(crate) resolved_expr_types: HashMap<shape_ast::ast::Span, shape_runtime::type_system::Type>,
 
     /// Track type aliases defined in the program
     /// Maps alias name -> target type (for type validation)
@@ -1183,8 +1182,7 @@ pub struct BytecodeCompiler {
     /// stamps a,b,c,d to the innermost proven element type `T`. A leaf
     /// identifier is stamped with this element type's name; a nested `Array`
     /// sub-pattern descends with the peeled inner element type.
-    pub(crate) pending_array_destructure_element_type:
-        Option<shape_value::v2::ConcreteType>,
+    pub(crate) pending_array_destructure_element_type: Option<shape_value::v2::ConcreteType>,
 
     /// v2 Phase 3.2: when the enclosing `let m: HashMap<K, V> = HashMap()`
     /// declares an explicit `HashMap<K, V>` annotation whose key/value pair
@@ -1277,8 +1275,7 @@ pub struct BytecodeCompiler {
     /// compile time (popped scope), so this records the element field types at
     /// let-binding compile time instead. The recorded annotation IS the proof
     /// (ADR-006 §2.7.5); object-literal field inference already froze them.
-    pub(crate) binding_object_element_fields:
-        HashMap<String, Vec<shape_ast::ast::ObjectTypeField>>,
+    pub(crate) binding_object_element_fields: HashMap<String, Vec<shape_ast::ast::ObjectTypeField>>,
     /// Lexical names that will later need their binding value to remain a raw reference.
     /// This is only used to choose `Value` vs `PreserveRef` lowering for bindings; MIR
     /// remains the sole authority for borrow legality.
@@ -1748,8 +1745,7 @@ pub struct BytecodeCompiler {
     /// `set_module_binding_type_info`: those feed the type-inference engine,
     /// where a `HashMap<…>` tracker name trips the `HasField` constraint on a
     /// subsequent method call (`m.remove(..)` → "HashMap cannot have fields").
-    pub(crate) binding_collection_carrier_kinds:
-        HashMap<String, shape_value::v2::ConcreteType>,
+    pub(crate) binding_collection_carrier_kinds: HashMap<String, shape_value::v2::ConcreteType>,
 
     /// Monomorphization cache for generic function specialization.
     pub(crate) monomorphization_cache: monomorphization::cache::MonomorphizationCache,

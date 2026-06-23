@@ -484,10 +484,7 @@ pub enum Rvalue {
     /// JIT simply does not implement the typed convert yet), NOT a dynamic
     /// fallback shim. Mirrors the `TypePatternTest` / `EnumDiscriminantTest`
     /// preflight-reject precedent. VM never consumes MIR.
-    PrimitiveCast {
-        operand: Operand,
-        target: String,
-    },
+    PrimitiveCast { operand: Operand, target: String },
 }
 
 /// Binary operations in MIR.

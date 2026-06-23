@@ -549,8 +549,7 @@ impl TypeRegistry {
         let mut found: Option<&str> = None;
         for enum_def in self.enum_defs.values() {
             let is_unit_variant = enum_def.members.iter().any(|m| {
-                m.name == name
-                    && matches!(m.kind, shape_ast::ast::EnumMemberKind::Unit { .. })
+                m.name == name && matches!(m.kind, shape_ast::ast::EnumMemberKind::Unit { .. })
             });
             if is_unit_variant {
                 if found.is_some() && found != Some(enum_def.name.as_str()) {

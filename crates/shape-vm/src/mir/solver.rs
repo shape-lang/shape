@@ -1817,8 +1817,7 @@ fn compute_ownership_decisions(
                         // bind through the same per-kind deep-clone primitives as
                         // an explicit `.clone()`, giving the copy a fresh
                         // refcount=1 backing so mutation is independent.
-                        if dest_is_var
-                            && liveness.is_live_after(block.id, stmt_idx, *src_slot, mir)
+                        if dest_is_var && liveness.is_live_after(block.id, stmt_idx, *src_slot, mir)
                         {
                             OwnershipDecision::DeepClone
                         } else {

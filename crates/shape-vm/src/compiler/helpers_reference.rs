@@ -93,7 +93,9 @@ impl BytecodeCompiler {
                 // cell's `SharedCell::kind()` / cell inner kind).
                 if self.mutable_closure_captures.contains_key(name.as_str())
                     || self.shared_closure_captures.contains_key(name.as_str())
-                    || self.owned_mutable_closure_captures.contains_key(name.as_str())
+                    || self
+                        .owned_mutable_closure_captures
+                        .contains_key(name.as_str())
                 {
                     return None;
                 }
@@ -692,21 +694,20 @@ impl BytecodeCompiler {
         // Only a `Basic`-element array is recorded (the common `&[int]` /
         // `&[number]` / `&[string]` case); a nested/generic element is left
         // unrecorded so no malformed name reaches the element-strip path.
-        let array_display_name =
-            |inner: &shape_ast::ast::TypeAnnotation| -> Option<String> {
-                if let shape_ast::ast::TypeAnnotation::Basic(elem) = inner {
-                    Some(format!("{}[]", elem))
-                } else {
-                    None
-                }
-            };
+        let array_display_name = |inner: &shape_ast::ast::TypeAnnotation| -> Option<String> {
+            if let shape_ast::ast::TypeAnnotation::Basic(elem) = inner {
+                Some(format!("{}[]", elem))
+            } else {
+                None
+            }
+        };
         let referent_name = match &inner_ty {
-            shape_runtime::type_system::Type::Concrete(
-                shape_ast::ast::TypeAnnotation::Basic(name),
-            ) => Some(name.clone()),
-            shape_runtime::type_system::Type::Concrete(
-                shape_ast::ast::TypeAnnotation::Array(inner),
-            ) => array_display_name(inner),
+            shape_runtime::type_system::Type::Concrete(shape_ast::ast::TypeAnnotation::Basic(
+                name,
+            )) => Some(name.clone()),
+            shape_runtime::type_system::Type::Concrete(shape_ast::ast::TypeAnnotation::Array(
+                inner,
+            )) => array_display_name(inner),
             _ => None,
         };
         if let Some(name) = referent_name {

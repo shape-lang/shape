@@ -293,11 +293,7 @@ impl BytecodeCompiler {
     /// Returns `None` for non-arithmetic ops, fully-agreeing operands, or
     /// operands the resolver cannot prove (those route through the other
     /// guards). NO fabrication.
-    fn binop_operand_disagreeing_primitive(
-        &self,
-        expr: &Expr,
-        decl_prim: &str,
-    ) -> Option<String> {
+    fn binop_operand_disagreeing_primitive(&self, expr: &Expr, decl_prim: &str) -> Option<String> {
         use shape_ast::ast::BinaryOp;
         use shape_value::v2::ConcreteType;
         let Expr::BinaryOp {
@@ -348,7 +344,6 @@ impl BytecodeCompiler {
         }
         None
     }
-
 
     fn check_let_annotation_element_type_strict(
         &mut self,
@@ -850,14 +845,12 @@ impl BytecodeCompiler {
                     // (`op_drop_call_impl`) looks up `drop_async` for the
                     // async opcode and `drop` for the sync opcode, so the
                     // symbol key must carry the same distinction.
-                    let symbol_method_name = if trait_basename == "Drop"
-                        && method.name == "drop"
-                        && method.is_async
-                    {
-                        "drop_async"
-                    } else {
-                        method.name.as_str()
-                    };
+                    let symbol_method_name =
+                        if trait_basename == "Drop" && method.name == "drop" && method.is_async {
+                            "drop_async"
+                        } else {
+                            method.name.as_str()
+                        };
                     self.program.register_trait_method_symbol(
                         &trait_basename,
                         type_name,
@@ -5365,8 +5358,7 @@ impl BytecodeCompiler {
                     .is_some();
                 if !annotation_proved_array_kind {
                     if let Some(init_expr) = var_decl.value.as_ref() {
-                        if let Some(reconciled) =
-                            self.reconcile_binding_typed_array_kind(init_expr)
+                        if let Some(reconciled) = self.reconcile_binding_typed_array_kind(init_expr)
                         {
                             captured_typed_array_kind = reconciled;
                         }
@@ -6392,9 +6384,7 @@ impl BytecodeCompiler {
                                         // stop). PER-SITE-ARM, int != number
                                         // preserved (the element kind is the
                                         // value's own proven kind).
-                                        self.record_pushed_element_concrete_type(
-                                            name, &args[0],
-                                        );
+                                        self.record_pushed_element_concrete_type(name, &args[0]);
                                         // The typed push left the (now-typed)
                                         // array on the stack; store it back into
                                         // the binding slot.
@@ -6428,9 +6418,7 @@ impl BytecodeCompiler {
                                             );
                                         }
                                         // T1 sub-case (a): see the first-push arm.
-                                        self.record_pushed_element_concrete_type(
-                                            name, &args[0],
-                                        );
+                                        self.record_pushed_element_concrete_type(name, &args[0]);
                                         self.plan_flexible_binding_storage_from_expr(
                                             local_idx,
                                             true,
@@ -6453,9 +6441,7 @@ impl BytecodeCompiler {
                                             );
                                         }
                                         // T1 sub-case (a): see the first-push arm.
-                                        self.record_pushed_element_concrete_type(
-                                            name, &args[0],
-                                        );
+                                        self.record_pushed_element_concrete_type(name, &args[0]);
                                         self.plan_flexible_binding_storage_from_expr(
                                             binding_idx,
                                             false,
@@ -6490,8 +6476,7 @@ impl BytecodeCompiler {
                 // hand-off. NO TypedArrayData: the typed allocator the kind
                 // selects is the existing per-T v2-raw `TypedArray<T>`
                 // monomorphization which already handles the count-0 case.
-                let saved_pending_typed_array_kind =
-                    self.pending_variable_typed_array_kind;
+                let saved_pending_typed_array_kind = self.pending_variable_typed_array_kind;
                 if matches!(&assign.value, Expr::Array(elements, _) if elements.is_empty()) {
                     if let Some(name) = assign.pattern.as_identifier() {
                         if let Some(shape_value::v2::ConcreteType::Array(elem)) =
@@ -8139,9 +8124,7 @@ mod tests {
         // HOLE-1: `let [a, b] = pair` over `Array<number>` binds a,b to number
         // (angle B); `let bad: int = a` then mismatches (number != int).
         assert!(
-            compile_fails(
-                "let pair = [3.0, 4.0]\nlet [a, b] = pair\nlet bad: int = a\nbad"
-            ),
+            compile_fails("let pair = [3.0, 4.0]\nlet [a, b] = pair\nlet bad: int = a\nbad"),
             "HOLE-1: number array element accepted into int binding"
         );
     }
@@ -8166,10 +8149,7 @@ mod tests {
         // COMPILE and run (a matching annotation must never reject a working
         // program). This was the over-rejected idiomatic class.
         use crate::test_utils::eval_typed_i64;
-        assert_eq!(
-            eval_typed_i64("fn f(x) { x + 1 }\nlet r: int = f(5)\nr"),
-            6,
-        );
+        assert_eq!(eval_typed_i64("fn f(x) { x + 1 }\nlet r: int = f(5)\nr"), 6,);
     }
 
     #[test]
@@ -8202,9 +8182,7 @@ mod tests {
         // (AddInt — no "no method add on Int64" runtime crash).
         use crate::test_utils::eval_typed_i64;
         assert_eq!(
-            eval_typed_i64(
-                "let [[a, b], [c, d]] = [[3, 4], [5, 6]]\nlet s: int = a + b\ns"
-            ),
+            eval_typed_i64("let [[a, b], [c, d]] = [[3, 4], [5, 6]]\nlet s: int = a + b\ns"),
             7,
         );
     }
@@ -8215,9 +8193,7 @@ mod tests {
         // [[3.0,4.0],[5.0,6.0]]` stamps a,b,c,d to number; `let bad: int = a`
         // then mismatches (number != int).
         assert!(
-            compile_fails(
-                "let [[a, b], [c, d]] = [[3.0, 4.0], [5.0, 6.0]]\nlet bad: int = a\nbad"
-            ),
+            compile_fails("let [[a, b], [c, d]] = [[3.0, 4.0], [5.0, 6.0]]\nlet bad: int = a\nbad"),
             "nested-destructure: number element accepted into int binding"
         );
     }
@@ -8227,9 +8203,7 @@ mod tests {
         // angle-B nested extension HOLE close (other direction): int element
         // into a number binding mismatches.
         assert!(
-            compile_fails(
-                "let [[a, b], [c, d]] = [[3, 4], [5, 6]]\nlet bad: number = a\nbad"
-            ),
+            compile_fails("let [[a, b], [c, d]] = [[3, 4], [5, 6]]\nlet bad: number = a\nbad"),
             "nested-destructure: int element accepted into number binding"
         );
     }
@@ -8370,9 +8344,7 @@ mod tests {
         // callable; it must still REJECT (via the constraint solver / FIX B),
         // NEVER leak. The point is no acceptance of an unproven HOF into int.
         assert!(
-            compile_fails(
-                "fn apply(f, x) { f(x) }\nlet bad: int = apply(|y| y * 2.0, 3.0)\nbad"
-            ),
+            compile_fails("fn apply(f, x) { f(x) }\nlet bad: int = apply(|y| y * 2.0, 3.0)\nbad"),
             "closure-callable HOF: unresolved number result accepted into int binding"
         );
     }

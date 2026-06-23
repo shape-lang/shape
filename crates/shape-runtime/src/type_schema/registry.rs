@@ -215,10 +215,7 @@ impl TypeSchemaRegistry {
                 continue;
             };
             if let Some(variant) = enum_info.variant_by_name(name) {
-                if matches!(
-                    variant.kind,
-                    crate::type_schema::EnumVariantKind::Unit
-                ) {
+                if matches!(variant.kind, crate::type_schema::EnumVariantKind::Unit) {
                     if found.is_some() && found.as_deref() != Some(schema.name.as_str()) {
                         // Ambiguous across multiple enums — do not guess.
                         return None;

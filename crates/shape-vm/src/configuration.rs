@@ -226,10 +226,7 @@ impl BytecodeExecutor {
     /// wall-time / output caps) rather than exhausting the machine. The
     /// limits cap *resource consumption only* — they never change the
     /// observable result of a program that stays within them.
-    pub fn set_resource_limits(
-        &mut self,
-        limits: Option<crate::resource_limits::ResourceLimits>,
-    ) {
+    pub fn set_resource_limits(&mut self, limits: Option<crate::resource_limits::ResourceLimits>) {
         self.resource_limits = limits;
     }
 }

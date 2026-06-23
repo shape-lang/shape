@@ -478,9 +478,10 @@ impl BytecodeCompiler {
     /// an `Array<T>` return annotation — so a non-array match (where `[]` would
     /// itself be a type error caught elsewhere) is NOT misclassified here.
     fn match_result_is_array_shaped(&self, match_expr: &shape_ast::ast::MatchExpr) -> bool {
-        let sibling_array = match_expr.arms.iter().any(|arm| {
-            matches!(&*arm.body, Expr::Array(elements, _) if !elements.is_empty())
-        });
+        let sibling_array = match_expr
+            .arms
+            .iter()
+            .any(|arm| matches!(&*arm.body, Expr::Array(elements, _) if !elements.is_empty()));
         if sibling_array {
             return true;
         }
@@ -566,8 +567,7 @@ impl BytecodeCompiler {
             // binder. A bare capitalized `Red` that names a known unit enum
             // variant becomes `Enum::Red` here; everything else is unchanged.
             let normalized = self.normalize_unit_variant_pattern(&arm.pattern);
-            let arm_pattern: &shape_ast::ast::Pattern =
-                normalized.as_ref().unwrap_or(&arm.pattern);
+            let arm_pattern: &shape_ast::ast::Pattern = normalized.as_ref().unwrap_or(&arm.pattern);
 
             // Pattern check — restore scrutinee schema before checking
             self.last_expr_schema = scrutinee_schema;
@@ -1149,8 +1149,7 @@ mod tests {
         let result = BytecodeCompiler::new().compile(&program);
         let compiled = result.expect("empty match-arm should compile");
         let has_generic_new_array = compiled.instructions.iter().any(|ins| {
-            matches!(ins.opcode, OpCode::NewArray)
-                && matches!(ins.operand, Some(Operand::Count(0)))
+            matches!(ins.opcode, OpCode::NewArray) && matches!(ins.operand, Some(Operand::Count(0)))
         });
         assert!(
             !has_generic_new_array,

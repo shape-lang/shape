@@ -284,9 +284,7 @@ pub(super) fn infer_local_type_from_expr(expr: &Expr) -> LocalTypeInfo {
         // for `let p = P { .. }` / `let a = [..]` sources, while leaving
         // identifier-sourced binds (`let x = i`, possibly a SCALAR loop var)
         // as `Unknown` → non-consuming Clone so scalars never move.
-        Expr::Array(..) | Expr::Object(..) | Expr::StructLiteral { .. } => {
-            LocalTypeInfo::NonCopy
-        }
+        Expr::Array(..) | Expr::Object(..) | Expr::StructLiteral { .. } => LocalTypeInfo::NonCopy,
         _ => LocalTypeInfo::Unknown,
     }
 }

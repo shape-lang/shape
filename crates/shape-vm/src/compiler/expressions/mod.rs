@@ -990,9 +990,7 @@ impl BytecodeCompiler {
                 .position(|p| p.as_deref() == Some(arg_name.as_str()))
             else {
                 return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "Function '{name}' has no parameter named '{arg_name}'"
-                    ),
+                    message: format!("Function '{name}' has no parameter named '{arg_name}'"),
                     location: Some(self.span_to_source_location(span)),
                 });
             };
@@ -1065,8 +1063,7 @@ impl BytecodeCompiler {
                 span,
                 ..
             } => {
-                let rebound =
-                    self.resolve_named_function_args(name, args, named_args, *span)?;
+                let rebound = self.resolve_named_function_args(name, args, named_args, *span)?;
                 let args: &[Expr] = rebound.as_deref().unwrap_or(args);
                 self.compile_expr_function_call(name, args, *span)
             }
@@ -1957,7 +1954,9 @@ impl BytecodeCompiler {
                     )
                 {
                     if let Some(ann) =
-                        crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
+                        crate::compiler::expressions::closures::concrete_type_to_type_annotation(
+                            &ct,
+                        )
                     {
                         return Ok(Type::Concrete(ann));
                     }

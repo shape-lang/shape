@@ -653,11 +653,7 @@ impl TypeInferenceEngine {
     /// arithmetic path and introduce no int/number coercion. `None` when the
     /// operand combination is not one of the documented temporal forms (e.g.
     /// `DateTime + DateTime`), which then rejects through the normal path.
-    fn temporal_arithmetic_result(
-        op: &BinaryOp,
-        left: &Type,
-        right: &Type,
-    ) -> Option<Type> {
+    fn temporal_arithmetic_result(op: &BinaryOp, left: &Type, right: &Type) -> Option<Type> {
         let lk = Self::temporal_operand_kind(left)?;
         let rk = Self::temporal_operand_kind(right)?;
         let datetime = || Type::Concrete(TypeAnnotation::Reference("DateTime".into()));
@@ -665,9 +661,7 @@ impl TypeInferenceEngine {
         match (op, lk, rk) {
             // DateTime + Duration / Duration + DateTime -> DateTime
             (BinaryOp::Add, TemporalKind::DateTime, TemporalKind::Duration)
-            | (BinaryOp::Add, TemporalKind::Duration, TemporalKind::DateTime) => {
-                Some(datetime())
-            }
+            | (BinaryOp::Add, TemporalKind::Duration, TemporalKind::DateTime) => Some(datetime()),
             // Duration + Duration -> Duration
             (BinaryOp::Add, TemporalKind::Duration, TemporalKind::Duration) => Some(duration()),
             // DateTime - Duration -> DateTime
@@ -753,7 +747,8 @@ impl TypeInferenceEngine {
                 // reject `Duration` as non-Numeric. Duration is NOT Numeric — no
                 // int/number coercion is introduced. The bytecode compiler
                 // dispatches these via `CallMethod("add")` (binary_ops.rs).
-                if let Some(result) = Self::temporal_arithmetic_result(&BinaryOp::Add, left, right) {
+                if let Some(result) = Self::temporal_arithmetic_result(&BinaryOp::Add, left, right)
+                {
                     return Ok(result);
                 }
                 // `+` is overloaded (numeric add OR string concat). When BOTH

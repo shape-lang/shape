@@ -1967,8 +1967,7 @@ impl BytecodeCompiler {
                             saved_current_function_return_reference_summary;
                         self.current_function_returns_borrow =
                             saved_current_function_returns_borrow;
-                        self.current_function_return_type =
-                            saved_current_function_return_type;
+                        self.current_function_return_type = saved_current_function_return_type;
                         // WS-1b: surface-and-stop any unresolved empty-array
                         // accumulator, then restore the caller's maps.
                         let acc_result = self.finalize_unresolved_empty_array_accumulators();

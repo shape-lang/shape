@@ -189,17 +189,18 @@ impl VirtualMachine {
                     )));
                 }
                 match v2_array_detect::as_v2_typed_array(arr_bits, arr_kind) {
-                    Some(view) => match v2_array_detect::push_element(&view, value_bits, value_kind)
-                    {
-                        Ok(()) => Ok(()),
-                        Err(msg) => {
-                            drop_with_kind(value_bits, value_kind);
-                            Err(VMError::TypeError {
-                                expected: "v2 typed-array element",
-                                got: msg,
-                            })
+                    Some(view) => {
+                        match v2_array_detect::push_element(&view, value_bits, value_kind) {
+                            Ok(()) => Ok(()),
+                            Err(msg) => {
+                                drop_with_kind(value_bits, value_kind);
+                                Err(VMError::TypeError {
+                                    expected: "v2 typed-array element",
+                                    got: msg,
+                                })
+                            }
                         }
-                    },
+                    }
                     None => {
                         drop_with_kind(value_bits, value_kind);
                         Err(VMError::NotImplemented(

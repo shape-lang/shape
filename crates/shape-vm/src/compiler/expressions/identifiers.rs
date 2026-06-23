@@ -517,9 +517,7 @@ impl BytecodeCompiler {
             // Reference value module binding read via `DerefLoad` (script-mode
             // top-level `let r = &n`): stamp the referent's numeric type. See
             // the sibling local-read path above.
-            if self
-                .reference_value_module_bindings
-                .contains(&binding_idx)
+            if self.reference_value_module_bindings.contains(&binding_idx)
                 && self.last_expr_numeric_type.is_none()
             {
                 if let Some(referent) = self.reference_referent_type_name(name) {

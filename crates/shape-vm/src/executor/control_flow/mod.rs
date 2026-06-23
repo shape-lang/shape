@@ -600,9 +600,7 @@ impl VirtualMachine {
                         // (capture read, value-call, refcount drop) is
                         // sound. A genuine closure value (already
                         // `Ptr(HeapKind::Closure)`) is written verbatim.
-                        if layout.capture_native_kind(i)
-                            == NativeKind::Ptr(HeapKind::Closure)
-                        {
+                        if layout.capture_native_kind(i) == NativeKind::Ptr(HeapKind::Closure) {
                             match *kind {
                                 // Genuine closure value: write the
                                 // `Arc<HeapValue::ClosureRaw>` pointer bits
@@ -625,14 +623,12 @@ impl VirtualMachine {
                                                 &[], &[], &[],
                                             ),
                                     );
-                                    let inner_ptr =
-                                        alloc_typed_closure(fn_id, 0, &empty_layout);
+                                    let inner_ptr = alloc_typed_closure(fn_id, 0, &empty_layout);
                                     let inner_block = OwnedClosureBlock::from_raw(
                                         inner_ptr as *const u8,
                                         empty_layout,
                                     );
-                                    let arc =
-                                        Arc::new(HeapValue::ClosureRaw(inner_block));
+                                    let arc = Arc::new(HeapValue::ClosureRaw(inner_block));
                                     let closure_bits = Arc::into_raw(arc) as u64;
                                     write_capture_raw_u64(ptr, &layout, i, closure_bits);
                                 }
@@ -716,10 +712,8 @@ impl VirtualMachine {
                             // segfault. We leak the raw allocation on this fatal
                             // terminating path — a one-shot leak is the safe
                             // choice over a null deref.
-                            if matches!(
-                                layout.capture_native_kind(i),
-                                NativeKind::Ptr(_)
-                            ) && !matches!(*kind, NativeKind::Ptr(_))
+                            if matches!(layout.capture_native_kind(i), NativeKind::Ptr(_))
+                                && !matches!(*kind, NativeKind::Ptr(_))
                             {
                                 return Err(VMError::RuntimeError(format!(
                                     "op_make_closure: capture {} is stamped a \

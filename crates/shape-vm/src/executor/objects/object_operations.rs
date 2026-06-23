@@ -451,8 +451,7 @@ pub(crate) fn deep_clone_typed_object(
                 // SAFETY: heap_mask bit i set with kind Ptr(TypedObject)
                 // ⇒ bits is a live `*const TypedObjectStorage` (v2-raw
                 // carrier) per the construction-side contract.
-                let nested: &TypedObjectStorage =
-                    unsafe { &*(bits as *const TypedObjectStorage) };
+                let nested: &TypedObjectStorage = unsafe { &*(bits as *const TypedObjectStorage) };
                 let cloned_ptr = deep_clone_typed_object(nested)?;
                 new_slots.push(ValueSlot::from_u64(cloned_ptr as u64));
             }

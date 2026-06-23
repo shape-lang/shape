@@ -127,7 +127,11 @@ impl TypeEnvironment {
             BuiltinTypes::integer(),
         );
 
-        self.define_builtin("ceil", vec![BuiltinTypes::number()], BuiltinTypes::integer());
+        self.define_builtin(
+            "ceil",
+            vec![BuiltinTypes::number()],
+            BuiltinTypes::integer(),
+        );
 
         // STRICT-FLIP (v0.3.3, STAGE-2 MATH): the trig / transcendental /
         // power math fns resolve at the bytecode-compiler level — bare `sin`,

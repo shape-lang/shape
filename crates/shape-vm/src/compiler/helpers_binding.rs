@@ -235,9 +235,7 @@ impl BytecodeCompiler {
             if stmt_span.start <= span.start && span.end <= stmt_span.end {
                 let tighter = match best {
                     None => true,
-                    Some((cur, _)) => {
-                        (stmt_span.end - stmt_span.start) < (cur.end - cur.start)
-                    }
+                    Some((cur, _)) => (stmt_span.end - stmt_span.start) < (cur.end - cur.start),
                 };
                 if tighter {
                     best = Some((stmt_span, *point));

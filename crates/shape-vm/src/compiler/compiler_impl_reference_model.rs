@@ -1793,8 +1793,7 @@ impl BytecodeCompiler {
                 if sym.is_annotation {
                     continue;
                 }
-                let Some(export_item) =
-                    Self::find_exported_item(dep_ast, &sym.original_name)
+                let Some(export_item) = Self::find_exported_item(dep_ast, &sym.original_name)
                 else {
                     continue;
                 };
@@ -2281,10 +2280,8 @@ impl BytecodeCompiler {
         // compile-time-baked literal — re-running the body at runtime leaks
         // its trailing value into the program-return slot. Deopt preserves
         // VM == JIT.
-        self.program.top_level_has_comptime = program
-            .items
-            .iter()
-            .any(top_level_item_contains_comptime);
+        self.program.top_level_has_comptime =
+            program.items.iter().any(top_level_item_contains_comptime);
 
         // Persist storage hints for JIT width-aware lowering.
         self.populate_program_storage_hints();
@@ -3117,10 +3114,7 @@ pub fn top_level_item_contains_comptime(item: &shape_ast::ast::Item) -> bool {
     use shape_ast::ast::Item;
     match item {
         Item::Comptime(_, _) => true,
-        Item::VariableDecl(decl, _) => decl
-            .value
-            .as_ref()
-            .is_some_and(expr_contains_comptime),
+        Item::VariableDecl(decl, _) => decl.value.as_ref().is_some_and(expr_contains_comptime),
         Item::Assignment(asgn, _) => expr_contains_comptime(&asgn.value),
         Item::Expression(expr, _) => expr_contains_comptime(expr),
         Item::Statement(stmt, _) => stmt_contains_comptime(stmt),
@@ -3131,9 +3125,7 @@ pub fn top_level_item_contains_comptime(item: &shape_ast::ast::Item) -> bool {
 fn stmt_contains_comptime(stmt: &shape_ast::ast::Statement) -> bool {
     use shape_ast::ast::Statement;
     match stmt {
-        Statement::VariableDecl(decl, _) => {
-            decl.value.as_ref().is_some_and(expr_contains_comptime)
-        }
+        Statement::VariableDecl(decl, _) => decl.value.as_ref().is_some_and(expr_contains_comptime),
         Statement::Assignment(asgn, _) => expr_contains_comptime(&asgn.value),
         Statement::Expression(expr, _) => expr_contains_comptime(expr),
         Statement::Return(Some(expr), _) => expr_contains_comptime(expr),
@@ -3189,7 +3181,9 @@ fn expr_contains_comptime(expr: &shape_ast::ast::Expr) -> bool {
         } => {
             expr_contains_comptime(condition)
                 || expr_contains_comptime(then_expr)
-                || else_expr.as_ref().is_some_and(|e| expr_contains_comptime(e))
+                || else_expr
+                    .as_ref()
+                    .is_some_and(|e| expr_contains_comptime(e))
         }
         Expr::Block(block, _) => block.items.iter().any(|it| match it {
             BlockItem::VariableDecl(decl) => {
@@ -3209,9 +3203,7 @@ fn expr_contains_comptime(expr: &shape_ast::ast::Expr) -> bool {
         Expr::While(w, _) => {
             expr_contains_comptime(&w.condition) || expr_contains_comptime(&w.body)
         }
-        Expr::For(f, _) => {
-            expr_contains_comptime(&f.iterable) || expr_contains_comptime(&f.body)
-        }
+        Expr::For(f, _) => expr_contains_comptime(&f.iterable) || expr_contains_comptime(&f.body),
         Expr::Loop(l, _) => expr_contains_comptime(&l.body),
         Expr::Match(m, _) => {
             expr_contains_comptime(&m.scrutinee)
