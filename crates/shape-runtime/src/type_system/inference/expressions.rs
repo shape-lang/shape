@@ -75,14 +75,16 @@ impl TypeInferenceEngine {
             },
             Expr::If(if_expr, _) => match &if_expr.else_branch {
                 Some(else_branch) => {
-                    Self::expr_diverges(&if_expr.then_branch)
-                        && Self::expr_diverges(else_branch)
+                    Self::expr_diverges(&if_expr.then_branch) && Self::expr_diverges(else_branch)
                 }
                 None => false,
             },
             Expr::Match(match_expr, _) => {
                 !match_expr.arms.is_empty()
-                    && match_expr.arms.iter().all(|arm| Self::expr_diverges(&arm.body))
+                    && match_expr
+                        .arms
+                        .iter()
+                        .all(|arm| Self::expr_diverges(&arm.body))
             }
             _ => false,
         }
@@ -328,10 +330,7 @@ impl TypeInferenceEngine {
                         // message rather than the generic "Reference(..) cannot
                         // have fields" from `infer_property_access`.
                         if matches!(ns.as_str(), "Color" | "Border" | "ChartType") {
-                            return Err(TypeError::UnknownProperty(
-                                ns.clone(),
-                                property.clone(),
-                            ));
+                            return Err(TypeError::UnknownProperty(ns.clone(), property.clone()));
                         }
                     }
                 }
@@ -391,7 +390,7 @@ impl TypeInferenceEngine {
                     // RefDispatch deref arm — not as a still-unresolved variable
                     // that falls to the constraint path with the referent never
                     // recovered (leaving the element `unknown`).
-                    let object_type = self.unifier.apply_substitutions(&object_type);
+                    let object_type = self.solver.unifier().apply_substitutions(&object_type);
                     self.infer_index_access(&object_type, &index_type)
                 }
             }
@@ -547,7 +546,8 @@ impl TypeInferenceEngine {
                                 // resolve it: `fn aabb(lo, hi) { {min: lo, max: hi} }`
                                 // returns `{min: <tyvar lo>, max: <tyvar hi>}`, and a
                                 // call `aabb(1, 5)` substitutes the markers to `int`.
-                                let resolved = self.unifier.apply_substitutions(&value_type);
+                                let resolved =
+                                    self.solver.unifier().apply_substitutions(&value_type);
                                 match &resolved {
                                     Type::Variable(var) => tyvar_to_annotation(var),
                                     Type::Constrained { var, .. } => tyvar_to_annotation(var),
@@ -560,7 +560,7 @@ impl TypeInferenceEngine {
                                     // "unknown" param and rejects. Mirrors the Variable/
                                     // Constrained arms so call-site substitution resolves it.
                                     Type::Function { params, returns } => {
-                                        let unifier = &self.unifier;
+                                        let unifier = self.solver.unifier().clone();
                                         let conv = |t: &Type| -> TypeAnnotation {
                                             match &unifier.apply_substitutions(t) {
                                                 Type::Variable(v) => tyvar_to_annotation(v),
@@ -1048,11 +1048,11 @@ impl TypeInferenceEngine {
                         }
                         if let Some(arg_ty) = arg_types.get(i) {
                             self.constraints.push((arg_ty.clone(), expected_ty.clone()));
-                            let resolved_arg = self.unifier.apply_substitutions(arg_ty);
+                            let resolved_arg = self.solver.unifier().apply_substitutions(arg_ty);
                             if !self.type_contains_unresolved_vars(&resolved_arg)
-                                && self.unifier.lookup(var).is_none()
+                                && self.solver.unifier().lookup(var).is_none()
                             {
-                                self.unifier.bind(var.clone(), resolved_arg);
+                                self.solver.unifier_mut().bind(var.clone(), resolved_arg);
                             }
                         }
                     }
@@ -1125,11 +1125,14 @@ impl TypeInferenceEngine {
                         // deferred solver).
                         self.constraints
                             .push((actual_ret.clone(), exp_ret.as_ref().clone()));
-                        let resolved_actual = self.unifier.apply_substitutions(&actual_ret);
+                        let resolved_actual =
+                            self.solver.unifier().apply_substitutions(&actual_ret);
                         if !self.type_contains_unresolved_vars(&resolved_actual)
-                            && self.unifier.lookup(ret_var).is_none()
+                            && self.solver.unifier().lookup(ret_var).is_none()
                         {
-                            self.unifier.bind(ret_var.clone(), resolved_actual);
+                            self.solver
+                                .unifier_mut()
+                                .bind(ret_var.clone(), resolved_actual);
                         }
                     }
                 }
@@ -1151,7 +1154,7 @@ impl TypeInferenceEngine {
                             &receiver_params,
                             &method_vars,
                         );
-                        return Ok(self.unifier.apply_substitutions(&result_type));
+                        return Ok(self.solver.unifier().apply_substitutions(&result_type));
                     }
                 }
 
@@ -1212,7 +1215,7 @@ impl TypeInferenceEngine {
                 // Without this, an inline literal receiver (`[1,2,3].sum()`)
                 // still has an un-applied element var at resolution time and
                 // `ElementOf` falls back to an OOB placeholder.
-                let resolved_receiver = self.unifier.apply_substitutions(&receiver_type);
+                let resolved_receiver = self.solver.unifier().apply_substitutions(&receiver_type);
                 if let Some(result_type) = self.method_table.resolve_method_call(
                     &resolved_receiver,
                     method,
@@ -1224,7 +1227,7 @@ impl TypeInferenceEngine {
                     // for `HashMap().set("a", 1)`) are reflected in the result
                     // type. Without this the result stays `HashMap<K, V>` and the
                     // let-gen function-return gate rejects it as unresolved.
-                    return Ok(self.unifier.apply_substitutions(&result_type));
+                    return Ok(self.solver.unifier().apply_substitutions(&result_type));
                 }
 
                 // REAL-MOVE keep-both (v0.3.3, user 2026-06-21): `clone p`
@@ -1246,7 +1249,7 @@ impl TypeInferenceEngine {
                             | Type::Concrete(TypeAnnotation::Reference(_))
                     );
                     if is_concrete_objectlike {
-                        return Ok(self.unifier.apply_substitutions(&receiver_type));
+                        return Ok(self.solver.unifier().apply_substitutions(&receiver_type));
                     }
                 }
 
@@ -1323,9 +1326,10 @@ impl TypeInferenceEngine {
                                 }
 
                                 let ret = match annotation_as_tyvar(&returns) {
-                                    Some(var) => {
-                                        self.unifier.apply_substitutions(&Type::Variable(var))
-                                    }
+                                    Some(var) => self
+                                        .solver
+                                        .unifier()
+                                        .apply_substitutions(&Type::Variable(var)),
                                     None => Type::Concrete(*returns),
                                 };
                                 return Ok(ret);
@@ -1387,7 +1391,10 @@ impl TypeInferenceEngine {
                 // `unknown * int`. Applying substitutions resolves `T → int`;
                 // no fabrication — the binder type comes verbatim from the
                 // already-registered constraint.
-                let scrutinee_type = self.unifier.apply_substitutions(&raw_scrutinee_type);
+                let scrutinee_type = self
+                    .solver
+                    .unifier()
+                    .apply_substitutions(&raw_scrutinee_type);
 
                 // Collect arm return types. A DIVERGING arm (one whose body
                 // ends in / is dominated by `return`/`break`/`continue`) is the
@@ -1610,9 +1617,7 @@ impl TypeInferenceEngine {
 
                     match (then_diverges, else_diverges) {
                         // Both branches diverge → the whole if/else is Never.
-                        (true, true) => {
-                            Ok(Type::Concrete(TypeAnnotation::Never))
-                        }
+                        (true, true) => Ok(Type::Concrete(TypeAnnotation::Never)),
                         // Only the else diverges → the if-expression type is the
                         // (non-diverging) then-branch type; no unification.
                         (false, true) => Ok(then_type),
@@ -1697,7 +1702,7 @@ impl TypeInferenceEngine {
                 let bound_via_fields = if let shape_ast::ast::Pattern::Object(fields) =
                     &for_expr.pattern
                 {
-                    let resolved_elem = self.unifier.apply_substitutions(&element_type);
+                    let resolved_elem = self.solver.unifier().apply_substitutions(&element_type);
                     if let Some(struct_name) = self
                         .struct_name_of_type(&resolved_elem)
                         .or_else(|| self.struct_name_of_type(&element_type))
@@ -1992,9 +1997,7 @@ impl TypeInferenceEngine {
                         // param escapes (forwarded) and no call site pins it.
                         // A body with no literal pairing yields None ⇒ the var
                         // stays a genuine proof-gap and is REJECTED there.
-                        if let Some(param_name) =
-                            params.get(index).and_then(|p| p.simple_name())
-                        {
+                        if let Some(param_name) = params.get(index).and_then(|p| p.simple_name()) {
                             if let Some(hint) =
                                 Self::closure_body_literal_param_type(param_name, body)
                             {
@@ -2072,9 +2075,9 @@ impl TypeInferenceEngine {
             // `d.year()` reported "Method 'year' not found on type 'datetime'".
             // The downstream concrete-conversion / compiler arithmetic sites
             // already accept both `"DateTime"` and `"datetime"`.
-            Expr::TimeRef(_, _) | Expr::DateTime(_, _) => Ok(Type::Concrete(
-                TypeAnnotation::Reference("DateTime".into()),
-            )),
+            Expr::TimeRef(_, _) | Expr::DateTime(_, _) => {
+                Ok(Type::Concrete(TypeAnnotation::Reference("DateTime".into())))
+            }
 
             // Duration
             Expr::Duration(_, _) => Ok(Type::Concrete(TypeAnnotation::Basic(
@@ -2328,7 +2331,7 @@ impl TypeInferenceEngine {
                 ..
             } => {
                 let inner_ty = self.infer_expr(inner)?;
-                let resolved_inner = self.unifier.apply_substitutions(&inner_ty);
+                let resolved_inner = self.solver.unifier().apply_substitutions(&inner_ty);
                 match resolved_inner.to_annotation() {
                     Some(inner_ann) => Ok(Type::Concrete(TypeAnnotation::Borrow {
                         mutable: *is_mutable,
@@ -2388,7 +2391,7 @@ impl TypeInferenceEngine {
     fn array_literal_element_contribution(&mut self, elem: &Expr) -> TypeResult<Type> {
         if let Expr::Spread(inner, _) = elem {
             let spread_type = self.infer_expr(inner)?;
-            let resolved = self.unifier.apply_substitutions(&spread_type);
+            let resolved = self.solver.unifier().apply_substitutions(&spread_type);
             match &resolved {
                 // Concrete array forms: unwrap the element type directly.
                 Type::Concrete(TypeAnnotation::Array(inner_ann)) => {
@@ -2697,9 +2700,7 @@ impl TypeInferenceEngine {
     /// the prior `None` surface-and-stop behaviour).
     fn pattern_array_element_type(ty: &Type) -> Option<Type> {
         match ty {
-            Type::Concrete(TypeAnnotation::Array(inner)) => {
-                Some(Type::Concrete((**inner).clone()))
-            }
+            Type::Concrete(TypeAnnotation::Array(inner)) => Some(Type::Concrete((**inner).clone())),
             Type::Concrete(TypeAnnotation::Generic { name, args })
                 if (name == "Array" || name == "Vec") && args.len() == 1 =>
             {

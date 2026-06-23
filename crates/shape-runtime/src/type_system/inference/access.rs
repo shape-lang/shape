@@ -202,7 +202,10 @@ impl TypeInferenceEngine {
                     // resolves through the unifier once callsite propagation
                     // has bound the parameter.
                     if let Some(var) = annotation_as_tyvar(&field.type_annotation) {
-                        return Ok(self.unifier.apply_substitutions(&Type::Variable(var)));
+                        return Ok(self
+                            .solver
+                            .unifier()
+                            .apply_substitutions(&Type::Variable(var)));
                     }
                     return Ok(Type::Concrete(field.type_annotation.clone()));
                 }
@@ -746,10 +749,8 @@ impl TypeInferenceEngine {
                     // default: the closure either gets pinned by a downstream
                     // concrete call site (via `escaping_closure_arg_sites`
                     // follow-the-callable) or is REJECTED cleanly.
-                    let arg_carries_deferred_closure_param = matches!(
-                        arg,
-                        Expr::Identifier(..)
-                    ) && matches!(&inferred, Type::Function { params, .. }
+                    let arg_carries_deferred_closure_param = matches!(arg, Expr::Identifier(..))
+                        && matches!(&inferred, Type::Function { params, .. }
                         if params.iter().any(|p| matches!(
                             p,
                             Type::Variable(v)
@@ -803,7 +804,7 @@ impl TypeInferenceEngine {
             // mutability lives in the param's `is_reference`/`is_mut_reference`
             // flags, not the arg type.
             let arg_type = if matches!(arg, Expr::Reference { .. }) {
-                match self.unifier.apply_substitutions(&arg_type) {
+                match self.solver.unifier().apply_substitutions(&arg_type) {
                     Type::Concrete(TypeAnnotation::Borrow { inner, .. }) => Type::Concrete(*inner),
                     other => other,
                 }
@@ -864,7 +865,7 @@ impl TypeInferenceEngine {
 
             // Series form: a single Array<T> argument.
             if arg_types.len() == 1 {
-                let resolved = self.unifier.apply_substitutions(&arg_types[0]);
+                let resolved = self.solver.unifier().apply_substitutions(&arg_types[0]);
                 if let Some(elem) = Self::min_max_array_element_type(&resolved) {
                     // Constrain the element type to Numeric and return it.
                     let bound = self.fresh_var();
@@ -897,7 +898,7 @@ impl TypeInferenceEngine {
                 // checker cannot prove. A mixed `min(1, 2.0)` still fails: the
                 // second arg's `number` unifies against the first arg's `int`
                 // and the solver rejects (int !~ number) — no silent coercion.
-                let result = self.unifier.apply_substitutions(&arg_types[0]);
+                let result = self.solver.unifier().apply_substitutions(&arg_types[0]);
                 for arg_ty in arg_types.iter().skip(1) {
                     self.push_constraint_with_origin(arg_ty.clone(), result.clone(), origin);
                 }
@@ -1238,8 +1239,10 @@ impl TypeInferenceEngine {
         // `FunctionCall` result, so it is untouched. The constraint pushed above
         // still carries the `&T` return so the callee's own `-> &T` annotation
         // unification (Borrow-vs-Borrow) is unaffected.
-        if let Type::Concrete(TypeAnnotation::Borrow { inner, .. }) =
-            self.unifier.apply_substitutions(&inferred_result_type)
+        if let Type::Concrete(TypeAnnotation::Borrow { inner, .. }) = self
+            .solver
+            .unifier()
+            .apply_substitutions(&inferred_result_type)
         {
             return Ok(Type::Concrete(*inner));
         }
@@ -1263,7 +1266,7 @@ impl TypeInferenceEngine {
         // return leaves the result as-is (no fabrication).
         if let Some(&fn_param_idx) = self.callable_return_from_fn_param.get(name) {
             if let Some(arg_ty) = arg_types.get(fn_param_idx) {
-                let resolved_arg = self.unifier.apply_substitutions(arg_ty);
+                let resolved_arg = self.solver.unifier().apply_substitutions(arg_ty);
                 let arg_return = match &resolved_arg {
                     Type::Function { returns, .. } => Some((**returns).clone()),
                     Type::Concrete(TypeAnnotation::Function { returns, .. }) => {
@@ -1275,7 +1278,7 @@ impl TypeInferenceEngine {
                     _ => None,
                 };
                 if let Some(genuine) = arg_return {
-                    let genuine = self.unifier.apply_substitutions(&genuine);
+                    let genuine = self.solver.unifier().apply_substitutions(&genuine);
                     if !matches!(genuine, Type::Variable(_)) {
                         // Unify (don't blindly replace): an agreeing instantiated
                         // result var binds to `genuine`; a conflict surfaces.

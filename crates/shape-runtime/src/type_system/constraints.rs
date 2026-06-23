@@ -269,10 +269,7 @@ impl ConstraintSolver {
                         .zip(a2.iter())
                         .all(|(x, y)| Self::types_equivalent(x, y))
             }
-            (
-                Type::Constrained { var: v1, .. },
-                Type::Constrained { var: v2, .. },
-            ) => v1 == v2,
+            (Type::Constrained { var: v1, .. }, Type::Constrained { var: v2, .. }) => v1 == v2,
             (
                 Type::Function {
                     params: p1,
@@ -427,38 +424,13 @@ impl ConstraintSolver {
                 self.solve_constraint(*r1.clone(), *r2.clone())
             }
 
-            // Cross-compatibility: Type::Function ~ Concrete(TypeAnnotation::Function)
-            (
-                Type::Function {
-                    params: fp,
-                    returns: fr,
-                },
-                Type::Concrete(TypeAnnotation::Function {
-                    params: cp,
-                    returns: cr,
-                }),
-            )
-            | (
-                Type::Concrete(TypeAnnotation::Function {
-                    params: cp,
-                    returns: cr,
-                }),
-                Type::Function {
-                    params: fp,
-                    returns: fr,
-                },
-            ) => {
-                if fp.len() != cp.len() {
-                    return Err(TypeError::ArityMismatch(fp.len(), cp.len()));
-                }
-                for (f_param, c_param) in fp.iter().zip(cp.iter()) {
-                    self.solve_constraint(
-                        f_param.clone(),
-                        Type::Concrete(c_param.type_annotation.clone()),
-                    )?;
-                }
-                self.solve_constraint(*fr.clone(), Type::Concrete(*cr.clone()))
-            }
+            // SB-2: the former `Type::Function ~ Concrete(TypeAnnotation::Function)`
+            // cross-form arm is DELETED. `canonicalize()` (run at the top of every
+            // `solve_constraint` call) folds `Concrete(Function{..})` into
+            // `Type::Function{..}`, so a function on either side is always
+            // `Function ~ Function` and handled by the pairwise arm above. Keeping
+            // the cross-form arm would re-create the split-brain this unifies —
+            // exactly as the Array fold deleted its own cross-form arm below.
 
             // U1: the former `Generic ~ Concrete(Array(T))` cross-form arm is
             // DELETED. `canonicalize()` (run at the top of every
@@ -466,7 +438,6 @@ impl ConstraintSolver {
             // `Type::Generic{Array, [..]}`, so an array on either side is always
             // `Generic ~ Generic` and handled by the generic arm above. Keeping
             // the cross-form arm would re-create the split-brain this unifies.
-
             _ => Err(TypeError::TypeMismatch(
                 format!("{:?}", t1),
                 format!("{:?}", t2),
@@ -1563,6 +1534,13 @@ impl ConstraintSolver {
     pub fn unifier(&self) -> &Unifier {
         &self.unifier
     }
+
+    /// Mutable access to the solver's unifier — the SINGLE substitution store.
+    /// SB-2: the inference engine no longer keeps a parallel unifier; engine
+    /// `bind` writes land directly here so a subsequent `solve` sees them.
+    pub fn unifier_mut(&mut self) -> &mut Unifier {
+        &mut self.unifier
+    }
 }
 
 #[cfg(test)]
@@ -1606,10 +1584,9 @@ mod tests {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".into()))),
             args: vec![int()],
         };
-        let array_concrete =
-            Type::Concrete(TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
-                "int".to_string(),
-            ))));
+        let array_concrete = Type::Concrete(TypeAnnotation::Array(Box::new(
+            TypeAnnotation::Basic("int".to_string()),
+        )));
         let array_concrete_generic = Type::Concrete(TypeAnnotation::Generic {
             name: "Array".into(),
             args: vec![TypeAnnotation::Basic("int".to_string())],
@@ -1662,14 +1639,35 @@ mod tests {
             }],
             returns: Box::new(TypeAnnotation::Basic("int".to_string())),
         });
-        // NOTE: the two Function encodings are distinct CARRIERS by design
-        // (`Type::Function` can hold inference vars; `Concrete(Function)` cannot)
-        // and `canonicalize` does not fold `Concrete(Function)` into
-        // `Type::Function`. Equivalence holds within each carrier; cross-carrier
-        // Function *unifiability* is the hard-constraint path's job, not
-        // equivalence. Assert self-equality within each encoding.
+        // SB-2: the two Function encodings now FOLD to the single canonical
+        // `Type::Function` carrier (exactly as the 4 Array encodings fold), so
+        // cross-carrier equality holds — `canonicalize` rewrites
+        // `Concrete(TypeAnnotation::Function{..})` to `Type::Function{..}` before
+        // comparison. The former "distinct carriers by design" split is gone.
         assert!(solver.probe_equal(&fn_inference, &fn_inference));
         assert!(solver.probe_equal(&fn_concrete, &fn_concrete));
+        assert!(
+            solver.probe_equal(&fn_inference, &fn_concrete),
+            "SB-2: the two (int)->int Function encodings must be equal after the fold"
+        );
+        assert!(
+            solver.probe_equal(&fn_concrete, &fn_inference),
+            "SB-2: Function fold is symmetric"
+        );
+
+        // A distinct Function return type stays distinct after the fold.
+        let fn_concrete_ret_number = Type::Concrete(TypeAnnotation::Function {
+            params: vec![FunctionParam {
+                name: None,
+                optional: false,
+                type_annotation: TypeAnnotation::Basic("int".to_string()),
+            }],
+            returns: Box::new(TypeAnnotation::Basic("number".to_string())),
+        });
+        assert!(
+            !solver.probe_equal(&fn_inference, &fn_concrete_ret_number),
+            "SB-2: (int)->int must NOT equal (int)->number after the fold"
+        );
 
         // int and number are NOT equal (strict typing — the core finding).
         assert!(!solver.probe_equal(&int(), &number()));
@@ -1688,10 +1686,9 @@ mod tests {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference("Array".into()))),
             args: vec![int()],
         };
-        let array_concrete =
-            Type::Concrete(TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
-                "int".to_string(),
-            ))));
+        let array_concrete = Type::Concrete(TypeAnnotation::Array(Box::new(
+            TypeAnnotation::Basic("int".to_string()),
+        )));
 
         let f1 = Type::Function {
             params: vec![array_generic.clone()],
@@ -1707,6 +1704,76 @@ mod tests {
             solver.probe_equal(&f1, &f2),
             "U1: (Array<int>)->int with different element encodings must be equal"
         );
+    }
+
+    /// SB-2 isolation gate (Function fold): the two Function encodings agree
+    /// after `canonicalize`, exactly as the Array gate proves the Array
+    /// encodings agree. `Concrete(TypeAnnotation::Function{..})` folds to the
+    /// canonical `Type::Function{..}` carrier, so equality, nested-Function
+    /// equality, and a return-type discriminator all hold over the single
+    /// carrier — and the deleted solver cross-form `Function ~ Concrete(Function)`
+    /// patch arm is unreachable.
+    #[test]
+    fn sb2_function_encodings_fold_and_agree() {
+        use shape_ast::ast::{FunctionParam, TypeAnnotation};
+
+        let int = || Type::Concrete(TypeAnnotation::Basic("int".to_string()));
+        let concrete_fn = |ret: &str| {
+            Type::Concrete(TypeAnnotation::Function {
+                params: vec![FunctionParam {
+                    name: None,
+                    optional: false,
+                    type_annotation: TypeAnnotation::Basic("int".to_string()),
+                }],
+                returns: Box::new(TypeAnnotation::Basic(ret.to_string())),
+            })
+        };
+        let inference_fn = |ret: Type| Type::Function {
+            params: vec![int()],
+            returns: Box::new(ret),
+        };
+
+        // The Concrete(Function) encoding canonicalizes to Type::Function.
+        assert_eq!(
+            concrete_fn("int").canonicalize(),
+            inference_fn(int()),
+            "SB-2: Concrete(Function) must fold to Type::Function"
+        );
+
+        let solver = ConstraintSolver::new();
+
+        // Both directions of cross-carrier equality.
+        assert!(solver.probe_equal(&concrete_fn("int"), &inference_fn(int())));
+        assert!(solver.probe_equal(&inference_fn(int()), &concrete_fn("int")));
+
+        // Nested function (a (int)->int parameter) folds recursively.
+        let concrete_hof = Type::Concrete(TypeAnnotation::Function {
+            params: vec![FunctionParam {
+                name: None,
+                optional: false,
+                type_annotation: TypeAnnotation::Function {
+                    params: vec![FunctionParam {
+                        name: None,
+                        optional: false,
+                        type_annotation: TypeAnnotation::Basic("int".to_string()),
+                    }],
+                    returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+                },
+            }],
+            returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+        });
+        let inference_hof = inference_fn(int());
+        let inference_hof = Type::Function {
+            params: vec![inference_hof],
+            returns: Box::new(int()),
+        };
+        assert!(
+            solver.probe_equal(&concrete_hof, &inference_hof),
+            "SB-2: nested ((int)->int)->int folds recursively"
+        );
+
+        // Return-type discriminator: int!=number is preserved after the fold.
+        assert!(!solver.probe_equal(&concrete_fn("number"), &inference_fn(int())));
     }
 
     #[test]

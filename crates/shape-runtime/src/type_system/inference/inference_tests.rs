@@ -1971,8 +1971,7 @@ fn ws9_index_access_on_unannotated_param_resolves_element_type() {
         assert!(
             is_array_int,
             "twoidx param {} must resolve to Array<int>, got {:?}",
-            idx,
-            p,
+            idx, p,
         );
     }
 }

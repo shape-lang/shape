@@ -182,15 +182,6 @@ impl Unifier {
         }
     }
 
-    /// Merge another unifier's substitutions
-    pub fn merge(&mut self, other: &Unifier) {
-        for (var, ty) in &other.substitutions {
-            if !self.substitutions.contains_key(var) {
-                self.bind(var.clone(), ty.clone());
-            }
-        }
-    }
-
     /// Clear all substitutions
     pub fn clear(&mut self) {
         self.substitutions.clear();

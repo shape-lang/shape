@@ -190,7 +190,10 @@ impl TypeInferenceEngine {
                 // the boundary, producing a heap-pointer reinterpret. Threading
                 // the real scrutinee gives the ownership check the type it needs
                 // to reject the foreign pattern.
-                let scrutinee_type = self.unifier.apply_substitutions(&raw_scrutinee_type);
+                let scrutinee_type = self
+                    .solver
+                    .unifier()
+                    .apply_substitutions(&raw_scrutinee_type);
 
                 let mut arm_types = Vec::new();
                 let mut any_arm = false;
@@ -616,11 +619,16 @@ impl TypeInferenceEngine {
         // the var unbound (still-unresolved → no bind), so a numeric annotation
         // on the result REJECTS rather than coerces — no fabrication.
         let returned_type = if let Type::Variable(ret_var) = &constrained_expected_return {
-            let resolved = self.unifier.apply_substitutions(&inferred_return_type);
+            let resolved = self
+                .solver
+                .unifier()
+                .apply_substitutions(&inferred_return_type);
             if !self.type_contains_unresolved_vars(&resolved)
-                && self.unifier.lookup(ret_var).is_none()
+                && self.solver.unifier().lookup(ret_var).is_none()
             {
-                self.unifier.bind(ret_var.clone(), resolved.clone());
+                self.solver
+                    .unifier_mut()
+                    .bind(ret_var.clone(), resolved.clone());
                 resolved
             } else {
                 constrained_expected_return.clone()
@@ -778,10 +786,9 @@ impl TypeInferenceEngine {
             return true;
         };
         // Form 1: all structurally equal.
-        if elem_types
-            .iter()
-            .all(|t| crate::type_system::unification::structural_equality::annotations_equal(first, t))
-        {
+        if elem_types.iter().all(|t| {
+            crate::type_system::unification::structural_equality::annotations_equal(first, t)
+        }) {
             return true;
         }
         // Form 2: all in the fixed-width lossless numeric lattice.

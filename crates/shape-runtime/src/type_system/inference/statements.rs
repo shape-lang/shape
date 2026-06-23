@@ -50,12 +50,14 @@ impl TypeInferenceEngine {
             // mismatch (`Option<T> !~ int`). A numeric RHS (`sum + v`) or an
             // as-yet-unresolved var RHS is left alone — ROOT-B keeps adopting.
             let mut grounded_seed_mismatch = false;
-            if let Type::Variable(target_var) = self.unifier.apply_substitutions(&target_type) {
+            if let Type::Variable(target_var) =
+                self.solver.unifier().apply_substitutions(&target_type)
+            {
                 if self
                     .deferred_constructor_literal_payload_vars
                     .contains(&target_var)
                 {
-                    let resolved_value = self.unifier.apply_substitutions(&value_type);
+                    let resolved_value = self.solver.unifier().apply_substitutions(&value_type);
                     if Self::is_definitely_non_numeric(&resolved_value) {
                         // Ground the seed to its NATURAL `int` and surface the
                         // mismatch directly as `value ~ int` (a clean
@@ -134,7 +136,7 @@ impl TypeInferenceEngine {
         element_type: &Type,
     ) {
         if let shape_ast::ast::DestructurePattern::Object(fields) = pattern {
-            let resolved_elem = self.unifier.apply_substitutions(element_type);
+            let resolved_elem = self.solver.unifier().apply_substitutions(element_type);
             if let Some(struct_name) = self
                 .struct_name_of_type(&resolved_elem)
                 .or_else(|| self.struct_name_of_type(element_type))

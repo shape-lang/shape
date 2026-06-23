@@ -45,7 +45,6 @@ pub use hoisting::{PropertyAssignment, PropertyAssignmentCollector};
 use super::checking::MethodTable;
 use super::constraints::ConstraintSolver;
 use super::environment::TypeEnvironment;
-use super::unification::Unifier;
 use super::*;
 use shape_ast::ast::{ObjectTypeField, Program, Span, StructTypeDef, TypeAnnotation};
 use std::collections::HashMap;
@@ -60,10 +59,11 @@ pub struct TypeInferenceEngine {
     /// former process-global `NEXT_TYPEVAR_ID` counter so test runs and
     /// independent inference sessions can't alias each other's IDs.
     pub type_var_gen: crate::type_system::TypeVarGen,
-    /// Constraint solver for type constraints
+    /// Constraint solver for type constraints. SB-2: the solver's unifier is
+    /// the SINGLE substitution store — the engine no longer keeps a parallel
+    /// one. All grounding reads `self.solver.unifier()` / writes
+    /// `self.solver.unifier_mut()`.
     pub(crate) solver: ConstraintSolver,
-    /// Type unifier
-    pub(crate) unifier: Unifier,
     /// Generated constraints
     pub(crate) constraints: Vec<(Type, Type)>,
     /// Best-effort origin spans for generated constraints.
@@ -162,8 +162,7 @@ pub struct TypeInferenceEngine {
     /// resolver/solver pins is already concrete (not a `Type::Variable`) at the
     /// default pass and is skipped, so §4 literal-adoption at a real call site
     /// (`Array<number>.map(|x| x / 2)`) is untouched.
-    pub(crate) deferred_closure_numeric_param_body_hint:
-        std::collections::HashMap<TypeVar, Type>,
+    pub(crate) deferred_closure_numeric_param_body_hint: std::collections::HashMap<TypeVar, Type>,
     /// Indirected-callable COMPLETENESS extension (full-inference ruling). Each
     /// entry records a closure LITERAL passed as a value argument to a USER
     /// function call (`applyx(|a,b| a*b,6,7)`, `id(|a,b| a*b)`,
@@ -298,7 +297,6 @@ impl TypeInferenceEngine {
             env,
             type_var_gen: crate::type_system::TypeVarGen::new(),
             solver: ConstraintSolver::new(),
-            unifier: Unifier::new(),
             constraints: Vec::new(),
             constraint_origins: HashMap::new(),
             callable_origins_by_name: HashMap::new(),
@@ -365,7 +363,7 @@ impl TypeInferenceEngine {
             .expr_type_table
             .drain()
             .filter_map(|(span, ty)| {
-                let resolved = self.unifier.apply_substitutions(&ty);
+                let resolved = self.solver.unifier().apply_substitutions(&ty);
                 // No Unknown-default: a still-free variable (or a type whose
                 // structure still contains a free variable) is un-inferable —
                 // drop it so the compiler boundary surfaces the genuine error.
@@ -395,8 +393,7 @@ impl TypeInferenceEngine {
                     && Self::type_is_fully_resolved(returns)
             }
             Type::Generic { base, args } => {
-                Self::type_is_fully_resolved(base)
-                    && args.iter().all(Self::type_is_fully_resolved)
+                Self::type_is_fully_resolved(base) && args.iter().all(Self::type_is_fully_resolved)
             }
         }
     }
@@ -458,7 +455,7 @@ impl TypeInferenceEngine {
     /// name is not bound (no fabrication).
     pub fn resolved_binding_type(&self, name: &str) -> Option<Type> {
         let scheme = self.env.lookup(name)?;
-        Some(self.unifier.apply_substitutions(&scheme.ty))
+        Some(self.solver.unifier().apply_substitutions(&scheme.ty))
     }
 
     /// Push a new function scope for fallibility tracking
@@ -541,7 +538,10 @@ impl TypeInferenceEngine {
             .entry(base_var)
             .or_insert_with(Vec::new);
         for member in additional_members {
-            if !entry.iter().any(|existing| solver.probe_equal(existing, &member)) {
+            if !entry
+                .iter()
+                .any(|existing| solver.probe_equal(existing, &member))
+            {
                 entry.push(member);
             }
         }
@@ -1660,7 +1660,6 @@ impl TypeInferenceEngine {
         if let Err(err) = self.solver.solve(&mut self.constraints) {
             errors.push(err);
         }
-        self.unifier.merge(self.solver.unifier());
 
         self.apply_callsite_unions(&mut types);
         errors.extend(self.refine_numeric_params_post_callsite(&mut types));
@@ -1671,7 +1670,7 @@ impl TypeInferenceEngine {
         self.default_unresolved_constructor_literal_payload_vars();
 
         for (_name, ty) in types.iter_mut() {
-            *ty = self.unifier.apply_substitutions(ty);
+            *ty = self.solver.unifier().apply_substitutions(ty);
         }
 
         // Let-gen spec §4 (A-enforced): parity with `infer_program_best_effort`.
@@ -1806,7 +1805,6 @@ impl TypeInferenceEngine {
         if let Err(err) = self.solver.solve(&mut self.constraints) {
             errors.push(err);
         }
-        self.unifier.merge(self.solver.unifier());
 
         // Apply callsite widening before root-scope substitutions so unresolved
         // callable vars can still be widened in best-effort mode.
@@ -1879,7 +1877,10 @@ impl TypeInferenceEngine {
             else {
                 continue;
             };
-            let genuine = self.unifier.apply_substitutions(param_returns.as_ref());
+            let genuine = self
+                .solver
+                .unifier()
+                .apply_substitutions(param_returns.as_ref());
             if matches!(genuine, Type::Variable(_)) {
                 continue;
             }
@@ -1889,12 +1890,11 @@ impl TypeInferenceEngine {
             if let Err(err) = self.solver.solve(&mut hof_return_constraints) {
                 errors.push(err);
             }
-            self.unifier.merge(self.solver.unifier());
         }
 
         // Apply substitutions to get final types
         for (_name, ty) in types.iter_mut() {
-            *ty = self.unifier.apply_substitutions(ty);
+            *ty = self.solver.unifier().apply_substitutions(ty);
         }
 
         // Let-gen spec §4 (A-enforced): now that every binding has its FINAL
@@ -2238,7 +2238,7 @@ impl TypeInferenceEngine {
         for &idx in indices {
             let arg = call_args.get(idx)?;
             let ty = self.infer_expr(arg).ok()?;
-            let resolved = self.unifier.apply_substitutions(&ty);
+            let resolved = self.solver.unifier().apply_substitutions(&ty);
             if matches!(resolved, Type::Variable(_) | Type::Constrained { .. }) {
                 return None;
             }
@@ -2491,8 +2491,10 @@ impl TypeInferenceEngine {
                                 ..
                             }) = widened_params.get(fn_param_idx)
                             {
-                                let resolved_param_return =
-                                    self.unifier.apply_substitutions(param_returns.as_ref());
+                                let resolved_param_return = self
+                                    .solver
+                                    .unifier()
+                                    .apply_substitutions(param_returns.as_ref());
                                 if !matches!(resolved_param_return, Type::Variable(_)) {
                                     substitutions.insert(return_var.clone(), resolved_param_return);
                                 }
@@ -2581,13 +2583,13 @@ impl TypeInferenceEngine {
             if matches!(ty, Type::Variable(_)) {
                 continue;
             }
-            match self.unifier.lookup(var) {
+            match self.solver.unifier().lookup(var) {
                 Some(existing) if !matches!(existing, Type::Variable(_)) => {
                     // Already concretely bound — leave the prior binding;
                     // a real conflict is reported by constraint solving.
                     let _ = existing;
                 }
-                _ => self.unifier.bind(var.clone(), ty.clone()),
+                _ => self.solver.unifier_mut().bind(var.clone(), ty.clone()),
             }
         }
     }
@@ -2647,7 +2649,7 @@ impl TypeInferenceEngine {
                 let Some(param_ty) = new_params.get_mut(index) else {
                     continue;
                 };
-                let resolved = self.unifier.apply_substitutions(param_ty);
+                let resolved = self.solver.unifier().apply_substitutions(param_ty);
                 match resolved {
                     Type::Variable(var) | Type::Constrained { var, .. } => {
                         // Genuinely unresolved → apply the `number` default.
@@ -2783,9 +2785,7 @@ impl TypeInferenceEngine {
                     scan_expr(name, left).or_else(|| scan_expr(name, right))
                 }
                 Expr::UnaryOp { operand, .. } => scan_expr(name, operand),
-                Expr::FunctionCall { args, .. } => {
-                    args.iter().find_map(|a| scan_expr(name, a))
-                }
+                Expr::FunctionCall { args, .. } => args.iter().find_map(|a| scan_expr(name, a)),
                 Expr::MethodCall { receiver, args, .. } => scan_expr(name, receiver)
                     .or_else(|| args.iter().find_map(|a| scan_expr(name, a))),
                 Expr::Array(elements, _) => elements.iter().find_map(|e| scan_expr(name, e)),
@@ -2818,7 +2818,8 @@ impl TypeInferenceEngine {
             .collect();
         for var in vars {
             match self
-                .unifier
+                .solver
+                .unifier()
                 .apply_substitutions(&Type::Variable(var.clone()))
             {
                 Type::Variable(_) | Type::Constrained { .. } => {
@@ -2830,10 +2831,12 @@ impl TypeInferenceEngine {
                     // closure body proves int or number". Only reached when no
                     // call site pinned the var (it is still a Variable here), so
                     // §4 literal-adoption at a real call site is untouched.
-                    if let Some(hint) =
-                        self.deferred_closure_numeric_param_body_hint.get(&var).cloned()
+                    if let Some(hint) = self
+                        .deferred_closure_numeric_param_body_hint
+                        .get(&var)
+                        .cloned()
                     {
-                        self.unifier.bind(var, hint);
+                        self.solver.unifier_mut().bind(var, hint);
                         continue;
                     }
                     // Indirected-callable surface (the recurring unsoundness). A
@@ -2863,7 +2866,7 @@ impl TypeInferenceEngine {
                     // Genuinely never-invoked closure (`let f = |x| x*3`): no value
                     // ever flows through the param, so the last-resort `number`
                     // default is harmless and keeps the binding concrete.
-                    self.unifier.bind(var, BuiltinTypes::number());
+                    self.solver.unifier_mut().bind(var, BuiltinTypes::number());
                 }
                 _ => {}
             }
@@ -2890,11 +2893,12 @@ impl TypeInferenceEngine {
             .collect();
         for var in vars {
             match self
-                .unifier
+                .solver
+                .unifier()
                 .apply_substitutions(&Type::Variable(var.clone()))
             {
                 Type::Variable(_) | Type::Constrained { .. } => {
-                    self.unifier.bind(var, BuiltinTypes::integer());
+                    self.solver.unifier_mut().bind(var, BuiltinTypes::integer());
                 }
                 _ => {}
             }
@@ -2915,13 +2919,12 @@ impl TypeInferenceEngine {
     /// engine per expression (as the LSP helpers already do).
     pub fn infer_expr_finalized(&mut self, expr: &shape_ast::ast::Expr) -> TypeResult<Type> {
         let ty = self.infer_expr(expr)?;
-        // Solve the constraints this expression accumulated, then merge the
-        // solver's bindings back into the engine unifier so the deferred-var
-        // grounding + final `apply_substitutions` see them.
+        // Solve the constraints this expression accumulated. SB-2: the solver's
+        // unifier is the single store, so the deferred-var grounding + final
+        // `apply_substitutions` read those bindings directly.
         let _ = self.solver.solve(&mut self.constraints);
-        self.unifier.merge(self.solver.unifier());
         self.default_unresolved_constructor_literal_payload_vars();
-        Ok(self.unifier.apply_substitutions(&ty))
+        Ok(self.solver.unifier().apply_substitutions(&ty))
     }
 
     fn propagate_return_alias_substitution(
@@ -3013,7 +3016,7 @@ impl TypeInferenceEngine {
         let mut current = ty.clone();
         // Bound: every step must consume one variable from a finite pool, so
         // the unifier's variable count plus the `resolved` size is a safe cap.
-        let max_steps = self.unifier.substitutions().len() + resolved.len() + 2;
+        let max_steps = self.solver.unifier().substitutions().len() + resolved.len() + 2;
         for _ in 0..max_steps {
             let Type::Variable(var) = &current else {
                 break;
@@ -3028,7 +3031,7 @@ impl TypeInferenceEngine {
                 continue;
             }
             // Constraint-solver hop.
-            let stepped = self.unifier.apply_substitutions(&current);
+            let stepped = self.solver.unifier().apply_substitutions(&current);
             if stepped == current {
                 break;
             }

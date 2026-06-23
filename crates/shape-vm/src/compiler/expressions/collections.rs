@@ -579,15 +579,36 @@ impl BytecodeCompiler {
             // different carrier shape than the v2-raw `HeapElement` element
             // carriers — a genuine divergence surfaced here per the stage
             // binders (SURFACE, do not fabricate a parallel carrier).
+            //
+            // SB-2: a NAMED function value used as an element (`[add]`,
+            // `[add, sub]`) is the SAME closure-share carrier at runtime — an
+            // identifier that resolves to a registered user/foreign function,
+            // not a scalar/struct value. Inference already projects it to the
+            // canonical `Type::Function` carrier (`[add]` infers
+            // `Array<(int)->int>`), but the typed-array element carrier for
+            // function values does not exist yet. Recognize this case so the
+            // SURFACE message is ACCURATE (a closure-carrier limitation) rather
+            // than the misleading "make every element the same proven type" —
+            // SURFACE, do not fabricate a parallel carrier.
+            let is_named_fn_value = |e: &Expr| {
+                if let Expr::Identifier(name, _) = e {
+                    self.function_defs.contains_key(name)
+                        || self.foreign_function_defs.contains_key(name)
+                } else {
+                    false
+                }
+            };
             let has_closure_elem = elements
                 .iter()
-                .any(|e| matches!(e, Expr::FunctionExpr { .. }));
+                .any(|e| matches!(e, Expr::FunctionExpr { .. }) || is_named_fn_value(e));
             let (kind_hint, detail) = if has_closure_elem {
                 (
-                    "closures",
-                    "Arrays of closures are not yet supported — a closure \
-                     element's runtime carrier differs from the value \
-                     carriers arrays currently store.",
+                    "function values",
+                    "Arrays of function values (closures or named functions) are \
+                     not yet supported — a function element's runtime carrier (a \
+                     closure share) differs from the value carriers arrays \
+                     currently store. Inference proves the element type (e.g. \
+                     `Array<(int) -> int>`); the typed-array carrier is the gap.",
                 )
             } else {
                 (
@@ -2105,10 +2126,7 @@ mod tests {
 
         let mut saw_i64_field_read = false;
         for instr in &compiled.instructions {
-            if let Some(Operand::TypedField {
-                field_type_tag, ..
-            }) = &instr.operand
-            {
+            if let Some(Operand::TypedField { field_type_tag, .. }) = &instr.operand {
                 assert_ne!(
                     *field_type_tag, FIELD_TAG_OBJECT,
                     "S2 regression: a generic scalar field read is FIELD_TAG_OBJECT-tagged \
@@ -2146,10 +2164,7 @@ mod tests {
             .expect("Box<string> construction + field read must compile");
 
         for instr in &compiled.instructions {
-            if let Some(Operand::TypedField {
-                field_type_tag, ..
-            }) = &instr.operand
-            {
+            if let Some(Operand::TypedField { field_type_tag, .. }) = &instr.operand {
                 assert_ne!(
                     *field_type_tag, FIELD_TAG_OBJECT,
                     "S2 regression: Box<string>.value read is FIELD_TAG_OBJECT-tagged \

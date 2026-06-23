@@ -335,10 +335,21 @@ impl Type {
                 base: Box::new(Type::Concrete(TypeAnnotation::Reference(
                     name.as_str().into(),
                 ))),
-                args: args
+                args: args.iter().map(Self::canonicalize_annotation).collect(),
+            },
+            // SB-2: fold the `Concrete(TypeAnnotation::Function{..})` encoding
+            // into the canonical `Type::Function{..}` carrier — exactly as the
+            // Array/Generic arms fold their collection annotations. Both Function
+            // encodings (the `Type::Function` from inference and the
+            // `Concrete(Function)` parsed/synthesised from annotations) therefore
+            // become `Type::Function` BEFORE any comparison, so the solver no
+            // longer needs a cross-form `Function ~ Concrete(Function)` patch arm.
+            TypeAnnotation::Function { params, returns } => Type::Function {
+                params: params
                     .iter()
-                    .map(Self::canonicalize_annotation)
+                    .map(|p| Self::canonicalize_annotation(&p.type_annotation))
                     .collect(),
+                returns: Box::new(Self::canonicalize_annotation(returns)),
             },
             // All other annotations stay concrete (Basic/Reference/Object/etc.).
             // A `tyvar` marker stays as-is here; it is decoded by the
