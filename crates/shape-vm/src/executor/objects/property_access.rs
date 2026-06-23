@@ -644,13 +644,31 @@ impl VirtualMachine {
                         "length() on null TypedObject".to_string(),
                     ))
                 } else {
-                    // SAFETY: kind says `Ptr(HeapKind::TypedObject)`; bits
-                    // are `Arc::into_raw::<TypedObjectStorage>` per the
-                    // construction-side contract. Borrow transiently.
-                    let storage: Arc<shape_value::heap_value::TypedObjectStorage> =
-                        unsafe { Arc::from_raw(bits as *const _) };
-                    let len = storage.slots().len() as i64;
-                    let _ = Arc::into_raw(storage);
+                    // R4 soundness (2026-06-23): `bits` is a v2-raw
+                    // `TypedObjectStorage::_new` pointer (HeapHeader at
+                    // offset 0), NOT `Arc::into_raw`. The production carrier
+                    // for `Ptr(HeapKind::TypedObject)` is the `_new`/`_drop`
+                    // path — `drop_with_kind` dispatches to
+                    // `TypedObjectStorage::release_elem` (vm_impl/stack.rs)
+                    // against the HeapHeader at offset 0, never an
+                    // `Arc<TypedObjectStorage>` decrement. Recovering the
+                    // share via `Arc::from_raw` was wrong-type recovery: its
+                    // `byte_sub(16)` ArcInner offset stepped into a
+                    // non-ArcInner allocation → Miri UB ("dangling pointer /
+                    // no provenance"). This is the SAME defect class R3's
+                    // `op_set_prop` carried (mis-classified LOW/test-fixture
+                    // in the catalog). Mirror R3's raw-pointer discipline:
+                    // read `slots().len()` through a transient
+                    // `&TypedObjectStorage` formed from the raw `_new`
+                    // pointer — no `Arc::from_raw`, no refcount touch (the
+                    // popped share is retired once by `drop_with_kind` below).
+                    // SAFETY: `bits` is a live `_new` pointer (non-null,
+                    // checked above) owned by the popped slot; the borrow is
+                    // a read-only `.slots()` access that does not escape and
+                    // forms no `&mut`.
+                    let storage_ptr =
+                        bits as *const shape_value::heap_value::TypedObjectStorage;
+                    let len = unsafe { (*storage_ptr).slots().len() } as i64;
                     self.push_kinded(len as u64, NativeKind::Int64)
                 }
             }
