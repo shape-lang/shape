@@ -3280,3 +3280,339 @@ let r = f(xs) + 1
         engine.resolved_expr_type(call_span)
     );
 }
+
+// ── U4-3pre §5(A) PRECONDITION GATE: resilient span-table recording ──────────
+//
+// The deletion of the fallback re-derivation engine (U4-3) requires that EVERY
+// trivially-typed child the strict checker would query lands in the span table,
+// independent of whether a SIBLING failed. Before U4-3pre, a compound handler
+// aborted on the FIRST erroring child via `?`, so the recordable siblings
+// (literals, simple closures) were never visited/recorded and only the fallback
+// supplied their types. These tests assert ZERO OK_RESOLVED user-source MISS for
+// the recordable children across the aborting contexts, while the genuinely
+// un-inferable parent/scrutinee stays a MISS (→ later surface-and-stop) and the
+// program still ERRORS (soundness (a)).
+
+/// Match-arm-aware span finder: `u40_find_expr_span` does not recurse into
+/// `Match` arm bodies (the exact site U4-3pre fixes), so the gate needs its own
+/// walker that descends through match scrutinees + arm guards/bodies.
+fn u43_find_expr_span<F>(
+    program: &shape_ast::ast::Program,
+    pred: &F,
+) -> Option<shape_ast::ast::Span>
+where
+    F: Fn(&shape_ast::ast::Expr) -> bool,
+{
+    use shape_ast::ast::{BlockItem, Expr, Item, Span, Spanned, Statement};
+
+    fn walk_expr<F: Fn(&Expr) -> bool>(e: &Expr, pred: &F, out: &mut Option<Span>) {
+        if out.is_some() {
+            return;
+        }
+        if pred(e) {
+            *out = Some(Spanned::span(e));
+            return;
+        }
+        match e {
+            Expr::BinaryOp { left, right, .. } => {
+                walk_expr(left, pred, out);
+                walk_expr(right, pred, out);
+            }
+            Expr::UnaryOp { operand, .. } => walk_expr(operand, pred, out),
+            Expr::PropertyAccess { object, .. } => walk_expr(object, pred, out),
+            Expr::IndexAccess { object, index, .. } => {
+                walk_expr(object, pred, out);
+                walk_expr(index, pred, out);
+            }
+            Expr::FunctionCall { args, .. } => {
+                for a in args {
+                    walk_expr(a, pred, out);
+                }
+            }
+            Expr::MethodCall { receiver, args, .. } => {
+                walk_expr(receiver, pred, out);
+                for a in args {
+                    walk_expr(a, pred, out);
+                }
+            }
+            Expr::FunctionExpr { body, .. } => walk_stmts(body, pred, out),
+            Expr::Match(m, _) => {
+                walk_expr(&m.scrutinee, pred, out);
+                for arm in &m.arms {
+                    if let Some(g) = &arm.guard {
+                        walk_expr(g, pred, out);
+                    }
+                    walk_expr(&arm.body, pred, out);
+                }
+            }
+            Expr::Block(block, _) => {
+                for item in &block.items {
+                    match item {
+                        BlockItem::Expression(ex) => walk_expr(ex, pred, out),
+                        BlockItem::Statement(s) => walk_stmt(s, pred, out),
+                        BlockItem::VariableDecl(decl) => {
+                            if let Some(v) = &decl.value {
+                                walk_expr(v, pred, out);
+                            }
+                        }
+                        BlockItem::Assignment(_) => {}
+                    }
+                }
+            }
+            Expr::Return(Some(v), _) => walk_expr(v, pred, out),
+            Expr::Reference { expr, .. } => walk_expr(expr, pred, out),
+            _ => {}
+        }
+    }
+
+    fn walk_stmt<F: Fn(&Expr) -> bool>(s: &Statement, pred: &F, out: &mut Option<Span>) {
+        match s {
+            Statement::Expression(e, _) => walk_expr(e, pred, out),
+            Statement::Return(Some(e), _) => walk_expr(e, pred, out),
+            Statement::VariableDecl(decl, _) => {
+                if let Some(v) = &decl.value {
+                    walk_expr(v, pred, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_stmts<F: Fn(&Expr) -> bool>(stmts: &[Statement], pred: &F, out: &mut Option<Span>) {
+        for s in stmts {
+            walk_stmt(s, pred, out);
+        }
+    }
+
+    let mut out = None;
+    for item in &program.items {
+        match item {
+            Item::Statement(stmt, _) => walk_stmt(stmt, pred, &mut out),
+            Item::Function(func, _) => walk_stmts(&func.body, pred, &mut out),
+            _ => {}
+        }
+        if out.is_some() {
+            break;
+        }
+    }
+    out
+}
+
+fn u43_is_string(ty: &Type) -> bool {
+    matches!(ty, Type::Concrete(TypeAnnotation::Basic(n)) if n == "string")
+}
+
+#[test]
+fn u43pre_match_over_unmodeled_scrutinee_records_arm_literal() {
+    // ROOT REPRO (modeled on `resumability/probe.shape`): `snapshot()` is an
+    // engine-unmodeled builtin (the inference tier has no stdlib module-export
+    // signatures), so the match SCRUTINEE inference errors `UndefinedFunction`.
+    // Before U4-3pre, `infer_match` aborted at the scrutinee `?`, dropping the
+    // arm-body literal `"saved: "` — which the deleted fallback then had to
+    // supply, and which would become a spurious `string + unknown` strict error
+    // once the fallback is gone. After U4-3pre: the scrutinee degrades to a
+    // fresh var, the arm bodies are still walked + recorded, and the `"saved: "`
+    // literal lands in the span table; the scrutinee stays a MISS.
+    //
+    // Placed in a FUNCTION BODY so the un-inferable scrutinee genuinely
+    // propagates an error (a top-level expression statement deliberately
+    // TOLERATES `UndefinedFunction` — `items.rs:253` — so `print(...)`/builtin
+    // calls at module scope do not kill inference; that tolerance is exactly why
+    // `probe.shape` compiles and why the fallback was load-bearing).
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn handle() -> string {
+  match snapshot() {
+    Snapshot::Hash(id) => "saved: " + id
+    Snapshot::Resumed => "resumed"
+  }
+}
+"#;
+    let program = parse_program(code).expect("parse");
+    let (engine, _types, errors) = u40_infer(code);
+
+    // soundness (a): un-inferable scrutinee in a function body → the construct
+    // still errors (the error is NOT swallowed by the resilient recording).
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, TypeError::UndefinedFunction(n) if n == "snapshot")),
+        "u43pre: a function-body match over an un-inferable scrutinee must still \
+         surface the scrutinee error, got {:?}",
+        errors
+    );
+
+    // The arm-body string literal `"saved: "` is a trivially-typed child that
+    // MUST be recorded (zero OK_RESOLVED user-source miss).
+    let lit_span = u43_find_expr_span(&program, &|e| {
+        matches!(e, Expr::Literal(shape_ast::ast::Literal::String(s), _) if s == "saved: ")
+    })
+    .expect("the `\"saved: \"` literal must exist in the AST");
+    assert!(
+        engine
+            .resolved_expr_type(lit_span)
+            .is_some_and(u43_is_string),
+        "u43pre: the arm-body literal `\"saved: \"` MUST be recorded as `string` \
+         (zero OK_RESOLVED miss), got {:?}",
+        engine.resolved_expr_type(lit_span)
+    );
+
+    // The genuinely-un-inferable scrutinee `snapshot()` stays ABSENT (a MISS the
+    // compiler boundary later turns into a surface-and-stop). No Unknown-default.
+    let scrut_span = u43_find_expr_span(&program, &|e| {
+        matches!(e, Expr::FunctionCall { name, .. } if name == "snapshot")
+    })
+    .expect("snapshot() scrutinee must exist");
+    assert!(
+        engine.resolved_expr_type(scrut_span).is_none(),
+        "u43pre: the un-inferable scrutinee `snapshot()` MUST stay a MISS (None), got {:?}",
+        engine.resolved_expr_type(scrut_span)
+    );
+}
+
+#[test]
+fn u43pre_binop_with_uninferable_operand_records_literal_sibling() {
+    // BINARY-OP abort site: an un-inferable operand must not drop the sibling
+    // operand's literal recording. `mystery() + 0`: before U4-3pre the
+    // `infer_expr(left)?` aborted before the `0` was visited. After: `0` is
+    // recorded as `int`, `mystery()` stays a MISS, and the binop still ERRORS.
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+let z = mystery() + 7
+"#;
+    let program = parse_program(code).expect("parse");
+    let (engine, _types, errors) = u40_infer(code);
+
+    assert!(
+        !errors.is_empty(),
+        "u43pre: a binop with an un-inferable operand must still ERROR; got no errors"
+    );
+
+    // The sibling literal `7` MUST be recorded as `int`.
+    let lit_span = u43_find_expr_span(&program, &|e| {
+        matches!(e, Expr::Literal(shape_ast::ast::Literal::Int(7), _))
+    })
+    .expect("the `7` literal must exist");
+    assert!(
+        engine.resolved_expr_type(lit_span).is_some_and(u40_is_int),
+        "u43pre: the sibling literal `7` MUST be recorded as `int` (zero OK_RESOLVED miss), got {:?}",
+        engine.resolved_expr_type(lit_span)
+    );
+
+    // The un-inferable operand `mystery()` stays a MISS.
+    let call_span = u43_find_expr_span(&program, &|e| {
+        matches!(e, Expr::FunctionCall { name, .. } if name == "mystery")
+    })
+    .expect("mystery() must exist");
+    assert!(
+        engine.resolved_expr_type(call_span).is_none(),
+        "u43pre: the un-inferable operand `mystery()` MUST stay a MISS (None), got {:?}",
+        engine.resolved_expr_type(call_span)
+    );
+}
+
+#[test]
+fn u43pre_match_arm_bodies_recorded_across_sibling_arm_abort() {
+    // Multi-arm: even when ONE arm body is un-inferable, the OTHER arm bodies'
+    // literals must still be recorded. Arm 1 body references an undefined symbol
+    // (un-inferable); arm 2 body is a clean `"ok"` literal. The `"ok"` literal
+    // MUST land in the table; the program still ERRORS.
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn handle() -> string {
+  match snapshot() {
+    Snapshot::Hash(id) => mystery() + id
+    Snapshot::Resumed => "ok"
+  }
+}
+"#;
+    let program = parse_program(code).expect("parse");
+    let (engine, _types, errors) = u40_infer(code);
+
+    assert!(
+        !errors.is_empty(),
+        "u43pre: an un-inferable scrutinee/arm must still ERROR"
+    );
+
+    let ok_span = u43_find_expr_span(&program, &|e| {
+        matches!(e, Expr::Literal(shape_ast::ast::Literal::String(s), _) if s == "ok")
+    })
+    .expect("the `\"ok\"` literal must exist");
+    assert!(
+        engine.resolved_expr_type(ok_span).is_some_and(u43_is_string),
+        "u43pre: the sibling arm-body literal `\"ok\"` MUST be recorded as `string`, got {:?}",
+        engine.resolved_expr_type(ok_span)
+    );
+}
+
+#[test]
+fn u43pre_clean_match_unaffected_by_resilient_recording() {
+    // SOUNDNESS (b/c/d) GUARD: a CLEAN, fully-inferable match over a real enum
+    // must be UNCHANGED by resilient recording — it still infers cleanly (no new
+    // error), records its arm-body literals, AND its exhaustiveness verdict is
+    // unaffected (a NON-exhaustive clean match still errors; an exhaustive one
+    // does not). This pins that the resilient path is inert on the happy path.
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+enum Color { Red, Green, Blue }
+fn name(c: Color) -> string {
+  match c {
+    Color::Red => "red"
+    Color::Green => "green"
+    Color::Blue => "blue"
+  }
+}
+"#;
+    let program = parse_program(code).expect("parse");
+    let (engine, _types, errors) = u40_infer(code);
+    assert!(
+        errors.is_empty(),
+        "u43pre: a clean exhaustive match must infer with NO error, got {:?}",
+        errors
+    );
+
+    let red_span = u43_find_expr_span(&program, &|e| {
+        matches!(e, Expr::Literal(shape_ast::ast::Literal::String(s), _) if s == "red")
+    })
+    .expect("`\"red\"` literal must exist");
+    assert!(
+        engine.resolved_expr_type(red_span).is_some_and(u43_is_string),
+        "u43pre: clean-match arm literal must still be recorded, got {:?}",
+        engine.resolved_expr_type(red_span)
+    );
+}
+
+#[test]
+fn u43pre_nonexhaustive_clean_match_still_errors() {
+    // SOUNDNESS (b): the resilient path must NOT mask a genuine non-exhaustive
+    // error on a REAL (un-degraded) scrutinee. A clean enum scrutinee with a
+    // missing variant still rejects as NonExhaustiveMatch.
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+enum Color { Red, Green, Blue }
+fn name(c: Color) -> string {
+  match c {
+    Color::Red => "red"
+    Color::Green => "green"
+  }
+}
+"#;
+    let _program = parse_program(code).expect("parse");
+    let (_engine, _types, errors) = u40_infer(code);
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, TypeError::NonExhaustiveMatch { .. })),
+        "u43pre: a non-exhaustive clean match must still error NonExhaustiveMatch, got {:?}",
+        errors
+    );
+}

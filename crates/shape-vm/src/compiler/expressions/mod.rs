@@ -2141,6 +2141,26 @@ impl BytecodeCompiler {
             }
         }
 
+        // U4-3 MEASURE/pre toggle: when `U43_SIMULATE_DELETE=1`, simulate the
+        // U4-3 deletion of this fallback re-derivation engine — instead of
+        // re-running Engine B (module-scope env, blind to function-body locals),
+        // return a surface-and-stop so a span-table MISS is the compile error the
+        // post-deletion world will make it. This lets U4-3pre verify the
+        // engine-completeness gap is closed: a program that used to need this
+        // fallback must now compile WITHOUT it because the engine recorded the
+        // child's type into the span table (consulted FIRST, above). Off by
+        // default — production keeps the fallback until U4-3 deletes it.
+        if std::env::var("U43_SIMULATE_DELETE").as_deref() == Ok("1") {
+            return Err(shape_ast::error::ShapeError::SemanticError {
+                message: format!(
+                    "U43_SIMULATE_DELETE: span-table miss for expr at {:?} \
+                     (fallback re-derivation engine simulated-deleted)",
+                    shape_ast::ast::Spanned::span(expr)
+                ),
+                location: None,
+            });
+        }
+
         self.type_inference.infer_expr(expr).map_err(|e| {
             shape_ast::error::ShapeError::SemanticError {
                 message: format!("Type inference failed: {:?}", e),

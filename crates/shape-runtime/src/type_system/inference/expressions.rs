@@ -174,6 +174,44 @@ impl TypeInferenceEngine {
         Ok(ty)
     }
 
+    /// U4-3pre (resilient span-table recording, 2026-06-23): infer a child of a
+    /// COMPOUND expression for its TYPE, but do NOT let an un-inferable child
+    /// abort the parent's walk before the parent's OTHER (trivially-typed)
+    /// children are visited and recorded.
+    ///
+    /// THE GAP this closes: `infer_expr` records an expression's type into the
+    /// span table only AFTER its full sub-walk succeeds. A compound handler that
+    /// does `infer_expr(child)?` unwinds on the FIRST erroring child — so the
+    /// containing walk never reaches the sibling literals (`"saved: "`, `0`,
+    /// simple closures), which are then NEVER recorded. Only the to-be-deleted
+    /// fallback re-derivation engine (U4-3 target) supplies their types. The
+    /// canonical root: `match snapshot() { Snapshot::Hash(id) => print("saved: "
+    /// + id) }` — `snapshot()` is engine-unmodeled, the scrutinee inference
+    /// errors, `infer_match` aborts, and the arm-body literal `"saved: "` is
+    /// dropped.
+    ///
+    /// THE FIX: on `Ok`, return `(ty, None)` exactly as the `?` path would. On
+    /// `Err`, DEGRADE the un-inferable child to a FRESH `Type::Variable` so the
+    /// parent walk CONTINUES (records the recordable siblings/arm-bodies) and
+    /// STASH the error for the caller to propagate at the end. Any descendant of
+    /// the erroring child that itself inferred cleanly was ALREADY recorded
+    /// (`infer_expr` records at the tail of each successful sub-walk, depth-first)
+    /// — so degrading the failing node loses ONLY the genuinely-un-inferable
+    /// span, never a recordable one.
+    ///
+    /// SOUNDNESS: this is RECORDING resilience, not error suppression. The caller
+    /// MUST surface the stashed error when the construct is genuinely
+    /// un-inferable (see `infer_match` / the `BinaryOp` arm). A degraded fresh
+    /// var stays free → `finalize_expr_type_table` DROPS the parent span → the
+    /// compiler boundary surfaces a genuine compile error. int != number: a fresh
+    /// var unifies with nothing on its own, so no silent numeric merge occurs.
+    fn infer_child_resilient(&mut self, expr: &Expr) -> (Type, Option<TypeError>) {
+        match self.infer_expr(expr) {
+            Ok(ty) => (ty, None),
+            Err(err) => (self.fresh_type_var(), Some(err)),
+        }
+    }
+
     /// U4-0 P3 (Borrow→referent projection at record time): the type to STORE in
     /// the span table for `expr`, given its synthesized type `ty`.
     ///
@@ -280,8 +318,29 @@ impl TypeInferenceEngine {
                 right,
                 span,
             } => {
-                let mut left_type = self.infer_expr(left)?;
-                let mut right_type = self.infer_expr(right)?;
+                // U4-3pre (resilient recording): infer BOTH operands before
+                // letting either abort the arm, so an un-inferable operand does
+                // not drop the sibling operand's (trivially-typed) recording.
+                // `a + snapshot()` records `a`'s `int`; `snapshot() + "x"`
+                // records the `"x"` literal. The degraded operand becomes a
+                // fresh var and the genuine error is propagated AT THE END (after
+                // both spans are recorded) — soundness (a): the op still errors.
+                // U4-3pre (resilient recording): infer BOTH operands before
+                // letting either abort the arm, so an un-inferable operand does
+                // not drop the sibling operand's (trivially-typed) recording.
+                // `a + snapshot()` records `a`'s `int`; `snapshot() + "x"`
+                // records the `"x"` literal. The degraded operand becomes a
+                // fresh var and the genuine error is propagated AT THE END (after
+                // both spans are recorded) — soundness (a): the op still errors.
+                let (mut left_type, left_err) = self.infer_child_resilient(left);
+                let (mut right_type, right_err) = self.infer_child_resilient(right);
+                if let Some(err) = left_err.or(right_err) {
+                    // One operand was genuinely un-inferable. Its span stayed a
+                    // free var → dropped at finalize → this BinaryOp span is a
+                    // genuine miss. Surface the error now that the recordable
+                    // sibling operand (and its sub-literals) is in the table.
+                    return Err(err);
+                }
 
                 // Numeric-conversion LITERAL ADOPTION (spec §4): a bare integer
                 // literal operand adopts the OTHER operand's concrete numeric
@@ -1403,7 +1462,21 @@ impl TypeInferenceEngine {
 
             // Match expression
             Expr::Match(match_expr, span) => {
-                let raw_scrutinee_type = self.infer_expr(&match_expr.scrutinee)?;
+                // U4-3pre (resilient recording): a match over an engine-unmodeled
+                // scrutinee (`match snapshot() { … }`) must NOT abort before its
+                // arm bodies are walked — the arm-body literals (`"saved: "`, …)
+                // would otherwise never be recorded and would become spurious
+                // `string + unknown` strict errors once the fallback engine is
+                // deleted (U4-3). Degrade an un-inferable scrutinee to a FRESH
+                // var so pattern binding + arm-body recording still run; surface
+                // the scrutinee error AT THE END (soundness (a): the construct
+                // still errors). A degraded fresh-var scrutinee is provably-safe
+                // for exhaustiveness: `to_annotation()`/`to_semantic()` on a free
+                // var yield no enum/union, so `check_exhaustiveness*` returns
+                // `NotApplicable`/`TriviallyExhaustive` — never a false
+                // exhaustive/non-exhaustive verdict (soundness (b)).
+                let (raw_scrutinee_type, scrutinee_err) =
+                    self.infer_child_resilient(&match_expr.scrutinee);
                 // F5 (v0.3.3 strict-flip): zonk the scrutinee through the
                 // unifier's substitution store BEFORE binding pattern vars.
                 // `match Ok(5) { Ok(v) => v * 2 }` infers the scrutinee as
@@ -1432,6 +1505,11 @@ impl TypeInferenceEngine {
                 let mut arm_types: Vec<Type> = Vec::new();
                 let mut any_arm = false;
                 let mut all_diverge = true;
+                // U4-3pre: the FIRST error encountered across the scrutinee +
+                // any arm (pattern binding / guard / body). Recording continues
+                // across siblings; this is surfaced once the whole match has been
+                // walked so every recordable child landed in the table.
+                let mut deferred_err: Option<TypeError> = scrutinee_err;
 
                 for arm in &match_expr.arms {
                     any_arm = true;
@@ -1440,16 +1518,33 @@ impl TypeInferenceEngine {
                     // Bind pattern variables. WS-4 4b: pass the scrutinee
                     // type so object/struct patterns bind each field to
                     // its declared type rather than a fresh type var.
-                    self.bind_pattern_vars_typed(&arm.pattern, Some(&scrutinee_type))?;
+                    //
+                    // U4-3pre: a pattern-ownership reject (a genuine TP — a
+                    // foreign variant over a real scrutinee) is STASHED, not
+                    // aborted, so the remaining arms' bodies are still recorded.
+                    // With a degraded fresh-var scrutinee the ownership check
+                    // returns Ok and binds payload vars from the pattern's own
+                    // `enum_name`, so payload binders stay correctly typed.
+                    if let Err(err) =
+                        self.bind_pattern_vars_typed(&arm.pattern, Some(&scrutinee_type))
+                    {
+                        deferred_err.get_or_insert(err);
+                    }
 
                     // Check guard if present
                     if let Some(guard) = &arm.guard {
-                        let guard_type = self.infer_expr(guard)?;
+                        let (guard_type, guard_err) = self.infer_child_resilient(guard);
+                        if let Some(err) = guard_err {
+                            deferred_err.get_or_insert(err);
+                        }
                         self.constraints.push((guard_type, BuiltinTypes::boolean()));
                     }
 
                     let arm_diverges = Self::expr_diverges(&arm.body);
-                    let body_type = self.infer_expr(&arm.body)?;
+                    let (body_type, body_err) = self.infer_child_resilient(&arm.body);
+                    if let Some(err) = body_err {
+                        deferred_err.get_or_insert(err);
+                    }
                     if arm_diverges {
                         self.env.pop_scope();
                         continue;
@@ -1458,6 +1553,18 @@ impl TypeInferenceEngine {
                     arm_types.push(body_type);
 
                     self.env.pop_scope();
+                }
+
+                // U4-3pre: every recordable arm body / scrutinee descendant has
+                // now been walked and recorded. Surface the first genuine error
+                // (un-inferable scrutinee, foreign-variant pattern, guard/body
+                // error) — BEFORE the exhaustiveness check, preserving the prior
+                // precedence where the arm's `?` aborts fired before
+                // exhaustiveness. Soundness (a): an un-inferable match still
+                // errors. With a degraded scrutinee, exhaustiveness would be
+                // `NotApplicable` anyway, so nothing meaningful is skipped.
+                if let Some(err) = deferred_err {
+                    return Err(err);
                 }
 
                 // Check exhaustiveness for closed types (enums, unions).
