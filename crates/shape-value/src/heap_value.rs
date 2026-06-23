@@ -1444,6 +1444,66 @@ impl<V: HashMapValueElem> HashMapData<V> {
         true
     }
 
+    /// Raw-pointer in-place insert — the O(1)-amortized entry point used by
+    /// the method-tier `HashMap.set` handler (U3-perf, 2026-06-23).
+    ///
+    /// Mirrors `TypedArray::push(this: *mut Self)` exactly: takes a raw
+    /// `*mut Self` (NOT `&mut self`) and mutates through it. The caller
+    /// derives `this` from the receiver SLOT BITS (the heap pointer value),
+    /// **not** from `Arc::as_ptr(&borrow)` — so there is no `&Arc`→`&mut`
+    /// retag under a shared-Arc protector (the reverted-UB shape). The
+    /// keys/values buffers (`(*this).keys` / `(*this).values`) are
+    /// separately-allocated v2-raw `TypedArray` heap objects addressed by
+    /// their own raw pointers; mutating through them is sound regardless of
+    /// the enclosing `Arc<HashMapData<V>>`'s strong count — the same
+    /// discipline that lets `Array.push` mutate a possibly-shared array's
+    /// buffer in place.
+    ///
+    /// Semantics identical to `insert(&mut self, ...)`: overwrite drops the
+    /// old value's share (SB-13), new-key insert allocates a fresh `StringObj`
+    /// key + transfers one share on `value` into the values buffer. Returns
+    /// `true` on new-key insert, `false` on overwrite.
+    ///
+    /// # Safety
+    /// `this` must point to a live `HashMapData<V>` (derived from the
+    /// receiver slot bits). `value` must be a valid owned V — the caller
+    /// transfers one refcount share (for HeapElement / ptr-newtype V).
+    pub unsafe fn insert_at(this: *mut Self, key: &str, value: V) -> bool {
+        let hash = fnv1a_hash(key.as_bytes());
+        // Check for existing key — overwrite path.
+        if let Some(bucket) = unsafe { (*this).index.get(&hash) } {
+            for &idx in bucket {
+                let i = idx as usize;
+                // SAFETY: keys live + index points into keys range.
+                let stored_ptr = unsafe {
+                    crate::v2::typed_array::TypedArray::get_unchecked((*this).keys, idx)
+                };
+                let stored_str = unsafe { crate::v2::string_obj::StringObj::as_str(stored_ptr) };
+                if stored_str == key {
+                    // Overwrite: read+drop the old value (SB-13), write new.
+                    unsafe {
+                        let data_ptr = (*(*this).values).data.add(i);
+                        let old_value: V = std::ptr::read(data_ptr);
+                        Self::drop_owned_value(old_value);
+                        std::ptr::write(data_ptr, value);
+                    }
+                    return false;
+                }
+            }
+        }
+        // New-key insert path. Allocate new StringObj for the key.
+        let key_obj: *const crate::v2::string_obj::StringObj =
+            crate::v2::string_obj::StringObj::new(key);
+        let new_idx_u32 = unsafe { crate::v2::typed_array::TypedArray::len((*this).keys) };
+        // Push key into the StringObj keys buffer (Copy-bounded *const T).
+        unsafe { crate::v2::typed_array::TypedArray::push((*this).keys, key_obj) };
+        // Push value into the values buffer via raw write (V may be non-Copy).
+        unsafe { Self::values_push((*this).values, value) };
+        // Update bucket index.
+        unsafe { (*this).index.entry(hash).or_default().push(new_idx_u32) };
+        true
+    }
+
     /// Remove the entry under `key`. Returns the removed value (transferring
     /// one share to the caller) if present, else `None`.
     ///
