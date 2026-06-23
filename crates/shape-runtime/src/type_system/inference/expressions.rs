@@ -169,9 +169,35 @@ impl TypeInferenceEngine {
         // would alias unrelated expressions.
         let span = shape_ast::ast::Spanned::span(expr);
         if !span.is_dummy() {
-            self.expr_type_table.insert(span, ty.clone());
+            self.expr_type_table.insert(span, self.recorded_type_for(expr, &ty));
         }
         Ok(ty)
+    }
+
+    /// U4-0 P3 (Borrow→referent projection at record time): the type to STORE in
+    /// the span table for `expr`, given its synthesized type `ty`.
+    ///
+    /// A reference-typed READ (`ref_a` used as `ref_a + 1`, where `ref_a: &int`)
+    /// produces the REFERENT value `int` when read in a value position — the
+    /// strict binop / comparison checker queries the operand's span expecting the
+    /// referent type (`&T → T` auto-deref), not the `Borrow` wrapper. Record the
+    /// projected referent so such reads hit the table directly instead of
+    /// requiring the compiler-side GapA `&T → T` projection ladder arm.
+    ///
+    /// The carve-out: an `Expr::Reference` node (`&a`) is the address-of operator
+    /// that GENUINELY produces a `&T` — its `Borrow` recording is load-bearing for
+    /// `-> &T` return-type unification (R1/GAP-2) and is left intact. Only a read
+    /// whose own kind is not the reference-producer is projected. The RETURNED
+    /// type (used for constraint generation and by-reference argument flow) is
+    /// never altered — this projection affects only the recorded table entry.
+    fn recorded_type_for(&self, expr: &Expr, ty: &Type) -> Type {
+        if matches!(expr, Expr::Reference { .. }) {
+            return ty.clone();
+        }
+        if let Type::Concrete(TypeAnnotation::Borrow { inner, .. }) = ty {
+            return Type::Concrete((**inner).clone());
+        }
+        ty.clone()
     }
 
     /// Inner body of `infer_expr` — the actual structural inference. Kept

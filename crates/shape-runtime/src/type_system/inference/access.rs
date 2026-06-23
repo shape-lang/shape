@@ -50,6 +50,34 @@ impl TypeInferenceEngine {
                 assignment_target,
             );
         }
+        // U4-0 P2 (struct-name carrier normalization): a struct name may arrive
+        // as `Basic("Emp")` rather than `Reference("Emp")` depending on the
+        // annotation parse path — notably a CLOSURE param annotation (`|p: Emp|`)
+        // resolves to `Basic`, whereas a struct literal / named-fn return yields
+        // `Reference`. The struct-field projection below keys off the `Reference`
+        // arm; a `Basic`-carried struct name falls through to the `HasField`
+        // fallback, which (for `Basic`) only *tentatively accepts* the constraint
+        // WITHOUT binding the field-result var to the declared field type. The
+        // var then stays free post-solve and the whole closure-body field-read
+        // (`|p: Emp| { p.salary }`) is dropped from the span table — the live U4
+        // bug. Normalize a struct-named `Basic` to its `Reference` form so the
+        // field resolves to its declared type (`int`) identically to `e.salary`.
+        // Bounded to KNOWN struct defs / type aliases — an unregistered `Basic`
+        // name (a genuine builtin/record scalar) is untouched and keeps its
+        // existing record-schema / fallback path, so strictness (STAGE-F1) is
+        // unaffected: f1's array element back-propagates to a `Reference`, never
+        // a `Basic`, so this normalization never touches it.
+        if let Type::Concrete(TypeAnnotation::Basic(name)) = object_type {
+            if self.struct_type_defs.contains_key(name.as_str())
+                || self.env.lookup_type_alias(name).is_some()
+            {
+                return self.infer_property_access_internal(
+                    &Type::Concrete(TypeAnnotation::Reference(name.as_str().into())),
+                    property,
+                    assignment_target,
+                );
+            }
+        }
         if let Type::Concrete(TypeAnnotation::Reference(name)) = object_type {
             // Check struct type definitions FIRST (includes comptime fields),
             // before type aliases (which only contain runtime fields).

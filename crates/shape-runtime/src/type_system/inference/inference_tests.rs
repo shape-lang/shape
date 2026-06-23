@@ -2795,3 +2795,444 @@ if x > 0 { f(); } else { g(); }
         .infer_program(&program)
         .expect("`;`-discarded if/else branch tails must type-check (arms discard to Unit)");
 }
+
+// ========================================================================
+// U4-0: ENGINE SPAN-TABLE COMPLETENESS (closure-body field-reads + Borrow
+// referents). The engine standalone gate for the unification roadmap
+// (docs/cluster-audits/U4-ROADMAP.md §4 Wave U4-0 / §5 / §6 / §7 risk #4).
+//
+// SUCCESS CRITERION = engine-standalone: after inference + finalize, the
+// per-expression span table must RESOLVE the closure-field call/return sites
+// to the concrete field type, KEEP the un-inferable tail DROPPED (None), and
+// LEAVE STAGE-F1 strictness intact (an unannotated empty-`[]` field read is
+// still an engine ConstraintViolation). The actual programs (f8 etc.) STILL
+// fail at runtime until later waves delete the fallback/mini-inferencer.
+// ========================================================================
+
+/// Recursively collect every expression node's span+kind for span lookup.
+/// Returns the FIRST span matching `pred`, walking the whole program AST.
+fn u40_find_expr_span<F>(program: &shape_ast::ast::Program, pred: &F) -> Option<shape_ast::ast::Span>
+where
+    F: Fn(&shape_ast::ast::Expr) -> bool,
+{
+    use shape_ast::ast::{Expr, Item, Span, Spanned, Statement};
+
+    fn walk_expr<F: Fn(&Expr) -> bool>(e: &Expr, pred: &F, out: &mut Option<Span>) {
+        if out.is_some() {
+            return;
+        }
+        if pred(e) {
+            *out = Some(Spanned::span(e));
+            return;
+        }
+        match e {
+            Expr::BinaryOp { left, right, .. } => {
+                walk_expr(left, pred, out);
+                walk_expr(right, pred, out);
+            }
+            Expr::UnaryOp { operand, .. } => walk_expr(operand, pred, out),
+            Expr::PropertyAccess { object, .. } => walk_expr(object, pred, out),
+            Expr::IndexAccess { object, index, .. } => {
+                walk_expr(object, pred, out);
+                walk_expr(index, pred, out);
+            }
+            Expr::FunctionCall { args, .. } => {
+                for a in args {
+                    walk_expr(a, pred, out);
+                }
+            }
+            Expr::FunctionExpr { body, .. } => walk_stmts(body, pred, out),
+            Expr::Block(block, _) => {
+                for item in &block.items {
+                    match item {
+                        shape_ast::ast::BlockItem::Expression(ex) => walk_expr(ex, pred, out),
+                        shape_ast::ast::BlockItem::Statement(s) => walk_stmt(s, pred, out),
+                        shape_ast::ast::BlockItem::VariableDecl(decl) => {
+                            if let Some(v) = &decl.value {
+                                walk_expr(v, pred, out);
+                            }
+                        }
+                        shape_ast::ast::BlockItem::Assignment(_) => {}
+                    }
+                }
+            }
+            Expr::Return(Some(v), _) => walk_expr(v, pred, out),
+            Expr::Reference { expr, .. } => walk_expr(expr, pred, out),
+            _ => {}
+        }
+    }
+
+    fn walk_stmt<F: Fn(&Expr) -> bool>(s: &Statement, pred: &F, out: &mut Option<Span>) {
+        match s {
+            Statement::Expression(e, _) => walk_expr(e, pred, out),
+            Statement::Return(Some(e), _) => walk_expr(e, pred, out),
+            Statement::VariableDecl(decl, _) => {
+                if let Some(v) = &decl.value {
+                    walk_expr(v, pred, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_stmts<F: Fn(&Expr) -> bool>(stmts: &[Statement], pred: &F, out: &mut Option<Span>) {
+        for s in stmts {
+            walk_stmt(s, pred, out);
+        }
+    }
+
+    let mut out = None;
+    for item in &program.items {
+        match item {
+            Item::Statement(stmt, _) => walk_stmt(stmt, pred, &mut out),
+            Item::Function(func, _) => walk_stmts(&func.body, pred, &mut out),
+            _ => {}
+        }
+        if out.is_some() {
+            break;
+        }
+    }
+    out
+}
+
+/// Resolve a program through the engine and return (engine, types, errors).
+fn u40_infer(
+    code: &str,
+) -> (
+    TypeInferenceEngine,
+    HashMap<String, Type>,
+    Vec<TypeError>,
+) {
+    use shape_ast::parser::parse_program;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let (types, errors) = engine.infer_program_best_effort(&program);
+    (engine, types, errors)
+}
+
+/// Assert a `Type` is exactly the `int` scalar (the closure-field result type
+/// for the §6 regression corpus). Accepts both `Basic("int")` carriers.
+fn u40_is_int(ty: &Type) -> bool {
+    matches!(ty, Type::Concrete(TypeAnnotation::Basic(n)) if n == "int")
+}
+
+#[test]
+fn u40_closure_field_return_resolves_to_int_f8() {
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    // f8: `let get = |p: Emp| { p.salary }; get(e) + 1`. The closure body is a
+    // bare field-read; pre-U4-0 the engine recorded `p.salary` / the closure
+    // return / the call result as a free `Type::Variable` and `finalize` DROPPED
+    // all three. With the P2 struct-name-carrier normalization, `p.salary`
+    // resolves to `Emp.salary` (`int`) and propagates to the closure return and
+    // the `get(e)` call result.
+    let code = r#"
+type Emp { salary: int }
+let get = |p: Emp| { p.salary }
+let e = Emp { salary: 50 }
+let r = get(e) + 1
+"#;
+    let program = parse_program(code).expect("parse");
+    let (engine, _types, errors) = u40_infer(code);
+    assert!(errors.is_empty(), "f8 should infer cleanly, got {:?}", errors);
+
+    // The `get(e)` call-result span.
+    let call_span = u40_find_expr_span(&program, &|e| {
+        matches!(e, Expr::FunctionCall { name, .. } if name == "get")
+    })
+    .expect("get(e) call site must exist");
+    let resolved = engine.resolved_expr_type(call_span);
+    assert!(
+        resolved.is_some_and(u40_is_int),
+        "f8: get(e) call-result span must resolve to `int`, got {:?}",
+        resolved
+    );
+
+    // The closure body field-read `p.salary` span.
+    let field_span = u40_find_expr_span(&program, &|e| {
+        matches!(e, Expr::PropertyAccess { property, .. } if property == "salary")
+    })
+    .expect("p.salary must exist");
+    let field_resolved = engine.resolved_expr_type(field_span);
+    assert!(
+        field_resolved.is_some_and(u40_is_int),
+        "f8: closure-body p.salary span must resolve to `int`, got {:?}",
+        field_resolved
+    );
+
+    // The `get(e) + 1` binop span.
+    let binop_span = u40_find_expr_span(&program, &|e| {
+        matches!(e, Expr::BinaryOp { .. })
+    })
+    .expect("get(e) + 1 must exist");
+    assert!(
+        engine.resolved_expr_type(binop_span).is_some_and(u40_is_int),
+        "f8: get(e) + 1 must resolve to `int`"
+    );
+}
+
+#[test]
+fn u40_nested_closure_field_resolves_to_int_h1() {
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    // h1: nested field projection `|w: Outer| { w.inner.x }`.
+    let code = r#"
+type Inner { x: int }
+type Outer { inner: Inner }
+let getx = |w: Outer| { w.inner.x }
+let o = Outer { inner: Inner { x: 3 } }
+let r = getx(o) + 1
+"#;
+    let program = parse_program(code).expect("parse");
+    let (engine, _types, errors) = u40_infer(code);
+    assert!(errors.is_empty(), "h1 should infer cleanly, got {:?}", errors);
+
+    let call_span = u40_find_expr_span(&program, &|e| {
+        matches!(e, Expr::FunctionCall { name, .. } if name == "getx")
+    })
+    .expect("getx(o) call site");
+    assert!(
+        engine.resolved_expr_type(call_span).is_some_and(u40_is_int),
+        "h1: getx(o) (nested w.inner.x) must resolve to `int`, got {:?}",
+        engine.resolved_expr_type(call_span)
+    );
+
+    // The outer field-read `.x` (terminal of `w.inner.x`).
+    let field_span = u40_find_expr_span(&program, &|e| {
+        matches!(e, Expr::PropertyAccess { property, .. } if property == "x")
+    })
+    .expect("w.inner.x must exist");
+    assert!(
+        engine.resolved_expr_type(field_span).is_some_and(u40_is_int),
+        "h1: w.inner.x must resolve to `int`"
+    );
+}
+
+#[test]
+fn u40_explicit_return_closure_field_resolves_h2() {
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    // h2: explicit `return p.salary` in the closure body.
+    let code = r#"
+type Emp { salary: int }
+let get = |p: Emp| { return p.salary }
+let e = Emp { salary: 7 }
+let r = get(e) + 1
+"#;
+    let program = parse_program(code).expect("parse");
+    let (engine, _types, errors) = u40_infer(code);
+    assert!(errors.is_empty(), "h2 should infer cleanly, got {:?}", errors);
+
+    let call_span = u40_find_expr_span(&program, &|e| {
+        matches!(e, Expr::FunctionCall { name, .. } if name == "get")
+    })
+    .expect("get(e) call site");
+    assert!(
+        engine.resolved_expr_type(call_span).is_some_and(u40_is_int),
+        "h2: explicit-return closure get(e) must resolve to `int`, got {:?}",
+        engine.resolved_expr_type(call_span)
+    );
+}
+
+#[test]
+fn u40_closure_field_equality_resolves_h4b() {
+    use shape_ast::parser::parse_program;
+
+    // h4b: `get(a) == get(b)` — both operands are closure-field call results,
+    // with no sibling-literal recovery. Both must resolve to `int` so the `==`
+    // operands hit the table.
+    let code = r#"
+type Emp { salary: int }
+let get = |p: Emp| { p.salary }
+let a = Emp { salary: 1 }
+let b = Emp { salary: 2 }
+let r = get(a) == get(b)
+"#;
+    let program = parse_program(code).expect("parse");
+    let (engine, _types, errors) = u40_infer(code);
+    assert!(errors.is_empty(), "h4b should infer cleanly, got {:?}", errors);
+
+    // Find BOTH get(...) call sites by collecting all matching spans.
+    let mut call_spans: Vec<shape_ast::ast::Span> = Vec::new();
+    fn collect_calls(
+        program: &shape_ast::ast::Program,
+        out: &mut Vec<shape_ast::ast::Span>,
+    ) {
+        use shape_ast::ast::{Expr, Item, Spanned, Statement};
+        fn we(e: &Expr, out: &mut Vec<shape_ast::ast::Span>) {
+            if let Expr::FunctionCall { name, .. } = e {
+                if name == "get" {
+                    out.push(Spanned::span(e));
+                }
+            }
+            match e {
+                Expr::BinaryOp { left, right, .. } => {
+                    we(left, out);
+                    we(right, out);
+                }
+                Expr::FunctionCall { args, .. } => {
+                    for a in args {
+                        we(a, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for item in &program.items {
+            if let Item::Statement(Statement::VariableDecl(decl, _), _) = item {
+                if let Some(v) = &decl.value {
+                    we(v, out);
+                }
+            }
+        }
+    }
+    collect_calls(&program, &mut call_spans);
+    assert_eq!(call_spans.len(), 2, "h4b: both get(...) sites");
+    for span in call_spans {
+        assert!(
+            engine.resolved_expr_type(span).is_some_and(u40_is_int),
+            "h4b: get(...) call-result must resolve to `int`, got {:?}",
+            engine.resolved_expr_type(span)
+        );
+    }
+}
+
+#[test]
+fn u40_borrow_referent_recorded_as_referent_p3() {
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    // P3: a reference-typed READ (`ref_a` used as an operand of `ref_a + 1`,
+    // where `ref_a: &int`) must hit the table with the PROJECTED REFERENT type
+    // (`int`), not the `Borrow` wrapper. The address-of producer `&a` itself
+    // keeps its `Borrow` recording (load-bearing for `-> &T` unification).
+    let code = r#"
+let a = 5
+let ref_a = &a
+let s = ref_a + 1
+"#;
+    let program = parse_program(code).expect("parse");
+    let (engine, _types, errors) = u40_infer(code);
+    assert!(errors.is_empty(), "P3 ref read should infer cleanly, got {:?}", errors);
+
+    // `ref_a` operand inside `ref_a + 1` → referent `int`.
+    let operand_span = u40_find_expr_span(&program, &|e| {
+        matches!(e, Expr::Identifier(n, _) if n == "ref_a")
+    })
+    .expect("ref_a operand");
+    assert!(
+        engine.resolved_expr_type(operand_span).is_some_and(u40_is_int),
+        "P3: ref_a operand read must record the referent `int`, got {:?}",
+        engine.resolved_expr_type(operand_span)
+    );
+
+    // `&a` producer keeps the `Borrow` recording.
+    let amp_span = u40_find_expr_span(&program, &|e| matches!(e, Expr::Reference { .. }))
+        .expect("&a producer");
+    let amp_ty = engine.resolved_expr_type(amp_span);
+    assert!(
+        matches!(amp_ty, Some(Type::Concrete(TypeAnnotation::Borrow { .. }))),
+        "P3: the &a producer must keep its Borrow recording, got {:?}",
+        amp_ty
+    );
+}
+
+#[test]
+fn u40_uninferable_tail_stays_dropped() {
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    // FINALIZE AUDIT: the genuinely-un-inferable tail must STAY absent (None) so
+    // the later compiler boundary surfaces a real surface-and-stop error. U4-0
+    // must NOT over-force these to resolve.
+
+    // (a) Comptime block — its value var is fresh and never pinned.
+    {
+        let code = r#"
+let x = comptime { 1 + 1 }
+"#;
+        let program = parse_program(code).expect("parse");
+        let (engine, _types, _errors) = u40_infer(code);
+        let cspan = u40_find_expr_span(&program, &|e| matches!(e, Expr::Comptime(..)));
+        if let Some(span) = cspan {
+            assert!(
+                engine.resolved_expr_type(span).is_none(),
+                "tail: a comptime block value must stay DROPPED (None), got {:?}",
+                engine.resolved_expr_type(span)
+            );
+        }
+    }
+
+    // (b) Empty array with NO element pin — element var never resolved.
+    {
+        let code = r#"
+let xs = []
+"#;
+        let program = parse_program(code).expect("parse");
+        let (engine, _types, _errors) = u40_infer(code);
+        let aspan = u40_find_expr_span(&program, &|e| matches!(e, Expr::Array(els, _) if els.is_empty()))
+            .expect("empty array literal");
+        assert!(
+            engine.resolved_expr_type(aspan).is_none(),
+            "tail: an un-pinned empty `[]` must stay DROPPED (None), got {:?}",
+            engine.resolved_expr_type(aspan)
+        );
+    }
+
+    // (c) QualifiedFunctionCall to a non-enum/non-struct namespace — deliberately
+    // a fresh result var (the inference tier has no module-export signatures).
+    {
+        let code = r#"
+let v = somemod::compute(1)
+"#;
+        let program = parse_program(code).expect("parse");
+        let (engine, _types, _errors) = u40_infer(code);
+        let qspan =
+            u40_find_expr_span(&program, &|e| matches!(e, Expr::QualifiedFunctionCall { .. }));
+        if let Some(span) = qspan {
+            assert!(
+                engine.resolved_expr_type(span).is_none(),
+                "tail: a QualifiedFunctionCall to a real module fn must stay DROPPED (None), got {:?}",
+                engine.resolved_expr_type(span)
+            );
+        }
+    }
+}
+
+#[test]
+fn u40_stage_f1_still_fires_for_unannotated_array_field_read() {
+    // STAGE-F1 strictness must NOT be weakened by U4-0: an unannotated empty-`[]`
+    // accumulator grown by `push` has NO declared element type, so a field read
+    // off its element is an engine ConstraintViolation. The P2 normalization is
+    // bounded to `Basic`-carried struct NAMES; f1's element back-propagates to a
+    // `Reference`, never a `Basic`, so the normalization never touches it.
+    let code = r#"
+type Run { n: int }
+let mut rs = []
+rs = rs.push(Run { n: 1 })
+for r in rs { r.n + 1 }
+"#;
+    let (engine, _types, errors) = u40_infer(code);
+    assert!(
+        errors.iter().any(|e| matches!(e, TypeError::ConstraintViolation(_))),
+        "f1: an unannotated [] field read must still produce a ConstraintViolation (STAGE-F1), got {:?}",
+        errors
+    );
+    // The field-read span must NOT be present as a resolved entry (it is an error,
+    // never recorded as a fully-resolved type).
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+    let program = parse_program(code).expect("parse");
+    if let Some(span) = u40_find_expr_span(&program, &|e| {
+        matches!(e, Expr::PropertyAccess { property, .. } if property == "n")
+    }) {
+        assert!(
+            engine.resolved_expr_type(span).is_none(),
+            "f1: the un-annotatable field read must stay DROPPED (None), got {:?}",
+            engine.resolved_expr_type(span)
+        );
+    }
+}
