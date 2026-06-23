@@ -1,0 +1,5 @@
+fn make(store: string) -> string {
+  let banner = |n| f"{store} has {n} items"
+  banner(3)
+}
+print(make("WAREHOUSE"))

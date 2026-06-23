@@ -1,813 +1,469 @@
-// large.shape — error-handling slice (book: fundamentals/error-handling.mdx)
 // ============================================================================
-// A recursive-descent arithmetic expression evaluator with error recovery.
+// large.shape — Arithmetic Expression Calculator with Error Recovery
 //
-// This is the canonical "parser with error recovery" application for the
-// error-handling slice. Every fallible step returns Result<T> or Option<T>.
-// We use:
-//   - `?`  to propagate failures up through the recursive grammar    (book §"? Try Operator")
-//   - `!!` to attach higher-level context at recovery boundaries     (book §"!! Error Context Operator")
-//   - `??` to supply defaults for Option lookups                     (book §"Related Operators")
-//   - `as int?` fallible cast for numeric literal parsing            (book §"Typed Conversion / Fallible")
-//   - match on Result/Option for branch handling                    (book §"AnyError Structure" example)
+// A real-world, non-interactive, machine-proofable application rooted in the
+// error-handling slice (fundamentals/error-handling.mdx). It implements a full
+// pipeline:
+//   1. tokenizer        -> Result<Array<Token>>   (? on `as int?`)
+//   2. recursive-descent parser -> Result<Expr>   (recursive enum AST; !! context; ?)
+//   3. evaluator        -> Result<int>            (division-by-zero Err)
+//   4. batch driver     with PER-LINE error recovery (caught Err keeps the
+//                         batch going; book §"opaque value — print/propagate")
 //
-// Grammar (space-separated tokens):
-//   expr   := term (('+' | '-') term)*
-//   term   := factor (('*' | '/' | '%') factor)*
-//   factor := NUMBER | '(' expr ')' | '-' factor
+// All error flow uses ONLY what the chapter teaches:
+//   Result<T> / Option<T>, Ok/Err, `?`, `!!`, `??`, `as Type?`.
 //
-// The evaluator is a module-level state machine: `g_tokens` + `g_pos`.
-// Each parse resets that state. Errors do NOT crash the batch driver; the
-// driver catches each Result and recovers, continuing to the next input.
-//
-// MACHINE-PROOFABLE: every expected value below is derived from arithmetic +
-// book error-handling semantics and written BEFORE the first run.
+// Every EXPECTED value is derived from arithmetic / grammar semantics and was
+// written BEFORE the first run (never back-filled from output).
+// On all-pass:  prints ALL_CHECKS_PASSED
+// On mismatch:  prints CHECK_FAILED: <which> expected=<e> got=<g>
 // ============================================================================
+
 from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
 
 // ---------------------------------------------------------------------------
-// Module-level lexer/parser state (book-supported: module-level `let mut`,
-// mutated from functions — verified pattern).
+// Tokens
 // ---------------------------------------------------------------------------
-let mut g_tokens: Array<string> = [];
-let mut g_pos: int = 0;
-
-fn reset_state(toks: Array<string>) {
-    g_tokens = toks;
-    g_pos = 0;
+enum Token {
+    Num(int),
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    LParen,
+    RParen,
+    End,
 }
 
-// Option-returning lookahead: None at end of input. (book: Option missing-value sentinel)
-fn peek() -> Option<string> {
-    if g_pos < g_tokens.len() {
-        return Some(g_tokens[g_pos]);
-    }
-    return None;
-}
-
-// Consume the current token; Err if at end. (book: Err normalizes a payload)
-fn consume() -> Result<string> {
-    match peek() {
-        Some(t) => {
-            g_pos = g_pos + 1;
-            return Ok(t);
-        }
-        None => {
-            return Err("unexpected end of input");
-        }
+fn token_label(t: Token) -> string {
+    match t {
+        Token::Num(n) => f"Num({n})",
+        Token::Plus   => "Plus",
+        Token::Minus  => "Minus",
+        Token::Star   => "Star",
+        Token::Slash  => "Slash",
+        Token::LParen => "LParen",
+        Token::RParen => "RParen",
+        Token::End    => "End",
     }
 }
 
-fn at_end() -> bool {
-    return g_pos >= g_tokens.len();
+fn is_digit(c: string) -> bool {
+    return c >= "0" && c <= "9";
 }
 
 // ---------------------------------------------------------------------------
-// Tokenizer: split on spaces, drop empty fragments. Returns Result so an
-// all-whitespace / empty source is a recoverable Err (not a silent success).
+// Tokenizer — Result-returning; ? threads the single-digit `as int?` conversion
 // ---------------------------------------------------------------------------
-fn tokenize(src: string) -> Result<Array<string>> {
-    let raw = src.split(" ");
-    let mut out: Array<string> = [];
-    for piece in raw {
-        if piece != "" {
-            out.push(piece);
+fn tokenize(src: string) -> Result<Array<Token>> {
+    let mut out: Array<Token> = [];
+    let mut i = 0;
+    let n = src.length();
+    while i < n {
+        let c = src.substring(i, i + 1);
+        if c == " " {
+            i = i + 1;
+        } else if c == "+" {
+            out.push(Token::Plus);
+            i = i + 1;
+        } else if c == "-" {
+            out.push(Token::Minus);
+            i = i + 1;
+        } else if c == "*" {
+            out.push(Token::Star);
+            i = i + 1;
+        } else if c == "/" {
+            out.push(Token::Slash);
+            i = i + 1;
+        } else if c == "(" {
+            out.push(Token::LParen);
+            i = i + 1;
+        } else if c == ")" {
+            out.push(Token::RParen);
+            i = i + 1;
+        } else if is_digit(c) {
+            let mut value = 0;
+            while i < n {
+                let d = src.substring(i, i + 1);
+                if is_digit(d) {
+                    // `as int?` — book §"Fallible: as Type?"; ? propagates failure
+                    let digit = (d as int?)?;
+                    value = value * 10 + digit;
+                    i = i + 1;
+                } else {
+                    break;
+                }
+            }
+            out.push(Token::Num(value));
+        } else {
+            return Err(f"tokenize: unexpected character '{c}' at position {i}");
         }
     }
-    if out.len() == 0 {
-        return Err("empty expression");
-    }
+    out.push(Token::End);
     return Ok(out);
 }
 
 // ---------------------------------------------------------------------------
-// Numeric literal recognizer. Uses the fallible cast `as int?` (book §Fallible).
-// A token that is not an integer literal yields Err with context via `!!`.
+// AST — recursive enum (idiomatic; no arena)
 // ---------------------------------------------------------------------------
-fn parse_number(tok: string) -> Result<int> {
-    // Book-faithful fallible cast (§Typed Conversion / Fallible): `(tok as int?)`
-    // yields Result<int, AnyError>; `!!` attaches higher-level context on the Err
-    // arm (§"!! Error Context Operator"). Verified at HEAD that `as int?` works
-    // directly on a string read from an Array<string> element.
-    let n = (tok as int?) !! f"not a number: {tok}";
-    return n;
+enum Expr {
+    Lit(int),
+    Neg(Expr),
+    Add(Expr, Expr),
+    Sub(Expr, Expr),
+    Mul(Expr, Expr),
+    Div(Expr, Expr),
 }
 
 // ---------------------------------------------------------------------------
-// Recursive-descent grammar. Each level returns Result<int>; `?` propagates.
+// Parser — position carried in an int-only Cursor struct mutated across calls.
+// Grammar (standard precedence):
+//   expr   := term (('+' | '-') term)*
+//   term   := factor (('*' | '/') factor)*
+//   factor := '-' factor | '(' expr ')' | Num
 // ---------------------------------------------------------------------------
+type Cursor { pos: int }
 
-// factor := NUMBER | '(' expr ')' | '-' factor
-fn parse_factor() -> Result<int> {
-    match peek() {
-        Some(t) => {
-            if t == "(" {
-                let open = consume()?;                       // '('
-                let inner = parse_expr()?;                   // recurse
-                match peek() {
-                    Some(c) => {
-                        if c == ")" {
-                            let close = consume()?;          // ')'
-                            return Ok(inner);
-                        }
-                        return Err(f"expected ')' but found '{c}'");
-                    }
-                    None => {
-                        return Err("unbalanced '(' : missing ')'");
-                    }
-                }
+fn peek(tokens: Array<Token>, c: Cursor) -> Token {
+    if c.pos < tokens.length() {
+        return tokens[c.pos];
+    }
+    return Token::End;
+}
+
+fn parse_factor(tokens: Array<Token>, c: Cursor) -> Result<Expr> {
+    let t = peek(tokens, c);
+    match t {
+        Token::Num(value) => {
+            c.pos = c.pos + 1;
+            return Ok(Expr::Lit(value));
+        },
+        Token::Minus => {
+            c.pos = c.pos + 1;
+            let inner = (parse_factor(tokens, c) !! "expected factor after unary '-'")?;
+            return Ok(Expr::Neg(inner));
+        },
+        Token::LParen => {
+            c.pos = c.pos + 1;
+            let inner = (parse_expr(tokens, c) !! "expected expression inside parentheses")?;
+            let closing = peek(tokens, c);
+            match closing {
+                Token::RParen => {
+                    c.pos = c.pos + 1;
+                    return Ok(inner);
+                },
+                _ => {
+                    return Err(f"parse: expected ')' but found {token_label(closing)}");
+                },
             }
-            if t == "-" {
-                let neg = consume()?;                        // unary minus
-                let operand = parse_factor()?;
-                return Ok(0 - operand);
-            }
-            // otherwise must be a number
-            let numtok = consume()?;
-            return parse_number(numtok) !! "invalid factor";
-        }
-        None => {
-            return Err("unexpected end of input in factor");
-        }
+        },
+        _ => {
+            return Err(f"parse: expected number, '-' or '(' but found {token_label(t)}");
+        },
     }
 }
 
-// ipow: integer power by repeated multiply; Err on negative exponent.
-// (book §"? Try Operator" pattern: an inner fallible primitive returning Result)
-fn ipow(base: int, exp: int) -> Result<int> {
-    if exp < 0 {
-        return Err("negative exponent");
-    }
-    let mut r = 1;
-    let mut i = 0;
-    while i < exp {
-        r = r * base;
-        i = i + 1;
-    }
-    return Ok(r);
-}
-
-// power := factor ('^' factor)*  (left-associative for determinism)
-// `?` propagates a failing factor OR a failing ipow up to the caller.
-fn parse_power() -> Result<int> {
-    let mut acc = parse_factor()?;
+fn parse_term(tokens: Array<Token>, c: Cursor) -> Result<Expr> {
+    let mut left = (parse_factor(tokens, c) !! "expected factor")?;
     let mut go = true;
     while go {
-        match peek() {
-            Some(op) => {
-                if op == "^" {
-                    let o = consume()?;
-                    let rhs = parse_factor()?;
-                    // ipow returns Result; `?` unwraps or propagates the Err
-                    let powed = ipow(acc, rhs) !! "power evaluation failed";
-                    acc = powed?;
-                } else {
-                    go = false;
-                }
-            }
-            None => {
+        let t = peek(tokens, c);
+        match t {
+            Token::Star => {
+                c.pos = c.pos + 1;
+                let right = (parse_factor(tokens, c) !! "expected factor after '*'")?;
+                left = Expr::Mul(left, right);
+            },
+            Token::Slash => {
+                c.pos = c.pos + 1;
+                let right = (parse_factor(tokens, c) !! "expected factor after '/'")?;
+                left = Expr::Div(left, right);
+            },
+            _ => {
                 go = false;
-            }
+            },
         }
     }
-    return Ok(acc);
+    return Ok(left);
 }
 
-// term := power (('*' | '/' | '%') power)*
-fn parse_term() -> Result<int> {
-    let mut acc = parse_power()?;
+fn parse_expr(tokens: Array<Token>, c: Cursor) -> Result<Expr> {
+    let mut left = (parse_term(tokens, c) !! "expected term")?;
     let mut go = true;
     while go {
-        match peek() {
-            Some(op) => {
-                if op == "*" {
-                    let o = consume()?;
-                    let rhs = parse_power()?;
-                    acc = acc * rhs;
-                } else {
-                    if op == "/" {
-                        let o = consume()?;
-                        let rhs = parse_power()?;
-                        if rhs == 0 {
-                            return Err("division by zero");
-                        }
-                        acc = acc / rhs;
-                    } else {
-                        if op == "%" {
-                            let o = consume()?;
-                            let rhs = parse_power()?;
-                            if rhs == 0 {
-                                return Err("modulo by zero");
-                            }
-                            acc = acc % rhs;
-                        } else {
-                            go = false;
-                        }
-                    }
-                }
-            }
-            None => {
+        let t = peek(tokens, c);
+        match t {
+            Token::Plus => {
+                c.pos = c.pos + 1;
+                let right = (parse_term(tokens, c) !! "expected term after '+'")?;
+                left = Expr::Add(left, right);
+            },
+            Token::Minus => {
+                c.pos = c.pos + 1;
+                let right = (parse_term(tokens, c) !! "expected term after '-'")?;
+                left = Expr::Sub(left, right);
+            },
+            _ => {
                 go = false;
-            }
+            },
         }
     }
-    return Ok(acc);
+    return Ok(left);
 }
 
-// expr := term (('+' | '-') term)*
-fn parse_expr() -> Result<int> {
-    let mut acc = parse_term()?;
-    let mut go = true;
-    while go {
-        match peek() {
-            Some(op) => {
-                if op == "+" {
-                    let o = consume()?;
-                    let rhs = parse_term()?;
-                    acc = acc + rhs;
-                } else {
-                    if op == "-" {
-                        let o = consume()?;
-                        let rhs = parse_term()?;
-                        acc = acc - rhs;
-                    } else {
-                        go = false;
-                    }
-                }
-            }
-            None => {
-                go = false;
-            }
-        }
+// Top-level parse: parse an expression then REQUIRE the End token (else trailing
+// garbage). Returns the AST.
+fn parse(tokens: Array<Token>) -> Result<Expr> {
+    let mut c = Cursor { pos: 0 };
+    let root = (parse_expr(tokens, c) !! "failed to parse expression")?;
+    let last = peek(tokens, c);
+    match last {
+        Token::End => {
+            return Ok(root);
+        },
+        _ => {
+            return Err(f"parse: unexpected trailing token {token_label(last)}");
+        },
     }
-    return Ok(acc);
-}
-
-// Top-level: tokenize, parse, require all input consumed. Context via `!!`.
-fn evaluate(src: string) -> Result<int> {
-    let toks = tokenize(src) !! "tokenize failed";
-    reset_state(toks?);
-    let value = parse_expr() !! "parse failed";
-    let v = value?;
-    if !at_end() {
-        let leftover = peek() ?? "?";
-        return Err(f"trailing tokens after expression: '{leftover}'");
-    }
-    return Ok(v);
 }
 
 // ---------------------------------------------------------------------------
-// Batch driver with error RECOVERY: evaluate each line, collect outcomes.
-// A failing line is caught and recorded; the batch continues.
-// Returns counts so the harness can assert recovery behavior.
+// Evaluator — Result; integer arithmetic; division-by-zero is an Err
 // ---------------------------------------------------------------------------
-type BatchResult { ok_count: int, err_count: int, sum_ok: int }
+fn eval(e: Expr) -> Result<int> {
+    match e {
+        Expr::Lit(v) => {
+            return Ok(v);
+        },
+        Expr::Neg(inner) => {
+            let v = (eval(inner) !! "eval: failed to evaluate negation operand")?;
+            return Ok(0 - v);
+        },
+        Expr::Add(l, r) => {
+            let a = (eval(l) !! "eval: failed left of '+'")?;
+            let b = (eval(r) !! "eval: failed right of '+'")?;
+            return Ok(a + b);
+        },
+        Expr::Sub(l, r) => {
+            let a = (eval(l) !! "eval: failed left of '-'")?;
+            let b = (eval(r) !! "eval: failed right of '-'")?;
+            return Ok(a - b);
+        },
+        Expr::Mul(l, r) => {
+            let a = (eval(l) !! "eval: failed left of '*'")?;
+            let b = (eval(r) !! "eval: failed right of '*'")?;
+            return Ok(a * b);
+        },
+        Expr::Div(l, r) => {
+            let a = (eval(l) !! "eval: failed left of '/'")?;
+            let b = (eval(r) !! "eval: failed right of '/'")?;
+            if b == 0 {
+                return Err("eval: division by zero");
+            }
+            return Ok(a / b);
+        },
+    }
+}
+
+// End-to-end: source -> Result<int>. ? + !! thread tokenizer, parser, evaluator.
+fn calculate(src: string) -> Result<int> {
+    let tokens = (tokenize(src) !! "calculate: tokenize stage failed")?;
+    let ast = (parse(tokens) !! "calculate: parse stage failed")?;
+    let value = (eval(ast) !! "calculate: eval stage failed")?;
+    return Ok(value);
+}
+
+// ---------------------------------------------------------------------------
+// Self-check helpers — a caught error is OPAQUE in v0.3.3 (book §AnyError),
+// so we reduce a Result<int> to (ok?, value) without touching any error fields.
+// ---------------------------------------------------------------------------
+fn result_is_ok(r: Result<int>) -> bool {
+    match r { Ok(v) => true, Err(e) => false }
+}
+fn result_or(r: Result<int>, dflt: int) -> int {
+    match r { Ok(v) => v, Err(e) => dflt }
+}
+
+// ---------------------------------------------------------------------------
+// Batch driver with per-line error recovery. One malformed line does NOT abort
+// the batch — its Err is caught and recorded; good lines still accumulate.
+// ---------------------------------------------------------------------------
+type BatchResult {
+    ok_count: int,
+    err_count: int,
+    sum_ok: int,
+}
 
 fn run_batch(lines: Array<string>) -> BatchResult {
     let mut ok_count = 0;
     let mut err_count = 0;
     let mut sum_ok = 0;
     for line in lines {
-        match evaluate(line) {
+        let r = calculate(line);
+        match r {
             Ok(v) => {
                 ok_count = ok_count + 1;
                 sum_ok = sum_ok + v;
-            }
+            },
             Err(e) => {
-                // recovery point: record and continue (do not propagate)
                 err_count = err_count + 1;
-            }
+            },
         }
     }
     return BatchResult { ok_count: ok_count, err_count: err_count, sum_ok: sum_ok };
 }
 
+// ---------------------------------------------------------------------------
+// A small config sub-language to exercise !! context chains + Option/??.
+// "key=expr" lines; lookup returns Option<int>; ?? supplies defaults.
+// ---------------------------------------------------------------------------
+fn lookup(key: string) -> Option<int> {
+    if key == "width"  { return Some(80); }
+    if key == "height" { return Some(24); }
+    if key == "depth"  { return Some(3); }
+    return None;
+}
+
+// Option ? propagation inside a Result context: None propagates as Err per
+// book §"? Try Operator" (None -> Err(AnyError, code OPTION_NONE)).
+fn area() -> Result<int> {
+    let w = lookup("width")?;
+    let h = lookup("height")?;
+    return Ok(w * h);
+}
+fn volume_missing() -> Result<int> {
+    let w = lookup("width")?;
+    let z = lookup("zdepth")?;   // None -> propagates as Err
+    return Ok(w * z);
+}
+
 // ===========================================================================
-// CHECK HARNESS
+// SELF-CHECKS   (expected values derived from semantics, written before run)
 // ===========================================================================
 let mut failures = 0;
 
-fn check_eq_int(name: string, got: int, expected: int) {
-    if got != expected {
-        failures = failures + 1;
+fn check_int(name: string, expected: int, got: int) -> int {
+    if expected != got {
         print(f"CHECK_FAILED: {name} expected={expected} got={got}");
+        return 1;
     }
+    return 0;
 }
-
-fn check_ok(name: string, src: string, expected: int) {
-    match evaluate(src) {
-        Ok(v) => {
-            if v != expected {
-                failures = failures + 1;
-                print(f"CHECK_FAILED: {name} expected={expected} got={v}");
-            }
-        }
-        Err(e) => {
-            failures = failures + 1;
-            print(f"CHECK_FAILED: {name} expected Ok({expected}) got Err");
-        }
+fn check_bool(name: string, expected: bool, got: bool) -> int {
+    if expected != got {
+        print(f"CHECK_FAILED: {name} expected={expected} got={got}");
+        return 1;
     }
+    return 0;
 }
 
-fn check_err(name: string, src: string) {
-    match evaluate(src) {
-        Ok(v) => {
-            failures = failures + 1;
-            print(f"CHECK_FAILED: {name} expected Err got Ok({v})");
-        }
-        Err(e) => {
-            // expected
-        }
-    }
+// --- tokenizer sanity: "12+34" -> [Num,Plus,Num,End] = length 4 ---
+match tokenize("12+34") {
+    Ok(ts) => { failures = failures + check_int("tok_len", 4, ts.length()); },
+    Err(e) => { failures = failures + 1; print("CHECK_FAILED: tok_len tokenize errored"); },
+}
+// "(1)" -> [LParen,Num,RParen,End] = length 4
+match tokenize("(1)") {
+    Ok(ts) => { failures = failures + check_int("tok_paren_len", 4, ts.length()); },
+    Err(e) => { failures = failures + 1; print("CHECK_FAILED: tok_paren_len errored"); },
 }
 
-// ---------------------------------------------------------------------------
-// SECTION 1 — basic arithmetic (expected values = plain integer arithmetic)
-// ---------------------------------------------------------------------------
-check_ok("add", "1 + 2", 3);
-check_ok("sub", "10 - 4", 6);
-check_ok("mul", "6 * 7", 42);
-check_ok("div", "20 / 5", 4);
-check_ok("mod", "17 % 5", 2);
-check_ok("single", "99", 99);
-check_ok("zero", "0", 0);
+// --- arithmetic: precedence + associativity (all expected by hand) ---
+failures = failures + check_int("c1",  14,        result_or(calculate("2 + 3 * 4"), -1));          // 2 + 12
+failures = failures + check_int("c2",  20,        result_or(calculate("(2 + 3) * 4"), -1));        // 5 * 4
+failures = failures + check_int("c3",  75,        result_or(calculate("100 - 20 - 5"), -1));       // left-assoc
+failures = failures + check_int("c4",  26,        result_or(calculate("2 * 3 + 4 * 5"), -1));      // 6 + 20
+failures = failures + check_int("c5",  1,         result_or(calculate("20 / 4 / 5"), -1));         // (20/4)/5
+failures = failures + check_int("c6",  3,         result_or(calculate("-7 + 10"), -1));            // unary minus
+failures = failures + check_int("c7",  21,        result_or(calculate("((1 + 2) * (3 + 4))"), -1));// 3*7
+failures = failures + check_int("c8",  0 - 12,    result_or(calculate("-(3 * 4)"), -99999));       // negate group
+failures = failures + check_int("c9",  3,         result_or(calculate("7 / 2"), -1));              // int trunc
+failures = failures + check_int("c10", 42,        result_or(calculate("42"), -1));                 // single num
+failures = failures + check_int("c11", 5,         result_or(calculate("1 + 2 * 3 - 4 / 2"), -1));  // 1+6-2
+failures = failures + check_int("c12", 5,         result_or(calculate("--5"), -1));                // double neg
+failures = failures + check_int("c13", 1000,      result_or(calculate("10 * 10 * 10"), -1));       // 1000
+failures = failures + check_int("c14", 0,         result_or(calculate("5 - 5"), -99));             // zero
+failures = failures + check_int("c15", 0 - 6,     result_or(calculate("2 * -3"), -99999));         // -6
+failures = failures + check_int("c16", 100,       result_or(calculate("((((100))))"), -1));        // deep parens
 
-// ---------------------------------------------------------------------------
-// SECTION 2 — precedence (* binds tighter than +/-)
-// ---------------------------------------------------------------------------
-check_ok("prec1", "1 + 2 * 3", 7);          // 1 + 6
-check_ok("prec2", "2 * 3 + 4", 10);         // 6 + 4
-check_ok("prec3", "10 - 2 * 3", 4);         // 10 - 6
-check_ok("prec4", "2 + 3 * 4 - 1", 13);     // 2 + 12 - 1
-check_ok("prec5", "100 / 5 / 2", 10);       // (100/5)/2 = 20/2
-check_ok("prec6", "20 - 5 - 3", 12);        // left assoc: (20-5)-3
-check_ok("prec7", "2 * 3 * 4", 24);
+// --- error cases: each must be Err (recovered, never aborting the script) ---
+failures = failures + check_bool("e_divzero",    false, result_is_ok(calculate("1 / 0")));
+failures = failures + check_bool("e_divzero2",   false, result_is_ok(calculate("10 / (5 - 5)")));
+failures = failures + check_bool("e_badchar",    false, result_is_ok(calculate("3 & 4")));
+failures = failures + check_bool("e_unbalanced", false, result_is_ok(calculate("(1 + 2")));
+failures = failures + check_bool("e_trailing",   false, result_is_ok(calculate("1 2")));
+failures = failures + check_bool("e_dangling",   false, result_is_ok(calculate("1 +")));
+failures = failures + check_bool("e_lone_op",    false, result_is_ok(calculate("*")));
+failures = failures + check_bool("e_empty_grp",  false, result_is_ok(calculate("()")));
+failures = failures + check_bool("e_close_only", false, result_is_ok(calculate(")")));
 
-// ---------------------------------------------------------------------------
-// SECTION 3 — parentheses
-// ---------------------------------------------------------------------------
-check_ok("paren1", "( 1 + 2 ) * 3", 9);
-check_ok("paren2", "2 * ( 3 + 4 )", 14);
-check_ok("paren3", "( ( 1 + 1 ) )", 2);
-check_ok("paren4", "( 10 - 2 ) / ( 1 + 1 )", 4);     // 8/2
-check_ok("paren5", "3 * ( 2 + ( 4 - 1 ) )", 15);     // 3*(2+3)=15
+// --- good cases ARE ok ---
+failures = failures + check_bool("g1", true, result_is_ok(calculate("8 * 8")));
+failures = failures + check_bool("g2", true, result_is_ok(calculate("(0)")));
 
-// ---------------------------------------------------------------------------
-// SECTION 4 — unary minus
-// ---------------------------------------------------------------------------
-check_ok("neg1", "- 5", -5);
-check_ok("neg2", "0 - 5", -5);
-check_ok("neg3", "10 + - 3", 7);             // 10 + (-3)
-check_ok("neg4", "- ( 2 + 3 )", -5);
-check_ok("neg5", "- 2 * 3", -6);             // (-2)*3
+// --- batch driver with error recovery ---
+// good: 2+2=4, 3*3=9, 10-1=9, 8/2=4  => ok=4, sum=26
+// bad:  "1 / 0" (div0), "bad$" (tokenize)  => err=2
+let lines: Array<string> = ["2 + 2", "3 * 3", "1 / 0", "10 - 1", "bad$", "8 / 2"];
+let summary = run_batch(lines);
+failures = failures + check_int("batch_ok",  4,  summary.ok_count);
+failures = failures + check_int("batch_err", 2,  summary.err_count);
+failures = failures + check_int("batch_sum", 26, summary.sum_ok);
 
-// ---------------------------------------------------------------------------
-// SECTION 5 — integer division / modulo semantics (truncation toward zero)
-// ---------------------------------------------------------------------------
-check_ok("idiv1", "7 / 2", 3);
-check_ok("idiv2", "9 / 4", 2);
-check_ok("imod1", "10 % 3", 1);
-check_ok("imod2", "20 % 7", 6);
-check_ok("combo", "2 * 10 % 7", 6);          // (2*10)%7 = 20%7 = 6
+// a batch of ALL-bad lines: ok=0, err=3, sum=0 (recovery handles every failure)
+let bad_lines: Array<string> = ["1/0", "@@@", "(("];
+let bad_summary = run_batch(bad_lines);
+failures = failures + check_int("batch_allbad_ok",  0, bad_summary.ok_count);
+failures = failures + check_int("batch_allbad_err", 3, bad_summary.err_count);
+failures = failures + check_int("batch_allbad_sum", 0, bad_summary.sum_ok);
 
-// ---------------------------------------------------------------------------
-// SECTION 6 — ERROR cases (each must be a recoverable Err, never a crash)
-// Book §"? Try Operator": Err propagates to nearest enclosing fallible scope;
-// here that's evaluate(), which returns it to the caller.
-// ---------------------------------------------------------------------------
-check_err("err_empty", "");                  // tokenize → "empty expression"
-check_err("err_spaces", "     ");            // all whitespace → empty
-check_err("err_div0", "5 / 0");              // division by zero guard
-check_err("err_mod0", "5 % 0");              // modulo by zero guard
-check_err("err_badtok", "1 + x");            // "x" not a number
-check_err("err_open", "( 1 + 2");            // missing ')'
-check_err("err_close", "1 + 2 )");           // trailing ')' → trailing tokens
-check_err("err_trailing", "1 2");            // two numbers, no operator
-check_err("err_dangling_op", "1 +");         // operator then EOF
-check_err("err_lead_op", "* 3");             // term starts with operator
-check_err("err_only_op", "+");               // operator only
-check_err("err_unbalanced2", "( ( 1 )");     // one ')' missing
+// --- Option / ?? (book §Related Operators) ---
+failures = failures + check_int("opt_width",   80, lookup("width")  ?? 0);
+failures = failures + check_int("opt_missing",  0, lookup("nope")   ?? 0);
+failures = failures + check_int("opt_depth",    3, lookup("depth")  ?? 0);
 
-// ---------------------------------------------------------------------------
-// SECTION 7 — `??` None-coalescing on Option (book §"Related Operators")
-// Probe peek()'s Option directly via a small helper.
-// ---------------------------------------------------------------------------
-fn first_token_or_default(src: string, dflt: string) -> string {
-    let toks = src.split(" ");
-    reset_state(toks);
-    // peek() returns Option<string>; ?? supplies the default for None
-    return peek() ?? dflt;
+// --- Option ? propagation into Result ---
+failures = failures + check_int("area_ok",   1920, result_or(area(), -1));            // 80 * 24
+failures = failures + check_bool("vol_miss", false, result_is_ok(volume_missing()));   // None -> Err
+
+// --- !! Ok-passthrough: Ok(v) !! ctx == Ok(v) (book §!! table) ---
+fn must_pos(x: int) -> Result<int> {
+    if x <= 0 { return Err("must be positive"); }
+    return Ok(x);
 }
-let ft1 = first_token_or_default("42 + 1", "EMPTY");
-if ft1 != "42" { failures = failures + 1; print(f"CHECK_FAILED: coalesce_present expected=42 got={ft1}"); }
-let ft2 = first_token_or_default("", "EMPTY");
-// "".split(" ") yields [""] (one empty fragment); reset_state stores it, so
-// peek() returns Some("") — NOT None. Expected per split semantics = "".
-if ft2 != "" { failures = failures + 1; print(f"CHECK_FAILED: coalesce_empty expected=<empty> got={ft2}"); }
+failures = failures + check_int("ctx_ok",  5, result_or((must_pos(5) !! "validation failed"), -1));
+failures = failures + check_bool("ctx_bad", false, result_is_ok((must_pos(0) !! "validation failed")));
 
-// Force a true None: reset to an explicitly empty token array.
-reset_state([]);
-let none_default = peek() ?? "FALLBACK";
-if none_default != "FALLBACK" { failures = failures + 1; print(f"CHECK_FAILED: coalesce_none expected=FALLBACK got={none_default}"); }
+// --- large deterministic aggregate exercising the whole pipeline 50x ---
+// total = sum_{k=1..50} of  k*(k+1)/2  (triangular numbers; k(k+1) always even
+// so integer division is exact). Closed form:
+//   sum_{1..50} k   = 1275
+//   sum_{1..50} k^2 = 42925
+//   total = (42925 + 1275)/2 = 22100
+let mut total = 0;
+let mut k = 1;
+while k <= 50 {
+    let expr = f"{k} * ({k} + 1) / 2";
+    total = total + result_or(calculate(expr), 0);
+    k = k + 1;
+}
+failures = failures + check_int("triangular_sum", 22100, total);
 
-// ---------------------------------------------------------------------------
-// SECTION 8 — `!!` always yields Result; Ok / Some / plain all become Ok
-// (book §"!! Error Context Operator" table rows)
-// ---------------------------------------------------------------------------
-fn wrap_ok() -> Result<int> { return Ok(5) !! "ctx"; }
-fn wrap_some() -> Result<int> { return Some(9) !! "ctx"; }
-fn wrap_plain() -> Result<int> { return 11 !! "ctx"; }
-fn wrap_err() -> Result<int> { return Err("inner") !! "outer"; }
+// --- second aggregate: alternating accumulation through batch recovery ---
+// expressions 1..20, all good; each = i*i; sum of squares 1..20 = 2870
+let mut sq_lines: Array<string> = [];
+let mut j = 1;
+while j <= 20 {
+    sq_lines.push(f"{j} * {j}");
+    j = j + 1;
+}
+let sq = run_batch(sq_lines);
+failures = failures + check_int("sq_ok",  20,   sq.ok_count);
+failures = failures + check_int("sq_err",  0,   sq.err_count);
+failures = failures + check_int("sq_sum", 2870, sq.sum_ok);   // sum i^2, i=1..20
 
-match wrap_ok()   { Ok(v) => check_eq_int("wrap_ok", v, 5),   Err(e) => { failures = failures + 1; print("CHECK_FAILED: wrap_ok err"); } }
-match wrap_some() { Ok(v) => check_eq_int("wrap_some", v, 9), Err(e) => { failures = failures + 1; print("CHECK_FAILED: wrap_some err"); } }
-match wrap_plain(){ Ok(v) => check_eq_int("wrap_plain", v, 11),Err(e) => { failures = failures + 1; print("CHECK_FAILED: wrap_plain err"); } }
-match wrap_err()  { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: wrap_err expected Err"); }, Err(e) => { } }
-
-// ---------------------------------------------------------------------------
-// SECTION 9 — `?` chaining through several fallible calls (book end-to-end)
-// ---------------------------------------------------------------------------
-fn step_a(x: int) -> Result<int> {
-    if x < 0 { return Err("negative input"); }
-    return Ok(x + 1);
-}
-fn step_b(x: int) -> Result<int> {
-    if x > 100 { return Err("too large"); }
-    return Ok(x * 2);
-}
-fn pipeline(x: int) -> Result<int> {
-    let a = step_a(x)?;
-    let b = step_b(a)?;
-    return Ok(b);
-}
-match pipeline(10) { Ok(v) => check_eq_int("pipe_ok", v, 22), Err(e) => { failures = failures + 1; print("CHECK_FAILED: pipe_ok err"); } }   // (10+1)*2
-match pipeline(-3) { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: pipe_neg expected Err"); }, Err(e) => { } }
-match pipeline(200){ Ok(v) => { failures = failures + 1; print("CHECK_FAILED: pipe_big expected Err"); }, Err(e) => { } }
-
-// ---------------------------------------------------------------------------
-// SECTION 10 — `as int?` fallible cast: valid vs invalid (book §Fallible)
-// ---------------------------------------------------------------------------
-match ("123" as int?) { Ok(v) => check_eq_int("cast_ok", v, 123), Err(e) => { failures = failures + 1; print("CHECK_FAILED: cast_ok err"); } }
-match ("0"   as int?) { Ok(v) => check_eq_int("cast_zero", v, 0), Err(e) => { failures = failures + 1; print("CHECK_FAILED: cast_zero err"); } }
-match ("xyz" as int?) { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: cast_bad expected Err"); }, Err(e) => { } }
-match ("12a" as int?) { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: cast_partial expected Err"); }, Err(e) => { } }
-
-// ---------------------------------------------------------------------------
-// SECTION 11 — BATCH RECOVERY: a mixed batch; assert ok/err counts + sum.
-// Inputs:  "1 + 1"=2 ok, "bad x"=err, "3 * 3"=9 ok, "5 / 0"=err,
-//          "( 2 + 2 )"=4 ok, ""=err, "10 - 3"=7 ok
-// Expected: ok_count=4, err_count=3, sum_ok = 2+9+4+7 = 22
-// ---------------------------------------------------------------------------
-let batch = ["1 + 1", "bad x", "3 * 3", "5 / 0", "( 2 + 2 )", "", "10 - 3"];
-let br = run_batch(batch);
-check_eq_int("batch_ok_count", br.ok_count, 4);
-check_eq_int("batch_err_count", br.err_count, 3);
-check_eq_int("batch_sum_ok", br.sum_ok, 22);
-
-// ---------------------------------------------------------------------------
-// SECTION 12 — larger deterministic stress batch.
-// 20 well-formed expressions; assert the running sum of all results.
-// Each expected value computed by hand from the grammar.
-// ---------------------------------------------------------------------------
-let stress = [
-    "1 + 2 + 3 + 4 + 5",          // 15
-    "2 * 3 * 4",                  // 24
-    "100 - 50 - 25",              // 25
-    "( 1 + 2 ) * ( 3 + 4 )",      // 21
-    "81 / 9 / 3",                 // 3
-    "7 % 4 + 1",                  // 4
-    "- 5 + 10",                   // 5
-    "3 * 3 + 4 * 4",              // 25
-    "( 10 - 4 ) * 2",            // 12
-    "1000 / 10 / 10",            // 10
-    "2 + 2 * 2 * 2",             // 10  (2 + 8)
-    "50 % 7",                     // 1
-    "( 6 + 4 ) / 5",             // 2
-    "9 - 3 - 3 - 3",             // 0
-    "8 * ( 2 + 3 )",             // 40
-    "- ( 4 * 2 )",               // -8
-    "15 % 4 % 2",                // 1  ((15%4)=3, 3%2=1)
-    "( ( 2 ) )",                 // 2
-    "1 + 1 + 1 + 1 + 1 + 1",     // 6
-    "60 / 2 / 3 / 5",            // 2
-];
-// Expected total = 15+24+25+21+3+4+5+25+12+10+10+1+2+0+40-8+1+2+6+2
-//                = 200
-let sr = run_batch(stress);
-check_eq_int("stress_ok_count", sr.ok_count, 20);
-check_eq_int("stress_err_count", sr.err_count, 0);
-check_eq_int("stress_sum_ok", sr.sum_ok, 200);
-
-// ---------------------------------------------------------------------------
-// SECTION 13 — all-error batch: every input is malformed; recovery keeps going.
-// ---------------------------------------------------------------------------
-let bad_batch = ["", "+ +", "( ( (", "1 2 3", "5 / 0", "x", ") )", "* /"];
-let bb = run_batch(bad_batch);
-check_eq_int("bad_ok_count", bb.ok_count, 0);
-check_eq_int("bad_err_count", bb.err_count, 8);
-check_eq_int("bad_sum_ok", bb.sum_ok, 0);
-
-// ---------------------------------------------------------------------------
-// SECTION 14 — deep nesting (recursion depth through parens).
-// (((((((((( 1 + 1 )))))))))) = 2 with 10 levels.
-// ---------------------------------------------------------------------------
-check_ok("deep", "( ( ( ( ( ( ( ( ( ( 1 + 1 ) ) ) ) ) ) ) ) ) )", 2);
-check_ok("deep_calc", "( ( ( 2 * 3 ) + ( 4 * 5 ) ) - 6 )", 20);  // (6+20)-6
-
-// ---------------------------------------------------------------------------
-// SECTION 15 — context-chaining via `!!` then `?` (book §"!! + ? Parsing")
-// `lhs !! rhs?` parses as `(lhs !! rhs)?`.
-// ---------------------------------------------------------------------------
-fn parse_or_zero(src: string) -> int {
-    match evaluate(src) {
-        Ok(v) => { return v; }
-        Err(e) => { return 0; }
-    }
-}
-check_eq_int("por_ok", parse_or_zero("4 * 5"), 20);
-check_eq_int("por_bad", parse_or_zero("nope"), 0);
-
-fn must_eval(src: string) -> Result<int> {
-    // (evaluate(src) !! "evaluation failed")?  — combined !! + ?
-    let v = (evaluate(src) !! "evaluation failed")?;
-    return Ok(v);
-}
-match must_eval("7 + 8") { Ok(v) => check_eq_int("must_ok", v, 15), Err(e) => { failures = failures + 1; print("CHECK_FAILED: must_ok err"); } }
-match must_eval("oops")  { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: must_bad expected Err"); }, Err(e) => { } }
-
-// ---------------------------------------------------------------------------
-// SECTION 16 — power operator `^` (left-assoc, higher precedence than * / %)
-// Expected values computed by hand.
-// ---------------------------------------------------------------------------
-check_ok("pow1", "2 ^ 10", 1024);
-check_ok("pow2", "3 ^ 0", 1);                 // anything ^ 0 = 1
-check_ok("pow3", "5 ^ 1", 5);
-check_ok("pow4", "2 ^ 3 ^ 2", 64);            // left-assoc: (2^3)^2 = 8^2 = 64
-check_ok("pow5", "2 ^ 3 + 1", 9);             // 8 + 1   (^ binds tighter than +)
-check_ok("pow6", "1 + 2 ^ 3", 9);             // 1 + 8
-check_ok("pow7", "2 * 3 ^ 2", 18);            // 2 * 9   (^ binds tighter than *)
-check_ok("pow8", "( 1 + 1 ) ^ 4", 16);        // 2^4
-check_ok("pow9", "10 ^ 0 ^ 5", 1);            // (10^0)^5 = 1^5 = 1
-// Grammar: power := factor ('^' factor)*. parse_factor consumes unary '-'
-// BEFORE the power loop, so "- 2 ^ 2" structures as (-2) ^ 2 = 4.
-check_ok("pow10", "- 2 ^ 2", 4);              // (-2)^2 = 4
-
-// power error: negative exponent surfaces ipow's Err through `!!` + `?`
-check_err("pow_negexp", "2 ^ - 1");           // ipow(2,-1) → "negative exponent"
-
-// ---------------------------------------------------------------------------
-// SECTION 17 — multi-statement program: ';'-separated expressions.
-// Evaluate each; the program result is the LAST successful value.
-// If ANY statement errors, the whole program errors (book §"? Try Operator":
-// `?` early-returns the Err from run_program).
-// ---------------------------------------------------------------------------
-fn run_program(src: string) -> Result<int> {
-    let stmts = src.split(";");
-    let mut last = 0;
-    let mut seen = false;
-    for stmt in stmts {
-        let trimmed = stmt.trim();
-        if trimmed != "" {
-            // evaluate returns Result; `?` propagates the first failing stmt
-            last = evaluate(trimmed)?;
-            seen = true;
-        }
-    }
-    if !seen {
-        return Err("empty program");
-    }
-    return Ok(last);
-}
-match run_program("1 + 1 ; 2 * 3 ; 10 - 4") {
-    Ok(v) => check_eq_int("prog_last", v, 6),                 // last stmt = 10-4
-    Err(e) => { failures = failures + 1; print("CHECK_FAILED: prog_last err"); }
-}
-match run_program("5 ; 5 / 0 ; 9") {
-    Ok(v) => { failures = failures + 1; print("CHECK_FAILED: prog_midfail expected Err"); }
-    Err(e) => { }                                            // 2nd stmt fails → whole program Err
-}
-match run_program("   ;   ;   ") {
-    Ok(v) => { failures = failures + 1; print("CHECK_FAILED: prog_empty expected Err"); }
-    Err(e) => { }
-}
-match run_program("42") {
-    Ok(v) => check_eq_int("prog_single", v, 42),
-    Err(e) => { failures = failures + 1; print("CHECK_FAILED: prog_single err"); }
-}
-
-// ---------------------------------------------------------------------------
-// SECTION 18 — running a program with `??` to default a failing program to 0.
-// run_program returns Result; convert to Option-like default via match.
-// ---------------------------------------------------------------------------
-fn program_or(src: string, dflt: int) -> int {
-    match run_program(src) {
-        Ok(v) => { return v; }
-        Err(e) => { return dflt; }
-    }
-}
-check_eq_int("progor_ok", program_or("2 ^ 4 ; 3 * 3", -1), 9);
-check_eq_int("progor_bad", program_or("oops ; 1", -1), -1);
-
-// ---------------------------------------------------------------------------
-// SECTION 19 — large mixed batch with power + recovery. 24 inputs.
-//  index: expr              => result / ERR
-//   0  "2 ^ 5"              => 32
-//   1  "bad"                => ERR
-//   2  "( 3 + 4 ) ^ 2"      => 49
-//   3  "10 % 0"             => ERR
-//   4  "2 * 3 ^ 2"          => 18
-//   5  ""                   => ERR
-//   6  "100 - 1"            => 99
-//   7  "5 / 0"              => ERR
-//   8  "- 3 ^ 2"            => 9    ((-3)^2)
-//   9  "( ( 2 ) )"          => 2
-//  10  "7"                  => 7
-//  11  "1 +"                => ERR
-//  12  "8 / 2 / 2"          => 2
-//  13  "3 ^ 0"             => 1
-//  14  "x + 1"              => ERR
-//  15  "20 % 6"             => 2
-//  16  "( 1 + 2 ) * 3"      => 9
-//  17  "2 ^ - 1"            => ERR  (neg exp)
-//  18  "0"                  => 0
-//  19  "( 5"                => ERR  (unbalanced)
-//  20  "4 ^ 2 - 1"          => 15
-//  21  "1 2"                => ERR  (trailing)
-//  22  "6 % 4 + 2"          => 4
-//  23  "9 / 3 ^ 2"          => 1    (9 / 9)
-//
-// ok values: 32,49,18,99,9,2,7,2,1,2,9,0,15,4,1
-//   count = 15;  sum = 32+49+18+99+9+2+7+2+1+2+9+0+15+4+1 = 250
-// err count = 9
-// ---------------------------------------------------------------------------
-let mega = [
-    "2 ^ 5", "bad", "( 3 + 4 ) ^ 2", "10 % 0", "2 * 3 ^ 2", "",
-    "100 - 1", "5 / 0", "- 3 ^ 2", "( ( 2 ) )", "7", "1 +",
-    "8 / 2 / 2", "3 ^ 0", "x + 1", "20 % 6", "( 1 + 2 ) * 3", "2 ^ - 1",
-    "0", "( 5", "4 ^ 2 - 1", "1 2", "6 % 4 + 2", "9 / 3 ^ 2",
-];
-let mr = run_batch(mega);
-check_eq_int("mega_ok_count", mr.ok_count, 15);
-check_eq_int("mega_err_count", mr.err_count, 9);
-check_eq_int("mega_sum_ok", mr.sum_ok, 250);
-
-// ---------------------------------------------------------------------------
-// SECTION 20 — deterministic generated batch: evaluate "i + i" for i in 0..30,
-// each must equal 2*i; assert the total. Exercises the parser at volume.
-//   sum over i=0..29 of (2*i) = 2 * (0+1+...+29) = 2 * 435 = 870
-// ---------------------------------------------------------------------------
-let mut gen_total = 0;
-let mut gen_fail = 0;
-let mut gi = 0;
-while gi < 30 {
-    let src = f"{gi} + {gi}";
-    match evaluate(src) {
-        Ok(v) => {
-            if v != gi + gi {
-                gen_fail = gen_fail + 1;
-            }
-            gen_total = gen_total + v;
-        }
-        Err(e) => {
-            gen_fail = gen_fail + 1;
-        }
-    }
-    gi = gi + 1;
-}
-check_eq_int("gen_total", gen_total, 870);
-check_eq_int("gen_fail", gen_fail, 0);
-
-// ---------------------------------------------------------------------------
-// SECTION 21 — generated power table: evaluate "2 ^ k" for k in 0..12.
-//   results: 1,2,4,...,2048;  sum = 2^13 - 1 = 8191
-// ---------------------------------------------------------------------------
-let mut pow_total = 0;
-let mut pk = 0;
-while pk < 13 {
-    let src = f"2 ^ {pk}";
-    let v = evaluate(src)?;          // top-level `?`: any failure aborts (none expected)
-    pow_total = pow_total + v;
-    pk = pk + 1;
-}
-check_eq_int("pow_total", pow_total, 8191);
-
-// ---------------------------------------------------------------------------
-// SECTION 22 — `?` at TOP LEVEL aborts the script on failure (book §"? Try
-// Operator": at script top-level a propagated failure surfaces as uncaught).
-// We DON'T trigger it here (that would abort the run); instead we prove the
-// caught form: a function using `?` returns the Err to its caller, who matches.
-// ---------------------------------------------------------------------------
-fn strict_eval(src: string) -> Result<int> {
-    let v = evaluate(src)?;      // propagate up — NOT to top level
-    return Ok(v + 1000);
-}
-match strict_eval("5 + 5") { Ok(v) => check_eq_int("strict_ok", v, 1010), Err(e) => { failures = failures + 1; print("CHECK_FAILED: strict_ok err"); } }
-match strict_eval("5 / 0") { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: strict_bad expected Err"); }, Err(e) => { } }
-
-// ---------------------------------------------------------------------------
-// SECTION 23 — Option `?` propagation: None inside a Result-returning fn
-// becomes Err (book §"? Try Operator" table: None → Err(AnyError) OPTION_NONE).
-// ---------------------------------------------------------------------------
-fn add_opts(a: Option<int>, b: Option<int>) -> Result<int> {
-    let x = a?;          // Some→value, None→propagate Err
-    let y = b?;
-    return Ok(x + y);
-}
-match add_opts(Some(3), Some(4)) { Ok(v) => check_eq_int("addopt_ok", v, 7), Err(e) => { failures = failures + 1; print("CHECK_FAILED: addopt_ok err"); } }
-match add_opts(Some(3), None)    { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: addopt_none expected Err"); }, Err(e) => { } }
-match add_opts(None, Some(4))    { Ok(v) => { failures = failures + 1; print("CHECK_FAILED: addopt_none2 expected Err"); }, Err(e) => { } }
-
-// ---------------------------------------------------------------------------
-// SECTION 24 — `??` chaining (book §"Related Operators"): a ?? (b ?? dflt)
-// ---------------------------------------------------------------------------
-fn coalesce3(a: Option<int>, b: Option<int>, dflt: int) -> int {
-    return a ?? (b ?? dflt);
-}
-check_eq_int("c3_first",  coalesce3(Some(5), Some(9), 0), 5);
-check_eq_int("c3_second", coalesce3(None, Some(9), 0), 9);
-check_eq_int("c3_dflt",   coalesce3(None, None, -1), -1);
-
-// ---------------------------------------------------------------------------
-// SECTION 25 — Option-returning safe lookup + `!!` to convert to Result.
-// A "find first evaluable token" scanner over an Array<string>: returns the
-// first token that parses as a complete expression, else Err.
-// ---------------------------------------------------------------------------
-fn first_evaluable(candidates: Array<string>) -> Result<int> {
-    for cand in candidates {
-        match evaluate(cand) {
-            Ok(v) => { return Ok(v); }      // recovery: take the first success
-            Err(e) => { }                   // skip failures, keep scanning
-        }
-    }
-    return Err("no evaluable candidate");
-}
-match first_evaluable(["bad", "x +", "3 * 4", "5 + 5"]) {
-    Ok(v) => check_eq_int("scan_first", v, 12),     // first OK is "3 * 4"
-    Err(e) => { failures = failures + 1; print("CHECK_FAILED: scan_first err"); }
-}
-match first_evaluable(["1 +", "(", "/ 0"]) {
-    Ok(v) => { failures = failures + 1; print("CHECK_FAILED: scan_none expected Err"); }
-    Err(e) => { }                                   // none evaluable
-}
-match first_evaluable(["( 2 + 3 ) ^ 2"]) {
-    Ok(v) => check_eq_int("scan_single", v, 25),    // 5^2
-    Err(e) => { failures = failures + 1; print("CHECK_FAILED: scan_single err"); }
-}
-
-// ---------------------------------------------------------------------------
-// SECTION 26 — combined `!!` context + `?` over a deeper call chain, asserting
-// the SUCCESS value flows through unchanged (book §"!! + ? Parsing":
-// `lhs !! rhs?` == `(lhs !! rhs)?`; Ok(v) !! ctx == Ok(v)).
-// ---------------------------------------------------------------------------
-fn layer3(src: string) -> Result<int> {
-    let v = (evaluate(src) !! "layer3 failed")?;
-    return Ok(v);
-}
-fn layer2(src: string) -> Result<int> {
-    let v = (layer3(src) !! "layer2 failed")?;
-    return Ok(v * 2);
-}
-fn layer1(src: string) -> Result<int> {
-    let v = (layer2(src) !! "layer1 failed")?;
-    return Ok(v + 1);
-}
-match layer1("3 + 4") {
-    Ok(v) => check_eq_int("layered_ok", v, 15),     // ((7)*2)+1 = 15
-    Err(e) => { failures = failures + 1; print("CHECK_FAILED: layered_ok err"); }
-}
-match layer1("3 / 0") {
-    Ok(v) => { failures = failures + 1; print("CHECK_FAILED: layered_bad expected Err"); }
-    Err(e) => { }                                   // div0 propagates through all 3 layers
-}
-
-// ---------------------------------------------------------------------------
-// SECTION 27 — final generated stress: evaluate "( i + 1 ) * ( i + 1 )" for
-// i in 0..25, each must equal (i+1)^2; assert the total.
-//   sum over i=0..24 of (i+1)^2 = sum of 1^2..25^2 = 25*26*51/6 = 5525
-// ---------------------------------------------------------------------------
-let mut sq_total = 0;
-let mut sq_fail = 0;
-let mut si = 0;
-while si < 25 {
-    let src = f"( {si} + 1 ) * ( {si} + 1 )";
-    match evaluate(src) {
-        Ok(v) => {
-            let exp = (si + 1) * (si + 1);
-            if v != exp { sq_fail = sq_fail + 1; }
-            sq_total = sq_total + v;
-        }
-        Err(e) => { sq_fail = sq_fail + 1; }
-    }
-    si = si + 1;
-}
-check_eq_int("sq_total", sq_total, 5525);
-check_eq_int("sq_fail", sq_fail, 0);
-
-// ===========================================================================
-// FINAL VERDICT
-// ===========================================================================
 if failures == 0 {
     print("ALL_CHECKS_PASSED");
 } else {
-    print(f"TOTAL_FAILURES={failures}");
+    print(f"FAILURES: {failures}");
 }

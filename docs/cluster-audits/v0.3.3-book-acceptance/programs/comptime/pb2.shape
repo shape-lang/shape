@@ -1,0 +1,4 @@
+let mut a = []
+a.push(10)
+a.push(20)
+print(f"{a[0]} {a.length}")

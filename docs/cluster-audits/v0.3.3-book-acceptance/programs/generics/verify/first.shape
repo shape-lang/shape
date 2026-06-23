@@ -1,0 +1,3 @@
+fn first<T>(items: Vec<T>) -> T { items[0] }
+let xs: Vec<int> = [10, 20, 30]
+print(first(xs))

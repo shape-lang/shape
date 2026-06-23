@@ -1,0 +1,6 @@
+let r = comptime { implements("int", "Display") }
+if r == null {
+  print("is-null")
+} else {
+  print("not-null")
+}

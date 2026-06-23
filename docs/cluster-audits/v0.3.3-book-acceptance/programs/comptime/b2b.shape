@@ -1,0 +1,2 @@
+let os = comptime { build_config().target_os }
+print(os)

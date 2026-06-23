@@ -317,7 +317,7 @@ fn exp_taylor(x: number, terms: int) -> number {
 //  Values; indexed reads in a counted loop)
 // -----------------------------------------------------------------------------
 
-fn dot_product(a: Vec<number>, b: Vec<number>, n: int) -> number {
+fn dot_product(a: Array<number>, b: Array<number>, n: int) -> number {
   var s = 0.0
   var i = 0
   while i < n {
@@ -327,7 +327,7 @@ fn dot_product(a: Vec<number>, b: Vec<number>, n: int) -> number {
   s
 }
 
-fn array_sum(a: Vec<number>, n: int) -> number {
+fn array_sum(a: Array<number>, n: int) -> number {
   var s = 0.0
   var i = 0
   while i < n {
@@ -337,11 +337,11 @@ fn array_sum(a: Vec<number>, n: int) -> number {
   s
 }
 
-fn array_mean(a: Vec<number>, n: int) -> number {
+fn array_mean(a: Array<number>, n: int) -> number {
   array_sum(a, n) / (n as number)
 }
 
-fn array_variance(a: Vec<number>, n: int) -> number {
+fn array_variance(a: Array<number>, n: int) -> number {
   let mu = array_mean(a, n)
   var acc = 0.0
   var i = 0
@@ -353,7 +353,7 @@ fn array_variance(a: Vec<number>, n: int) -> number {
   acc / (n as number)
 }
 
-fn array_max(a: Vec<number>, n: int) -> number {
+fn array_max(a: Array<number>, n: int) -> number {
   var m = a[0]
   var i = 1
   while i < n {
@@ -366,7 +366,7 @@ fn array_max(a: Vec<number>, n: int) -> number {
 }
 
 // L2 norm using the Newton sqrt kernel above.
-fn l2_norm(a: Vec<number>, n: int) -> number {
+fn l2_norm(a: Array<number>, n: int) -> number {
   newton_sqrt(dot_product(a, a, n))
 }
 
@@ -380,7 +380,7 @@ fn l2_norm(a: Vec<number>, n: int) -> number {
 
 fn weighted_sorted_checksum() -> int {
   // Fixed permutation of 0..9.
-  var arr: Vec<int> = [5, 3, 8, 1, 9, 2, 7, 4, 6, 0]
+  var arr: Array<int> = [5, 3, 8, 1, 9, 2, 7, 4, 6, 0]
   let n = 10
   // Bubble sort ascending.
   var i = 0
@@ -520,24 +520,24 @@ fn run_float_anchors() {
 fn run_array_anchors() {
   let eps = 0.0000001
 
-  let u: Vec<number> = [1.0, 2.0, 3.0, 4.0]
-  let v: Vec<number> = [4.0, 3.0, 2.0, 1.0]
+  let u: Array<number> = [1.0, 2.0, 3.0, 4.0]
+  let v: Array<number> = [4.0, 3.0, 2.0, 1.0]
   // 1*4 + 2*3 + 3*2 + 4*1 = 4+6+6+4 = 20
   check_approx("dot_product(u,v)", dot_product(u, v, 4), 20.0, eps)
   // sum u = 10
   check_approx("array_sum(u)", array_sum(u, 4), 10.0, eps)
 
-  let d: Vec<number> = [2.0, 4.0, 6.0, 8.0, 10.0]
+  let d: Array<number> = [2.0, 4.0, 6.0, 8.0, 10.0]
   check_approx("array_mean(d)", array_mean(d, 5), 6.0, eps)
   // population variance = ((-4)^2+(-2)^2+0+2^2+4^2)/5 = (16+4+0+4+16)/5 = 8
   check_approx("array_variance(d)", array_variance(d, 5), 8.0, eps)
   check_approx("array_max(d)", array_max(d, 5), 10.0, eps)
 
   // L2 norm of [3,4] = 5
-  let pyth: Vec<number> = [3.0, 4.0]
+  let pyth: Array<number> = [3.0, 4.0]
   check_approx("l2_norm([3,4])", l2_norm(pyth, 2), 5.0, eps)
   // L2 norm of [1,2,2] = 3
-  let triple: Vec<number> = [1.0, 2.0, 2.0]
+  let triple: Array<number> = [1.0, 2.0, 2.0]
   check_approx("l2_norm([1,2,2])", l2_norm(triple, 3), 3.0, eps)
 }
 

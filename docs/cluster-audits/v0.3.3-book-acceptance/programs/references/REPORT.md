@@ -4,13 +4,16 @@ Chapter (book-PRIMARY): `fundamentals/references-borrowing.mdx`
 Determinism: pure (&, &mut, borrow rules). No stdin/clock/network/RNG.
 
 ## Result summary
-| Program | LOC | VM ec | JIT ec | VM stdout | JIT stdout | byte-identical |
-|---------|-----|-------|--------|-----------|------------|----------------|
-| small.shape | 97 | 0 | 0 | ALL_CHECKS_PASSED | ALL_CHECKS_PASSED | YES |
-| large.shape | 826 | 0 | 0 | ALL_CHECKS_PASSED | ALL_CHECKS_PASSED | YES |
+| Program | LOC | assertions | VM ec | JIT ec | VM stdout | JIT stdout | byte-identical |
+|---------|-----|-----------|-------|--------|-----------|------------|----------------|
+| small.shape | 74  | 17  | 0 | 0 | ALL_CHECKS_PASSED | ALL_CHECKS_PASSED | YES |
+| large.shape | 799 | 114 | 0 | 0 | ALL_CHECKS_PASSED | ALL_CHECKS_PASSED | YES |
 
-Both PASS under both modes, byte-identical stdout. large.shape = 97 machine-proofable
+Both PASS under both modes, byte-identical stdout. large.shape = 114 machine-proofable
 assertions, all expected values hand-derived from book semantics before first run.
+(Extended this rotation with descendant counts, distinct directed-path counts, flat-array
+sum/max, in-place reverse + scalar-add through &mut, clone-before-mutation independence,
+and a second 7-node perfect-binary-tree fixture.)
 
 Stderr emits pre-existing V2 FrameDescriptor verification warnings + a [jit-fallback]
 (ADR-006 §2.7.14) note; these are infra diagnostics, not slice-specific, go to stderr,
@@ -26,9 +29,11 @@ do not affect stdout, and both modes still reach ALL_CHECKS_PASSED. Classified P
 (none — both deliverables writable from chapter positive guidance alone; no fallback used.)
 
 ## book_wrong
-1. Stored-reference index `let r=&nums; r[0]` documented (book 225-227) as a v0.3.3
-   compile error ("Borrow ... does not support index access") but actually WORKS:
-   prints 1, ec=0, both VM+JIT. Book wrong in the SAFE/conservative direction (warns
-   off a construct that works); does not break book-following programs. Low severity.
+(none against the CURRENT chapter text.) A PRIOR rotation recorded that the book
+documented stored-reference indexing (`r[0]`) as a v0.3.3 compile error while it actually
+works. The current chapter (lines 226-230, `:::tip[Indexing and methods through a stored
+reference]`) now DOCUMENTS it as working in v0.3.3 — matching the binary. Re-probed and
+confirmed `let r = &nums; r[0]` / `r.len()` work under both modes. The imprecision is
+already corrected in the book; no remaining book_wrong.
 
-## Classification: PASS (slice). One conservative-direction doc imprecision (book_wrong #1).
+## Classification: PASS (slice). Book accurate for everything exercised; VM/JIT byte-identical.

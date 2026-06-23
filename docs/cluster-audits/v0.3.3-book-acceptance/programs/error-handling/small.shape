@@ -1,65 +1,79 @@
-// small.shape — error-handling slice (book: fundamentals/error-handling.mdx)
-// Exercises: Result/Option constructors, `?` propagation, `!!` context,
-// `??` None-coalescing, `as Type?` fallible cast. Self-checking.
+// Small error-handling demo — exercises Result/Option, ?, !!, ??, as Type?
+// Book: fundamentals/error-handling.mdx
 from std::core::intrinsics use { Result, Option, AnyError, Ok, Err }
 
-fn read_file(path: string) -> Result<string> {
-    if path == "" { return Err("empty path"); }
-    return Ok("port = 8080");
+// --- helpers used by self-checks (caught error treated as opaque per book v0.3.3) ---
+fn r_is_ok(r: Result<int>) -> bool {
+    match r { Ok(v) => true, Err(e) => false }
+}
+fn r_value_or(r: Result<int>, dflt: int) -> int {
+    match r { Ok(v) => v, Err(e) => dflt }
 }
 
-fn parse_config(text: string) -> Result<int> {
-    let n = ("8080" as int?)?;
+// --- a fallible parse using the book's `as int?` then `?` pattern ---
+fn parse_int(raw: string) -> Result<int> {
+    let n = (raw as int?)?;
     return Ok(n);
 }
 
-fn load_config(path: string) -> Result<int> {
-    let text = (read_file(path) !! "Failed to read config")?;
-    return parse_config(text) !! "Config parse failed";
+// --- ? propagation through Result-returning functions ---
+fn read_field(text: string) -> Result<string> {
+    if text.length() == 0 {
+        return Err("empty input");
+    }
+    return Ok(text);
 }
 
-fn find_user(found: bool) -> Option<int> {
-    if found { return Some(7); }
-    return None;
+fn load_port(text: string) -> Result<int> {
+    // !! adds context, ? propagates; (lhs !! rhs)? per book §"!! + ? Parsing"
+    let field = (read_field(text) !! "failed to read field")?;
+    let port = (parse_int(field) !! "failed to parse port")?;
+    return Ok(port);
 }
 
-fn lookup(found: bool) -> Result<int> {
-    let id = (find_user(found) !! "User not found")?;
-    return Ok(id);
+// --- Option + ? propagation; None propagates as the function's None ---
+fn maybe_double(o: Option<int>) -> Option<int> {
+    let v = o?;
+    return Some(v * 2);
 }
 
-let mut ok = true;
+// =================== self-checks ===================
+let mut failures = 0;
 
-match load_config("config.shape") {
-    Ok(v) => { if v != 8080 { ok = false; print("CHECK_FAILED: load_ok expected=8080"); } }
-    Err(e) => { ok = false; print("CHECK_FAILED: load_ok unexpected err"); }
-}
+// 1. as int? + ? yields Ok on valid input
+let p1 = parse_int("8080");
+if r_value_or(p1, -1) != 8080 { failures = failures + 1; print("CHECK_FAILED: parse_int valid expected=8080 got=" + f"{r_value_or(p1, -1)}"); }
 
-match load_config("") {
-    Ok(v) => { ok = false; print("CHECK_FAILED: load_err expected Err got Ok"); }
-    Err(e) => { }
-}
+// 2. as int? on bad input is an Err (opaque); is_ok == false
+let p2 = parse_int("not-a-number");
+if r_is_ok(p2) { failures = failures + 1; print("CHECK_FAILED: parse_int invalid expected=Err got=Ok"); }
 
-match lookup(true) {
-    Ok(v) => { if v != 7 { ok = false; print("CHECK_FAILED: lookup_ok expected=7"); } }
-    Err(e) => { ok = false; print("CHECK_FAILED: lookup_ok unexpected err"); }
-}
+// 3. load_port happy path
+let lp = load_port("443");
+if r_value_or(lp, -1) != 443 { failures = failures + 1; print("CHECK_FAILED: load_port valid expected=443 got=" + f"{r_value_or(lp, -1)}"); }
 
-match lookup(false) {
-    Ok(v) => { ok = false; print("CHECK_FAILED: lookup_none expected Err got Ok"); }
-    Err(e) => { }
-}
+// 4. load_port propagates the empty-input error (Err)
+let lp2 = load_port("");
+if r_is_ok(lp2) { failures = failures + 1; print("CHECK_FAILED: load_port empty expected=Err got=Ok"); }
 
-let a = find_user(false) ?? 99;
-if a != 99 { ok = false; print("CHECK_FAILED: coalesce_none expected=99"); }
+// 5. Option ? propagation: Some(v) -> Some(v*2)
+let d1 = maybe_double(Some(21));
+let g1 = match d1 { Some(v) => v, None => -1 };
+if g1 != 42 { failures = failures + 1; print("CHECK_FAILED: maybe_double Some expected=42 got=" + f"{g1}"); }
 
-let b = find_user(true) ?? 99;
-if b != 7 { ok = false; print("CHECK_FAILED: coalesce_some expected=7"); }
+// 6. Option ? propagation: None -> None
+let d2 = maybe_double(None);
+let g2 = match d2 { Some(v) => v, None => -1 };
+if g2 != -1 { failures = failures + 1; print("CHECK_FAILED: maybe_double None expected=None got=" + f"{g2}"); }
 
-fn wrap_plain() -> Result<int> { return 42 !! "ctx"; }
-match wrap_plain() {
-    Ok(v) => { if v != 42 { ok = false; print("CHECK_FAILED: wrap_plain expected=42"); } }
-    Err(e) => { ok = false; print("CHECK_FAILED: wrap_plain unexpected err"); }
-}
+// 7. ?? None coalescing default
+let opt_none: Option<int> = None;
+let coalesced = opt_none ?? 99;
+if coalesced != 99 { failures = failures + 1; print("CHECK_FAILED: ?? on None expected=99 got=" + f"{coalesced}"); }
 
-if ok { print("ALL_CHECKS_PASSED"); }
+// 8. ?? passes through Some
+let opt_some: Option<int> = Some(7);
+let kept = opt_some ?? 99;
+if kept != 7 { failures = failures + 1; print("CHECK_FAILED: ?? on Some expected=7 got=" + f"{kept}"); }
+
+if failures == 0 { print("ALL_CHECKS_PASSED"); } else { print(f"FAILURES: {failures}"); }

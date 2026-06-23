@@ -31,6 +31,16 @@ output. No book_wrong; book_gap #1/#2 remain RESOLVED-at-HEAD, #3 (no `assert`
 builtin) and #4 (mixed enum-variant array needs `Array<T>` annotation) remain
 accurate. Classification: PASS.
 
+RE-VERIFIED 2026-06-22 (current pass, same worktree HEAD): both programs PASS
+under vm AND jit, ec=0, stdout byte-identical (single line `ALL_CHECKS_PASSED`).
+Stability 3/3 vm + 3/3 jit (ec=0, identical output) for both programs.
+`large.shape` = 980 LOC; `ck_*` occurrences = 93, minus 3 helper `fn` defs = **90
+assertion call sites** (HEAD-true). `assert` builtin still undefined (book_gap #3
+accurate). All three book `runnable=true` snippets re-checked verbatim
+(`dyn` monomorphic 425-444 → `Alice\nBob`; `dyn Display + Serializable` decl
+449-459 → `ok`; supertrait decl 350-364 → `ok`) — all match book under vm+jit.
+No book_wrong. Classification: PASS.
+
 RE-RE-VERIFIED 2026-06-21 (later pass, same worktree HEAD): both programs still
 PASS byte-identical. HOWEVER, the call-site return-type propagation defects that
 this report previously recorded as **book_gap #1** and **book_gap #2** are NO

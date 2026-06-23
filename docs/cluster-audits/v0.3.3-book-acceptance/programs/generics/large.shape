@@ -1,913 +1,950 @@
-// large.shape — generics slice book-acceptance program
-// Book-primary sources: fundamentals/functions.mdx + fundamentals/traits.mdx
+// large.shape — generics slice (book-acceptance, ~1000 LOC)
+// Book sources:
+//   fundamentals/functions.mdx  — Generics, Trait Bounds, where clauses,
+//                                 Default Parameter Values, Named Arguments,
+//                                 Higher-Order Functions, Closures and Capture.
+//   fundamentals/traits.mdx     — Defining/Implementing a Trait, Trait Bounds,
+//                                 Multiple bounds, Supertraits, Extend Blocks,
+//                                 Conversion Traits (primitive as/as?).
 //
-// A real-world, non-interactive, machine-proofable application: a "Shape &
-// Inventory Toolkit". It models a small domain library built ENTIRELY on the
-// generics + traits surface the book teaches:
+// A NON-INTERACTIVE, deterministic generic catalog/report engine. Every record
+// type implements a small set of user traits; generic functions parameterized by
+// those bounds (`fn f<T: Bound>(x: T)`) drive all formatting, pricing, and
+// summarization. All inputs are fixed literals; every computed result is asserted
+// against a value derived from book semantics BEFORE running.
 //
-//   - trait declaration + impl (book: "Defining a Trait" / "Implementing a Trait")
-//   - supertraits via `:` (book: "Supertraits")
-//   - dyn Trait collections + iteration (book: "Trait Objects")
-//   - extend blocks adding methods to a type (book: "Extend Blocks")
-//   - higher-order functions taking a lambda (book: "Higher-Order Functions")
-//   - closure-returning functions bound to a let (book: "Higher-Order Functions")
-//   - closures with read-only capture (book: "Closures and Capture")
-//   - closure inference from method signatures (book: "Closure Inference")
-//   - default parameter values (book: "Default Parameter Values")
-//   - tail-expression returns, no `return` keyword (book: "Tail Expression vs ;")
+// Self-check protocol: each check is a bool-returning helper that prints
+// "CHECK_FAILED: <name> expected=<e> got=<g>" on mismatch and returns the bool.
+// A running AND of all checks gates the final "ALL_CHECKS_PASSED".
 //
-// MACHINE-PROOFABLE: every computed result is asserted against an expected
-// value derived from the formulas BEFORE the first run. On all-pass it prints
-// ALL_CHECKS_PASSED; on any mismatch it prints CHECK_FAILED with which/exp/got.
-//
-// Numeric note: the heavy arithmetic uses `int` for exact, robust assertions.
-// A focused `number` section uses the book's typed-let idiom
-// (`let a: number = ...`) so trait-method-return values carry their kind for
-// arithmetic.
-
 // =====================================================================
-// 0. Tiny test harness (generic-shaped over int, the book's first_int idiom)
+// SECTION 0 — Check harness
 // =====================================================================
 
-// A mutable failure counter captured read-only is not enough (book notes
-// mutable capture is gated), so we thread a fail flag through module scope.
-let mut FAILS: int = 0
+fn ck_int(name: string, got: int, want: int) -> bool {
+  if got != want { print(f"CHECK_FAILED: {name} expected={want} got={got}") }
+  got == want
+}
 
-fn check_int(label: string, expected: int, got: int) {
-  if expected != got {
-    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
-    FAILS = FAILS + 1
+fn ck_str(name: string, got: string, want: string) -> bool {
+  if got != want { print(f"CHECK_FAILED: {name} expected={want} got={got}") }
+  got == want
+}
+
+fn ck_bool(name: string, got: bool, want: bool) -> bool {
+  if got != want { print(f"CHECK_FAILED: {name} expected={want} got={got}") }
+  got == want
+}
+
+fn ck_num(name: string, got: number, want: number) -> bool {
+  if got != want { print(f"CHECK_FAILED: {name} expected={want} got={got}") }
+  got == want
+}
+
+// =====================================================================
+// SECTION 1 — Core generic combinators (functions.mdx "Generics")
+// Scalar type-param generics: identity, projection, swap, const.
+// =====================================================================
+
+fn identity<T>(x: T) -> T { x }
+
+fn const_first<A, B>(a: A, b: B) -> A { a }
+fn const_second<A, B>(a: A, b: B) -> B { b }
+
+// A generic that threads its argument through a let-binding then returns it.
+fn echo<T>(x: T) -> T {
+  let captured = x
+  captured
+}
+
+// A generic that returns a fixed concrete result regardless of T (uses the
+// type param only as an input gate).
+fn tag_of<T>(x: T) -> int { 0 }
+
+// =====================================================================
+// SECTION 2 — Trait hierarchy (traits.mdx)
+// Display: human-readable name.
+// Priced:  integer price in cents.
+// Stocked: integer on-hand quantity.
+// Coded:   a short string code.
+// =====================================================================
+
+trait Display { fn display() -> string; }
+trait Priced  { fn price() -> int; }
+trait Stocked { fn stock() -> int; }
+trait Coded   { fn code() -> string; }
+
+// Supertrait (traits.mdx "Supertraits"): a Catalogable item is Display + Priced.
+trait Catalogable : Display + Priced {
+  fn category() -> string;
+}
+
+// =====================================================================
+// SECTION 3 — Record types + impls
+// =====================================================================
+
+type Book {
+  title: string,
+  isbn: string,
+  cents: int,
+  qty: int
+}
+
+type Gadget {
+  name: string,
+  sku: string,
+  cents: int,
+  qty: int
+}
+
+type Subscription {
+  plan: string,
+  monthly_cents: int,
+  seats: int
+}
+
+impl Display for Book   { method display() -> string { self.title } }
+impl Priced  for Book   { method price() -> int { self.cents } }
+impl Stocked for Book   { method stock() -> int { self.qty } }
+impl Coded   for Book   { method code() -> string { self.isbn } }
+
+impl Display for Gadget { method display() -> string { self.name } }
+impl Priced  for Gadget { method price() -> int { self.cents } }
+impl Stocked for Gadget { method stock() -> int { self.qty } }
+impl Coded   for Gadget { method code() -> string { self.sku } }
+
+impl Display for Subscription { method display() -> string { self.plan } }
+impl Priced  for Subscription { method price() -> int { self.monthly_cents } }
+impl Stocked for Subscription { method stock() -> int { self.seats } }
+
+// Catalogable impls (must also satisfy supertraits Display + Priced).
+impl Catalogable for Book   { method category() -> string { "media" } }
+impl Catalogable for Gadget { method category() -> string { "hardware" } }
+
+// =====================================================================
+// SECTION 4 — Generic trait-bound functions (traits.mdx "Trait Bounds",
+// functions.mdx "where clauses"). Each is instantiated at several
+// concrete types — exercising monomorphization.
+// =====================================================================
+
+// Single bound, inline.
+fn name_of<T: Display>(x: T) -> string { x.display() }
+
+// where-clause form, equivalent.
+fn name_of_w<T>(x: T) -> string where T: Display { x.display() }
+
+// Two bounds: Display + Priced.
+fn line_item<T: Display + Priced>(x: T) -> string {
+  f"{x.display()} = {x.price()}"
+}
+
+// Three bounds: Display + Priced + Stocked.
+fn shelf_line<T: Display + Priced + Stocked>(x: T) -> string {
+  f"{x.display()} | price {x.price()} | qty {x.stock()}"
+}
+
+// where-clause with multiple bounds.
+fn coded_label<T>(x: T) -> string where T: Display, T: Coded {
+  f"{x.code()}:{x.display()}"
+}
+
+// Inventory value = price * stock, for any Priced + Stocked type.
+fn inventory_value<T: Priced + Stocked>(x: T) -> int {
+  x.price() * x.stock()
+}
+
+// Apply a percentage discount (integer cents, truncating division).
+fn discounted_price<T: Priced>(x: T, pct: int) -> int {
+  let p = x.price()
+  p - (p * pct) / 100
+}
+
+// Catalogable summary, leans on the supertrait methods + the subtrait method.
+fn catalog_entry<T: Catalogable>(x: T) -> string {
+  f"[{x.category()}] {x.display()} ({x.price()})"
+}
+
+// Generic-calls-generic: build a labelled line from name_of.
+fn labelled<T: Display>(prefix: string, x: T) -> string {
+  f"{prefix}: {name_of(x)}"
+}
+
+// =====================================================================
+// SECTION 5 — Default params + named args (functions.mdx)
+// =====================================================================
+
+fn money(cents: int, symbol: string = "$") -> string {
+  let dollars = cents / 100
+  let rem = cents % 100
+  if rem < 10 {
+    f"{symbol}{dollars}.0{rem}"
+  } else {
+    f"{symbol}{dollars}.{rem}"
   }
 }
 
-fn check_str(label: string, expected: string, got: string) {
-  if expected != got {
-    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
-    FAILS = FAILS + 1
+fn box_vol(w: int = 1, h: int = 1, d: int = 1) -> int { w * h * d }
+
+// =====================================================================
+// SECTION 6 — Concrete-typed array utilities (Vec<int> works at HEAD)
+// Used to aggregate over price/stock vectors extracted from records.
+// =====================================================================
+
+fn sum_ints(xs: Vec<int>) -> int {
+  let mut s = 0
+  for x in xs { s = s + x }
+  s
+}
+
+fn max_int(xs: Vec<int>) -> int {
+  let mut m = xs[0]
+  for x in xs {
+    if x > m { m = x }
   }
+  m
 }
 
-fn check_bool(label: string, expected: bool, got: bool) {
-  if expected != got {
-    print(f"CHECK_FAILED: {label} expected={expected} got={got}")
-    FAILS = FAILS + 1
+fn min_int(xs: Vec<int>) -> int {
+  let mut m = xs[0]
+  for x in xs {
+    if x < m { m = x }
   }
+  m
 }
 
-// number check with an integer-scaled tolerance: compare round(x*1000)
-fn check_num_milli(label: string, expected_milli: int, got: number) {
-  let scaled: number = got * 1000.0
-  let as_int: int = scaled as int
-  if expected_milli != as_int {
-    print(f"CHECK_FAILED: {label} expected_milli={expected_milli} got_milli={as_int}")
-    FAILS = FAILS + 1
-  }
-}
-
-// =====================================================================
-// 1. The Geometry trait hierarchy (book: traits + supertraits + dyn Trait)
-// =====================================================================
-
-// Geometry trait: every dispatched method is declared DIRECTLY on the trait
-// that is used as the `dyn` type, so trait-object dispatch resolves cleanly.
-//
-// NOTE (book-gap): an earlier design declared `type_name` on a supertrait
-// `Named` and used `Geometry : Named`, then dispatched the inherited
-// `type_name` through `Vec<dyn Geometry>`. That surfaces a real defect
-// ("Concrete(Dyn([Geometry])) cannot have fields") — supertrait-method
-// dispatch through a `dyn SubTrait` value is not yet end-to-end. The book's
-// "Supertraits" and "Trait Objects" sections never combine the two, so the
-// book is silent here. We keep dispatched traits self-contained (the form the
-// book *does* demonstrate) and exercise supertrait DECLARATIONS separately
-// (see `trait Sized3 : Tagged` below, declaration + direct call only).
-trait Geometry {
-  fn type_name() -> string;      // declared here (not via supertrait)
-  fn area_milli() -> int;        // area * 1000, integer
-  fn perimeter_milli() -> int;   // perimeter * 1000, integer
-}
-
-// --- Concrete figures -------------------------------------------------
-
-// Square with integer side. area = s*s, perimeter = 4*s. (milli = *1000)
-type Square { side: int }
-impl Geometry for Square {
-  method type_name() -> string { "square" }
-  method area_milli() -> int { self.side * self.side * 1000 }
-  method perimeter_milli() -> int { 4 * self.side * 1000 }
-}
-
-// Rectangle. area = w*h, perimeter = 2*(w+h).
-type Rectangle { w: int, h: int }
-impl Geometry for Rectangle {
-  method type_name() -> string { "rectangle" }
-  method area_milli() -> int { self.w * self.h * 1000 }
-  method perimeter_milli() -> int { 2 * (self.w + self.h) * 1000 }
-}
-
-// Right triangle with integer legs a,b. area = a*b/2, perimeter = a+b+hyp.
-// We use a Pythagorean-triple fixture so the hypotenuse is integral.
-type RightTriangle { a: int, b: int, hyp: int }
-impl Geometry for RightTriangle {
-  method type_name() -> string { "right_triangle" }
-  method area_milli() -> int { self.a * self.b * 500 }   // (a*b/2)*1000
-  method perimeter_milli() -> int { (self.a + self.b + self.hyp) * 1000 }
-}
-
-// "L-shape": two stacked rectangles. area = w1*h1 + w2*h2.
-type LShape { w1: int, h1: int, w2: int, h2: int }
-impl Geometry for LShape {
-  method type_name() -> string { "l_shape" }
-  method area_milli() -> int { (self.w1 * self.h1 + self.w2 * self.h2) * 1000 }
-  method perimeter_milli() -> int { 2 * (self.w1 + self.h1 + self.h2) * 1000 }
-}
-
-// --- Supertrait DECLARATION + direct-call demo (book: "Supertraits") -------
-// This exercises the `:` supertrait grammar the book teaches. We call the
-// methods DIRECTLY on a concrete value (no `dyn` indirection), which is the
-// form the book's "Implementing a Trait" + "Supertraits" sections support.
-trait Tagged {
-  fn tag() -> string;
-}
-trait Sized3 : Tagged {
-  fn span() -> int;
-}
-type Beam { name: string, length: int }
-impl Tagged for Beam { method tag() -> string { self.name } }
-impl Sized3 for Beam { method span() -> int { self.length } }
-
-// =====================================================================
-// 2. extend blocks: add derived methods to a concrete figure type
-//    (book: "Extend Blocks" — fully runnable form)
-// =====================================================================
-
-extend Square {
-  method diagonal_sq() -> int { 2 * self.side * self.side } // d^2 = 2 s^2
-  method is_unit() -> bool { self.side == 1 }
-}
-
-extend Rectangle {
-  method is_square() -> bool { self.w == self.h }
-  method aspect_num() -> int { self.w }
-  method aspect_den() -> int { self.h }
-}
-
-// =====================================================================
-// 3. Aggregate functions over Vec<dyn Geometry> (book: Trait Objects)
-//    Each trait-method result is bound to an annotated local before use in
-//    arithmetic, per the book's typed-let idiom.
-// =====================================================================
-
-fn total_area_milli(figs: Vec<dyn Geometry>) -> int {
-  let mut sum: int = 0
-  for f in figs {
-    let a: int = f.area_milli()
-    sum = sum + a
-  }
-  sum
-}
-
-fn total_perimeter_milli(figs: Vec<dyn Geometry>) -> int {
-  let mut sum: int = 0
-  for f in figs {
-    let p: int = f.perimeter_milli()
-    sum = sum + p
-  }
-  sum
-}
-
-fn count_named(figs: Vec<dyn Geometry>, target: string) -> int {
-  let mut c: int = 0
-  for f in figs {
-    let n: string = f.type_name()
-    if n == target { c = c + 1 }
+fn count_above(xs: Vec<int>, threshold: int) -> int {
+  let mut c = 0
+  for x in xs {
+    if x > threshold { c = c + 1 }
   }
   c
 }
 
-fn max_area_milli(figs: Vec<dyn Geometry>) -> int {
-  let mut best: int = 0
-  for f in figs {
-    let a: int = f.area_milli()
-    if a > best { best = a }
-  }
-  best
-}
-
-// Build the name list of all figures (book: dyn dispatch + string building)
-fn name_list(figs: Vec<dyn Geometry>) -> string {
-  let mut out: string = ""
-  let mut first: bool = true
-  for f in figs {
-    let n: string = f.type_name()
-    if first {
-      out = n
-      first = false
-    } else {
-      out = out + "," + n
-    }
-  }
-  out
-}
-
-// =====================================================================
-// 4. Higher-order functions + closures (book: Higher-Order Functions,
-//    Closures and Capture)
-// =====================================================================
-
-// apply: book's exact signature `fn apply(f, x) { f(x) }`
-fn apply(f, x) { f(x) }
-
-// twice: apply f to x two times. book-shape HOF (single-callee).
-fn twice(f, x) { f(f(x)) }
-
-// adder: closure-returning fn bound to a let (book runnable form)
-fn adder(a) { |b| a + b }
-
-// scaler: returns a closure that multiplies by `k` (read-only capture)
-fn scaler(k) { |x| x * k }
-
-// pipeline of int transforms applied left-to-right via a Vec of closures.
-// We can't return-and-inline-call (book gap), so we bind each step.
-fn run_pipeline(start: int) -> int {
-  let inc = |x| x + 1
-  let dbl = |x| x * 2
-  let s1 = apply(inc, start)   // start+1
-  let s2 = apply(dbl, s1)      // (start+1)*2
-  let s3 = twice(inc, s2)      // s2+2
-  s3
-}
-
-// =====================================================================
-// 5. Default parameters (book: "Default Parameter Values")
-// =====================================================================
-
-// grid area with positional default-fill
-fn grid_area(rows: int = 4, cols: int = 4) -> int { rows * cols }
-
-// pad a label to a target width with a fill char count (default 8 width)
-fn pad_width(label: string, width: int = 8) -> int {
-  // returns number of pad chars needed (>=0); here we just return width-ish
-  // metric for assertion: width minus a fixed nominal length of label "x".
-  width - 1
-}
-
-// =====================================================================
-// 6. Inventory domain: a second trait hierarchy to exercise generics breadth
-//    Priced : Named  (supertrait), stored in Vec<dyn Priced>
-// =====================================================================
-
-// Self-contained (every dispatched method declared on Priced itself).
-trait Priced {
-  fn item_name() -> string;
-  fn unit_price_cents() -> int;
-  fn quantity() -> int;
-}
-
-type Widget { qty: int, price_cents: int }
-impl Priced for Widget {
-  method item_name() -> string { "widget" }
-  method unit_price_cents() -> int { self.price_cents }
-  method quantity() -> int { self.qty }
-}
-
-type Gadget { qty: int, price_cents: int, discount_cents: int }
-impl Priced for Gadget {
-  method item_name() -> string { "gadget" }
-  method unit_price_cents() -> int { self.price_cents - self.discount_cents }
-  method quantity() -> int { self.qty }
-}
-
-type Bundle { count: int, each_cents: int }
-impl Priced for Bundle {
-  method item_name() -> string { "bundle" }
-  method unit_price_cents() -> int { self.each_cents }
-  method quantity() -> int { self.count }
-}
-
-// total inventory value in cents = sum(unit_price * quantity)
-fn inventory_value_cents(items: Vec<dyn Priced>) -> int {
-  let mut total: int = 0
-  for it in items {
-    let p: int = it.unit_price_cents()
-    let q: int = it.quantity()
-    total = total + p * q
-  }
-  total
-}
-
-// total unit count
-fn inventory_units(items: Vec<dyn Priced>) -> int {
-  let mut n: int = 0
-  for it in items {
-    let q: int = it.quantity()
-    n = n + q
-  }
-  n
-}
-
-// most expensive unit price across the inventory
-fn max_unit_price(items: Vec<dyn Priced>) -> int {
-  let mut best: int = 0
-  for it in items {
-    let p: int = it.unit_price_cents()
-    if p > best { best = p }
-  }
-  best
-}
-
-// =====================================================================
-// 7. Array-method generics with closure inference (book: Closure Inference)
-//    These exercise .map/.filter/.reduce with inferred element-typed closures.
-// =====================================================================
-
-fn sum_of_squares(nums: Vec<int>) -> int {
-  let squares: Vec<int> = nums.map(|x| x * x)
-  squares.reduce(|acc, x| acc + x, 0)
-}
-
-fn count_evens(nums: Vec<int>) -> int {
-  let evens = nums.filter(|x| x % 2 == 0)
-  evens.len()
-}
-
-fn max_of(nums: Vec<int>) -> int {
-  nums.reduce(|acc, x| if x > acc { x } else { acc }, 0)
-}
-
-// capture a threshold (read-only) inside a filter closure
-fn count_above(nums: Vec<int>, threshold: int) -> int {
-  let above = nums.filter(|x| x > threshold)
-  above.len()
-}
-
-// =====================================================================
-// 8. The number section (book: "Into / TryInto" primitive conversions +
-//    typed-let idiom for kind-correct arithmetic on trait-method returns)
-// =====================================================================
-
-trait Weighed {
-  fn kilos() -> number;
-}
-type Crate { mass: number }
-impl Weighed for Crate {
-  method kilos() -> number { self.mass }
-}
-
-fn total_kilos(crates: Vec<dyn Weighed>) -> number {
-  let mut sum: number = 0.0
-  for c in crates {
-    let k: number = c.kilos()
-    sum = sum + k
-  }
-  sum
-}
-
-// =====================================================================
-// 9. A generic-shaped statistics module over Vec<int>
-//    (book: Higher-Order Functions + Closure Inference). Each function is a
-//    small "generic over the int element" routine using the concrete-element
-//    idiom the book recommends (functions.mdx "Generics" -> first_int).
-// =====================================================================
-
-// sum via reduce with an inferred closure
-fn stat_sum(xs: Vec<int>) -> int {
-  xs.reduce(|acc, x| acc + x, 0)
-}
-
-// product via reduce
-fn stat_product(xs: Vec<int>) -> int {
-  xs.reduce(|acc, x| acc * x, 1)
-}
-
-// min via reduce (seed with a large sentinel)
-fn stat_min(xs: Vec<int>) -> int {
-  xs.reduce(|acc, x| if x < acc { x } else { acc }, 1000000)
-}
-
-// max via reduce
-fn stat_max(xs: Vec<int>) -> int {
-  xs.reduce(|acc, x| if x > acc { x } else { acc }, -1000000)
-}
-
-// count of elements satisfying a captured predicate threshold
-fn stat_count_ge(xs: Vec<int>, t: int) -> int {
-  let kept = xs.filter(|x| x >= t)
-  kept.len()
-}
-
-// arithmetic mean, scaled by 1000 to stay integral (sum*1000 / n)
-fn stat_mean_milli(xs: Vec<int>) -> int {
-  let s: int = stat_sum(xs)
-  let n: int = xs.len()
-  s * 1000 / n
-}
-
-// variance numerator: sum of (x - mean)^2, with mean computed as integer floor.
-// We use exact-divisible fixtures so floor(mean) == mean.
-fn stat_var_num(xs: Vec<int>) -> int {
-  let s: int = stat_sum(xs)
-  let n: int = xs.len()
-  let mean: int = s / n
-  let mut acc: int = 0
+fn join_ints(xs: Vec<int>, sep: string) -> string {
+  let mut acc = ""
+  let mut firstFlag = true
   for x in xs {
-    let d: int = x - mean
-    acc = acc + d * d
+    if firstFlag {
+      acc = f"{x}"
+      firstFlag = false
+    } else {
+      acc = f"{acc}{sep}{x}"
+    }
   }
   acc
 }
 
-// map a transform closure over the list and sum (HOF over the whole list)
-fn stat_map_sum(xs: Vec<int>, k: int) -> int {
-  // capture k read-only inside the map closure
-  let scaled = xs.map(|x| x * k)
-  stat_sum(scaled)
+// =====================================================================
+// SECTION 7 — Higher-order + closure capture (functions.mdx)
+// =====================================================================
+
+fn apply_int(f, x: int) -> int { f(x) }
+
+// Closure capture (read-only) — book "Closures and Capture".
+// NOTE: the book demonstrates capture only at MODULE scope; capturing a
+// function-LOCAL binding (param/local let) into a closure fails on v0.3.3 with
+// `Undefined variable` (book-gap — see REPORT.md). So this section captures a
+// module-scope binding, matching the book's runnable example exactly.
+
+// =====================================================================
+// SECTION 8 — Primitive conversion traits (traits.mdx "Conversion Traits")
+// as / as? on primitives ship in stdlib.
+// =====================================================================
+
+fn bool_to_num(b: bool) -> number { b as number }
+
+fn try_parse_int(s: string) -> Result<int, AnyError> {
+  let n = (s as int?)?
+  Ok(n)
 }
 
 // =====================================================================
-// 10. A 2D integer vector / transform trait set
-//     Transformable { apply(self) -> Vec2 }, several concrete transforms,
-//     composed by binding intermediate results (book: closure-return + let).
+// SECTION 9 — Fixtures (deterministic literals)
 // =====================================================================
 
-type Vec2 { x: int, y: int }
-
-extend Vec2 {
-  method add(other: Vec2) -> Vec2 { Vec2 { x: self.x + other.x, y: self.y + other.y } }
-  method scale(k: int) -> Vec2 { Vec2 { x: self.x * k, y: self.y * k } }
-  method dot(other: Vec2) -> int { self.x * other.x + self.y * other.y }
-  method manhattan() -> int {
-    let ax: int = if self.x < 0 { 0 - self.x } else { self.x }
-    let ay: int = if self.y < 0 { 0 - self.y } else { self.y }
-    ax + ay
-  }
-}
-
-// A transform is any value that maps a Vec2 to a Vec2. We model each transform
-// as a concrete type implementing a self-contained trait (book: trait + impl).
-// NOTE: the trait method is named `transform`, NOT `apply`. A free function
-// `fn apply(f, x)` (book HOF example) coexisting with a trait method also
-// named `apply` makes the value-call site resolve the closure call to the
-// trait object ("callee must be ... got Ptr(TraitObject)"). Renaming the
-// trait method avoids the collision.
-trait Transform {
-  fn transform(p: Vec2) -> Vec2;
-  fn label() -> string;
-}
-
-type Translate { dx: int, dy: int }
-impl Transform for Translate {
-  method transform(p: Vec2) -> Vec2 { Vec2 { x: p.x + self.dx, y: p.y + self.dy } }
-  method label() -> string { "translate" }
-}
-
-type ScaleT { k: int }
-impl Transform for ScaleT {
-  method transform(p: Vec2) -> Vec2 { Vec2 { x: p.x * self.k, y: p.y * self.k } }
-  method label() -> string { "scale" }
-}
-
-// rotate 90 degrees CCW: (x,y) -> (-y, x)
-type Rotate90 { }
-impl Transform for Rotate90 {
-  method transform(p: Vec2) -> Vec2 { Vec2 { x: 0 - p.y, y: p.x } }
-  method label() -> string { "rotate90" }
-}
-
-// Apply a pipeline of transforms (Vec<dyn Transform>) to a starting point.
-fn run_transforms(start: Vec2, steps: Vec<dyn Transform>) -> Vec2 {
-  let mut cur: Vec2 = start
-  for t in steps {
-    let next: Vec2 = t.transform(cur)
-    cur = next
-  }
-  cur
-}
-
-// Build a comma-joined label trace of a transform pipeline.
-fn transform_trace(steps: Vec<dyn Transform>) -> string {
-  let mut out: string = ""
-  let mut first: bool = true
-  for t in steps {
-    let l: string = t.label()
-    if first { out = l; first = false } else { out = out + ">" + l }
-  }
-  out
-}
+let b1 = Book   { title: "Shape Lang",  isbn: "978-1", cents: 4999, qty: 12 }
+let b2 = Book   { title: "Type Theory", isbn: "978-2", cents: 8999, qty: 3 }
+let g1 = Gadget { name:  "Keyboard",    sku:  "KB-01", cents: 12000, qty: 25 }
+let g2 = Gadget { name:  "Mouse",       sku:  "MS-02", cents: 3500,  qty: 40 }
+let s1 = Subscription { plan: "Pro", monthly_cents: 1500, seats: 5 }
 
 // =====================================================================
-// 11. Reducer routines built on the BUILTIN `.reduce` method.
-//
-//     NOTE (book-gap): a user-defined HOF taking a *two-argument numeric*
-//     closure (`fn fold_with(xs, f, seed)`) is not expressible in the book's
-//     surface. The closure's param types can only be pinned by a method
-//     signature (`.reduce`) or a single-callee `apply(f, x)` shape; forwarding
-//     a 2-arg numeric closure through an untyped `f` param fails inference,
-//     and annotating `|acc: int, x: int|` is a parse error ("type annotations
-//     not allowed inside the pipes", functions.mdx). So we fold via the
-//     builtin `.reduce`, whose signature pins the element type (the book's
-//     recommended way to type a lambda).
+// SECTION 10 — Checks
+// Every expected value is computed by hand from the fixtures + book semantics.
 // =====================================================================
 
-fn running_max(xs: Vec<int>) -> int {
-  xs.reduce(|acc, x| if x > acc { x } else { acc }, -1000000)
-}
+// --- Section 1: combinators ---
+let r001 = ck_int("identity_int",   identity(99), 99)
+let r002 = ck_str("identity_str",   identity("abc"), "abc")
+let r003 = ck_bool("identity_bool", identity(false), false)
+let r004 = ck_num("identity_num",   identity(2.5), 2.5)
+let r005 = ck_int("const_first",    const_first(7, "z"), 7)
+let r006 = ck_str("const_second",   const_second(7, "z"), "z")
+let r007 = ck_int("echo_int",       echo(123), 123)
+let r008 = ck_str("echo_str",       echo("hi"), "hi")
+let r009 = ck_int("tag_of_book",    tag_of(b1), 0)
+let r010 = ck_int("tag_of_int",     tag_of(5), 0)
 
-fn running_sum(xs: Vec<int>) -> int {
-  xs.reduce(|acc, x| acc + x, 0)
-}
+// --- Section 4: trait-bound generics, monomorphized at Book/Gadget/Subscription ---
+let r011 = ck_str("name_book",      name_of(b1), "Shape Lang")
+let r012 = ck_str("name_gadget",    name_of(g1), "Keyboard")
+let r013 = ck_str("name_sub",       name_of(s1), "Pro")
+let r014 = ck_str("name_w_book",    name_of_w(b2), "Type Theory")
+let r015 = ck_str("name_w_gadget",  name_of_w(g2), "Mouse")
 
-fn running_product(xs: Vec<int>) -> int {
-  xs.reduce(|acc, x| acc * x, 1)
-}
+// line_item: "<name> = <cents>"
+let r016 = ck_str("line_book1",     line_item(b1), "Shape Lang = 4999")
+let r017 = ck_str("line_gadget1",   line_item(g1), "Keyboard = 12000")
+let r018 = ck_str("line_sub",       line_item(s1), "Pro = 1500")
 
-fn running_count(xs: Vec<int>) -> int {
-  xs.reduce(|acc, x| acc + 1, 0)
-}
+// shelf_line: "<name> | price <p> | qty <q>"
+let r019 = ck_str("shelf_book1",    shelf_line(b1), "Shape Lang | price 4999 | qty 12")
+let r020 = ck_str("shelf_gadget2",  shelf_line(g2), "Mouse | price 3500 | qty 40")
+
+// coded_label: "<code>:<name>"
+let r021 = ck_str("coded_book1",    coded_label(b1), "978-1:Shape Lang")
+let r022 = ck_str("coded_gadget1",  coded_label(g1), "KB-01:Keyboard")
+
+// inventory_value = price * stock
+let r023 = ck_int("inv_book1",      inventory_value(b1), 4999 * 12)   // 59988
+let r024 = ck_int("inv_book2",      inventory_value(b2), 8999 * 3)    // 26997
+let r025 = ck_int("inv_gadget1",    inventory_value(g1), 12000 * 25)  // 300000
+let r026 = ck_int("inv_gadget2",    inventory_value(g2), 3500 * 40)   // 140000
+let r027 = ck_int("inv_sub",        inventory_value(s1), 1500 * 5)    // 7500
+
+// discounted_price: p - (p*pct)/100 (integer truncating)
+let r028 = ck_int("disc_book1_10",  discounted_price(b1, 10), 4999 - (4999 * 10) / 100) // 4999-499=4500
+let r029 = ck_int("disc_gadget1_25",discounted_price(g1, 25), 12000 - (12000 * 25) / 100) // 12000-3000=9000
+let r030 = ck_int("disc_book2_0",   discounted_price(b2, 0), 8999)
+
+// catalog_entry: "[<category>] <name> (<price>)"  — Catalogable supertrait
+let r031 = ck_str("cat_book1",      catalog_entry(b1), "[media] Shape Lang (4999)")
+let r032 = ck_str("cat_gadget1",    catalog_entry(g1), "[hardware] Keyboard (12000)")
+
+// labelled (generic-calls-generic)
+let r033 = ck_str("lab_book2",      labelled("ITEM", b2), "ITEM: Type Theory")
+let r034 = ck_str("lab_gadget2",    labelled("ITEM", g2), "ITEM: Mouse")
+
+// --- Section 5: defaults + named args ---
+let r035 = ck_str("money_default",  money(4999), "$49.99")
+let r036 = ck_str("money_symbol",   money(1500, "€"), "€15.00")
+let r037 = ck_str("money_named",    money(cents: 305, symbol: "$"), "$3.05")
+let r038 = ck_str("money_pad",      money(4005), "$40.05")
+let r039 = ck_int("box_all_default",box_vol(), 1)
+let r040 = ck_int("box_one",        box_vol(5), 5)
+let r041 = ck_int("box_two",        box_vol(5, 6), 30)
+let r042 = ck_int("box_three",      box_vol(2, 3, 4), 24)
+let r043 = ck_int("box_named",      box_vol(h: 6), 6)             // w=1,h=6,d=1
+let r044 = ck_int("box_named2",     box_vol(w: 2, d: 5), 10)      // w=2,h=1,d=5
+let r045 = ck_int("box_ooo",        box_vol(d: 4, w: 2, h: 3), 24)
+
+// --- Section 6: concrete array utilities ---
+let prices: Vec<int> = [4999, 8999, 12000, 3500, 1500]
+let stocks: Vec<int> = [12, 3, 25, 40, 5]
+let r046 = ck_int("sum_prices",     sum_ints(prices), 4999 + 8999 + 12000 + 3500 + 1500) // 30998
+let r047 = ck_int("sum_stocks",     sum_ints(stocks), 12 + 3 + 25 + 40 + 5)              // 85
+let r048 = ck_int("max_price",      max_int(prices), 12000)
+let r049 = ck_int("min_price",      min_int(prices), 1500)
+let r050 = ck_int("max_stock",      max_int(stocks), 40)
+let r051 = ck_int("min_stock",      min_int(stocks), 3)
+let r052 = ck_int("count_above5k",  count_above(prices, 5000), 2)  // 8999, 12000
+let r053 = ck_int("count_above10",  count_above(stocks, 10), 3)    // 12, 25, 40
+let r054 = ck_str("join_stocks",    join_ints(stocks, "-"), "12-3-25-40-5")
+let r055 = ck_str("join_prices",    join_ints(prices, ","), "4999,8999,12000,3500,1500")
+
+// map / filter / reduce on concrete Vec<int>
+let halved = prices.map(|p| p / 2)
+let r056 = ck_int("map_halved0",    halved[0], 2499)   // 4999/2 truncates
+let r057 = ck_int("map_halved2",    halved[2], 6000)
+let cheap = prices.filter(|p| p < 5000)
+let r058 = ck_int("filter_cheap_len", cheap.len(), 3)  // 4999, 3500, 1500
+let r059 = ck_int("filter_cheap0",  cheap[0], 4999)
+let reduced = prices.reduce(|acc, p| acc + p, 0)
+let r060 = ck_int("reduce_sum",     reduced, 30998)
+
+// --- Section 7: higher-order + capture ---
+let dbl = |x| x * 2
+let r061 = ck_int("apply_dbl",      apply_int(dbl, 21), 42)
+// Module-scope read-only capture, exactly the book's "Closures and Capture" shape.
+let store = "WAREHOUSE"
+let banner = |n| f"{store} has {n} items"
+let r062 = ck_str("report_header",  banner(3), "WAREHOUSE has 3 items")
+let bias = 100
+let add_bias = |x| x + bias
+let r063 = ck_int("capture_bias",   add_bias(5), 105)
+let r064 = ck_int("capture_bias2",  add_bias(50), 150)
+
+// --- Section 8: conversion traits (primitive) ---
+let r065 = ck_num("bool_true_num",  bool_to_num(true), 1.0)
+let r066 = ck_num("bool_false_num", bool_to_num(false), 0.0)
+let parsed = try_parse_int("42")
+let r067 = ck_int("parse_ok",       match parsed { Ok(v) => v, Err(e) => -1 }, 42)
+let parsed2 = try_parse_int("7")
+let r068 = ck_int("parse_ok2",      match parsed2 { Ok(v) => v, Err(e) => -1 }, 7)
 
 // =====================================================================
-// MAIN: build fixtures, compute, assert against pre-derived expected values.
+// SECTION 11 — Aggregate report assembled via generics (more checks)
+// Build a multi-line report string by calling the generic line builders
+// in sequence, asserting each segment.
 // =====================================================================
 
-fn main() {
-  // ---- 1. Geometry over dyn Geometry --------------------------------
-  // Fixtures:
-  //   Square{side:3}      area=9     perim=12
-  //   Rectangle{w:4,h:6}  area=24    perim=20
-  //   RightTriangle 3-4-5 area=6     perim=12
-  //   LShape{2,3, 5,1}    area=2*3+5*1=11   perim=2*(2+3+1)=12
-  let figures: Vec<dyn Geometry> = [
-    Square { side: 3 },
-    Rectangle { w: 4, h: 6 },
-    RightTriangle { a: 3, b: 4, hyp: 5 },
-    LShape { w1: 2, h1: 3, w2: 5, h2: 1 },
-  ]
+fn full_report_book(x: Book) -> string {
+  let l1 = catalog_entry(x)
+  let l2 = shelf_line(x)
+  let l3 = coded_label(x)
+  f"{l1}\n{l2}\n{l3}"
+}
 
-  // total area = 9+24+6+11 = 50  -> milli 50000
-  check_int("geo_total_area", 50000, total_area_milli(figures))
-  // total perimeter = 12+20+12+12 = 56 -> milli 56000
-  check_int("geo_total_perimeter", 56000, total_perimeter_milli(figures))
-  // max area = 24 -> milli 24000
-  check_int("geo_max_area", 24000, max_area_milli(figures))
-  // count of "square" = 1
-  check_int("geo_count_square", 1, count_named(figures, "square"))
-  // count of "circle" = 0
-  check_int("geo_count_circle", 0, count_named(figures, "circle"))
-  // name list joined
-  check_str("geo_names", "square,rectangle,right_triangle,l_shape", name_list(figures))
+let rep_b1 = full_report_book(b1)
+let exp_b1 = "[media] Shape Lang (4999)\nShape Lang | price 4999 | qty 12\n978-1:Shape Lang"
+let r069 = ck_str("report_b1",      rep_b1, exp_b1)
 
-  // ---- 2. extend-block methods --------------------------------------
-  let sq = Square { side: 5 }
-  // diagonal_sq = 2*25 = 50
-  check_int("sq_diag_sq", 50, sq.diagonal_sq())
-  check_bool("sq_is_unit_false", false, sq.is_unit())
-  let unit = Square { side: 1 }
-  check_bool("sq_is_unit_true", true, unit.is_unit())
+let rep_b2 = full_report_book(b2)
+let exp_b2 = "[media] Type Theory (8999)\nType Theory | price 8999 | qty 3\n978-2:Type Theory"
+let r070 = ck_str("report_b2",      rep_b2, exp_b2)
 
-  let r1 = Rectangle { w: 7, h: 7 }
-  check_bool("rect_is_square_true", true, r1.is_square())
-  let r2 = Rectangle { w: 7, h: 3 }
-  check_bool("rect_is_square_false", false, r2.is_square())
-  check_int("rect_aspect_num", 7, r2.aspect_num())
-  check_int("rect_aspect_den", 3, r2.aspect_den())
+// Total catalog value across all items, summed via inventory_value generic.
+let total_value =
+  inventory_value(b1) +
+  inventory_value(b2) +
+  inventory_value(g1) +
+  inventory_value(g2) +
+  inventory_value(s1)
+let exp_total = 59988 + 26997 + 300000 + 140000 + 7500   // 534485
+let r071 = ck_int("total_value",    total_value, exp_total)
 
-  // ---- 3. Higher-order functions + closures -------------------------
-  let double = |x| x * 2
-  // apply(double, 21) = 42
-  check_int("apply_double", 42, apply(double, 21))
-  // twice(double, 3) = double(double(3)) = 12
-  check_int("twice_double", 12, twice(double, 3))
+// Discounted total (each item 10% off), summed.
+let disc_total =
+  discounted_price(b1, 10) +
+  discounted_price(b2, 10) +
+  discounted_price(g1, 10) +
+  discounted_price(g2, 10) +
+  discounted_price(s1, 10)
+// b1: 4999-499=4500 ; b2: 8999-899=8100 ; g1:12000-1200=10800 ; g2:3500-350=3150 ; s1:1500-150=1350
+let exp_disc = 4500 + 8100 + 10800 + 3150 + 1350   // 27900
+let r072 = ck_int("disc_total",     disc_total, exp_disc)
 
-  let inc = |x| x + 1
-  // twice(inc, 10) = 12
-  check_int("twice_inc", 12, twice(inc, 10))
+// Money formatting over the total (cents -> $).
+let r073 = ck_str("money_total",    money(total_value), "$5344.85")
+let r074 = ck_str("money_disc",     money(disc_total), "$279.00")
 
-  // closure-returning fn bound to let
-  let plus10 = adder(10)
-  check_int("adder_plus10", 15, plus10(5))
-  let plus100 = adder(100)
-  check_int("adder_plus100", 142, plus100(42))
+// =====================================================================
+// SECTION 12 — Generic chains across multiple distinct types
+// Re-instantiate the same generic at every fixture type to stress
+// monomorphization breadth.
+// =====================================================================
 
-  // scaler with capture
-  let times3 = scaler(3)
-  check_int("scaler_times3", 21, times3(7))
-  let times0 = scaler(0)
-  check_int("scaler_times0", 0, times0(99))
+let names_concat =
+  name_of(b1) + "|" +
+  name_of(b2) + "|" +
+  name_of(g1) + "|" +
+  name_of(g2) + "|" +
+  name_of(s1)
+let r075 = ck_str("names_concat", names_concat, "Shape Lang|Type Theory|Keyboard|Mouse|Pro")
 
-  // pipeline: start=5 -> +1=6 -> *2=12 -> +2=14
-  check_int("pipeline_5", 14, run_pipeline(5))
-  // start=0 -> +1=1 -> *2=2 -> +2=4
-  check_int("pipeline_0", 4, run_pipeline(0))
+let lines_concat =
+  line_item(b1) + " ; " +
+  line_item(g2) + " ; " +
+  line_item(s1)
+let r076 = ck_str("lines_concat", lines_concat,
+  "Shape Lang = 4999 ; Mouse = 3500 ; Pro = 1500")
 
-  // read-only capture (book: "Closures and Capture")
-  let base = 1000
-  let add_base = |x| x + base
-  check_int("capture_base_1", 1005, add_base(5))
-  check_int("capture_base_2", 1042, add_base(42))
+// where-clause variant across types.
+let names_w_concat =
+  name_of_w(b1) + "/" + name_of_w(g1) + "/" + name_of_w(s1)
+let r077 = ck_str("names_w_concat", names_w_concat, "Shape Lang/Keyboard/Pro")
 
-  // ---- 4. Default parameters ----------------------------------------
-  // grid_area() = 4*4 = 16
-  check_int("grid_default", 16, grid_area())
-  // grid_area(3) = 3*4 = 12 (cols defaults to 4)
-  check_int("grid_one_arg", 12, grid_area(3))
-  // grid_area(3, 2) = 6
-  check_int("grid_two_args", 6, grid_area(3, 2))
-  // pad_width("x") = 8-1 = 7
-  check_int("pad_default", 7, pad_width("x"))
-  // pad_width("x", 12) = 11
-  check_int("pad_explicit", 11, pad_width("x", 12))
+// identity threaded through every fixture's display.
+let id_chain =
+  identity(name_of(b2)) + ":" + identity(name_of(g2))
+let r078 = ck_str("id_chain", id_chain, "Type Theory:Mouse")
 
-  // ---- 5. Inventory over dyn Priced ---------------------------------
-  // Widget{qty:10, price:250}     unit=250  line=2500
-  // Gadget{qty:4, price:900, disc:100} unit=800 line=3200
-  // Bundle{count:6, each:150}     unit=150  line=900
-  let inventory: Vec<dyn Priced> = [
-    Widget { qty: 10, price_cents: 250 },
-    Gadget { qty: 4, price_cents: 900, discount_cents: 100 },
-    Bundle { count: 6, each_cents: 150 },
-  ]
-  // value = 2500 + 3200 + 900 = 6600
-  check_int("inv_value", 6600, inventory_value_cents(inventory))
-  // units = 10 + 4 + 6 = 20
-  check_int("inv_units", 20, inventory_units(inventory))
-  // max unit price = 800
-  check_int("inv_max_unit", 800, max_unit_price(inventory))
+// =====================================================================
+// SECTION 13 — Numeric generic-free aggregations over derived vectors
+// =====================================================================
 
-  // ---- 5b. Supertrait declaration + direct-call (book: "Supertraits") ----
-  // Beam implements Sized3 : Tagged; call both the subtrait method and the
-  // supertrait method DIRECTLY on the concrete value (no dyn indirection).
-  let beam = Beam { name: "joist", length: 240 }
-  check_str("beam_tag", "joist", beam.tag())     // supertrait method
-  check_int("beam_span", 240, beam.span())       // subtrait method
+let inv_values: Vec<int> = [
+  inventory_value(b1),
+  inventory_value(b2),
+  inventory_value(g1),
+  inventory_value(g2),
+  inventory_value(s1)
+]
+let r079 = ck_int("inv_sum",       sum_ints(inv_values), exp_total)
+let r080 = ck_int("inv_max",       max_int(inv_values), 300000)
+let r081 = ck_int("inv_min",       min_int(inv_values), 7500)
+let r082 = ck_int("inv_above100k", count_above(inv_values, 100000), 2) // 300000, 140000
+let r083 = ck_str("inv_join",      join_ints(inv_values, ","),
+  "59988,26997,300000,140000,7500")
 
-  // ---- 6. Array-method generics + closure inference -----------------
-  let nums: Vec<int> = [1, 2, 3, 4, 5, 6, 7, 8]
-  // sum of squares 1..8 = 1+4+9+16+25+36+49+64 = 204
-  check_int("sum_of_squares", 204, sum_of_squares(nums))
-  // count evens = 2,4,6,8 = 4
-  check_int("count_evens", 4, count_evens(nums))
-  // max = 8
-  check_int("max_of", 8, max_of(nums))
-  // count above 5 = 6,7,8 = 3
-  check_int("count_above_5", 3, count_above(nums, 5))
-  // count above 0 = 8
-  check_int("count_above_0", 8, count_above(nums, 0))
+// =====================================================================
+// SECTION 14 — More generic combinators + bound-dispatch batteries
+// Additional generic helpers, each instantiated at several concrete types,
+// with fully hand-derived expected values.
+// =====================================================================
 
-  // direct .map / .filter with inferred closures (book: Closure Inference)
-  let tens = nums.map(|x| x * 10)
-  check_int("map_first", 10, tens[0])
-  check_int("map_last", 80, tens[7])
-  let bigs = nums.filter(|x| x > 4)
-  check_int("filter_count", 4, bigs.len())
-  check_int("filter_first", 5, bigs[0])
+// Generic "is the same display string" comparison across any Display types.
+fn same_name<T: Display, U: Display>(a: T, b: U) -> bool {
+  a.display() == b.display()
+}
 
-  // chained: map then filter then reduce
-  let chained = nums.map(|x| x + 1)            // 2..9
-  let chained2 = chained.filter(|x| x % 3 == 0) // 3,6,9
-  let chained_sum = chained2.reduce(|acc, x| acc + x, 0) // 18
-  check_int("chain_sum", 18, chained_sum)
+// Generic price comparison: returns the cheaper item's price (Priced bound).
+fn cheaper_price<T: Priced, U: Priced>(a: T, b: U) -> int {
+  let pa = a.price()
+  let pb = b.price()
+  if pa < pb { pa } else { pb }
+}
 
-  // ---- 7. Block-body lambda (book: Lambdas, block body) -------------
-  let processed = nums.map(|x| {
-    let bumped = x + 1
-    bumped * 2
-  })
-  // first: (1+1)*2 = 4 ; last: (8+1)*2 = 18
-  check_int("block_lambda_first", 4, processed[0])
-  check_int("block_lambda_last", 18, processed[7])
+// Generic richer-of comparison: returns higher inventory value.
+fn richer_value<T: Priced + Stocked, U: Priced + Stocked>(a: T, b: U) -> int {
+  let va = a.price() * a.stock()
+  let vb = b.price() * b.stock()
+  if va > vb { va } else { vb }
+}
 
-  // ---- 8. number section (typed-let idiom + dyn Weighed) ------------
-  // Crate masses: 1.5, 2.25, 0.75 -> total 4.5 kg
-  let crates: Vec<dyn Weighed> = [
-    Crate { mass: 1.5 },
-    Crate { mass: 2.25 },
-    Crate { mass: 0.75 },
-  ]
-  // expected 4.5 -> milli 4500
-  check_num_milli("total_kilos", 4500, total_kilos(crates))
+// Generic that formats a "receipt line": code + name + price, for Display+Priced+Coded.
+fn receipt_line<T: Display + Priced + Coded>(x: T) -> string {
+  f"{x.code()} {x.display()} ${x.price()}"
+}
 
-  // primitive conversion (book: Into/TryInto). true as number = 1.0
-  let one: number = true as number
-  check_num_milli("bool_as_number", 1000, one)
-  let f7: number = 7 as number
-  check_num_milli("int_as_number", 7000, f7)
+// Generic count of distinct displays in a fixed pair.
+fn distinct_pair<T: Display, U: Display>(a: T, b: U) -> int {
+  if a.display() == b.display() { 1 } else { 2 }
+}
 
-  // ---- 9. A "generic-shaped" dispatch table via dyn + closures ------
-  // Combine both hierarchies: count figures whose area exceeds a threshold
-  // using a captured threshold inside a manual loop (closures-as-predicate).
-  let thr_milli = 10000   // area threshold = 10
-  let mut big_figs = 0
-  for f in figures {
-    let a: int = f.area_milli()
-    if a > thr_milli { big_figs = big_figs + 1 }
-  }
-  // areas: 9,24,6,11 -> >10: 24,11 -> 2
-  check_int("big_figs", 2, big_figs)
+// Generic tax computation: 8% sales tax, integer truncating, on any Priced.
+fn with_tax<T: Priced>(x: T) -> int {
+  let p = x.price()
+  p + (p * 8) / 100
+}
 
-  // ---- 10. Cross-check totals with independent recomputation --------
-  // Recompute total area by hand-summing per-figure (defensive double check)
-  let s_a: int = (Square { side: 3 }).area_milli()
-  let r_a: int = (Rectangle { w: 4, h: 6 }).area_milli()
-  let t_a: int = (RightTriangle { a: 3, b: 4, hyp: 5 }).area_milli()
-  let l_a: int = (LShape { w1: 2, h1: 3, w2: 5, h2: 1 }).area_milli()
-  let manual_total = s_a + r_a + t_a + l_a
-  check_int("manual_total_area", 50000, manual_total)
-  check_int("manual_eq_agg", total_area_milli(figures), manual_total)
+// Generic restock cost: (target - current stock) * price, clamped at 0 deficit.
+fn restock_cost<T: Priced + Stocked>(x: T, target: int) -> int {
+  let cur = x.stock()
+  let deficit = if target > cur { target - cur } else { 0 }
+  deficit * x.price()
+}
 
-  // ---- 11. Larger stress: build N squares, sum areas --------------
-  // squares side 1..20, area = sum of i^2 for i in 1..=20 = 2870 -> milli
-  let sides: Vec<int> = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
-  let mut sq_area_sum: int = 0
-  for s in sides {
-    let sq2 = Square { side: s }
-    let a: int = sq2.area_milli()
-    sq_area_sum = sq_area_sum + a
-  }
-  // sum_{1..20} i^2 = 2870 ; milli = 2870000
-  check_int("squares_1_20_area", 2870000, sq_area_sum)
+// --- same_name checks ---
+let r084 = ck_bool("same_name_diff", same_name(b1, g1), false)  // "Shape Lang" vs "Keyboard"
+let r085 = ck_bool("same_name_self", same_name(b1, b1), true)   // identical display
+let r086 = ck_bool("same_name_bg",   same_name(g2, s1), false)  // "Mouse" vs "Pro"
 
-  // perimeters of squares 1..20: 4*sum(i)=4*210=840 -> milli 840000
-  let mut sq_perim_sum: int = 0
-  for s in sides {
-    let sq3 = Square { side: s }
-    let p: int = sq3.perimeter_milli()
-    sq_perim_sum = sq_perim_sum + p
-  }
-  check_int("squares_1_20_perim", 840000, sq_perim_sum)
+// --- cheaper_price checks ---
+let r087 = ck_int("cheap_b1_b2",    cheaper_price(b1, b2), 4999)   // 4999 < 8999
+let r088 = ck_int("cheap_g1_g2",    cheaper_price(g1, g2), 3500)   // 3500 < 12000
+let r089 = ck_int("cheap_b1_s1",    cheaper_price(b1, s1), 1500)   // 1500 < 4999
+let r090 = ck_int("cheap_g2_s1",    cheaper_price(g2, s1), 1500)   // 1500 < 3500
 
-  // ---- 12. Closure pipeline over the sides list -------------------
-  // map each side to its diagonal_sq via extend method, sum them.
-  // diagonal_sq(i) = 2 i^2 ; sum over 1..20 = 2*2870 = 5740
-  let mut diag_sum: int = 0
-  for s in sides {
-    let sq4 = Square { side: s }
-    let d: int = sq4.diagonal_sq()   // bind to typed local (kind-stamp)
-    diag_sum = diag_sum + d
-  }
-  check_int("diag_sum_1_20", 5740, diag_sum)
+// --- richer_value checks (inventory value = price*stock) ---
+// b1=59988, b2=26997, g1=300000, g2=140000, s1=7500
+let r091 = ck_int("rich_b1_b2",     richer_value(b1, b2), 59988)
+let r092 = ck_int("rich_g1_g2",     richer_value(g1, g2), 300000)
+let r093 = ck_int("rich_b1_s1",     richer_value(b1, s1), 59988)
+let r094 = ck_int("rich_g2_b2",     richer_value(g2, b2), 140000)
 
-  // ---- 13. Inventory scaling stress -------------------------------
-  // 10 widgets each qty=i, price=i*100 ; line=i * (i*100) = 100 i^2
-  // total = 100 * sum_{1..10} i^2 = 100 * 385 = 38500
-  let qtys: Vec<int> = [1,2,3,4,5,6,7,8,9,10]
-  let mut inv_total: int = 0
-  for i in qtys {
-    let invn: Vec<dyn Priced> = [Widget { qty: i, price_cents: i * 100 }]
-    let v: int = inventory_value_cents(invn)
-    inv_total = inv_total + v
-  }
-  check_int("inv_scale_total", 38500, inv_total)
+// --- receipt_line checks (Subscription has no Coded impl, so only Book/Gadget) ---
+let r095 = ck_str("receipt_b1",     receipt_line(b1), "978-1 Shape Lang $4999")
+let r096 = ck_str("receipt_g1",     receipt_line(g1), "KB-01 Keyboard $12000")
+let r097 = ck_str("receipt_g2",     receipt_line(g2), "MS-02 Mouse $3500")
+let r098 = ck_str("receipt_b2",     receipt_line(b2), "978-2 Type Theory $8999")
 
-  // ---- 14. higher-order over a list: apply a closure to each --------
-  // Use adder-returned closure inside a loop (read-only capture of returned fn)
-  let add5 = adder(5)
-  let mut hof_sum: int = 0
-  for i in qtys {
-    let r: int = add5(i)   // bind closure-call result to typed local
-    hof_sum = hof_sum + r
-  }
-  // sum_{1..10}(i+5) = 55 + 50 = 105
-  check_int("hof_loop_sum", 105, hof_sum)
+// --- distinct_pair checks ---
+let r099 = ck_int("distinct_bg",    distinct_pair(b1, g1), 2)
+let r100 = ck_int("distinct_self",  distinct_pair(b2, b2), 1)
 
-  // ---- 16. Statistics module over Vec<int> --------------------------
-  let data: Vec<int> = [4, 8, 15, 16, 23, 42]
-  // sum = 4+8+15+16+23+42 = 108
-  check_int("stat_sum", 108, stat_sum(data))
-  // product = 4*8*15*16*23*42 = 4*8=32, *15=480, *16=7680, *23=176640, *42=7418880
-  check_int("stat_product", 7418880, stat_product(data))
-  // min = 4, max = 42
-  check_int("stat_min", 4, stat_min(data))
-  check_int("stat_max", 42, stat_max(data))
-  // count >= 16 : 16,23,42 = 3
-  check_int("stat_count_ge16", 3, stat_count_ge(data, 16))
-  // count >= 4 : all 6
-  check_int("stat_count_ge4", 6, stat_count_ge(data, 4))
+// --- with_tax checks (price + price*8/100, truncating) ---
+let r101 = ck_int("tax_b1",         with_tax(b1), 4999 + (4999 * 8) / 100)   // 4999+399=5398
+let r102 = ck_int("tax_g1",         with_tax(g1), 12000 + (12000 * 8) / 100) // 12000+960=12960
+let r103 = ck_int("tax_s1",         with_tax(s1), 1500 + (1500 * 8) / 100)   // 1500+120=1620
+let r104 = ck_int("tax_g2",         with_tax(g2), 3500 + (3500 * 8) / 100)   // 3500+280=3780
 
-  // exact-divisible data for mean/variance: [2,4,6,8] sum=20 n=4 mean=5
-  let evend: Vec<int> = [2, 4, 6, 8]
-  // mean_milli = 20*1000/4 = 5000
-  check_int("stat_mean_milli", 5000, stat_mean_milli(evend))
-  // variance numerator = (2-5)^2+(4-5)^2+(6-5)^2+(8-5)^2 = 9+1+1+9 = 20
-  check_int("stat_var_num", 20, stat_var_num(evend))
-  // map_sum with k=3 over [2,4,6,8] -> 6+12+18+24 = 60
-  check_int("stat_map_sum_3", 60, stat_map_sum(evend, 3))
-  // map_sum with k=0 -> 0
-  check_int("stat_map_sum_0", 0, stat_map_sum(evend, 0))
+// --- restock_cost checks ---
+// b1: stock 12, target 20 -> deficit 8 * 4999 = 39992
+let r105 = ck_int("restock_b1_20",  restock_cost(b1, 20), 8 * 4999)
+// b2: stock 3, target 10 -> deficit 7 * 8999 = 62993
+let r106 = ck_int("restock_b2_10",  restock_cost(b2, 10), 7 * 8999)
+// g1: stock 25, target 20 -> deficit 0 -> 0
+let r107 = ck_int("restock_g1_20",  restock_cost(g1, 20), 0)
+// s1: seats 5, target 12 -> deficit 7 * 1500 = 10500
+let r108 = ck_int("restock_s1_12",  restock_cost(s1, 12), 7 * 1500)
 
-  // ---- 17. Vec2 extend-method algebra -------------------------------
-  let a = Vec2 { x: 1, y: 2 }
-  let b = Vec2 { x: 3, y: 4 }
-  let c: Vec2 = a.add(b)            // (4,6)
-  check_int("vec2_add_x", 4, c.x)
-  check_int("vec2_add_y", 6, c.y)
-  let s: Vec2 = a.scale(5)          // (5,10)
-  check_int("vec2_scale_x", 5, s.x)
-  check_int("vec2_scale_y", 10, s.y)
-  // dot = 1*3 + 2*4 = 11
-  check_int("vec2_dot", 11, a.dot(b))
-  // manhattan of (-3, 7) = 3 + 7 = 10
-  let neg = Vec2 { x: 0 - 3, y: 7 }
-  check_int("vec2_manhattan", 10, neg.manhattan())
+// =====================================================================
+// SECTION 15 — Aggregated batteries over derived vectors
+// =====================================================================
 
-  // ---- 18. Transform pipeline over Vec<dyn Transform> ---------------
-  // start (1,1):
-  //   translate(+2,+3) -> (3,4)
-  //   scale(2)         -> (6,8)
-  //   rotate90         -> (-8, 6)
-  let start = Vec2 { x: 1, y: 1 }
-  let pipeline: Vec<dyn Transform> = [
-    Translate { dx: 2, dy: 3 },
-    ScaleT { k: 2 },
-    Rotate90 { },
-  ]
-  let result: Vec2 = run_transforms(start, pipeline)
-  check_int("transform_x", 0 - 8, result.x)
-  check_int("transform_y", 6, result.y)
-  check_str("transform_trace", "translate>scale>rotate90", transform_trace(pipeline))
+// Tax-inclusive prices for the catalog, derived via the generic with_tax.
+let taxed: Vec<int> = [
+  with_tax(b1),  // 5398
+  with_tax(b2),  // 9718 (8999 + 719)
+  with_tax(g1),  // 12960
+  with_tax(g2),  // 3780
+  with_tax(s1)   // 1620
+]
+let r109 = ck_int("taxed_b2",       taxed[1], 8999 + (8999 * 8) / 100) // 8999+719=9718
+let r110 = ck_int("taxed_sum",      sum_ints(taxed), 5398 + 9718 + 12960 + 3780 + 1620) // 33476
+let r111 = ck_int("taxed_max",      max_int(taxed), 12960)
+let r112 = ck_int("taxed_min",      min_int(taxed), 1620)
+let r113 = ck_int("taxed_above5k",  count_above(taxed, 5000), 3) // 5398,9718,12960
+let r114 = ck_str("taxed_join",     join_ints(taxed, "|"), "5398|9718|12960|3780|1620")
 
-  // a second pipeline: rotate then translate
-  // start (2,0): rotate90 -> (0,2) ; translate(+1,+1) -> (1,3)
-  let start2 = Vec2 { x: 2, y: 0 }
-  let pipeline2: Vec<dyn Transform> = [ Rotate90 { }, Translate { dx: 1, dy: 1 } ]
-  let result2: Vec2 = run_transforms(start2, pipeline2)
-  check_int("transform2_x", 1, result2.x)
-  check_int("transform2_y", 3, result2.y)
+// Cheaper-of pairwise reductions threaded by hand.
+let cheap_bg = cheaper_price(b1, g1)   // min(4999,12000)=4999
+let r115 = ck_int("cheap_bg",       cheap_bg, 4999)
 
-  // ---- 19. reduce-based reducer routines ----------------------------
-  let foldd: Vec<int> = [5, 1, 9, 3, 7]
-  check_int("running_max", 9, running_max(foldd))
-  // running_sum = 25
-  check_int("running_sum", 25, running_sum(foldd))
-  // running_count via +1 ignoring x -> length 5
-  check_int("running_count", 5, running_count(foldd))
-  // running_product = 5*1*9*3*7 = 945
-  check_int("running_product", 945, running_product(foldd))
+// Map+filter on the taxed vector to stress closure inference on derived data.
+let big_taxed = taxed.filter(|t| t > 5000)
+let r116 = ck_int("big_taxed_len",  big_taxed.len(), 3)
+let r117 = ck_int("big_taxed_0",    big_taxed[0], 5398)
+let halved_taxed = taxed.map(|t| t / 2)
+let r118 = ck_int("halved_taxed_0", halved_taxed[0], 2699)   // 5398/2
+let r119 = ck_int("halved_taxed_2", halved_taxed[2], 6480)   // 12960/2
+let taxed_total = taxed.reduce(|acc, t| acc + t, 0)
+let r120 = ck_int("taxed_reduce",   taxed_total, 33476)
 
-  // ---- 20. Cross-module: transform every point in a list, sum dots --
-  // For each side i in 1..5, make point (i, i), rotate90 -> (-i, i),
-  // dot with (1,1) = -i + i = 0. Sum of dots = 0.
-  let smalls: Vec<int> = [1, 2, 3, 4, 5]
-  let rot = Rotate90 { }
-  let ones = Vec2 { x: 1, y: 1 }
-  let mut dot_sum: int = 0
-  for i in smalls {
-    let p = Vec2 { x: i, y: i }
-    let r: Vec2 = rot.transform(p)
-    let d: int = r.dot(ones)
-    dot_sum = dot_sum + d
-  }
-  check_int("rotate_dot_sum", 0, dot_sum)
+// =====================================================================
+// SECTION 16 — Generic identity / projection re-instantiated broadly
+// (monomorphization breadth across every primitive + record type)
+// =====================================================================
 
-  // translate every point by (+10,+10), sum manhattan distances.
-  // point (i,i) -> (i+10, i+10), manhattan = 2*(i+10).
-  // sum over i in 1..5 = 2 * sum(i+10) = 2 * (15+50) = 2*65 = 130
-  let tr = Translate { dx: 10, dy: 10 }
-  let mut man_sum: int = 0
-  for i in smalls {
-    let p = Vec2 { x: i, y: i }
-    let r: Vec2 = tr.transform(p)
-    let m: int = r.manhattan()
-    man_sum = man_sum + m
-  }
-  check_int("translate_manhattan_sum", 130, man_sum)
+let r121 = ck_int("id_b1_price",    identity(b1.cents), 4999)
+let r122 = ck_str("id_b1_title",    identity(b1.title), "Shape Lang")
+let r123 = ck_int("id_g2_qty",      identity(g2.qty), 40)
+let r124 = ck_num("id_num",         identity(3.14), 3.14)
+let r125 = ck_bool("id_cmp",        identity(5 > 3), true)
+let r126 = ck_int("echo_neg",       echo(0 - 7), 0 - 7)
+let r127 = ck_str("echo_empty",     echo(""), "")
+let r128 = ck_int("const_first_rec",const_first(b1.qty, "ignored"), 12)
+let r129 = ck_str("const_second_rec",const_second(99, g1.name), "Keyboard")
 
-  // ---- 21. Mixed geometry + stats: areas of squares 1..6 as a list --
-  // collect area_milli of squares 1..6 into running stats.
-  // areas: 1,4,9,16,25,36 (in units) -> milli x1000.
-  let mut area_list_sum: int = 0
-  let mut area_list_max: int = 0
-  let sides6: Vec<int> = [1, 2, 3, 4, 5, 6]
-  for s6 in sides6 {
-    let sq = Square { side: s6 }
-    let a: int = sq.area_milli()
-    area_list_sum = area_list_sum + a
-    if a > area_list_max { area_list_max = a }
-  }
-  // sum of squares 1..6 = 1+4+9+16+25+36 = 91 -> milli 91000
-  check_int("area6_sum", 91000, area_list_sum)
-  // max = 36 -> milli 36000
-  check_int("area6_max", 36000, area_list_max)
+// =====================================================================
+// SECTION 17 — Named-argument batteries on generic-fed values
+// =====================================================================
 
-  // ---- 22. Inventory item-name trace via dyn Priced -----------------
-  // We dispatch item_name (declared directly on Priced) through dyn.
-  let inv2: Vec<dyn Priced> = [
-    Widget { qty: 1, price_cents: 100 },
-    Gadget { qty: 1, price_cents: 200, discount_cents: 50 },
-    Bundle { count: 1, each_cents: 75 },
-  ]
-  let mut name_trace: string = ""
-  let mut nfirst: bool = true
-  for it in inv2 {
-    let nm: string = it.item_name()
-    if nfirst { name_trace = nm; nfirst = false } else { name_trace = name_trace + "|" + nm }
-  }
-  check_str("inv_name_trace", "widget|gadget|bundle", name_trace)
+let r130 = ck_str("money_b1",       money(cents: b1.cents), "$49.99")
+let r131 = ck_str("money_g1_eur",   money(symbol: "€", cents: g1.cents), "€120.00")
+let r132 = ck_str("money_s1",       money(s1.monthly_cents), "$15.00")
+let r133 = ck_int("box_named_d",    box_vol(d: 7), 7)
+let r134 = ck_int("box_wh",         box_vol(w: 3, h: 3), 9)
+let r135 = ck_int("box_pos_named",  box_vol(2, d: 5), 10) // w=2,h=1,d=5
 
-  // ---- 15. final tally ---------------------------------------------
-  if FAILS == 0 {
-    print("ALL_CHECKS_PASSED")
-  } else {
-    print(f"FAILURES: {FAILS}")
+// =====================================================================
+// SECTION 18 — Catalog grand totals tying the generics together
+// =====================================================================
+
+let grand_taxed = sum_ints(taxed)                  // 33476
+let grand_inv = sum_ints(inv_values)               // 534485
+let r136 = ck_int("grand_taxed",    grand_taxed, 33476)
+let r137 = ck_int("grand_inv",      grand_inv, 534485)
+let r138 = ck_str("grand_inv_money",money(grand_inv), "$5344.85")
+let r139 = ck_int("grand_combo",    grand_taxed + count_above(taxed, 0), 33476 + 5) // all 5 > 0
+let r140 = ck_bool("rich_consistency",
+  richer_value(g1, g2) == max_int(inv_values), true)  // 300000 == 300000
+
+// =====================================================================
+// SECTION 19 — Generic Option-returning selectors + a third record type
+// =====================================================================
+
+type Service {
+  label: string,
+  rate_cents: int,
+  units: int
+}
+
+impl Display for Service { method display() -> string { self.label } }
+impl Priced  for Service { method price() -> int { self.rate_cents } }
+impl Stocked for Service { method stock() -> int { self.units } }
+
+// Generic affordability: Some(price) if it fits the budget, else None.
+fn affordable<T: Priced>(x: T, budget: int) -> Option<int> {
+  let p = x.price()
+  if p <= budget { Some(p) } else { None }
+}
+
+// Generic: unwrap an affordability check to a sentinel.
+fn affordable_or<T: Priced>(x: T, budget: int, sentinel: int) -> int {
+  match affordable(x, budget) {
+    Some(p) => p,
+    None => sentinel
   }
 }
 
-main()
+let sv1 = Service { label: "Consulting", rate_cents: 25000, units: 8 }
+let sv2 = Service { label: "Support",    rate_cents: 5000,  units: 30 }
+
+let r141 = ck_str("svc_name",       name_of(sv1), "Consulting")
+let r142 = ck_int("svc_price",      sv1.price(), 25000)
+let r143 = ck_int("svc_inv",        inventory_value(sv1), 25000 * 8)  // 200000
+let r144 = ck_str("svc_line",       line_item(sv2), "Support = 5000")
+let r145 = ck_str("svc_shelf",      shelf_line(sv2), "Support | price 5000 | qty 30")
+
+// affordable: sv2 price 5000 fits budget 6000; sv1 price 25000 does not fit 6000.
+let r146 = ck_int("afford_sv2",     affordable_or(sv2, 6000, -1), 5000)
+let r147 = ck_int("afford_sv1_no",  affordable_or(sv1, 6000, -1), -1)
+let r148 = ck_int("afford_sv1_yes", affordable_or(sv1, 30000, -1), 25000)
+let r149 = ck_int("afford_b1",      affordable_or(b1, 5000, 0), 4999)   // 4999 <= 5000
+let r150 = ck_int("afford_b2_no",   affordable_or(b2, 5000, 0), 0)      // 8999 > 5000
+
+// with_tax + restock_cost on Service
+let r151 = ck_int("svc_tax",        with_tax(sv2), 5000 + (5000 * 8) / 100)  // 5400
+let r152 = ck_int("svc_restock",    restock_cost(sv2, 50), (50 - 30) * 5000)  // 100000
+let r153 = ck_int("svc_restock0",   restock_cost(sv1, 5), 0)                  // 8 >= 5
+
+// cheaper / richer mixing Service with other types
+let r154 = ck_int("cheap_sv2_b1",   cheaper_price(sv2, b1), 4999)   // min(5000,4999)
+let r155 = ck_int("rich_sv1_g2",    richer_value(sv1, g2), 200000)  // 200000 vs 140000
+
+// =====================================================================
+// SECTION 20 — Combined catalog including the Service items
+// =====================================================================
+
+let all_prices: Vec<int> = [
+  b1.cents, b2.cents, g1.cents, g2.cents, s1.monthly_cents,
+  sv1.rate_cents, sv2.rate_cents
+]
+let r156 = ck_int("all_prices_len", all_prices.len(), 7)
+let r157 = ck_int("all_prices_sum", sum_ints(all_prices),
+  4999 + 8999 + 12000 + 3500 + 1500 + 25000 + 5000) // 60998
+let r158 = ck_int("all_prices_max", max_int(all_prices), 25000)
+let r159 = ck_int("all_prices_min", min_int(all_prices), 1500)
+let r160 = ck_int("all_above10k",   count_above(all_prices, 10000), 2) // 12000, 25000
+
+let all_inv: Vec<int> = [
+  inventory_value(b1), inventory_value(b2),
+  inventory_value(g1), inventory_value(g2),
+  inventory_value(s1), inventory_value(sv1), inventory_value(sv2)
+]
+let r161 = ck_int("all_inv_sum",    sum_ints(all_inv),
+  59988 + 26997 + 300000 + 140000 + 7500 + 200000 + 150000) // 884485
+let r162 = ck_int("all_inv_max",    max_int(all_inv), 300000)
+let r163 = ck_int("all_inv_min",    min_int(all_inv), 7500)
+let r164 = ck_int("svc2_inv",       inventory_value(sv2), 5000 * 30) // 150000
+
+// map/filter/reduce over the combined price vector
+let discounted_all = all_prices.map(|p| p - (p * 10) / 100)
+let r165 = ck_int("disc_all_0",     discounted_all[0], 4999 - 499)   // 4500
+let r166 = ck_int("disc_all_5",     discounted_all[5], 25000 - 2500) // 22500
+let expensive = all_prices.filter(|p| p >= 10000)
+let r167 = ck_int("expensive_len",  expensive.len(), 2)              // 12000, 25000
+let r168 = ck_int("all_reduce",     all_prices.reduce(|a, p| a + p, 0), 60998)
+
+// =====================================================================
+// SECTION 21 — Generic boolean predicates + folds over records
+// =====================================================================
+
+// Generic predicate: is this item premium (price above threshold)?
+fn is_premium<T: Priced>(x: T, threshold: int) -> bool {
+  x.price() > threshold
+}
+
+// Generic predicate: is this item well-stocked?
+fn well_stocked<T: Stocked>(x: T, floor: int) -> bool {
+  x.stock() >= floor
+}
+
+let r169 = ck_bool("prem_g1",       is_premium(g1, 10000), true)   // 12000 > 10000
+let r170 = ck_bool("prem_b1_no",    is_premium(b1, 10000), false)  // 4999 < 10000
+let r171 = ck_bool("prem_sv1",      is_premium(sv1, 10000), true)  // 25000 > 10000
+let r172 = ck_bool("stock_g2",      well_stocked(g2, 30), true)    // 40 >= 30
+let r173 = ck_bool("stock_b2_no",   well_stocked(b2, 30), false)   // 3 < 30
+let r174 = ck_bool("stock_sv2",     well_stocked(sv2, 30), true)   // 30 >= 30
+
+// Count premium items by manual fold over the fixtures.
+let mut premium_count = 0
+if is_premium(b1, 10000) { premium_count = premium_count + 1 }
+if is_premium(b2, 10000) { premium_count = premium_count + 1 }
+if is_premium(g1, 10000) { premium_count = premium_count + 1 }
+if is_premium(g2, 10000) { premium_count = premium_count + 1 }
+if is_premium(s1, 10000) { premium_count = premium_count + 1 }
+if is_premium(sv1, 10000) { premium_count = premium_count + 1 }
+if is_premium(sv2, 10000) { premium_count = premium_count + 1 }
+// Above 10000: g1 (12000), sv1 (25000) => 2
+let r175 = ck_int("premium_count",  premium_count, 2)
+
+// =====================================================================
+// SECTION 22 — String assembly report tying all generics into one blob
+// =====================================================================
+
+fn full_receipt_book(x: Book) -> string {
+  let l1 = receipt_line(x)
+  let l2 = f"  tax-incl: {with_tax(x)}"
+  let l3 = f"  inv-value: {inventory_value(x)}"
+  f"{l1}\n{l2}\n{l3}"
+}
+
+let receipt_b1 = full_receipt_book(b1)
+let exp_receipt_b1 = "978-1 Shape Lang $4999\n  tax-incl: 5398\n  inv-value: 59988"
+let r176 = ck_str("full_receipt_b1", receipt_b1, exp_receipt_b1)
+
+let receipt_b2 = full_receipt_book(b2)
+let exp_receipt_b2 = "978-2 Type Theory $8999\n  tax-incl: 9718\n  inv-value: 26997"
+let r177 = ck_str("full_receipt_b2", receipt_b2, exp_receipt_b2)
+
+// Grand combined money formatting.
+let r178 = ck_str("all_prices_money", money(sum_ints(all_prices)), "$609.98")
+let r179 = ck_str("all_inv_money",    money(sum_ints(all_inv)), "$8844.85")
+let r180 = ck_str("svc1_money",       money(sv1.rate_cents), "$250.00")
+
+// =====================================================================
+// SECTION 23 — Cross-checks: generic results vs hand vectors
+// =====================================================================
+
+let r181 = ck_bool("max_consistency",
+  max_int(all_inv) == richer_value(g1, sv1), true) // 300000 == max(300000,200000)
+let r182 = ck_bool("cheap_consistency",
+  min_int(all_prices) == cheaper_price(s1, sv2), true) // 1500 == min(1500,5000)
+let r183 = ck_int("name_len_sum",
+  name_of(b1).len() + name_of(g1).len(), 10 + 8) // "Shape Lang"=10, "Keyboard"=8
+let r184 = ck_int("identity_chain_sum",
+  identity(b1.cents) + identity(g1.cents) + identity(sv1.rate_cents),
+  4999 + 12000 + 25000) // 41999
+let r185 = ck_str("labelled_svc",   labelled("SVC", sv1), "SVC: Consulting")
+let r186 = ck_str("coded_svc_book", coded_label(b1), "978-1:Shape Lang")
+let r187 = ck_int("with_tax_then_inv",
+  with_tax(g2) + inventory_value(g2), 3780 + 140000) // 143780
+let r188 = ck_bool("premium_and_stocked",
+  is_premium(g1, 10000) && well_stocked(g1, 20), true) // 12000>10000 && 25>=20
+let r189 = ck_int("affordable_grid",
+  affordable_or(b1, 5000, 0) + affordable_or(sv2, 6000, 0), 4999 + 5000) // 9999
+let r190 = ck_str("final_combo",
+  f"{name_of(b1)}/{money(b1.cents)}", "Shape Lang/$49.99")
+
+// =====================================================================
+// SECTION 24 — Generic accumulation pipelines (manual folds over fixtures)
+// Each fold re-instantiates the trait-bound generics per element type.
+// =====================================================================
+
+// Total inventory value across the full catalog, accumulated by hand
+// so every term flows through inventory_value<T: Priced + Stocked>.
+let mut total_inv = 0
+total_inv = total_inv + inventory_value(b1)
+total_inv = total_inv + inventory_value(b2)
+total_inv = total_inv + inventory_value(g1)
+total_inv = total_inv + inventory_value(g2)
+total_inv = total_inv + inventory_value(s1)
+total_inv = total_inv + inventory_value(sv1)
+total_inv = total_inv + inventory_value(sv2)
+let r191 = ck_int("fold_total_inv", total_inv, 884485)
+
+// Total with-tax across the catalog.
+let mut total_tax = 0
+total_tax = total_tax + with_tax(b1)
+total_tax = total_tax + with_tax(b2)
+total_tax = total_tax + with_tax(g1)
+total_tax = total_tax + with_tax(g2)
+total_tax = total_tax + with_tax(s1)
+total_tax = total_tax + with_tax(sv1)
+total_tax = total_tax + with_tax(sv2)
+// 5398+9718+12960+3780+1620+27000+5400
+// sv1 tax: 25000 + 2000 = 27000 ; sv2 tax: 5000 + 400 = 5400
+let r192 = ck_int("fold_total_tax", total_tax, 5398 + 9718 + 12960 + 3780 + 1620 + 27000 + 5400) // 65876
+
+// Concatenate all names through name_of into one delimited string by hand.
+let mut all_names = ""
+all_names = name_of(b1)
+all_names = f"{all_names},{name_of(b2)}"
+all_names = f"{all_names},{name_of(g1)}"
+all_names = f"{all_names},{name_of(g2)}"
+all_names = f"{all_names},{name_of(s1)}"
+all_names = f"{all_names},{name_of(sv1)}"
+all_names = f"{all_names},{name_of(sv2)}"
+let r193 = ck_str("fold_all_names", all_names,
+  "Shape Lang,Type Theory,Keyboard,Mouse,Pro,Consulting,Support")
+
+// Count items affordable under a 6000-cent budget.
+let mut afford_count = 0
+if affordable_or(b1, 6000, -1) >= 0 { afford_count = afford_count + 1 }   // 4999 yes
+if affordable_or(b2, 6000, -1) >= 0 { afford_count = afford_count + 1 }   // 8999 no
+if affordable_or(g1, 6000, -1) >= 0 { afford_count = afford_count + 1 }   // 12000 no
+if affordable_or(g2, 6000, -1) >= 0 { afford_count = afford_count + 1 }   // 3500 yes
+if affordable_or(s1, 6000, -1) >= 0 { afford_count = afford_count + 1 }   // 1500 yes
+if affordable_or(sv1, 6000, -1) >= 0 { afford_count = afford_count + 1 }  // 25000 no
+if affordable_or(sv2, 6000, -1) >= 0 { afford_count = afford_count + 1 }  // 5000 yes
+// affordable: b1, g2, s1, sv2 => 4
+let r194 = ck_int("afford_count",   afford_count, 4)
+
+// Sum of prices of well-stocked items (stock >= 20).
+let mut stocked_value = 0
+if well_stocked(b1, 20) { stocked_value = stocked_value + b1.cents }   // 12 no
+if well_stocked(g1, 20) { stocked_value = stocked_value + g1.cents }   // 25 yes 12000
+if well_stocked(g2, 20) { stocked_value = stocked_value + g2.cents }   // 40 yes 3500
+if well_stocked(s1, 20) { stocked_value = stocked_value + s1.monthly_cents } // 5 no
+if well_stocked(sv2, 20) { stocked_value = stocked_value + sv2.rate_cents }  // 30 yes 5000
+// 12000 + 3500 + 5000 = 20500
+let r195 = ck_int("stocked_value",  stocked_value, 20500)
+
+// =====================================================================
+// SECTION 25 — Generic identity over derived expressions (breadth)
+// =====================================================================
+
+let r196 = ck_int("id_expr1",       identity(b1.cents + g1.cents), 16999)
+let r197 = ck_int("id_expr2",       identity(inventory_value(g1)), 300000)
+let r198 = ck_bool("id_expr3",      identity(is_premium(sv1, 1000)), true)
+let r199 = ck_str("id_expr4",       identity(name_of(g2)), "Mouse")
+let r200 = ck_int("id_expr5",       echo(with_tax(s1)), 1620)
+let r201 = ck_int("const_chain",    const_first(const_second(1, 2), 3), 2)
+let r202 = ck_str("const_chain2",   const_second(const_first("a", "b"), "c"), "c")
+let r203 = ck_int("nested_generic", identity(cheaper_price(b1, b2)), 4999)
+let r204 = ck_int("nested_generic2",echo(richer_value(g1, g2)), 300000)
+let r205 = ck_bool("nested_generic3",same_name(b1, b1), true)
+
+// =====================================================================
+// SECTION 26 — where-clause + multi-bound re-exercise across all types
+// =====================================================================
+
+let r206 = ck_str("nw_b1",          name_of_w(b1), "Shape Lang")
+let r207 = ck_str("nw_b2",          name_of_w(b2), "Type Theory")
+let r208 = ck_str("nw_g1",          name_of_w(g1), "Keyboard")
+let r209 = ck_str("nw_g2",          name_of_w(g2), "Mouse")
+let r210 = ck_str("nw_s1",          name_of_w(s1), "Pro")
+let r211 = ck_str("nw_sv1",         name_of_w(sv1), "Consulting")
+let r212 = ck_str("nw_sv2",         name_of_w(sv2), "Support")
+let r213 = ck_str("coded_b2",       coded_label(b2), "978-2:Type Theory")
+let r214 = ck_str("coded_g2",       coded_label(g2), "MS-02:Mouse")
+let r215 = ck_str("catentry_b2",    catalog_entry(b2), "[media] Type Theory (8999)")
+
+// =====================================================================
+// SECTION 27 — Final cross-totals
+// =====================================================================
+
+let r216 = ck_bool("inv_fold_eq_vec",
+  total_inv == sum_ints(all_inv), true)        // both 884485
+let r217 = ck_int("tax_plus_inv",   total_tax + total_inv, 65876 + 884485) // 950361
+let r218 = ck_str("tax_money",      money(total_tax), "$658.76")
+let r219 = ck_str("inv_money2",     money(total_inv), "$8844.85")
+let r220 = ck_int("grand_units",
+  b1.qty + b2.qty + g1.qty + g2.qty + s1.seats + sv1.units + sv2.units,
+  12 + 3 + 25 + 40 + 5 + 8 + 30)               // 123
+
+// =====================================================================
+// SECTION 28 — Final gate
+// =====================================================================
+
+let group_a = r001 && r002 && r003 && r004 && r005 && r006 && r007 && r008 && r009 && r010
+let group_b = r011 && r012 && r013 && r014 && r015 && r016 && r017 && r018 && r019 && r020
+let group_c = r021 && r022 && r023 && r024 && r025 && r026 && r027 && r028 && r029 && r030
+let group_d = r031 && r032 && r033 && r034 && r035 && r036 && r037 && r038 && r039 && r040
+let group_e = r041 && r042 && r043 && r044 && r045 && r046 && r047 && r048 && r049 && r050
+let group_f = r051 && r052 && r053 && r054 && r055 && r056 && r057 && r058 && r059 && r060
+let group_g = r061 && r062 && r063 && r064 && r065 && r066 && r067 && r068 && r069 && r070
+let group_h = r071 && r072 && r073 && r074 && r075 && r076 && r077 && r078 && r079 && r080
+let group_i = r081 && r082 && r083 && r084 && r085 && r086 && r087 && r088 && r089 && r090
+let group_j = r091 && r092 && r093 && r094 && r095 && r096 && r097 && r098 && r099 && r100
+let group_k = r101 && r102 && r103 && r104 && r105 && r106 && r107 && r108 && r109 && r110
+let group_l = r111 && r112 && r113 && r114 && r115 && r116 && r117 && r118 && r119 && r120
+let group_m = r121 && r122 && r123 && r124 && r125 && r126 && r127 && r128 && r129 && r130
+let group_n = r131 && r132 && r133 && r134 && r135 && r136 && r137 && r138 && r139 && r140
+let group_o = r141 && r142 && r143 && r144 && r145 && r146 && r147 && r148 && r149 && r150
+let group_p = r151 && r152 && r153 && r154 && r155 && r156 && r157 && r158 && r159 && r160
+let group_q = r161 && r162 && r163 && r164 && r165 && r166 && r167 && r168 && r169 && r170
+let group_r = r171 && r172 && r173 && r174 && r175 && r176 && r177 && r178 && r179 && r180
+let group_s = r181 && r182 && r183 && r184 && r185 && r186 && r187 && r188 && r189 && r190
+let group_t = r191 && r192 && r193 && r194 && r195 && r196 && r197 && r198 && r199 && r200
+let group_u = r201 && r202 && r203 && r204 && r205 && r206 && r207 && r208 && r209 && r210
+let group_v = r211 && r212 && r213 && r214 && r215 && r216 && r217 && r218 && r219 && r220
+
+if group_a && group_b && group_c && group_d && group_e && group_f && group_g &&
+   group_h && group_i && group_j && group_k && group_l && group_m && group_n &&
+   group_o && group_p && group_q && group_r && group_s && group_t && group_u && group_v {
+  print("ALL_CHECKS_PASSED")
+}

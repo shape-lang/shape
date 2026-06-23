@@ -2,6 +2,9 @@
 // Exercises every operator family taught in fundamentals/operators.mdx.
 // Every expected value is derived from BOOK SEMANTICS (cited by line number).
 
+// Each check prints CHECK_FAILED on a violated invariant; the run-driver
+// treats ANY CHECK_FAILED line as failure regardless of the trailing
+// ALL_CHECKS_PASSED. A clean run emits ALL_CHECKS_PASSED and no CHECK_FAILED.
 fn check(cond: bool, label: string) {
   if !cond {
     print(f"CHECK_FAILED: {label}")

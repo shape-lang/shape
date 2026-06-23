@@ -1,5 +1,24 @@
 # Book-Acceptance Report — slice: resource-mgmt
 
+## RE-VALIDATION 2026-06-22b (current HEAD, independent re-run)
+Independently re-ran both deliverables + all three finding probes at HEAD with
+stdout/stderr split to files:
+- small.shape (63 LOC): VM ec=0 ALL_CHECKS_PASSED, JIT ec=0 ALL_CHECKS_PASSED,
+  stdout BYTE-IDENTICAL (diff empty). stderr = V2 FrameDescriptor verification
+  noise only (loopdrops + Json.keys), not program output.
+- large.shape (980 LOC): VM ec=0 checks_run=28 ALL_CHECKS_PASSED, JIT ec=0
+  checks_run=28 ALL_CHECKS_PASSED, stdout BYTE-IDENTICAL (diff empty).
+- finding_question_mark_drop: SUCCESS_PATH_DROP_OK + ERROR_PATH_DROP_OK (no `?`
+  drop elision at HEAD).
+- finding_double_drop: id=8 then id=7 (reverse decl), each id dropped EXACTLY
+  ONCE; escape-defers-drop holds.
+- finding_async_drop_variant_decl_order: ALL_CHECKS_PASSED.
+- Spot-checked expected-value provenance: scenario_dependent_stack expects
+  cursor:close -> tx:rollback -> conn:return (reverse of conn,tx,cursor decl) and
+  block_scoping expects conn:return BEFORE body:after-block — both encode book
+  invariants, NOT back-filled output. Confirmed.
+Net: PASS, unchanged from prior re-validation.
+
 ## RE-VALIDATION 2026-06-22 (current HEAD)
 Re-ran both deliverables + both finding probes at HEAD:
 - small.shape: VM ec=0 ALL_CHECKS_PASSED, JIT ec=0 ALL_CHECKS_PASSED, stdout BYTE-IDENTICAL.

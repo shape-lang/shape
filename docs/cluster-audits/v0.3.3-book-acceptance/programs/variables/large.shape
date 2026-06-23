@@ -138,12 +138,13 @@ fn run(program: Array<Instr>, reg_count: int) -> RunResult {
             stack.push(operand)
             pc = pc + 1
         } else if op == OP_ADD {
-            // NOTE: the `: int` annotations on every pop/index inside these
-            // branches are REQUIRED in the current strict-flip build. A bare
-            // `let b = stack.pop()` inside an if/else branch infers `unknown`
-            // (see REPORT.md "pop-in-branch" finding); the annotation recovers
-            // the Array<int> element type. Book-sanctioned: annotations are a
-            // taught feature ("Type Annotations").
+            // NOTE: the `: int` annotations on the pops/indexes below are
+            // explicit on purpose (book: "Type Annotations" — a taught feature,
+            // recommended "at API boundaries"). On the current strict-flip
+            // build the BARE form `let b = stack.pop()` inside an if/else branch
+            // ALSO infers Array<int>'s element type correctly (verified — see
+            // REPORT.md "pop-in-branch"); the annotations are belt-and-braces,
+            // not a workaround for an inference gap.
             let b: int = stack.pop()
             let a: int = stack.pop()
             stack.push(a + b)

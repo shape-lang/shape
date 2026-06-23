@@ -11,10 +11,18 @@ multi-file libraries authored in this slice dir). Money is integer cents so ever
 | small   | 56  | 1 + 2 lib (geomlib/) | 4 explicit checks | 0 | 0 | yes (ALL_CHECKS_PASSED) | PASS |
 | large   | 912 total (main 424 + 8 lib under ledger/) | 9 | 127 | 0 | 0 | yes (ALL_CHECKS_PASSED) | PASS |
 
-Slice classification: PASS. Every documented module mechanic works under both VM and JIT,
-byte-identical stdout. The chapter is accurate for the import/export surface it covers.
-All friction was author-error (my own non-book API guesses, fixed as a real user would) or
-strict-typing inference limits orthogonal to the module system (recorded as book_gaps).
+Slice classification: BOOK-WRONG (one runnable book example fails as written; the two
+deliverables themselves PASS). Both deliverables run clean under VM and JIT, byte-identical
+stdout, ALL_CHECKS_PASSED. The chapter is accurate for the import/export surface the deliverables
+exercise, with ONE exception found by re-running the chapter's own `runnable=true` snippets
+directly (see book_wrong #1): a named-alias import of a STDLIB function is accepted at import
+but the aliased name is not callable.
+
+Re-verification note (this re-run): I independently re-derived every expected value from the
+module sources + fixture (not from output) and re-ran both programs under VM and JIT — all pass,
+byte-identical. I additionally executed each `runnable=true` snippet from the chapter verbatim,
+which surfaced the book_wrong below that the prior run missed (the prior run only exercised the
+alias form on a LOCAL module, where it works; the book's runnable example aliases a STDLIB module).
 
 ## small.shape (PASS)
 Two-file geomlib library (geomlib::stats, geomlib::linalg) + driver. Exercises:
@@ -80,9 +88,37 @@ orthogonal to the module slice.
    Same class as the documented hazard but for member names, undocumented.
 
 ## book_wrong
-None. Every mechanic the chapter explicitly teaches (all five import forms; pub fn/type/enum/
-annotation exports; file->path mapping; deep paths; cross-module imports; the `as number` note)
-worked exactly as written under both VM and JIT.
+1. **Named-alias import of a STDLIB function is accepted but not callable.** The chapter's
+   "Named alias" example (lines 42-44) is marked `runnable=true`:
+   ```shape
+   from math::stats use { mean as avg }
+   ```
+   Running that import and then calling the alias (`let m = avg([2.0,4.0,6.0])`) fails at
+   compile/semantic time:
+   ```
+   error[SEMANTIC]: Undefined function: 'avg'
+     --> <input>:1:1
+   ```
+   Isolation proof (all run --mode vm at HEAD):
+   - `from math::stats use { mean }`            (no alias)  -> WORKS  (m=4.0)
+   - `from geomlib::stats use { mean as avg }`  (LOCAL module alias) -> WORKS (avg=4.0)
+   - `from math::stats use { mean as avg }` then call avg(...) -> FAILS "Undefined function: 'avg'"
+   - `from math::stats use { variance as v }` with NO call -> no error (unused import accepted)
+   So the alias is parsed/accepted as an import but the aliased binding never reaches the call
+   resolver for EMBEDDED STDLIB functions specifically; the same alias works for filesystem
+   modules. A real user copying the book's runnable named-alias example verbatim hits a hard
+   compile error. Classified BOOK-WRONG: the book promises (runnable=true) behavior the shipped
+   binary does not deliver. (Root cause is a language alias-resolution defect for stdlib members,
+   not a wording error — the fix is in the compiler, not the prose.)
+
+All OTHER mechanics the chapter explicitly teaches (the other four import forms; pub fn/type/enum/
+annotation exports; file->path mapping; deep paths; cross-module imports; the `as number` note;
+the stdlib-shadowing caution — verified: a local math/stats.shape IS silently shadowed by the
+embedded math::stats) worked exactly as written under both VM and JIT.
+
+(Excluded from book_wrong: the `state::capture()` top-level example at lines 20-24 errors at
+runtime — "state.capture must be called from within a function body" — but that snippet is marked
+`runnable=false` in the book, so it is a documented non-runnable illustration, not a defect.)
 
 ## Other observations (not classified)
 - A non-pub function was still importable via `from mylib::vis use { secret }` and executed.

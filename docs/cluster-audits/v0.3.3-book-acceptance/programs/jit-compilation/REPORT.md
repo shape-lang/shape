@@ -35,33 +35,39 @@ Idiomatic Collatz step-count kernel. 5 hand-verified unit anchors
 (collatz(1)=0, (2)=1, (3)=7, (6)=8, (27)=111) + one hot accumulator:
 sum over n=1..399 of collatz_steps(n) = 20114 (external oracle). 399 calls > T1=100.
 
-Result:
+Result (re-verified 2026-06-22):
   VM : ec=0  stdout=`ALL_CHECKS_PASSED`
   JIT: ec=0  stdout=`ALL_CHECKS_PASSED`  stderr=`[jit-fallback] function main failed
-       JIT compile: Runtime error: JIT execution error (code: -1); running under interpreter`
+       JIT compile: Runtime error: V2 bytecode verification failed: 1 violation(s);
+       first: V2 typed opcode NewTypedArrayString at offset 1114 in function
+       'Json.keys' has no FrameDescriptor. R8 W7 G.5 SURFACE (ADR-006 §2.7.14) ...
+       running under interpreter`
   VM==JIT stdout: IDENTICAL (byte-for-byte).
 
 Classification: PASS.
-  - C1 satisfied (byte-identical; `cmp /tmp/small_vm.out /tmp/small_jit.out` clean).
+  - C1 satisfied (byte-identical; `[ "$vm" = "$jit" ]` clean).
   - C2 satisfied (399 calls > T1, result unchanged).
-  - C3 satisfied: a toplevel `for n in 1..400` range loop trips the JIT preflight
-    (`JIT execution error (code: -1)`); whole-program fall-through fires and the
-    diagnostic matches the book's documented format (mdx line 229:
+  - C3 satisfied: whole-program fall-through fires and the diagnostic matches the
+    book's documented format (mdx line 229:
     `[jit-fallback] function main failed JIT compile: <reason>; running under
     interpreter`). Result is identical and correct → NOT a defect.
 
-  INDEPENDENT RE-VERIFICATION (2026-06-21, this session):
-  - Re-ran both modes: VM ec=0 / JIT ec=0, stdout byte-identical (cmp clean).
-  - Bisected the fallback trigger precisely: a minimal pure-int fn called once
-    (`fn add3(...); print(add3(1,2,3))`) JIT-compiles with NO `[jit-fallback]`
-    on stderr (stdout=6) — so the JIT path DOES engage on simple programs. A
-    toplevel `while` loop with `var` accumulators ALSO compiles clean (no
-    fallback). It is specifically the toplevel `for ... in <range>` loop that
-    trips the preflight (`code: -1`). This refines (does not contradict) C3:
-    fall-through is construct-specific, not "all toplevel loops". Observable
-    contract (NOT silent-no-output, identical result) holds either way.
+  IMPORTANT — fallback trigger on this build (2026-06-22):
+  On the current HEAD binary, the fall-through is triggered by a V2 verification
+  failure in a PRELUDE function (`Json.keys`: `NewTypedArrayString ... has no
+  FrameDescriptor`), NOT by anything in the user program. Because the prelude is
+  linked into every program, EVERY `--mode jit` invocation — including this pure
+  integer Collatz kernel with no arrays and no objects, exactly the "JIT-compatible"
+  shape the book describes (§Scoped Per-Function JIT) — falls through to the
+  interpreter. The JIT native path therefore never engages for user code on this
+  binary. The book's documented OBSERVABLE contract (NOT silent-no-output, VM==JIT
+  identical result) still holds; but the book's implication that a pure numeric
+  kernel JIT-compiles and runs native does NOT hold here. Recorded as book_wrong #1
+  (optimistic-vs-shipped) — it does not break the slice's PRIMARY signal.
+
   - Negative control: asserting collatz_steps(27)==999 printed
     `CHECK_FAILED: collatz_wrong expected=999 got=111` → harness non-vacuous.
+  - small.shape uses `Array<int>`/numeric loops only (no array params).
 
 ---
 
@@ -75,7 +81,13 @@ before and after tier promotion. 76 assertions total.
 Kernels: gcd/lcm, modexp, fib_mod, digit_sum, fact_mod, is_prime/count_primes,
 totient, collatz, isqrt, cube_mod, Newton sqrt, Horner poly (float+int),
 geometric series, Leibniz pi/4, factorial_f, exp Taylor, dot/sum/mean/variance/
-max/L2-norm over Vec<number>, bubble-sort positional checksum.
+max/L2-norm over Array<number>, bubble-sort positional checksum.
+
+NOTE (2026-06-22): array kernels now use `Array<number>`/`Array<int>` — the exact
+vocabulary the book teaches in §Fully Typed Native Values (`Array<number>` ->
+`TypedArray<f64>`). A prior revision used `Vec<...>`; `Vec` is NOT a type the JIT
+chapter teaches, so it was migrated to `Array<...>` for book-fidelity. Both modes
+re-verified byte-identical (`ALL_CHECKS_PASSED`) after the change.
 
 Hot driver loops (all accumulator constants from external oracle, pre-run):
   hot_sum_gcd_i_360        = 10278   (999 calls > T1)
@@ -157,17 +169,31 @@ Classification: PASS.
    expecting clean stderr under VM would be surprised.
 
 ## book_wrong (book documents behavior the language does not do)
-None. Every documented OBSERVABLE claim held:
-  - VM==JIT stdout identical: held for every program.
+1. §--mode jit semantics implies that a program which is JIT-compatible (pure
+   arithmetic / comparisons / local access / direct calls / control flow) "runs
+   the JIT path; tier promotion happens transparently on functions that cross the
+   call-count thresholds", and that `[jit-fallback]` "only fires when the entire
+   program cannot be JIT-compiled at all". On the current HEAD binary the JIT
+   ALWAYS falls through to the interpreter — even for small.shape, a pure integer
+   Collatz kernel with no arrays/objects — because a PRELUDE function (`Json.keys`)
+   fails V2 bytecode verification (`NewTypedArrayString ... has no FrameDescriptor`)
+   and the prelude is linked into every program. So no user program actually
+   executes JIT-native code in this build; `[jit-fallback]` fires for 100% of
+   programs, contradicting the book's "only ... cannot be JIT-compiled at all".
+   This is OPTIMISTIC-vs-shipped, not a correctness lie: the documented OBSERVABLE
+   contract (NOT silent-no-output, VM==JIT byte-identical result, tier-up does not
+   change result) is fully upheld. Classified at slice level as PASS because the
+   PRIMARY signal (VM==JIT byte-identical + tier-up invariant) holds; the divergence
+   is in the JIT-engagement narrative, which is an internals claim a reader cannot
+   directly observe from the book anyway (see book_gap #2).
+
+Other documented OBSERVABLE claims held:
+  - VM==JIT stdout identical: held for every program (byte-for-byte).
   - Fall-through is NOT silent-no-output and produces the same result as VM: held;
-    the `[jit-fallback] ... ; running under interpreter` diagnostic format matches
-    mdx line 229 essentially verbatim.
-  - Tier-up does not change results: held across T1 and T2 crossings.
-The typed-array JIT-path claim (gap #3) is an OPTIMISTIC-vs-shipped gap, not a
-correctness lie — the documented correctness guarantee (identical result via
-fall-through) is upheld.
+    `[jit-fallback] ... ; running under interpreter` matches mdx line 229.
+  - Tier-up does not change results: held across T1 (100) and T2 (10k) crossings.
 
 ## Files
-  small.shape  (61 LOC)
-  large.shape  (681 LOC, 76 assertions)
+  small.shape  (61 LOC, 7 check calls)
+  large.shape  (681 LOC, 79 assertions)
   REPORT.md

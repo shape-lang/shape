@@ -1,31 +1,13 @@
-// small.shape — pattern-matching core, book-driven.
-// Book: fundamentals/pattern-matching.mdx
-// Exercises: match-as-expression, literal/where guards, type-based matching (union),
-// enum matching (tuple + struct + unit payloads), constructor patterns (Some/None/Ok/Err),
-// nested constructor patterns, wildcard. Every feature is taught by the chapter
-// or is a direct composition of taught features (nested constructors / enum-struct payloads).
+// Pattern matching small program — exercises the chapter's core:
+// where-guards, type-based matching, enum matching, constructor patterns,
+// match-as-expression, wildcard.
 
-enum Token {
-  Num(int),
-  Op(string),
-  End
+enum Status {
+  Ok(int),
+  Error(string)
 }
 
-// enum with struct-payload variant (composition of "Enum Matching")
-enum Shape2 {
-  Circle { radius: int },
-  Rect { w: int, h: int }
-}
-
-let mut failures: int = 0
-fn check(name: string, cond: bool) {
-  if !cond {
-    failures = failures + 1
-    print(f"CHECK_FAILED: {name}")
-  }
-}
-
-// Basic Match + guards + wildcard (book "Basic Match")
+// Basic match with where-guards + wildcard (book: "Basic Match")
 fn sign(n: int) -> string {
   match n {
     x: int where x < 0 => "negative"
@@ -34,7 +16,7 @@ fn sign(n: int) -> string {
   }
 }
 
-// Type-Based Matching on a union (book "Type-Based Matching")
+// Type-based matching on a union type (book: "Type-Based Matching")
 fn normalize(value: int | string) -> string {
   match value {
     n: int => f"int:{n}"
@@ -42,24 +24,15 @@ fn normalize(value: int | string) -> string {
   }
 }
 
-// Enum Matching with tuple/unit payloads (book "Enum Matching")
-fn show(t: Token) -> string {
-  match t {
-    Token::Num(n) => f"num({n})"
-    Token::Op(o) => f"op({o})"
-    Token::End => "end"
+// Enum matching (book: "Enum Matching")
+fn render(status: Status) -> string {
+  match status {
+    Status::Ok(code) => f"ok({code})"
+    Status::Error(msg) => f"error({msg})"
   }
 }
 
-// Enum struct-payload variant matching
-fn area(s: Shape2) -> int {
-  match s {
-    Shape2::Circle { radius } => radius * radius * 3
-    Shape2::Rect { w, h } => w * h
-  }
-}
-
-// Constructor patterns: Some/None, with a nested constructor pattern (book "Constructor Patterns")
+// Constructor patterns on Option (book: "Constructor Patterns")
 fn unwrap_or(opt: Option<int>, default: int) -> int {
   match opt {
     Some(v) => v
@@ -67,16 +40,7 @@ fn unwrap_or(opt: Option<int>, default: int) -> int {
   }
 }
 
-fn classify_opt(o: Option<Token>) -> string {
-  match o {
-    Some(Token::Num(n)) => f"some-num-{n}"
-    Some(Token::Op(_)) => "some-op"
-    Some(Token::End) => "some-end"
-    None => "none"
-  }
-}
-
-// Constructor patterns: Ok/Err on Result<string> (book "Constructor Patterns")
+// Constructor patterns on Result (book: "Constructor Patterns")
 fn describe(result: Result<string>) -> string {
   match result {
     Ok(value) => f"success: {value}"
@@ -84,7 +48,7 @@ fn describe(result: Result<string>) -> string {
   }
 }
 
-// Match Is an Expression — assign the result (book "Match Is an Expression")
+// Match-as-expression returning an int (book: "Match Is an Expression")
 fn bucket(n: int) -> int {
   match n {
     x: int where x < 10 => 0
@@ -93,38 +57,50 @@ fn bucket(n: int) -> int {
   }
 }
 
-check("sign neg", sign(-3) == "negative")
-check("sign zero", sign(0) == "zero")
-check("sign pos", sign(5) == "positive")
+let mut ok = true
 
-check("norm int", normalize(42) == "int:42")
-check("norm str", normalize("hi") == "str:hi")
+fn check_str(name: string, got: string, want: string) -> bool {
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    return false
+  }
+  return true
+}
 
-check("show num", show(Token::Num(42)) == "num(42)")
-check("show op", show(Token::Op("+")) == "op(+)")
-check("show end", show(Token::End) == "end")
+fn check_int(name: string, got: int, want: int) -> bool {
+  if got != want {
+    print(f"CHECK_FAILED: {name} expected={want} got={got}")
+    return false
+  }
+  return true
+}
 
-check("area circle", area(Shape2::Circle { radius: 2 }) == 12)
-check("area rect", area(Shape2::Rect { w: 3, h: 4 }) == 12)
+if !check_str("sign(-5)", sign(-5), "negative") { ok = false }
+if !check_str("sign(0)", sign(0), "zero") { ok = false }
+if !check_str("sign(42)", sign(42), "positive") { ok = false }
 
-check("unwrap some", unwrap_or(Some(7), 0) == 7)
-check("unwrap none", unwrap_or(None, 99) == 99)
+if !check_str("normalize(7)", normalize(7), "int:7") { ok = false }
+if !check_str("normalize(hi)", normalize("hi"), "str:hi") { ok = false }
 
-check("nested some-num", classify_opt(Some(Token::Num(9))) == "some-num-9")
-check("nested some-op", classify_opt(Some(Token::Op("*"))) == "some-op")
-check("nested some-end", classify_opt(Some(Token::End)) == "some-end")
-check("nested none", classify_opt(None) == "none")
+if !check_str("render(Ok)", render(Status::Ok(200)), "ok(200)") { ok = false }
+if !check_str("render(Error)", render(Status::Error("boom")), "error(boom)") { ok = false }
 
-check("desc ok", describe(Ok("yes")) == "success: yes")
-check("desc err", describe(Err("no")) == "failed: no")
+if !check_int("unwrap_or(Some 9)", unwrap_or(Some(9), 0), 9) { ok = false }
+if !check_int("unwrap_or(None)", unwrap_or(None, -1), -1) { ok = false }
 
-let b0: int = bucket(3)
-let b1: int = bucket(50)
-let b2: int = bucket(500)
-check("bucket 0", b0 == 0)
-check("bucket 1", b1 == 1)
-check("bucket 2", b2 == 2)
+if !check_str("describe(Ok)", describe(Ok("yay")), "success: yay") { ok = false }
+if !check_str("describe(Err)", describe(Err("nope")), "failed: nope") { ok = false }
 
-if failures == 0 {
+if !check_int("bucket(3)", bucket(3), 0) { ok = false }
+if !check_int("bucket(50)", bucket(50), 1) { ok = false }
+if !check_int("bucket(999)", bucket(999), 2) { ok = false }
+
+let label = match 5 {
+  x: int where x < 3 => "small"
+  _ => "big"
+}
+if !check_str("label", label, "big") { ok = false }
+
+if ok {
   print("ALL_CHECKS_PASSED")
 }

@@ -1,140 +1,115 @@
-# Book-Acceptance Report — slice: types-primitive
+# Book-Acceptance REPORT — slice: types-primitive
 
-Binary: /home/dev/dev/shape-lang/shape-strict-flip-collection-dispatch/target/release/shape (HEAD, prebuilt)
-Chapters (book-PRIMARY): fundamentals/builtin-types.mdx, fundamentals/integer-types.mdx
-Determinism: pure (no time/random/network; the LCG section is seeded integer-only).
-All runs memory-capped (ulimit -v 12 GiB) + timeout 30s.
+Binary: `/home/dev/dev/shape-lang/shape-strict-flip-collection-dispatch/target/release/shape` (release, at HEAD)
+Book chapters (PRIMARY source):
+- `fundamentals/builtin-types.mdx`
+- `fundamentals/integer-types.mdx`
+Determinism strategy: pure (no time/network/random; all fixtures inline).
 
-RE-VERIFICATION 2026-06-22: small.shape + large.shape re-run at current HEAD under
-both VM and JIT — both EC=0, both print ALL_CHECKS_PASSED, stdout BYTE-IDENTICAL
-across modes (large: `checks_run=121\nALL_CHECKS_PASSED`). LCG s1/s2, Frame-A
-timestamp bytes + checksum independently re-derived (awk bitwise) and confirmed.
-D3 re-checked and found RESOLVED (see Section). Slice verdict: PASS.
+## Summary
 
-## Programs
+| Program | LOC | VM ec | JIT ec | VM stdout | JIT stdout | byte-identical |
+|---------|-----|-------|--------|-----------|------------|----------------|
+| small.shape | 74 | 0 | 0 | `ALL_CHECKS_PASSED` | `ALL_CHECKS_PASSED` | YES |
+| large.shape | 889 | 0 | 0 | `ALL_CHECKS_PASSED` | `ALL_CHECKS_PASSED` | YES |
 
-### small.shape (84 LOC)
-Exercises the chapter core: int/number/bool/string scalars, width-typed literal
-suffixes (i8/u8/i16/i32/u32), hex/bin/oct+suffix combos, and `as` bit-level casts
-(300 as i8 -> 44 ; -1 as u8 -> 255), each asserted against a book-derived value.
+Both programs PASS under both execution modes with byte-identical stdout.
+(Note: stdlib emits a benign `V2 bytecode verification failed ... Json.keys`
+line to **stderr** during init — unrelated to these programs; stdout is clean.)
 
-- VM:  EC=0, stdout = "ALL_CHECKS_PASSED"
-- JIT: EC=0, stdout = "ALL_CHECKS_PASSED" (stderr: one documented `[jit-fallback]`
-  line — `ConvertToInt` from `as int` is a vm_only opcode; JIT falls through to the
-  interpreter exactly as `run --help` documents; NOT silent-no-output).
-- vm_jit_byte_identical (stdout): YES.
-- Classification: PASS.
+Assertions: small ~21 distinct checks; large 187 `check`/`check_bool`/`check_str` calls.
 
-### large.shape (519 LOC, 121 asserted checks)
-Real-world app: a deterministic binary sensor-telemetry codec + fixed-point
-arithmetic engine, rooted entirely in primitive integer types. Sections:
- 1. Byte primitives (hi8/lo8/join16/join32/sign_extend16) — bit manipulation on int.
- 2. `as`-cast bit-level conformance (the chapter's headline rules: narrow=low bits,
-    signed<->unsigned=reinterpret). 300 as i8 -> 44; -1 as u8/u16/u32 -> 255/65535/
-    4294967295; 65535 as i16 -> -1; 128 as i8 -> -128; etc.
- 3. Frame encode/decode round-trip with mod-256 checksum (Frame A positive temp,
-    Frame B negative temp via two's-complement low-16, Frame C corruption detection).
- 4. Multi-frame streaming ramp + min/max/sum/mean aggregate (integer-exact).
- 5. Fixed-point Q16.16 scaled-integer arithmetic (to_fixed/mul/div/whole/frac_milli).
- 6. Deterministic LCG (a=1664525,c=1013904223,m=2^32) — seeded, integer-only.
- 7. Integer division/modulo identities + power-of-two shifts (1<<31, 1<<32 exact in i64).
- 8. Population count + 8-bit reversal (table-free bit loops).
- 9. Width-typed literal edge table (i8/u8/i16/u16/i32/u32 min/max; hex/bin/oct suffixes).
+## small.shape
 
-- VM:  EC=0, stdout = "checks_run=121\nALL_CHECKS_PASSED"
-- JIT: EC=0, stdout = "checks_run=121\nALL_CHECKS_PASSED" (stderr: one documented
-  `[jit-fallback]` — function-local typed-array opcodes lack a FrameDescriptor, so
-  the JIT refuses the unverified V2 opcodes and falls through to the interpreter so
-  its surface agrees with VM; R8/W7 SURFACE, ADR-006 §2.7.14, tracked for v0.4).
-- vm_jit_byte_identical (stdout): YES.
-- Classification: PASS.
+Exercises the chapter cores:
+- Scalar types: `int`, `number`, `bool`, `string` (builtin-types.mdx "Scalar Types").
+- Large i64 literal stores exactly: `9000000000000000000` (integer-types.mdx).
+- Literal suffixes: `42i8`, `255u8`, `1000i16`, `50000u16`, `100i32`, `3000000u32`, `1048576u64`.
+- Hex/bin/oct + suffix: `0xFFu8`=255, `0b1010i16`=10, `0o77u32`=63 (integer-types.mdx §Literal Suffixes).
+- `as` casting verbatim from book §"Explicit Casting": `300 as i8`=44, `-1 as u8`=255, `3.9 as int`=3.
+- Width types as struct fields (`Pixel { r/g/b/a: u8 }`) per §"In Type Definitions".
 
-## Expected-value rationale (all derived from BOOK SEMANTICS before first run)
+All expected values taken directly from the book's own worked examples. PASS.
 
-- `as` is a BIT-LEVEL conversion (integer-types.mdx "Explicit Casting with as"):
-  narrowing keeps the LOW bits (book's stated `300 as i8 -> 44`); signed/unsigned
-  changes reinterpret the same bits (book's stated `-1 as u8 -> 255`). No range-check,
-  no saturate. Every cast assertion in Sections 2/9 follows this rule.
-- `int` is signed i64; literals within range store exactly and arithmetic below 2^53
-  is exact in both VM and JIT (integer-types.mdx "The int Type" + the large-integer
-  Aside). All div/mod, shift, checksum, LCG, and fixed-point constants rely on this.
-- Width-typed literals are in-range, so their value equals the plain integer
-  (integer-types.mdx "Literal Suffixes"); hex/bin/oct prefixes combine with suffixes.
-- Two's-complement byte/word semantics for &, |, ^, <<, >> (bitwise ops are available
-  in the language; the book's bit-level cast story is the conceptual anchor).
+## large.shape — Binary Protocol Codec + Fixed-Point Math
 
-DISCIPLINE NOTE: during pre-run hand-derivation, five of my own constants were wrong
-(Frame A timestamp bytes/checksum, Frame B low byte, LCG s1/s2). They were caught and
-corrected by independent exact-arithmetic re-derivation (perl Math::BigInt) BEFORE the
-first run — never back-filled from program output. The asserted values encode book
-semantics, not observed behavior.
+A deterministic, non-interactive, machine-proofable application rooted in the
+primitive-types slice. 15 sections, 187 assertions. Every expected value was
+hand-derived from book semantics BEFORE the first run (no back-filling).
 
-## Author-errors fixed during development (a real user would hit + fix these)
-- `assert(...)` is NOT a *prelude* builtin (bare `assert` -> Undefined function).
-  Switched to a `check_int/check_bool` helper that prints CHECK_FAILED + counts
-  failures, reaching ALL_CHECKS_PASSED only on zero failures. [NOTE 2026-06-22:
-  `assert`/`assert_eq` ARE available via explicit import
-  `from std::core::utils::testing use { assert, assert_eq }` — verified working
-  at current HEAD (smoke.shape prints SMOKE_OK). So this is a discoverability
-  book_gap, not an absence; the helper approach is still valid and dependency-free.]
-- Top-level `let SCALE = 65536` is not visible inside top-level `fn` bodies
-  (RUNTIME: Undefined variable: SCALE). Top-level functions do not capture module
-  locals; inlined the literal. (Consistent, well-diagnosed; not a defect.)
-- Operator-precedence subtlety: `-2 as u8` parses as `-(2 as u8)` = -2, not 254.
-  Binding first (`let v: int = -2; v as u8` -> 254) matches the book's own idiom
-  (`let signed: int = -1; let unsigned = signed as u8`). Not book-wrong; the book
-  always binds first. Used the bind-first idiom throughout.
+- §1 Byte primitives — `as u8` masking; book claim "narrowing keeps low bits"
+  (e.g. `to_byte(300)=44`, `to_byte(256)=0`, `to_byte(-1)=255`).
+- §2 Q16.16 fixed-point — `number as int` truncation, `int as number` widening
+  (e.g. `1.5 -> 98304`, `fp_mul(0.5,0.5)=16384`).
+- §3 Big-endian buffer writer/reader over `Vec<int>`.
+- §4 Fletcher-16 checksum (hand-traced: `[1,2,3,4]`→5130, `"abcde"`→51440).
+- §5 RLE codec with round-trip equality proof.
+- §6 Record (`magic:u16, kind:u8, value:u32`) pack/unpack; `0xCAFE`/`0xDEADBEEF`
+  byte decomposition asserted.
+- §7 Bit-width boundary table for `as` (e.g. `128 as i8`=-128, `255 as i8`=-1).
+- §8 Bool truth table + comparison operators yield `bool` (strict, no truthiness).
+- §9 Integer identities: ipow/gcd/factorial; signed `/` and `%` truncate toward
+  zero (`-7/2=-3`, `-7%2=-1`); exact i64 product `10^12`.
+- §10 number arithmetic + number/int interplay; truncation table incl. negatives.
+- §11 End-to-end: encode 3 records → checksum → RLE round-trip → re-checksum
+  stable → decode → sum=600.
+- §12 Base-N integer formatter/parser (decimal/hex/bin/oct), string round-trips
+  (`0xABCD`→"ABCD"→43981, `DEADBEEF`).
+- §13 Extended width-cast boundary matrix across u8/i8/u16/i16/u32/i32.
+- §14 Saturating byte arithmetic (clamp 0..255).
+- §15 Q16.16 affine transform pipeline over integer points; number-derived
+  coefficient `1.25*65536=81920`.
 
-## Language defects encountered (recorded, NOT worked around silently)
+### Defects found during authoring (BOTH author-error — fixed, NOT language defects)
 
-These are all in COLLECTION/CODEGEN territory (the v0.3.3 strict-flip + W17 WIP), NOT
-in the primitive-types semantics my chapters teach. I restructured the large program
-to stay rooted in the primitive slice and recorded each defect here. None changed an
-asserted primitive value.
+1. **`as` precedence vs unary minus** — `-128 as u8` parses as `-(128 as u8)`
+   (=-128), not `(-128) as u8` (=128). The book's casting examples always bind
+   the negative value to a variable first (`let signed: int = -1; signed as u8`),
+   so a book-following user would not hit this; I hit it by writing a negative
+   literal directly. Fixed by binding to a variable, matching book idiom.
+   First-run truth: `cast_neg128_u8 expected=128 got=-128` (+ u16/u32 siblings).
+   → recorded as a **book_gap** (book never states `as` precedence).
 
-D1. Nested empty-array annotation NOT honored.
-    `let mut a: Vec<Vec<int>> = []` -> SEMANTIC error "cannot determine the element
-    type of empty array" DESPITE the explicit concrete annotation. Single-level
-    `let mut a: Vec<int> = []` works. 3-line repro. (Outside slice: containers.)
+2. **Dead scratch loop in `rle_encode`** — a placeholder `while` block I left in
+   mutated the index `i` early, causing an out-of-bounds read. Pure typo/leftover;
+   replaced with the clean single counting loop. First-run truth:
+   `Index 21 out of bounds (length 21)`. Author-error, not a language defect.
 
-D2. Function-local typed-array opcodes lack FrameDescriptor.
-    Any `[...]`/`.push()`/`[i]=` inside a `fn` body emits "V2 typed opcode
-    NewTypedArrayI64/TypedArrayPushI64/SetElemI64 ... has no FrameDescriptor"
-    verification warnings to stderr (result still correct under VM; this is what
-    forces the JIT `[jit-fallback]`). (Outside slice: codegen.)
+After fixes both programs pass cleanly under VM and JIT.
 
-D3. [RE-VERIFIED 2026-06-22 at current HEAD — NOW RESOLVED]
-    Previously: function-returned Vec<int> bound to a module `let mut` then
-    index-mutated hit a HARD SURFACE stub (SetModuleBindingIndex, ADR-006
-    §2.7.24 Q25.A). Re-running the 5-line repro at this HEAD now SUCCEEDS:
-      fn mk() -> Vec<int> { return [10,20,30] }
-      let mut a = mk(); a[1] = 99; print(a[1])   // -> prints 99 (ec=0)
-    The only residual is the D2 FrameDescriptor verification warning on stderr
-    (correct result under VM). The W17 SURFACE stub has been retired since the
-    prior report. (Outside slice; recorded for accuracy.)
+## book_gaps (book silent; behavior verified via experimentation / works fine)
 
-## book_gaps
-- builtin-types.mdx "Notes" states "`[]` literals infer as `Vec<T>`" but neither
-  chapter mentions that a DEFERRED-PUSH empty array (`let mut a = []` then `.push`)
-  requires an explicit `Vec<T>` / `Array<T>` annotation under strict typing, and that
-  a NESTED empty array `Vec<Vec<int>> = []` is currently rejected even WITH the
-  annotation (D1). A reader following the Notes verbatim hits a SEMANTIC error.
-- Neither chapter teaches an assertion/test mechanism, so self-checking programs must
-  either invent one or discover the import `from std::core::utils::testing use {
-  assert, assert_eq }` (verified working at HEAD, but undocumented in these chapters).
-  Minor — out of these chapters' scope — but every machine-proofable program needs it.
-- Neither chapter documents bitwise operators (&, |, ^, <<, >>) on `int`. The
-  integer-types chapter leans entirely on `as` for the "bit-level" story; a reader
-  doing real integer/protocol work (the natural application of width types, which the
-  chapter explicitly motivates with "binary protocol work") has to discover &/<</>>
-  elsewhere. They DO work; the chapter is silent. (Used MCP/reference-free probing.)
-- integer-types.mdx "Explicit Casting" shows `300 as i8` directly in prose but does
-  not warn that unary-minus binds looser than `as` (`-2 as u8` = -2, not 254). A
-  reader writing `-2 as u8` literally gets a surprising result; the book's worked
-  examples happen to bind to a variable first, sidestepping it.
+- **Operator precedence of `as`** — integer-types.mdx §"Explicit Casting" shows
+  `wide as i8` and `signed as u8` but never states how `as` binds relative to
+  unary minus (or other operators). `-1 as u8` is `-(1 as u8)` = -1, surprising a
+  reader who expects 255. A precedence note (or "parenthesize negative operands")
+  would prevent the trap.
+- **Bitwise / shift operators** — neither chapter documents `&`, `|`, `^`, `<<`,
+  `>>`, `%`, or integer `/`. A binary-protocol / width-int user needs these and
+  the chapters are the natural home. (The codec used `/`/`*`/`%` to emulate shifts
+  to stay strictly within documented operators; the language DOES provide
+  `&`/`>>`/`<<` — verified — but the slice chapters never mention them.)
+- **String indexing returns a 1-char string** — used for the digit table in §12;
+  not covered by these chapters (belongs to a strings chapter), verified by
+  experiment.
+- **No `assert` builtin in prelude** — a natural "self-checking program" needs an
+  assertion primitive; `assert(...)` is an undefined function. Had to roll a
+  manual `if got != want { ... }` check helper. Not strictly a types chapter gap,
+  but worth noting for the acceptance methodology.
 
-## book_wrong
-- (none) Every documented primitive behavior I followed verbatim produced exactly the
-  book's stated result: 300 as i8 = 44, -1 as u8 = 255, the suffix table, hex/bin/oct
-  combos, int exactness within i64. No case where the book documents something the
-  language does not do for the PRIMITIVE-type semantics these chapters cover.
+## book_wrong (book documents X, language does not do X)
+
+- NONE. Every behavior the two chapters explicitly document was reproduced
+  exactly: `int`=i64 with exact large literals; all literal suffixes; hex/bin/oct
+  + suffix combos; `as` bit-level semantics (narrowing keeps low bits — `300 as
+  i8`=44; signed/unsigned reinterpret — `-1 as u8`=255); `number as int`
+  truncation (`3.9 as int`=3); width types as struct field annotations.
+  The book's "i32 has typed-opcode support; other widths are docs/interop"
+  caveat held — all width casts behaved consistently across VM and JIT for the
+  values tested (all within i64 range, as the book recommends).
+
+## Classification
+
+- small.shape: **PASS**
+- large.shape: **PASS** (the two authoring defects were AUTHOR-ERROR, fixed)
+- vm_jit_byte_identical: **YES** for both.

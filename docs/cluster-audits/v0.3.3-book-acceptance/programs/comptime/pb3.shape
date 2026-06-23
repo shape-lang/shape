@@ -1,0 +1,8 @@
+comptime fn names() -> Array<string> {
+  let mut a = []
+  a.push("x")
+  a.push("y")
+  a
+}
+let N = comptime { names() }
+print(f"{N[0]} {N.length}")

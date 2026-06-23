@@ -15,6 +15,23 @@ Determinism strategy: pure (closures + HOFs); no I/O, no time, no randomness.
 | named-args-repro.shape | 37 | 0 | 0 | byte-identical (24/24/24/24/15/25) | PASS (named arguments IMPLEMENTED — STAGE T4) |
 | rangevar-closure-repro.shape | 28 | 1 | 1 | byte-identical (i64-overflow err, line 3) | minimal repro for NEW adjacent kind-tracking finding (book SILENT — not a deliverable) |
 
+**Independent re-verification 2026-06-22 (FRESH pass — current HEAD, first-run truth).**
+All five programs re-run under both `--mode vm` and `--mode jit` (absolute binary,
+12 GiB ulimit + 30s timeout). `small.shape` (99 LOC, 19 `check()` calls) and
+`large.shape` (635 LOC, 114 `check_*` assertions) both print `ALL_CHECKS_PASSED`,
+ec=0, stdout byte-identical VM vs JIT (`cmp -s` IDENTICAL). `segfault-repro.shape`
+→ `25` (both modes, ec=0). `named-args-repro.shape` → `24/24/24/24/15/25` (both
+modes, byte-identical). `rangevar-closure-repro.shape` → ec=1 both modes, error
+`integer addition overflow: result of 4607182418800017408 and 4616189618054758400`
+(= IEEE-754 bits of `1.0` and `4.0`) — the range-var→closure→int-arithmetic
+kind-loss defect (book_gap #7) STILL reproduces; book-SILENT, does not affect the
+deliverables. The book's §"Named Arguments" (lines 200-247) teaches named args as
+working v0.3.3 and the binary matches it exactly (verified the book's own `sma`
+examples: `sma(20,0.05)`→`1.0`, `sma(threshold:0.02)`→`0.28`,
+`sma(20,threshold:0.02)`→`0.4`; `adder(10)(5)`→`15`) — book is ACCURATE, no
+book_wrong. Slice classification this pass: PASS (deliverables); one book_gap
+defect (rangevar kind-loss) remains open but outside the deliverables.
+
 **Independent re-verification 2026-06-22 (LATEST pass — fresh first-run truth).**
 All four programs re-run under both `--mode vm` and `--mode jit` at current HEAD
 (absolute binary, 12 GiB ulimit + 30s timeout). `small.shape` and `large.shape`

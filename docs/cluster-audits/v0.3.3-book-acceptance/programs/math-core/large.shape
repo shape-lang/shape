@@ -1,423 +1,614 @@
 // ============================================================================
-// large.shape — math-core slice
+// math-core large program: a deterministic Statistics & Numerical-Methods
+// toolkit built ENTIRELY on the math surface taught by the book
+// (stdlib/core/math.mdx + stdlib/native/math.mdx).
 //
-// A NON-INTERACTIVE, MACHINE-PROOFABLE numerical-computing toolkit built ONLY
-// on the math-chapter surface:
-//   stdlib/native/math.mdx : sqrt, pow, abs, floor, ceil, round, min, max,
-//                            PI(), E(), TAU(), sin, cos, tan, asin, acos, atan,
-//                            atan2, clamp, lerp, sign, degrees, radians
-//   stdlib/core/math.mdx   : sum, mean, std, variance
+// It implements, from the documented primitives:
+//   - descriptive statistics (mean / variance / std / spread / median, built
+//     on the book's sum/mean/std/variance plus min/max)
+//   - normalization (min-max scale, z-score) and moving averages
+//   - linear regression (least squares) and Pearson correlation, implemented
+//     from documented primitives (the stdlib correlation() is v0.4-only)
+//   - 2D vector geometry using trig (norm, dot, angle, rotate)
+//   - numerical integration (composite Simpson) and Newton's-method roots
+//   - a deterministic projectile-motion simulation using sin/cos/radians
+//   - financial compounding and a factorial/series sum
 //
-// SCOPE DISCIPLINE: the math chapters only ever pass ARRAY LITERALS directly to
-// sum/mean/std/variance at the call site, and otherwise operate on scalar
-// numbers. This program stays strictly inside that surface — all aggregate
-// statistics use array literals; everything else is pure scalar arithmetic
-// over the math builtins. No arrays are constructed inside helper functions.
+// MACHINE-PROOFABLE: every result is asserted against an expected value DERIVED
+// FROM BOOK SEMANTICS / closed-form mathematics, written BEFORE the first run.
+// Transcendental/iterative results are checked within a tolerance against their
+// analytic closed form (never back-filled from observed output).
 //
-// Every expected value is derived from BOOK SEMANTICS and the mathematical
-// definitions of the operations, written BEFORE the first run. Each computed
-// result is asserted against its expected value. On all-pass the program prints
-// ALL_CHECKS_PASSED; any mismatch prints CHECK_FAILED.
-//
-// Determinism: pure arithmetic, no clocks, no randomness, no I/O.
+// On all-pass prints ALL_CHECKS_PASSED; on mismatch prints CHECK_FAILED lines.
 // ============================================================================
 
 from std::core::math use {
     sum, mean, std, variance,
     PI, E, TAU,
-    sin, cos, tan, asin, acos, atan, atan2,
+    sin, cos, tan, atan2, asin, acos,
     clamp, lerp, sign, degrees, radians
 }
 
-// ----------------------------------------------------------------------------
-// Test harness. Each check_* returns 0 on pass and 1 (after printing) on fail;
-// the total is summed at the top level. (Functions do not mutate outer state.)
-// ----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Test harness
+// ---------------------------------------------------------------------------
 
-fn close(got: number, expected: number) -> bool {
-    abs(got - expected) < 0.000001
+let mut failures = 0
+
+fn approx(a: number, b: number, eps: number) -> bool {
+    let d = a - b
+    return abs(d) < eps
 }
 
-fn check_num(name: string, got: number, expected: number) -> int {
-    if close(got, expected) {
-        0
-    } else {
-        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
-        1
+fn check_eq(name: string, got: number, want: number) {
+    if got != want {
+        print(f"CHECK_FAILED: {name} expected={want} got={got}")
+        failures = failures + 1
     }
 }
 
-fn check_int(name: string, got: int, expected: int) -> int {
-    if got == expected {
-        0
-    } else {
-        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
-        1
+fn check_close(name: string, got: number, want: number, eps: number) {
+    if !approx(got, want, eps) {
+        print(f"CHECK_FAILED: {name} expected={want} got={got}")
+        failures = failures + 1
     }
 }
 
-fn check_bool(name: string, got: bool, expected: bool) -> int {
-    if got == expected {
-        0
-    } else {
-        print(f"CHECK_FAILED: {name} expected={expected} got={got}")
-        1
+fn check_int(name: string, got: int, want: int) {
+    if got != want {
+        print(f"CHECK_FAILED: {name} expected={want} got={got}")
+        failures = failures + 1
     }
 }
 
-// ----------------------------------------------------------------------------
-// SECTION 1 — Vec2 algebra (struct-of-numbers; pure scalar math)
-// ----------------------------------------------------------------------------
-
-type Vec2 { x: number, y: number }
-
-fn v2_add(a: Vec2, b: Vec2) -> Vec2 { Vec2 { x: a.x + b.x, y: a.y + b.y } }
-fn v2_sub(a: Vec2, b: Vec2) -> Vec2 { Vec2 { x: a.x - b.x, y: a.y - b.y } }
-fn v2_scale(a: Vec2, s: number) -> Vec2 { Vec2 { x: a.x * s, y: a.y * s } }
-fn v2_dot(a: Vec2, b: Vec2) -> number { a.x * b.x + a.y * b.y }
-fn v2_cross(a: Vec2, b: Vec2) -> number { a.x * b.y - a.y * b.x }
-fn v2_len(a: Vec2) -> number { sqrt(v2_dot(a, a)) }
-fn v2_dist(a: Vec2, b: Vec2) -> number { v2_len(v2_sub(a, b)) }
-
-fn v2_normalize(a: Vec2) -> Vec2 {
-    let l: number = v2_len(a)
-    if l < 0.0000001 {
-        Vec2 { x: 0.0, y: 0.0 }
-    } else {
-        Vec2 { x: a.x / l, y: a.y / l }
+fn check_true(name: string, cond: bool) {
+    if !cond {
+        print(f"CHECK_FAILED: {name} expected=true got=false")
+        failures = failures + 1
     }
 }
 
-// standard rotation matrix: x' = x cos - y sin ; y' = x sin + y cos
-fn v2_rotate(a: Vec2, theta: number) -> Vec2 {
-    let c: number = cos(theta)
-    let s: number = sin(theta)
-    Vec2 { x: a.x * c - a.y * s, y: a.x * s + a.y * c }
-}
+let TOL = 0.000000001  // 1e-9
 
-fn v2_lerp(a: Vec2, b: Vec2, t: number) -> Vec2 {
-    Vec2 { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) }
-}
+// ---------------------------------------------------------------------------
+// Section 1: Descriptive statistics (built on documented sum/mean/std/variance)
+// ---------------------------------------------------------------------------
 
-fn v2_angle(a: Vec2) -> number { atan2(a.y, a.x) }
+// Book reference dataset (core/math.mdx lines 47/57): std=2.0, variance=4.0
+let ref_data = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
 
-fn v2_clamp(a: Vec2, lo: number, hi: number) -> Vec2 {
-    Vec2 { x: clamp(a.x, lo, hi), y: clamp(a.y, lo, hi) }
-}
+// sum = 2+4+4+4+5+5+7+9 = 40
+check_eq("stats.sum", sum(ref_data), 40.0)
+// mean = 40 / 8 = 5.0
+check_eq("stats.mean", mean(ref_data), 5.0)
+// variance (population) = 4.0 per book
+check_eq("stats.variance", variance(ref_data), 4.0)
+// std = sqrt(4) = 2.0 per book
+check_eq("stats.std", std(ref_data), 2.0)
 
-// ----------------------------------------------------------------------------
-// SECTION 2 — geometry over fixed points
-// ----------------------------------------------------------------------------
+// A second dataset with hand-computed stats.
+// d2 = [10, 12, 14, 16, 18]; sum=70; mean=14
+// deviations: -4,-2,0,2,4 -> squares 16,4,0,4,16 = 40; var=40/5=8; std=sqrt(8)
+let d2 = [10.0, 12.0, 14.0, 16.0, 18.0]
+check_eq("stats.sum2", sum(d2), 70.0)
+check_eq("stats.mean2", mean(d2), 14.0)
+check_eq("stats.variance2", variance(d2), 8.0)
+check_close("stats.std2", std(d2), sqrt(8.0), TOL)
 
-fn tri_area_signed(a: Vec2, b: Vec2, c: Vec2) -> number {
-    v2_cross(v2_sub(b, a), v2_sub(c, a)) / 2.0
-}
-fn tri_area(a: Vec2, b: Vec2, c: Vec2) -> number { abs(tri_area_signed(a, b, c)) }
-fn tri_perimeter(a: Vec2, b: Vec2, c: Vec2) -> number {
-    v2_dist(a, b) + v2_dist(b, c) + v2_dist(c, a)
-}
-
-// interior angle at vertex b via the dot-product formula
-fn angle_at(a: Vec2, b: Vec2, c: Vec2) -> number {
-    let u: Vec2 = v2_sub(a, b)
-    let v: Vec2 = v2_sub(c, b)
-    let denom: number = v2_len(u) * v2_len(v)
-    if denom < 0.0000001 {
-        0.0
-    } else {
-        acos(clamp(v2_dot(u, v) / denom, -1.0, 1.0))
+// spread = max - min, implemented from documented min/max (the stdlib spread()
+// is v0.4-only per the book's v0.4-preview caution at line 115).
+fn spread(xs: Array<number>) -> number {
+    let mut lo = xs[0]
+    let mut hi = xs[0]
+    for x in xs {
+        lo = min(lo, x)
+        hi = max(hi, x)
     }
+    return hi - lo
 }
+// ref_data spread = 9 - 2 = 7
+check_eq("stats.spread", spread(ref_data), 7.0)
+// d2 spread = 18 - 10 = 8
+check_eq("stats.spread2", spread(d2), 8.0)
 
-// shoelace term for a single edge (p -> q); polygon area built by summing terms
-fn shoelace_term(p: Vec2, q: Vec2) -> number { p.x * q.y - q.x * p.y }
-
-// ----------------------------------------------------------------------------
-// SECTION 3 — numerical integration (trapezoidal rule), pure scalar loop.
-// Integral of sin over [0, PI] = 2.0 exactly.
-// ----------------------------------------------------------------------------
-
-fn integrate_sin(steps: int) -> number {
-    let a: number = 0.0
-    let b: number = PI()
-    let h: number = (b - a) / (steps as number)
-    let mut acc: number = (sin(a) + sin(b)) / 2.0
-    let mut i: int = 1
-    while i < steps {
-        acc = acc + sin(a + h * (i as number))
+// median via insertion sort then middle element (median() is v0.4-only).
+fn sorted_copy(xs: Array<number>) -> Array<number> {
+    let mut out: Array<number> = []
+    for x in xs { out.push(x) }
+    let n = out.len()
+    let mut i = 1
+    while i < n {
+        let key = out[i]
+        let mut j = i - 1
+        while j >= 0 && out[j] > key {
+            out[j + 1] = out[j]
+            j = j - 1
+        }
+        out[j + 1] = key
         i = i + 1
     }
-    acc * h
+    return out
 }
 
-// ----------------------------------------------------------------------------
-// SECTION 4 — Newton's method square root, cross-checked vs builtin sqrt.
-// ----------------------------------------------------------------------------
-
-fn newton_sqrt(value: number) -> number {
-    if value <= 0.0 {
-        0.0
-    } else {
-        let mut guess: number = value
-        let mut i: int = 0
-        while i < 50 {
-            guess = (guess + value / guess) / 2.0
-            i = i + 1
-        }
-        guess
+fn median(xs: Array<number>) -> number {
+    let s = sorted_copy(xs)
+    let n = s.len()
+    let half = n / 2
+    if n % 2 == 1 {
+        return s[half]
     }
+    let a = s[half - 1]
+    let b = s[half]
+    return (a + b) / 2.0
 }
 
-// ----------------------------------------------------------------------------
-// SECTION 5 — Horner polynomial evaluation over fixed coefficients (scalar).
-//   p(x) = 2x^3 - 3x^2 + 4x - 5
-// ----------------------------------------------------------------------------
+// ref_data sorted = [2,4,4,4,5,5,7,9]; n=8 even; middle two = s[3]=4, s[4]=5 -> 4.5
+check_eq("stats.median.even", median(ref_data), 4.5)
+// odd dataset [3,1,4,1,5] sorted=[1,1,3,4,5]; median=3 (book line 98)
+check_eq("stats.median.odd", median([3.0, 1.0, 4.0, 1.0, 5.0]), 3.0)
 
-fn poly_eval(x: number) -> number {
-    // Horner: ((2*x - 3)*x + 4)*x - 5
-    ((2.0 * x - 3.0) * x + 4.0) * x - 5.0
+// coefficient_of_variation = std/mean, implemented from primitives.
+// NOTE: the book's coefficient_of_variation() exists but its standalone import
+// (core/math.mdx line 108) does NOT resolve in v0.3.3 — see REPORT book_wrong.
+// We reimplement it to keep the program self-contained.
+fn cv(xs: Array<number>) -> number {
+    let m = mean(xs)
+    return std(xs) / m
+}
+// ref_data: std=2.0, mean=5.0 -> 0.4 (book line 113)
+check_close("stats.cv", cv(ref_data), 0.4, TOL)
+
+// ---------------------------------------------------------------------------
+// Section 2: Normalization (min-max scale + z-score), moving average
+// ---------------------------------------------------------------------------
+
+fn min_of(xs: Array<number>) -> number {
+    let mut lo = xs[0]
+    for x in xs { lo = min(lo, x) }
+    return lo
 }
 
-// ----------------------------------------------------------------------------
-// SECTION 6 — rounding matrix
-// ----------------------------------------------------------------------------
-
-type Rounded { fl: int, ce: int, rd: int }
-fn round_all(x: number) -> Rounded { Rounded { fl: floor(x), ce: ceil(x), rd: round(x) } }
-
-// ----------------------------------------------------------------------------
-// SECTION 7 — physics: projectile range/height (deterministic, scalar)
-// ----------------------------------------------------------------------------
-
-fn projectile_range(speed: number, angle_deg: number, g: number) -> number {
-    pow(speed, 2.0) * sin(2.0 * radians(angle_deg)) / g
-}
-fn projectile_height(speed: number, angle_deg: number, g: number) -> number {
-    let vy: number = speed * sin(radians(angle_deg))
-    pow(vy, 2.0) / (2.0 * g)
+fn max_of(xs: Array<number>) -> number {
+    let mut hi = xs[0]
+    for x in xs { hi = max(hi, x) }
+    return hi
 }
 
-// ----------------------------------------------------------------------------
-// SECTION 8 — Pythagorean trig identity helper
-// ----------------------------------------------------------------------------
-
-fn pyth(theta: number) -> number {
-    let s: number = sin(theta)
-    let c: number = cos(theta)
-    s * s + c * c
+// min-max scale into [0,1], using documented clamp to guard the denominator.
+fn min_max_scale(xs: Array<number>) -> Array<number> {
+    let lo = min_of(xs)
+    let hi = max_of(xs)
+    let range = hi - lo
+    let mut out: Array<number> = []
+    for x in xs {
+        if range == 0.0 {
+            out.push(0.0)
+        } else {
+            let v = (x - lo) / range
+            out.push(clamp(v, 0.0, 1.0))
+        }
+    }
+    return out
 }
 
-// ----------------------------------------------------------------------------
-// SECTION 9 — control curve: clamp a raw signal into [0,1] then lerp to [20,80]
-// ----------------------------------------------------------------------------
+// scale [10,12,14,16,18]: lo=10 hi=18 range=8 -> [0, .25, .5, .75, 1]
+let scaled = min_max_scale(d2)
+check_eq("norm.scale.0", scaled[0], 0.0)
+check_eq("norm.scale.1", scaled[1], 0.25)
+check_eq("norm.scale.2", scaled[2], 0.5)
+check_eq("norm.scale.3", scaled[3], 0.75)
+check_eq("norm.scale.4", scaled[4], 1.0)
 
-fn control(raw: number) -> number { lerp(20.0, 80.0, clamp(raw, 0.0, 1.0)) }
+// z-score normalization: (x - mean)/std (zscore() is v0.4-only, book line 129).
+fn zscore(xs: Array<number>) -> Array<number> {
+    let m = mean(xs)
+    let s = std(xs)
+    let mut out: Array<number> = []
+    for x in xs {
+        out.push((x - m) / s)
+    }
+    return out
+}
+// d2: mean=14, std=sqrt(8). z for 14 (the middle) = 0.
+let zs = zscore(d2)
+check_close("norm.zscore.mid", zs[2], 0.0, TOL)
+// z for 10 = (10-14)/sqrt(8) = -4/sqrt(8)
+check_close("norm.zscore.lo", zs[0], -4.0 / sqrt(8.0), TOL)
+// z-scored series has mean ~0 and std ~1
+check_close("norm.zscore.mean0", mean(zs), 0.0, TOL)
+check_close("norm.zscore.std1", std(zs), 1.0, TOL)
 
-// ============================================================================
-// MAIN — accumulate all checks
-// ============================================================================
+// simple moving average, window w.
+fn moving_average(xs: Array<number>, w: int) -> Array<number> {
+    let n = xs.len()
+    let mut out: Array<number> = []
+    let mut i = 0
+    while i + w <= n {
+        let mut acc = 0.0
+        let mut k = 0
+        while k < w {
+            acc = acc + xs[i + k]
+            k = k + 1
+        }
+        out.push(acc / (w as number))
+        i = i + 1
+    }
+    return out
+}
+// MA window 3 of [1,2,3,4,5] -> [2,3,4]
+let ma = moving_average([1.0, 2.0, 3.0, 4.0, 5.0], 3)
+check_int("norm.ma.len", ma.len(), 3)
+check_eq("norm.ma.0", ma[0], 2.0)
+check_eq("norm.ma.1", ma[1], 3.0)
+check_eq("norm.ma.2", ma[2], 4.0)
 
-let mut failures: int = 0
+// ---------------------------------------------------------------------------
+// Section 3: Linear regression + Pearson correlation (from primitives)
+// ---------------------------------------------------------------------------
 
-// ---- SECTION 1: vector algebra ----
-let a: Vec2 = Vec2 { x: 3.0, y: 4.0 }
-let b: Vec2 = Vec2 { x: 1.0, y: 2.0 }
+// least-squares slope/intercept for y = a + b*x.
+// (correlation()/covariance() are v0.4-only per book lines 63-82.)
+fn lin_slope(xs: Array<number>, ys: Array<number>) -> number {
+    let mx = mean(xs)
+    let my = mean(ys)
+    let n = xs.len()
+    let mut sxy = 0.0
+    let mut sxx = 0.0
+    let mut i = 0
+    while i < n {
+        let dx = xs[i] - mx
+        sxy = sxy + dx * (ys[i] - my)
+        sxx = sxx + dx * dx
+        i = i + 1
+    }
+    return sxy / sxx
+}
 
-let s1: Vec2 = v2_add(a, b)        // (4, 6)
-failures = failures + check_num("add.x", s1.x, 4.0)
-failures = failures + check_num("add.y", s1.y, 6.0)
+fn lin_intercept(xs: Array<number>, ys: Array<number>) -> number {
+    let b = lin_slope(xs, ys)
+    return mean(ys) - b * mean(xs)
+}
 
-let d1: Vec2 = v2_sub(a, b)        // (2, 2)
-failures = failures + check_num("sub.x", d1.x, 2.0)
-failures = failures + check_num("sub.y", d1.y, 2.0)
+// Perfect line y = 2x + 1 over x=0..4 -> slope=2, intercept=1
+let lx = [0.0, 1.0, 2.0, 3.0, 4.0]
+let ly = [1.0, 3.0, 5.0, 7.0, 9.0]
+check_close("reg.slope", lin_slope(lx, ly), 2.0, TOL)
+check_close("reg.intercept", lin_intercept(lx, ly), 1.0, TOL)
 
-let sc: Vec2 = v2_scale(a, 2.5)    // (7.5, 10)
-failures = failures + check_num("scale.x", sc.x, 7.5)
-failures = failures + check_num("scale.y", sc.y, 10.0)
+// Pearson correlation: cov(x,y) / (std(x)*std(y)). For a perfect positive
+// linear relationship r = 1.0.
+fn pearson(xs: Array<number>, ys: Array<number>) -> number {
+    let mx = mean(xs)
+    let my = mean(ys)
+    let n = xs.len()
+    let mut sxy = 0.0
+    let mut i = 0
+    while i < n {
+        sxy = sxy + (xs[i] - mx) * (ys[i] - my)
+        i = i + 1
+    }
+    let cov = sxy / (n as number)
+    return cov / (std(xs) * std(ys))
+}
+check_close("reg.pearson.perfect", pearson(lx, ly), 1.0, TOL)
+// Perfect negative line y = -3x: r = -1.0
+let lyn = [0.0, -3.0, -6.0, -9.0, -12.0]
+check_close("reg.pearson.neg", pearson(lx, lyn), -1.0, TOL)
 
-failures = failures + check_num("dot", v2_dot(a, b), 11.0)     // 3+8
-failures = failures + check_num("cross", v2_cross(a, b), 2.0)  // 6-4
-failures = failures + check_num("len", v2_len(a), 5.0)         // sqrt(25)
-failures = failures + check_num("dist", v2_dist(a, b), 2.8284271247461903) // sqrt(8)
+// ---------------------------------------------------------------------------
+// Section 4: 2D vector geometry using trig
+// ---------------------------------------------------------------------------
 
-let na: Vec2 = v2_normalize(a)     // (0.6, 0.8)
-failures = failures + check_num("norm.x", na.x, 0.6)
-failures = failures + check_num("norm.y", na.y, 0.8)
-failures = failures + check_num("norm.len", v2_len(na), 1.0)
-let nz: Vec2 = v2_normalize(Vec2 { x: 0.0, y: 0.0 })
-failures = failures + check_num("norm_zero.x", nz.x, 0.0)
-failures = failures + check_num("norm_zero.y", nz.y, 0.0)
+fn vlen(x: number, y: number) -> number {
+    return sqrt(x * x + y * y)
+}
 
-let r90: Vec2 = v2_rotate(Vec2 { x: 1.0, y: 0.0 }, radians(90.0))  // (0,1)
-failures = failures + check_num("rot90.x", r90.x, 0.0)
-failures = failures + check_num("rot90.y", r90.y, 1.0)
-let r180: Vec2 = v2_rotate(Vec2 { x: 1.0, y: 0.0 }, radians(180.0)) // (-1,0)
-failures = failures + check_num("rot180.x", r180.x, -1.0)
-failures = failures + check_num("rot180.y", r180.y, 0.0)
-let r360: Vec2 = v2_rotate(Vec2 { x: 1.0, y: 0.0 }, TAU())          // (1,0)
-failures = failures + check_num("rot360.x", r360.x, 1.0)
-failures = failures + check_num("rot360.y", r360.y, 0.0)
-let rlen: Vec2 = v2_rotate(a, radians(37.0))                       // length preserved = 5
-failures = failures + check_num("rot_preserves_len", v2_len(rlen), 5.0)
+fn vdot(ax: number, ay: number, bx: number, by: number) -> number {
+    return ax * bx + ay * by
+}
 
-let lp: Vec2 = v2_lerp(Vec2 { x: 0.0, y: 0.0 }, Vec2 { x: 10.0, y: 20.0 }, 0.25) // (2.5,5)
-failures = failures + check_num("lerp.x", lp.x, 2.5)
-failures = failures + check_num("lerp.y", lp.y, 5.0)
-let lp0: Vec2 = v2_lerp(Vec2 { x: 1.0, y: 2.0 }, Vec2 { x: 9.0, y: 8.0 }, 0.0)
-failures = failures + check_num("lerp0.x", lp0.x, 1.0)
-failures = failures + check_num("lerp0.y", lp0.y, 2.0)
-let lp1: Vec2 = v2_lerp(Vec2 { x: 1.0, y: 2.0 }, Vec2 { x: 9.0, y: 8.0 }, 1.0)
-failures = failures + check_num("lerp1.x", lp1.x, 9.0)
-failures = failures + check_num("lerp1.y", lp1.y, 8.0)
+// vector angle via atan2.
+fn vangle(x: number, y: number) -> number {
+    return atan2(y, x)
+}
 
-failures = failures + check_num("angle_diag", v2_angle(Vec2 { x: 1.0, y: 1.0 }), 0.7853981633974483) // PI/4
-failures = failures + check_num("angle_up", v2_angle(Vec2 { x: 0.0, y: 1.0 }), PI() / 2.0)
-failures = failures + check_num("angle_left", v2_angle(Vec2 { x: -1.0, y: 0.0 }), PI())
+// rotate (x,y) by theta radians.
+fn rot_x(x: number, y: number, t: number) -> number {
+    return x * cos(t) - y * sin(t)
+}
+fn rot_y(x: number, y: number, t: number) -> number {
+    return x * sin(t) + y * cos(t)
+}
 
-let cl: Vec2 = v2_clamp(Vec2 { x: -5.0, y: 150.0 }, 0.0, 100.0)  // (0,100)
-failures = failures + check_num("clamp.x", cl.x, 0.0)
-failures = failures + check_num("clamp.y", cl.y, 100.0)
+// (3,4) has length 5 (classic triple)
+check_close("geo.len.345", vlen(3.0, 4.0), 5.0, TOL)
+// (1,0)·(0,1) = 0 (orthogonal)
+check_eq("geo.dot.ortho", vdot(1.0, 0.0, 0.0, 1.0), 0.0)
+// (2,3)·(4,5) = 8 + 15 = 23
+check_eq("geo.dot.gen", vdot(2.0, 3.0, 4.0, 5.0), 23.0)
+// angle of (1,1) = PI/4
+check_close("geo.angle.diag", vangle(1.0, 1.0), PI() / 4.0, TOL)
+// angle of (0,1) = PI/2
+check_close("geo.angle.up", vangle(0.0, 1.0), PI() / 2.0, TOL)
 
-// ---- SECTION 2: geometry ----
-let t0: Vec2 = Vec2 { x: 0.0, y: 0.0 }
-let t1: Vec2 = Vec2 { x: 4.0, y: 0.0 }
-let t2: Vec2 = Vec2 { x: 0.0, y: 3.0 }
-failures = failures + check_num("tri_area", tri_area(t0, t1, t2), 6.0)
-failures = failures + check_num("tri_perim", tri_perimeter(t0, t1, t2), 12.0) // 3+4+5
-failures = failures + check_num("tri_signed_ccw", tri_area_signed(t0, t1, t2), 6.0)
-failures = failures + check_num("tri_signed_cw", tri_area_signed(t0, t2, t1), -6.0)
-failures = failures + check_num("tri_right_angle", angle_at(t1, t0, t2), PI() / 2.0)
-let ang_sum: number = angle_at(t1, t0, t2) + angle_at(t0, t1, t2) + angle_at(t0, t2, t1)
-failures = failures + check_num("tri_angle_sum", ang_sum, PI())
+// rotate (1,0) by 90deg -> (0,1)
+let half_pi = PI() / 2.0
+check_close("geo.rot.x", rot_x(1.0, 0.0, half_pi), 0.0, TOL)
+check_close("geo.rot.y", rot_y(1.0, 0.0, half_pi), 1.0, TOL)
+// rotation preserves length: rotate (3,4) by some angle keeps length 5
+let theta = radians(37.0)
+let rx = rot_x(3.0, 4.0, theta)
+let ry = rot_y(3.0, 4.0, theta)
+check_close("geo.rot.preserve", vlen(rx, ry), 5.0, TOL)
 
-// unit-square area via four shoelace terms (literal vertices, scalar math)
-let q0: Vec2 = Vec2 { x: 0.0, y: 0.0 }
-let q1: Vec2 = Vec2 { x: 1.0, y: 0.0 }
-let q2: Vec2 = Vec2 { x: 1.0, y: 1.0 }
-let q3: Vec2 = Vec2 { x: 0.0, y: 1.0 }
-let sq_area: number = abs(shoelace_term(q0, q1) + shoelace_term(q1, q2)
-                       + shoelace_term(q2, q3) + shoelace_term(q3, q0)) / 2.0
-failures = failures + check_num("square_area", sq_area, 1.0)
+// trig identity sin^2 + cos^2 = 1 across a sweep
+let mut id_ok = true
+let mut a = 0
+while a < 360 {
+    let r = radians(a as number)
+    let s = sin(r)
+    let c = cos(r)
+    if !approx(s * s + c * c, 1.0, 0.000001) { id_ok = false }
+    a = a + 15
+}
+check_true("geo.trig.identity", id_ok)
 
-// 2x3 rectangle area
-let w0: Vec2 = Vec2 { x: 0.0, y: 0.0 }
-let w1: Vec2 = Vec2 { x: 2.0, y: 0.0 }
-let w2: Vec2 = Vec2 { x: 2.0, y: 3.0 }
-let w3: Vec2 = Vec2 { x: 0.0, y: 3.0 }
-let rect_area: number = abs(shoelace_term(w0, w1) + shoelace_term(w1, w2)
-                         + shoelace_term(w2, w3) + shoelace_term(w3, w0)) / 2.0
-failures = failures + check_num("rect_area", rect_area, 6.0)
+// tan(theta) == sin/cos for a non-singular angle
+let ang30 = radians(30.0)
+check_close("geo.tan", tan(ang30), sin(ang30) / cos(ang30), TOL)
 
-// ---- SECTION 3: statistics via array literals (the documented call shape) ----
-// Book series {2,4,4,4,5,5,7,9}: sum=40, mean=5, variance=4, std=2
-failures = failures + check_num("stats.sum", sum([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]), 40.0)
-failures = failures + check_num("stats.mean", mean([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]), 5.0)
-failures = failures + check_num("stats.var", variance([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]), 4.0)
-failures = failures + check_num("stats.std", std([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]), 2.0)
-// std == sqrt(variance) identity
-failures = failures + check_num("stats.std_is_sqrt_var",
-    std([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]),
-    sqrt(variance([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])))
+// asin/acos round-trip: asin(sin(x)) == x for x in (-pi/2, pi/2)
+let xa = 0.5
+check_close("geo.asin.roundtrip", asin(sin(xa)), xa, 0.0000001)
+check_close("geo.acos.roundtrip", acos(cos(xa)), xa, 0.0000001)
 
-// {1,2,3,4,5}: sum=15, mean=3, pop variance=2, std=sqrt(2)
-failures = failures + check_num("stats2.sum", sum([1.0, 2.0, 3.0, 4.0, 5.0]), 15.0)
-failures = failures + check_num("stats2.mean", mean([1.0, 2.0, 3.0, 4.0, 5.0]), 3.0)
-failures = failures + check_num("stats2.var", variance([1.0, 2.0, 3.0, 4.0, 5.0]), 2.0)
-failures = failures + check_num("stats2.std", std([1.0, 2.0, 3.0, 4.0, 5.0]), 1.4142135623730951)
+// ---------------------------------------------------------------------------
+// Section 5: Numerical integration (composite Simpson)
+// ---------------------------------------------------------------------------
 
-// constant series: variance 0, std 0
-failures = failures + check_num("statsc.mean", mean([7.0, 7.0, 7.0, 7.0]), 7.0)
-failures = failures + check_num("statsc.var", variance([7.0, 7.0, 7.0, 7.0]), 0.0)
-failures = failures + check_num("statsc.std", std([7.0, 7.0, 7.0, 7.0]), 0.0)
+// Integrate f(x)=x^2 over [a,b]. Simpson is exact for cubics, so result should
+// equal the analytic (b^3-a^3)/3 to machine precision.
+fn simpson_x2(a: number, b: number, n: int) -> number {
+    let h = (b - a) / (n as number)
+    let mut acc = a * a + b * b
+    let mut i = 1
+    while i < n {
+        let x = a + (i as number) * h
+        let coeff = if i % 2 == 1 { 4.0 } else { 2.0 }
+        acc = acc + coeff * (x * x)
+        i = i + 1
+    }
+    return acc * h / 3.0
+}
+// integral of x^2 over [0,2] = 8/3
+check_close("integ.x2.0to2", simpson_x2(0.0, 2.0, 100), 8.0 / 3.0, 0.0000001)
+// integral of x^2 over [1,4] = (64-1)/3 = 21
+check_close("integ.x2.1to4", simpson_x2(1.0, 4.0, 100), 21.0, 0.000001)
 
-// symmetric series -5..5: sum 0, mean 0, variance 10, std sqrt(10)
-failures = failures + check_num("sym.sum",
-    sum([-5.0, -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0]), 0.0)
-failures = failures + check_num("sym.mean",
-    mean([-5.0, -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0]), 0.0)
-failures = failures + check_num("sym.var",
-    variance([-5.0, -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0]), 10.0)
-failures = failures + check_num("sym.std",
-    std([-5.0, -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0]), 3.1622776601683795)
+// Integrate sin over [0, PI] via Simpson; analytic answer is 2.0.
+fn simpson_sin(a: number, b: number, n: int) -> number {
+    let h = (b - a) / (n as number)
+    let mut acc = sin(a) + sin(b)
+    let mut i = 1
+    while i < n {
+        let x = a + (i as number) * h
+        let coeff = if i % 2 == 1 { 4.0 } else { 2.0 }
+        acc = acc + coeff * sin(x)
+        i = i + 1
+    }
+    return acc * h / 3.0
+}
+check_close("integ.sin.0toPI", simpson_sin(0.0, PI(), 1000), 2.0, 0.000001)
 
-// shift-invariance of variance: {12,14,14,14,15,15,17,19} == ref+10 -> same variance
-failures = failures + check_num("shift.mean", mean([12.0, 14.0, 14.0, 14.0, 15.0, 15.0, 17.0, 19.0]), 15.0)
-failures = failures + check_num("shift.var", variance([12.0, 14.0, 14.0, 14.0, 15.0, 15.0, 17.0, 19.0]), 4.0)
-// scale-by-2 -> variance * 4
-failures = failures + check_num("scale.var", variance([4.0, 8.0, 8.0, 8.0, 10.0, 10.0, 14.0, 18.0]), 16.0)
+// ---------------------------------------------------------------------------
+// Section 6: Newton's method root-finding (uses pow/sqrt/abs)
+// ---------------------------------------------------------------------------
 
-// ---- SECTION 4: numerical integration ----
-failures = failures + check_bool("integrate_sin_close", abs(integrate_sin(1000) - 2.0) < 0.00001, true)
-failures = failures + check_bool("integrate_coarse_under", integrate_sin(4) < 2.0, true)
-failures = failures + check_bool("integrate_coarse_pos", integrate_sin(4) > 1.0, true)
+// Newton's method for f(x)=x^2 - c, derivative 2x: converges to sqrt(c).
+fn newton_sqrt(c: number) -> number {
+    let mut x = c / 2.0 + 1.0  // deterministic seed > 0
+    let mut iter = 0
+    while iter < 60 {
+        let fx = x * x - c
+        let dfx = 2.0 * x
+        let nx = x - fx / dfx
+        if abs(nx - x) < 0.0000000001 {
+            x = nx
+            iter = 100
+        } else {
+            x = nx
+            iter = iter + 1
+        }
+    }
+    return x
+}
+// newton_sqrt(2) -> sqrt(2); compare to documented sqrt builtin
+check_close("root.sqrt2", newton_sqrt(2.0), sqrt(2.0), 0.0000001)
+check_close("root.sqrt2.analytic", newton_sqrt(2.0), 1.4142135623730951, 0.0000001)
+// newton_sqrt(16) -> 4
+check_close("root.sqrt16", newton_sqrt(16.0), 4.0, 0.0000001)
 
-// ---- SECTION 5: Newton sqrt cross-check ----
-failures = failures + check_num("newton_2", newton_sqrt(2.0), sqrt(2.0))
-failures = failures + check_num("newton_9", newton_sqrt(9.0), 3.0)
-failures = failures + check_num("newton_1000", newton_sqrt(1000.0), sqrt(1000.0))
-failures = failures + check_num("newton_zero", newton_sqrt(0.0), 0.0)
+// Newton for cube-root of 27 -> 3 (f(x)=x^3-27, f'=3x^2), using pow.
+fn newton_cbrt27() -> number {
+    let c = 27.0
+    let mut x = 2.0
+    let mut iter = 0
+    while iter < 80 {
+        let fx = pow(x, 3.0) - c
+        let dfx = 3.0 * pow(x, 2.0)
+        let nx = x - fx / dfx
+        if abs(nx - x) < 0.0000000001 {
+            x = nx
+            iter = 200
+        } else {
+            x = nx
+            iter = iter + 1
+        }
+    }
+    return x
+}
+check_close("root.cbrt27", newton_cbrt27(), 3.0, 0.0000001)
 
-// ---- SECTION 5b: Horner polynomial ----
-failures = failures + check_num("poly_2", poly_eval(2.0), 7.0)   // 16-12+8-5
-failures = failures + check_num("poly_0", poly_eval(0.0), -5.0)
-failures = failures + check_num("poly_1", poly_eval(1.0), -2.0)  // 2-3+4-5
+// ---------------------------------------------------------------------------
+// Section 7: Deterministic projectile-motion simulation (sin/cos/radians)
+// ---------------------------------------------------------------------------
 
-// ---- SECTION 6: rounding matrix ----
-let rp: Rounded = round_all(2.3)
-failures = failures + check_int("round_pos.fl", rp.fl, 2)
-failures = failures + check_int("round_pos.ce", rp.ce, 3)
-failures = failures + check_int("round_pos.rd", rp.rd, 2)
-let rn: Rounded = round_all(-2.3)
-failures = failures + check_int("round_neg.fl", rn.fl, -3)
-failures = failures + check_int("round_neg.ce", rn.ce, -2)
-failures = failures + check_int("round_neg.rd", rn.rd, -2)
-let rh: Rounded = round_all(2.5)
-failures = failures + check_int("round_half.fl", rh.fl, 2)
-failures = failures + check_int("round_half.ce", rh.ce, 3)
-failures = failures + check_int("round_half.rd", rh.rd, 3)
+// Launch speed v at angle deg, gravity g. Analytic results:
+//   range  R = v^2 * sin(2θ) / g
+//   apex   H = v^2 * sin(θ)^2 / (2g)
+//   flight T = 2 v sin(θ) / g
+let G = 9.8
+let V0 = 20.0
 
-// ---- SECTION 7: trig identities + constants ----
-failures = failures + check_num("pyth_0", pyth(0.0), 1.0)
-failures = failures + check_num("pyth_1", pyth(1.0), 1.0)
-failures = failures + check_num("pyth_pi3", pyth(PI() / 3.0), 1.0)
-failures = failures + check_num("pyth_tau", pyth(TAU()), 1.0)
-failures = failures + check_num("tan_quarter", tan(PI() / 4.0), 1.0)
-failures = failures + check_num("asin_1", asin(1.0), PI() / 2.0)
-failures = failures + check_num("acos_1", acos(1.0), 0.0)
-failures = failures + check_num("atan_1", atan(1.0), PI() / 4.0)
-failures = failures + check_num("deg_rad_roundtrip", degrees(radians(57.0)), 57.0)
-failures = failures + check_num("rad_deg_90", radians(90.0), PI() / 2.0)
-failures = failures + check_num("e_pow0", pow(E(), 0.0), 1.0)
-failures = failures + check_num("e_pow1", pow(E(), 1.0), E())
-failures = failures + check_num("tau_is_2pi", TAU(), 2.0 * PI())
-failures = failures + check_int("sign_big_neg", sign(-1000000), -1)
-failures = failures + check_int("sign_big_pos", sign(1000000), 1)
-failures = failures + check_int("sign_zero", sign(0), 0)
+fn proj_range(v: number, deg: number, g: number) -> number {
+    let t = radians(deg)
+    return v * v * sin(2.0 * t) / g
+}
+fn proj_apex(v: number, deg: number, g: number) -> number {
+    let t = radians(deg)
+    let s = sin(t)
+    return v * v * s * s / (2.0 * g)
+}
+fn proj_flight(v: number, deg: number, g: number) -> number {
+    let t = radians(deg)
+    return 2.0 * v * sin(t) / g
+}
 
-// ---- SECTION 7b: projectile physics ----
-failures = failures + check_num("proj_range_45", projectile_range(10.0, 45.0, 9.8), 10.204081632653061)
-failures = failures + check_num("proj_range_0", projectile_range(10.0, 0.0, 9.8), 0.0)
-failures = failures + check_num("proj_range_90", projectile_range(10.0, 90.0, 9.8), 0.0)
-failures = failures + check_num("proj_height_45", projectile_height(10.0, 45.0, 9.8), 2.5510204081632653)
+// 45 degrees: R = 400*sin(90deg)/9.8 = 400/9.8
+check_close("proj.range.45", proj_range(V0, 45.0, G), 400.0 / G, 0.000001)
+// 30 and 60 degrees give the SAME range (complementary-angle property)
+check_close("proj.range.complement", proj_range(V0, 30.0, G), proj_range(V0, 60.0, G), 0.000001)
+// apex at 90deg straight up: H = v^2/(2g) = 400/19.6
+check_close("proj.apex.90", proj_apex(V0, 90.0, G), 400.0 / (2.0 * G), 0.000001)
+// flight time at 90deg = 2v/g
+check_close("proj.flight.90", proj_flight(V0, 90.0, G), 2.0 * V0 / G, 0.000001)
 
-// ---- SECTION 9: control curve ----
-failures = failures + check_num("control_under", control(-0.5), 20.0)
-failures = failures + check_num("control_zero", control(0.0), 20.0)
-failures = failures + check_num("control_mid", control(0.5), 50.0)
-failures = failures + check_num("control_one", control(1.0), 80.0)
-failures = failures + check_num("control_over", control(2.0), 80.0)
+// Stepwise (closed-form-sampled) simulation of vertical motion, find max height.
+fn simulate_apex(v: number, deg: number, g: number) -> number {
+    let t = radians(deg)
+    let vy0 = v * sin(t)
+    let dt = 0.001
+    let mut time = 0.0
+    let mut max_h = 0.0
+    let mut steps = 0
+    while steps < 20000 {
+        let h = vy0 * time - 0.5 * g * time * time
+        if h > max_h { max_h = h }
+        if h < 0.0 && time > 0.0 {
+            steps = 30000
+        } else {
+            time = time + dt
+            steps = steps + 1
+        }
+    }
+    return max_h
+}
+// simulated apex should match analytic apex closely (coarse-step tolerance)
+let sim = simulate_apex(V0, 50.0, G)
+let ana = proj_apex(V0, 50.0, G)
+check_close("proj.sim.apex", sim, ana, 0.01)
 
-// ---- pow / sqrt round-trip identities ----
-failures = failures + check_num("pow_sqrt", pow(sqrt(7.0), 2.0), 7.0)
-failures = failures + check_num("pow_half", pow(9.0, 0.5), 3.0)
-failures = failures + check_num("min_max_pair_min", min(3.0, 5.0), 3.0)
-failures = failures + check_num("min_max_pair_max", max(3.0, 5.0), 5.0)
+// ---------------------------------------------------------------------------
+// Section 8: Financial compounding, factorial, series (lerp/sign/clamp)
+// ---------------------------------------------------------------------------
 
-// ============================================================================
-// FINAL VERDICT
-// ============================================================================
+// Compound interest: P*(1+r)^n. 1000 at 5% for 10 yrs via pow.
+fn compound(p: number, r: number, n: int) -> number {
+    return p * pow(1.0 + r, n as number)
+}
+// 1000*(1.05^10) = 1628.894626777442
+check_close("fin.compound", compound(1000.0, 0.05, 10), 1000.0 * pow(1.05, 10.0), TOL)
+check_close("fin.compound.value", compound(1000.0, 0.05, 10), 1628.894626777442, 0.0001)
+
+// factorial 5 = 120
+fn factorial(n: int) -> int {
+    let mut acc = 1
+    let mut i = 2
+    while i <= n {
+        acc = acc * i
+        i = i + 1
+    }
+    return acc
+}
+check_int("series.fact5", factorial(5), 120)
+check_int("series.fact0", factorial(0), 1)
+
+// geometric series sum_{k=0}^{n} r^k = (1-r^(n+1))/(1-r)
+fn geom_sum(r: number, n: int) -> number {
+    let mut acc = 0.0
+    let mut k = 0
+    while k <= n {
+        acc = acc + pow(r, k as number)
+        k = k + 1
+    }
+    return acc
+}
+// r=0.5, n=10: closed form (1 - 0.5^11)/(1-0.5)
+let gs_closed = (1.0 - pow(0.5, 11.0)) / (1.0 - 0.5)
+check_close("series.geom", geom_sum(0.5, 10), gs_closed, TOL)
+
+// lerp interpolation table: midpoint of [0,100] is 50; quarter is 25.
+check_eq("interp.lerp.mid", lerp(0.0, 100.0, 0.5), 50.0)
+check_eq("interp.lerp.q", lerp(0.0, 100.0, 0.25), 25.0)
+check_eq("interp.lerp.end", lerp(10.0, 20.0, 1.0), 20.0)
+
+// sign across the line
+check_int("sign.neg", sign(-42), -1)
+check_int("sign.zero", sign(0), 0)
+check_int("sign.pos", sign(7), 1)
+
+// clamp saturates both ends, passes through interior
+check_eq("clamp.hi", clamp(150.0, 0.0, 100.0), 100.0)
+check_eq("clamp.lo", clamp(-9.0, 0.0, 100.0), 0.0)
+check_eq("clamp.mid", clamp(42.5, 0.0, 100.0), 42.5)
+
+// constants sanity: TAU == 2*PI, E within known value
+check_close("const.tau", TAU(), 2.0 * PI(), TOL)
+check_close("const.e", E(), 2.718281828459045, TOL)
+check_close("const.degrees.pi", degrees(PI()), 180.0, TOL)
+
+// ---------------------------------------------------------------------------
+// Section 9: Aggregate report over a synthetic deterministic sine series.
+// ---------------------------------------------------------------------------
+
+// One full period of sin sampled at N points has mean ~0.
+fn sine_series(n: int) -> Array<number> {
+    let mut out: Array<number> = []
+    let mut i = 0
+    while i < n {
+        let frac = (i as number) / (n as number)
+        let x = frac * TAU()
+        out.push(sin(x))
+        i = i + 1
+    }
+    return out
+}
+let wave = sine_series(360)
+check_int("wave.len", wave.len(), 360)
+// mean over a full period ~ 0
+check_close("wave.mean", mean(wave), 0.0, 0.0001)
+// peak (max) ~ 1.0 and trough (min) ~ -1.0
+check_close("wave.max", max_of(wave), 1.0, 0.0001)
+check_close("wave.min", min_of(wave), -1.0, 0.0001)
+// variance of sin over a full period = 1/2. Discrete approx ~0.5
+check_close("wave.variance", variance(wave), 0.5, 0.001)
+
+// Add a DC offset of 5.0 and verify mean shifts by exactly 5, variance unchanged.
+fn shift(xs: Array<number>, c: number) -> Array<number> {
+    let mut out: Array<number> = []
+    for x in xs { out.push(x + c) }
+    return out
+}
+let wave5 = shift(wave, 5.0)
+check_close("wave.shift.mean", mean(wave5), 5.0, 0.0001)
+check_close("wave.shift.var", variance(wave5), variance(wave), 0.00001)
+
+// ---------------------------------------------------------------------------
+// Final verdict
+// ---------------------------------------------------------------------------
+
 if failures == 0 {
     print("ALL_CHECKS_PASSED")
 } else {
-    print(f"TOTAL_FAILURES: {failures}")
+    print(f"TOTAL_FAILURES={failures}")
 }
