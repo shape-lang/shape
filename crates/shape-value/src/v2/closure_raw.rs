@@ -165,13 +165,33 @@ impl OwnedClosureBlock {
             self.layout.capture_count()
         );
         let off = self.layout.heap_capture_offset(idx);
-        // SAFETY: caller upholds the construction-side init contract; the
-        // 8-byte read at `heap_capture_offset(idx)` is in-bounds per the
-        // layout's geometry (every capture slot is at least 8 bytes wide
-        // — narrower kinds zero-extend in the `read_capture_as_value_bits`
-        // path; this raw read sees the same on-block bytes the JIT and
-        // VM consumers see).
-        let bits = unsafe { std::ptr::read(self.ptr.add(off) as *const u64) };
+        let slot_kind = self.layout.capture_kind(idx);
+        // SAFETY: caller upholds the construction-side init contract. The
+        // read width is dictated by the capture's *slot* `FieldKind`
+        // (`capture_kind`), NOT a blanket 8-byte read: a narrow trailing
+        // capture (e.g. `Bool`/`I8` = 1 byte, `I32`/`U32` = 4 bytes) may
+        // sit in the final slot with fewer than 8 bytes to the end of the
+        // allocation, so an unconditional 8-byte `read` overruns the
+        // `alloc_zeroed` block. This mirrors `read_capture_as_value_bits`'s
+        // per-kind sign/zero-extend so the round-trip with
+        // `write_capture_typed` is bit-identical for every kind while every
+        // read stays in-bounds. `OwnedMutable`/`Shared` captures carry a
+        // `Ptr` slot kind (8 bytes), so they take the verbatim 8-byte read.
+        let bits = unsafe {
+            let field_ptr = self.ptr.add(off);
+            match slot_kind {
+                FieldKind::F64 | FieldKind::I64 | FieldKind::U64 | FieldKind::Ptr => {
+                    std::ptr::read(field_ptr as *const u64)
+                }
+                FieldKind::I32 => std::ptr::read(field_ptr as *const i32) as i64 as u64,
+                FieldKind::U32 => std::ptr::read(field_ptr as *const u32) as u64,
+                FieldKind::I16 => std::ptr::read(field_ptr as *const i16) as i64 as u64,
+                FieldKind::U16 => std::ptr::read(field_ptr as *const u16) as u64,
+                FieldKind::I8 => std::ptr::read(field_ptr as *const i8) as i64 as u64,
+                FieldKind::U8 => std::ptr::read(field_ptr as *const u8) as u64,
+                FieldKind::Bool => (std::ptr::read(field_ptr as *const u8) != 0) as u64,
+            }
+        };
         let kind = self.layout.capture_native_kind(idx);
         (bits, kind)
     }
@@ -2025,6 +2045,83 @@ mod owned_closure_block_kinded_tests {
 
             let (b2, k2) = block.read_capture_kinded(2);
             assert_eq!(b2 & 0xFF, 1);
+            assert_eq!(k2, NativeKind::Bool);
+        }
+    }
+
+    #[test]
+    fn read_capture_kinded_narrow_trailing_slot_no_oob() {
+        // R2 regression: a NARROW capture in a trailing 4-byte-aligned (but
+        // not 8-byte-aligned) slot leaves fewer than 8 bytes to the end of
+        // the `alloc_zeroed` block. `captures_size` is only rounded up to
+        // 8-byte alignment for the WHOLE captures area, so a final narrow
+        // slot that lands at a non-8-aligned offset has < 8 bytes to the
+        // allocation end. The pre-fix unconditional 8-byte read at
+        // `heap_capture_offset(last)` overran the allocation (Miri: OOB read
+        // past alloc end under both Stacked and Tree Borrows). The kind-width
+        // read must read exactly the slot width and zero/sign-extend, staying
+        // in-bounds while round-tripping bit-identically with
+        // `write_capture_typed`.
+
+        // Case A — the exact catalog repro: [F64, I32, I32].
+        //   F64 @ capture-offset 0   (heap 16)
+        //   I32 @ capture-offset 8   (heap 24)
+        //   I32 @ capture-offset 12  (heap 28 = alloc+0x1c)  <- trailing
+        // captures_size = round_up(16, 8) = 16, total block = 32. An 8-byte
+        // read of the trailing I32 at heap offset 28 reads bytes 28..36 —
+        // 4 bytes past the 32-byte allocation end (the prompt's
+        // "alloc+0x1c with only 4 bytes left to end").
+        let layout = arc_immutable_layout(&[ConcreteType::F64, ConcreteType::I32, ConcreteType::I32]);
+        // SAFETY: alloc + per-slot writes are paired; single-threaded.
+        unsafe {
+            // Confirm the geometry actually places the last I32 in a slot
+            // whose 8-byte read would overrun (offset + 8 > captures_size).
+            let last = layout.capture_count() - 1;
+            assert!(
+                layout.capture_offset(last) + 8
+                    > layout.total_heap_size()
+                        - crate::v2::closure_layout::HEAP_CLOSURE_HEADER_SIZE,
+                "test must exercise the trailing-narrow overrun shape"
+            );
+            let ptr = alloc_typed_closure(0, 0, &layout);
+            write_capture_typed(ptr, &layout, 0, f64::to_bits(3.25));
+            write_capture_typed(ptr, &layout, 1, (-12345i32) as u32 as u64);
+            write_capture_typed(ptr, &layout, 2, (-7i32) as u32 as u64);
+            let block = OwnedClosureBlock::from_raw(ptr, Arc::clone(&layout));
+            let (b0, k0) = block.read_capture_kinded(0);
+            assert_eq!(f64::from_bits(b0), 3.25);
+            assert_eq!(k0, NativeKind::Float64);
+            let (b1, k1) = block.read_capture_kinded(1);
+            assert_eq!(b1 as i32, -12345);
+            assert_eq!(k1, NativeKind::Int32);
+            let (b2, k2) = block.read_capture_kinded(2);
+            assert_eq!(b2 as i32, -7);
+            assert_eq!(k2, NativeKind::Int32);
+        }
+
+        // Case B — I8/Bool trailing after an I32 (1-byte read path).
+        //   I32  @ capture-offset 0  (heap 16)
+        //   I8   @ capture-offset 4  (heap 20)         <- 1-byte slot
+        //   Bool @ capture-offset 5  (heap 21)         <- trailing 1-byte
+        // captures_size = round_up(6, 8) = 8, total = 24. An 8-byte read of
+        // the trailing Bool at heap offset 21 reads 21..29 — 5 bytes past
+        // the 24-byte allocation. The kind-width read takes the single byte.
+        let layout_b = arc_immutable_layout(&[ConcreteType::I32, ConcreteType::I8, ConcreteType::Bool]);
+        // SAFETY: alloc + per-slot writes are paired; single-threaded.
+        unsafe {
+            let ptr = alloc_typed_closure(0, 0, &layout_b);
+            write_capture_typed(ptr, &layout_b, 0, (-9i32) as u32 as u64);
+            write_capture_typed(ptr, &layout_b, 1, (-5i8) as u8 as u64);
+            write_capture_typed(ptr, &layout_b, 2, 1);
+            let block = OwnedClosureBlock::from_raw(ptr, Arc::clone(&layout_b));
+            let (b0, k0) = block.read_capture_kinded(0);
+            assert_eq!(b0 as i32, -9);
+            assert_eq!(k0, NativeKind::Int32);
+            let (b1, k1) = block.read_capture_kinded(1);
+            assert_eq!(b1 as i8, -5);
+            assert_eq!(k1, NativeKind::Int8);
+            let (b2, k2) = block.read_capture_kinded(2);
+            assert_eq!(b2, 1);
             assert_eq!(k2, NativeKind::Bool);
         }
     }
