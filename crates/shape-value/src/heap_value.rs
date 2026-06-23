@@ -1208,7 +1208,24 @@ pub struct HashMapData<V: HashMapValueElem> {
     /// Eager bucket-index: hash → list of indices into `keys` / `values`
     /// arrays. Enables O(1) lookup at the user-facing `map.get(key)` path.
     /// Hash is computed via FNV-1a over the key string bytes.
-    pub index: std::collections::HashMap<u64, Vec<u32>>,
+    ///
+    /// **Boxed-out-of-line (U3-perf, 2026-06-23).** This is a Copy raw
+    /// pointer to a SEPARATE `Box`-allocated `std::HashMap`, NOT an inline
+    /// field, for the same reason `keys`/`values` are out-of-line raw
+    /// pointers: `insert_at(this: *mut Self, ...)` mutates the index through
+    /// `this` (derived from `Arc::as_ptr` of a SHARED `&Arc<HashMapData<V>>`).
+    /// Forming a Rust `&mut` to an *inline* field reached through such a
+    /// `this` is UB under Stacked/Tree Borrows (it retags the whole Arc
+    /// allocation as uniquely-borrowed). By boxing the index out of line, the
+    /// `&mut *(*this).index` carries the Box allocation's whole-allocation
+    /// provenance — NOT the Arc's — exactly as keys/values do. All three
+    /// fields are now Copy `*mut` to separate allocations; there is ZERO
+    /// `&mut` to any inline field reached via an `Arc::as_ptr`-derived `this`.
+    ///
+    /// Allocated via `Box::into_raw(Box::new(HashMap::new()))` at every
+    /// construction site; freed via `drop(Box::from_raw(self.index))` in
+    /// `Drop`. Always non-null for a live `HashMapData<V>`.
+    pub index: *mut std::collections::HashMap<u64, Vec<u32>>,
 }
 
 // SAFETY: `*mut TypedArray<T>` is `!Send + !Sync` by default. `HashMapData<V>`
@@ -1239,7 +1256,8 @@ impl<V: HashMapValueElem> HashMapData<V> {
             // so use the non-Copy `TypedArray::<V>::new_generic` path
             // (allocation only; no element-level reads/writes).
             values: crate::v2::typed_array::TypedArray::<V>::new_generic(),
-            index: std::collections::HashMap::new(),
+            // Boxed out-of-line index (raw provenance, separate allocation).
+            index: Box::into_raw(Box::new(std::collections::HashMap::new())),
         }
     }
 
@@ -1301,7 +1319,8 @@ impl<V: HashMapValueElem> HashMapData<V> {
         Self {
             keys,
             values,
-            index,
+            // Move the locally-built index into a fresh Box (raw provenance).
+            index: Box::into_raw(Box::new(index)),
         }
     }
 
@@ -1347,7 +1366,10 @@ impl<V: HashMapValueElem> HashMapData<V> {
     /// disambiguation.
     pub fn get_index(&self, key: &str) -> Option<usize> {
         let hash = fnv1a_hash(key.as_bytes());
-        let bucket = self.index.get(&hash)?;
+        // SAFETY: `self.index` is a live Box-allocated HashMap for any live
+        // `HashMapData<V>`; `&*` here is a shared borrow of that separate
+        // allocation (Box provenance, not Arc).
+        let bucket = unsafe { (*self.index).get(&hash)? };
         // SAFETY: keys is live; len is the bucket-recorded element count.
         let keys_slice = unsafe { crate::v2::typed_array::TypedArray::as_slice(self.keys) };
         for &idx in bucket {
@@ -1402,8 +1424,9 @@ impl<V: HashMapValueElem> HashMapData<V> {
     /// own themselves.
     pub unsafe fn insert(&mut self, key: &str, value: V) -> bool {
         let hash = fnv1a_hash(key.as_bytes());
-        // Check for existing key — overwrite path.
-        if let Some(bucket) = self.index.get(&hash) {
+        // Check for existing key — overwrite path. SAFETY: `self.index` is a
+        // live Box-allocated HashMap (Box provenance, separate allocation).
+        if let Some(bucket) = unsafe { (*self.index).get(&hash) } {
             for &idx in bucket {
                 let i = idx as usize;
                 // SAFETY: keys live + index points into keys range.
@@ -1439,8 +1462,10 @@ impl<V: HashMapValueElem> HashMapData<V> {
         unsafe { crate::v2::typed_array::TypedArray::push(self.keys, key_obj) };
         // Push value into the values buffer via raw write (V may be non-Copy).
         unsafe { Self::values_push(self.values, value) };
-        // Update bucket index.
-        self.index.entry(hash).or_default().push(new_idx_u32);
+        // Update bucket index. SAFETY: `&mut *self.index` carries the Box
+        // allocation's whole-allocation provenance (separate allocation), NOT
+        // any Arc provenance.
+        unsafe { (*self.index).entry(hash).or_default().push(new_idx_u32) };
         true
     }
 
@@ -1470,8 +1495,14 @@ impl<V: HashMapValueElem> HashMapData<V> {
     /// transfers one refcount share (for HeapElement / ptr-newtype V).
     pub unsafe fn insert_at(this: *mut Self, key: &str, value: V) -> bool {
         let hash = fnv1a_hash(key.as_bytes());
+        // Read the Copy index pointer field, then borrow the Box-allocated
+        // HashMap behind it. SAFETY: `(*this).index` is the Copy `*mut`
+        // pointer value (raw provenance from the Box allocation); `&*idx_ptr`
+        // borrows the SEPARATE Box allocation — NOT the Arc allocation `this`
+        // points into. No `&mut`/`&` to any inline field of `*this` is formed.
+        let idx_ptr: *mut std::collections::HashMap<u64, Vec<u32>> = unsafe { (*this).index };
         // Check for existing key — overwrite path.
-        if let Some(bucket) = unsafe { (*this).index.get(&hash) } {
+        if let Some(bucket) = unsafe { (*idx_ptr).get(&hash) } {
             for &idx in bucket {
                 let i = idx as usize;
                 // SAFETY: keys live + index points into keys range.
@@ -1499,8 +1530,14 @@ impl<V: HashMapValueElem> HashMapData<V> {
         unsafe { crate::v2::typed_array::TypedArray::push((*this).keys, key_obj) };
         // Push value into the values buffer via raw write (V may be non-Copy).
         unsafe { Self::values_push((*this).values, value) };
-        // Update bucket index.
-        unsafe { (*this).index.entry(hash).or_default().push(new_idx_u32) };
+        // Update bucket index. SAFETY: `idx_ptr` is the Copy index-pointer
+        // field value read above (Box allocation provenance); `&mut *idx_ptr`
+        // carries the Box allocation's whole-allocation provenance, NOT the
+        // Arc's. This is the load-bearing fix: forming `&mut` here used to
+        // retag the inline `index` field through an `Arc::as_ptr`-derived
+        // `this` (UB under Stacked/Tree Borrows); it now retags only the
+        // separately-allocated Box, exactly as keys/values do.
+        unsafe { (*idx_ptr).entry(hash).or_default().push(new_idx_u32) };
         true
     }
 
@@ -1512,8 +1549,12 @@ impl<V: HashMapValueElem> HashMapData<V> {
     /// position (mirror of `HashSetData::remove`).
     pub unsafe fn remove(&mut self, key: &str) -> Option<V> {
         let hash = fnv1a_hash(key.as_bytes());
+        // Read the Copy index pointer field once; all index access below
+        // goes through the Box allocation (raw provenance, separate alloc).
+        let idx_ptr: *mut std::collections::HashMap<u64, Vec<u32>> = self.index;
         let removed_idx: usize = {
-            let bucket = self.index.get(&hash)?;
+            // SAFETY: `idx_ptr` is the live Box-allocated HashMap.
+            let bucket = unsafe { (*idx_ptr).get(&hash)? };
             let mut found: Option<usize> = None;
             for (bucket_pos, &idx) in bucket.iter().enumerate() {
                 // SAFETY: keys live.
@@ -1526,10 +1567,12 @@ impl<V: HashMapValueElem> HashMapData<V> {
                 }
             }
             let bucket_pos = found?;
-            let bucket = self.index.get_mut(&hash).expect("bucket present");
+            // SAFETY: `&mut *idx_ptr` carries Box-allocation provenance, not
+            // Arc provenance.
+            let bucket = unsafe { (*idx_ptr).get_mut(&hash).expect("bucket present") };
             let removed_idx = bucket.swap_remove(bucket_pos) as usize;
             if bucket.is_empty() {
-                self.index.remove(&hash);
+                unsafe { (*idx_ptr).remove(&hash) };
             }
             removed_idx
         };
@@ -1559,7 +1602,8 @@ impl<V: HashMapValueElem> HashMapData<V> {
             (*self.values).len -= 1;
         }
         // Renumber the bucket index entries pointing past the removed slot.
-        for bucket in self.index.values_mut() {
+        // SAFETY: `&mut *idx_ptr` carries Box-allocation provenance.
+        for bucket in unsafe { (*idx_ptr).values_mut() } {
             for slot in bucket.iter_mut() {
                 if (*slot as usize) > removed_idx {
                     *slot -= 1;
@@ -1679,6 +1723,14 @@ impl<V: HashMapValueElem> Drop for HashMapData<V> {
             // Per-V dispatcher via `HashMapValueElem`.
             unsafe { V::release_typed_array(self.values) }
         }
+        if !self.index.is_null() {
+            // SAFETY: `self.index` was allocated via `Box::into_raw` at the
+            // construction site and is owned exclusively by this struct.
+            // Reconstituting the Box and dropping it frees the separate
+            // allocation exactly once (no leak, no double-free). After this
+            // `self.index` is invalid.
+            unsafe { drop(Box::from_raw(self.index)) }
+        }
     }
 }
 
@@ -1722,10 +1774,16 @@ impl<V: HashMapValueElem> Clone for HashMapData<V> {
             (*new_keys).len = n as u32;
             (*new_values).len = n as u32;
         }
+        // Deep-copy the index into a FRESH Box allocation. SAFETY: `self.index`
+        // is a live Box-allocated HashMap; `&*self.index` borrows it to clone
+        // the contents into a new owned `HashMap`, then `Box::into_raw` hands
+        // the clone its own separate allocation. The clone does NOT alias the
+        // source's index allocation.
+        let cloned_index = unsafe { (*self.index).clone() };
         Self {
             keys: new_keys,
             values: new_values,
-            index: self.index.clone(),
+            index: Box::into_raw(Box::new(cloned_index)),
         }
     }
 }
@@ -5329,8 +5387,49 @@ mod hashmap_mutation {
         // Bucket index has registrations for both keys' hashes.
         let h_a = fnv1a_hash(b"a");
         let h_b = fnv1a_hash(b"b");
-        assert!(m.index.get(&h_a).is_some());
-        assert!(m.index.get(&h_b).is_some());
+        assert!(unsafe { (*m.index).get(&h_a) }.is_some());
+        assert!(unsafe { (*m.index).get(&h_b) }.is_some());
+    }
+
+    /// MIRI/Stacked-Borrows anchor (U3-perf box-index, 2026-06-23).
+    ///
+    /// Drives `insert_at(this, ...)` where `this` is derived from
+    /// `Arc::as_ptr` of a map whose outer `Arc` strong_count >= 2 (a SHARED
+    /// borrow). The pre-fix code formed `&mut` to the inline `index` field via
+    /// this `this`, which is UB under Stacked/Tree Borrows (retags the whole
+    /// Arc allocation as uniquely-borrowed). Post-fix the index lives behind a
+    /// Copy `*mut` to a separate Box allocation, so the `&mut` carries Box
+    /// provenance and this test is clean under `cargo miri`.
+    ///
+    /// Exercises both branches: a new-key insert (grows the boxed index) and
+    /// an overwrite (reads the boxed index, no growth).
+    #[test]
+    fn insert_at_on_shared_arc_no_mut_via_arc_provenance() {
+        let arc: Arc<HashMapData<i64>> = Arc::new(HashMapData::new());
+        // Second owner — strong_count == 2; `arc` is now a genuinely shared
+        // allocation. `Arc::as_ptr` yields a pointer derived from a shared
+        // borrow; mutating inline data through it would be UB.
+        let alias = Arc::clone(&arc);
+        assert_eq!(Arc::strong_count(&arc), 2);
+
+        let this = Arc::as_ptr(&arc) as *mut HashMapData<i64>;
+        unsafe {
+            // New-key insert (boxed-index growth through Box provenance).
+            assert!(HashMapData::insert_at(this, "alpha", 1));
+            assert!(HashMapData::insert_at(this, "beta", 2));
+            // Overwrite (boxed-index read through Box provenance).
+            assert!(!HashMapData::insert_at(this, "alpha", 99));
+        }
+        assert_eq!(arc.len(), 2);
+        assert_eq!(arc.get_index("alpha"), Some(0));
+        assert_eq!(unsafe { arc.value_at_raw(0) }, 99);
+        assert_eq!(arc.get_index("beta"), Some(1));
+        // Bucket index reachable via the boxed pointer.
+        assert!(unsafe { (*arc.index).get(&fnv1a_hash(b"alpha")) }.is_some());
+        // Both Arc owners drop here — Drop frees the boxed index exactly once
+        // (the last owner). Element-Drop (SB-13) on the i64 values is a no-op.
+        drop(alias);
+        drop(arc);
     }
 
     #[test]
@@ -5566,8 +5665,8 @@ mod hashmap_mutation {
         // Bucket index has registrations for both group keys.
         let h_small = fnv1a_hash(b"small");
         let h_large = fnv1a_hash(b"large");
-        assert!(outer.index.get(&h_small).is_some());
-        assert!(outer.index.get(&h_large).is_some());
+        assert!(unsafe { (*outer.index).get(&h_small) }.is_some());
+        assert!(unsafe { (*outer.index).get(&h_large) }.is_some());
         // get_share returns a fresh per-variant Arc::clone-bumped copy.
         let small_ref = outer.get_share("small").expect("small bucket present");
         match small_ref {
