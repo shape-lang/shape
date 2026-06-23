@@ -16,8 +16,6 @@ use super::super::BytecodeCompiler;
 enum TypedLengthLocal {
     /// Receiver is a typed array — emit `ArrayLenTyped(slot)`
     Array(u16),
-    /// Receiver is a typed HashMap — emit `MapLenTyped(slot)`
-    Map(u16),
     /// Receiver is a string — emit `StringLenTyped(slot)`
     String(u16),
 }
@@ -442,16 +440,6 @@ impl BytecodeCompiler {
                         self.last_expr_numeric_type = Some(NumericType::Int);
                         return Ok(());
                     }
-                    TypedLengthLocal::Map(slot) => {
-                        self.emit(Instruction::new(
-                            OpCode::MapLenTyped,
-                            Some(Operand::Local(slot)),
-                        ));
-                        self.last_expr_schema = None;
-                        self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = Some(NumericType::Int);
-                        return Ok(());
-                    }
                     TypedLengthLocal::String(slot) => {
                         self.emit(Instruction::new(
                             OpCode::StringLenTyped,
@@ -803,10 +791,6 @@ impl BytecodeCompiler {
         // Typed array (v2)
         if self.v2_typed_array_locals.contains_key(&local_idx) {
             return Some(TypedLengthLocal::Array(local_idx));
-        }
-        // Typed HashMap (v2)
-        if self.v2_typed_map_locals.contains_key(&local_idx) {
-            return Some(TypedLengthLocal::Map(local_idx));
         }
         // String (non-param locals with confirmed type name)
         if !self.param_locals.contains(&local_idx) {

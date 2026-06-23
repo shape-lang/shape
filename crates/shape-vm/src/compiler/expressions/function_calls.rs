@@ -1561,47 +1561,16 @@ impl BytecodeCompiler {
                 return self.compile_print_with_interpolation(args);
             }
 
-            // v2 Phase 3.2: HashMap() typed-map fast path. When the call site's
-            // surrounding context resolves K and V to a typed-map kind, lower
-            // the constructor to a `NewTypedMap*` opcode instead of the
-            // legacy `BuiltinCall(HashMapCtor)`. Falls through for any
-            // unresolved K/V pair.
-            if builtin == BuiltinFunction::HashMapCtor && args.is_empty() {
-                use crate::compiler::v2_map_emission::infer_hashmap_kv_from_context;
-                use crate::compiler::v2_typed_map_emission::should_use_typed_map;
-
-                // Synthesize a fake call expression so we can query the
-                // span-based side table. The call has no AST node here, so
-                // we use a dummy expression with the call span — the only
-                // shape `infer_hashmap_kv_from_context` actually queries.
-                let dummy = Expr::Identifier(name.to_string(), span);
-                if let Some((k, v)) = infer_hashmap_kv_from_context(self, &dummy) {
-                    if let Some(kind) = should_use_typed_map(&k, &v) {
-                        self.emit(Instruction::simple(kind.new_opcode()));
-                        // Record the kv pair for the call expression's span so
-                        // downstream method dispatch can use it without
-                        // re-inference.
-                        self.record_map_key_value_for_node(span, k, v);
-                        // Propagate basic metadata so subsequent ops see a
-                        // HashMap-shaped value.
-                        self.last_expr_numeric_type = None;
-                        self.last_expr_schema = None;
-                        self.last_expr_type_info = None;
-                        self.clear_last_expr_reference_result();
-                        // ADR-006 §2.7.27 / Item 4: v2 typed-map fast-
-                        // path also produces a COW HashMap carrier. The
-                        // existing `v2_typed_map_locals` track will
-                        // carry the (k,v) pair; the parallel
-                        // `mut_self_container_locals` track records the
-                        // higher-level kind so method-call write-back
-                        // emission picks the right `MUT_SELF_HASHMAP`
-                        // set.
-                        self.pending_variable_container_kind =
-                            Some(crate::compiler::mutation_writeback::ContainerKind::HashMap);
-                        return Ok(());
-                    }
-                }
-            }
+            // U3 (SB-9 deletion): the dual-HashMap-carrier split-brain is gone.
+            // ALL HashMap construction routes through `BuiltinCall(HashMapCtor)`
+            // → the single honest `HashMapData` carrier (HeapKind::HashMap,
+            // refcounted via the §2.7.7 kind track, element-releasing Drop,
+            // `NativeKind::Null` None-arm, snapshot arm). The compile-time
+            // `should_use_typed_map` switch + the `TypedMap<K,V>` carrier that
+            // stamped `NativeKind::UInt64` (the carrier-kind lie SB-10/11/12/13)
+            // were deleted: adding/removing a type annotation on a HashMap must
+            // not change which runtime structure, None-encoding, or refcount
+            // discipline is used.
 
             for arg in args {
                 self.compile_expr_as_value_or_placeholder(arg)?;
@@ -2945,27 +2914,11 @@ impl BytecodeCompiler {
             }
         }
 
-        // v2 Phase 3.2: HashMap typed-map fast path for `m.set/.get/.has/.delete`.
-        //
-        // Resolved BEFORE compiling the receiver because the typed opcodes
-        // expect (map_ptr, key[, value]) on the stack with raw scalars where
-        // appropriate. Falls through to the legacy CallMethod path when the
-        // receiver isn't tracked as a typed map or when the method isn't one
-        // of the four typed-map methods.
-        if matches!(
-            method,
-            // D3 (S4): `len`/`size`/`isEmpty` added — the v2 typed-map carrier
-            // (raw `*const TypedMap*`, NativeKind::UInt64) cannot dispatch
-            // through the generic `CallMethod` path, so route these through the
-            // stack-based `TypedMapLenStack` opcode in
-            // `try_compile_typed_map_method`.
-            "set" | "get" | "has" | "delete" | "len" | "size" | "isEmpty" | "is_empty"
-        ) && self.is_typed_map_receiver(receiver)
-        {
-            if let Some(()) = self.try_compile_typed_map_method(receiver, method, args)? {
-                return Ok(());
-            }
-        }
+        // U3 (SB-9 deletion): the v2 typed-map method fast path is gone.
+        // `m.set/.get/.has/.delete/.len` on a HashMap now always dispatches
+        // through the generic `CallMethod` / local-slot HashMapData path
+        // (the single honest carrier), never the deleted `TypedMap<K,V>`
+        // carrier with its `NativeKind::UInt64` kind lie.
 
         // Local-slot-based typed method dispatch.
         //
@@ -3877,17 +3830,6 @@ impl BytecodeCompiler {
                     self.clear_last_expr_reference_result();
                     return Ok(Some(()));
                 }
-                if self.v2_typed_map_locals.contains_key(&local_idx) {
-                    self.emit(Instruction::new(
-                        OpCode::MapLenTyped,
-                        Some(Operand::Local(local_idx)),
-                    ));
-                    self.last_expr_schema = None;
-                    self.last_expr_type_info = None;
-                    self.last_expr_numeric_type = Some(NumericType::Int);
-                    self.clear_last_expr_reference_result();
-                    return Ok(Some(()));
-                }
                 if !self.param_locals.contains(&local_idx) {
                     let is_string = self
                         .type_tracker
@@ -3912,83 +3854,12 @@ impl BytecodeCompiler {
                 }
             }
 
-            // `.get(key)` — typed HashMap get for string-keyed maps
-            "get" if args.len() == 1 => {
-                if let Some(kind) = self.v2_typed_map_locals.get(&local_idx).copied() {
-                    let opcode = match kind {
-                        crate::compiler::v2_typed_map_emission::TypedMapKind::StringI64 => {
-                            Some(OpCode::MapGetStrI64)
-                        }
-                        crate::compiler::v2_typed_map_emission::TypedMapKind::StringF64 => {
-                            Some(OpCode::MapGetStrF64)
-                        }
-                        _ => None,
-                    };
-                    if let Some(opcode) = opcode {
-                        self.compile_expr(&args[0])?;
-                        self.emit(Instruction::new(opcode, Some(Operand::Local(local_idx))));
-                        self.last_expr_schema = None;
-                        self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = match kind {
-                            crate::compiler::v2_typed_map_emission::TypedMapKind::StringI64 => {
-                                Some(NumericType::Int)
-                            }
-                            crate::compiler::v2_typed_map_emission::TypedMapKind::StringF64 => {
-                                Some(NumericType::Number)
-                            }
-                            _ => None,
-                        };
-                        self.clear_last_expr_reference_result();
-                        return Ok(Some(()));
-                    }
-                }
-            }
-
-            // `.has(key)` — typed HashMap has for string-keyed maps
-            "has" if args.len() == 1 => {
-                if let Some(kind) = self.v2_typed_map_locals.get(&local_idx).copied() {
-                    let is_string_keyed = matches!(
-                        kind,
-                        crate::compiler::v2_typed_map_emission::TypedMapKind::StringI64
-                            | crate::compiler::v2_typed_map_emission::TypedMapKind::StringF64
-                            | crate::compiler::v2_typed_map_emission::TypedMapKind::StringPtr
-                    );
-                    if is_string_keyed {
-                        self.compile_expr(&args[0])?;
-                        self.emit(Instruction::new(
-                            OpCode::MapHasStr,
-                            Some(Operand::Local(local_idx)),
-                        ));
-                        self.last_expr_schema = None;
-                        self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = None;
-                        self.clear_last_expr_reference_result();
-                        return Ok(Some(()));
-                    }
-                }
-            }
-
-            // `.set(key, value)` — typed HashMap set for HashMap<string, int>
-            "set" if args.len() == 2 => {
-                if let Some(kind) = self.v2_typed_map_locals.get(&local_idx).copied() {
-                    if matches!(
-                        kind,
-                        crate::compiler::v2_typed_map_emission::TypedMapKind::StringI64
-                    ) {
-                        self.compile_expr(&args[0])?;
-                        self.compile_expr(&args[1])?;
-                        self.emit(Instruction::new(
-                            OpCode::MapSetStrI64,
-                            Some(Operand::Local(local_idx)),
-                        ));
-                        self.last_expr_schema = None;
-                        self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = None;
-                        self.clear_last_expr_reference_result();
-                        return Ok(Some(()));
-                    }
-                }
-            }
+            // U3 (SB-9 deletion): the `.get/.has/.set` local-slot fast path
+            // was guarded on `v2_typed_map_locals`, which only registered the
+            // deleted `TypedMap<K,V>` carrier. With one honest `HashMapData`
+            // carrier, HashMap method calls dispatch through the generic
+            // `CallMethod` path (MapGetStr*/MapHasStr/MapSetStr* opcodes are
+            // unreachable from here and slated for removal).
 
             // `.push(value)` — typed array push (local-slot-based)
             "push" if args.len() == 1 => {
@@ -4435,128 +4306,6 @@ impl BytecodeCompiler {
         shape_runtime::builtin_metadata::is_comptime_builtin_function(name)
     }
 
-    /// v2 Phase 3.2: emit a typed-map opcode sequence for `m.set(k, v)`,
-    /// `m.get(k)`, `m.has(k)`, or `m.delete(k)` when the receiver `m` is
-    /// tracked as a v2 typed map. Returns `Ok(Some(()))` on success and
-    /// `Ok(None)` when the receiver isn't a typed map (caller should fall
-    /// through to the legacy `CallMethod` path).
-    pub(super) fn try_compile_typed_map_method(
-        &mut self,
-        receiver: &Expr,
-        method: &str,
-        args: &[Expr],
-    ) -> Result<Option<()>> {
-        let kind = match self.resolve_receiver_typed_map_kind(receiver) {
-            Some(k) => k,
-            None => return Ok(None),
-        };
-
-        // v0.3 WS-6b GAP B: `set` / `delete` re-emit the receiver for the
-        // fluent-chaining return value. Re-`compile_expr` is safe for a pure
-        // identifier receiver (it just re-emits `LoadLocal` /
-        // `LoadModuleBinding`), but for a non-identifier receiver — e.g. a
-        // function call `id(m)` — that would evaluate the receiver TWICE,
-        // duplicating side effects and re-running monomorphization. Spill
-        // such receivers into a temp local and reload from it instead.
-        let receiver_is_pure_identifier = matches!(receiver, Expr::Identifier(..));
-        let needs_fluent_return = matches!(method, "set" | "delete");
-        let receiver_temp: Option<u16> = if needs_fluent_return && !receiver_is_pure_identifier {
-            // Wrong arity bails before we touch the temp — pre-check here so
-            // we don't declare a temp we won't use.
-            if args.len() != if method == "set" { 2 } else { 1 } {
-                return Ok(None);
-            }
-            self.compile_expr(receiver)?;
-            let t = self.declare_temp_local("__typed_map_recv_")?;
-            self.emit(Instruction::new(
-                OpCode::StoreLocal,
-                Some(Operand::Local(t)),
-            ));
-            self.emit(Instruction::new(OpCode::LoadLocal, Some(Operand::Local(t))));
-            Some(t)
-        } else {
-            // Compile receiver to put map_ptr on the stack.
-            self.compile_expr(receiver)?;
-            None
-        };
-
-        // Re-emit the receiver value for the fluent-chaining return. Reloads
-        // from the spill temp when one was allocated, otherwise re-compiles
-        // the pure-identifier receiver expression.
-        let reload_receiver = |this: &mut Self| -> Result<()> {
-            match receiver_temp {
-                Some(t) => {
-                    this.emit(Instruction::new(OpCode::LoadLocal, Some(Operand::Local(t))));
-                    Ok(())
-                }
-                None => this.compile_expr(receiver),
-            }
-        };
-
-        match method {
-            "set" => {
-                if args.len() != 2 {
-                    // Wrong arity — fall back to the legacy path.
-                    return Ok(None);
-                }
-                self.compile_expr_as_value_or_placeholder(&args[0])?;
-                self.compile_expr_as_value_or_placeholder(&args[1])?;
-                self.emit(Instruction::simple(kind.set_opcode()));
-                // set() returns the map itself for fluent chaining.
-                reload_receiver(self)?;
-            }
-            "get" => {
-                if args.len() != 1 {
-                    return Ok(None);
-                }
-                self.compile_expr_as_value_or_placeholder(&args[0])?;
-                self.emit(Instruction::simple(kind.get_opcode()));
-            }
-            "has" => {
-                if args.len() != 1 {
-                    return Ok(None);
-                }
-                self.compile_expr_as_value_or_placeholder(&args[0])?;
-                self.emit(Instruction::simple(kind.has_opcode()));
-            }
-            "delete" => {
-                if args.len() != 1 {
-                    return Ok(None);
-                }
-                self.compile_expr_as_value_or_placeholder(&args[0])?;
-                self.emit(Instruction::simple(kind.delete_opcode()));
-                // delete() returns the map itself for chaining.
-                reload_receiver(self)?;
-            }
-            // D3 (S4): `len`/`size`/`isEmpty`. The receiver map pointer is on
-            // the stack (compiled above). `TypedMapLenStack` pops it and pushes
-            // the Int64 entry count; `isEmpty` then compares the length to 0.
-            "len" | "size" | "isEmpty" | "is_empty" if args.is_empty() => {
-                self.emit(Instruction::simple(OpCode::TypedMapLenStack));
-                if matches!(method, "isEmpty" | "is_empty") {
-                    let zero = self.program.add_constant(Constant::Int(0));
-                    self.emit(Instruction::new(
-                        OpCode::PushConst,
-                        Some(Operand::Const(zero)),
-                    ));
-                    self.emit(Instruction::simple(OpCode::EqInt));
-                    self.last_expr_numeric_type = None;
-                } else {
-                    self.last_expr_numeric_type = Some(NumericType::Int);
-                }
-                self.last_expr_schema = None;
-                self.last_expr_type_info = None;
-                self.clear_last_expr_reference_result();
-                return Ok(Some(()));
-            }
-            _ => return Ok(None),
-        }
-        self.last_expr_schema = None;
-        self.last_expr_numeric_type = None;
-        self.last_expr_type_info = None;
-        self.clear_last_expr_reference_result();
-        Ok(Some(()))
-    }
 
     /// BUG3 — Attempt to monomorphize a generic free function for the given
     /// call-site argument types. Returns `Some(specialized_func_idx)` on

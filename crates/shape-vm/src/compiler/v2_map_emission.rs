@@ -160,140 +160,6 @@ impl BytecodeCompiler {
         self.array_element_types.get(&span)
     }
 
-    /// Whether a receiver expression resolves to a tracked v2 typed map.
-    /// Used by [`compile_expr_method_call`] to gate the typed-map fast path.
-    ///
-    /// Walks the receiver name through the v2 typed-map locals/module bindings
-    /// side-table only — does NOT consult the type tracker fallback. The
-    /// stricter check ensures we never emit typed map opcodes for receivers
-    /// allocated as legacy NaN-boxed `HashMapData`.
-    pub(crate) fn is_typed_map_receiver(&self, receiver: &Expr) -> bool {
-        self.resolve_receiver_typed_map_kind(receiver).is_some()
-    }
-
-    /// Resolve a typed-map receiver expression to its
-    /// [`crate::compiler::v2_typed_map_emission::TypedMapKind`]. Returns
-    /// `None` for non-identifier receivers and for receivers that aren't
-    /// tracked as v2 typed maps.
-    pub(crate) fn resolve_receiver_typed_map_kind(
-        &self,
-        receiver: &Expr,
-    ) -> Option<crate::compiler::v2_typed_map_emission::TypedMapKind> {
-        if let Expr::Identifier(name, _) = receiver {
-            if let Some(local_idx) = self.resolve_local(name) {
-                if let Some(&kind) = self.v2_typed_map_locals.get(&local_idx) {
-                    return Some(kind);
-                }
-            }
-            if let Some(&binding_idx) = self.module_bindings.get(name) {
-                if let Some(&kind) = self.v2_typed_map_module_bindings.get(&binding_idx) {
-                    return Some(kind);
-                }
-            }
-            return None;
-        }
-
-        // v0.3 WS-6b GAP B: a non-identifier receiver — e.g. the result of a
-        // (possibly generic) function call `id(m)` or a method-chain — whose
-        // statically-resolved type is `HashMap<K, V>`. A `HashMap<K, V>`
-        // annotation whose `(K, V)` pair has a typed-map opcode is ALWAYS
-        // allocated as a v2 `*mut TypedMap*` carrier (the `HashMapCtor` fast
-        // path at `function_calls.rs` fires unconditionally once the
-        // annotation resolves), so a function returning that type returns a
-        // typed-map pointer. Driving `.get`/`.set` through the typed-map
-        // opcodes is therefore sound — the receiver value on the stack IS a
-        // `*mut TypedMap*`, regardless of the `NativeKind::UInt64` carrier
-        // tag the generic call boundary stamps onto it.
-        //
-        // Per ADR-006 §2.7.5 stamp-at-compile-time: the (specialized) callee's
-        // substituted return-type annotation IS the proof — no runtime decode,
-        // no kind probe. `concrete_type_for_expr` returns `None` for any
-        // receiver whose type is not statically resolvable, in which case the
-        // caller falls back to the generic `CallMethod` path unchanged.
-        // A fluent typed-map method (`set` / `delete`) returns the receiver
-        // map itself, so a `m.set(...).get(...)` chain's `.get` receiver
-        // carries the inner receiver's typed-map kind. Recurse on the inner
-        // receiver — `concrete_type_for_expr` does not model the typed-map
-        // fast path's fluent return, so this structural step covers it.
-        if let Expr::MethodCall {
-            receiver: inner,
-            method,
-            ..
-        } = receiver
-        {
-            if matches!(method.as_str(), "set" | "delete") {
-                if let Some(kind) = self.resolve_receiver_typed_map_kind(inner) {
-                    return Some(kind);
-                }
-            }
-        }
-
-        if matches!(
-            receiver,
-            Expr::FunctionCall { .. } | Expr::MethodCall { .. }
-        ) {
-            if let Some(shape_value::v2::ConcreteType::HashMap(k, v)) =
-                crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
-                    self, receiver,
-                )
-            {
-                return crate::compiler::v2_typed_map_emission::should_use_typed_map(&k, &v);
-            }
-        }
-        None
-    }
-}
-
-/// Bridge between the BytecodeCompiler's type tracker and the v2 typed-map
-/// side-table. For a call expression that may be a `HashMap()` constructor,
-/// inspect the surrounding context (the call's recorded span side-table, the
-/// pending variable's type annotation captured before init compilation) and
-/// return a `(K, V)` `ConcreteType` pair when one can be derived.
-///
-/// Returns `None` for any non-resolvable shape — callers MUST fall back to
-/// the legacy `BuiltinCall(HashMapCtor)` path in that case.
-///
-/// Phase 3.2: This is the single point where the compiler asks "do we have
-/// enough type information to lower this `HashMap()` constructor (or method
-/// dispatch) to a typed-map opcode?". When type inference resolves both K
-/// and V, this returns Some.
-pub(crate) fn infer_hashmap_kv_from_context(
-    compiler: &BytecodeCompiler,
-    expr: &Expr,
-) -> Option<(ConcreteType, ConcreteType)> {
-    // 1. Side-table by AST span (populated either by annotation tracking or
-    //    by inference helpers earlier in the compilation pass).
-    let span = shape_ast::ast::Spanned::span(expr);
-    if let Some(kv) = compiler.map_key_value_for_node(span).cloned() {
-        return Some(kv);
-    }
-    // 2. Pending variable typed-map kind, set by the enclosing
-    //    `let m: HashMap<K, V> = ...` annotation BEFORE init compilation.
-    if let Some(kind) = compiler.pending_variable_typed_map_kind {
-        return Some(typed_map_kind_to_concrete_kv(kind));
-    }
-    None
-}
-
-/// Convert a [`crate::compiler::v2_typed_map_emission::TypedMapKind`] back
-/// into a `(K, V)` `ConcreteType` pair. Used by
-/// [`infer_hashmap_kv_from_context`] when only the typed-map kind has been
-/// captured (no full annotation/side-table entry exists).
-fn typed_map_kind_to_concrete_kv(
-    kind: crate::compiler::v2_typed_map_emission::TypedMapKind,
-) -> (ConcreteType, ConcreteType) {
-    use crate::compiler::v2_typed_map_emission::TypedMapKind;
-    match kind {
-        TypedMapKind::StringF64 => (ConcreteType::String, ConcreteType::F64),
-        TypedMapKind::StringI64 => (ConcreteType::String, ConcreteType::I64),
-        // StringPtr collapses many V types onto the ptr-shaped slot. Use
-        // String as the canonical V; this is enough for downstream
-        // verification (callers only check `should_use_typed_map`).
-        TypedMapKind::StringPtr => (ConcreteType::String, ConcreteType::String),
-        TypedMapKind::I64F64 => (ConcreteType::I64, ConcreteType::F64),
-        TypedMapKind::I64I64 => (ConcreteType::I64, ConcreteType::I64),
-        TypedMapKind::I64Ptr => (ConcreteType::I64, ConcreteType::String),
-    }
 }
 
 /// Parse a tracked type-tracker name like `"HashMap<string, int>"` into a
@@ -1037,13 +903,16 @@ mod tests {
 
     #[test]
     fn ws6b_typed_map_local_in_function_set_get() {
-        // Function-local typed-map: `m.set` / `m.get` on a local binding.
+        // Function-local HashMap: `m.set` / `m.get` on a local binding.
+        // U3 (SB-9 deletion): `get` honestly returns `Option<int>`, so the
+        // `-> int` return position unwraps via `?? 0` (the deleted TypedMap
+        // path returned a bare value with the `(0,Bool)` None sentinel).
         assert_eq!(
             crate::test_utils::eval_typed_i64(
                 "fn run() -> int {\n\
                  let mut m: HashMap<string,int> = HashMap()\n\
                  m.set(\"k\", 1)\n\
-                 m.get(\"k\")\n\
+                 m.get(\"k\") ?? 0\n\
                  }\n\
                  run()"
             ),

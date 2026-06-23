@@ -127,9 +127,6 @@ impl BytecodeCompiler {
             empty_array_accumulators: HashMap::new(),
             pending_empty_array_alloc_idx: None,
             pending_array_destructure_element_type: None,
-            pending_variable_typed_map_kind: None,
-            v2_typed_map_locals: HashMap::new(),
-            v2_typed_map_module_bindings: HashMap::new(),
             // ADR-006 §2.7.27 / Item 4 ruling: container-kind tracking for
             // `&mut self` write-back emission.
             mut_self_container_locals: HashMap::new(),

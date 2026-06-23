@@ -1184,30 +1184,6 @@ pub struct BytecodeCompiler {
     /// sub-pattern descends with the peeled inner element type.
     pub(crate) pending_array_destructure_element_type: Option<shape_value::v2::ConcreteType>,
 
-    /// v2 Phase 3.2: when the enclosing `let m: HashMap<K, V> = HashMap()`
-    /// declares an explicit `HashMap<K, V>` annotation whose key/value pair
-    /// maps to a [`v2_typed_map_emission::TypedMapKind`], stash the kind here
-    /// so `compile_expr_function_call` (HashMap ctor path) can lower the
-    /// allocation to a v2 typed-map opcode. The statement-binding code path
-    /// resets this to `None` before each new initializer.
-    pub(crate) pending_variable_typed_map_kind:
-        Option<crate::compiler::v2_typed_map_emission::TypedMapKind>,
-
-    /// v2 Phase 3.2: per-local-slot record of which locals hold a v2 typed
-    /// HashMap (allocated via `NewTypedMap*` rather than the legacy
-    /// `BuiltinCall(HashMapCtor)`). Populated by the statement-binding code
-    /// path. Consumed by HashMap method dispatch (`m.set/.get/.has/.delete`)
-    /// so the typed Set/Get/Has/Delete opcodes are only emitted for receivers
-    /// that were ALSO allocated as v2 typed maps — never for legacy NaN-boxed
-    /// HashMapData.
-    pub(crate) v2_typed_map_locals:
-        HashMap<u16, crate::compiler::v2_typed_map_emission::TypedMapKind>,
-
-    /// v2 Phase 3.2: per-module-binding record of v2 typed maps. Mirrors
-    /// [`v2_typed_map_locals`] for top-level bindings.
-    pub(crate) v2_typed_map_module_bindings:
-        HashMap<u16, crate::compiler::v2_typed_map_emission::TypedMapKind>,
-
     /// ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback, 2026-05-12):
     /// per-local-slot record of locals known to hold a Copy-on-Write
     /// collection (HashSet / HashMap / Deque / PriorityQueue / Array of
@@ -1845,7 +1821,6 @@ mod compiler_deep;
 pub(crate) mod v2_array_emission;
 pub(crate) mod v2_map_emission;
 pub(crate) mod v2_typed_emission;
-pub(crate) mod v2_typed_map_emission;
 
 // ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback, 2026-05-12):
 // compile-time write-back emission for `&mut self` opt-in methods on

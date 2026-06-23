@@ -1,6 +1,12 @@
 //! D4 (strict-flip, 2026-06-22) — hashmap-readback key-kind tests.
 //!
-//! Two regressions in the typed-map (`HashMap<string, int>`) fast path:
+//! U3 (SB-9 deletion, 2026-06-23): rebased onto the single honest
+//! `HashMapData` carrier (the `TypedMap<K,V>` fast path was deleted). `.set`
+//! is a COW mutator that requires a `let mut` binding, so these readback
+//! fixtures bind `let mut m`.
+//!
+//! Two regressions originally in the typed-map path, now verified through
+//! `HashMapData`:
 //!
 //!   (D4) A string key produced by a v2-raw `TypedArray<*const StringObj>`
 //!   read (`TypedArrayGetString`) carries `NativeKind::StringV2`. The
@@ -28,7 +34,7 @@ use super::test_utils::eval_typed_i64;
 fn hashmap_get_with_array_sourced_string_key() {
     let src = r#"
 fn main() -> int {
-    let m: HashMap<string, int> = HashMap()
+    let mut m: HashMap<string, int> = HashMap()
     m.set("a", 10)
     let keys = ["a"]
     let k = keys[0]
@@ -47,7 +53,7 @@ fn typed_object_int_field_sums_hashmap_readback_in_loop() {
     let src = r#"
 type Acc { total: int }
 fn main() -> int {
-    let m: HashMap<string, int> = HashMap()
+    let mut m: HashMap<string, int> = HashMap()
     m.set("a", 10)
     m.set("b", 20)
     m.set("c", 30)
@@ -69,7 +75,7 @@ main()
 fn hashmap_has_with_array_sourced_string_key() {
     let src = r#"
 fn main() -> int {
-    let m: HashMap<string, int> = HashMap()
+    let mut m: HashMap<string, int> = HashMap()
     m.set("a", 1)
     let keys = ["a"]
     let k = keys[0]
@@ -89,7 +95,7 @@ fn field_assign_after_hashmap_set_no_constraint_mis_solve() {
     let src = r#"
 type Acc { total: int }
 fn main() -> int {
-    let m: HashMap<string, int> = HashMap()
+    let mut m: HashMap<string, int> = HashMap()
     m.set("a", 10)
     let mut acc = Acc { total: 0 }
     acc.total = m.get("a") ?? 0

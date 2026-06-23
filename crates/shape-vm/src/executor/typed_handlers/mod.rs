@@ -2,7 +2,6 @@
 //! and array detection utilities.
 
 pub(crate) mod typed_array;
-pub(crate) mod typed_map;
 pub(crate) mod array_detect;
 pub(crate) mod field;
 pub(crate) mod int;

@@ -5210,20 +5210,9 @@ impl BytecodeCompiler {
                     .type_annotation
                     .as_ref()
                     .and_then(|ann| self.resolve_typed_array_kind_and_record_trait(ann));
-                // v2 Phase 3.2: when the binding has an explicit
-                // `HashMap<K, V>` annotation whose key/value pair maps to a
-                // typed-map kind, signal it to `compile_expr_function_call`
-                // (HashMap ctor path) so the constructor lowers to the v2
-                // typed-map opcode.
-                self.pending_variable_typed_map_kind = var_decl
-                    .type_annotation
-                    .as_ref()
-                    .and_then(|ann| {
-                        crate::compiler::v2_map_emission::map_key_value_from_annotation(ann)
-                    })
-                    .and_then(|(k, v)| {
-                        crate::compiler::v2_typed_map_emission::should_use_typed_map(&k, &v)
-                    });
+                // U3 (SB-9 deletion): no typed-map carrier selection. Every
+                // `HashMap<K, V>` binding uses the single honest `HashMapData`
+                // carrier; there is no `pending_variable_typed_map_kind` to set.
 
                 // Compile-time range check: if the type annotation is a width type
                 // (i8, u8, i16, etc.) and the initializer is a constant expression,
@@ -5364,8 +5353,6 @@ impl BytecodeCompiler {
                         }
                     }
                 }
-                let captured_typed_map_kind = self.pending_variable_typed_map_kind;
-                self.pending_variable_typed_map_kind = None;
                 // Phase 4b Round 6 WS-1b W16.2-C residual: capture the bare
                 // empty-array-accumulator placeholder index alongside the
                 // other initializer-derived signals.
@@ -5515,10 +5502,6 @@ impl BytecodeCompiler {
                                 name,
                                 var_decl.value.as_ref().map(|v| v.span()),
                             );
-                        }
-                        // v2 Phase 3.2: record v2 typed map kind for this binding
-                        if let Some(kind) = captured_typed_map_kind {
-                            self.v2_typed_map_module_bindings.insert(binding_idx, kind);
                         }
                         // ADR-006 §2.7.27 / Item 4 ruling: transfer the
                         // pending container-kind signal to the module
@@ -6061,26 +6044,6 @@ impl BytecodeCompiler {
                             self.record_binding_object_element_fields(name, init_expr);
                         }
                     }
-                    // v0.3 WS-6b GAP B: record v2 typed-map kind for the
-                    // local. The module-binding path above stamps
-                    // `v2_typed_map_module_bindings`, but the function-local
-                    // path had no mirror — so a function-scoped
-                    // `let m: HashMap<K,V> = HashMap()` produced a
-                    // `NewTypedMap*` carrier whose slot was never registered
-                    // as a typed map. `is_typed_map_receiver` /
-                    // `try_compile_typed_slot_method` then both missed it,
-                    // method dispatch fell through to the generic
-                    // `CallMethod` path, and the runtime surfaced
-                    // `no method 'set'/'get' on receiver kind UInt64`.
-                    // Mirrors the `v2_typed_array_locals` arm directly above.
-                    if let Some(kind) = captured_typed_map_kind {
-                        if let Some(name) = var_decl.pattern.as_identifier() {
-                            if let Some(local_idx) = self.resolve_local(name) {
-                                self.v2_typed_map_locals.insert(local_idx, kind);
-                            }
-                        }
-                    }
-
                     // cluster-2-cw-IC-class-c (Phase 3 cluster-2 Round 3,
                     // 2026-05-16): Class C method-chain intermediate slot
                     // coverage. When the RHS is a method call that just

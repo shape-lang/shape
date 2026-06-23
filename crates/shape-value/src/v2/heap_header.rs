@@ -20,6 +20,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // These start at 80 to avoid collision with v1 HeapKind variants.
 pub const HEAP_KIND_V2_TYPED_ARRAY: u16 = 80;
 pub const HEAP_KIND_V2_STRING: u16 = 81;
+/// U3 (SB-9 deletion): VACATED. Was the `TypedMap<K,V>` carrier's heap-header
+/// kind; the carrier was deleted (one honest `HashMapData` survives). Ordinal
+/// 82 is reserved do-not-reuse, mirroring the W12 TypedArray=8 vacation.
 pub const HEAP_KIND_V2_TYPED_MAP: u16 = 82;
 pub const HEAP_KIND_V2_STRUCT: u16 = 83;
 /// Closure-spec Phase F: escape-fallback `TypedClosureHeader` allocation kind.

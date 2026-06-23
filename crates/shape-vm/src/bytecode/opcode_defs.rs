@@ -843,67 +843,12 @@ define_opcodes! {
     /// pushes nothing. Releases prior element, transfers new value's refcount share.
     TypedArraySetTraitObject = 0x1C0, Object, pops: 3, pushes: 0;
 
-    // ===== v2 Typed Map Operations =====
-    /// Allocate a new TypedMap<*const StringObj, f64>. Pushes ptr.
-    NewTypedMapStringF64 = 0xCD, Object, pops: 0, pushes: 1;
-    /// Allocate a new TypedMap<*const StringObj, i64>. Pushes ptr.
-    NewTypedMapStringI64 = 0xCE, Object, pops: 0, pushes: 1;
-    /// Allocate a new TypedMap<*const StringObj, *const u8>. Pushes ptr.
-    NewTypedMapStringPtr = 0xCF, Object, pops: 0, pushes: 1;
-    /// Allocate a new TypedMap<i64, f64>. Pushes ptr.
-    NewTypedMapI64F64 = 0xD5, Object, pops: 0, pushes: 1;
-    /// Allocate a new TypedMap<i64, i64>. Pushes ptr.
-    NewTypedMapI64I64 = 0xD6, Object, pops: 0, pushes: 1;
-    /// Allocate a new TypedMap<i64, *const u8>. Pushes ptr.
-    NewTypedMapI64Ptr = 0xD9, Object, pops: 0, pushes: 1;
-    /// String→f64 get: pops (map_ptr, key), pushes f64 (or null).
-    TypedMapStringF64Get = 0xDA, Object, pops: 2, pushes: 1;
-    /// String→i64 get: pops (map_ptr, key), pushes i64 (or null).
-    TypedMapStringI64Get = 0xDB, Object, pops: 2, pushes: 1;
-    /// String→Ptr get: pops (map_ptr, key), pushes ptr (or null).
-    TypedMapStringPtrGet = 0xDC, Object, pops: 2, pushes: 1;
-    /// I64→f64 get: pops (map_ptr, key), pushes f64 (or null).
-    TypedMapI64F64Get = 0xDD, Object, pops: 2, pushes: 1;
-    /// I64→i64 get: pops (map_ptr, key), pushes i64 (or null).
-    TypedMapI64I64Get = 0xDE, Object, pops: 2, pushes: 1;
-    /// I64→Ptr get: pops (map_ptr, key), pushes ptr (or null).
-    TypedMapI64PtrGet = 0xDF, Object, pops: 2, pushes: 1;
-    /// String→f64 set: pops (map_ptr, key, value).
-    TypedMapStringF64Set = 0x4D, Object, pops: 3, pushes: 0;
-    /// String→i64 set: pops (map_ptr, key, value).
-    TypedMapStringI64Set = 0x4E, Object, pops: 3, pushes: 0;
-    /// String→Ptr set: pops (map_ptr, key, value).
-    TypedMapStringPtrSet = 0x4F, Object, pops: 3, pushes: 0;
-    /// I64→f64 set: pops (map_ptr, key, value).
-    TypedMapI64F64Set = 0x6D, Object, pops: 3, pushes: 0;
-    /// I64→i64 set: pops (map_ptr, key, value).
-    TypedMapI64I64Set = 0x6E, Object, pops: 3, pushes: 0;
-    /// I64→Ptr set: pops (map_ptr, key, value).
-    TypedMapI64PtrSet = 0x6F, Object, pops: 3, pushes: 0;
-    /// String→f64 has: pops (map_ptr, key), pushes bool.
-    TypedMapStringF64Has = 0x8E, Object, pops: 2, pushes: 1;
-    /// String→i64 has: pops (map_ptr, key), pushes bool.
-    TypedMapStringI64Has = 0x8F, Object, pops: 2, pushes: 1;
-    /// String→Ptr has: pops (map_ptr, key), pushes bool.
-    TypedMapStringPtrHas = 0xB9, Object, pops: 2, pushes: 1;
-    /// I64→f64 has: pops (map_ptr, key), pushes bool.
-    TypedMapI64F64Has = 0xBA, Object, pops: 2, pushes: 1;
-    /// I64→i64 has: pops (map_ptr, key), pushes bool.
-    TypedMapI64I64Has = 0xBB, Object, pops: 2, pushes: 1;
-    /// I64→Ptr has: pops (map_ptr, key), pushes bool.
-    TypedMapI64PtrHas = 0xBC, Object, pops: 2, pushes: 1;
-    /// String→f64 delete: pops (map_ptr, key).
-    TypedMapStringF64Delete = 0xBD, Object, pops: 2, pushes: 0;
-    /// String→i64 delete: pops (map_ptr, key).
-    TypedMapStringI64Delete = 0xBE, Object, pops: 2, pushes: 0;
-    /// String→Ptr delete: pops (map_ptr, key).
-    TypedMapStringPtrDelete = 0xBF, Object, pops: 2, pushes: 0;
-    /// I64→f64 delete: pops (map_ptr, key).
-    TypedMapI64F64Delete = 0xF9, Object, pops: 2, pushes: 0;
-    /// I64→i64 delete: pops (map_ptr, key).
-    TypedMapI64I64Delete = 0xFA, Object, pops: 2, pushes: 0;
-    /// I64→Ptr delete: pops (map_ptr, key).
-    TypedMapI64PtrDelete = 0xFB, Object, pops: 2, pushes: 0;
+    // U3 (SB-9 deletion): the v2 `TypedMap<K,V>` opcode family (0xCD-0xFB
+    // ranges) was deleted along with the dual-HashMap-carrier split-brain.
+    // ALL HashMap operations now use the single honest `HashMapData` carrier
+    // (HeapKind::HashMap) via the generic CallMethod path and the local-slot
+    // MapGetStr*/MapHasStr/MapSetStr*/MapLenTyped fast path. Those opcode
+    // discriminants are VACATED (do-not-reuse).
 
     // ===== v2 Concatenation Operations =====
     /// Concatenate two heap strings/chars, pushing a new string. Pops (a, b).
@@ -987,11 +932,9 @@ define_opcodes! {
     MapHasStr = 0x112, Object, pops: 1, pushes: 1;
     /// Get HashMap length. Operand: map slot.
     MapLenTyped = 0x113, Object, pops: 0, pushes: 1;
-    /// D3 (S4): get the length of a v2 typed-map carrier whose raw
-    /// `*const TypedMap<K,V>` pointer is on the stack (NativeKind::UInt64).
-    /// The `len` field lives at a K/V-independent struct offset, so a single
-    /// opcode serves every typed-map kind. Pops the map ptr, pushes Int64 len.
-    TypedMapLenStack = 0x1C1, Object, pops: 1, pushes: 1;
+    // U3 (SB-9 deletion): `TypedMapLenStack` (0x1C1) deleted with the
+    // `TypedMap<K,V>` carrier. HashMap `.len()` uses `MapLenTyped` (slot-based,
+    // HashMapData) or the generic CallMethod path. Discriminant VACATED.
 
     // ===== Typed String Access (local-slot based) =====
     /// Get string length (chars). Operand: string slot.

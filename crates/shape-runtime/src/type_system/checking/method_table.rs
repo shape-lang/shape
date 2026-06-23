@@ -706,6 +706,16 @@ impl MethodTable {
                 vec![E::ReceiverParam(0)],
                 hashmap_of(E::ReceiverParam(0), E::ReceiverParam(1)),
             ),
+            // U3 (SB-9 deletion): `remove(key)` returns the removed value
+            // `Option<V>` (tuple-return mutator, runtime handler `v2_remove`).
+            // Previously absent from the inference table — exposed once all
+            // HashMaps route through the single HashMapData carrier.
+            (
+                "remove",
+                0,
+                vec![E::ReceiverParam(0)],
+                opt_of(E::ReceiverParam(1)),
+            ),
             ("keys", 0, vec![], vec_of(E::ReceiverParam(0))),
             ("values", 0, vec![], vec_of(E::ReceiverParam(1))),
             ("entries", 0, vec![], vec_of(vec_of(E::ReceiverParam(0)))),

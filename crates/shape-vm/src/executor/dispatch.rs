@@ -1008,40 +1008,11 @@ impl VirtualMachine {
                 return self.exec_typed_string_access(instruction);
             }
 
-            // v2 typed map operations
-            NewTypedMapStringF64
-            | NewTypedMapStringI64
-            | NewTypedMapStringPtr
-            | NewTypedMapI64F64
-            | NewTypedMapI64I64
-            | NewTypedMapI64Ptr
-            | TypedMapStringF64Get
-            | TypedMapStringI64Get
-            | TypedMapStringPtrGet
-            | TypedMapI64F64Get
-            | TypedMapI64I64Get
-            | TypedMapI64PtrGet
-            | TypedMapStringF64Set
-            | TypedMapStringI64Set
-            | TypedMapStringPtrSet
-            | TypedMapI64F64Set
-            | TypedMapI64I64Set
-            | TypedMapI64PtrSet
-            | TypedMapStringF64Has
-            | TypedMapStringI64Has
-            | TypedMapStringPtrHas
-            | TypedMapI64F64Has
-            | TypedMapI64I64Has
-            | TypedMapI64PtrHas
-            | TypedMapStringF64Delete
-            | TypedMapStringI64Delete
-            | TypedMapStringPtrDelete
-            | TypedMapI64F64Delete
-            | TypedMapI64I64Delete
-            | TypedMapI64PtrDelete
-            | TypedMapLenStack => {
-                return self.exec_v2_typed_map(instruction);
-            }
+            // U3 (SB-9 deletion): the v2 `TypedMap<K,V>` opcode family and its
+            // `exec_v2_typed_map` handler were deleted. The single honest
+            // `HashMapData` carrier (HeapKind::HashMap) dispatches through the
+            // generic CallMethod path and the local-slot MapGetStr*/MapHasStr/
+            // MapSetStr*/MapLenTyped fast path above.
 
             // Special
             Nop => {}
