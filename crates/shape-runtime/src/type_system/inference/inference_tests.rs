@@ -1946,12 +1946,30 @@ fn ws9_index_access_on_unannotated_param_resolves_element_type() {
         panic!("twoidx should be inferred as a function");
     };
     for (idx, p) in params.iter().enumerate() {
+        // U1: the canonical array carrier is `Type::Generic { base:
+        // Reference("Array"/"Vec"), args: [int] }`. Canonicalize before the
+        // shape check so the assertion is encoding-agnostic.
+        let canon = p.canonicalize();
+        let is_array_int = match &canon {
+            Type::Generic { base, args } => {
+                let base_ok = match base.as_ref() {
+                    Type::Concrete(TypeAnnotation::Reference(tp)) => {
+                        let n = tp.to_string();
+                        n == "Array" || n == "Vec"
+                    }
+                    _ => false,
+                };
+                base_ok
+                    && args.len() == 1
+                    && matches!(
+                        &args[0],
+                        Type::Concrete(TypeAnnotation::Basic(n)) if n == "int"
+                    )
+            }
+            _ => false,
+        };
         assert!(
-            matches!(
-                p,
-                Type::Concrete(TypeAnnotation::Array(elem))
-                    if matches!(elem.as_ref(), TypeAnnotation::Basic(n) if n == "int")
-            ),
+            is_array_int,
             "twoidx param {} must resolve to Array<int>, got {:?}",
             idx,
             p,

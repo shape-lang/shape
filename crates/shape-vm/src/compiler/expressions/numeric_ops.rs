@@ -119,6 +119,17 @@ pub(super) fn type_display_name(ty: &Type) -> String {
             format!("{}[]", type_display_name(&Type::Concrete(*inner.clone())))
         }
         Type::Concrete(TypeAnnotation::Generic { name, .. }) => name.to_string(),
+        // U1: the canonical parametric carrier is `Type::Generic { base:
+        // Reference(name), args }` (e.g. the canonical `Array<T>`). Render the
+        // bare base NAME so downstream string checks (`is_arrayish` Some("Array"),
+        // operator-trait dispatch) see the same name they got from the legacy
+        // `Concrete(Generic{name})` / `Concrete(Array)` spellings instead of the
+        // `Debug` repr.
+        Type::Generic { base, .. } => match base.as_ref() {
+            Type::Concrete(TypeAnnotation::Reference(path)) => path.as_str().to_string(),
+            Type::Concrete(TypeAnnotation::Basic(name)) => name.clone(),
+            _ => format!("{:?}", ty),
+        },
         Type::Variable(v) => format!("?T{}", v.0),
         _ => format!("{:?}", ty),
     }

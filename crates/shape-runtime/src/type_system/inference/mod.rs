@@ -532,15 +532,16 @@ impl TypeInferenceEngine {
         base_var: TypeVar,
         additional_members: impl IntoIterator<Item = Type>,
     ) {
+        // Borrow the solver (disjoint from `pending_return_unions`) for the
+        // single equality relation so the `&mut self.pending_return_unions`
+        // entry borrow and the `&self.solver` probe don't conflict.
+        let solver = &self.solver;
         let entry = self
             .pending_return_unions
             .entry(base_var)
             .or_insert_with(Vec::new);
         for member in additional_members {
-            if !entry
-                .iter()
-                .any(|existing| crate::type_system::unification::types_equal(existing, &member))
-            {
+            if !entry.iter().any(|existing| solver.probe_equal(existing, &member)) {
                 entry.push(member);
             }
         }
@@ -1137,11 +1138,16 @@ impl TypeInferenceEngine {
         types.iter().all(|t| self.types_equal(first, t))
     }
 
-    /// Check if two types are structurally equal
+    /// The SINGLE type-equivalence relation (U1).
     ///
-    /// Uses proper structural equality instead of string-based comparison.
+    /// Routes to `ConstraintSolver::probe_equal` — `solve_constraint` run in
+    /// non-committing probe mode against the live substitution store. The
+    /// standalone structural `types_equal` free fn and `Unifier::try_unify` were
+    /// deleted; this is the one relation, so it sees through every encoding
+    /// (canonical `Generic{Array}` vs annotation `Concrete(Array)`), the bound
+    /// substitution chain, the numeric lattice, and `AnyError`.
     fn types_equal(&self, a: &Type, b: &Type) -> bool {
-        crate::type_system::unification::types_equal(a, b)
+        self.solver.probe_equal(a, b)
     }
 
     /// Create a nominal union type from heterogeneous types

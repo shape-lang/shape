@@ -113,7 +113,9 @@ pub fn annotation_to_semantic(ann: &TypeAnnotation) -> SemanticType {
                     ok_type: Box::new(semantic_args[0].clone()),
                     err_type: semantic_args.get(1).cloned().map(Box::new),
                 },
-                "Vec" if semantic_args.len() == 1 => {
+                // U1: "Array" is the canonical collection base name; "Vec" is
+                // its alias. Both map to SemanticType::Array.
+                "Vec" | "Array" if semantic_args.len() == 1 => {
                     SemanticType::Array(Box::new(semantic_args[0].clone()))
                 }
                 "Table" if semantic_args.len() == 1 => SemanticType::Generic {

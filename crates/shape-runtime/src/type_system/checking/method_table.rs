@@ -1091,7 +1091,17 @@ impl MethodTable {
             Type::Concrete(TypeAnnotation::Array(_)) => "Vec".to_string(),
             Type::Generic { base, .. } => {
                 if let Type::Concrete(TypeAnnotation::Reference(name)) = base.as_ref() {
-                    name.to_string()
+                    // U1: the canonical array carrier is `Generic{Array, ..}`;
+                    // array methods are registered under the "Vec" key. Normalize
+                    // the canonical "Array" base name to "Vec" so the canonical
+                    // carrier resolves the same registered methods as the legacy
+                    // `Concrete(Array(_))` spelling (line above) and the empty
+                    // `Generic{Array}` literal. Mirrors `extract_receiver_info`.
+                    if name.to_string() == "Array" {
+                        "Vec".to_string()
+                    } else {
+                        name.to_string()
+                    }
                 } else {
                     return None;
                 }

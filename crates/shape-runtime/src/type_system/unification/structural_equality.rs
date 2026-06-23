@@ -1,65 +1,18 @@
-//! Structural Type Equality
+//! Structural Type Annotation Equality
 //!
-//! Implements proper structural equality for types, replacing the string-based
-//! comparison with actual type structure comparison.
+//! `annotations_equal` is the structural comparison for the **annotation**
+//! layer (`TypeAnnotation`). It is NOT a type-equivalence relation.
+//!
+//! U1 (canonical-Type unification): the standalone `types_equal(&Type, &Type)`
+//! and its `constraints_equal` helper were DELETED. They were the third,
+//! arm-incomplete equality procedure (STRUCTURAL-AUDIT SB-3) that could not see
+//! through the multiple `Array<T>` encodings (SB-4). The single
+//! type-equivalence relation now lives in `ConstraintSolver::probe_equal`
+//! (`solve_constraint` run in non-committing probe mode), reached via
+//! `TypeInferenceEngine::types_equal`. Do not reintroduce a parallel
+//! `Type`-level structural-equality fn here.
 
-use crate::type_system::{Type, TypeConstraint};
-
-// TypeVar is used in tests below
 use shape_ast::ast::TypeAnnotation;
-
-/// Check if two types are structurally equal
-///
-/// This function replaces the previous `format!("{:?}", a) == format!("{:?}", b)`
-/// comparison with proper structural equality.
-pub fn types_equal(a: &Type, b: &Type) -> bool {
-    match (a, b) {
-        // Variable equality
-        (Type::Variable(v1), Type::Variable(v2)) => v1 == v2,
-
-        // Concrete type equality
-        (Type::Concrete(ann1), Type::Concrete(ann2)) => annotations_equal(ann1, ann2),
-
-        // Generic type equality
-        (Type::Generic { base: b1, args: a1 }, Type::Generic { base: b2, args: a2 }) => {
-            if a1.len() != a2.len() {
-                return false;
-            }
-            types_equal(b1, b2) && a1.iter().zip(a2.iter()).all(|(t1, t2)| types_equal(t1, t2))
-        }
-
-        // Constrained type equality
-        (
-            Type::Constrained {
-                var: v1,
-                constraint: c1,
-            },
-            Type::Constrained {
-                var: v2,
-                constraint: c2,
-            },
-        ) => v1 == v2 && constraints_equal(c1, c2),
-
-        // Function type equality
-        (
-            Type::Function {
-                params: p1,
-                returns: r1,
-            },
-            Type::Function {
-                params: p2,
-                returns: r2,
-            },
-        ) => {
-            p1.len() == p2.len()
-                && p1.iter().zip(p2.iter()).all(|(a, b)| types_equal(a, b))
-                && types_equal(r1, r2)
-        }
-
-        // Different type kinds are not equal
-        _ => false,
-    }
-}
 
 /// Check if two type annotations are structurally equal
 pub fn annotations_equal(a: &TypeAnnotation, b: &TypeAnnotation) -> bool {
@@ -187,101 +140,9 @@ pub fn annotations_equal(a: &TypeAnnotation, b: &TypeAnnotation) -> bool {
     }
 }
 
-/// Check if two type constraints are equal
-pub fn constraints_equal(a: &TypeConstraint, b: &TypeConstraint) -> bool {
-    match (a, b) {
-        (TypeConstraint::Comparable, TypeConstraint::Comparable) => true,
-        (
-            TypeConstraint::ImplementsTrait { trait_name: n1 },
-            TypeConstraint::ImplementsTrait { trait_name: n2 },
-        ) => n1 == n2,
-        (TypeConstraint::Iterable, TypeConstraint::Iterable) => true,
-        (TypeConstraint::HasField(n1, t1), TypeConstraint::HasField(n2, t2)) => {
-            n1 == n2 && types_equal(t1, t2)
-        }
-        (TypeConstraint::Indexable(t1), TypeConstraint::Indexable(t2)) => types_equal(t1, t2),
-        (
-            TypeConstraint::Callable {
-                params: p1,
-                returns: r1,
-            },
-            TypeConstraint::Callable {
-                params: p2,
-                returns: r2,
-            },
-        ) => {
-            p1.len() == p2.len()
-                && p1.iter().zip(p2.iter()).all(|(t1, t2)| types_equal(t1, t2))
-                && types_equal(r1, r2)
-        }
-        (TypeConstraint::OneOf(o1), TypeConstraint::OneOf(o2)) => {
-            o1.len() == o2.len() && o1.iter().zip(o2.iter()).all(|(t1, t2)| types_equal(t1, t2))
-        }
-        (TypeConstraint::Extends(e1), TypeConstraint::Extends(e2)) => types_equal(e1, e2),
-        (
-            TypeConstraint::HasMethod {
-                method_name: n1,
-                arg_types: a1,
-                return_type: r1,
-            },
-            TypeConstraint::HasMethod {
-                method_name: n2,
-                arg_types: a2,
-                return_type: r2,
-            },
-        ) => {
-            n1 == n2
-                && a1.len() == a2.len()
-                && a1.iter().zip(a2.iter()).all(|(t1, t2)| types_equal(t1, t2))
-                && types_equal(r1, r2)
-        }
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::type_system::TypeVar;
-
-    #[test]
-    fn test_basic_type_equality() {
-        let num1 = Type::Concrete(TypeAnnotation::Basic("number".to_string()));
-        let num2 = Type::Concrete(TypeAnnotation::Basic("number".to_string()));
-        let str1 = Type::Concrete(TypeAnnotation::Basic("string".to_string()));
-
-        assert!(types_equal(&num1, &num2));
-        assert!(!types_equal(&num1, &str1));
-    }
-
-    #[test]
-    fn test_variable_equality() {
-        let v1 = Type::Variable(TypeVar::new("T1".to_string()));
-        let v2 = Type::Variable(TypeVar::new("T1".to_string()));
-        let v3 = Type::Variable(TypeVar::new("T2".to_string()));
-
-        assert!(types_equal(&v1, &v2));
-        assert!(!types_equal(&v1, &v3));
-    }
-
-    #[test]
-    fn test_generic_type_equality() {
-        let opt1 = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Option".into()))),
-            args: vec![Type::Concrete(TypeAnnotation::Basic("number".to_string()))],
-        };
-        let opt2 = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Option".into()))),
-            args: vec![Type::Concrete(TypeAnnotation::Basic("number".to_string()))],
-        };
-        let opt3 = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Option".into()))),
-            args: vec![Type::Concrete(TypeAnnotation::Basic("string".to_string()))],
-        };
-
-        assert!(types_equal(&opt1, &opt2));
-        assert!(!types_equal(&opt1, &opt3));
-    }
 
     #[test]
     fn test_union_annotation_equality_order_independent() {

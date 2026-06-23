@@ -82,6 +82,26 @@ impl TypeInferenceEngine {
 
             // Array: propagate element type to elements
             Expr::Array(elements, _) => {
+                // U1: the expected array type may arrive in ANY encoding — the
+                // canonical `Generic{Array, [elem]}` (now produced by every array
+                // literal + `BuiltinTypes::array`), the annotation
+                // `Concrete(Generic{name:"Array"/"Vec"})`, or the legacy
+                // `Concrete(Array(..))`. Canonicalize and extract the single
+                // element type so it propagates into the literal's elements
+                // (enabling per-element numeric literal width-adoption, e.g.
+                // `let a: Array<i32> = [1,2,3]`) regardless of which encoding the
+                // annotation produced.
+                let canon_expected = expected.canonicalize();
+                if let Type::Generic { base, args } = &canon_expected {
+                    let is_array_base = matches!(
+                        base.as_ref(),
+                        Type::Concrete(TypeAnnotation::Reference(tp))
+                            if { let n = tp.to_string(); n == "Array" || n == "Vec" }
+                    );
+                    if is_array_base && args.len() == 1 {
+                        return self.check_array_against(elements, &args[0]);
+                    }
+                }
                 match expected {
                     Type::Concrete(TypeAnnotation::Array(elem_ty)) => {
                         self.check_array_against(elements, &Type::Concrete(*elem_ty.clone()))
@@ -465,8 +485,10 @@ impl TypeInferenceEngine {
         let inferred = self.infer_expr(expr)?;
 
         // Try to unify with hint - if it fails, just return inferred
-        // This is a "soft" constraint that helps but doesn't force
-        if self.unifier.try_unify(&inferred, hint).is_ok() {
+        // This is a "soft" constraint that helps but doesn't force.
+        // U1: the single equality relation (probe-mode solve) replaces the
+        // deleted read-only `Unifier::try_unify` here.
+        if self.solver.probe_equal(&inferred, hint) {
             Ok(hint.clone())
         } else {
             Ok(inferred)
@@ -570,11 +592,12 @@ impl TypeInferenceEngine {
                 inferred_return_type.clone(),
                 constrained_expected_return.clone(),
             ));
-        } else {
-            let _ = self
-                .unifier
-                .try_unify(&inferred_return_type, &constrained_expected_return);
         }
+        // U1: the concrete-return branch previously called the read-only
+        // `Unifier::try_unify` and discarded the result — a pure no-op whose
+        // only purpose was to NOT push a hard constraint. With `try_unify`
+        // deleted, the branch is simply the absence of a pushed constraint;
+        // closure PARAMS were already bound above. No coercion, no fabrication.
 
         // STRICT-FLIP (v0.3.3 map/collect OUTPUT element stamp): when the
         // expected return is a bare `MethodParam` var (the

@@ -279,6 +279,74 @@ pub fn substitute(ty: &Type, subst: &HashMap<TypeVar, Type>) -> Type {
 }
 
 impl Type {
+    /// U1 (canonical-Type unification): normalize any residual encoding of a
+    /// parametric collection / generic to the SINGLE canonical form
+    /// `Type::Generic { base: Reference(name), args }`.
+    ///
+    /// The historical split-brain (STRUCTURAL-AUDIT SB-4) admitted three
+    /// encodings of `Array<T>`: the var-preserving `Generic{Array}`, the
+    /// `Concrete(TypeAnnotation::Array(..))` synthesised by `BuiltinTypes::array`,
+    /// and the `Concrete(TypeAnnotation::Generic{name:"Array"})` parsed from
+    /// annotations. `canonicalize` folds the two `Concrete(..)` forms into the
+    /// `Generic{..}` form so every comparison/constraint sees one representation.
+    /// Run it at the entry of the single equality relation and the constraint
+    /// solver; there is no parallel "patch the encodings pairwise" path anymore.
+    ///
+    /// `Array` is normalised to the base name `"Array"` and `Vec` is treated as
+    /// its alias (both already accepted by `is_array_or_vec_base`).
+    pub fn canonicalize(&self) -> Type {
+        match self {
+            Type::Concrete(ann) => Self::canonicalize_annotation(ann),
+            Type::Variable(_) => self.clone(),
+            Type::Constrained { .. } => self.clone(),
+            Type::Generic { base, args } => Type::Generic {
+                base: Box::new(Self::canonicalize_collection_base(base)),
+                args: args.iter().map(|a| a.canonicalize()).collect(),
+            },
+            Type::Function { params, returns } => Type::Function {
+                params: params.iter().map(|p| p.canonicalize()).collect(),
+                returns: Box::new(returns.canonicalize()),
+            },
+        }
+    }
+
+    /// Normalize a `Generic` base so the `Vec` collection alias collapses to the
+    /// single canonical `Array` name (U1: `Array`/`Vec` are one type; `Vec` is
+    /// the SemanticType spelling, `Array` the inference spelling). Other bases
+    /// canonicalize structurally.
+    fn canonicalize_collection_base(base: &Type) -> Type {
+        if let Type::Concrete(TypeAnnotation::Reference(tp)) = base {
+            if tp.to_string() == "Vec" {
+                return Type::Concrete(TypeAnnotation::Reference("Array".into()));
+            }
+        }
+        base.canonicalize()
+    }
+
+    /// Canonicalize a `TypeAnnotation`-backed type, folding the collection /
+    /// generic annotation shapes into `Type::Generic`.
+    fn canonicalize_annotation(ann: &TypeAnnotation) -> Type {
+        match ann {
+            TypeAnnotation::Array(elem) => Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Array".into()))),
+                args: vec![Self::canonicalize_annotation(elem)],
+            },
+            TypeAnnotation::Generic { name, args } => Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference(
+                    name.as_str().into(),
+                ))),
+                args: args
+                    .iter()
+                    .map(Self::canonicalize_annotation)
+                    .collect(),
+            },
+            // All other annotations stay concrete (Basic/Reference/Object/etc.).
+            // A `tyvar` marker stays as-is here; it is decoded by the
+            // substitution store, not by structural canonicalization.
+            other => Type::Concrete(other.clone()),
+        }
+    }
+
     /// Convert Type back to TypeAnnotation for AST
     pub fn to_annotation(&self) -> Option<TypeAnnotation> {
         match self {
@@ -290,9 +358,21 @@ impl Type {
                     let arg_annotations: Option<Vec<_>> =
                         args.iter().map(|arg| arg.to_annotation()).collect();
 
-                    arg_annotations.map(|args| TypeAnnotation::Generic {
-                        name: name.clone(),
-                        args,
+                    arg_annotations.map(|args| {
+                        // U1: the canonical collection carrier is
+                        // `Generic{Array/Vec, [elem]}`. Round-trip the
+                        // single-arg Array/Vec form back to
+                        // `TypeAnnotation::Array` so downstream annotation
+                        // consumers (string rendering, compiler element re-read)
+                        // see the legacy array shape they already understand.
+                        if (name.as_str() == "Array" || name.as_str() == "Vec") && args.len() == 1 {
+                            TypeAnnotation::Array(Box::new(args.into_iter().next().unwrap()))
+                        } else {
+                            TypeAnnotation::Generic {
+                                name: name.clone(),
+                                args,
+                            }
+                        }
                     })
                 } else {
                     None
@@ -348,7 +428,9 @@ impl Type {
                             ok_type: Box::new(semantic_args[0].clone()),
                             err_type: semantic_args.get(1).cloned().map(Box::new),
                         }),
-                        "Vec" if semantic_args.len() == 1 => {
+                        // U1: "Array" is the canonical collection base name;
+                        // "Vec" is its alias. Both map to SemanticType::Array.
+                        "Vec" | "Array" if semantic_args.len() == 1 => {
                             Some(SemanticType::Array(Box::new(semantic_args[0].clone())))
                         }
                         _ => Some(SemanticType::Generic {

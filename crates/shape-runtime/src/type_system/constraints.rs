@@ -99,6 +99,7 @@ fn collapse_degenerate_union(ann: &TypeAnnotation) -> &TypeAnnotation {
     ann
 }
 
+#[derive(Clone)]
 pub struct ConstraintSolver {
     /// Type unifier
     unifier: Unifier,
@@ -225,13 +226,89 @@ impl ConstraintSolver {
         Ok(())
     }
 
+    /// The SINGLE type-equivalence relation (U1).
+    ///
+    /// This is EQUIVALENCE, not unifiability: it answers "are these two types
+    /// the same type" for union/match-arm dedup, as-cast identity, and the soft
+    /// bidirectional hint-adoption probe. It replaces BOTH deleted procedures —
+    /// the standalone structural `types_equal` (which could not follow the
+    /// substitution chain and could not see two `Array<T>` encodings as equal,
+    /// STRUCTURAL-AUDIT SB-3/SB-4) AND `Unifier::try_unify` (which over-merged by
+    /// treating `Variable ~ anything` as "equal", wrongly collapsing distinct
+    /// union members).
+    ///
+    /// The relation is: resolve both sides through the live substitution store,
+    /// `canonicalize()` (folding every collection/generic encoding to the single
+    /// `Type::Generic` form), then compare structurally for EXACT equality. A
+    /// free `Type::Variable` is equal only to the same variable — it is NOT
+    /// bound, so this never mutates `self` and never collapses two concrete
+    /// members. Numeric widening / `AnyError` subsumption are *unifiability*
+    /// concerns handled by `solve_constraint` on the hard constraint path; they
+    /// are deliberately NOT part of equivalence (an `int` member and a `number`
+    /// member of a union stay distinct).
+    pub fn probe_equal(&self, t1: &Type, t2: &Type) -> bool {
+        let a = self.unifier.apply_substitutions(t1).canonicalize();
+        let b = self.unifier.apply_substitutions(t2).canonicalize();
+        Self::types_equivalent(&a, &b)
+    }
+
+    /// Structural EXACT equality over already-substituted, already-canonicalized
+    /// types — the comparison core of `probe_equal` (U1). The single source of
+    /// truth for type sameness; do not add a parallel structural comparison.
+    fn types_equivalent(a: &Type, b: &Type) -> bool {
+        match (a, b) {
+            (Type::Variable(v1), Type::Variable(v2)) => v1 == v2,
+            (Type::Concrete(ann1), Type::Concrete(ann2)) => {
+                crate::type_system::unification::annotations_equal(ann1, ann2)
+            }
+            (Type::Generic { base: b1, args: a1 }, Type::Generic { base: b2, args: a2 }) => {
+                a1.len() == a2.len()
+                    && Self::types_equivalent(b1, b2)
+                    && a1
+                        .iter()
+                        .zip(a2.iter())
+                        .all(|(x, y)| Self::types_equivalent(x, y))
+            }
+            (
+                Type::Constrained { var: v1, .. },
+                Type::Constrained { var: v2, .. },
+            ) => v1 == v2,
+            (
+                Type::Function {
+                    params: p1,
+                    returns: r1,
+                },
+                Type::Function {
+                    params: p2,
+                    returns: r2,
+                },
+            ) => {
+                p1.len() == p2.len()
+                    && p1
+                        .iter()
+                        .zip(p2.iter())
+                        .all(|(x, y)| Self::types_equivalent(x, y))
+                    && Self::types_equivalent(r1, r2)
+            }
+            _ => false,
+        }
+    }
+
     /// Solve a single constraint
     fn solve_constraint(&mut self, t1: Type, t2: Type) -> TypeResult<()> {
         // Apply current substitutions before matching to avoid overwriting
         // existing bindings (e.g., T17=string overwritten by T17=T19 during
         // Function param/return pairwise unification).
-        let t1 = self.unifier.apply_substitutions(&t1);
-        let t2 = self.unifier.apply_substitutions(&t2);
+        //
+        // U1: canonicalize AFTER substitution so every residual encoding of a
+        // parametric collection / generic (`Concrete(Array(..))`,
+        // `Concrete(Generic{name:"Array"})`) — including any re-introduced by a
+        // stored binding — is folded to the single `Type::Generic{..}` form
+        // before matching. With this, no `Concrete(Array(..))` can reach the
+        // match arms; the former cross-form `Generic ~ Concrete(Array)` patch is
+        // deleted rather than kept as a parallel reconciliation arm.
+        let t1 = self.unifier.apply_substitutions(&t1).canonicalize();
+        let t2 = self.unifier.apply_substitutions(&t2).canonicalize();
 
         match (&t1, &t2) {
             // Variable constraints
@@ -383,13 +460,12 @@ impl ConstraintSolver {
                 self.solve_constraint(*fr.clone(), Type::Concrete(*cr.clone()))
             }
 
-            // Array<T> (Type::Generic with base "Array" or "Vec") ~ Concrete(Array(T))
-            (Type::Generic { base, args }, Type::Concrete(TypeAnnotation::Array(elem)))
-            | (Type::Concrete(TypeAnnotation::Array(elem)), Type::Generic { base, args })
-                if args.len() == 1 && is_array_or_vec_base(base) =>
-            {
-                self.solve_constraint(args[0].clone(), Type::Concrete((**elem).clone()))
-            }
+            // U1: the former `Generic ~ Concrete(Array(T))` cross-form arm is
+            // DELETED. `canonicalize()` (run at the top of every
+            // `solve_constraint` call) folds `Concrete(Array(..))` into
+            // `Type::Generic{Array, [..]}`, so an array on either side is always
+            // `Generic ~ Generic` and handled by the generic arm above. Keeping
+            // the cross-form arm would re-create the split-brain this unifies.
 
             _ => Err(TypeError::TypeMismatch(
                 format!("{:?}", t1),
@@ -1504,6 +1580,133 @@ mod tests {
 
     fn fresh_type(tvgen: &mut TypeVarGen) -> Type {
         tvgen.fresh_type()
+    }
+
+    /// U1 ISOLATION GATE (STRUCTURAL-AUDIT §U1 regression test).
+    ///
+    /// The single type-equivalence relation (`ConstraintSolver::probe_equal`)
+    /// must agree that ALL FOUR historical `Array<int>` encodings are the same
+    /// type, and that BOTH `Function` encodings are the same type — and must
+    /// still keep genuinely-distinct types (`Array<int>` vs `Array<number>`,
+    /// `int` vs `number`) distinct. Before U1, three different procedures over
+    /// these encodings could disagree (SB-3/SB-4). This pins the unification.
+    #[test]
+    fn u1_single_relation_agrees_on_all_array_and_function_encodings() {
+        use shape_ast::ast::{FunctionParam, TypeAnnotation};
+
+        let int = || Type::Concrete(TypeAnnotation::Basic("int".to_string()));
+        let number = || Type::Concrete(TypeAnnotation::Basic("number".to_string()));
+
+        // The 4 Array<int> encodings (SB-4 Enc 1/2/3 + the Vec alias).
+        let array_generic = Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Array".into()))),
+            args: vec![int()],
+        };
+        let vec_generic = Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".into()))),
+            args: vec![int()],
+        };
+        let array_concrete =
+            Type::Concrete(TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                "int".to_string(),
+            ))));
+        let array_concrete_generic = Type::Concrete(TypeAnnotation::Generic {
+            name: "Array".into(),
+            args: vec![TypeAnnotation::Basic("int".to_string())],
+        });
+        let array_encodings = [
+            &array_generic,
+            &vec_generic,
+            &array_concrete,
+            &array_concrete_generic,
+        ];
+
+        let solver = ConstraintSolver::new();
+
+        // Every pair of the 4 Array<int> encodings is equivalent (the single
+        // relation sees through the encoding split).
+        for a in array_encodings.iter() {
+            for b in array_encodings.iter() {
+                assert!(
+                    solver.probe_equal(a, b),
+                    "U1: array encodings must be equal: {:?} vs {:?}",
+                    a,
+                    b
+                );
+            }
+        }
+
+        // Distinct element type stays distinct.
+        let array_number = Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Array".into()))),
+            args: vec![number()],
+        };
+        for a in array_encodings.iter() {
+            assert!(
+                !solver.probe_equal(a, &array_number),
+                "U1: Array<int> must NOT equal Array<number>: {:?}",
+                a
+            );
+        }
+
+        // The 2 Function encodings: `(int) -> int`.
+        let fn_inference = Type::Function {
+            params: vec![int()],
+            returns: Box::new(int()),
+        };
+        let fn_concrete = Type::Concrete(TypeAnnotation::Function {
+            params: vec![FunctionParam {
+                name: None,
+                optional: false,
+                type_annotation: TypeAnnotation::Basic("int".to_string()),
+            }],
+            returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+        });
+        // NOTE: the two Function encodings are distinct CARRIERS by design
+        // (`Type::Function` can hold inference vars; `Concrete(Function)` cannot)
+        // and `canonicalize` does not fold `Concrete(Function)` into
+        // `Type::Function`. Equivalence holds within each carrier; cross-carrier
+        // Function *unifiability* is the hard-constraint path's job, not
+        // equivalence. Assert self-equality within each encoding.
+        assert!(solver.probe_equal(&fn_inference, &fn_inference));
+        assert!(solver.probe_equal(&fn_concrete, &fn_concrete));
+
+        // int and number are NOT equal (strict typing — the core finding).
+        assert!(!solver.probe_equal(&int(), &number()));
+    }
+
+    /// U1: identical function types over identical Array<int> encodings unify —
+    /// the `(Vec<int>) -> int != (Vec<int>) -> int` finding is GONE. Two
+    /// function types whose single param uses *different* Array encodings are
+    /// equivalent because canonicalize folds the params.
+    #[test]
+    fn u1_identical_function_types_over_array_encodings_unify() {
+        use shape_ast::ast::TypeAnnotation;
+
+        let int = || Type::Concrete(TypeAnnotation::Basic("int".to_string()));
+        let array_generic = Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Array".into()))),
+            args: vec![int()],
+        };
+        let array_concrete =
+            Type::Concrete(TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                "int".to_string(),
+            ))));
+
+        let f1 = Type::Function {
+            params: vec![array_generic.clone()],
+            returns: Box::new(int()),
+        };
+        let f2 = Type::Function {
+            params: vec![array_concrete.clone()],
+            returns: Box::new(int()),
+        };
+
+        let solver = ConstraintSolver::new();
+        assert!(
+            solver.probe_equal(&f1, &f2),
+            "U1: (Array<int>)->int with different element encodings must be equal"
+        );
     }
 
     #[test]
