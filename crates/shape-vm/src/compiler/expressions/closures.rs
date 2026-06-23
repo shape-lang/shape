@@ -770,9 +770,11 @@ pub(crate) fn infer_closure_body_return_type_name_with_caller_context(
     // FORWARD BINDER: an unknown-sentinel survives finalization but is NOT a
     // real type — treat it as un-inferable so the call site stays a genuine
     // miss → strict surface-and-stop, never the type literally named "unknown".
+    // Parity with the engine (operators.rs:526): match both `Basic("unknown")`
+    // and `Reference("unknown")` sentinel shapes via `as_type_name_str`.
     if matches!(
         resolved,
-        shape_runtime::type_system::Type::Concrete(TypeAnnotation::Basic(n)) if n == "unknown"
+        shape_runtime::type_system::Type::Concrete(ann) if ann.as_type_name_str() == Some("unknown")
     ) {
         return None;
     }

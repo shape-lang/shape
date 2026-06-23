@@ -1578,9 +1578,14 @@ impl BytecodeCompiler {
                     // operand through as the type literally named "unknown".
                     // Treat the unknown-sentinel as un-inferable (fall through to
                     // the genuine surface-and-stop) rather than serving it.
+                    // FORWARD BINDER parity with the engine (operators.rs:526):
+                    // `Type::to_annotation()` lowers a lost TypeVar to the
+                    // `"unknown"` sentinel as either `Basic("unknown")` OR
+                    // `Reference("unknown")`. Match both via `as_type_name_str`
+                    // so a `Reference`-shaped sentinel is also treated as a MISS.
                     let is_unknown_sentinel = matches!(
                         resolved,
-                        Type::Concrete(TypeAnnotation::Basic(n)) if n == "unknown"
+                        Type::Concrete(ann) if ann.as_type_name_str() == Some("unknown")
                     );
                     if !is_reference && !is_unknown_sentinel {
                         return Ok(resolved.clone());
