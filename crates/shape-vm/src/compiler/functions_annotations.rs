@@ -1096,14 +1096,15 @@ impl BytecodeCompiler {
                     // the same return-type info. Without this, the
                     // numeric-typed call path treats the shadow's return
                     // as Unknown and `__original__() + 1` falls into
-                    // trait dispatch.
+                    // trait dispatch. U4-5b: copied STRUCTURALLY as a
+                    // `ConcreteType`.
                     if let Some(rt) = self
                         .type_tracker
-                        .get_function_return_type(&func_def.name)
+                        .get_function_return_concrete_type(&func_def.name)
                         .cloned()
                     {
                         self.type_tracker
-                            .register_function_return_type(&shadow_name, &rt);
+                            .register_function_return_concrete_type(&shadow_name, rt);
                     }
 
                     // Register alias so __original__ resolves to the shadow function.

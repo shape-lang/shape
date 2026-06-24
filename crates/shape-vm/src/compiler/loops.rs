@@ -1846,22 +1846,17 @@ impl BytecodeCompiler {
     /// compile time (HashMap iteration, custom iterables, untyped arrays).
     pub(super) fn iter_element_type_name(&self, iter: &Expr) -> Option<String> {
         match iter {
-            Expr::Identifier(name, _) => {
-                let type_name = if let Some(local_idx) = self.resolve_local(name) {
-                    self.type_tracker
-                        .get_local_type(local_idx)?
-                        .type_name
-                        .clone()?
-                } else if let Some(scoped) = self.resolve_scoped_module_binding_name(name) {
-                    let binding_idx = *self.module_bindings.get(&scoped)?;
-                    self.type_tracker
-                        .get_binding_type(binding_idx)?
-                        .type_name
-                        .clone()?
-                } else {
-                    return None;
-                };
-                Self::array_type_name_inner(&type_name)
+            Expr::Identifier(..) => {
+                // U4-5b: recover the iterable's element type NAME STRUCTURALLY —
+                // the element `ConcreteType` of the array binding, projected to a
+                // tracker name. Replaces the deleted read of the binding's
+                // `type_name` display string + `array_type_name_inner`
+                // `strip_prefix("Vec<")` re-parse (the read half of the Rep-B
+                // string round-trip). A non-array (or unresolved) iterable yields
+                // `None` — the loop var stays unstamped and SURFACEs.
+                self.iter_element_concrete_type(iter)
+                    .as_ref()
+                    .and_then(crate::compiler::patterns::binding::concrete_type_tracker_name)
             }
             Expr::Array(elems, _) => {
                 let first = elems.first()?;
@@ -1921,14 +1916,22 @@ impl BytecodeCompiler {
             // `ElementOf(ReceiverParam(0))` flatten signature. A receiver whose
             // element name is not an array (or unresolvable) yields `None` —
             // the closure param stays unstamped and SURFACEs.
-            Expr::MethodCall {
-                receiver,
-                method,
-                args,
-                ..
-            } if method.as_str() == "flatten" && args.is_empty() => self
-                .iter_element_type_name(receiver)
-                .and_then(|inner_name| Self::array_type_name_inner(&inner_name)),
+            flatten @ Expr::MethodCall { method, args, .. }
+                if method.as_str() == "flatten" && args.is_empty() =>
+            {
+                // U4-5b: `flatten()` un-nests one level — its element type is the
+                // INNER element of the nested-array receiver. Derive that element
+                // NAME STRUCTURALLY: `iter_element_concrete_type` already resolves
+                // the flatten element `ConcreteType` (un-nesting one `Array`
+                // layer), so project it to the tracker name. Replaces the deleted
+                // `array_type_name_inner` `strip_prefix("Array<")` re-parse of the
+                // receiver's element-name display string. A receiver whose element
+                // is not an array (or unresolvable) yields `None` — the closure
+                // param stays unstamped and SURFACEs.
+                self.iter_element_concrete_type(flatten)
+                    .as_ref()
+                    .and_then(crate::compiler::patterns::binding::concrete_type_tracker_name)
+            }
             _ => None,
         }
     }
@@ -2001,23 +2004,6 @@ impl BytecodeCompiler {
             Some(ConcreteType::Array(elem)) => Some(*elem),
             _ => None,
         }
-    }
-
-    /// Strip an `Array<T>` / `Vec<T>` / `Iterator<T>` wrapper to recover the
-    /// element type name. Returns `None` for non-iterable tracker names.
-    ///
-    /// `Iterator<T>` is included (Wave 1b iterator-HOF, 2026-06-15) so that a
-    /// `let`-bound iterator (`let it = arr.iter(); it.reduce(..)`) recovers its
-    /// element type `T` for closure-param seeding — the iterator yields `T`,
-    /// exactly like iterating an `Array<T>`.
-    fn array_type_name_inner(name: &str) -> Option<String> {
-        let trimmed = name.trim();
-        let inner = trimmed
-            .strip_prefix("Vec<")
-            .or_else(|| trimmed.strip_prefix("Array<"))
-            .or_else(|| trimmed.strip_prefix("Iterator<"))?
-            .strip_suffix('>')?;
-        Some(inner.trim().to_string())
     }
 }
 

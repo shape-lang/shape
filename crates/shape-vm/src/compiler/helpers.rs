@@ -1347,6 +1347,25 @@ fn classify_type_annotation_kind(
     classify_fn_return_kind(head)
 }
 
+/// U4-5b: classify the Result/Option return-frame discriminator directly off
+/// the recorded return `ConcreteType` (the structural source that replaced the
+/// stringly `function_return_types` map). Mirrors `classify_fn_return_kind` but
+/// matches the `ConcreteType` variant rather than a return-NAME string head.
+fn classify_concrete_return_kind(
+    ct: &shape_value::v2::ConcreteType,
+) -> Option<shape_value::NativeKind> {
+    use shape_value::v2::ConcreteType;
+    match ct {
+        ConcreteType::Result(..) => {
+            Some(shape_value::NativeKind::Ptr(shape_value::HeapKind::Result))
+        }
+        ConcreteType::Option(_) => {
+            Some(shape_value::NativeKind::Ptr(shape_value::HeapKind::Option))
+        }
+        _ => None,
+    }
+}
+
 /// Option inference to stamp the inner type of `Ok(v)` / `Err(e)` /
 /// `Some(x)` from the operand at MIR-emission time per ADR-006 §2.7.5.
 ///
@@ -3503,10 +3522,13 @@ impl BytecodeCompiler {
             .and_then(|fd| fd.return_type.as_ref())
             .and_then(classify_type_annotation_kind)
             .or_else(|| {
+                // U4-5b: classify the Result/Option discriminator off the
+                // recorded return `ConcreteType` — no return-NAME string head
+                // match.
                 let func_name = self.program.functions[func_idx].name.clone();
                 self.type_tracker
-                    .get_function_return_type(&func_name)
-                    .and_then(|rt| classify_fn_return_kind(rt))
+                    .get_function_return_concrete_type(&func_name)
+                    .and_then(classify_concrete_return_kind)
             });
 
         // Populate FrameDescriptor when (a) every slot's kind is proven

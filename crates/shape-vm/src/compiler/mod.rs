@@ -729,7 +729,6 @@ pub struct BytecodeCompiler {
     // (`binary_ops.rs`) → `inferred_type_to_numeric` (`numeric_ops.rs`), the
     // SOLE Type→NumericType derivation. The `NumericType` enum itself survives
     // as the emit-time opcode index.
-
     /// E+5.5 Unit C step 2: captured top-level program return-kind, snapshotted
     /// right after the last item compiles (before drop-scope emission and
     /// Halt overwrite `last_expr_*`). Consumed by
@@ -1343,21 +1342,14 @@ pub struct BytecodeCompiler {
     pub(crate) reference_value_locals: HashSet<u16>,
     /// Subset of reference_value_locals that hold exclusive (`&mut`) references.
     pub(crate) exclusive_reference_value_locals: HashSet<u16>,
-    /// Referent scalar type name for a first-class reference binding
-    /// (`let r = &n` where `n: int` records `int`). Lets value-position reads
-    /// (`r + 1`, `-r`) auto-deref the reference to its referent type for the
-    /// strict-typing operand check and typed-opcode numeric stamping, mirroring
-    /// the `r.len()` method-dispatch auto-deref. Keyed by local slot.
-    pub(crate) reference_value_local_referent_type: HashMap<u16, String>,
-    /// As `reference_value_local_referent_type`, keyed by module-binding index
-    /// (script-mode top-level `let r = &n`).
-    pub(crate) reference_value_module_binding_referent_type: HashMap<u16, String>,
-    /// U4-5: structural referent `ConcreteType` for an array/collection
-    /// first-class reference binding (`let r = &a` where `a: Array<int>`).
-    /// Lets `r[i]` recover its element type THROUGH the reference structurally
-    /// (`tracked_array_element_type`) without re-parsing a `"int[]"` display
-    /// string. Keyed by local slot. (The scalar-name auto-deref `r + 1` still
-    /// uses `reference_value_local_referent_type`.)
+    /// U4-5b: the single structural referent `ConcreteType` carrier for a
+    /// first-class reference binding (`let r = &n` / `let r = &a`). Serves BOTH
+    /// `r[i]` (array element via `ConcreteType::Array`, in
+    /// `tracked_array_element_type`) AND the value-position scalar auto-deref
+    /// `r + 1` / `-r` (scalar projected by `reference_referent_scalar_type_name`
+    /// in `infer_expr_type`), mirroring the `r.len()` method-dispatch auto-deref.
+    /// Keyed by local slot. Collapses the deleted parallel referent
+    /// display-string carrier — the referent's ConcreteType IS the proof.
     pub(crate) reference_value_local_referent_concrete_type:
         HashMap<u16, shape_value::v2::ConcreteType>,
     /// As `reference_value_local_referent_concrete_type`, keyed by

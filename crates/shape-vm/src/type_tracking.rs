@@ -41,9 +41,9 @@ use serde::{Deserialize, Serialize};
 use shape_ast::ast::TypeAnnotation;
 use shape_runtime::type_schema::{FieldType, SchemaId, TypeSchema, TypeSchemaRegistry};
 use shape_runtime::type_system::{BuiltinTypes, StorageType};
+use shape_value::v2::ConcreteType;
 use shape_value::v2::closure_layout::native_kind_from_concrete_type;
 use shape_value::v2::struct_layout::{FieldKind, StructLayout};
-use shape_value::v2::ConcreteType;
 
 /// Numeric type known at compile time for typed opcode emission.
 ///
@@ -639,8 +639,15 @@ pub struct TypeTracker {
     /// Scoped local binding metadata mappings (for scope push/pop).
     local_binding_semantic_scopes: Vec<HashMap<u16, BindingSemantics>>,
 
-    /// Function return types (function name -> type name)
-    function_return_types: HashMap<String, String>,
+    /// U4-5b: function return types (function name -> structural
+    /// `ConcreteType`). Replaces the deleted stringly `function_return_types:
+    /// HashMap<String, String>` parallel source. Populated from the
+    /// type-checker-inferred `Type::Function { returns }` (declared returns are
+    /// served structurally upstream from `function_defs`/`find_function`). Every
+    /// consumer that previously parsed the return NAME string now reads the
+    /// `ConcreteType` directly (numeric source, struct-name key, Result/Option
+    /// kind, Copy/NonCopy move-class). The ConcreteType IS the proof.
+    function_return_concrete_types: HashMap<String, shape_value::v2::ConcreteType>,
     /// Compile-time object schema contracts: schema id -> field type annotation.
     ///
     /// Used for callable typed-object fields where runtime schema stores only slot layout.
@@ -668,7 +675,7 @@ impl TypeTracker {
             binding_semantics: HashMap::new(),
             local_type_scopes: vec![HashMap::new()],
             local_binding_semantic_scopes: vec![HashMap::new()],
-            function_return_types: HashMap::new(),
+            function_return_concrete_types: HashMap::new(),
             object_field_contracts: HashMap::new(),
             v2_layouts: HashMap::new(),
             inline_object_counter: 0,
@@ -799,15 +806,22 @@ impl TypeTracker {
         self.binding_semantics.get(&slot)
     }
 
-    /// Register a function's return type
-    pub fn register_function_return_type(&mut self, func_name: &str, return_type: &str) {
-        self.function_return_types
-            .insert(func_name.to_string(), return_type.to_string());
+    /// U4-5b: register a function's inferred return `ConcreteType`.
+    pub fn register_function_return_concrete_type(
+        &mut self,
+        func_name: &str,
+        return_type: shape_value::v2::ConcreteType,
+    ) {
+        self.function_return_concrete_types
+            .insert(func_name.to_string(), return_type);
     }
 
-    /// Get a function's return type
-    pub fn get_function_return_type(&self, func_name: &str) -> Option<&String> {
-        self.function_return_types.get(func_name)
+    /// U4-5b: get a function's inferred return `ConcreteType`.
+    pub fn get_function_return_concrete_type(
+        &self,
+        func_name: &str,
+    ) -> Option<&shape_value::v2::ConcreteType> {
+        self.function_return_concrete_types.get(func_name)
     }
 
     /// Register compile-time field type contracts for an object schema id.
@@ -1321,10 +1335,8 @@ mod tests {
     #[test]
     fn prove_native_kind_accepts_faithful_heap_projection() {
         // HashMap proven type with the canonical Ptr(HeapKind::HashMap) claim.
-        let map_ty = ConcreteType::HashMap(
-            Box::new(ConcreteType::String),
-            Box::new(ConcreteType::I64),
-        );
+        let map_ty =
+            ConcreteType::HashMap(Box::new(ConcreteType::String), Box::new(ConcreteType::I64));
         assert_eq!(
             prove_native_kind("test_map_ok", &map_ty, NativeKind::Ptr(HeapKind::HashMap)).unwrap(),
             NativeKind::Ptr(HeapKind::HashMap)
@@ -1335,10 +1347,8 @@ mod tests {
     fn prove_native_kind_rejects_sb10_uint64_for_hashmap() {
         // SB-10: a HashMap alloc stamped UInt64 (no refcount) is the lie.
         // The real gate refuses it — silent corruption becomes a ProofGap.
-        let map_ty = ConcreteType::HashMap(
-            Box::new(ConcreteType::String),
-            Box::new(ConcreteType::I64),
-        );
+        let map_ty =
+            ConcreteType::HashMap(Box::new(ConcreteType::String), Box::new(ConcreteType::I64));
         let err = prove_native_kind("test_sb10", &map_ty, NativeKind::UInt64)
             .expect_err("UInt64 claim on a HashMap proven type must be refused");
         assert_eq!(err.site(), "test_sb10");
@@ -1483,16 +1493,23 @@ mod tests {
     }
 
     #[test]
-    fn test_function_return_types() {
+    fn test_function_return_concrete_types() {
         let mut tracker = TypeTracker::empty();
 
-        tracker.register_function_return_type("get_point", "Point");
+        tracker.register_function_return_concrete_type(
+            "get_count",
+            shape_value::v2::ConcreteType::I64,
+        );
 
         assert_eq!(
-            tracker.get_function_return_type("get_point"),
-            Some(&"Point".to_string())
+            tracker.get_function_return_concrete_type("get_count"),
+            Some(&shape_value::v2::ConcreteType::I64)
         );
-        assert!(tracker.get_function_return_type("unknown").is_none());
+        assert!(
+            tracker
+                .get_function_return_concrete_type("unknown")
+                .is_none()
+        );
     }
 
     #[test]

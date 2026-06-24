@@ -462,35 +462,6 @@ pub fn should_use_typed_array_from_slot_kind(
     }
 }
 
-/// Map a tracked type name like `"Vec<int>"` / `"Array<number>"` to a [`TypedArrayKind`].
-#[inline]
-#[allow(dead_code)]
-pub fn typed_array_kind_from_type_name(type_name: &str) -> Option<TypedArrayKind> {
-    let trimmed = type_name.trim();
-    let inner = trimmed
-        .strip_prefix("Vec<")
-        .or_else(|| trimmed.strip_prefix("Array<"))?
-        .strip_suffix('>')?;
-    match inner.trim() {
-        "number" | "f64" => Some(TypedArrayKind::F64),
-        "int" | "i64" => Some(TypedArrayKind::I64),
-        "i32" => Some(TypedArrayKind::I32),
-        "bool" => Some(TypedArrayKind::Bool),
-        // W12 S1 (2026-05-13) — sized integer monomorphizations.
-        "i8" => Some(TypedArrayKind::I8),
-        "u8" => Some(TypedArrayKind::U8),
-        "i16" => Some(TypedArrayKind::I16),
-        "u16" => Some(TypedArrayKind::U16),
-        "u32" => Some(TypedArrayKind::U32),
-        // "u64" intentionally falls through — `Array<u64>` migration
-        // deferred to S1.5 per the supervisor's S1 reopen.
-        // Wave 2 Agent A1 (2026-05-14) — F32 + Char.
-        "f32" => Some(TypedArrayKind::F32),
-        "char" => Some(TypedArrayKind::Char),
-        _ => None,
-    }
-}
-
 /// Phase 4b Round 6 WS-1 W16.2-C (2026-05-21) — the `Vec<…>` type-tracker
 /// name for a [`TypedArrayKind`].
 ///
@@ -603,6 +574,35 @@ impl super::BytecodeCompiler {
     /// return a struct (`type AABB { ... }` + `fn aabb(...) -> AABB`), so
     /// the literal's element kind is proven at compile time without runtime
     /// inference. NO fabrication, NO Bool-default.
+    /// U4-5b: the `ConcreteType` a free-function call returns, resolved
+    /// STRUCTURALLY. Prefers the declared `-> T` annotation resolved
+    /// SCHEMA-AWARELY (`declared_annotation_concrete_type` — struct/enum names
+    /// resolve to `ConcreteType::Struct`/`Enum` because the struct registry is
+    /// fully populated by bytecode-emission time, even though the function was
+    /// registered before its struct schema). Falls back to the inferred return
+    /// `ConcreteType` recorded for unannotated functions
+    /// (`function_return_concrete_types`). Replaces the deleted return-NAME
+    /// string lookup + `struct_types.contains_key` round-trip.
+    fn function_call_return_concrete_type(
+        &self,
+        name: &str,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        if let Some(def) = self.function_defs.get(name) {
+            if let Some(ann) = def.return_type.as_ref() {
+                if let Some(ct) =
+                    crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                        self, ann,
+                    )
+                {
+                    return Some(ct);
+                }
+            }
+        }
+        self.type_tracker
+            .get_function_return_concrete_type(name)
+            .cloned()
+    }
+
     pub(crate) fn array_elements_all_typed_object(
         &self,
         elements: &[shape_ast::ast::Expr],
@@ -612,7 +612,10 @@ impl super::BytecodeCompiler {
             return false;
         }
         for elem in elements {
-            let returned_type_name: Option<String> = match elem {
+            // U4-5b: the element is a named-struct array slot iff the called
+            // function's return type is a `Struct`. Resolved STRUCTURALLY — no
+            // return-NAME string round-trip through `struct_types`/`type_aliases`.
+            let returned_ct: Option<shape_value::v2::ConcreteType> = match elem {
                 Expr::FunctionCall { name, .. } => {
                     // Construction strict-typing close (2026-06-05): a
                     // function with an INFERRED anonymous-object return
@@ -626,7 +629,7 @@ impl super::BytecodeCompiler {
                     if self.function_return_schema_ids.contains_key(name) {
                         continue;
                     }
-                    self.type_tracker.get_function_return_type(name).cloned()
+                    self.function_call_return_concrete_type(name)
                 }
                 Expr::QualifiedFunctionCall {
                     namespace,
@@ -634,21 +637,11 @@ impl super::BytecodeCompiler {
                     ..
                 } => {
                     let qualified = format!("{}::{}", namespace, function);
-                    self.type_tracker
-                        .get_function_return_type(&qualified)
-                        .cloned()
+                    self.function_call_return_concrete_type(&qualified)
                 }
                 _ => return false,
             };
-            let Some(name) = returned_type_name else {
-                return false;
-            };
-            let resolved = self
-                .type_aliases
-                .get(&name)
-                .map(|s| s.as_str())
-                .unwrap_or(name.as_str());
-            if !self.struct_types.contains_key(resolved) && !self.struct_types.contains_key(&name) {
+            if !matches!(returned_ct, Some(shape_value::v2::ConcreteType::Struct(_))) {
                 return false;
             }
         }
@@ -1484,30 +1477,6 @@ mod tests {
     }
 
     #[test]
-    fn test_type_name_vec_f32_maps_to_f32() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<f32>"),
-            Some(TypedArrayKind::F32)
-        );
-        assert_eq!(
-            typed_array_kind_from_type_name("Array<f32>"),
-            Some(TypedArrayKind::F32)
-        );
-    }
-
-    #[test]
-    fn test_type_name_vec_char_maps_to_char() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<char>"),
-            Some(TypedArrayKind::Char)
-        );
-        assert_eq!(
-            typed_array_kind_from_type_name("Array<char>"),
-            Some(TypedArrayKind::Char)
-        );
-    }
-
-    #[test]
     fn test_u64_falls_back_to_legacy() {
         // Per S1 reopen (2026-05-13), `Array<u64>` deliberately falls
         // back to the legacy NaN-boxed `NewArray` path: `NativeKind::UInt64`
@@ -1692,59 +1661,6 @@ mod tests {
             should_use_typed_array_from_slot_kind(NativeKind::UInt64),
             None
         );
-    }
-
-    // ---- typed_array_kind_from_type_name ----
-
-    #[test]
-    fn test_type_name_vec_int_maps_to_i64() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<int>"),
-            Some(TypedArrayKind::I64)
-        );
-    }
-
-    #[test]
-    fn test_type_name_vec_number_maps_to_f64() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<number>"),
-            Some(TypedArrayKind::F64)
-        );
-    }
-
-    #[test]
-    fn test_type_name_vec_bool_maps_to_bool() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<bool>"),
-            Some(TypedArrayKind::Bool)
-        );
-    }
-
-    #[test]
-    fn test_type_name_vec_i32_maps_to_i32() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Vec<i32>"),
-            Some(TypedArrayKind::I32)
-        );
-    }
-
-    #[test]
-    fn test_type_name_array_int_maps_to_i64() {
-        assert_eq!(
-            typed_array_kind_from_type_name("Array<int>"),
-            Some(TypedArrayKind::I64)
-        );
-    }
-
-    #[test]
-    fn test_type_name_vec_string_falls_back() {
-        assert_eq!(typed_array_kind_from_type_name("Vec<string>"), None);
-    }
-
-    #[test]
-    fn test_type_name_non_array_falls_back() {
-        assert_eq!(typed_array_kind_from_type_name("HashMap<int, int>"), None);
-        assert_eq!(typed_array_kind_from_type_name("int"), None);
     }
 }
 

@@ -802,7 +802,7 @@ impl BytecodeCompiler {
         HashMap<String, Vec<bool>>,
         HashMap<String, Vec<bool>>,
         HashMap<String, Vec<Option<String>>>,
-        HashMap<String, String>,
+        HashMap<String, shape_ast::ast::TypeAnnotation>,
         HashMap<String, Vec<Option<shape_value::v2::ConcreteType>>>,
         HashMap<String, Vec<Option<Vec<(String, shape_runtime::type_schema::FieldType)>>>>,
         HashMap<String, Vec<(String, shape_runtime::type_schema::FieldType)>>,
@@ -823,7 +823,8 @@ impl BytecodeCompiler {
         let resolved_expr_types = inference.take_expr_type_table();
         let inferred_ref_params = Self::infer_reference_params_from_types(program, &types);
         let inferred_param_type_hints = Self::infer_param_type_hints_from_types(program, &types);
-        let inferred_return_type_hints = Self::infer_return_type_hints_from_types(program, &types);
+        let inferred_return_annotations =
+            Self::infer_return_annotations_from_types(program, &types);
         // v0.3 WS-7: project the inference engine's per-parameter `Type`
         // for UNANNOTATED params into a `ConcreteType`. This is the JIT's
         // proof source for the v2 typed-array fast path on unannotated
@@ -913,7 +914,7 @@ impl BytecodeCompiler {
             inferred_ref_params,
             result,
             inferred_param_type_hints,
-            inferred_return_type_hints,
+            inferred_return_annotations,
             inferred_param_concrete_types,
             inferred_param_object_fields,
             inferred_return_object_fields,
@@ -1568,26 +1569,37 @@ impl BytecodeCompiler {
         hints
     }
 
-    /// Phase 3e: extract a hint name for each function's inferred return
-    /// type. Used to populate `type_tracker.function_return_types` so call
-    /// expressions can recover numeric types (and string/bool primitives
-    /// via `set_function_return_type`) when the source has no explicit
-    /// return-type annotation.
-    pub(super) fn infer_return_type_hints_from_types(
+    /// U4-5b: extract each function's inferred return `TypeAnnotation` (for
+    /// functions WITHOUT an explicit return annotation). The caller resolves it
+    /// to a `ConcreteType` SCHEMA-AWARELY (`declared_annotation_concrete_type`)
+    /// and registers `type_tracker.function_return_concrete_types` so call
+    /// expressions recover the return type STRUCTURALLY (numeric source,
+    /// struct-name key, Result/Option kind, Copy/NonCopy move-class). Replaces
+    /// the deleted stringly `infer_return_type_hints_from_types` →
+    /// `function_return_types` map.
+    ///
+    /// `Type::to_annotation()` reconstructs the `TypeAnnotation` for resolved
+    /// concrete/generic types and yields `None` for unresolved type variables —
+    /// exactly the gate we want (no fabricated type, no Bool-default;
+    /// surface-and-stop preserved). The annotation is resolved to a
+    /// `ConcreteType` at the registration site (where the schema registry is in
+    /// scope) so a named-struct/enum inferred return resolves to
+    /// `ConcreteType::Struct`/`Enum`.
+    pub(super) fn infer_return_annotations_from_types(
         program: &Program,
         inferred_types: &HashMap<String, Type>,
-    ) -> HashMap<String, String> {
+    ) -> HashMap<String, shape_ast::ast::TypeAnnotation> {
         let funcs = Self::collect_program_functions(program);
-        let mut hints = HashMap::new();
+        let mut out = HashMap::new();
         for (name, _) in funcs {
             let Some(Type::Function { returns, .. }) = inferred_types.get(&name) else {
                 continue;
             };
-            if let Some(rt_name) = Self::inferred_type_to_hint_name(returns) {
-                hints.insert(name, rt_name);
+            if let Some(ann) = returns.to_annotation() {
+                out.insert(name, ann);
             }
         }
-        hints
+        out
     }
 
     pub(crate) fn resolve_compiled_annotation_name(
@@ -2049,7 +2061,7 @@ impl BytecodeCompiler {
             inferred_ref_params,
             inferred_ref_mutates,
             inferred_param_type_hints,
-            inferred_return_type_hints,
+            inferred_return_annotations,
             inferred_param_concrete_types,
             inferred_param_object_fields,
             inferred_return_object_fields,
@@ -2079,12 +2091,27 @@ impl BytecodeCompiler {
         // `f(...).field` directly). `register_inline_object_schema_typed` is
         // idempotent on the field set, so this never duplicates a schema.
         self.register_inferred_return_object_schemas();
-        // Phase 3e: register inferred return types so function-call
-        // compilation can recover the numeric type even for sources with
-        // no explicit `-> T` annotation.
-        for (fn_name, ret_ty) in &inferred_return_type_hints {
+        // U4-5b: register inferred return ConcreteTypes so function-call
+        // compilation can recover the return type STRUCTURALLY even for sources
+        // with no explicit `-> T` annotation. Resolved SCHEMA-AWARELY
+        // (`declared_annotation_concrete_type`) so a named-struct/enum inferred
+        // return resolves to `ConcreteType::Struct`/`Enum` (the v2-typed-array
+        // element-carrier detection needs the struct identity). An unresolvable
+        // inferred annotation registers nothing (surface-and-stop).
+        let self_ref: &Self = &self;
+        let inferred_return_cts: Vec<(String, shape_value::v2::ConcreteType)> =
+            inferred_return_annotations
+                .iter()
+                .filter_map(|(fn_name, ann)| {
+                    crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                        self_ref, ann,
+                    )
+                    .map(|ct| (fn_name.clone(), ct))
+                })
+                .collect();
+        for (fn_name, ret_ty) in inferred_return_cts {
             self.type_tracker
-                .register_function_return_type(fn_name, ret_ty);
+                .register_function_return_concrete_type(&fn_name, ret_ty);
         }
 
         // Two-phase TypedObject field hoisting:

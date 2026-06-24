@@ -87,25 +87,27 @@ impl BytecodeCompiler {
             // Strict REAL-MOVE close R1 (2026-06-21): seed UNANNOTATED functions
             // from the type-checker-INFERRED return type. The MIR layer does not
             // run inference, so the compiler's inference pass already recorded
-            // the inferred return type as a `to_type_string` hint name in
-            // `type_tracker.function_return_types`
-            // (via `infer_return_type_hints_from_types` →
-            // `register_function_return_type`). Classifying that hint here closes
-            // the last binding-move hole: `fn mk() { "hi" } let p = mk() let q =
-            // p print(p)` now classifies `p` `NonCopy` → MOVE → B0005 (parity
-            // with the annotated `fn mk() -> string` case). Scalar inferred
-            // returns classify `Copy` so a scalar chain never false-moves.
+            // the inferred return `ConcreteType` in
+            // `type_tracker.function_return_concrete_types`
+            // (via `infer_return_concrete_types_from_types` →
+            // `register_function_return_concrete_type`). Classifying that type
+            // here closes the last binding-move hole: `fn mk() { "hi" } let p =
+            // mk() let q = p print(p)` now classifies `p` `NonCopy` → MOVE →
+            // B0005 (parity with the annotated `fn mk() -> string` case). Scalar
+            // inferred returns classify `Copy` so a scalar chain never
+            // false-moves.
             //
             // A function whose generic-param return stayed an unresolved
-            // `Type::Variable` produces NO hint (`inferred_type_to_hint_name`
-            // returns `None`), so it never registers a return type and stays
-            // unseeded → conservative `Unknown` non-consuming path. We never
-            // fabricate a classification (no Bool-default / force-scalar) —
-            // ADR-006 §Forbidden, surface-and-stop.
-            if let Some(hint) = self.type_tracker.get_function_return_type(name) {
+            // `Type::Variable` produces NO recorded `ConcreteType`
+            // (`Type::to_annotation()` returns `None`), so it never registers a
+            // return type and stays unseeded → conservative `Unknown`
+            // non-consuming path. We never fabricate a classification (no
+            // Bool-default / force-scalar) — ADR-006 §Forbidden, surface-and-stop.
+            // U4-5b: classified STRUCTURALLY off the `ConcreteType`.
+            if let Some(ct) = self.type_tracker.get_function_return_concrete_type(name) {
                 map.insert(
                     name.clone(),
-                    crate::mir::lowering::classify_return_hint_name(hint),
+                    crate::mir::lowering::classify_return_concrete_type(ct),
                 );
             }
         }
@@ -1383,8 +1385,8 @@ impl BytecodeCompiler {
         let saved_reference_value_locals = std::mem::take(&mut self.reference_value_locals);
         let saved_exclusive_reference_value_locals =
             std::mem::take(&mut self.exclusive_reference_value_locals);
-        let saved_reference_value_local_referent_type =
-            std::mem::take(&mut self.reference_value_local_referent_type);
+        let saved_reference_value_local_referent_concrete_type =
+            std::mem::take(&mut self.reference_value_local_referent_concrete_type);
         let saved_reference_value_module_bindings = self.reference_value_module_bindings.clone();
         let saved_exclusive_reference_value_module_bindings =
             self.exclusive_reference_value_module_bindings.clone();
@@ -1485,7 +1487,7 @@ impl BytecodeCompiler {
         self.local_callable_closure_bodies.clear();
         self.reference_value_locals.clear();
         self.exclusive_reference_value_locals.clear();
-        self.reference_value_local_referent_type.clear();
+        self.reference_value_local_referent_concrete_type.clear();
         self.immutable_locals.clear();
         self.param_locals.clear();
         // v0.3 WS-6: per-function local ConcreteType table — local slot
@@ -1975,8 +1977,8 @@ impl BytecodeCompiler {
                         self.reference_value_locals = saved_reference_value_locals;
                         self.exclusive_reference_value_locals =
                             saved_exclusive_reference_value_locals;
-                        self.reference_value_local_referent_type =
-                            saved_reference_value_local_referent_type;
+                        self.reference_value_local_referent_concrete_type =
+                            saved_reference_value_local_referent_concrete_type;
                         self.reference_value_module_bindings =
                             saved_reference_value_module_bindings;
                         self.exclusive_reference_value_module_bindings =
@@ -2100,7 +2102,8 @@ impl BytecodeCompiler {
         self.local_callable_closure_bodies = saved_local_callable_closure_bodies;
         self.reference_value_locals = saved_reference_value_locals;
         self.exclusive_reference_value_locals = saved_exclusive_reference_value_locals;
-        self.reference_value_local_referent_type = saved_reference_value_local_referent_type;
+        self.reference_value_local_referent_concrete_type =
+            saved_reference_value_local_referent_concrete_type;
         self.reference_value_module_bindings = saved_reference_value_module_bindings;
         self.exclusive_reference_value_module_bindings =
             saved_exclusive_reference_value_module_bindings;

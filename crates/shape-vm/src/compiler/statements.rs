@@ -1126,12 +1126,27 @@ impl BytecodeCompiler {
 
         // Register function return type for typed opcode emission.
         // When a function has an explicit return type annotation (e.g., `: int`),
-        // record it so that call sites can propagate NumericType through expressions
-        // like `fib(n-1) + fib(n-2)` and emit AddInt instead of generic Add.
+        // record its ConcreteType so call sites can propagate the numeric type
+        // through expressions like `fib(n-1) + fib(n-2)` and emit AddInt instead
+        // of generic Add. U4-5b: registered STRUCTURALLY as a `ConcreteType` — no
+        // `as_simple_name()` display string. A shape with no `ConcreteType`
+        // projection (unresolved annotation) registers nothing (surface-and-stop).
         if let Some(ref return_type) = func_def.return_type {
-            if let Some(type_name) = return_type.as_simple_name() {
+            // Resolve via the SCHEMA-AWARE `declared_annotation_concrete_type`
+            // (not the bare `concrete_type_from_annotation`) so a named
+            // struct/enum return (`fn make() -> Box`) resolves to
+            // `ConcreteType::Struct`/`Enum` — the v2-typed-array element-carrier
+            // detection (`array_elements_all_typed_object`) needs the struct
+            // identity. An unresolvable annotation registers nothing
+            // (surface-and-stop).
+            if let Some(ct) =
+                crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                    self,
+                    return_type,
+                )
+            {
                 self.type_tracker
-                    .register_function_return_type(&func_def.name, type_name);
+                    .register_function_return_concrete_type(&func_def.name, ct);
             }
         }
 

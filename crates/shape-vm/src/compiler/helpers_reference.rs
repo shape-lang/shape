@@ -658,9 +658,9 @@ impl BytecodeCompiler {
         }
     }
 
-    /// Records the referent scalar type name for a first-class reference
+    /// Records the referent's `ConcreteType` for a first-class reference
     /// binding (`let r = &n`). See `finish_reference_binding_from_expr` and
-    /// `reference_referent_type_name`.
+    /// `reference_referent_concrete_type`.
     fn record_reference_referent_type(
         &mut self,
         slot: u16,
@@ -668,25 +668,25 @@ impl BytecodeCompiler {
         expr: &shape_ast::ast::Expr,
     ) {
         if is_local {
-            self.reference_value_local_referent_type.remove(&slot);
-            self.reference_value_local_referent_concrete_type.remove(&slot);
-        } else {
-            self.reference_value_module_binding_referent_type
+            self.reference_value_local_referent_concrete_type
                 .remove(&slot);
+        } else {
             self.reference_value_module_binding_referent_concrete_type
                 .remove(&slot);
         }
         let shape_ast::ast::Expr::Reference { expr: inner, .. } = expr else {
             return;
         };
-        // U4-5: record the referent's array `ConcreteType` structurally so
-        // `r[i]` recovers its element type THROUGH the reference without a
-        // string round-trip. The array shape is read from the referent's
-        // recorded ConcreteType (`concrete_type_for_expr`), not rebuilt from a
-        // `"int[]"` display string. A scalar referent has no array ConcreteType
-        // and is left unrecorded here (the scalar-name path below still drives
-        // `r + 1`).
-        if let Some(referent_ct @ shape_value::v2::ConcreteType::Array(_)) =
+        // U4-5b: record the referent's `ConcreteType` STRUCTURALLY — one carrier
+        // for both shapes. `r[i]` reads the element type THROUGH the reference
+        // off the recorded `ConcreteType::Array(elem)`; the value-position
+        // auto-deref (`r + 1`, `-r`) reads the scalar off the recorded scalar
+        // `ConcreteType` (`reference_referent_scalar_type_name` projects it to a
+        // scalar name at the use site). The referent's ConcreteType IS the proof
+        // (ADR-006 §2.7.5) — the U4-5b deletion collapsed the parallel
+        // `"int"`/`"int[]"` display-string carrier the read sites previously
+        // consulted. An unresolved referent records nothing (surface-and-stop).
+        if let Some(referent_ct) =
             crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, inner)
         {
             if is_local {
@@ -697,68 +697,47 @@ impl BytecodeCompiler {
                     .insert(slot, referent_ct);
             }
         }
-        let Ok(inner_ty) = self.infer_expr_type(inner) else {
-            return;
-        };
-        // Record the referent's scalar type NAME. Scalars (`&int` -> `"int"`)
-        // drive the value-position operator auto-deref (`r + 1`, `-r`). The
-        // array referent (`&Array<int>`) case is handled STRUCTURALLY above
-        // (`reference_value_*_referent_concrete_type`) — U4-5 deleted the
-        // `"int[]"` display-string projection that previously fed the
-        // `tracked_array_element_type` strip. Only a scalar `Basic` referent
-        // name is recorded here; a still-unknown inner stays unrecorded.
-        let referent_name = match &inner_ty {
-            shape_runtime::type_system::Type::Concrete(shape_ast::ast::TypeAnnotation::Basic(
-                name,
-            )) => Some(name.clone()),
-            _ => None,
-        };
-        if let Some(name) = referent_name {
-            if is_local {
-                self.reference_value_local_referent_type.insert(slot, name);
-            } else {
-                self.reference_value_module_binding_referent_type
-                    .insert(slot, name);
-            }
-        }
     }
 
-    /// Returns the recorded referent scalar type name for an identifier bound to
-    /// a first-class reference (`let r = &n` -> `int`), if any. Consulted by the
-    /// value-position auto-deref in `infer_expr_type` and the typed-opcode
-    /// numeric stamping in the identifier-load path.
-    pub(super) fn reference_referent_type_name(&self, name: &str) -> Option<String> {
-        if let Some(local_idx) = self.resolve_local(name) {
-            if let Some(tn) = self.reference_value_local_referent_type.get(&local_idx) {
-                return Some(tn.clone());
-            }
-        }
-        if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
-            if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
-                if let Some(tn) = self
-                    .reference_value_module_binding_referent_type
-                    .get(&binding_idx)
-                {
-                    return Some(tn.clone());
-                }
-            }
-        }
-        if let Some(&binding_idx) = self.module_bindings.get(name) {
-            if let Some(tn) = self
-                .reference_value_module_binding_referent_type
-                .get(&binding_idx)
-            {
-                return Some(tn.clone());
-            }
-        }
-        None
+    /// U4-5b: the referent's SCALAR type name for an identifier bound to a
+    /// reference (`let r = &n`, `n: int` -> `"int"`), projected from the
+    /// structural referent `ConcreteType`. Returns `None` for a non-scalar (or
+    /// unrecorded) referent. Consulted by the value-position auto-deref in
+    /// `infer_expr_type` (`r + 1`, `-r`). Collapses the deleted parallel
+    /// `reference_value_*_referent_type` string carrier onto the one structural
+    /// `reference_value_*_referent_concrete_type` source. Covers every scalar
+    /// `ConcreteType` variant the prior `Basic(name)` carrier could record
+    /// (sized ints, `bigint`, `char`) — int != number preserved, no coercion.
+    pub(super) fn reference_referent_scalar_type_name(&self, name: &str) -> Option<String> {
+        use shape_value::v2::ConcreteType;
+        let ct = self.reference_referent_concrete_type(name)?;
+        let n = match ct {
+            ConcreteType::I64 => "int",
+            ConcreteType::I32 => "i32",
+            ConcreteType::I16 => "i16",
+            ConcreteType::I8 => "i8",
+            ConcreteType::U64 => "u64",
+            ConcreteType::U32 => "u32",
+            ConcreteType::U16 => "u16",
+            ConcreteType::U8 => "u8",
+            ConcreteType::F64 => "number",
+            ConcreteType::F32 => "f32",
+            ConcreteType::Bool => "bool",
+            ConcreteType::String => "string",
+            ConcreteType::Decimal => "decimal",
+            ConcreteType::BigInt => "bigint",
+            ConcreteType::Char => "char",
+            _ => return None,
+        };
+        Some(n.to_string())
     }
 
-    /// U4-5: structural counterpart of `reference_referent_type_name` for the
-    /// array case. Returns the referent's recorded array `ConcreteType` for an
-    /// identifier bound to a reference (`let r = &a`, `a: Array<int>`). Lets
-    /// `r[i]` recover its element type THROUGH the reference structurally,
-    /// replacing the deleted `"int[]"` strip in `tracked_array_element_type`.
+    /// U4-5b: the single structural referent carrier. Returns the referent's
+    /// recorded `ConcreteType` for an identifier bound to a reference (`let r =
+    /// &a`). Serves BOTH `r[i]` (array element via `ConcreteType::Array`) and
+    /// `r + 1` (scalar via `reference_referent_scalar_type_name`) — collapsing
+    /// the deleted parallel `reference_value_*_referent_type` display-string
+    /// carrier onto this one structural source.
     pub(super) fn reference_referent_concrete_type(
         &self,
         name: &str,

@@ -26,11 +26,34 @@ fn builtin_function_return_type(name: &str) -> Option<shape_runtime::type_system
         // Int-returning builtins (book spec: `(number) -> int`).
         "floor" | "ceil" | "round" => "int",
         // Number-returning builtins + `__intrinsic_*` stdlib-wrapper aliases.
-        "abs" | "sqrt" | "sum" | "mean" | "min" | "max" | "sin" | "cos" | "tan" | "exp" | "ln"
-        | "log" | "stddev" | "std" | "variance" | "pow" | "asin" | "acos" | "atan"
-        | "__intrinsic_mean" | "__intrinsic_min" | "__intrinsic_max" | "__intrinsic_std"
-        | "__intrinsic_variance" | "__intrinsic_correlation" | "__intrinsic_covariance"
-        | "__intrinsic_percentile" | "__intrinsic_median" => "number",
+        "abs"
+        | "sqrt"
+        | "sum"
+        | "mean"
+        | "min"
+        | "max"
+        | "sin"
+        | "cos"
+        | "tan"
+        | "exp"
+        | "ln"
+        | "log"
+        | "stddev"
+        | "std"
+        | "variance"
+        | "pow"
+        | "asin"
+        | "acos"
+        | "atan"
+        | "__intrinsic_mean"
+        | "__intrinsic_min"
+        | "__intrinsic_max"
+        | "__intrinsic_std"
+        | "__intrinsic_variance"
+        | "__intrinsic_correlation"
+        | "__intrinsic_covariance"
+        | "__intrinsic_percentile"
+        | "__intrinsic_median" => "number",
         _ => return None,
     };
     Some(Type::Concrete(TypeAnnotation::Basic(ty_name.to_string())))
@@ -1587,8 +1610,8 @@ impl BytecodeCompiler {
                     // A reference (`&T` / `&mut T`) binding is read THROUGH the
                     // reference in value position — the bytecode loads it via
                     // `DerefLoad`, and the GapA referent-projection patch below
-                    // (`reference_referent_type_name`) supplies the projected
-                    // `T`. Serving the raw `&T` here would route `r + 1` through
+                    // (`reference_referent_scalar_type_name`) supplies the
+                    // projected `T`. Serving the raw `&T` here would route `r + 1` through
                     // a `&int + int` operand mismatch and break the auto-deref
                     // (borrow_refs `operator_deref::*` / `ref_dispatch::*`).
                     // Fall through to the patch ladder for a reference-typed
@@ -1626,20 +1649,19 @@ impl BytecodeCompiler {
             // — the bytecode loads it via `DerefLoad`. The reference binding's
             // tracker entry carries no scalar type_name, so the strict-typing
             // operand check (`r + 1`) would otherwise see `unknown`. Consult the
-            // referent type recorded at bind time (`reference_referent_type_name`,
-            // populated in `finish_reference_binding_from_expr`) and forward it
-            // verbatim, mirroring the already-auto-derefing method dispatch
-            // (`r.len()`). Scoped to reference-BOUND identifiers (`let r = &n`):
-            // a reference-TYPED param (`x: &int`) records no referent here and
+            // referent type recorded at bind time (the structural
+            // `reference_value_*_referent_concrete_type` carrier, projected to a
+            // scalar name by `reference_referent_scalar_type_name`; populated in
+            // `finish_reference_binding_from_expr`) and forward it verbatim,
+            // mirroring the already-auto-derefing method dispatch (`r.len()`).
+            // Scoped to reference-BOUND identifiers (`let r = &n`): a
+            // reference-TYPED param (`x: &int`) records no referent here and
             // stays a clean R4 compile-reject (`reference_typed_operand_span` in
             // `binary_ops.rs`). NOT a numeric coercion: `&int` -> `int`.
-            if let Some(referent) = self.reference_referent_type_name(name) {
-                if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(&referent)
-                    || shape_runtime::type_system::BuiltinTypes::is_number_type_name(&referent)
-                    || matches!(referent.as_str(), "bool" | "string" | "decimal" | "bigint")
-                {
-                    return Ok(Type::Concrete(TypeAnnotation::Basic(referent)));
-                }
+            // U4-5b: served from the one structural ConcreteType carrier — the
+            // parallel referent display-string carrier is deleted.
+            if let Some(referent) = self.reference_referent_scalar_type_name(name) {
+                return Ok(Type::Concrete(TypeAnnotation::Basic(referent)));
             }
             if let Some(type_name) = self.tracker_type_name_for_identifier(name) {
                 if matches!(type_name.as_str(), "DateTime" | "Duration" | "TimeSpan") {
@@ -1737,10 +1759,10 @@ impl BytecodeCompiler {
         // Phase 3e: function call return type from the tracker. The
         // runtime type-inference engine doesn't always see freshly
         // declared user functions; the tracker's
-        // `function_return_types` is populated by the inference
-        // pre-pass (`infer_return_type_hints_from_types`) and serves as
-        // the authoritative source for inferred return types in the
-        // compiler's strict-typing decisions.
+        // `function_return_concrete_types` is populated by the inference
+        // pre-pass (`infer_return_concrete_types_from_types`) and serves
+        // as the authoritative STRUCTURAL source for inferred return types
+        // in the compiler's strict-typing decisions.
         if let Expr::FunctionCall { name, .. } = expr {
             // ADR-006 §2.7.30 (GapA): a `-> &T` callee's result is read THROUGH
             // the reference in value position (where `infer_expr_type` is asked —
@@ -1774,10 +1796,7 @@ impl BytecodeCompiler {
                         // call-site type-argument inference / monomorphization.
                         // The concrete return type of a generic call is resolved
                         // by the monomorphizer, not this declared-return lookup.
-                        let is_generic = def
-                            .type_params
-                            .as_ref()
-                            .is_some_and(|tp| !tp.is_empty());
+                        let is_generic = def.type_params.as_ref().is_some_and(|tp| !tp.is_empty());
                         if !is_generic {
                             if let Some(ret) = def.return_type.as_ref() {
                                 if !matches!(ret, TypeAnnotation::Borrow { .. }) {
@@ -1788,8 +1807,17 @@ impl BytecodeCompiler {
                     }
                 }
             }
-            if let Some(rt_name) = self.type_tracker.get_function_return_type(name).cloned() {
-                return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
+            // U4-5b: inferred return type, served STRUCTURALLY from the
+            // function's recorded return `ConcreteType` (declared returns are
+            // served above from `function_defs`/`find_function`). The
+            // ConcreteType is projected back to an inference `Type` at the use
+            // site — no `"int"`/`"Vec<int>"` display-string round-trip.
+            if let Some(ct) = self.type_tracker.get_function_return_concrete_type(name) {
+                if let Some(ann) =
+                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(ct)
+                {
+                    return Ok(Type::Concrete(ann));
+                }
             }
             // U4-4: builtin / `__intrinsic_*` math-function return TYPE. These
             // are compiler-internal builtins whose bodies the inference engine
@@ -2388,4 +2416,3 @@ impl BytecodeCompiler {
         None
     }
 }
-

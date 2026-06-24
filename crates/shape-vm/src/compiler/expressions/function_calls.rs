@@ -12,8 +12,8 @@ use crate::type_tracking::{VariableKind, VariableTypeInfo};
 use shape_ast::ast::{Expr, InterpolationMode, Literal, Span, Spanned};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::closure::EnvironmentAnalyzer;
-use shape_runtime::type_system::suggestions::suggest_function;
 use shape_runtime::type_system::Type;
+use shape_runtime::type_system::suggestions::suggest_function;
 use shape_value::v2::ConcreteType;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -858,12 +858,25 @@ impl BytecodeCompiler {
                     // typed-array bindings flow via the type-tracker's
                     // `Vec<scalar>` name fallback at
                     // `monomorphization/type_resolution.rs:1493`).
-                    let caller_arg_type_names: Vec<Option<String>> = args
+                    // U4-5b: keep the caller-arg ConcreteTypes STRUCTURALLY so
+                    // the closure-body param seed (below) reads each arg's array
+                    // element type directly from `ConcreteType::Array(elem)` —
+                    // never by stripping a `"Vec<elem>"` display string. The
+                    // string vec is retained ONLY for the closure-body
+                    // mini-inferencer ABI (`..._with_caller_context`, a T3-wave
+                    // target), not as a type source.
+                    let caller_arg_concrete_types: Vec<Option<shape_value::v2::ConcreteType>> = args
                         .iter()
                         .map(|arg_expr| {
                             crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, arg_expr)
+                        })
+                        .collect();
+                    let caller_arg_type_names: Vec<Option<String>> = caller_arg_concrete_types
+                        .iter()
+                        .map(|ct| {
+                            ct.as_ref()
                                 .and_then(|ct| {
-                                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
+                                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(ct)
                                 })
                                 .and_then(|ann| {
                                     crate::compiler::BytecodeCompiler::tracked_type_name_from_annotation(&ann)
@@ -1028,58 +1041,34 @@ impl BytecodeCompiler {
                                         for (param_idx, slot) in
                                             mir_data.mir.param_slots.clone().iter().enumerate()
                                         {
-                                            let Some(Some(caller_tn)) =
-                                                caller_arg_type_names.get(param_idx)
+                                            // U4-5b: read the caller arg's array
+                                            // element type STRUCTURALLY from its
+                                            // recorded `ConcreteType::Array(elem)`.
+                                            // The element ConcreteType IS the
+                                            // proof (ADR-006 §2.7.5); no
+                                            // `"Vec<elem>"` display-string strip /
+                                            // re-parse. A non-array (or
+                                            // unresolved) caller arg yields
+                                            // nothing to seed (surface-and-stop
+                                            // preserved). Only typed-array element
+                                            // kinds (scalars with a typed-array
+                                            // carrier) reach
+                                            // `local_typed_array_element_types`;
+                                            // `or_insert` skips a struct/object
+                                            // element exactly as the kind-bounded
+                                            // string match did.
+                                            let Some(Some(shape_value::v2::ConcreteType::Array(
+                                                elem,
+                                            ))) = caller_arg_concrete_types.get(param_idx)
                                             else {
                                                 continue;
                                             };
-                                            // Parse "Vec<elem>" into
-                                            // Array(elem). Mirror of
-                                            // `concrete_type_to_type_annotation`'s
-                                            // Array arm inverse;
-                                            // bounded to scalar elem
-                                            // types per the same kind-
-                                            // classifier discipline.
-                                            let Some(inner_name) = caller_tn
-                                                .strip_prefix("Vec<")
-                                                .and_then(|s| s.strip_suffix('>'))
-                                            else {
-                                                continue;
-                                            };
-                                            let elem_ct: Option<shape_value::v2::ConcreteType> =
-                                                match inner_name {
-                                                    "int" | "i64" => {
-                                                        Some(shape_value::v2::ConcreteType::I64)
-                                                    }
-                                                    "i32" => {
-                                                        Some(shape_value::v2::ConcreteType::I32)
-                                                    }
-                                                    "i16" => {
-                                                        Some(shape_value::v2::ConcreteType::I16)
-                                                    }
-                                                    "i8" => Some(shape_value::v2::ConcreteType::I8),
-                                                    "u64" => {
-                                                        Some(shape_value::v2::ConcreteType::U64)
-                                                    }
-                                                    "u32" => {
-                                                        Some(shape_value::v2::ConcreteType::U32)
-                                                    }
-                                                    "u16" => {
-                                                        Some(shape_value::v2::ConcreteType::U16)
-                                                    }
-                                                    "u8" => Some(shape_value::v2::ConcreteType::U8),
-                                                    "number" | "f64" => {
-                                                        Some(shape_value::v2::ConcreteType::F64)
-                                                    }
-                                                    "bool" => {
-                                                        Some(shape_value::v2::ConcreteType::Bool)
-                                                    }
-                                                    "string" => {
-                                                        Some(shape_value::v2::ConcreteType::String)
-                                                    }
-                                                    _ => None,
-                                                };
-                                            if let Some(elem_ct) = elem_ct {
+                                            let elem_ct = (**elem).clone();
+                                            if crate::compiler::v2_typed_emission::should_use_typed_array(
+                                                &elem_ct,
+                                            )
+                                            .is_some()
+                                            {
                                                 mir_data
                                                     .mir
                                                     .local_typed_array_element_types
@@ -4225,7 +4214,6 @@ impl BytecodeCompiler {
     fn is_comptime_only_builtin(name: &str) -> bool {
         shape_runtime::builtin_metadata::is_comptime_builtin_function(name)
     }
-
 
     /// BUG3 — Attempt to monomorphize a generic free function for the given
     /// call-site argument types. Returns `Some(specialized_func_idx)` on
