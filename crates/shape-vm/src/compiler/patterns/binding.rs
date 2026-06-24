@@ -287,9 +287,12 @@ impl BytecodeCompiler {
                 VariableTypeInfo::known(schema_id, format!("__typed_obj_{}", schema_id)),
             );
         }
-        // Propagate numeric type info from the scrutinee expression so that
-        // match binding variables inherit the correct storage hint (e.g., Int64).
-        self.propagate_initializer_type_to_slot(value_local, true, false);
+        // Propagate type info from the scrutinee so match binding variables
+        // inherit the correct storage hint. U4-4: the match-value temp has no
+        // single value expr here (the scrutinee was already compiled to the
+        // temp), so the stamp comes from `last_expr_type_info` / schema; the
+        // scrutinee's `ConcreteType` is recorded separately below.
+        self.propagate_initializer_type_to_slot(value_local, true, false, None);
         // F5 (v0.3.3 strict-flip): record the scrutinee's proven ConcreteType
         // on the match-value temp so `Ok(v)` / `Some(v)` / `Err(e)` payload
         // unwraps can stamp the binder type (`stamp_unwrapped_payload_local`).

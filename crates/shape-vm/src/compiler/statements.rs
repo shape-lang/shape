@@ -1313,7 +1313,12 @@ impl BytecodeCompiler {
                         }
                     } else {
                         let is_mutable = var_decl.kind == shape_ast::ast::VarKind::Var;
-                        self.propagate_initializer_type_to_slot(binding_idx, false, is_mutable);
+                        self.propagate_initializer_type_to_slot(
+                            binding_idx,
+                            false,
+                            is_mutable,
+                            var_decl.value.as_ref(),
+                        );
                     }
 
                     // Track for auto-drop at program exit
@@ -4929,7 +4934,9 @@ impl BytecodeCompiler {
             OpCode::StoreModuleBinding,
             Some(Operand::ModuleBinding(binding_idx)),
         ));
-        self.propagate_initializer_type_to_slot(binding_idx, false, false);
+        // U4-4: the module-namespace object is a non-numeric heap value; its
+        // tracker type comes from `last_expr_type_info` (no numeric expr).
+        self.propagate_initializer_type_to_slot(binding_idx, false, false, Some(&module_object));
 
         if self.module_scope_stack.len() == 1 {
             self.module_namespace_bindings
@@ -4995,8 +5002,13 @@ impl BytecodeCompiler {
         slot: u16,
         is_local: bool,
         _is_mutable: bool,
+        // U4-4: the initializer expression — its resolved Type drives the
+        // numeric slot hint (`numeric_type_of`), replacing the deleted
+        // `last_expr_numeric_type` register. `None` where no single init expr
+        // is in hand (falls back to `last_expr_type_info`).
+        init_expr: Option<&shape_ast::ast::Expr>,
     ) {
-        self.propagate_assignment_type_to_slot(slot, is_local, true);
+        self.propagate_assignment_type_to_slot(slot, is_local, true, init_expr);
     }
 
     /// Compile a statement
@@ -5081,7 +5093,7 @@ impl BytecodeCompiler {
                     self.emit_drops_for_early_exit(total_scopes)?;
                 }
                 self.return_escape_drop_skip_local = None;
-                self.emit_return_value_with_ownership();
+                self.emit_return_value_with_ownership(expr_opt.as_ref());
             }
 
             Statement::Break(_) => {
@@ -5554,7 +5566,12 @@ impl BytecodeCompiler {
                             self.try_track_datatable_type(type_ann, binding_idx, false)?;
                         } else {
                             let is_mutable = var_decl.kind == shape_ast::ast::VarKind::Var;
-                            self.propagate_initializer_type_to_slot(binding_idx, false, is_mutable);
+                            self.propagate_initializer_type_to_slot(
+                                binding_idx,
+                                false,
+                                is_mutable,
+                                var_decl.value.as_ref(),
+                            );
                             // v0.3 WS-6b GAP A: an *inferred-type* `let p =
                             // <expr>` carries no annotation, so the WS-6
                             // annotated-only recording above never runs. Resolve
@@ -5977,7 +5994,12 @@ impl BytecodeCompiler {
                             }
                         } else if let Some(local_idx) = self.resolve_local(name) {
                             let is_mutable = var_decl.kind == shape_ast::ast::VarKind::Var;
-                            self.propagate_initializer_type_to_slot(local_idx, true, is_mutable);
+                            self.propagate_initializer_type_to_slot(
+                                local_idx,
+                                true,
+                                is_mutable,
+                                var_decl.value.as_ref(),
+                            );
                             // v0.3 WS-6b GAP A: mirror of the inferred-type
                             // module-binding path above. An inferred `let p =
                             // <expr>` local carries no annotation, so the WS-6
@@ -6368,7 +6390,8 @@ impl BytecodeCompiler {
                                     }
                                     if let Some(local_idx) = self.resolve_local(name) {
                                         self.compile_expr(&args[0])?;
-                                        let pushed_numeric = self.last_expr_numeric_type;
+                                        // U4-4: pushed element kind from the one resolved Type.
+                                        let pushed_numeric = self.numeric_type_of(&args[0]);
                                         self.emit(Instruction::new(
                                             OpCode::ArrayPushLocal,
                                             Some(Operand::Local(local_idx)),
@@ -6391,7 +6414,8 @@ impl BytecodeCompiler {
                                     } else {
                                         let binding_idx = self.get_or_create_module_binding(name);
                                         self.compile_expr(&args[0])?;
-                                        let pushed_numeric = self.last_expr_numeric_type;
+                                        // U4-4: pushed element kind from the one resolved Type.
+                                        let pushed_numeric = self.numeric_type_of(&args[0]);
                                         self.emit(Instruction::new(
                                             OpCode::ArrayPushLocal,
                                             Some(Operand::ModuleBinding(binding_idx)),
@@ -6500,7 +6524,7 @@ impl BytecodeCompiler {
                             );
                         }
                     }
-                    self.propagate_assignment_type_to_identifier(name);
+                    self.propagate_assignment_type_to_identifier(name, Some(&assign.value));
                 }
             }
 
@@ -6603,7 +6627,8 @@ impl BytecodeCompiler {
                                     return Ok(());
                                 }
                                 self.compile_expr(&args[0])?;
-                                let pushed_numeric = self.last_expr_numeric_type;
+                                // U4-4: pushed element kind from the one resolved Type.
+                                let pushed_numeric = self.numeric_type_of(&args[0]);
                                 self.emit(Instruction::new(
                                     OpCode::ArrayPushLocal,
                                     Some(Operand::Local(local_idx)),

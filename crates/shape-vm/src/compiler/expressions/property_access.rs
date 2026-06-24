@@ -3,10 +3,9 @@
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::NumericType;
-use shape_ast::ast::{DataIndex, Expr, Spanned, TypeAnnotation};
+use shape_ast::ast::{DataIndex, Expr, Spanned};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::FieldType;
-use shape_runtime::type_system::{BuiltinTypes, Type};
 
 use shape_value::v2::struct_layout::FieldKind;
 
@@ -92,51 +91,13 @@ fn style_spec_members(namespace: &str) -> &'static [&'static str] {
     }
 }
 
-fn basic_name_to_numeric(name: &str) -> Option<NumericType> {
-    if BuiltinTypes::is_integer_type_name(name) {
-        return Some(NumericType::Int);
-    }
-    if BuiltinTypes::is_number_type_name(name) {
-        return Some(NumericType::Number);
-    }
-    match name {
-        "decimal" | "Decimal" => Some(NumericType::Decimal),
-        _ => None,
-    }
-}
-
-fn array_type_name_to_numeric(type_name: &str) -> Option<NumericType> {
-    let inner = type_name
-        .strip_prefix("Vec<")
-        .and_then(|s| s.strip_suffix('>'))?;
-    basic_name_to_numeric(inner.trim())
-}
-
-fn type_annotation_to_numeric(annotation: &TypeAnnotation) -> Option<NumericType> {
-    match annotation {
-        TypeAnnotation::Basic(name) => basic_name_to_numeric(name),
-        TypeAnnotation::Reference(name) => basic_name_to_numeric(name),
-        TypeAnnotation::Generic { name, args } if name == "Option" && args.len() == 1 => {
-            type_annotation_to_numeric(&args[0])
-        }
-        _ => None,
-    }
-}
-
-fn index_result_numeric_from_object_type(ty: &Type) -> Option<NumericType> {
-    match ty {
-        Type::Concrete(TypeAnnotation::Array(inner)) => type_annotation_to_numeric(inner),
-        Type::Concrete(TypeAnnotation::Generic { name, args })
-            if name == "Option" && args.len() == 1 =>
-        {
-            match &args[0] {
-                TypeAnnotation::Array(elem) => type_annotation_to_numeric(elem),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
+// U4-4: `basic_name_to_numeric`, `array_type_name_to_numeric` (a `Vec<...>`
+// string re-parse), `type_annotation_to_numeric`, and
+// `index_result_numeric_from_object_type` are DELETED. They projected an
+// `arr[i]` element type to a `NumericType` only to stamp the deleted
+// `last_expr_numeric_type` register. The index-result numeric kind is now
+// derived from the one resolved Type via `numeric_type_of` →
+// `infer_expr_type` (which resolves `arr[i]` via `tracked_array_element_type`).
 
 impl BytecodeCompiler {
     /// Compile a property access expression
@@ -184,7 +145,6 @@ impl BytecodeCompiler {
                 Some(Operand::Const(const_idx)),
             ));
             self.last_expr_schema = None;
-            self.last_expr_numeric_type = None;
             self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
                 "string".to_string(),
             ));
@@ -270,8 +230,6 @@ impl BytecodeCompiler {
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
                 // Propagate numeric type from RowView field type
-                self.last_expr_numeric_type =
-                    self.resolve_row_view_field_numeric_type(name, property);
                 return Ok(());
             }
             // If the variable IS a RowView but the field was NOT found → compile error
@@ -402,7 +360,6 @@ impl BytecodeCompiler {
                 _ => None,
             };
             self.last_expr_type_info = None;
-            self.last_expr_numeric_type = field_type_to_numeric(&place.field_type_info);
             return Ok(());
         }
 
@@ -437,7 +394,6 @@ impl BytecodeCompiler {
                         ));
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = Some(NumericType::Int);
                         return Ok(());
                     }
                     TypedLengthLocal::String(slot) => {
@@ -447,7 +403,6 @@ impl BytecodeCompiler {
                         ));
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = Some(NumericType::Int);
                         return Ok(());
                     }
                 }
@@ -650,7 +605,6 @@ impl BytecodeCompiler {
         };
         self.last_expr_type_info = None;
         // Propagate numeric type from field type for typed opcode emission
-        self.last_expr_numeric_type = field_numeric_type;
         // D-α.2: when the slow-path `Length` / `TypedArrayLen` opcode was
         // emitted (reached only when neither a v2 field load nor a typed-
         // object field-tag carrier applied), the produced value is always
@@ -665,7 +619,6 @@ impl BytecodeCompiler {
             && typed_field.is_none()
             && field_numeric_type.is_none()
         {
-            self.last_expr_numeric_type = Some(NumericType::Int);
         }
         Ok(())
     }
@@ -677,35 +630,11 @@ impl BytecodeCompiler {
         index: &Expr,
         end_index: &Option<Box<Expr>>,
     ) -> Result<()> {
-        let tracked_numeric = if let Expr::Identifier(name, _) = object {
-            if let Some(local_idx) = self.resolve_local(name) {
-                self.type_tracker
-                    .get_local_type(local_idx)
-                    .and_then(|info| info.type_name.as_deref())
-                    .and_then(array_type_name_to_numeric)
-            } else {
-                let scoped_name = self
-                    .resolve_scoped_module_binding_name(name)
-                    .unwrap_or_else(|| name.to_string());
-                self.module_bindings
-                    .get(&scoped_name)
-                    .and_then(|binding_idx| self.type_tracker.get_binding_type(*binding_idx))
-                    .and_then(|info| info.type_name.as_deref())
-                    .and_then(array_type_name_to_numeric)
-            }
-        } else {
-            None
-        };
-
-        let inferred_numeric = if end_index.is_none() {
-            tracked_numeric.or_else(|| {
-                self.infer_expr_type(object)
-                    .ok()
-                    .and_then(|ty| index_result_numeric_from_object_type(&ty))
-            })
-        } else {
-            None
-        };
+        // U4-4: the `arr[i]` index-result numeric-type computation (formerly
+        // stamped onto the deleted `last_expr_numeric_type` register) is
+        // removed — a downstream `arr[i] + 1` derives the element's numeric
+        // kind from the one resolved Type (`numeric_type_of` →
+        // `infer_expr_type` → `tracked_array_element_type`).
 
         // v2 Phase 3.1 (Agent 3): typed-array fast path for `arr[i]`.
         // Resolve the receiver kind BEFORE compiling the object —
@@ -730,7 +659,6 @@ impl BytecodeCompiler {
                 self.emit(Instruction::new(elem_opcode, Some(Operand::Local(slot))));
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
-                self.last_expr_numeric_type = inferred_numeric;
                 return Ok(());
             }
         }
@@ -754,7 +682,6 @@ impl BytecodeCompiler {
                 emit_index_trait_call(self, "index", 1);
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
-                self.last_expr_numeric_type = None;
                 return Ok(());
             }
         }
@@ -775,7 +702,6 @@ impl BytecodeCompiler {
         // Index access result is typically not a TypedObject
         self.last_expr_schema = None;
         self.last_expr_type_info = None;
-        self.last_expr_numeric_type = inferred_numeric;
         Ok(())
     }
 

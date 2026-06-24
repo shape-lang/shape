@@ -1499,7 +1499,6 @@ impl BytecodeCompiler {
         // Reset expression-level tracking to prevent stale values from previous
         // function compilations leaking into parameter binding
         self.last_expr_schema = None;
-        self.last_expr_numeric_type = None;
         self.last_expr_type_info = None;
 
         // Set function entry point (AFTER the jump instruction)
@@ -1902,7 +1901,7 @@ impl BytecodeCompiler {
                             self.emit_drops_for_early_exit(total_scopes)?;
                         }
                         self.return_escape_drop_skip_local = None;
-                        self.emit_return_value_with_ownership();
+                        self.emit_return_value_with_ownership(Some(return_expr));
                         // Skip the fallback return below since we've already returned
                         // Update function locals count
                         self.program.functions[func_idx].locals_count = self.next_local;

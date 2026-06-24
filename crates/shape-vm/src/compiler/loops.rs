@@ -67,8 +67,9 @@ impl BytecodeCompiler {
         self.set_local_type_info(end_local, "int");
 
         // compile(start) → [NumberToInt if float] → StoreLocal(counter)
+        // U4-4: endpoint numeric kind derived from the one resolved Type.
         self.compile_expr(start_expr)?;
-        let start_nt = self.last_expr_numeric_type;
+        let start_nt = self.numeric_type_of(start_expr);
         if matches!(start_nt, Some(NumericType::Number)) {
             self.emit(Instruction::simple(OpCode::NumberToInt));
         }
@@ -79,7 +80,7 @@ impl BytecodeCompiler {
 
         // compile(end) → [NumberToInt if float] → StoreLocal(__end)
         self.compile_expr(end_expr)?;
-        let end_nt = self.last_expr_numeric_type;
+        let end_nt = self.numeric_type_of(end_expr);
         if matches!(end_nt, Some(NumericType::Number)) {
             self.emit(Instruction::simple(OpCode::NumberToInt));
         }
@@ -1117,30 +1118,30 @@ impl BytecodeCompiler {
     /// of a list-comprehension element expression that just compiled.
     ///
     /// Reads, in order:
-    ///   1. `last_expr_numeric_type` — set when the element is a numeric
-    ///      literal / operation (covers `x * 2`, `x + 1`, range-counter
-    ///      loop variables which the range specialization types as `int`).
+    ///   1. The element's one resolved Type (`numeric_type_of` →
+    ///      `infer_expr_type`) — covers `x * 2`, `x + 1`, range-counter loop
+    ///      variables which the range specialization types as `int`. (U4-4:
+    ///      this REPLACES the deleted ambient `last_expr_numeric_type`
+    ///      register.)
     ///   2. `last_expr_type_info`'s `storage_hint` — covers the `bool`
-    ///      case (a comparison result clears `last_expr_numeric_type` but
-    ///      stamps `StorageHint::Bool`).
+    ///      case (a comparison result stamps `StorageHint::Bool`).
     ///   3. `concrete_type_for_expr` on the element AST — covers a bare
     ///      identifier loop variable bound by a generic-iterator clause
     ///      (`[x for x in src]`), where the kind lives in the type tracker.
     ///
-    /// Per ADR-006 §2.7.5 every signal is a producer-side type proof set
-    /// when the element compiled (or a structural type-tracker fact) —
-    /// never fabricated, never decoded from runtime bits. Returns `None`
-    /// when no scalar kind is proven; the caller surfaces a clean compile
-    /// error.
+    /// Per ADR-006 §2.7.5 every signal is a producer-side type proof (or a
+    /// structural type-tracker fact) — never fabricated, never decoded from
+    /// runtime bits. Returns `None` when no scalar kind is proven; the caller
+    /// surfaces a clean compile error.
     fn resolve_pushed_element_typed_array_kind(
-        &self,
+        &mut self,
         element: &Expr,
     ) -> Option<super::v2_typed_emission::TypedArrayKind> {
         use super::monomorphization::type_resolution::concrete_type_for_expr;
         use super::v2_typed_emission::{
             TypedArrayKind, should_use_typed_array, typed_array_kind_from_numeric_type,
         };
-        if let Some(nt) = self.last_expr_numeric_type {
+        if let Some(nt) = self.numeric_type_of(element) {
             return Some(typed_array_kind_from_numeric_type(nt));
         }
         if let Some(info) = &self.last_expr_type_info {
@@ -1247,7 +1248,6 @@ impl BytecodeCompiler {
         } else {
             self.last_expr_type_info = None;
         }
-        self.last_expr_numeric_type = None;
         self.last_expr_schema = None;
 
         self.pop_scope();
@@ -1551,8 +1551,9 @@ impl BytecodeCompiler {
                         let end_local = self.declare_local(&format!("__spread_end_{idx}"))?;
 
                         // Compile start → [NumberToInt if float] → store
+                        // U4-4: endpoint numeric kind from the one resolved Type.
                         self.compile_expr(start_expr)?;
-                        let start_nt = self.last_expr_numeric_type;
+                        let start_nt = self.numeric_type_of(start_expr);
                         if matches!(start_nt, Some(NumericType::Number)) {
                             self.emit(Instruction::simple(OpCode::NumberToInt));
                         }
@@ -1563,7 +1564,7 @@ impl BytecodeCompiler {
 
                         // Compile end → [NumberToInt if float] → store
                         self.compile_expr(end_expr)?;
-                        let end_nt = self.last_expr_numeric_type;
+                        let end_nt = self.numeric_type_of(end_expr);
                         if matches!(end_nt, Some(NumericType::Number)) {
                             self.emit(Instruction::simple(OpCode::NumberToInt));
                         }
@@ -1737,7 +1738,6 @@ impl BytecodeCompiler {
         } else {
             self.last_expr_type_info = None;
         }
-        self.last_expr_numeric_type = None;
         self.last_expr_schema = None;
 
         self.pop_scope();

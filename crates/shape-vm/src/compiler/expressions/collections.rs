@@ -701,7 +701,6 @@ impl BytecodeCompiler {
         if let Some(elem_ct) = legacy_elem {
             self.record_array_element_type(span, elem_ct);
         }
-        self.last_expr_numeric_type = None;
         // R3 sibling-leak fix: restore the entry hand-off value so this
         // literal's inferred element kind does not leak into a sibling array
         // literal compiled later in the same initializer expression.
@@ -894,7 +893,6 @@ impl BytecodeCompiler {
         // compile-time producer-side stamp of the proven schema (ADR-006
         // §2.7.5) — no runtime decode, no generic property-lookup fallback.
         self.last_expr_schema = Some(schema_id);
-        self.last_expr_numeric_type = None;
         let schema_name = self
             .type_tracker
             .schema_registry()
@@ -1529,7 +1527,6 @@ impl BytecodeCompiler {
                 ));
 
                 self.last_expr_schema = Some(schema_id);
-                self.last_expr_numeric_type = None;
                 self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::known(
                     schema_id,
                     runtime_type_name.clone(),
@@ -1654,7 +1651,6 @@ impl BytecodeCompiler {
         // (e.g. `Status::Ok(1)` would leave NumericType::Int from the `1`),
         // causing typed opcodes like EqInt to be emitted for enum comparisons.
         self.last_expr_schema = Some(schema_id);
-        self.last_expr_numeric_type = None;
 
         Ok(())
     }
@@ -1792,7 +1788,6 @@ impl BytecodeCompiler {
             "Table<{}>",
             inner_type_name
         )));
-        self.last_expr_numeric_type = None;
 
         Ok(())
     }

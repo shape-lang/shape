@@ -157,9 +157,14 @@ impl BytecodeCompiler {
                                 } else {
                                     // Propagate initializer type (e.g., var x = 0 → Int64 hint)
                                     // so typed opcodes can be emitted for operations on this variable.
+                                    // U4-4: simple-identifier pattern → the numeric kind derives
+                                    // from `init_expr`'s resolved Type.
                                     let is_mutable = var_decl.kind == shape_ast::ast::VarKind::Var;
                                     self.propagate_initializer_type_to_slot(
-                                        local_idx, true, is_mutable,
+                                        local_idx,
+                                        true,
+                                        is_mutable,
+                                        Some(init_expr),
                                     );
                                 }
                                 // Track for auto-drop at scope exit

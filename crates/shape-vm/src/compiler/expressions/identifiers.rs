@@ -5,7 +5,7 @@ use shape_ast::ast::Span;
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_system::suggestions::suggest_variable;
 
-use crate::type_tracking::{BindingStorageClass, NumericType, StorageHint, VariableKind};
+use crate::type_tracking::{BindingStorageClass, StorageHint, VariableKind};
 
 use super::super::BytecodeCompiler;
 
@@ -74,65 +74,12 @@ impl BytecodeCompiler {
         result
     }
 
-    /// Map a storage hint to a numeric type (if applicable).
-    /// Width-specific hints (Int8, UInt16, etc.) → IntWidth(w);
-    /// default Int64 → Int; Float64 → Number.
-    pub(in crate::compiler) fn storage_hint_to_numeric_type(
-        hint: StorageHint,
-    ) -> Option<NumericType> {
-        use shape_ast::IntWidth;
-        match hint {
-            StorageHint::Int8 | StorageHint::NullableInt8 => {
-                Some(NumericType::IntWidth(IntWidth::I8))
-            }
-            StorageHint::UInt8 | StorageHint::NullableUInt8 => {
-                Some(NumericType::IntWidth(IntWidth::U8))
-            }
-            StorageHint::Int16 | StorageHint::NullableInt16 => {
-                Some(NumericType::IntWidth(IntWidth::I16))
-            }
-            StorageHint::UInt16 | StorageHint::NullableUInt16 => {
-                Some(NumericType::IntWidth(IntWidth::U16))
-            }
-            StorageHint::Int32 | StorageHint::NullableInt32 => {
-                Some(NumericType::IntWidth(IntWidth::I32))
-            }
-            StorageHint::UInt32 | StorageHint::NullableUInt32 => {
-                Some(NumericType::IntWidth(IntWidth::U32))
-            }
-            StorageHint::UInt64 | StorageHint::NullableUInt64 => {
-                Some(NumericType::IntWidth(IntWidth::U64))
-            }
-            _ if hint.is_default_int_family() => Some(NumericType::Int),
-            _ if hint.is_float_family() => Some(NumericType::Number),
-            _ => None,
-        }
-    }
-
-    /// Map a referent scalar type name (`int` / `number` / `i8` / `decimal` …)
-    /// to the typed-opcode `NumericType`, for stamping `last_expr_numeric_type`
-    /// when a reference value binding (`let r = &n`) is read via `DerefLoad`.
-    /// Width-aware: `i8`/`u32`/… map to the matching `IntWidth`. Non-numeric
-    /// referent names (`bool`/`string`) return `None` — they carry no numeric
-    /// opcode kind (the strict-typing operand check resolves them via
-    /// `infer_expr_type` instead).
-    pub(in crate::compiler) fn referent_type_name_to_numeric_type(
-        name: &str,
-    ) -> Option<NumericType> {
-        if let Some(width) = shape_ast::IntWidth::from_name(name) {
-            return Some(NumericType::IntWidth(width));
-        }
-        if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(name) {
-            return Some(NumericType::Int);
-        }
-        if shape_runtime::type_system::BuiltinTypes::is_number_type_name(name) {
-            return Some(NumericType::Number);
-        }
-        match name {
-            "decimal" | "Decimal" => Some(NumericType::Decimal),
-            _ => None,
-        }
-    }
+    // U4-4: `storage_hint_to_numeric_type` and
+    // `referent_type_name_to_numeric_type` are DELETED. They mapped a slot
+    // storage hint / referent type name to a `NumericType` only to stamp the
+    // deleted `last_expr_numeric_type` register on a variable / reference read.
+    // A downstream binop derives the operand's numeric kind from the one
+    // resolved Type (`numeric_type_of` → `infer_expr_type`).
 
     /// Compile an identifier (variable or function reference)
     pub(in crate::compiler) fn compile_expr_identifier(
@@ -205,7 +152,6 @@ impl BytecodeCompiler {
                 self.emit(Instruction::new(opcode, Some(Operand::Local(shared_idx))));
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
-                self.last_expr_numeric_type = None;
                 return Ok(());
             }
             // Track A.1C.2b + Wave E: OwnedMutable (let mut) captures
@@ -237,7 +183,6 @@ impl BytecodeCompiler {
                 self.emit(Instruction::new(opcode, Some(Operand::Local(owned_idx))));
                 self.last_expr_schema = None;
                 self.last_expr_type_info = None;
-                self.last_expr_numeric_type = None;
                 return Ok(());
             }
             self.emit(Instruction::new(
@@ -246,7 +191,6 @@ impl BytecodeCompiler {
             ));
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
-            self.last_expr_numeric_type = None;
             return Ok(());
         }
         if let Some(local_idx) = self.resolve_local(name) {
@@ -398,30 +342,11 @@ impl BytecodeCompiler {
             });
             self.last_expr_type_info = local_type;
             // Track numeric type for typed opcode emission. Post-§2.7.5.1:
-            // `info.storage_hint` is `Option<StorageHint>`, so we
-            // `.and_then` through both layers — `None` propagates "kind not
-            // yet proven" so no numeric type is recorded.
-            self.last_expr_numeric_type = self
-                .type_tracker
-                .get_local_type(local_idx)
-                .and_then(|info| info.storage_hint)
-                .and_then(Self::storage_hint_to_numeric_type);
-            // Reference value local read via `DerefLoad` (`r` for `let r = &n`):
-            // the loaded value IS the referent, so stamp the referent's numeric
-            // type for typed-opcode emission. The reference binding's own
-            // tracker slot carries no numeric storage hint, so without this a
-            // downstream `r + 1` falls to the strict-typing `unknown` operand
-            // error. Mirrors the value-position auto-deref already wired for
-            // method dispatch. Forwarded verbatim — `&int` stamps Int.
-            if (self.ref_locals.contains(&local_idx)
-                || self.reference_value_locals.contains(&local_idx))
-                && self.last_expr_numeric_type.is_none()
-            {
-                if let Some(referent) = self.reference_referent_type_name(name) {
-                    self.last_expr_numeric_type =
-                        Self::referent_type_name_to_numeric_type(&referent);
-                }
-            }
+            // U4-4: the reference-value referent numeric-type stamp is DELETED
+            // (its sole purpose was to write the deleted `last_expr_numeric_type`
+            // register). A downstream `r + 1` on `let r = &n` now derives the
+            // referent's numeric type from the one resolved Type table — the
+            // U4-3 keystone consult projects `&int → int` at the reference read.
         } else if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
             let binding_idx = *self.module_bindings.get(&scoped_name).ok_or_else(|| {
                 ShapeError::RuntimeError {
@@ -505,26 +430,10 @@ impl BytecodeCompiler {
                 }
             });
             self.last_expr_type_info = binding_type;
-            // Track numeric type for typed opcode emission. Post-§2.7.5.1:
-            // `info.storage_hint` is `Option<StorageHint>`, so we
-            // `.and_then` through both layers — `None` propagates "kind not
-            // yet proven" so no numeric type is recorded.
-            self.last_expr_numeric_type = self
-                .type_tracker
-                .get_binding_type(binding_idx)
-                .and_then(|info| info.storage_hint)
-                .and_then(Self::storage_hint_to_numeric_type);
-            // Reference value module binding read via `DerefLoad` (script-mode
-            // top-level `let r = &n`): stamp the referent's numeric type. See
-            // the sibling local-read path above.
-            if self.reference_value_module_bindings.contains(&binding_idx)
-                && self.last_expr_numeric_type.is_none()
-            {
-                if let Some(referent) = self.reference_referent_type_name(name) {
-                    self.last_expr_numeric_type =
-                        Self::referent_type_name_to_numeric_type(&referent);
-                }
-            }
+            // U4-4: the reference-value module-binding referent numeric-type
+            // stamp is DELETED (sole purpose was the deleted
+            // `last_expr_numeric_type` register). A downstream `r + 1` derives
+            // the referent's type from the one resolved Type table.
         } else if let Some(func_idx) = self.find_function(name) {
             let resolved_name = self.program.functions[func_idx].name.clone();
 
@@ -565,7 +474,6 @@ impl BytecodeCompiler {
             ));
             // Functions don't produce TypedObjects or numeric values
             self.last_expr_schema = None;
-            self.last_expr_numeric_type = None;
             self.last_expr_type_info = None;
         } else {
             // Collect available names for "Did you mean?" suggestion

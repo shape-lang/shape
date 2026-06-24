@@ -720,10 +720,15 @@ pub struct BytecodeCompiler {
     /// Used for compile-time typed merge optimization.
     pub(crate) last_expr_schema: Option<SchemaId>,
 
-    /// Numeric type of the last compiled expression (for typed opcode emission).
-    /// Set by literal compilation, variable loads, and other expression compilers.
-    /// Read by binary op compilation to emit typed opcodes (e.g., MulInt).
-    pub(crate) last_expr_numeric_type: Option<crate::type_tracking::NumericType>,
+    // U4-4 (T2): the standalone `last_expr_numeric_type` per-expression
+    // register is DELETED. It was a SECOND source of truth for "is this
+    // operand int / number / decimal / width" that competed with the engine
+    // span-keyed `resolved_expr_types: HashMap<Span, Type>` table (SB-7
+    // drift). NumericType is now derived from that one resolved Type at the
+    // opcode-selection / storage-hint point via `numeric_type_of`
+    // (`binary_ops.rs`) → `inferred_type_to_numeric` (`numeric_ops.rs`), the
+    // SOLE Type→NumericType derivation. The `NumericType` enum itself survives
+    // as the emit-time opcode index.
 
     /// E+5.5 Unit C step 2: captured top-level program return-kind, snapshotted
     /// right after the last item compiles (before drop-scope emission and

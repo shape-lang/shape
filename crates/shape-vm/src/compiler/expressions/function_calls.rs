@@ -8,12 +8,12 @@ use crate::compiler::monomorphization::type_resolution::{
 };
 use crate::compiler::string_interpolation::has_interpolation;
 use crate::executor::typed_object_ops::field_type_to_tag;
-use crate::type_tracking::{NumericType, VariableKind, VariableTypeInfo};
+use crate::type_tracking::{VariableKind, VariableTypeInfo};
 use shape_ast::ast::{Expr, InterpolationMode, Literal, Span, Spanned};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::closure::EnvironmentAnalyzer;
 use shape_runtime::type_system::suggestions::suggest_function;
-use shape_runtime::type_system::{BuiltinTypes, Type};
+use shape_runtime::type_system::Type;
 use shape_value::v2::ConcreteType;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -131,75 +131,14 @@ pub(crate) fn field_type_contract_annotation(
     }
 }
 
-/// Map a return type name string to a NumericType.
-fn return_type_to_numeric(type_name: &str) -> Option<NumericType> {
-    if BuiltinTypes::is_integer_type_name(type_name) {
-        return Some(NumericType::Int);
-    }
-    if BuiltinTypes::is_number_type_name(type_name) {
-        return Some(NumericType::Number);
-    }
-    match type_name {
-        "decimal" | "Decimal" => Some(NumericType::Decimal),
-        _ => None,
-    }
-}
-
-/// Get the known return NumericType for a builtin function name.
-fn builtin_return_numeric_type(name: &str) -> Option<NumericType> {
-    match name {
-        // Int-returning builtins. floor/ceil/round return a REAL `int` per the
-        // book spec (stdlib/native/math.mdx: `(number) -> int`). This stamp is
-        // load-bearing: it drives `last_expr_numeric_type` so downstream int
-        // arithmetic (`floor(3.7) + 1` => 4, an int) and int-index use
-        // (`arr[floor(2.9)]`) compile as int ops, not number ops. `int` and
-        // `number` never unify — no implicit widening back to `number`.
-        "floor" | "ceil" | "round" => Some(NumericType::Int),
-        // Number-returning builtins
-        "abs" | "sqrt" | "sum" | "mean" | "min" | "max" | "sin"
-        | "cos" | "tan" | "exp" | "ln" | "log" | "stddev" | "std" | "variance"
-        // STRICT-FLIP (v0.3.3, STAGE-2 MATH): `pow`, `asin`, `acos`, `atan`
-        // were absent from this table, so the compiler's typed-opcode
-        // return-kind stamp (`last_expr_numeric_type` at function_calls.rs:1485)
-        // stayed unset for them — `pow(sin(x), 2.0) + pow(cos(x), 2.0)` then
-        // failed strict typing as `unknown + unknown` at binary_ops.rs:196 even
-        // though the inference checker had already proven each `pow(...)` /
-        // `acos(...)` is `number`. All return `number` per
-        // `stdlib-src/core/intrinsics.shape:42-67`; the bare names map to
-        // `BuiltinFunction::Pow/Asin/Acos/Atan` (compiler/helpers.rs:4419-4430)
-        // and execute at runtime by bare name. (`atan2`/`sinh`/`cosh`/`tanh`
-        // are intentionally omitted: their bare names are pure-Shape stdlib
-        // wrappers with no bare-name compiler mapping and do not resolve at
-        // runtime — see the matching note in environment/mod.rs init_builtins.)
-        | "pow" | "asin" | "acos" | "atan"
-        // Strict-typing-sweep: __intrinsic_* aliases used by stdlib wrappers
-        // such as `coefficient_of_variation` need return-type info too,
-        // otherwise their `let std_val = __intrinsic_std(series)`
-        // bindings stay typeless and `std_val / mean_val` fails strict-typing.
-        // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
-        // `__intrinsic_sum` deleted — stdlib `sum()` routes through PHF
-        // method dispatch (per ADR-005 §1).
-        | "__intrinsic_mean" | "__intrinsic_min" | "__intrinsic_max"
-        | "__intrinsic_std" | "__intrinsic_variance" | "__intrinsic_correlation"
-        | "__intrinsic_covariance" | "__intrinsic_percentile" | "__intrinsic_median" => {
-            Some(NumericType::Number)
-        }
-        _ => None,
-    }
-}
-
-/// Get the known return NumericType for a method name.
-fn method_return_numeric_type(method: &str) -> Option<NumericType> {
-    match method {
-        // Int-returning methods
-        "len" | "length" | "count" | "indexOf" | "findIndex" => Some(NumericType::Int),
-        // Number-returning methods
-        "sum" | "mean" | "avg" | "min" | "max" | "std" | "var" | "abs" | "sqrt" => {
-            Some(NumericType::Number)
-        }
-        _ => None,
-    }
-}
+// U4-4: `return_type_to_numeric`, `builtin_return_numeric_type`, and
+// `method_return_numeric_type` are DELETED. They computed a `NumericType` for
+// the sole purpose of stamping the deleted `last_expr_numeric_type` register
+// for call/method results (`floor(3.7) + 1 => 4`, `pow(sin(x),2.0)+...`). The
+// inference engine already proves these return types (it recorded them in the
+// span-keyed `resolved_expr_types` table), so a downstream binop now derives
+// the call result's numeric kind via `numeric_type_of` → `infer_expr_type` —
+// one source, no register-feeding tables.
 
 /// Conservative compile-time-constant check for const parameters.
 /// Accepts literals and recursively literal-composed containers.
@@ -782,7 +721,6 @@ impl BytecodeCompiler {
             }
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
-            self.last_expr_numeric_type = None;
             // Sweep phase 3c.x: when the callee is a `let f = |…|`
             // binding with a tracked closure return type, propagate that
             // type onto `last_expr_numeric_type` (or `last_expr_type_info`
@@ -803,11 +741,16 @@ impl BytecodeCompiler {
                         .and_then(|idx| self.module_binding_callable_return_types.get(idx).cloned())
                 };
             if let Some(rt_name) = tracked_callable_rt.as_ref() {
-                use crate::type_tracking::NumericType;
                 match rt_name.as_str() {
-                    "int" => self.last_expr_numeric_type = Some(NumericType::Int),
-                    "number" => self.last_expr_numeric_type = Some(NumericType::Number),
-                    "decimal" => self.last_expr_numeric_type = Some(NumericType::Decimal),
+                    // U4-4: numeric register stamps replaced by `last_expr_type_info`
+                    // name stamps (same shape as the width-aware-int arm). The
+                    // numeric storage hint is re-derived from this name (or the
+                    // resolved Type) downstream.
+                    "int" | "number" | "decimal" => {
+                        self.last_expr_type_info = Some(
+                            crate::type_tracking::VariableTypeInfo::named(rt_name.clone()),
+                        );
+                    }
                     other
                         if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(
                             other,
@@ -1147,23 +1090,20 @@ impl BytecodeCompiler {
                                     }
                                 }
 
-                                // Also bridge to last_expr_* for
-                                // downstream binop dispatch in the same
-                                // expression, parallel to the
-                                // tracked_callable_rt block above.
-                                use crate::type_tracking::NumericType;
+                                // U4-4: stamp `last_expr_type_info` from the
+                                // tracked callable return-type name so a
+                                // downstream `let`-binding / storage-hint sees
+                                // it. The deleted `last_expr_numeric_type`
+                                // register stamp is gone — a binop on the call
+                                // result derives its numeric kind from the one
+                                // resolved Type via `numeric_type_of`.
                                 match rt_name.as_str() {
-                                    "int" => {
-                                        self.last_expr_numeric_type =
-                                            Some(NumericType::Int);
-                                    }
-                                    "number" => {
-                                        self.last_expr_numeric_type =
-                                            Some(NumericType::Number);
-                                    }
-                                    "decimal" => {
-                                        self.last_expr_numeric_type =
-                                            Some(NumericType::Decimal);
+                                    "int" | "number" | "decimal" => {
+                                        self.last_expr_type_info = Some(
+                                            crate::type_tracking::VariableTypeInfo::named(
+                                                rt_name.clone(),
+                                            ),
+                                        );
                                     }
                                     other if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(other) => {
                                         self.last_expr_type_info =
@@ -1515,10 +1455,6 @@ impl BytecodeCompiler {
                 .and_then(Self::value_schema_from_type_info);
 
             // Propagate return type for typed opcode emission
-            self.last_expr_numeric_type = self
-                .type_tracker
-                .get_function_return_type(&call_name)
-                .and_then(|rt| return_type_to_numeric(rt));
             if let Some(return_reference_summary) = return_reference_summary {
                 self.set_last_expr_reference_result(return_reference_summary.mode, true);
             } else if let Some(borrow_mode) = self.function_declares_borrow_return(&call_name) {
@@ -1587,7 +1523,6 @@ impl BytecodeCompiler {
                 Some(Operand::Builtin(builtin)),
             ));
             // Propagate known return type for builtin functions
-            self.last_expr_numeric_type = builtin_return_numeric_type(name);
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
             self.clear_last_expr_reference_result();
@@ -1945,7 +1880,6 @@ impl BytecodeCompiler {
             Some(Operand::Builtin(builtin)),
         ));
         self.last_expr_schema = None;
-        self.last_expr_numeric_type = None;
         // SC1: `Color.rgb(...)` returns a `string` carrier; the remaining
         // namespace ctors produce Content / DateTime values whose type the
         // downstream dispatch infers structurally (left as `None`).
@@ -2625,7 +2559,6 @@ impl BytecodeCompiler {
             }
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
-            self.last_expr_numeric_type = None;
             // Phase 4b Round 3 Surface-1A LANG-W13-3-iife-closure-capture:
             // IIFE `(|y| body)(args)` parses as
             // `MethodCall { method: "__call__", receiver: FunctionExpr {..} }`
@@ -2677,11 +2610,15 @@ impl BytecodeCompiler {
                         &caller_arg_type_names,
                     )
                 {
-                    use crate::type_tracking::NumericType;
                     match rt_name.as_str() {
-                        "int" => self.last_expr_numeric_type = Some(NumericType::Int),
-                        "number" => self.last_expr_numeric_type = Some(NumericType::Number),
-                        "decimal" => self.last_expr_numeric_type = Some(NumericType::Decimal),
+                        // U4-4: numeric register stamps replaced by
+                        // `last_expr_type_info` name stamps (same as width arm).
+                        "int" | "number" | "decimal" => {
+                            self.last_expr_type_info =
+                                Some(crate::type_tracking::VariableTypeInfo::named(
+                                    rt_name.clone(),
+                                ));
+                        }
                         other
                             if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(
                                 other,
@@ -2851,7 +2788,8 @@ impl BytecodeCompiler {
                         return Ok(());
                     }
                     self.compile_expr(&args[0])?;
-                    let pushed_numeric = self.last_expr_numeric_type;
+                    // U4-4: pushed element kind from the one resolved Type.
+                    let pushed_numeric = self.numeric_type_of(&args[0]);
                     self.emit(Instruction::new(
                         OpCode::ArrayPushLocal,
                         Some(Operand::Local(local_idx)),
@@ -2979,7 +2917,6 @@ impl BytecodeCompiler {
             }
 
             self.last_expr_schema = None;
-            self.last_expr_numeric_type = None;
             self.last_expr_type_info = None;
             self.clear_last_expr_reference_result();
             return Ok(());
@@ -3016,7 +2953,6 @@ impl BytecodeCompiler {
                 Some(Operand::Builtin(BuiltinFunction::FormatValueWithMeta)),
             ));
             self.last_expr_schema = None;
-            self.last_expr_numeric_type = None;
             // D-β string-join receiver-kind fix (v0.3 KC #6(d), 2026-05-22):
             // `.toString()` / `.to_string()` always returns a `string`. The
             // pre-fix code cleared `last_expr_type_info` to None, which made
@@ -3221,8 +3157,9 @@ impl BytecodeCompiler {
         self.compile_expr(receiver)?;
         let receiver_schema = self.last_expr_schema;
         let receiver_type_info = self.last_expr_type_info.clone();
-        // Capture receiver's numeric type for extend method return type propagation.
-        let receiver_numeric_type = self.last_expr_numeric_type;
+        // Capture receiver's numeric type for extend method return type
+        // propagation. U4-4: derived from the receiver's one resolved Type.
+        let receiver_numeric_type = self.numeric_type_of(receiver);
         // Capture receiver's extend type before args compilation overwrites compiler state.
         let receiver_extend_type =
             self.resolve_receiver_extend_type(receiver, &receiver_type_info, receiver_schema);
@@ -3296,7 +3233,6 @@ impl BytecodeCompiler {
                 .last_expr_type_info
                 .as_ref()
                 .and_then(Self::value_schema_from_type_info);
-            self.last_expr_numeric_type = None;
             self.closure_row_schema = None;
             self.clear_last_expr_reference_result();
             return Ok(());
@@ -3336,7 +3272,6 @@ impl BytecodeCompiler {
             ));
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
-            self.last_expr_numeric_type = None;
             self.clear_last_expr_reference_result();
             return Ok(());
         }
@@ -3470,16 +3405,10 @@ impl BytecodeCompiler {
             }
             self.last_expr_schema = None;
             // Propagate return type for UFCS method calls.
-            // For extend methods (resolved via qualified Type.method name),
-            // propagate the receiver's numeric type for chaining support.
-            // For bare-name user functions, use the static method table.
-            let resolved_via_extend =
-                extend_func_idx.is_some() && self.find_function(method).is_none();
-            self.last_expr_numeric_type = if resolved_via_extend {
-                receiver_numeric_type
-            } else {
-                method_return_numeric_type(method)
-            };
+            // U4-4: the extend-method receiver-numeric-type propagation (which
+            // wrote the deleted `last_expr_numeric_type` register for chaining)
+            // is removed — a chained binop derives the result kind from the one
+            // resolved Type.
             // UFCS to user function: type-preserving methods still propagate Table<T>
             if self.is_type_preserving_table_method(method) {
                 self.last_expr_type_info = receiver_type_info;
@@ -3605,7 +3534,6 @@ impl BytecodeCompiler {
                     blob.record_call(&call_func_name);
                 }
                 self.last_expr_schema = None;
-                self.last_expr_numeric_type = method_return_numeric_type(method);
                 if self.is_type_preserving_table_method(method) {
                     self.last_expr_type_info = receiver_type_info;
                 } else {
@@ -3648,7 +3576,6 @@ impl BytecodeCompiler {
                 ));
                 self.last_expr_schema = None;
                 // Propagate known return type for UFCS builtin method calls
-                self.last_expr_numeric_type = method_return_numeric_type(method);
                 if self.is_type_preserving_table_method(method) {
                     self.last_expr_type_info = receiver_type_info;
                 } else {
@@ -3754,7 +3681,6 @@ impl BytecodeCompiler {
 
         // Propagate known return type for standard method calls
         self.last_expr_schema = None;
-        self.last_expr_numeric_type = method_return_numeric_type(method);
 
         // REAL-MOVE keep-both (v0.3.3, user 2026-06-21): `clone` returns
         // `Self`. For a struct (`TypedObject`) receiver carrying a known
@@ -3826,7 +3752,6 @@ impl BytecodeCompiler {
                     ));
                     self.last_expr_schema = None;
                     self.last_expr_type_info = None;
-                    self.last_expr_numeric_type = Some(NumericType::Int);
                     self.clear_last_expr_reference_result();
                     return Ok(Some(()));
                 }
@@ -3847,7 +3772,6 @@ impl BytecodeCompiler {
                         ));
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = Some(NumericType::Int);
                         self.clear_last_expr_reference_result();
                         return Ok(Some(()));
                     }
@@ -3896,7 +3820,6 @@ impl BytecodeCompiler {
                         }
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = None;
                         self.clear_last_expr_reference_result();
                         return Ok(Some(()));
                     }
@@ -3923,7 +3846,6 @@ impl BytecodeCompiler {
                         ));
                         self.last_expr_schema = None;
                         self.last_expr_type_info = None;
-                        self.last_expr_numeric_type = None;
                         self.clear_last_expr_reference_result();
                         return Ok(Some(()));
                     }
@@ -4156,7 +4078,6 @@ impl BytecodeCompiler {
             .last_expr_type_info
             .as_ref()
             .and_then(Self::value_schema_from_type_info);
-        self.last_expr_numeric_type = None;
         Ok(())
     }
 
@@ -4242,7 +4163,6 @@ impl BytecodeCompiler {
 
         self.last_expr_schema = None;
         self.last_expr_type_info = None;
-        self.last_expr_numeric_type = None;
 
         Ok(())
     }

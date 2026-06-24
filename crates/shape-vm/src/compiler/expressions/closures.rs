@@ -1738,7 +1738,6 @@ impl BytecodeCompiler {
         // local handlers don't perform Arc retain/release on their
         // 8-byte slot, leading to a use-after-free of the closure block
         // when the binding is loaded for a call (see #104 / #95).
-        self.last_expr_numeric_type = None;
         self.last_expr_type_info = None;
         Ok(())
     }

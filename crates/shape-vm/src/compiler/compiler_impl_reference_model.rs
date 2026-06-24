@@ -2220,8 +2220,14 @@ impl BytecodeCompiler {
                 // yet proven" as `Option::None` — `.or_else(...)` falls
                 // back to the AST-driven path when the state-driven one
                 // produced no kind.
+                // U4-4: the final expression's resolved Type drives the
+                // numeric return kind — thread the last item's tail expr so
+                // `infer_top_level_return_kind` derives it from the one Type
+                // table (`numeric_type_of`) rather than the deleted
+                // `last_expr_numeric_type` register.
+                let tail_expr = Self::top_level_item_tail_expr(item);
                 let kind = self
-                    .infer_top_level_return_kind()
+                    .infer_top_level_return_kind(tail_expr)
                     .or_else(|| self.infer_top_level_return_kind_from_item(item));
                 self.top_level_program_return_kind = kind;
             }
@@ -3094,7 +3100,9 @@ impl BytecodeCompiler {
             OpCode::StoreModuleBinding,
             Some(Operand::ModuleBinding(binding_idx)),
         ));
-        self.propagate_initializer_type_to_slot(binding_idx, false, false);
+        // U4-4: module-namespace object → non-numeric heap value; tracker type
+        // comes from `last_expr_type_info`.
+        self.propagate_initializer_type_to_slot(binding_idx, false, false, Some(&module_object));
 
         self.module_scope_stack.pop();
         self.allow_internal_builtins = prev_allow;

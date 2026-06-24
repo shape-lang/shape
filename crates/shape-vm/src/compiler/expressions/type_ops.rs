@@ -761,22 +761,15 @@ impl BytecodeCompiler {
     /// sentinel or the scalar, so a bare scalar kind must NOT be
     /// stamped for the lift paths.
     fn record_cast_result_kind(&mut self, target_selector: &str) {
-        use crate::type_tracking::NumericType;
+        // U4-4: the deleted `last_expr_numeric_type` register stamp for the
+        // cast TARGET kind is replaced by a `last_expr_type_info` name stamp.
+        // A downstream `(x as number) / (y as number)` derives `Number` for
+        // both operands from the cast expressions' one resolved Type
+        // (`numeric_type_of` → `infer_expr_type`), so `DivNumber` is selected
+        // — closing the `(2 as number) / (8 as number) == 0` soundness hole
+        // without a competing register.
         match target_selector {
-            "int" => {
-                self.last_expr_numeric_type = Some(NumericType::Int);
-                self.last_expr_type_info = None;
-            }
-            "number" => {
-                self.last_expr_numeric_type = Some(NumericType::Number);
-                self.last_expr_type_info = None;
-            }
-            "decimal" => {
-                self.last_expr_numeric_type = Some(NumericType::Decimal);
-                self.last_expr_type_info = None;
-            }
-            "bool" | "string" | "char" => {
-                self.last_expr_numeric_type = None;
+            "int" | "number" | "decimal" | "bool" | "string" | "char" => {
                 self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
                     target_selector.to_string(),
                 ));
@@ -925,7 +918,6 @@ impl BytecodeCompiler {
                     OpCode::CastWidth,
                     Some(Operand::Width(NumericWidth::from_int_width(w))),
                 ));
-                self.last_expr_numeric_type = Some(crate::type_tracking::NumericType::IntWidth(w));
                 return Ok(());
             }
         }

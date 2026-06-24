@@ -477,7 +477,14 @@ impl BytecodeCompiler {
     /// Otherwise fall back to polymorphic `ReturnValue`, which carries no
     /// runtime kind stamp and lets the synthesizer pass tagged bits
     /// through.
-    pub(super) fn emit_return_value_with_ownership(&mut self) {
+    pub(super) fn emit_return_value_with_ownership(
+        &mut self,
+        // U4-4: the returned expression — its resolved Type drives the numeric
+        // return-value storage hint (`numeric_type_of`), replacing the deleted
+        // `last_expr_numeric_type` register. `None` where the return value is
+        // not a single expr (falls back to `last_expr_type_info`).
+        return_expr: Option<&shape_ast::ast::Expr>,
+    ) {
         use crate::bytecode::{Instruction, OpCode};
         use crate::type_tracking::StorageHint;
         if matches!(
@@ -489,7 +496,7 @@ impl BytecodeCompiler {
         // Per ADR-006 §2.7.5.1, the proven-hint state is carried locally
         // as `Option<StorageHint>`. `None` ≡ "no proven kind" — the helper
         // routes to the polymorphic legacy `ReturnValue`.
-        let hint = self.last_expr_numeric_type_to_storage_hint();
+        let hint = self.last_expr_numeric_type_to_storage_hint(return_expr);
         let gated_hint: Option<StorageHint> = hint.and_then(|h| {
             self.last_emitted_native_kind().and_then(|native_kind| {
                 let is_int_family = matches!(
@@ -530,9 +537,10 @@ impl BytecodeCompiler {
     /// Per ADR-006 §2.7.5.1, "kind not yet known" is carried locally as
     /// `Option<StorageHint>` — there is no `StorageHint::Unknown` sentinel.
     pub(in crate::compiler) fn let_decl_storage_hint(
-        &self,
+        &mut self,
+        value_expr: Option<&shape_ast::ast::Expr>,
     ) -> Option<crate::type_tracking::StorageHint> {
-        if let Some(hint) = self.last_expr_numeric_type_to_storage_hint() {
+        if let Some(hint) = self.last_expr_numeric_type_to_storage_hint(value_expr) {
             return Some(hint);
         }
         // Post-§2.7.5.1: `info.storage_hint` is itself `Option<StorageHint>`,
@@ -543,14 +551,22 @@ impl BytecodeCompiler {
             .and_then(|info| info.storage_hint)
     }
 
-    /// Priority order used by `infer_top_level_return_kind`. Returns
-    /// `None` when no signal is available — the caller then routes to
-    /// the polymorphic legacy `ReturnValue`. Per ADR-006 §2.7.5.1.
+    /// Derive the storage hint for the just-compiled `value_expr`.
+    ///
+    /// U4-4: the numeric kind is derived from `value_expr`'s one resolved Type
+    /// (`numeric_type_of` → `infer_expr_type`), NOT the deleted ambient
+    /// `last_expr_numeric_type` register. `last_expr_type_info` remains the
+    /// fallback for Bool / String / nullable / sub-i64-width kinds the
+    /// type-tracker resolved structurally. `value_expr == None` (no single
+    /// value expr in hand) skips the numeric derivation. Returns `None` when
+    /// no signal is available — the caller then routes to the polymorphic
+    /// legacy `ReturnValue`. Per ADR-006 §2.7.5.1.
     pub(in crate::compiler) fn last_expr_numeric_type_to_storage_hint(
-        &self,
+        &mut self,
+        value_expr: Option<&shape_ast::ast::Expr>,
     ) -> Option<crate::type_tracking::StorageHint> {
         use crate::type_tracking::StorageHint;
-        if let Some(nt) = self.last_expr_numeric_type {
+        if let Some(nt) = value_expr.and_then(|e| self.numeric_type_of(e)) {
             match nt {
                 crate::type_tracking::NumericType::Number => return Some(StorageHint::Float64),
                 crate::type_tracking::NumericType::Int => return Some(StorageHint::Int64),

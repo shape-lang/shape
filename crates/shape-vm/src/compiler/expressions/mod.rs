@@ -10,6 +10,32 @@ use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use shape_runtime::type_schema::FieldType;
 
+/// U4-4: return TYPE of a compiler-internal builtin / `__intrinsic_*` math
+/// function, by bare name. These builtins' bodies are never walked by the
+/// inference engine (their intrinsic type registrations are deliberately
+/// removed — `environment/mod.rs:1269`), so the span table carries no entry
+/// for e.g. `__intrinsic_max(series)`. This is the type knowledge that the
+/// deleted `builtin_return_numeric_type` register-feeder encoded — now
+/// returned as a proper `Type` so the ONE Type model (and `numeric_type_of`
+/// derived from it) sees the right kind. Mirrors the deleted table's set
+/// exactly: `floor`/`ceil`/`round` → `int`; the rest → `number`.
+fn builtin_function_return_type(name: &str) -> Option<shape_runtime::type_system::Type> {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_runtime::type_system::Type;
+    let ty_name = match name {
+        // Int-returning builtins (book spec: `(number) -> int`).
+        "floor" | "ceil" | "round" => "int",
+        // Number-returning builtins + `__intrinsic_*` stdlib-wrapper aliases.
+        "abs" | "sqrt" | "sum" | "mean" | "min" | "max" | "sin" | "cos" | "tan" | "exp" | "ln"
+        | "log" | "stddev" | "std" | "variance" | "pow" | "asin" | "acos" | "atan"
+        | "__intrinsic_mean" | "__intrinsic_min" | "__intrinsic_max" | "__intrinsic_std"
+        | "__intrinsic_variance" | "__intrinsic_correlation" | "__intrinsic_covariance"
+        | "__intrinsic_percentile" | "__intrinsic_median" => "number",
+        _ => return None,
+    };
+    Some(Type::Concrete(TypeAnnotation::Basic(ty_name.to_string())))
+}
+
 /// Extract the span from an expression (for source location tracking)
 fn get_expr_span(expr: &Expr) -> Option<Span> {
     match expr {
@@ -1133,7 +1159,6 @@ impl BytecodeCompiler {
         // Without this, a stale numeric type from a previous sub-expression
         // could cause the wrong typed opcode to be emitted.
         self.last_expr_schema = None;
-        self.last_expr_numeric_type = None;
         self.last_expr_type_info = None;
 
         // Track source line from expression span for error messages
@@ -1724,8 +1749,57 @@ impl BytecodeCompiler {
                     }
                 }
             }
+            // U4-4: declared return type of a (possibly IMPORTED) free function.
+            // An imported `area` is registered in `function_defs` under its
+            // QUALIFIED name (`calc::numbers::area`), so `function_defs.get(name)`
+            // (bare) and the keystone span-table both miss. `find_function`
+            // resolves the bare call to the compiled function index, whose
+            // `.name` is the qualified key into `function_defs`. This is the
+            // call-result type the deleted `last_expr_numeric_type` register
+            // held after the imported call compiled — now sourced from the one
+            // Type model. Scoped to a non-local, non-`-> &T` free function.
+            if self.resolve_local(name).is_none() {
+                if let Some(func_idx) = self.find_function(name) {
+                    let qualified = self.program.functions[func_idx].name.clone();
+                    if let Some(def) = self.function_defs.get(&qualified) {
+                        // Skip GENERIC functions: a `fn clamp<T: Ord>(..) -> T`
+                        // declares its return type as the unresolved type
+                        // parameter `T` — serving that here would poison
+                        // call-site type-argument inference / monomorphization.
+                        // The concrete return type of a generic call is resolved
+                        // by the monomorphizer, not this declared-return lookup.
+                        let is_generic = def
+                            .type_params
+                            .as_ref()
+                            .is_some_and(|tp| !tp.is_empty());
+                        if !is_generic {
+                            if let Some(ret) = def.return_type.as_ref() {
+                                if !matches!(ret, TypeAnnotation::Borrow { .. }) {
+                                    return Ok(Type::Concrete(ret.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if let Some(rt_name) = self.type_tracker.get_function_return_type(name).cloned() {
                 return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
+            }
+            // U4-4: builtin / `__intrinsic_*` math-function return TYPE. These
+            // are compiler-internal builtins whose bodies the inference engine
+            // never walks (`environment/mod.rs:1269` — intrinsic type
+            // registrations deliberately removed), so the span table has no
+            // entry for `__intrinsic_max(series)`. The deleted
+            // `last_expr_numeric_type` register was previously fed by a
+            // hardcoded builtin-return-NumericType table; that knowledge now
+            // feeds the ONE Type model here as a proper return `Type`, so
+            // `numeric_type_of` derives the same kind from it. (`floor(3.7) + 1`,
+            // `__intrinsic_max(s) - __intrinsic_min(s)`.)
+            if self.resolve_local(name).is_none()
+                && self.function_defs.get(name).is_none()
+                && let Some(ty) = builtin_function_return_type(name)
+            {
+                return Ok(ty);
             }
             // Sweep phase 3c.1: closure-binding return type. When the
             // call target is a `let f = |…| …` local or module binding,

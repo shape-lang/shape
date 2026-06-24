@@ -142,7 +142,6 @@ impl BytecodeCompiler {
         ));
 
         self.last_expr_schema = None;
-        self.last_expr_numeric_type = None;
         self.last_expr_type_info = Some(VariableTypeInfo::named(
             match kernel {
                 MatMulKernel::MatVec => "Vec<number>",
@@ -212,7 +211,6 @@ impl BytecodeCompiler {
         ));
 
         self.last_expr_schema = None;
-        self.last_expr_numeric_type = None;
         self.last_expr_type_info = Some(VariableTypeInfo::named("Mat<number>".to_string()));
         Ok(true)
     }
@@ -289,7 +287,6 @@ impl BytecodeCompiler {
         ));
 
         self.last_expr_schema = None;
-        self.last_expr_numeric_type = None;
         self.last_expr_type_info = Some(VariableTypeInfo::named("Vec<number>".to_string()));
         Ok(true)
     }

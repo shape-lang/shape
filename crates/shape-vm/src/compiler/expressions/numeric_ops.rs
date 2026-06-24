@@ -2,7 +2,7 @@
 
 use crate::bytecode::{Instruction, OpCode};
 use crate::type_tracking::NumericType;
-use shape_ast::ast::{BinaryOp, TypeAnnotation};
+use shape_ast::ast::{BinaryOp, Expr, TypeAnnotation};
 use shape_runtime::type_system::{BuiltinTypes, Type};
 
 use super::super::BytecodeCompiler;
@@ -72,6 +72,31 @@ pub(super) fn is_type_numeric(ty: &Type) -> bool {
 
 pub(super) fn is_function_type(ty: &Type) -> bool {
     matches!(ty, Type::Function { .. })
+}
+
+/// U4-4: a numeric LITERAL's `NumericType`, read directly from its AST node.
+/// A literal's kind is statically known with no inference; this is the kind the
+/// deleted `last_expr_numeric_type` register stamped at `compile_expr_literal`
+/// time. Used by `numeric_type_of` as the first derivation step so a literal in
+/// a body the engine span-table did not walk (extend-method bodies,
+/// comprehension element exprs) still types its operand.
+///
+/// A bare `Int` literal returns `Int` (its context-free kind); the binop arm's
+/// sibling-adoption / coercion logic still promotes it to `number` when its
+/// partner proves float — exactly as it did when the register seeded `Int`.
+pub(super) fn literal_numeric_type(expr: &shape_ast::ast::Expr) -> Option<NumericType> {
+    use shape_ast::ast::Literal;
+    let Expr::Literal(lit, _) = expr else {
+        return None;
+    };
+    match lit {
+        Literal::Int(_) => Some(NumericType::Int),
+        Literal::UInt(_) => Some(NumericType::IntWidth(shape_ast::IntWidth::U64)),
+        Literal::TypedInt(_, w) => Some(NumericType::IntWidth(*w)),
+        Literal::Number(_) => Some(NumericType::Number),
+        Literal::Decimal(_) => Some(NumericType::Decimal),
+        _ => None,
+    }
 }
 
 /// Map an inferred Type to a NumericType for typed opcode emission.

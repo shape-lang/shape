@@ -1650,12 +1650,10 @@ fn is_arith_or_cmp_op(op: shape_ast::ast::BinaryOp) -> bool {
 ///
 /// See V3.6 commit body for the full audit.
 ///
-/// Side effects: on emit (typed or dynamic), resets
-/// `last_expr_schema` / `last_expr_type_info` / `last_expr_numeric_type`.
-/// Typed-numeric emissions additionally restore
-/// `last_expr_numeric_type = Some(nt)` for arithmetic so downstream
-/// numeric-propagation logic keeps working. Comparisons always clear the
-/// numeric hint because the result is a `bool`.
+/// Side effects: on emit (typed or string-concat), resets
+/// `last_expr_schema` / `last_expr_type_info`. U4-4: the
+/// `last_expr_numeric_type` register writeback is deleted; a downstream
+/// consumer derives the result's numeric kind from the one resolved Type.
 #[allow(dead_code)]
 pub(in crate::compiler) fn emit_binary_op(
     compiler: &mut BytecodeCompiler,
@@ -1680,15 +1678,6 @@ pub(in crate::compiler) fn emit_binary_op(
                 compiler.last_expr_schema = None;
                 compiler.last_expr_type_info = None;
                 // Arithmetic preserves the numeric kind; comparison collapses to bool.
-                compiler.last_expr_numeric_type = match op {
-                    BinaryOp::Add
-                    | BinaryOp::Sub
-                    | BinaryOp::Mul
-                    | BinaryOp::Div
-                    | BinaryOp::Mod
-                    | BinaryOp::Pow => Some(lnt),
-                    _ => None,
-                };
                 return Ok(true);
             }
         }
@@ -1708,7 +1697,6 @@ pub(in crate::compiler) fn emit_binary_op(
         compiler.emit(Instruction::simple(OpCode::StringConcatTyped));
         compiler.last_expr_schema = None;
         compiler.last_expr_type_info = None;
-        compiler.last_expr_numeric_type = None;
         return Ok(true);
     }
 
@@ -2748,17 +2736,15 @@ impl BytecodeCompiler {
         // `LoadLocalTrusted` is "push the slot's raw bits" — and the
         // proof that the bits ARE native-kinded came from the typed
         // `StoreLocal<Kind>` emitted earlier in the same block. The
-        // compiler also propagates the slot's type up through
-        // `last_expr_numeric_type` / `last_expr_type_info`, which
-        // SURVIVE scope-pop. Use them to recover the kind here.
-        if let Some(nt) = self.last_expr_numeric_type {
-            return Some(match nt {
-                crate::type_tracking::NumericType::Number => StorageHint::Float64,
-                crate::type_tracking::NumericType::Int => StorageHint::Int64,
-                crate::type_tracking::NumericType::IntWidth(_) => StorageHint::Int64,
-                crate::type_tracking::NumericType::Decimal => return None,
-            });
-        }
+        // compiler propagates the slot's type up through
+        // `last_expr_type_info`, which SURVIVES scope-pop. Use it to
+        // recover the kind here.
+        //
+        // U4-4: the parallel `last_expr_numeric_type` register fallback is
+        // DELETED — it was redundant with the `last_expr_type_info`
+        // storage-hint below (both recover the same proven primitive kind),
+        // and it was the SB-7 second source of truth. The `Int64 / Float64 /
+        // Bool` recovery is preserved by `last_expr_type_info.storage_hint`.
         if let Some(info) = &self.last_expr_type_info {
             // `info.storage_hint: Option<StorageHint>` post-§2.7.5.1 —
             // match through `Some(..)` and forward only the proven
@@ -3478,12 +3464,24 @@ impl BytecodeCompiler {
         } else {
             instr_len
         };
-        let has_trusted = if func.entry_point <= code_end && code_end <= instr_len {
-            self.program.instructions[func.entry_point..code_end]
-                .iter()
-                .any(|i| i.opcode.is_trusted())
+        let (has_trusted, has_v2_typed) = if func.entry_point <= code_end && code_end <= instr_len {
+            let slice = &self.program.instructions[func.entry_point..code_end];
+            (
+                slice.iter().any(|i| i.opcode.is_trusted()),
+                // U4-4: a function emitting V2 typed opcodes (e.g.
+                // `NewTypedArrayString` for a `-> Array<string>` body that
+                // returns `[]`) REQUIRES a FrameDescriptor — the bytecode
+                // verifier rejects a V2 typed opcode in a descriptor-less
+                // function (`verifier.rs:243`). Detect it here so the
+                // descriptor is created even when no scalar local slot is
+                // proven (the function may have only heap/enum locals). This
+                // restores the descriptor that the deleted
+                // `last_expr_numeric_type` register's slot-typing side effects
+                // previously kept alive for such functions.
+                slice.iter().any(|i| i.opcode.is_v2_typed()),
+            )
         } else {
-            false
+            (false, false)
         };
 
         // PB1 Wave-1-extension (audit 14a + 14b, 2026-05-29): infer the
@@ -3526,8 +3524,10 @@ impl BytecodeCompiler {
             None => false,
         };
         let needs_descriptor_for_return = return_kind.is_some();
+        // U4-4: V2 typed opcodes in the body force a descriptor (verifier rule).
+        let needs_descriptor_for_v2 = has_v2_typed;
 
-        if needs_descriptor_for_slots || needs_descriptor_for_return {
+        if needs_descriptor_for_slots || needs_descriptor_for_return || needs_descriptor_for_v2 {
             let slots = match &proven_hints {
                 Some(h) if needs_descriptor_for_slots => h.clone(),
                 _ => Vec::new(),
@@ -3551,8 +3551,9 @@ impl BytecodeCompiler {
     /// `NativeKind` from the last compiled expression's tracked type metadata.
     ///
     /// Source of truth (in priority order):
-    ///   1. `self.last_expr_numeric_type` — set by literals, var loads, and
-    ///      arithmetic; reliable signal for primitive numerics.
+    ///   1. the tail expression's one resolved Type (`numeric_type_of`,
+    ///      threaded by the caller) — reliable signal for primitive numerics
+    ///      (U4-4: replaces the deleted `last_expr_numeric_type` register).
     ///   2. `self.last_expr_type_info.storage_hint` — covers Bool, String,
     ///      and any nullable / sub-i64 widths the type-tracker has resolved.
     ///
@@ -3585,6 +3586,22 @@ impl BytecodeCompiler {
     /// boundary, preserving pre-E+4 semantics) — per ADR-006 §2.7.5.1
     /// the deleted `StorageHint::Unknown` sentinel is replaced by
     /// `Option<StorageHint>` at the compiler-tier intermediate state.
+    /// U4-4: extract the trailing expression of a top-level item, if any.
+    /// Used to thread the program's final expression into
+    /// `infer_top_level_return_kind` so the return numeric kind derives from
+    /// the one resolved Type (`numeric_type_of`) rather than the deleted
+    /// `last_expr_numeric_type` register.
+    pub(super) fn top_level_item_tail_expr(
+        item: &shape_ast::ast::Item,
+    ) -> Option<&shape_ast::ast::Expr> {
+        use shape_ast::ast::{Item, Statement};
+        match item {
+            Item::Expression(expr, _) => Some(expr),
+            Item::Statement(Statement::Expression(expr, _), _) => Some(expr),
+            _ => None,
+        }
+    }
+
     pub(super) fn infer_top_level_return_kind_from_item(
         &self,
         item: &shape_ast::ast::Item,
@@ -3786,14 +3803,24 @@ impl BytecodeCompiler {
         uniform
     }
 
-    pub(super) fn infer_top_level_return_kind(&self) -> Option<StorageHint> {
-        // Inferred kind from compile-time numeric / type-info tracking.
+    pub(super) fn infer_top_level_return_kind(
+        &mut self,
+        tail_expr: Option<&shape_ast::ast::Expr>,
+    ) -> Option<StorageHint> {
+        // Inferred kind from the one resolved Type / type-info tracking.
         // This is the *intended* program return kind. We must still verify
         // the producer-side stack discipline matches before declaring it
         // (see `last_emitted_native_kind` and the gating below). Per
         // ADR-006 §2.7.5.1, "kind not yet proven" is carried as `None`.
-        let inferred: StorageHint = self
-            .last_expr_numeric_type
+        //
+        // U4-4: the program-return numeric kind is derived from the one
+        // resolved Type of the final expression (`numeric_type_of` →
+        // `infer_expr_type`), NOT the deleted ambient `last_expr_numeric_type`
+        // register. `last_expr_type_info.storage_hint` remains the fallback for
+        // Bool / String / nullable / sub-i64-width kinds the type-tracker
+        // resolved structurally.
+        let inferred: StorageHint = tail_expr
+            .and_then(|e| self.numeric_type_of(e))
             .and_then(|nt| match nt {
                 crate::type_tracking::NumericType::Number => Some(StorageHint::Float64),
                 crate::type_tracking::NumericType::Int => Some(StorageHint::Int64),
@@ -3898,9 +3925,13 @@ impl BytecodeCompiler {
         // post-Unit-A/B native arithmetic flip.
         //
         // Per ADR-006 §2.7.5.1, "kind not yet stamped" is `None`.
+        // U4-4: the primary capture (compiler_impl_reference_model.rs) already
+        // threaded the program's tail expr through `infer_top_level_return_kind`.
+        // This secondary fallback has no tail expr in hand → `None`; it relies
+        // on `last_expr_type_info` + the producer-opcode kind gate.
         let return_kind: Option<StorageHint> = self
             .top_level_program_return_kind
-            .or_else(|| self.infer_top_level_return_kind());
+            .or_else(|| self.infer_top_level_return_kind(None));
         let has_trusted = self
             .program
             .instructions
@@ -3952,6 +3983,14 @@ impl BytecodeCompiler {
         slot: u16,
         is_local: bool,
         allow_number_hint: bool,
+        // U4-4: the value expression whose type is being stamped onto `slot`.
+        // Its NumericType is derived from the one resolved Type
+        // (`numeric_type_of` → `infer_expr_type`), replacing the deleted
+        // ambient `last_expr_numeric_type` register. `None` at call sites
+        // where no single value expr is available (e.g. destructure / match
+        // scrutinee bindings) — those fall back to `last_expr_type_info`,
+        // exactly as before for non-numeric carriers.
+        value_expr: Option<&shape_ast::ast::Expr>,
     ) {
         if let Some(ref info) = self.last_expr_type_info {
             if info.is_indexed()
@@ -4012,7 +4051,7 @@ impl BytecodeCompiler {
             return;
         }
 
-        if let Some(numeric_type) = self.last_expr_numeric_type {
+        if let Some(numeric_type) = value_expr.and_then(|e| self.numeric_type_of(e)) {
             let (type_name, hint) = match numeric_type {
                 crate::type_tracking::NumericType::Int => ("int", StorageHint::Int64),
                 crate::type_tracking::NumericType::IntWidth(w) => {
@@ -4075,12 +4114,16 @@ impl BytecodeCompiler {
     /// Propagate current expression type metadata to an identifier target.
     ///
     /// Reference locals are skipped because assignment writes through to a pointee.
-    pub(super) fn propagate_assignment_type_to_identifier(&mut self, name: &str) {
+    pub(super) fn propagate_assignment_type_to_identifier(
+        &mut self,
+        name: &str,
+        value_expr: Option<&shape_ast::ast::Expr>,
+    ) {
         if let Some(local_idx) = self.resolve_local(name) {
             if self.local_binding_is_reference_value(local_idx) {
                 return;
             }
-            self.propagate_assignment_type_to_slot(local_idx, true, true);
+            self.propagate_assignment_type_to_slot(local_idx, true, true, value_expr);
             return;
         }
 
@@ -4088,7 +4131,7 @@ impl BytecodeCompiler {
             .resolve_scoped_module_binding_name(name)
             .unwrap_or_else(|| name.to_string());
         let binding_idx = self.get_or_create_module_binding(&scoped_name);
-        self.propagate_assignment_type_to_slot(binding_idx, false, true);
+        self.propagate_assignment_type_to_slot(binding_idx, false, true, value_expr);
     }
 
     /// T1 sub-case (a) (strict-flip, 2026-06-20): record the ELEMENT
@@ -4465,22 +4508,25 @@ impl BytecodeCompiler {
     /// Resolve the receiver's type name for extend method dispatch.
     ///
     /// Determines the Shape type name from all available compiler state:
+    /// - the receiver's one resolved Type (`numeric_type_of`) for numeric
+    ///   receivers → "Int", "Number", "Decimal" (U4-4: replaces the deleted
+    ///   `last_expr_numeric_type` register)
     /// - `last_expr_type_info.type_name` for TypedObjects (e.g., "Point", "Candle")
-    /// - `last_expr_numeric_type` for numeric types → "Int", "Number", "Decimal"
     /// - Receiver expression analysis for arrays, strings, booleans
     ///
     /// Returns the base type name (e.g., "Vec" not "Vec<int>") suitable for
     /// extend method lookup as "Type.method".
     pub(super) fn resolve_receiver_extend_type(
-        &self,
+        &mut self,
         receiver: &shape_ast::ast::Expr,
         receiver_type_info: &Option<crate::type_tracking::VariableTypeInfo>,
         _receiver_schema: Option<u32>,
     ) -> Option<String> {
-        // 1. Numeric type from typed opcode tracking — checked first because
-        //    the type tracker stores lowercase names ("int", "number") while
-        //    extend blocks use capitalized TypeName ("Int", "Number", "Decimal").
-        if let Some(numeric) = self.last_expr_numeric_type {
+        // 1. Numeric type from the receiver's resolved Type — checked first
+        //    because the type tracker stores lowercase names ("int", "number")
+        //    while extend blocks use capitalized TypeName ("Int", "Number",
+        //    "Decimal").
+        if let Some(numeric) = self.numeric_type_of(receiver) {
             return Some(
                 match numeric {
                     crate::type_tracking::NumericType::Int
@@ -5258,41 +5304,10 @@ impl BytecodeCompiler {
         OpCode::LoadColF64 // default
     }
 
-    /// Resolve the NumericType for a RowView field (used for typed opcode emission).
-    pub(super) fn resolve_row_view_field_numeric_type(
-        &self,
-        var_name: &str,
-        field_name: &str,
-    ) -> Option<crate::type_tracking::NumericType> {
-        use crate::type_tracking::NumericType;
-        use shape_runtime::type_schema::FieldType;
-
-        let type_name = if let Some(local_idx) = self.resolve_local(var_name) {
-            self.type_tracker
-                .get_local_type(local_idx)
-                .and_then(|info| info.type_name.clone())
-        } else if let Some(&binding_idx) = self.module_bindings.get(var_name) {
-            self.type_tracker
-                .get_binding_type(binding_idx)
-                .and_then(|info| info.type_name.clone())
-        } else {
-            None
-        };
-
-        if let Some(type_name) = type_name {
-            if let Some(schema) = self.type_tracker.schema_registry().get(&type_name) {
-                if let Some(field) = schema.get_field(field_name) {
-                    return match field.field_type {
-                        FieldType::F64 => Some(NumericType::Number),
-                        FieldType::I64 | FieldType::Timestamp => Some(NumericType::Int),
-                        FieldType::Decimal => Some(NumericType::Decimal),
-                        _ => None,
-                    };
-                }
-            }
-        }
-        None
-    }
+    // U4-4: `resolve_row_view_field_numeric_type` is DELETED — it projected a
+    // RowView field's schema type to a `NumericType` only to stamp the deleted
+    // `last_expr_numeric_type` register. A downstream binop on a row-view field
+    // read derives the operand kind from the one resolved Type.
 
     /// Convert a TypeAnnotation to a FieldType for TypeSchema registration.
     ///
@@ -6984,33 +6999,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn emit_binary_op_preserves_numeric_hint_for_arithmetic_only() {
-        use crate::compiler::helpers::{BinOperandKind, emit_binary_op};
-        use crate::type_tracking::NumericType;
-        use shape_ast::ast::BinaryOp;
-
-        let mut compiler = BytecodeCompiler::new();
-        emit_binary_op(
-            &mut compiler,
-            BinaryOp::Add,
-            BinOperandKind::Numeric(NumericType::Int),
-            BinOperandKind::Numeric(NumericType::Int),
-        )
-        .expect("ok");
-        assert_eq!(compiler.last_expr_numeric_type, Some(NumericType::Int));
-
-        let mut compiler = BytecodeCompiler::new();
-        compiler.last_expr_numeric_type = Some(NumericType::Number);
-        emit_binary_op(
-            &mut compiler,
-            BinaryOp::Less,
-            BinOperandKind::Numeric(NumericType::Int),
-            BinOperandKind::Numeric(NumericType::Int),
-        )
-        .expect("ok");
-        assert_eq!(compiler.last_expr_numeric_type, None);
-    }
+    // U4-4: `emit_binary_op_preserves_numeric_hint_for_arithmetic_only`
+    // deleted — it asserted on the deleted `last_expr_numeric_type` register
+    // writeback. The result's numeric kind is now derived from the one
+    // resolved Type at the consumer, so there is no register state to assert.
 
     #[test]
     fn from_numeric_maps_none_to_unknown() {

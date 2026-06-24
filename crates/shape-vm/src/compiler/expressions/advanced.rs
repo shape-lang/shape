@@ -131,7 +131,6 @@ impl BytecodeCompiler {
         // Clear any stale stamps from `compile_expr(inner)` first — the
         // unwrapped value's type, not the wrapper's, is what flows out.
         self.last_expr_type_info = None;
-        self.last_expr_numeric_type = None;
         self.last_expr_schema = None;
 
         // Primary path: full type inference on the `?` operand. Covers
@@ -344,13 +343,18 @@ impl BytecodeCompiler {
     /// records the type. Mirrors the `tracked_callable_rt` stamping in
     /// `compile_expr_function_call`.
     fn stamp_last_expr_from_type_name(&mut self, name: &str) {
-        use crate::type_tracking::{NumericType, VariableTypeInfo};
+        use crate::type_tracking::VariableTypeInfo;
         use shape_runtime::type_system::BuiltinTypes;
 
         match name {
-            "int" => self.last_expr_numeric_type = Some(NumericType::Int),
-            "number" => self.last_expr_numeric_type = Some(NumericType::Number),
-            "decimal" => self.last_expr_numeric_type = Some(NumericType::Decimal),
+            // U4-4: the deleted `last_expr_numeric_type` register stamp is
+            // replaced by a `last_expr_type_info` name stamp (same shape as the
+            // width-aware-int arm below). `propagate_*_type_to_slot` re-derives
+            // the numeric storage hint from this recorded name (or, when an
+            // initializer expr is in hand, from its resolved Type).
+            "int" | "number" | "decimal" => {
+                self.last_expr_type_info = Some(VariableTypeInfo::named(name.to_string()));
+            }
             "string" | "bool" | "char" | "bigint" => {
                 self.last_expr_type_info = Some(VariableTypeInfo::named(name.to_string()));
             }
@@ -532,8 +536,14 @@ impl BytecodeCompiler {
             );
         }
         // Propagate full type info (numeric type, storage hint) from the
-        // scrutinee expression so that match bindings inherit it.
-        self.propagate_initializer_type_to_slot(scrutinee_local, true, false);
+        // scrutinee expression so that match bindings inherit it. U4-4: the
+        // scrutinee numeric kind is derived from its resolved Type.
+        self.propagate_initializer_type_to_slot(
+            scrutinee_local,
+            true,
+            false,
+            Some(&match_expr.scrutinee),
+        );
         self.emit(Instruction::new(
             OpCode::StoreLocal,
             Some(Operand::Local(scrutinee_local)),
@@ -549,14 +559,10 @@ impl BytecodeCompiler {
             .type_tracker
             .get_local_type(scrutinee_local)
             .and_then(|info| info.schema_id);
-        // Post-§2.7.5.1: `info.storage_hint` is `Option<StorageHint>`,
-        // so `.and_then` collapses both Option layers. `None` propagates
-        // "kind not yet proven" — no numeric type recorded.
-        let scrutinee_numeric_type = self
-            .type_tracker
-            .get_local_type(scrutinee_local)
-            .and_then(|info| info.storage_hint)
-            .and_then(Self::storage_hint_to_numeric_type);
+        // U4-4: the scrutinee numeric-type computation (formerly stamped onto
+        // the deleted `last_expr_numeric_type` register for the per-arm result)
+        // is removed — arm-body binops derive operand kinds from the one
+        // resolved Type.
         let scrutinee_type_info = self.type_tracker.get_local_type(scrutinee_local).cloned();
 
         for arm in &match_expr.arms {
@@ -583,7 +589,6 @@ impl BytecodeCompiler {
             if let Some(guard) = &arm.guard {
                 self.push_scope();
                 self.last_expr_schema = scrutinee_schema;
-                self.last_expr_numeric_type = scrutinee_numeric_type;
                 self.last_expr_type_info = scrutinee_type_info.clone();
                 self.emit(Instruction::new(
                     OpCode::LoadLocal,
@@ -598,7 +603,6 @@ impl BytecodeCompiler {
             // Arm body with bindings
             self.push_scope();
             self.last_expr_schema = scrutinee_schema;
-            self.last_expr_numeric_type = scrutinee_numeric_type;
             self.last_expr_type_info = scrutinee_type_info.clone();
             self.emit(Instruction::new(
                 OpCode::LoadLocal,
@@ -760,11 +764,12 @@ impl BytecodeCompiler {
         // type info is unread by `compile_async_let`.
         //
         // `propagate_assignment_type_to_slot` reads `last_expr_type_info` /
-        // `last_expr_numeric_type` / `last_expr_schema` set by
-        // `compile_expr(&async_let.expr)` above and stamps the local
-        // accordingly — same shape as `var_decl.value`-less local
-        // declarations in `compile_statement::Let`.
-        self.propagate_initializer_type_to_slot(local_idx, true, false);
+        // `last_expr_schema` set by `compile_expr(&async_let.expr)` above and
+        // stamps the local accordingly. U4-4: an `async let` binds a Future
+        // wrapper, not a bare numeric — pass `None` so the stamp comes from
+        // `last_expr_type_info` (the future/awaited-type carrier), never a
+        // numeric derivation.
+        self.propagate_initializer_type_to_slot(local_idx, true, false, None);
 
         // `async let` is an expression — push the future back onto the stack
         self.emit(Instruction::new(

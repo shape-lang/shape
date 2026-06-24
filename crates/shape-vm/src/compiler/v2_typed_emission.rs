@@ -1098,16 +1098,19 @@ impl super::BytecodeCompiler {
             .and_then(|ct| should_use_typed_array(&ct))
     }
 
-    /// Resolve the `TypedArrayKind` from the `last_expr_*` proof stamped by
-    /// the bytecode compiler immediately after a push argument compiled.
+    /// Resolve the `TypedArrayKind` for a just-compiled push argument `arg`.
     ///
-    /// `last_expr_numeric_type` covers numeric literals / operations
-    /// (`j * 2`, `x + 1`); `last_expr_type_info`'s `storage_hint == Bool`
-    /// covers comparison results. Per ADR-006 §2.7.5 each is a producer-side
-    /// proof set when the element compiled — never fabricated. Returns
-    /// `None` when no scalar kind is proven.
-    fn push_element_kind_from_compiled_arg(&self) -> Option<TypedArrayKind> {
-        if let Some(nt) = self.last_expr_numeric_type {
+    /// U4-4: the numeric kind is derived from the one resolved Type
+    /// (`numeric_type_of(arg)` → `infer_expr_type`), not the deleted
+    /// `last_expr_numeric_type` register — covering numeric literals /
+    /// operations (`j * 2`, `x + 1`). `last_expr_type_info`'s
+    /// `storage_hint == Bool` still covers comparison results (a separate
+    /// non-numeric carrier). Returns `None` when no scalar kind is proven.
+    fn push_element_kind_from_compiled_arg(
+        &mut self,
+        arg: &shape_ast::ast::Expr,
+    ) -> Option<TypedArrayKind> {
+        if let Some(nt) = self.numeric_type_of(arg) {
             return Some(typed_array_kind_from_numeric_type(nt));
         }
         if let Some(info) = &self.last_expr_type_info {
@@ -1225,7 +1228,7 @@ impl super::BytecodeCompiler {
         // numeric / bool expressions (`j * 2`, `x + 1`, `a < b`) — never a
         // string / decimal that would need the `NewStringV2` carrier.
         self.compile_expr(arg)?;
-        let Some(kind) = self.push_element_kind_from_compiled_arg() else {
+        let Some(kind) = self.push_element_kind_from_compiled_arg(arg) else {
             let acc = &self.empty_array_accumulators[&key];
             return Err(shape_ast::error::ShapeError::SemanticError {
                 message: format!(

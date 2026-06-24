@@ -224,7 +224,6 @@ impl BytecodeCompiler {
         }?;
         self.last_expr_schema = None;
         self.last_expr_type_info = None;
-        self.last_expr_numeric_type = None;
         Ok(borrow_id)
     }
 

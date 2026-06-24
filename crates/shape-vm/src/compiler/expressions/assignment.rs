@@ -187,7 +187,8 @@ impl BytecodeCompiler {
                                             Some(source_loc),
                                         )?;
                                         self.compile_expr(&args[0])?;
-                                        let pushed_numeric = self.last_expr_numeric_type;
+                                        // U4-4: pushed element kind from the one resolved Type.
+                                        let pushed_numeric = self.numeric_type_of(&args[0]);
                                         self.emit(Instruction::new(
                                             OpCode::ArrayPushLocal,
                                             Some(Operand::Local(local_idx)),
@@ -216,7 +217,8 @@ impl BytecodeCompiler {
                                     // ModuleBinding variable: same optimization with ModuleBinding operand
                                     let binding_idx = self.get_or_create_module_binding(name);
                                     self.compile_expr(&args[0])?;
-                                    let pushed_numeric = self.last_expr_numeric_type;
+                                    // U4-4: pushed element kind from the one resolved Type.
+                                    let pushed_numeric = self.numeric_type_of(&args[0]);
                                     self.emit(Instruction::new(
                                         OpCode::ArrayPushLocal,
                                         Some(Operand::ModuleBinding(binding_idx)),
@@ -534,7 +536,7 @@ impl BytecodeCompiler {
                         &assign_expr.value,
                     );
                 }
-                self.propagate_assignment_type_to_identifier(name);
+                self.propagate_assignment_type_to_identifier(name, Some(&assign_expr.value));
                 Ok(())
             }
             Expr::PropertyAccess {

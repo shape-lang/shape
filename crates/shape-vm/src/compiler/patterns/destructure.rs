@@ -150,7 +150,6 @@ impl BytecodeCompiler {
         // recognised.
         self.last_expr_schema = None;
         self.last_expr_type_info = None;
-        self.last_expr_numeric_type = None;
 
         let Some(field_type) = self
             .type_tracker
@@ -206,58 +205,24 @@ impl BytecodeCompiler {
                     let info = VariableTypeInfo::named(tn.to_string());
                     match &field_type {
                         FieldType::I64 => {
-                            self.last_expr_numeric_type =
-                                Some(crate::type_tracking::NumericType::Int);
                         }
                         FieldType::F64 => {
-                            self.last_expr_numeric_type =
-                                Some(crate::type_tracking::NumericType::Number);
                         }
                         FieldType::Decimal => {
-                            self.last_expr_numeric_type =
-                                Some(crate::type_tracking::NumericType::Decimal);
                         }
                         FieldType::I8 => {
-                            self.last_expr_numeric_type =
-                                Some(crate::type_tracking::NumericType::IntWidth(
-                                    shape_ast::IntWidth::I8,
-                                ));
                         }
                         FieldType::U8 => {
-                            self.last_expr_numeric_type =
-                                Some(crate::type_tracking::NumericType::IntWidth(
-                                    shape_ast::IntWidth::U8,
-                                ));
                         }
                         FieldType::I16 => {
-                            self.last_expr_numeric_type =
-                                Some(crate::type_tracking::NumericType::IntWidth(
-                                    shape_ast::IntWidth::I16,
-                                ));
                         }
                         FieldType::U16 => {
-                            self.last_expr_numeric_type =
-                                Some(crate::type_tracking::NumericType::IntWidth(
-                                    shape_ast::IntWidth::U16,
-                                ));
                         }
                         FieldType::I32 => {
-                            self.last_expr_numeric_type =
-                                Some(crate::type_tracking::NumericType::IntWidth(
-                                    shape_ast::IntWidth::I32,
-                                ));
                         }
                         FieldType::U32 => {
-                            self.last_expr_numeric_type =
-                                Some(crate::type_tracking::NumericType::IntWidth(
-                                    shape_ast::IntWidth::U32,
-                                ));
                         }
                         FieldType::U64 => {
-                            self.last_expr_numeric_type =
-                                Some(crate::type_tracking::NumericType::IntWidth(
-                                    shape_ast::IntWidth::U64,
-                                ));
                         }
                         _ => {}
                     }
@@ -436,7 +401,15 @@ impl BytecodeCompiler {
                 // Per ADR-006 §2.7.5.1, `let_decl_storage_hint` returns
                 // `Option<StorageHint>` (no `Unknown` sentinel). On `None`
                 // emit the polymorphic legacy `StoreLocal`.
-                match self.let_decl_storage_hint() {
+                //
+                // U4-4: the destructured value was compiled by the caller and
+                // is on the stack; no single value expr is threaded into the
+                // recursive pattern walk, so the hint comes from
+                // `last_expr_type_info` (numeric `value_expr` is `None`). The
+                // binding's tracker numeric type is stamped separately by the
+                // statement-level `propagate_initializer_type_to_slot`, which
+                // DOES carry the resolved-Type-derived kind.
+                match self.let_decl_storage_hint(None) {
                     Some(hint) => self.emit_store_local_for_hint(local_idx, hint),
                     None => {
                         self.emit(Instruction::new(
