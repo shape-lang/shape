@@ -2672,6 +2672,16 @@ fn literal_concrete_type(literal: &shape_ast::ast::Literal) -> Option<ConcreteTy
     }
 }
 
+/// U4-5: public wrapper so the inference ladder (`tracked_array_element_type`)
+/// can read an identifier's structural `ConcreteType` instead of re-parsing the
+/// stringly tracker `type_name`.
+pub(crate) fn identifier_concrete_type_pub(
+    compiler: &BytecodeCompiler,
+    name: &str,
+) -> Option<ConcreteType> {
+    identifier_concrete_type(compiler, name)
+}
+
 fn identifier_concrete_type(compiler: &BytecodeCompiler, name: &str) -> Option<ConcreteType> {
     // Local slot first.
     if let Some(local_idx) = compiler_resolve_local(compiler, name) {
@@ -2777,26 +2787,21 @@ fn field_type_to_concrete(ft: &shape_runtime::type_schema::FieldType) -> Option<
 
 /// Extract a `ConcreteType` from a type tracker type name string.
 ///
-/// Recognises patterns like `"Vec<int>"`, `"Vec<number>"`, `"Vec<string>"`,
-/// `"Vec<bool>"` and maps them to `ConcreteType::Array(Box::new(...))`.
+/// Recognises scalar primitive / temporal names (`"int"`, `"number"`,
+/// `"string"`, `"bool"`, `"decimal"`, `"DateTime"`, ...). This is the
+/// fall-through used when the structural element / concrete side-tables
+/// (`local_array_element_types`, `current_function_local_concrete_types`,
+/// consulted FIRST in `identifier_concrete_type`) miss — notably for primitive
+/// parameters whose only tracker record is a scalar name.
+///
+/// U4-5: the `"Vec<...>"` array branch is deleted. The array element
+/// `ConcreteType` is served STRUCTURALLY by `local_array_element_types` /
+/// `module_binding_array_element_types` (which run before this fallback), so the
+/// `strip_prefix("Vec<")` re-parse — the read half of the Rep-B string
+/// round-trip — is gone. Array tracker names no longer round-trip through a
+/// string here.
 fn concrete_type_from_type_name(type_name: Option<&str>) -> Option<ConcreteType> {
     let name = type_name?;
-    if let Some(inner) = name.strip_prefix("Vec<").and_then(|s| s.strip_suffix('>')) {
-        let elem = match inner {
-            "int" => ConcreteType::I64,
-            "number" => ConcreteType::F64,
-            "string" => ConcreteType::String,
-            "bool" => ConcreteType::Bool,
-            "decimal" => ConcreteType::Decimal,
-            nested if nested.starts_with("Vec<") => {
-                // Nested array: Vec<Vec<int>> → Array(Array(I64))
-                concrete_type_from_type_name(Some(nested))
-                    .map(|inner_ct| ConcreteType::Array(Box::new(inner_ct)))?
-            }
-            _ => return None,
-        };
-        return Some(ConcreteType::Array(Box::new(elem)));
-    }
     // Scalar types
     match name {
         "int" => Some(ConcreteType::I64),

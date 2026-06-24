@@ -669,44 +669,48 @@ impl BytecodeCompiler {
     ) {
         if is_local {
             self.reference_value_local_referent_type.remove(&slot);
+            self.reference_value_local_referent_concrete_type.remove(&slot);
         } else {
             self.reference_value_module_binding_referent_type
+                .remove(&slot);
+            self.reference_value_module_binding_referent_concrete_type
                 .remove(&slot);
         }
         let shape_ast::ast::Expr::Reference { expr: inner, .. } = expr else {
             return;
         };
+        // U4-5: record the referent's array `ConcreteType` structurally so
+        // `r[i]` recovers its element type THROUGH the reference without a
+        // string round-trip. The array shape is read from the referent's
+        // recorded ConcreteType (`concrete_type_for_expr`), not rebuilt from a
+        // `"int[]"` display string. A scalar referent has no array ConcreteType
+        // and is left unrecorded here (the scalar-name path below still drives
+        // `r + 1`).
+        if let Some(referent_ct @ shape_value::v2::ConcreteType::Array(_)) =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, inner)
+        {
+            if is_local {
+                self.reference_value_local_referent_concrete_type
+                    .insert(slot, referent_ct);
+            } else {
+                self.reference_value_module_binding_referent_concrete_type
+                    .insert(slot, referent_ct);
+            }
+        }
         let Ok(inner_ty) = self.infer_expr_type(inner) else {
             return;
         };
-        // Record the referent's type NAME. Scalars (`&int` -> `"int"`) drive the
-        // value-position operator auto-deref (`r + 1`). Array referents
-        // (`&Array<int>` -> `"int[]"`, via `type_display_name`) drive the
-        // RefDispatch index-element auto-deref (`r[i]`): `tracked_array_element_type`
-        // strips the `[]`/`Array<>`/`Vec<>` shape, so storing the array's display
-        // name lets `r[i]` recover its element type THROUGH the reference exactly
-        // as `a[i]` would on the array binding directly. No fabrication — the name
-        // comes from the referent's own proven type; a still-unknown inner stays
-        // unrecorded.
-        // Build the referent's array display name (`Array<int>` -> `"int[]"`)
-        // using the same `T[]` convention `tracked_array_element_type` strips.
-        // Only a `Basic`-element array is recorded (the common `&[int]` /
-        // `&[number]` / `&[string]` case); a nested/generic element is left
-        // unrecorded so no malformed name reaches the element-strip path.
-        let array_display_name = |inner: &shape_ast::ast::TypeAnnotation| -> Option<String> {
-            if let shape_ast::ast::TypeAnnotation::Basic(elem) = inner {
-                Some(format!("{}[]", elem))
-            } else {
-                None
-            }
-        };
+        // Record the referent's scalar type NAME. Scalars (`&int` -> `"int"`)
+        // drive the value-position operator auto-deref (`r + 1`, `-r`). The
+        // array referent (`&Array<int>`) case is handled STRUCTURALLY above
+        // (`reference_value_*_referent_concrete_type`) — U4-5 deleted the
+        // `"int[]"` display-string projection that previously fed the
+        // `tracked_array_element_type` strip. Only a scalar `Basic` referent
+        // name is recorded here; a still-unknown inner stays unrecorded.
         let referent_name = match &inner_ty {
             shape_runtime::type_system::Type::Concrete(shape_ast::ast::TypeAnnotation::Basic(
                 name,
             )) => Some(name.clone()),
-            shape_runtime::type_system::Type::Concrete(shape_ast::ast::TypeAnnotation::Array(
-                inner,
-            )) => array_display_name(inner),
             _ => None,
         };
         if let Some(name) = referent_name {
@@ -745,6 +749,44 @@ impl BytecodeCompiler {
                 .get(&binding_idx)
             {
                 return Some(tn.clone());
+            }
+        }
+        None
+    }
+
+    /// U4-5: structural counterpart of `reference_referent_type_name` for the
+    /// array case. Returns the referent's recorded array `ConcreteType` for an
+    /// identifier bound to a reference (`let r = &a`, `a: Array<int>`). Lets
+    /// `r[i]` recover its element type THROUGH the reference structurally,
+    /// replacing the deleted `"int[]"` strip in `tracked_array_element_type`.
+    pub(super) fn reference_referent_concrete_type(
+        &self,
+        name: &str,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        if let Some(local_idx) = self.resolve_local(name) {
+            if let Some(ct) = self
+                .reference_value_local_referent_concrete_type
+                .get(&local_idx)
+            {
+                return Some(ct.clone());
+            }
+        }
+        if let Some(scoped_name) = self.resolve_scoped_module_binding_name(name) {
+            if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
+                if let Some(ct) = self
+                    .reference_value_module_binding_referent_concrete_type
+                    .get(&binding_idx)
+                {
+                    return Some(ct.clone());
+                }
+            }
+        }
+        if let Some(&binding_idx) = self.module_bindings.get(name) {
+            if let Some(ct) = self
+                .reference_value_module_binding_referent_concrete_type
+                .get(&binding_idx)
+            {
+                return Some(ct.clone());
             }
         }
         None

@@ -1352,6 +1352,18 @@ pub struct BytecodeCompiler {
     /// As `reference_value_local_referent_type`, keyed by module-binding index
     /// (script-mode top-level `let r = &n`).
     pub(crate) reference_value_module_binding_referent_type: HashMap<u16, String>,
+    /// U4-5: structural referent `ConcreteType` for an array/collection
+    /// first-class reference binding (`let r = &a` where `a: Array<int>`).
+    /// Lets `r[i]` recover its element type THROUGH the reference structurally
+    /// (`tracked_array_element_type`) without re-parsing a `"int[]"` display
+    /// string. Keyed by local slot. (The scalar-name auto-deref `r + 1` still
+    /// uses `reference_value_local_referent_type`.)
+    pub(crate) reference_value_local_referent_concrete_type:
+        HashMap<u16, shape_value::v2::ConcreteType>,
+    /// As `reference_value_local_referent_concrete_type`, keyed by
+    /// module-binding index.
+    pub(crate) reference_value_module_binding_referent_concrete_type:
+        HashMap<u16, shape_value::v2::ConcreteType>,
     /// Local variable indices declared as `const` (immutable binding).
     pub(crate) const_locals: HashSet<u16>,
     /// Module binding indices declared as `const` (immutable binding).

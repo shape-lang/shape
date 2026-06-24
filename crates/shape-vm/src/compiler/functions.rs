@@ -1743,6 +1743,26 @@ impl BytecodeCompiler {
                             if Self::tracker_type_name_is_primitive(&type_name) {
                                 self.param_locals.remove(&local_idx);
                             }
+                            // U4-5: seed the STRUCTURAL array-element side-table
+                            // for an unannotated ARRAY param. The program-wide
+                            // inference pass resolved the param's `ConcreteType`
+                            // (`inferred_param_concrete_types`); when it is an
+                            // `Array(elem)`, record the element `ConcreteType` so
+                            // `identifier_concrete_type` recovers `a[0]`'s element
+                            // type STRUCTURALLY. This replaces the deleted
+                            // `strip_prefix("Vec<")` re-parse of the param's
+                            // tracker `type_name` string (the WS-9 unannotated-
+                            // param array path) — the element type IS the
+                            // inference proof, threaded structurally, not parsed
+                            // back out of a `"Vec<int>"` display string.
+                            if let Some(shape_value::v2::ConcreteType::Array(elem)) = self
+                                .inferred_param_concrete_types
+                                .get(&func_def.name)
+                                .and_then(|v| v.get(idx))
+                                .and_then(|opt| opt.clone())
+                            {
+                                self.local_array_element_types.insert(local_idx, *elem);
+                            }
                         } else if let Some(ann) =
                             crate::compiler::expressions::closures::infer_param_type_from_body(
                                 name,

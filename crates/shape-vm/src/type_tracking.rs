@@ -350,9 +350,6 @@ pub struct VariableTypeInfo {
     /// is constructed for `FunctionBlob`, the kind is proven and stored
     /// flat in `FrameDescriptor.slots: Vec<NativeKind>` (no Option).
     pub storage_hint: Option<StorageHint>,
-    /// Preserved concrete numeric runtime type (e.g. "i16", "u8", "f32", "i64")
-    /// derived from source annotations.
-    pub concrete_numeric_type: Option<String>,
     /// What kind of variable this is (value, table, row view, column)
     pub kind: VariableKind,
     /// v2: For typed arrays, the element's FieldKind (enables typed array codegen)
@@ -364,13 +361,11 @@ pub struct VariableTypeInfo {
 impl VariableTypeInfo {
     /// Create type info for a known type
     pub fn known(schema_id: SchemaId, type_name: String) -> Self {
-        let concrete_numeric_type = Self::infer_numeric_runtime_name(&type_name);
         Self {
             schema_id: Some(schema_id),
             type_name: Some(type_name),
             is_definite: true,
             storage_hint: None,
-            concrete_numeric_type,
             kind: VariableKind::Value,
             v2_array_element_kind: None,
             v2_struct_layout: None,
@@ -384,7 +379,6 @@ impl VariableTypeInfo {
             type_name: None,
             is_definite: false,
             storage_hint: None,
-            concrete_numeric_type: None,
             kind: VariableKind::Value,
             v2_array_element_kind: None,
             v2_struct_layout: None,
@@ -395,13 +389,11 @@ impl VariableTypeInfo {
     pub fn named(type_name: String) -> Self {
         // Infer storage hint from common type names
         let storage_hint = Self::infer_storage_hint(&type_name);
-        let concrete_numeric_type = Self::infer_numeric_runtime_name(&type_name);
         Self {
             schema_id: None,
             type_name: Some(type_name),
             is_definite: false,
             storage_hint,
-            concrete_numeric_type,
             kind: VariableKind::Value,
             v2_array_element_kind: None,
             v2_struct_layout: None,
@@ -410,13 +402,11 @@ impl VariableTypeInfo {
 
     /// Create type info with explicit storage hint
     pub fn with_storage(type_name: String, storage_hint: StorageHint) -> Self {
-        let concrete_numeric_type = Self::infer_numeric_runtime_name(&type_name);
         Self {
             schema_id: None,
             type_name: Some(type_name),
             is_definite: true,
             storage_hint: Some(storage_hint),
-            concrete_numeric_type,
             kind: VariableKind::Value,
             v2_array_element_kind: None,
             v2_struct_layout: None,
@@ -430,7 +420,6 @@ impl VariableTypeInfo {
             type_name: Some("Option<Number>".to_string()),
             is_definite: true,
             storage_hint: Some(StorageHint::NullableFloat64),
-            concrete_numeric_type: Some("f64".to_string()),
             kind: VariableKind::Value,
             v2_array_element_kind: None,
             v2_struct_layout: None,
@@ -444,7 +433,6 @@ impl VariableTypeInfo {
             type_name: Some("Number".to_string()),
             is_definite: true,
             storage_hint: Some(StorageHint::Float64),
-            concrete_numeric_type: Some("f64".to_string()),
             kind: VariableKind::Value,
             v2_array_element_kind: None,
             v2_struct_layout: None,
@@ -458,7 +446,6 @@ impl VariableTypeInfo {
             type_name: Some(type_name.clone()),
             is_definite: true,
             storage_hint: None,
-            concrete_numeric_type: None,
             kind: VariableKind::RowView {
                 element_type: type_name,
             },
@@ -474,7 +461,6 @@ impl VariableTypeInfo {
             type_name: Some(type_name.clone()),
             is_definite: true,
             storage_hint: None,
-            concrete_numeric_type: None,
             kind: VariableKind::Table {
                 element_type: type_name,
             },
@@ -490,7 +476,6 @@ impl VariableTypeInfo {
             type_name: Some(type_name.clone()),
             is_definite: true,
             storage_hint: None,
-            concrete_numeric_type: None,
             kind: VariableKind::Column {
                 element_type,
                 column_type: type_name,
@@ -507,7 +492,6 @@ impl VariableTypeInfo {
             type_name: Some(type_name.clone()),
             is_definite: true,
             storage_hint: None,
-            concrete_numeric_type: None,
             kind: VariableKind::Indexed {
                 element_type: type_name,
                 index_column,
@@ -607,15 +591,6 @@ impl VariableTypeInfo {
             _ => return None,
         };
         Some(base.with_nullability(nullable))
-    }
-
-    fn infer_numeric_runtime_name(type_name: &str) -> Option<String> {
-        let inner = if type_name.starts_with("Option<") && type_name.ends_with('>') {
-            &type_name["Option<".len()..type_name.len() - 1]
-        } else {
-            type_name
-        };
-        BuiltinTypes::canonical_numeric_runtime_name(inner).map(ToString::to_string)
     }
 }
 
@@ -1647,30 +1622,6 @@ mod tests {
         assert_eq!(
             VariableTypeInfo::infer_storage_hint("usize"),
             Some(StorageHint::UIntSize)
-        );
-    }
-
-    #[test]
-    fn test_concrete_numeric_type_inference() {
-        assert_eq!(
-            VariableTypeInfo::infer_numeric_runtime_name("int"),
-            Some("i64".to_string())
-        );
-        assert_eq!(
-            VariableTypeInfo::infer_numeric_runtime_name("i16"),
-            Some("i16".to_string())
-        );
-        assert_eq!(
-            VariableTypeInfo::infer_numeric_runtime_name("byte"),
-            Some("u8".to_string())
-        );
-        assert_eq!(
-            VariableTypeInfo::infer_numeric_runtime_name("Option<f32>"),
-            Some("f32".to_string())
-        );
-        assert_eq!(
-            VariableTypeInfo::infer_numeric_runtime_name("SomeCustomType"),
-            None
         );
     }
 

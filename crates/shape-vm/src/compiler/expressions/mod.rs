@@ -1661,20 +1661,26 @@ impl BytecodeCompiler {
                 {
                     return Ok(Type::Concrete(TypeAnnotation::Basic(type_name)));
                 }
-                // Array-shaped tracker names (`T[]` from `type_display_name`,
-                // or a bare `Array`/`Vec`). The runtime inference engine returns
-                // a `Variable` (→ `unknown`) for function-body
-                // `let xs: Array<T>` locals because it never saw the body
-                // declaration; the tracker did. Reconstruct the array `Type` so
-                // a downstream `xs + [..]` resolves to the array shape and
-                // routes to `ArrayConcat` instead of erroring as
-                // `unknown + T[]`. Element-type preserved from the `T[]` name
-                // (no fabrication — `Array`/`Vec` with no element keeps an
-                // unresolved element var, which still type-names as an array).
-                if let Some(elem) = type_name.strip_suffix("[]") {
-                    return Ok(Type::Concrete(TypeAnnotation::Array(Box::new(
-                        TypeAnnotation::Basic(elem.to_string()),
-                    ))));
+            }
+            // U4-5: array-shaped identifier recovery, STRUCTURAL. The runtime
+            // inference engine returns `Variable` (→ `unknown`) for function-body
+            // `let xs: Array<T>` locals because it never saw the body declaration;
+            // the compiler did, and recorded the element `ConcreteType` in the
+            // structural side-tables (`local_array_element_types` /
+            // `current_function_local_concrete_types`). Read it back through
+            // `identifier_concrete_type` so a downstream `xs + [..]` resolves to
+            // the array shape and routes to `ArrayConcat` instead of erroring as
+            // `unknown + T[]`. Replaces the deleted `type_name.strip_suffix("[]")`
+            // re-parse (the read half of the Rep-B string round-trip).
+            if let Some(shape_value::v2::ConcreteType::Array(elem)) =
+                crate::compiler::monomorphization::type_resolution::identifier_concrete_type_pub(
+                    self, name,
+                )
+            {
+                if let Some(elem_ann) =
+                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(&elem)
+                {
+                    return Ok(Type::Concrete(TypeAnnotation::Array(Box::new(elem_ann))));
                 }
             }
             // R3-elemerasure (strict-flip): a `let x = a.first()` (scalar
@@ -2253,47 +2259,42 @@ impl BytecodeCompiler {
     /// WS-9: when `object` is an identifier tracked as a homogeneous array
     /// (`Array<T>` / `Vec<T>` / `T[]`), return the element type `T` as a
     /// concrete inference `Type`. Returns `None` for non-identifier
-    /// receivers, untracked names, non-array tracker types, and element type
-    /// names the compiler does not model as a basic primitive.
+    /// receivers, untracked names, and non-array receivers.
     ///
-    /// This intentionally trusts the tracker `type_name` for parameters too:
-    /// unlike the scalar-numeric mis-inference the `param_locals` guard
-    /// elsewhere defends against (a string parameter inferred numeric), an
-    /// array element type extracted from a fully-resolved `Array<int>` param
-    /// hint is exactly as sound as the parameter type itself — the hint is
-    /// only `Some` when the program-wide pass observed a concrete array
-    /// argument at a call site.
+    /// U4-5: reads the element type STRUCTURALLY from the recorded
+    /// `ConcreteType` (`identifier_concrete_type` consults
+    /// `local_array_element_types` / `module_binding_array_element_types` /
+    /// `current_function_local_concrete_types`), not by stripping a
+    /// `"Vec<...>"`/`"int[]"` tracker string. The old `strip_prefix("Array<")`
+    /// / `strip_suffix("[]")` re-parse (the read half of the Rep-B string
+    /// round-trip whose write half is `tracked_type_name_from_annotation`)
+    /// is deleted — the structural `Array(elem)` ConcreteType is the source.
     pub(super) fn tracked_array_element_type(
         &self,
         object: &Expr,
     ) -> Option<shape_runtime::type_system::Type> {
-        use shape_ast::ast::TypeAnnotation;
         use shape_runtime::type_system::Type;
 
         let Expr::Identifier(name, _) = object else {
             return None;
         };
         // RefDispatch (v0.3.3): `r[i]` on `let r = &a` (a: Array<T>). The
-        // reference binding carries no array tracker `type_name`, but the
-        // referent's array display name (`"int[]"`) was recorded at bind time
-        // (`record_reference_referent_type`). Consult it so the element type is
-        // recovered THROUGH the reference, mirroring the scalar value-position
-        // auto-deref (`r + 1`). A scalar referent (`&int` -> `"int"`) has no
-        // array shape and falls through the strip below to None.
-        let type_name = self
-            .tracker_type_name_for_identifier(name)
-            .or_else(|| self.reference_referent_type_name(name))?;
-        let trimmed = type_name.trim();
-        let inner = trimmed
-            .strip_prefix("Array<")
-            .or_else(|| trimmed.strip_prefix("Vec<"))
-            .and_then(|s| s.strip_suffix('>'))
-            .map(str::trim)
-            .or_else(|| trimmed.strip_suffix("[]").map(str::trim))?;
-        if inner.is_empty() || inner == "unknown" {
+        // reference binding carries no array ConcreteType of its own; its
+        // referent's array element ConcreteType was recorded at bind time
+        // (`record_reference_referent_concrete_type`). Consult the referent's
+        // ConcreteType so the element type is recovered THROUGH the reference,
+        // mirroring the scalar value-position auto-deref (`r + 1`). A scalar
+        // referent (`&int`) has no array shape and falls through to None.
+        let ct = crate::compiler::monomorphization::type_resolution::identifier_concrete_type_pub(
+            self, name,
+        )
+        .or_else(|| self.reference_referent_concrete_type(name))?;
+        let shape_value::v2::ConcreteType::Array(elem) = ct else {
             return None;
-        }
-        Some(Type::Concrete(TypeAnnotation::Basic(inner.to_string())))
+        };
+        let elem_ann =
+            crate::compiler::expressions::closures::concrete_type_to_type_annotation(&elem)?;
+        Some(Type::Concrete(elem_ann))
     }
 
     /// R5.3B helper: return the tracker-recorded `type_name` for an

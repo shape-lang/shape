@@ -158,6 +158,8 @@ impl BytecodeCompiler {
             exclusive_reference_value_locals: HashSet::new(),
             reference_value_local_referent_type: HashMap::new(),
             reference_value_module_binding_referent_type: HashMap::new(),
+            reference_value_local_referent_concrete_type: HashMap::new(),
+            reference_value_module_binding_referent_concrete_type: HashMap::new(),
             const_locals: HashSet::new(),
             const_module_bindings: HashSet::new(),
             immutable_locals: HashSet::new(),
