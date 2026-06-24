@@ -410,84 +410,20 @@ impl BytecodeCompiler {
         };
 
         if let Some(kind) = typed_kind {
-            // LANG-9 fix (Phase 4b round 2, 2026-05-18): record the
-            // proven element `ConcreteType` against this array literal's
-            // AST span so subsequent `try_monomorphize_method_call` on an
-            // inline receiver (`[1,2,3].map(|x| x*2)`) can reach the
-            // typed-array specialization. Pre-fix, `concrete_type_for_expr`
-            // hit the `Expr::Array` arm at
-            // `monomorphization/type_resolution.rs:1381`, looked up
-            // `array_element_types[span]`, found nothing, returned `None`,
-            // and `try_monomorphize_method_call` fell back to the generic
-            // `Vec.map` (entry_point=0 stub). The bound form
-            // (`let xs = [...]; xs.map(...)`) succeeded because
-            // `identifier_concrete_type` reads from
-            // `local_array_element_types`/`type_tracker`, which are
-            // populated by the binding propagation path. Per ADR-006
-            // §2.7.5 stamp-at-compile-time, the producer-side `typed_kind`
-            // IS the proof of element type — record it now so the
-            // bytecode-time monomorphizer can consume it. No
-            // Bool-default, no inference fabrication: the typed-kind
-            // branch only fires when `infer_array_literal_numeric_type` /
-            // `infer_array_element_type` / `pending_variable_typed_array_kind`
-            // already proved the element type at the producer site.
-            // R3-subcase struct-array HOF (strict-flip, 2026-06-14): the
-            // `kind → ConcreteType` round-trip collapses EVERY struct-element
-            // array to `placeholder_struct(name: None)` (the slot-bits kind is
-            // uniformly `Ptr(HeapKind::TypedObject)` — the round-trip cannot
-            // recover the specific struct). Recording that placeholder into the
-            // span side-table erases the struct identity, so a downstream
-            // `users.filter(|u| u.score > 85)` resolved its closure param `u`
-            // to a nameless struct and `u.score` surfaced "unknown". For a
-            // `TypedObject`-kind literal, recover the NAMED element
-            // `ConcreteType` structurally from the elements (the `StructLiteral`
-            // / registered-struct-returning element resolves to a
-            // `Struct(name: Some(..))` via `concrete_type_for_expr`); that name
-            // IS the proof (per ADR-006 §2.7.5). Only a named struct element is
-            // accepted — a heterogeneous / unresolvable / unnamed element falls
-            // back to the placeholder (no fabrication; the existing
-            // surface-clean-error contract is preserved for genuinely ambiguous
-            // element types).
-            let recorded_elem = if matches!(kind, TypedArrayKind::TypedObject) {
-                self.struct_array_named_element_concrete_type(elements)
-                    .unwrap_or_else(|| {
-                        super::super::v2_typed_emission::concrete_type_for_typed_array_kind(kind)
-                    })
-            } else if matches!(kind, TypedArrayKind::TypedArray) {
-                // ROOT-1 (F2, strict-flip 2026-06-18): a NESTED-array literal
-                // (`[[1,2],[3,4]]`) lowers to the kind-erased `TypedArray`
-                // carrier, whose `kind -> ConcreteType` round-trip collapses to
-                // a phantom `Array<Array<placeholder_struct>>` (the carrier
-                // slot-bits kind is uniformly `Ptr(HeapKind::TypedArray)` — the
-                // inner element type is unrecoverable from the kind alone).
-                // Recording THAT placeholder into the span side-table erased the
-                // real inner element type, so a downstream `for p in pairs {
-                // p[0] * 10 }` (loop var bound to the inner `Array<int>`) saw
-                // `p[0]` as a nameless struct and the binop emitter surfaced
-                // `unknown * int`. Recover the element's REAL `ConcreteType`
-                // structurally from the first inner-array element via
-                // `concrete_type_for_expr` (each element IS an `Expr::Array`,
-                // so this resolves `[1,2]` -> `Array<int>`). That element IS the
-                // proof (ADR-006 §2.7.5 — producer-site structural proof, no
-                // runtime bit inspection, no Bool-default). A heterogeneous /
-                // unresolvable inner element falls back to the kind placeholder
-                // (the existing surface-clean-error contract for genuinely
-                // ambiguous element types is preserved). Mirrors the
-                // `TypedObject` named-struct recovery above.
-                elements
-                    .first()
-                    .and_then(|first| {
-                        crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
-                            self, first,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        super::super::v2_typed_emission::concrete_type_for_typed_array_kind(kind)
-                    })
-            } else {
-                super::super::v2_typed_emission::concrete_type_for_typed_array_kind(kind)
-            };
-            self.record_array_element_type(span, recorded_elem);
+            // LANG-9 (Phase 4b round 2) + R3-subcase struct-array HOF
+            // (strict-flip): an inline array literal (`[1,2,3].map(...)` /
+            // `[User{..}].filter(...)`) monomorphizes its method call through
+            // `concrete_type_for_expr(Expr::Array)`. Per ADR-006 §2.7.5
+            // stamp-at-compile-time, the producer-side `typed_kind` is the proof
+            // of element type; the typed-kind branch only fires when
+            // `infer_array_literal_numeric_type` / `infer_array_element_type` /
+            // `pending_variable_typed_array_kind` already proved it.
+            // U4-6a: the former per-span `array_element_types` record at this
+            // producer site is deleted along with the table. The sole reader
+            // (`concrete_type_for_expr` for `Expr::Array`) now derives the
+            // element `ConcreteType` structurally from the literal's own
+            // elements — the same recursion this site used to pre-compute, so
+            // dropping the cache changes nothing observable.
             // Allocate the typed array with capacity = element count.
             self.emit(Instruction::new(
                 kind.new_opcode(),
@@ -679,28 +615,11 @@ impl BytecodeCompiler {
                 VariableTypeInfo::named(type_name.to_string())
             })
         };
-        // LANG-9 fix (legacy path): the spread / nested-array / heterogeneous
-        // fall-through above still produces a homogeneous-numeric receiver
-        // when `literal_numeric` is `Some` or `is_bool` (`NewTypedArray`
-        // emission). Record the element type at the same producer site so
-        // the inline `[...].method(...)` monomorphizer can reach
-        // `array_element_types[span]` from this branch too. Idempotent with
-        // the typed-kind branch's `record_array_element_type` above (which
-        // covers the v2 typed-array fast path) — both lower into the same
-        // map keyed by span.
-        let legacy_elem: Option<shape_value::v2::ConcreteType> = if is_bool {
-            Some(shape_value::v2::ConcreteType::Bool)
-        } else {
-            literal_numeric.and_then(|nt| match nt {
-                NumericType::Int => Some(shape_value::v2::ConcreteType::I64),
-                NumericType::Number => Some(shape_value::v2::ConcreteType::F64),
-                NumericType::Decimal => Some(shape_value::v2::ConcreteType::Decimal),
-                NumericType::IntWidth(_) => None,
-            })
-        };
-        if let Some(elem_ct) = legacy_elem {
-            self.record_array_element_type(span, elem_ct);
-        }
+        // U4-6a: the former legacy-path `array_element_types[span]` record is
+        // deleted with the table. The sole reader derives the array element
+        // `ConcreteType` structurally from the literal's own elements
+        // (`concrete_type_for_expr` for `Expr::Array`), which already covers the
+        // bool / homogeneous-numeric literals this branch used to cache.
         // R3 sibling-leak fix: restore the entry hand-off value so this
         // literal's inferred element kind does not leak into a sibling array
         // literal compiled later in the same initializer expression.

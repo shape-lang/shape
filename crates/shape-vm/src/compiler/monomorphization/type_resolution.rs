@@ -120,7 +120,7 @@
 //! of the v2 pipeline is being built out.
 
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
-use shape_ast::ast::{Expr, Spanned, Statement, TypeAnnotation};
+use shape_ast::ast::{Expr, Statement, TypeAnnotation};
 use shape_value::v2::ConcreteType;
 use shape_value::v2::concrete_type::ClosureTypeId;
 use std::collections::HashMap;
@@ -1625,21 +1625,16 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
         Expr::Identifier(name, _) => identifier_concrete_type(compiler, name),
 
         Expr::Array(elements, _) => {
-            // Array literals: prefer the per-span side-table (populated by
-            // `compile_expr_array` for typed literals).
-            let span = Spanned::span(expr);
-            if let Some(elem) = compiler.array_element_types.get(&span).cloned() {
-                return Some(ConcreteType::Array(Box::new(elem)));
-            }
-            // v0.3 WS-6: the span side-table is only populated once the
-            // literal has been *compiled*; at a generic call site
-            // (`id([1,2,3])`) the argument resolver runs *before* arg
-            // compilation, so the table is empty. Fall back to inferring
-            // the element type structurally from the literal's elements —
-            // the first element's `ConcreteType`, provided every element
-            // agrees (a homogeneous literal). A heterogeneous or
-            // unresolvable literal yields `None` (the resolver then falls
-            // back to the generic template — no fabrication).
+            // U4-6a: the array element ConcreteType is derived STRUCTURALLY from
+            // the literal's own elements — the first element's `ConcreteType`,
+            // provided every element agrees (a homogeneous literal). A
+            // heterogeneous or unresolvable literal yields `None` (the resolver
+            // then falls back to the generic template — no fabrication). The
+            // former per-span `array_element_types` side-table (a frozen
+            // projection populated only AFTER `compile_expr_array` ran) is
+            // deleted: this structural recursion is the single source of truth
+            // and is reached at generic call sites BEFORE arg compilation, where
+            // the side-table was always empty anyway.
             let mut elem_ct: Option<ConcreteType> = None;
             for el in elements {
                 match concrete_type_for_expr(compiler, el) {

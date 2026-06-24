@@ -4253,57 +4253,6 @@ impl BytecodeCompiler {
         }
     }
 
-    /// T1 sub-case (d) (strict-flip, 2026-06-20): record the element OBJECT
-    /// field annotations for a binding `name` whose initializer is an ARRAY of
-    /// anonymous object LITERALS (`let points = [{x: 1, y: 2}, ...]`). Each
-    /// field's value-expression ConcreteType is the proof (ADR-006 §2.7.5);
-    /// resolved structurally from the first element object literal. Consumed by
-    /// `anonymous_object_element_fields` for a destructuring for-in over `name`.
-    /// A non-array / non-object-element / unprovable-field initializer records
-    /// nothing (surface-and-stop). int != number preserved (the field's own
-    /// proven scalar kind).
-    pub(super) fn record_binding_object_element_fields(
-        &mut self,
-        name: &str,
-        init: &shape_ast::ast::Expr,
-    ) {
-        use shape_ast::ast::{Expr, ObjectEntry, ObjectTypeField, TypeAnnotation};
-        let Expr::Array(elements, _) = init else {
-            return;
-        };
-        let Some(Expr::Object(entries, _)) = elements.first() else {
-            return;
-        };
-        let mut fields: Vec<ObjectTypeField> = Vec::new();
-        for entry in entries {
-            let ObjectEntry::Field { key, value, .. } = entry else {
-                // A spread makes the element shape non-uniform — bail entirely
-                // (no partial record).
-                return;
-            };
-            let ann =
-                match crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
-                    self, value,
-                )
-                .and_then(|ct| {
-                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
-                }) {
-                    Some(a) => a,
-                    None => TypeAnnotation::Basic("unknown".to_string()),
-                };
-            fields.push(ObjectTypeField {
-                name: key.clone(),
-                optional: false,
-                type_annotation: ann,
-                annotations: vec![],
-            });
-        }
-        if !fields.is_empty() {
-            self.binding_object_element_fields
-                .insert(name.to_string(), fields);
-        }
-    }
-
     /// Resolve a local namespace name to its canonical module path.
     ///
     /// Checks `graph_namespace_map` first (populated by graph-driven compilation),

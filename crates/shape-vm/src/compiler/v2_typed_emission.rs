@@ -314,17 +314,14 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
 /// Mirror of [`should_use_typed_array`]: every variant produced by that
 /// function round-trips back to its source `ConcreteType` here.
 ///
-/// LANG-9 fix (Phase 4b round 2, 2026-05-18): inline array literals
-/// (`[1,2,3].map(...)`) failed to monomorphize the method call because
-/// `concrete_type_for_expr(Expr::Array)` reads
-/// `compiler.array_element_types[span]`, which `compile_expr_array` did
-/// not populate at typed-literal lowering time. Per ADR-006 §2.7.5
-/// stamp-at-compile-time, the literal's chosen `TypedArrayKind` IS the
-/// proof of element-type at construction time; this helper lets the
-/// producer record that proof in the side-table so subsequent
-/// `Expr::MethodCall` monomorphization on the inline receiver succeeds
-/// — same code path the bound form (`let xs = [1,2,3]; xs.map(...)`)
-/// reaches via the `identifier_concrete_type` side-table arm.
+/// LANG-9 (Phase 4b round 2, 2026-05-18): inline array literals
+/// (`[1,2,3].map(...)`) monomorphize the method call via
+/// `concrete_type_for_expr(Expr::Array)`. U4-6a (2026-06-24) deleted the
+/// per-span `array_element_types` cache this helper used to feed; the element
+/// `ConcreteType` is now derived STRUCTURALLY by `concrete_type_for_expr`'s
+/// element recursion. Per ADR-006 §2.7.5 stamp-at-compile-time, the literal's
+/// chosen `TypedArrayKind` IS the proof of element-type at construction time —
+/// this helper round-trips that proof for the scalar/primitive kinds.
 #[inline]
 pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType {
     match kind {
@@ -346,13 +343,12 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
         // every typed-object struct schema collapses to the same TypedArrayKind
         // (the slot-bits kind is uniformly `Ptr(HeapKind::TypedObject)`), so
         // the kind→ConcreteType round-trip cannot recover the specific
-        // StructLayoutId without an additional side-table lookup. This mirrors
+        // StructLayoutId without an additional structural lookup. This mirrors
         // the `helpers.rs:719` shape `ConcreteType::placeholder_struct(StructLayoutId(0))`
         // used by `StatementKind::ObjectStore` slot-stamping. Downstream
-        // consumers that need the precise schema must read from the bytecode
-        // compiler's `array_element_types[span]` side-table populated at the
-        // literal site (which records the resolved struct schema, NOT this
-        // round-trip placeholder).
+        // consumers that need the precise schema recover it STRUCTURALLY via
+        // `concrete_type_for_expr` over the literal's named-struct elements
+        // (U4-6a: the former `array_element_types[span]` cache is deleted).
         TypedArrayKind::TypedObject => {
             ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0))
         }
@@ -361,8 +357,9 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
         // round-trip cannot recover the trait identity (every `Array<dyn T>`
         // collapses to the same TraitObject carrier, slot-bits kind uniformly
         // `Ptr(HeapKind::TraitObject)`). Return a placeholder_struct mirroring
-        // the TypedObject arm; the bytecode compiler's `array_element_types`
-        // side-table records the trait name at the literal site.
+        // the TypedObject arm; the precise trait identity is recovered
+        // structurally by `concrete_type_for_expr` over the literal's elements
+        // (U4-6a: the former `array_element_types` cache is deleted).
         TypedArrayKind::TraitObject => {
             ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0))
         }
@@ -372,8 +369,9 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
         // carrier kind being uniformly `Ptr(HeapKind::TypedArray)`). Return a
         // `Array<Array<?>>` placeholder mirroring the TypedObject placeholder
         // shape; downstream consumers that need the precise inner element type
-        // read the bytecode compiler's `array_element_types[span]` side-table
-        // populated at the literal site.
+        // recover it structurally via `concrete_type_for_expr` over the
+        // literal's inner-array elements (U4-6a: the former
+        // `array_element_types[span]` cache is deleted).
         TypedArrayKind::TypedArray => ConcreteType::Array(Box::new(ConcreteType::Array(Box::new(
             ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0)),
         )))),
@@ -692,56 +690,6 @@ impl super::BytecodeCompiler {
             match acc {
                 Some(prev) if prev != kind => return None,
                 _ => acc = Some(kind),
-            }
-        }
-        acc
-    }
-
-    /// R3-subcase struct-array HOF (strict-flip, 2026-06-14): resolve the NAMED
-    /// struct/enum element [`ConcreteType`] of a `TypedObject`-kind array
-    /// literal (`[User { .. }, User { .. }]` / `[aabb(..), aabb(..)]`).
-    ///
-    /// The `TypedArrayKind::TypedObject → ConcreteType` round-trip
-    /// (`concrete_type_for_typed_array_kind`) collapses every struct element to
-    /// `placeholder_struct(name: None)` — the slot-bits kind is uniformly
-    /// `Ptr(HeapKind::TypedObject)`, so the round-trip cannot recover the
-    /// specific struct. Recording that nameless placeholder into the
-    /// `array_element_types[span]` side-table erased the struct identity, and a
-    /// downstream HOF closure (`users.filter(|u| u.score > 85)`) then resolved
-    /// its param to a nameless struct, surfacing "Cannot infer types for binary
-    /// operation" on the in-closure field access.
-    ///
-    /// Recovery is structural and type-proven: every element must resolve via
-    /// `concrete_type_for_expr` to the SAME `ConcreteType::Struct` /
-    /// `ConcreteType::Enum` whose `NamedTypeId` carries a `Some(name)` (a
-    /// `StructLiteral` resolves through `struct_or_enum_concrete_type`; a
-    /// registered-struct-returning call through the return-type tracker). The
-    /// name IS the proof (per ADR-006 §2.7.5). A heterogeneous, unresolvable, or
-    /// unnamed element yields `None` — the caller falls back to the placeholder
-    /// (no fabrication, no Bool-default; the clean-error contract is preserved).
-    pub(crate) fn struct_array_named_element_concrete_type(
-        &self,
-        elements: &[shape_ast::ast::Expr],
-    ) -> Option<shape_value::v2::ConcreteType> {
-        use shape_value::v2::ConcreteType;
-        if elements.is_empty() {
-            return None;
-        }
-        let mut acc: Option<ConcreteType> = None;
-        for elem in elements {
-            let ct = super::monomorphization::type_resolution::concrete_type_for_expr(self, elem)?;
-            // Only a NAMED struct / enum element carries recoverable identity.
-            let named = match &ct {
-                ConcreteType::Struct(n) if n.name_str().is_some() => true,
-                ConcreteType::Enum(n) if n.name_str().is_some() => true,
-                _ => false,
-            };
-            if !named {
-                return None;
-            }
-            match &acc {
-                Some(prev) if prev != &ct => return None,
-                _ => acc = Some(ct),
             }
         }
         acc

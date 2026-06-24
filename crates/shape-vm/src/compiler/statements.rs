@@ -5475,14 +5475,11 @@ impl BytecodeCompiler {
                         }
                         let binding_idx = self.get_or_create_module_binding(name);
 
-                        // T1 sub-case (d) (strict-flip, 2026-06-20): record the
-                        // element OBJECT field annotations for `let points =
-                        // [{x:1,y:2}]` so a downstream `for {x,y} in points`
-                        // destructure can type each field (the inference engine
-                        // env has no per-binding entry at compile time).
-                        if let Some(init_expr) = var_decl.value.as_ref() {
-                            self.record_binding_object_element_fields(name, init_expr);
-                        }
+                        // U4-6a: the former `record_binding_object_element_fields`
+                        // call is deleted with the side-table; `for {x,y} in
+                        // points` now resolves the element object's field
+                        // annotations via the inference engine span-table
+                        // (`infer_expr_type` in `anonymous_object_element_fields`).
 
                         // Emit StoreModuleBindingTyped for width-typed bindings,
                         // otherwise emit regular StoreModuleBinding.
@@ -6073,13 +6070,11 @@ impl BytecodeCompiler {
                                 var_decl.value.as_ref().map(|v| v.span()),
                             );
                         }
-                        // T1 sub-case (d) (strict-flip, 2026-06-20): local
-                        // `let pts = [{x:1,y:2}]` — record element object field
-                        // annotations for a downstream `for {x,y} in pts`
-                        // destructure (local equivalent of the module path).
-                        if let Some(init_expr) = var_decl.value.as_ref() {
-                            self.record_binding_object_element_fields(name, init_expr);
-                        }
+                        // U4-6a: the former `record_binding_object_element_fields`
+                        // call (local `let pts = [{x:1,y:2}]`) is deleted with
+                        // the side-table; `for {x,y} in pts` resolves the element
+                        // object's field annotations via the inference engine
+                        // span-table (`infer_expr_type`).
                     }
                     // cluster-2-cw-IC-class-c (Phase 3 cluster-2 Round 3,
                     // 2026-05-16): Class C method-chain intermediate slot

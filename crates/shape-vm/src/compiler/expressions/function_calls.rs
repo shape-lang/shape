@@ -1936,8 +1936,11 @@ impl BytecodeCompiler {
     /// trusts.
     ///
     /// The receiver was already compiled by the caller, so element-type
-    /// side-tables (`array_element_types[span]`, `local_array_element_types`,
-    /// `module_binding_array_element_types`) are populated.
+    /// side-tables (`local_array_element_types`,
+    /// `module_binding_array_element_types`) are populated; an inline array
+    /// literal receiver resolves its element type structurally via
+    /// `concrete_type_for_expr` (U4-6a: the per-span `array_element_types`
+    /// cache is deleted).
     ///
     /// Argument-order validation: every HOF wired here takes its callback
     /// as positional argument 0 — `map(f)` / `filter(predicate)` /
@@ -2013,10 +2016,9 @@ impl BytecodeCompiler {
             }
             // Fallback: if the receiver is an inline array literal, infer
             // element type from the elements via the existing inference helper.
-            // `concrete_type_for_expr` only handles array literals via
-            // `array_element_types[span]`, which is populated by HashMap
-            // method results — NOT by a plain `[1, 2, 3]` literal. This
-            // fallback closes that gap.
+            // (U4-6a: `concrete_type_for_expr` now resolves array literals
+            // structurally from their elements; this `infer_array_element_type`
+            // fallback remains for the kinds it does not yet cover.)
             .or_else(|| {
                 if let Expr::Array(elements, _) = receiver {
                     let kind = crate::compiler::v2_array_emission::infer_array_element_type(
@@ -5067,12 +5069,12 @@ mod r3_subcase_struct_array_hof_tests {
     //! resolved the field to `unknown` because the struct identity was erased
     //! at array-of-structs construction — the `TypedArrayKind::TypedObject →
     //! ConcreteType` round-trip collapsed every struct element to
-    //! `placeholder_struct(name: None)`, and that nameless placeholder was
-    //! recorded into `array_element_types[span]`. The fix recovers the NAMED
-    //! struct element `ConcreteType` structurally from the literal elements and
-    //! records THAT, so the HOF closure param carries the struct type and a
-    //! field access resolves to the field's type. Type-proven, not
-    //! broad-suppression: a non-existent field still rejects.
+    //! `placeholder_struct(name: None)`. The fix (and, post-U4-6a, the sole
+    //! mechanism) recovers the NAMED struct element `ConcreteType` STRUCTURALLY
+    //! from the literal elements via `concrete_type_for_expr`'s element
+    //! recursion, so the HOF closure param carries the struct type and a field
+    //! access resolves to the field's type. Type-proven, not broad-suppression:
+    //! a non-existent field still rejects.
 
     use crate::test_utils::compile_with_prelude;
 

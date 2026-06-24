@@ -148,18 +148,6 @@ impl BytecodeCompiler {
         }
     }
 
-    /// Record the element `ConcreteType` for an array-shaped expression at
-    /// the given AST span. Used by Phase 1.2 / 2.2 / 3.2 tracking — array
-    /// literal compilation, array method dispatch, etc.
-    pub(crate) fn record_array_element_type(&mut self, span: Span, element: ConcreteType) {
-        self.array_element_types.insert(span, element);
-    }
-
-    /// Look up the recorded array element `ConcreteType` for a span, if any.
-    pub(crate) fn get_array_element_type(&self, span: Span) -> Option<&ConcreteType> {
-        self.array_element_types.get(&span)
-    }
-
 }
 
 /// Parse a tracked type-tracker name like `"HashMap<string, int>"` into a
@@ -779,72 +767,27 @@ mod tests {
     // shapes are testable without standing up the full compile pipeline.
     // ----------------------------------------------------------------
 
-    #[test]
-    fn test_phase22_keys_records_array_of_k() {
-        let mut compiler = fresh_compiler();
-        let call_span = Span::new(100, 110);
-        let k = ConcreteType::String;
-        let v = ConcreteType::I64;
-        // Mimics compile_expr_method_call's `keys` arm.
-        compiler.record_array_element_type(call_span, k.clone());
-        compiler.record_map_key_value_for_node(call_span, k.clone(), v);
-        let elem = compiler
-            .get_array_element_type(call_span)
-            .expect("array element type recorded");
-        assert_eq!(*elem, ConcreteType::String);
-    }
-
-    #[test]
-    fn test_phase22_values_records_array_of_v_int() {
-        let mut compiler = fresh_compiler();
-        let call_span = Span::new(200, 210);
-        // HashMap<string, int>: values() -> Array<int>
-        let k = ConcreteType::String;
-        let v = ConcreteType::I64;
-        compiler.record_array_element_type(call_span, v.clone());
-        compiler.record_map_key_value_for_node(call_span, k, v);
-        let elem = compiler
-            .get_array_element_type(call_span)
-            .expect("array element type recorded");
-        assert_eq!(*elem, ConcreteType::I64);
-    }
+    // U4-6a: the per-span `array_element_types` table is deleted; the array
+    // element ConcreteType for a literal is now derived structurally by
+    // `concrete_type_for_expr` (Expr::Array). The former `keys`/`values`/
+    // `entries`/`split` array-element record tests + the array-empty assertions
+    // in `get`/`set` are removed; the surviving tests keep the still-live
+    // `map_key_value_for_node` kv-metadata coverage.
 
     #[test]
     fn test_phase22_get_records_kv_metadata_no_array() {
         let mut compiler = fresh_compiler();
         let call_span = Span::new(300, 310);
         // HashMap<string, number>: get("foo") -> Option<number>
-        // Per the dispatch arm we still record kv metadata, but no array
-        // element type (the get arm is intentionally a no-op for the array
-        // side-table — Option<V> isn't an Array<V>).
+        // The dispatch arm still records kv metadata (get() is not array-shaped).
         let k = ConcreteType::String;
         let v = ConcreteType::F64;
         compiler.record_map_key_value_for_node(call_span, k.clone(), v.clone());
-        // No call to record_array_element_type — get() is not array-shaped.
-        assert_eq!(compiler.get_array_element_type(call_span), None);
         let (rk, rv) = compiler
             .map_key_value_for_node(call_span)
             .expect("kv metadata recorded");
         assert_eq!(*rk, ConcreteType::String);
         assert_eq!(*rv, ConcreteType::F64);
-    }
-
-    #[test]
-    fn test_phase22_entries_records_array_of_tuple_kv() {
-        let mut compiler = fresh_compiler();
-        let call_span = Span::new(400, 410);
-        let k = ConcreteType::String;
-        let v = ConcreteType::I64;
-        let pair = ConcreteType::Tuple(vec![k.clone(), v.clone()]);
-        compiler.record_array_element_type(call_span, pair.clone());
-        compiler.record_map_key_value_for_node(call_span, k, v);
-        let elem = compiler
-            .get_array_element_type(call_span)
-            .expect("array element type recorded");
-        assert_eq!(
-            *elem,
-            ConcreteType::Tuple(vec![ConcreteType::String, ConcreteType::I64])
-        );
     }
 
     #[test]
@@ -860,24 +803,6 @@ mod tests {
             .expect("kv metadata recorded after set");
         assert_eq!(*rk, ConcreteType::I64);
         assert_eq!(*rv, ConcreteType::String);
-        // set() does not produce an array, so the array side-table is empty.
-        assert_eq!(compiler.get_array_element_type(call_span), None);
-    }
-
-    // ----------------------------------------------------------------
-    // Phase 2.2 — String split → Array<String> tracking
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_phase22_split_records_array_of_string() {
-        let mut compiler = fresh_compiler();
-        let call_span = Span::new(600, 610);
-        // Mimics the split arm: receiver is a string, record element=String
-        compiler.record_array_element_type(call_span, ConcreteType::String);
-        let elem = compiler
-            .get_array_element_type(call_span)
-            .expect("array element type recorded");
-        assert_eq!(*elem, ConcreteType::String);
     }
 
     // ── v0.3 WS-6b GAP B — typed-map fast path for non-identifier

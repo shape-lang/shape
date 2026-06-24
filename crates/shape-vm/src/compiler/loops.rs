@@ -1797,23 +1797,17 @@ impl BytecodeCompiler {
     ) -> Option<Vec<shape_ast::ast::ObjectTypeField>> {
         use shape_ast::ast::TypeAnnotation;
         use shape_runtime::type_system::Type;
-        // Resolve the iterable's type. `infer_expr_type` handles an inline array
-        // LITERAL iterable (`for {x,y} in [{x:1,y:2}]`). For an IDENTIFIER
-        // iterable bound at module scope (`let points = [...]; for {x,y} in
-        // points`) the compiler's shared inference engine env has no per-binding
-        // entry for a fresh `infer_expr` (it re-runs from an empty env and
-        // errors `UndefinedVariable`), so consult the engine env's already-
-        // solved scheme for the name and apply the pass's substitutions. Both
-        // are reading inference's own output, not fabricating.
-        // An identifier iterable bound to an anonymous object-literal array
-        // recorded its element field annotations at let-binding compile time
-        // (the inference engine env has no per-binding entry here). Consult that
-        // side-table first.
-        if let Expr::Identifier(name, _) = iterable {
-            if let Some(fields) = self.binding_object_element_fields.get(name) {
-                return Some(fields.clone());
-            }
-        }
+        // U4-6a: resolve the iterable's type from the inference engine's
+        // per-expression span table via `infer_expr_type`. The engine (post-U4
+        // span-table keystone) records the resolved type of the iterable
+        // expression — including an IDENTIFIER iterable bound to an anonymous
+        // object-literal array (`let points = [{x:1,y:2}]; for {x,y} in points`)
+        // — keyed by the use-site span, so a fresh `infer_expr` is no longer
+        // needed and no longer errors `UndefinedVariable`. The former
+        // `binding_object_element_fields` side-table (a frozen projection
+        // recorded at let-binding compile time to work around the empty-env
+        // re-run) is deleted: the engine span-table is the single source of
+        // truth for the element object's field annotations.
         let iter_ty = self.infer_expr_type(iterable).ok()?;
         let elem_ann = match &iter_ty {
             Type::Concrete(TypeAnnotation::Array(inner)) => (**inner).clone(),
