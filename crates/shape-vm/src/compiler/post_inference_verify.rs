@@ -188,7 +188,7 @@ pub(crate) const WHITELIST: &[WhitelistEntry] = &[
     },
     // -----
     // §4.D.11 RUNTIME_BUILTIN_SCHEMA extension landed at W17.2-B close
-    // (audit §4.D.11+§4.D.13 follow-up). The 15 `__PascalCase`
+    // (audit §4.D.11+§4.D.13 follow-up). The `__PascalCase`
     // builtin schemas registered at `register_builtin_schemas`
     // (`crates/shape-runtime/src/type_schema/builtin_schemas.rs:113`)
     // are stdlib carrier-tier exception territory — they use
@@ -262,6 +262,18 @@ pub(crate) const WHITELIST: &[WhitelistEntry] = &[
     },
     WhitelistEntry {
         rule: WhitelistRule::SchemaName("__SimulateReturn"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__Option"),
+        section: "§4.D.11",
+        permanent: true,
+        reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
+    },
+    WhitelistEntry {
+        rule: WhitelistRule::SchemaName("__Result"),
         section: "§4.D.11",
         permanent: true,
         reason: "stdlib runtime-builtin schema; builtin_schemas.rs",
@@ -779,6 +791,33 @@ mod tests {
                 errors.push(emit_e0900(schema, &field.name, &field.field_type));
             }
         }
+    }
+
+    /// Runtime builtin `__Option` / `__Result` schemas preserve their
+    /// concrete payload kind in the parallel `field_kinds` track, so the
+    /// `payload: Any` schema field is a permanent §4.D.11 exception.
+    #[test]
+    fn runtime_builtin_option_result_payload_any_pass_permanent_only() {
+        let mut reg = TypeSchemaRegistry::new();
+        for name in ["__Option", "__Result"] {
+            let id = reg.allocate_id();
+            let schema = TypeSchema::with_id(
+                id,
+                name,
+                vec![
+                    ("variant".to_string(), FieldType::I64),
+                    ("payload".to_string(), FieldType::Any),
+                ],
+            );
+            reg.register(schema);
+        }
+
+        let mut errors = Vec::new();
+        verify_registry_permanent_only(&reg, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "__Option/__Result payload Any must pass permanent-only verification"
+        );
     }
 
     /// Negative: user `type T { x: Any }` shape — the `x` field on a

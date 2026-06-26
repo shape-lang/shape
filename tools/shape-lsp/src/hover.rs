@@ -334,6 +334,7 @@ impl Visitor for TypedMatchPatternCollector {
                 let Pattern::Typed {
                     name,
                     type_annotation,
+                    ..
                 } = &arm.pattern
                 else {
                     continue;

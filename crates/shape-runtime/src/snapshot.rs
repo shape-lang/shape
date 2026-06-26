@@ -1927,6 +1927,7 @@ pub fn serializable_to_slot(
             let raw = Arc::into_raw(arc) as u64;
             Ok((raw, NativeKind::String))
         }
+        (SV::None | SV::Unit, NativeKind::Null) => Ok((0, NativeKind::Null)),
         (SV::None | SV::Unit, NativeKind::Bool) => Ok((0, NativeKind::Bool)),
 
         // Heap kinds — discriminator must align with `expected_kind`'s
@@ -1959,7 +1960,7 @@ fn expected_heap_field_kind(sv: &SerializableVMValue) -> NativeKind {
         SV::Number(_) => NativeKind::Float64,
         SV::Bool(_) => NativeKind::Bool,
         SV::String(_) => NativeKind::String,
-        SV::None | SV::Unit => NativeKind::Bool,
+        SV::None | SV::Unit => NativeKind::Null,
         SV::Decimal(_) => NativeKind::Ptr(HeapKind::Decimal),
         SV::BigInt(_) => NativeKind::Ptr(HeapKind::BigInt),
         SV::Char(_) => NativeKind::Ptr(HeapKind::Char),
@@ -2044,7 +2045,7 @@ fn serializable_to_heap_slot(
             // carrier doesn't statically pin the inner kind; the
             // serialized discriminator is used to pick the inner kind
             // (Int→Int64, String→String, Bool→Bool, Number→Float64,
-            // Unit→Bool-zero placeholder).
+            // Unit/None→Null placeholder).
             let inner_slot = inner_kinded_from_serializable(payload)?;
             let data = if *is_ok {
                 ResultData::ok(inner_slot)
@@ -2109,6 +2110,28 @@ fn serializable_to_heap_slot(
             let arc = Arc::new(data);
             let raw = Arc::into_raw(arc) as u64;
             Ok((raw, NativeKind::Ptr(HeapKind::Range)))
+        }
+        (SV::ResultData { is_ok, payload }, HeapKind::TypedObject) => {
+            let payload = inner_kinded_from_serializable(payload)?;
+            Ok(build_builtin_result_typed_object_slot(*is_ok, payload))
+        }
+        (SV::OptionData { is_some, payload }, HeapKind::TypedObject) => {
+            let payload = if *is_some {
+                match payload {
+                    Some(p) => inner_kinded_from_serializable(p)?,
+                    None => {
+                        return Err(
+                            "serializable_to_slot: OptionData is_some=true but payload=None — \
+                             malformed wire shape; expected Some(SerializableVMValue) for \
+                             is_some=true. ADR-006 §2.7.5.1."
+                                .to_string(),
+                        );
+                    }
+                }
+            } else {
+                KindedSlot::none()
+            };
+            Ok(build_builtin_option_typed_object_slot(*is_some, payload))
         }
         (
             SV::TypedObject {
@@ -2336,7 +2359,7 @@ fn serializable_to_heap_slot(
 
 /// Inverse for Result/Option inner payloads — discriminator-driven
 /// scalar projection (Int→Int64, String→String, Bool→Bool,
-/// Number→Float64, Unit→Bool-zero).
+/// Number→Float64, Unit/None→Null).
 fn inner_kinded_from_serializable(
     sv: &SerializableVMValue,
 ) -> std::result::Result<KindedSlot, String> {
@@ -2355,7 +2378,7 @@ fn inner_kinded_from_serializable(
             NativeKind::Bool,
         )),
         SV::String(s) => Ok(KindedSlot::from_string_arc(Arc::new(s.clone()))),
-        SV::Unit | SV::None => Ok(KindedSlot::new(ValueSlot::from_raw(0), NativeKind::Bool)),
+        SV::Unit | SV::None => Ok(KindedSlot::none()),
         other => Err(format!(
             "inner_kinded_from_serializable: W17-snapshot-roundtrip surface — \
              SerializableVMValue arm {} has no in-session inner-payload \
@@ -2380,6 +2403,71 @@ fn hashmap_kinded_ref_arm_name(kref: &shape_value::heap_value::HashMapKindedRef)
         K::TraitObject(_) => "TraitObject",
         K::HashMap(_) => "HashMap",
     }
+}
+
+fn build_builtin_result_typed_object_slot(is_ok: bool, payload: KindedSlot) -> (u64, NativeKind) {
+    use crate::type_schema::builtin_schemas::{RESULT_VARIANT_ERR, RESULT_VARIANT_OK};
+    let (_registry, schemas) =
+        crate::type_schema::TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+    build_builtin_variant_typed_object_slot(
+        schemas.result as u64,
+        if is_ok {
+            RESULT_VARIANT_OK
+        } else {
+            RESULT_VARIANT_ERR
+        },
+        payload,
+    )
+}
+
+fn build_builtin_option_typed_object_slot(is_some: bool, payload: KindedSlot) -> (u64, NativeKind) {
+    use crate::type_schema::builtin_schemas::{OPTION_VARIANT_NONE, OPTION_VARIANT_SOME};
+    let (_registry, schemas) =
+        crate::type_schema::TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+    build_builtin_variant_typed_object_slot(
+        schemas.option as u64,
+        if is_some {
+            OPTION_VARIANT_SOME
+        } else {
+            OPTION_VARIANT_NONE
+        },
+        payload,
+    )
+}
+
+fn build_builtin_variant_typed_object_slot(
+    schema_id: u64,
+    variant: i64,
+    payload: KindedSlot,
+) -> (u64, NativeKind) {
+    use crate::type_schema::builtin_schemas::OPTION_PAYLOAD;
+    use shape_value::TypedObjectStorage;
+
+    let payload_slot = payload.slot();
+    let payload_kind = payload.kind();
+    let payload_bits = payload_slot.raw();
+    let heap_mask = if payload_bits != 0 && snapshot_field_is_heap_like(payload_kind) {
+        1u64 << OPTION_PAYLOAD
+    } else {
+        0
+    };
+    let field_kinds: Arc<[NativeKind]> =
+        Arc::from(vec![NativeKind::Int64, payload_kind].into_boxed_slice());
+    let ptr = TypedObjectStorage::_new(
+        schema_id,
+        vec![ValueSlot::from_int(variant), payload_slot].into_boxed_slice(),
+        heap_mask,
+        field_kinds,
+    );
+    std::mem::forget(payload);
+    (ptr as u64, NativeKind::Ptr(HeapKind::TypedObject))
+}
+
+fn snapshot_field_is_heap_like(kind: NativeKind) -> bool {
+    matches!(
+        kind,
+        NativeKind::String | NativeKind::StringV2 | NativeKind::DecimalV2 | NativeKind::Ptr(_)
+    )
 }
 
 /// One-line discriminator name for diagnostic messages.
@@ -2482,6 +2570,177 @@ fn deserialize_datatable(
         dt = dt.with_schema_id(schema_id);
     }
     Ok(dt)
+}
+
+#[cfg(test)]
+mod l5_typed_object_result_option_snapshot_tests {
+    use super::{
+        SerializableVMValue as SV, SnapshotStore, serializable_to_slot, slot_to_serializable,
+    };
+    use crate::type_schema::TypeSchemaRegistry;
+    use crate::type_schema::builtin_schemas::{
+        OPTION_PAYLOAD, OPTION_VARIANT_NONE, OPTION_VARIANT_SOME, RESULT_PAYLOAD,
+        RESULT_VARIANT_ERR, RESULT_VARIANT_OK,
+    };
+    use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot};
+    use std::sync::Arc;
+
+    fn variant_object(schema_id: u64, variant: i64, payload: KindedSlot) -> KindedSlot {
+        let payload_slot = payload.slot();
+        let payload_kind = payload.kind();
+        let payload_bits = payload_slot.raw();
+        let heap_mask = if payload_bits != 0
+            && matches!(
+                payload_kind,
+                NativeKind::String
+                    | NativeKind::StringV2
+                    | NativeKind::DecimalV2
+                    | NativeKind::Ptr(_)
+            ) {
+            1u64 << OPTION_PAYLOAD
+        } else {
+            0
+        };
+        let field_kinds: Arc<[NativeKind]> =
+            Arc::from(vec![NativeKind::Int64, payload_kind].into_boxed_slice());
+        let ptr = TypedObjectStorage::_new(
+            schema_id,
+            vec![ValueSlot::from_int(variant), payload_slot].into_boxed_slice(),
+            heap_mask,
+            field_kinds,
+        );
+        std::mem::forget(payload);
+        KindedSlot::from_typed_object_raw(ptr)
+    }
+
+    fn restored_storage(bits: u64, kind: NativeKind) -> KindedSlot {
+        assert_eq!(kind, NativeKind::Ptr(HeapKind::TypedObject));
+        KindedSlot::new(ValueSlot::from_raw(bits), kind)
+    }
+
+    fn storage(slot: &KindedSlot) -> &TypedObjectStorage {
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        unsafe { &*(slot.raw() as *const TypedObjectStorage) }
+    }
+
+    #[test]
+    fn schema_backed_option_none_snapshot_restore_preserves_null_payload_kind() {
+        let (_registry, schemas) = TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let none = variant_object(
+            schemas.option as u64,
+            OPTION_VARIANT_NONE,
+            KindedSlot::none(),
+        );
+
+        let sv = slot_to_serializable(none.raw(), none.kind(), &store).expect("serialize none");
+        match &sv {
+            SV::TypedObject {
+                schema_id,
+                slot_data,
+                ..
+            } => {
+                assert_eq!(*schema_id, schemas.option as u64);
+                assert!(matches!(slot_data[0], SV::Int(OPTION_VARIANT_NONE)));
+                assert!(matches!(slot_data[OPTION_PAYLOAD], SV::None));
+            }
+            other => panic!("expected typed-object snapshot, got {other:?}"),
+        }
+
+        let (bits, kind) =
+            serializable_to_slot(&sv, NativeKind::Ptr(HeapKind::TypedObject), &store)
+                .expect("restore none typed object");
+        let restored = restored_storage(bits, kind);
+        let restored_storage = storage(&restored);
+        assert_eq!(restored_storage.schema_id, schemas.option as u64);
+        assert_eq!(
+            restored_storage.field_kinds[OPTION_PAYLOAD],
+            NativeKind::Null
+        );
+    }
+
+    #[test]
+    fn legacy_option_data_snapshot_restores_to_schema_backed_typed_object() {
+        let (_registry, schemas) = TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let sv = SV::OptionData {
+            is_some: false,
+            payload: None,
+        };
+
+        let (bits, kind) =
+            serializable_to_slot(&sv, NativeKind::Ptr(HeapKind::TypedObject), &store)
+                .expect("restore legacy option");
+        let restored = restored_storage(bits, kind);
+        let restored_storage = storage(&restored);
+        assert_eq!(restored_storage.schema_id, schemas.option as u64);
+        assert_eq!(restored_storage.slots()[0].as_i64(), OPTION_VARIANT_NONE);
+        assert_eq!(
+            restored_storage.field_kinds[OPTION_PAYLOAD],
+            NativeKind::Null
+        );
+    }
+
+    #[test]
+    fn legacy_result_data_snapshot_restores_to_schema_backed_typed_object() {
+        let (_registry, schemas) = TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let sv = SV::ResultData {
+            is_ok: false,
+            payload: Box::new(SV::String("bad".to_string())),
+        };
+
+        let (bits, kind) =
+            serializable_to_slot(&sv, NativeKind::Ptr(HeapKind::TypedObject), &store)
+                .expect("restore legacy result");
+        let restored = restored_storage(bits, kind);
+        let restored_storage = storage(&restored);
+        assert_eq!(restored_storage.schema_id, schemas.result as u64);
+        assert_eq!(restored_storage.slots()[0].as_i64(), RESULT_VARIANT_ERR);
+        assert_eq!(
+            restored_storage.field_kinds[RESULT_PAYLOAD],
+            NativeKind::String
+        );
+    }
+
+    #[test]
+    fn schema_backed_result_and_option_snapshot_as_typed_objects() {
+        let (_registry, schemas) = TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let ok = variant_object(
+            schemas.result as u64,
+            RESULT_VARIANT_OK,
+            KindedSlot::from_int(9),
+        );
+        let some = variant_object(
+            schemas.option as u64,
+            OPTION_VARIANT_SOME,
+            KindedSlot::from_int(5),
+        );
+
+        let ok_sv = slot_to_serializable(ok.raw(), ok.kind(), &store).expect("serialize ok");
+        let some_sv =
+            slot_to_serializable(some.raw(), some.kind(), &store).expect("serialize some");
+
+        assert!(matches!(
+            ok_sv,
+            SV::TypedObject {
+                schema_id,
+                ..
+            } if schema_id == schemas.result as u64
+        ));
+        assert!(matches!(
+            some_sv,
+            SV::TypedObject {
+                schema_id,
+                ..
+            } if schema_id == schemas.option as u64
+        ));
+    }
 }
 
 #[cfg(test)]

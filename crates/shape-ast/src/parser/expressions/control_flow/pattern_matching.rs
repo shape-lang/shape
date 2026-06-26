@@ -142,14 +142,12 @@ pub fn parse_pattern(pair: Pair<Rule>) -> Result<Pattern> {
         Rule::pattern_wildcard => Ok(Pattern::Wildcard),
         Rule::pattern_typed => {
             let mut inner = pair.into_inner();
-            let name = inner
-                .next()
-                .ok_or_else(|| ShapeError::ParseError {
-                    message: "expected identifier in typed pattern".to_string(),
-                    location: Some(pair_loc.clone()),
-                })?
-                .as_str()
-                .to_string();
+            let name_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
+                message: "expected identifier in typed pattern".to_string(),
+                location: Some(pair_loc.clone()),
+            })?;
+            let name_span = pair_span(&name_pair);
+            let name = name_pair.as_str().to_string();
             let type_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
                 message: "expected type annotation in typed pattern".to_string(),
                 location: Some(pair_loc),
@@ -157,10 +155,11 @@ pub fn parse_pattern(pair: Pair<Rule>) -> Result<Pattern> {
             let type_annotation = crate::parser::parse_type_annotation(type_pair)?;
             Ok(Pattern::Typed {
                 name,
+                name_span,
                 type_annotation,
             })
         }
-        Rule::pattern_identifier => Ok(Pattern::Identifier(pair.as_str().to_string())),
+        Rule::pattern_identifier => Ok(Pattern::identifier(pair.as_str(), pair_span(&pair))),
         Rule::pattern_literal => {
             let literal_pair = pair
                 .into_inner()
@@ -190,19 +189,17 @@ pub fn parse_pattern(pair: Pair<Rule>) -> Result<Pattern> {
             for field in pair.into_inner() {
                 if field.as_rule() == Rule::pattern_field {
                     let mut field_inner = field.into_inner();
-                    let name = field_inner
-                        .next()
-                        .ok_or_else(|| ShapeError::ParseError {
-                            message: "expected field name in object pattern".to_string(),
-                            location: Some(pair_loc.clone()),
-                        })?
-                        .as_str()
-                        .to_string();
+                    let name_pair = field_inner.next().ok_or_else(|| ShapeError::ParseError {
+                        message: "expected field name in object pattern".to_string(),
+                        location: Some(pair_loc.clone()),
+                    })?;
+                    let name_span = pair_span(&name_pair);
+                    let name = name_pair.as_str().to_string();
                     // Shorthand: `{x, y}` is equivalent to `{x: x, y: y}`
                     let pattern = if let Some(pattern_pair) = field_inner.next() {
                         parse_pattern(pattern_pair)?
                     } else {
-                        Pattern::Identifier(name.clone())
+                        Pattern::identifier(name.clone(), name_span)
                     };
                     fields.push((name, pattern));
                 }
@@ -323,19 +320,17 @@ fn parse_constructor_payload(pair: Pair<Rule>) -> Result<crate::ast::PatternCons
                 if field.as_rule() == Rule::pattern_field {
                     let field_loc = pair_location(&field);
                     let mut field_inner = field.into_inner();
-                    let name = field_inner
-                        .next()
-                        .ok_or_else(|| ShapeError::ParseError {
-                            message: "expected field name in constructor pattern".to_string(),
-                            location: Some(field_loc.clone()),
-                        })?
-                        .as_str()
-                        .to_string();
+                    let name_pair = field_inner.next().ok_or_else(|| ShapeError::ParseError {
+                        message: "expected field name in constructor pattern".to_string(),
+                        location: Some(field_loc.clone()),
+                    })?;
+                    let name_span = pair_span(&name_pair);
+                    let name = name_pair.as_str().to_string();
                     let pattern = if let Some(pattern_pair) = field_inner.next() {
                         parse_pattern(pattern_pair)?
                     } else {
                         // Shorthand: { radius } == { radius: radius }
-                        crate::ast::Pattern::Identifier(name.clone())
+                        crate::ast::Pattern::identifier(name.clone(), name_span)
                     };
                     fields.push((name, pattern));
                 }

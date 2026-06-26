@@ -770,7 +770,7 @@ fn lower_for_loop(
 
 pub(super) fn pattern_has_bindings(pattern: &ast::Pattern) -> bool {
     match pattern {
-        ast::Pattern::Identifier(_) | ast::Pattern::Typed { .. } => true,
+        ast::Pattern::Identifier { .. } | ast::Pattern::Typed { .. } => true,
         ast::Pattern::Array(patterns) => patterns.iter().any(pattern_has_bindings),
         ast::Pattern::Object(fields) => fields
             .iter()
@@ -950,7 +950,7 @@ pub(super) fn lower_pattern_bindings_from_place_opt(
     binding_metadata: Option<BindingMetadata>,
 ) {
     match pattern {
-        ast::Pattern::Identifier(name) | ast::Pattern::Typed { name, .. } => {
+        ast::Pattern::Identifier { name, .. } | ast::Pattern::Typed { name, .. } => {
             let slot = if let Some(binding_metadata) = binding_metadata {
                 builder.alloc_local_binding(name.clone(), LocalTypeInfo::Unknown, binding_metadata)
             } else {

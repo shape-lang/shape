@@ -169,7 +169,8 @@ impl TypeInferenceEngine {
         // would alias unrelated expressions.
         let span = shape_ast::ast::Spanned::span(expr);
         if !span.is_dummy() {
-            self.expr_type_table.insert(span, self.recorded_type_for(expr, &ty));
+            self.expr_type_table
+                .insert(span, self.recorded_type_for(expr, &ty));
         }
         Ok(ty)
     }
@@ -1525,10 +1526,14 @@ impl TypeInferenceEngine {
                     // With a degraded fresh-var scrutinee the ownership check
                     // returns Ok and binds payload vars from the pattern's own
                     // `enum_name`, so payload binders stay correctly typed.
-                    if let Err(err) =
-                        self.bind_pattern_vars_typed(&arm.pattern, Some(&scrutinee_type))
-                    {
-                        deferred_err.get_or_insert(err);
+                    match self.bind_pattern_vars_typed(&arm.pattern, Some(&scrutinee_type)) {
+                        Ok(()) => self.record_binding_facts_for_match_pattern(
+                            &arm.pattern,
+                            shape_ast::ast::Spanned::span(match_expr.scrutinee.as_ref()),
+                        ),
+                        Err(err) => {
+                            deferred_err.get_or_insert(err);
+                        }
                     }
 
                     // Check guard if present
@@ -1808,7 +1813,7 @@ impl TypeInferenceEngine {
                 fn collect_pattern_names(p: &shape_ast::ast::Pattern, out: &mut Vec<String>) {
                     use shape_ast::ast::Pattern::*;
                     match p {
-                        Identifier(n) => out.push(n.clone()),
+                        Identifier { name, .. } => out.push(name.clone()),
                         Typed { name, .. } => out.push(name.clone()),
                         Object(fields) => {
                             for (_k, sub) in fields {
@@ -1842,7 +1847,7 @@ impl TypeInferenceEngine {
                     {
                         for (key, sub) in fields {
                             let binder = match sub {
-                                shape_ast::ast::Pattern::Identifier(n) => n.as_str(),
+                                shape_ast::ast::Pattern::Identifier { name, .. } => name.as_str(),
                                 _ => key.as_str(),
                             };
                             let field_ty = self
@@ -1870,7 +1875,7 @@ impl TypeInferenceEngine {
                         // no fabrication). PER-SITE-ARM, int != number preserved.
                         for (key, sub) in fields {
                             let binder = match sub {
-                                shape_ast::ast::Pattern::Identifier(n) => n.as_str(),
+                                shape_ast::ast::Pattern::Identifier { name, .. } => name.as_str(),
                                 _ => key.as_str(),
                             };
                             let field_ty = elem_fields
@@ -2868,7 +2873,7 @@ impl TypeInferenceEngine {
         use shape_ast::ast::{Pattern, PatternConstructorFields};
 
         match pattern {
-            Pattern::Identifier(name) => {
+            Pattern::Identifier { name, .. } => {
                 // A bare capitalized identifier that names a known unit enum
                 // variant is a refutable variant pattern, not a binder — it
                 // introduces no binding and must not shadow the variant name
@@ -2879,13 +2884,16 @@ impl TypeInferenceEngine {
                 {
                     // Refutable unit-variant pattern — binds nothing.
                 } else {
-                    let var_type = self.fresh_type_var();
+                    let var_type = scrutinee
+                        .cloned()
+                        .unwrap_or_else(|| self.fresh_type_var());
                     self.env.define(name, TypeScheme::mono(var_type));
                 }
             }
             Pattern::Typed {
                 name,
                 type_annotation,
+                ..
             } => {
                 let var_type = self.resolve_type_annotation(type_annotation);
                 self.env.define(name, TypeScheme::mono(var_type));
@@ -2921,7 +2929,13 @@ impl TypeInferenceEngine {
                     self.bind_pattern_vars_typed(p, field_ty.as_ref())?;
                     // For a plain identifier field, override the
                     // fresh-var binding with the resolved field type.
-                    if let (Pattern::Identifier(bind_name), Some(ft)) = (p, &field_ty) {
+                    if let (
+                        Pattern::Identifier {
+                            name: bind_name, ..
+                        },
+                        Some(ft),
+                    ) = (p, &field_ty)
+                    {
                         self.env.define(bind_name, TypeScheme::mono(ft.clone()));
                     }
                 }
@@ -3046,7 +3060,13 @@ impl TypeInferenceEngine {
                             // For a plain identifier binder, override the
                             // fresh-var define with the resolved payload
                             // type — same shape as the Object/Struct arms.
-                            if let (Pattern::Identifier(bind_name), Some(ft)) = (p, &field_ty) {
+                            if let (
+                                Pattern::Identifier {
+                                    name: bind_name, ..
+                                },
+                                Some(ft),
+                            ) = (p, &field_ty)
+                            {
                                 self.env.define(bind_name, TypeScheme::mono(ft.clone()));
                             }
                         }
@@ -3080,7 +3100,13 @@ impl TypeInferenceEngine {
                                 })
                             };
                             self.bind_pattern_vars_typed(p, field_ty.as_ref())?;
-                            if let (Pattern::Identifier(bind_name), Some(ft)) = (p, &field_ty) {
+                            if let (
+                                Pattern::Identifier {
+                                    name: bind_name, ..
+                                },
+                                Some(ft),
+                            ) = (p, &field_ty)
+                            {
                                 self.env.define(bind_name, TypeScheme::mono(ft.clone()));
                             }
                         }

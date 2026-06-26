@@ -279,7 +279,7 @@ fn is_catch_all_pattern(pattern: &Pattern) -> bool {
         // Wildcard matches everything
         Pattern::Wildcard => true,
         // Identifier without guard matches everything
-        Pattern::Identifier(_) => true,
+        Pattern::Identifier { .. } => true,
         // Other patterns are not catch-all
         _ => false,
     }
@@ -502,6 +502,7 @@ mod tests {
                 make_match_arm(
                     Pattern::Typed {
                         name: "n".to_string(),
+                        name_span: make_span(),
                         type_annotation: TypeAnnotation::Basic("int".to_string()),
                     },
                     None,
@@ -510,6 +511,7 @@ mod tests {
                 make_match_arm(
                     Pattern::Typed {
                         name: "s".to_string(),
+                        name_span: make_span(),
                         type_annotation: TypeAnnotation::Basic("string".to_string()),
                     },
                     None,
@@ -533,6 +535,7 @@ mod tests {
             arms: vec![make_match_arm(
                 Pattern::Typed {
                     name: "n".to_string(),
+                    name_span: make_span(),
                     type_annotation: TypeAnnotation::Basic("int".to_string()),
                 },
                 None,

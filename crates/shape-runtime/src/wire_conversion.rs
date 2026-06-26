@@ -28,7 +28,7 @@ use crate::Context;
 use crate::marshal::MarshalError;
 use arrow_ipc::{reader::FileReader, writer::FileWriter};
 use shape_value::heap_value::HeapValue;
-use shape_value::{DataTable, HeapKind, NativeKind};
+use shape_value::{DataTable, HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot};
 use shape_wire::{DurationUnit as WireDurationUnit, ValueEnvelope, WireTable, WireValue};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -228,13 +228,18 @@ fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
             .cloned()
             .or_else(|| crate::type_schema::lookup_schema_by_id_public(schema_id as u32));
         if let Some(schema) = schema {
+            if let Some(wire) =
+                typed_object_result_option_to_wire(schema.name.as_str(), storage, ctx)
+            {
+                return wire;
+            }
             let mut map = BTreeMap::new();
             for field_def in &schema.fields {
                 let idx = field_def.index as usize;
                 if idx >= slots.len() {
                     continue;
                 }
-                let Some(field_kind) = schema.field_kind(idx) else {
+                let Some(field_kind) = storage.field_kinds.get(idx).copied() else {
                     continue;
                 };
                 let field_bits = slots[idx].raw();
@@ -251,13 +256,7 @@ fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
                 // sibling discipline at L47-74. Non-heap-kind fields
                 // (scalar Bool / Int / etc.) are bit-pattern-valid
                 // regardless of mask state.
-                let is_heap_kind = matches!(
-                    field_kind,
-                    NativeKind::String
-                        | NativeKind::StringV2
-                        | NativeKind::DecimalV2
-                        | NativeKind::Ptr(_)
-                );
+                let is_heap_kind = field_is_heap_like(field_kind);
                 if is_heap_kind && ((heap_mask >> idx) & 1 == 0) {
                     map.insert(field_def.name.clone(), WireValue::Null);
                     continue;
@@ -280,6 +279,71 @@ fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
         hv.kind()
     );
     heap_value_to_wire(hv, ctx)
+}
+
+fn typed_object_result_option_to_wire(
+    schema_name: &str,
+    storage: &TypedObjectStorage,
+    ctx: &Context,
+) -> Option<WireValue> {
+    use crate::type_schema::builtin_schemas::{
+        OPTION_PAYLOAD, OPTION_VARIANT, OPTION_VARIANT_NONE, OPTION_VARIANT_SOME, RESULT_PAYLOAD,
+        RESULT_VARIANT, RESULT_VARIANT_ERR, RESULT_VARIANT_OK,
+    };
+
+    let slots = storage.slots();
+    match schema_name {
+        "__Result"
+            if slots.len() > RESULT_PAYLOAD && storage.field_kinds.len() > RESULT_PAYLOAD =>
+        {
+            let ok = match slots[RESULT_VARIANT].as_i64() {
+                RESULT_VARIANT_OK => true,
+                RESULT_VARIANT_ERR => false,
+                _ => return None,
+            };
+            Some(WireValue::Result {
+                ok,
+                value: Box::new(typed_object_field_to_wire(storage, RESULT_PAYLOAD, ctx)),
+            })
+        }
+        "__Option"
+            if slots.len() > OPTION_PAYLOAD && storage.field_kinds.len() > OPTION_PAYLOAD =>
+        {
+            match slots[OPTION_VARIANT].as_i64() {
+                OPTION_VARIANT_SOME => {
+                    Some(typed_object_field_to_wire(storage, OPTION_PAYLOAD, ctx))
+                }
+                OPTION_VARIANT_NONE => Some(WireValue::Null),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn typed_object_field_to_wire(
+    storage: &TypedObjectStorage,
+    idx: usize,
+    ctx: &Context,
+) -> WireValue {
+    let Some(field_kind) = storage.field_kinds.get(idx).copied() else {
+        return WireValue::Null;
+    };
+    let Some(slot) = storage.slots().get(idx) else {
+        return WireValue::Null;
+    };
+    let field_bits = slot.raw();
+    if field_is_heap_like(field_kind) && ((storage.heap_mask >> idx) & 1 == 0 || field_bits == 0) {
+        return WireValue::Null;
+    }
+    slot_to_wire(field_bits, field_kind, ctx)
+}
+
+fn field_is_heap_like(kind: NativeKind) -> bool {
+    matches!(
+        kind,
+        NativeKind::String | NativeKind::StringV2 | NativeKind::DecimalV2 | NativeKind::Ptr(_)
+    )
 }
 
 /// Project a `&HeapValue` to `WireValue` by dispatching on its
@@ -543,6 +607,7 @@ pub fn wire_to_slot(wire: &WireValue, expected_kind: NativeKind) -> Result<u64, 
         (WireValue::Integer(i), NativeKind::Int64) => Ok(*i as u64),
         (WireValue::Bool(b), NativeKind::Bool) => Ok(*b as u64),
         (WireValue::Null, NativeKind::NullableFloat64) => Ok(f64::to_bits(f64::NAN)),
+        (WireValue::Null, NativeKind::Null) => Ok(0),
         (WireValue::String(s), NativeKind::String) => {
             let arc = Arc::new(s.clone());
             Ok(Arc::into_raw(arc) as u64)
@@ -568,6 +633,13 @@ pub fn wire_to_slot(wire: &WireValue, expected_kind: NativeKind) -> Result<u64, 
             let arc = Arc::new(HeapValue::DataTable(Arc::new(dt)));
             Ok(Arc::into_raw(arc) as u64)
         }
+        (WireValue::Result { ok, value }, NativeKind::Ptr(HeapKind::TypedObject)) => {
+            let payload = wire_payload_to_kinded_slot(value)?;
+            Ok(build_builtin_result_typed_object(*ok, payload))
+        }
+        (WireValue::Null, NativeKind::Ptr(HeapKind::TypedObject)) => {
+            Ok(build_builtin_option_typed_object(false, KindedSlot::none()))
+        }
         // Calling site passed a wire/kind pair we don't currently handle.
         // The strict-typed answer is to extend this match, not fall back —
         // each new case represents a concrete stdlib/wire shape, and
@@ -577,6 +649,106 @@ pub fn wire_to_slot(wire: &WireValue, expected_kind: NativeKind) -> Result<u64, 
             expected_kind
         ))),
     }
+}
+
+fn wire_payload_to_kinded_slot(wire: &WireValue) -> Result<KindedSlot, MarshalError> {
+    let slot = match wire {
+        WireValue::Null => KindedSlot::none(),
+        WireValue::Bool(b) => KindedSlot::new(
+            ValueSlot::from_raw(if *b { 1 } else { 0 }),
+            NativeKind::Bool,
+        ),
+        WireValue::Number(n) => {
+            KindedSlot::new(ValueSlot::from_raw(n.to_bits()), NativeKind::Float64)
+        }
+        WireValue::Integer(i) => KindedSlot::new(ValueSlot::from_raw(*i as u64), NativeKind::Int64),
+        WireValue::I8(n) => {
+            KindedSlot::new(ValueSlot::from_raw((*n as i64) as u64), NativeKind::Int8)
+        }
+        WireValue::U8(n) => KindedSlot::new(ValueSlot::from_raw(*n as u64), NativeKind::UInt8),
+        WireValue::I16(n) => {
+            KindedSlot::new(ValueSlot::from_raw((*n as i64) as u64), NativeKind::Int16)
+        }
+        WireValue::U16(n) => KindedSlot::new(ValueSlot::from_raw(*n as u64), NativeKind::UInt16),
+        WireValue::I32(n) => {
+            KindedSlot::new(ValueSlot::from_raw((*n as i64) as u64), NativeKind::Int32)
+        }
+        WireValue::U32(n) => KindedSlot::new(ValueSlot::from_raw(*n as u64), NativeKind::UInt32),
+        WireValue::I64(n) => KindedSlot::new(ValueSlot::from_raw(*n as u64), NativeKind::Int64),
+        WireValue::U64(n) => KindedSlot::new(ValueSlot::from_raw(*n), NativeKind::UInt64),
+        WireValue::Isize(n) => KindedSlot::new(ValueSlot::from_raw(*n as u64), NativeKind::IntSize),
+        WireValue::Usize(n) => KindedSlot::new(ValueSlot::from_raw(*n), NativeKind::UIntSize),
+        WireValue::F32(n) => {
+            KindedSlot::new(ValueSlot::from_raw(n.to_bits() as u64), NativeKind::Float32)
+        }
+        WireValue::String(s) => KindedSlot::from_string_arc(Arc::new(s.clone())),
+        WireValue::Result { ok, value } => {
+            let payload = wire_payload_to_kinded_slot(value)?;
+            KindedSlot::new(
+                ValueSlot::from_raw(build_builtin_result_typed_object(*ok, payload)),
+                NativeKind::Ptr(HeapKind::TypedObject),
+            )
+        }
+        other => {
+            return Err(MarshalError::Body(format!(
+                "wire_to_slot: no Result/Option payload projection for wire variant {}",
+                other.type_name()
+            )));
+        }
+    };
+    Ok(slot)
+}
+
+fn build_builtin_result_typed_object(ok: bool, payload: KindedSlot) -> u64 {
+    use crate::type_schema::builtin_schemas::{RESULT_VARIANT_ERR, RESULT_VARIANT_OK};
+    let (_registry, schemas) =
+        crate::type_schema::TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+    build_builtin_variant_typed_object(
+        schemas.result as u64,
+        if ok {
+            RESULT_VARIANT_OK
+        } else {
+            RESULT_VARIANT_ERR
+        },
+        payload,
+    )
+}
+
+fn build_builtin_option_typed_object(is_some: bool, payload: KindedSlot) -> u64 {
+    use crate::type_schema::builtin_schemas::{OPTION_VARIANT_NONE, OPTION_VARIANT_SOME};
+    let (_registry, schemas) =
+        crate::type_schema::TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+    build_builtin_variant_typed_object(
+        schemas.option as u64,
+        if is_some {
+            OPTION_VARIANT_SOME
+        } else {
+            OPTION_VARIANT_NONE
+        },
+        payload,
+    )
+}
+
+fn build_builtin_variant_typed_object(schema_id: u64, variant: i64, payload: KindedSlot) -> u64 {
+    use crate::type_schema::builtin_schemas::OPTION_PAYLOAD;
+    let payload_slot = payload.slot();
+    let payload_kind = payload.kind();
+    let payload_bits = payload_slot.raw();
+    let heap_mask = if payload_bits != 0 && field_is_heap_like(payload_kind) {
+        1u64 << OPTION_PAYLOAD
+    } else {
+        0
+    };
+    let field_kinds: Arc<[NativeKind]> =
+        Arc::from(vec![NativeKind::Int64, payload_kind].into_boxed_slice());
+    let ptr = TypedObjectStorage::_new(
+        schema_id,
+        vec![ValueSlot::from_int(variant), payload_slot].into_boxed_slice(),
+        heap_mask,
+        field_kinds,
+    );
+    std::mem::forget(payload);
+    ptr as u64
 }
 
 /// Wrap a typed slot in a `ValueEnvelope` with optional metadata.
@@ -963,5 +1135,127 @@ mod ws3_f2b_result_option_wire_tests {
         let slot = KindedSlot::from_option(Arc::new(OptionData::none()));
         let wire = slot_to_wire(slot.raw(), slot.kind(), &ctx);
         assert_eq!(wire, WireValue::Null);
+    }
+}
+
+#[cfg(test)]
+mod l5_typed_object_result_option_wire_tests {
+    use super::{slot_to_wire, wire_to_slot};
+    use crate::context::ExecutionContext;
+    use crate::type_schema::builtin_schemas::{
+        OPTION_PAYLOAD, OPTION_VARIANT_NONE, OPTION_VARIANT_SOME, RESULT_VARIANT_ERR,
+        RESULT_VARIANT_OK, resolve_builtin_schema_ids,
+    };
+    use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot};
+    use shape_wire::WireValue;
+    use std::sync::Arc;
+
+    fn variant_object(schema_id: u64, variant: i64, payload: KindedSlot) -> KindedSlot {
+        let payload_slot = payload.slot();
+        let payload_kind = payload.kind();
+        let payload_bits = payload_slot.raw();
+        let heap_mask = if payload_bits != 0
+            && matches!(
+                payload_kind,
+                NativeKind::String
+                    | NativeKind::StringV2
+                    | NativeKind::DecimalV2
+                    | NativeKind::Ptr(_)
+            ) {
+            1u64 << OPTION_PAYLOAD
+        } else {
+            0
+        };
+        let field_kinds: Arc<[NativeKind]> =
+            Arc::from(vec![NativeKind::Int64, payload_kind].into_boxed_slice());
+        let ptr = TypedObjectStorage::_new(
+            schema_id,
+            vec![ValueSlot::from_int(variant), payload_slot].into_boxed_slice(),
+            heap_mask,
+            field_kinds,
+        );
+        std::mem::forget(payload);
+        KindedSlot::from_typed_object_raw(ptr)
+    }
+
+    #[test]
+    fn schema_backed_result_projects_to_wire_result() {
+        let ctx = ExecutionContext::new_empty();
+        let schemas = resolve_builtin_schema_ids(ctx.type_schema_registry()).unwrap();
+        let ok = variant_object(
+            schemas.result as u64,
+            RESULT_VARIANT_OK,
+            KindedSlot::from_int(42),
+        );
+        let err = variant_object(
+            schemas.result as u64,
+            RESULT_VARIANT_ERR,
+            KindedSlot::from_string_arc(Arc::new("bad".to_string())),
+        );
+
+        match slot_to_wire(ok.raw(), ok.kind(), &ctx) {
+            WireValue::Result { ok, value } => {
+                assert!(ok);
+                assert_eq!(*value, WireValue::Integer(42));
+            }
+            other => panic!("expected wire Result Ok, got {other:?}"),
+        }
+        match slot_to_wire(err.raw(), err.kind(), &ctx) {
+            WireValue::Result { ok, value } => {
+                assert!(!ok);
+                assert_eq!(*value, WireValue::String("bad".to_string()));
+            }
+            other => panic!("expected wire Result Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_backed_option_projects_to_null_coding() {
+        let ctx = ExecutionContext::new_empty();
+        let schemas = resolve_builtin_schema_ids(ctx.type_schema_registry()).unwrap();
+        let some = variant_object(
+            schemas.option as u64,
+            OPTION_VARIANT_SOME,
+            KindedSlot::from_int(7),
+        );
+        let none = variant_object(
+            schemas.option as u64,
+            OPTION_VARIANT_NONE,
+            KindedSlot::none(),
+        );
+
+        assert_eq!(
+            slot_to_wire(some.raw(), some.kind(), &ctx),
+            WireValue::Integer(7)
+        );
+        assert_eq!(slot_to_wire(none.raw(), none.kind(), &ctx), WireValue::Null);
+    }
+
+    #[test]
+    fn wire_result_and_null_restore_to_schema_backed_typed_objects() {
+        let ok = WireValue::Result {
+            ok: true,
+            value: Box::new(WireValue::Integer(11)),
+        };
+        let ok_bits =
+            wire_to_slot(&ok, NativeKind::Ptr(HeapKind::TypedObject)).expect("restore ok");
+        let ok_storage = unsafe { &*(ok_bits as *const TypedObjectStorage) };
+        assert_eq!(ok_storage.slots()[0].as_i64(), RESULT_VARIANT_OK);
+        assert_eq!(ok_storage.field_kinds[1], NativeKind::Int64);
+
+        let none_bits = wire_to_slot(&WireValue::Null, NativeKind::Ptr(HeapKind::TypedObject))
+            .expect("restore none");
+        let none_storage = unsafe { &*(none_bits as *const TypedObjectStorage) };
+        assert_eq!(none_storage.slots()[0].as_i64(), OPTION_VARIANT_NONE);
+        assert_eq!(none_storage.field_kinds[1], NativeKind::Null);
+
+        drop(KindedSlot::new(
+            ValueSlot::from_raw(ok_bits),
+            NativeKind::Ptr(HeapKind::TypedObject),
+        ));
+        drop(KindedSlot::new(
+            ValueSlot::from_raw(none_bits),
+            NativeKind::Ptr(HeapKind::TypedObject),
+        ));
     }
 }

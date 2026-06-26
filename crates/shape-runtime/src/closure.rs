@@ -855,7 +855,7 @@ impl EnvironmentAnalyzer {
         use shape_ast::ast::Pattern;
 
         match pattern {
-            Pattern::Identifier(name) => {
+            Pattern::Identifier { name, .. } => {
                 self.define_variable(name);
             }
             Pattern::Typed { name, .. } => {

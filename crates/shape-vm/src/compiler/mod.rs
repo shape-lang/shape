@@ -52,8 +52,8 @@ use crate::type_tracking::{TypeTracker, VariableTypeInfo};
 use shape_ast::ast::{FunctionDef, Program, Span, TypeAnnotation};
 use shape_runtime::type_schema::SchemaId;
 use shape_runtime::type_system::{
-    Type, TypeAnalysisMode, TypeError, TypeErrorWithLocation, analyze_program_with_mode,
-    checking::MethodTable,
+    InferenceFacts, Type, TypeAnalysisMode, TypeError, TypeErrorWithLocation,
+    analyze_program_with_mode, checking::MethodTable,
 };
 
 // Sub-modules
@@ -577,6 +577,30 @@ pub(crate) struct EmptyArrayAccumulator {
     pub var_name: String,
 }
 
+/// Source of a slot-scoped concrete binding fact consumed by monomorphization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BindingConcreteFactSource {
+    DeclaredAnnotation,
+    FunctionSignature,
+    StructuralInitializer,
+    MonomorphizedCallReturn,
+    EmptyArrayAccumulator,
+    ArrayPushElement,
+    IteratorElement,
+    MatchPayload,
+}
+
+/// Explicit slot-scoped concrete binding fact.
+///
+/// These facts are derived from a single proof point and are the transition
+/// carrier for non-span VM projections that runtime `InferenceFacts` cannot
+/// own directly, such as post-monomorphized method-call returns.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BindingConcreteFact {
+    pub concrete_type: shape_value::v2::ConcreteType,
+    pub source: BindingConcreteFactSource,
+}
+
 /// Compiler state
 pub struct BytecodeCompiler {
     /// The program being built
@@ -767,30 +791,6 @@ pub struct BytecodeCompiler {
     pub(crate) module_binding_callable_return_reference_summaries:
         HashMap<u16, FunctionReturnReferenceSummary>,
 
-    /// Sweep phase 3c.1: inferred return-type names for closures stored in
-    /// local slots. Populated when `update_callable_binding_from_expr`
-    /// observes a `FunctionExpr` initializer; consumed by `infer_expr_type`
-    /// so a `FunctionCall { name: f, .. }` against `let f = |…| body` can
-    /// recover the body's return type for strict-typing binop dispatch.
-    pub(crate) local_callable_return_types: HashMap<u16, String>,
-
-    /// Sweep phase 3c.1: inferred return-type names for closures stored in
-    /// module-binding slots (top-level / REPL `let f = |…|` style).
-    pub(crate) module_binding_callable_return_types: HashMap<u16, String>,
-
-    /// Sweep phase 3c.x: inferred return-type names for arrays whose elements
-    /// are closure literals with a homogeneous return type. Keyed by the
-    /// local slot holding the array. Consumed by `infer_expr_type` for the
-    /// `arr[i](args...)` callsite (which the parser models as
-    /// `MethodCall { method: "__call__", receiver: IndexAccess { .. } }`).
-    /// Without this lookup, `arr[0](1) + arr[1](1)` fails strict-typing as
-    /// `unknown + unknown`.
-    pub(crate) local_array_callable_return_types: HashMap<u16, String>,
-
-    /// Sweep phase 3c.x: inferred return-type names for arrays of closures
-    /// stored in module-binding slots (top-level `let arr = [|x| ..., ...]`).
-    pub(crate) module_binding_array_callable_return_types: HashMap<u16, String>,
-
     /// cluster-2-cw-IB-class-b (2026-05-16, supervisor R3 binding-
     /// ratified): retained closure-literal body for local `let f = |..|
     /// ..` bindings. Populated at let-binding time by
@@ -803,8 +803,7 @@ pub struct BytecodeCompiler {
     /// occurs at lookup time — the inference walker only inspects AST
     /// shape, never emits bytecode for the body). Released on
     /// `clear_callable_binding` and on per-function compilation
-    /// snapshot/restore alongside the existing `local_callable_*`
-    /// maps (`functions.rs:1148-1151` / `:1496-1499` / `:1607-1608`).
+    /// snapshot/restore alongside the other local callable maps.
     ///
     /// Memory cost: bounded by the number of local closure bindings in
     /// the active function frame; the body is the same AST already held
@@ -817,9 +816,7 @@ pub struct BytecodeCompiler {
     /// cluster-2-cw-IB-class-b: module-binding variant of the closure
     /// body peek. Covers top-level / REPL `let f = |..|` bindings whose
     /// slots live in the module-binding space (not the local-slot
-    /// space). Populated/cleared alongside the existing
-    /// `module_binding_callable_return_types` map at the
-    /// `update_callable_binding_from_expr` `FunctionExpr` arm.
+    /// space). Populated/cleared by `update_callable_binding_from_expr`.
     pub(crate) module_binding_callable_closure_bodies: HashMap<u16, ClosureBodyPeek>,
 
     /// ADR-006 §2.7.24 Q25.C trait-object emission (Wave 2.6 round-2):
@@ -879,6 +876,12 @@ pub struct BytecodeCompiler {
 
     /// Type inference engine for match exhaustiveness and type checking
     pub(crate) type_inference: shape_runtime::type_system::inference::TypeInferenceEngine,
+
+    /// Canonical facts from the same best-effort inference pass that populated
+    /// `resolved_expr_types`. Later compiler phases derive function signature
+    /// projections from this carrier directly instead of maintaining parallel
+    /// per-param side tables.
+    pub(crate) inference_facts: InferenceFacts,
 
     /// T1 KEYSTONE (strict-flip, 2026-06-22): POST-SOLVE per-expression type
     /// table keyed by source span, harvested from the reference-model inference
@@ -1176,22 +1179,6 @@ pub struct BytecodeCompiler {
     /// element type NAME (`"int"` / `"number"` / `"string"` / …) of the array
     /// being destructured by the enclosing `let [a, b] = <Array<T>>`. Set from
     /// `concrete_type_for_expr(init).Array(elem)` at the VariableDecl
-    /// destructure site immediately before `compile_destructure_pattern*`, read
-    /// by the `DestructurePattern::Array` arm to stamp each element binding's
-    /// tracker type to the proven element type. Without it the binding kept an
-    /// `unknown` kind and `let bad: int = a` (a: number) was silently accepted.
-    /// `None` when the destructured receiver is not a proven concrete
-    /// `Array<T>` (the binding then carries no element hint — same as before).
-    ///
-    /// strict-flip S1 (nested-destructure extension, 2026-06-22): carries the
-    /// proven ELEMENT `ConcreteType` of the array currently being destructured
-    /// (not a flattened name) so the destructure recursion can peel one
-    /// `Array<…>` layer per nesting level — `let [[a,b],[c,d]] = <Array<Array<T>>>`
-    /// stamps a,b,c,d to the innermost proven element type `T`. A leaf
-    /// identifier is stamped with this element type's name; a nested `Array`
-    /// sub-pattern descends with the peeled inner element type.
-    pub(crate) pending_array_destructure_element_type: Option<shape_value::v2::ConcreteType>,
-
     /// ADR-006 §2.7.27 / Item 4 ruling (W17-mutation-writeback, 2026-05-12):
     /// per-local-slot record of locals known to hold a Copy-on-Write
     /// collection (HashSet / HashMap / Deque / PriorityQueue / Array of
@@ -1222,29 +1209,6 @@ pub struct BytecodeCompiler {
     /// [`pending_variable_typed_array_kind`] convention.
     pub(crate) pending_variable_container_kind:
         Option<crate::compiler::mutation_writeback::ContainerKind>,
-
-    /// v2 Phase 3.2: per-AST-node side table mapping a HashMap-shaped
-    /// expression to its key/value `ConcreteType` pair. Populated by the
-    /// `let m: HashMap<K, V> = ...` annotation path AND by inference helpers
-    /// (`infer_hashmap_kv_from_context`).
-    pub(crate) map_key_value_types: HashMap<
-        shape_ast::ast::Span,
-        (shape_value::v2::ConcreteType, shape_value::v2::ConcreteType),
-    >,
-
-    /// v2 Phase 3.2: per-local-slot side table for HashMap key/value pairs.
-    pub(crate) local_map_key_value_types:
-        HashMap<u16, (shape_value::v2::ConcreteType, shape_value::v2::ConcreteType)>,
-
-    /// v2 Phase 3.2: per-module-binding side table for HashMap key/value pairs.
-    pub(crate) module_binding_map_key_value_types:
-        HashMap<u16, (shape_value::v2::ConcreteType, shape_value::v2::ConcreteType)>,
-
-    /// v2 Phase 3.2: per-local-slot array element type table.
-    pub(crate) local_array_element_types: HashMap<u16, shape_value::v2::ConcreteType>,
-
-    /// v2 Phase 3.2: per-module-binding array element type table.
-    pub(crate) module_binding_array_element_types: HashMap<u16, shape_value::v2::ConcreteType>,
 
     /// Lexical names that will later need their binding value to remain a raw reference.
     /// This is only used to choose `Value` vs `PreserveRef` lowering for bindings; MIR
@@ -1365,82 +1329,6 @@ pub struct BytecodeCompiler {
     pub(crate) inferred_ref_mutates: HashMap<String, Vec<bool>>,
     /// Effective per-parameter pass mode (explicit + inferred), by function name.
     pub(crate) inferred_param_pass_modes: HashMap<String, Vec<ParamPassMode>>,
-    /// Inferred parameter type hints for unannotated params.
-    /// Keyed by function name; each entry is a per-param optional type string.
-    pub(crate) inferred_param_type_hints: HashMap<String, Vec<Option<String>>>,
-    /// v0.3 WS-7: inference-resolved per-parameter `ConcreteType` for
-    /// UNANNOTATED params. Keyed by function name; each entry is a per-param
-    /// optional `ConcreteType` projected from the program-wide type-inference
-    /// engine's result. Annotated params keep `None` here (their
-    /// `ConcreteType` is stamped directly from the annotation in the
-    /// `function_local_concrete_types` per-fn seeding pass). This is the
-    /// proof source that lets the JIT take the v2 typed-array fast path for
-    /// `fn get(xs, i) { xs[i] }`-style unannotated array parameters — without
-    /// it the slot stays `ConcreteType::Void`, the JIT mis-classifies the v2
-    /// `TypedArray` pointer as a NaN-boxed v1 array, and the inline index
-    /// load reads garbage / SIGSEGVs.
-    pub(crate) inferred_param_concrete_types:
-        HashMap<String, Vec<Option<shape_value::v2::ConcreteType>>>,
-    /// Wave 1a PART B: inference-resolved per-parameter FUNCTION-TYPE param
-    /// annotations for UNANNOTATED params that the whole-program inference
-    /// engine determined are USED AS CALLABLES in the function body
-    /// (`fn apply2(f, x, y) { f(x, y) }` → `f` inferred `fn(int,int)->_`).
-    ///
-    /// Keyed by function name; each entry is a per-param
-    /// `Option<Vec<TypeAnnotation>>`: the inner `Vec` holds one concrete
-    /// `TypeAnnotation` per callable-param argument, present ONLY when EVERY
-    /// argument position resolved to a concrete (non-variable, non-`unknown`)
-    /// type. A param the engine did not infer as a function, or whose
-    /// signature has any unresolved argument type, stays `None` here — the
-    /// closure argument then keeps its existing compile path (no fabrication,
-    /// no `any`, no Bool-default; an un-inferable usage keeps its rejection).
-    ///
-    /// Consumed at the call site by
-    /// `install_pending_closure_param_types_for_inferred_fn_param`: when the
-    /// matching argument is a closure literal whose user-param count equals the
-    /// inferred signature arity, the per-arg annotations seed
-    /// `pending_closure_param_types`, so `|a, b| a * b` compiles as
-    /// `|a: int, b: int|`. This is the higher-ranked extension of PART A's
-    /// let-bound-closure call-site inference to fn-typed function parameters.
-    pub(crate) inferred_param_fn_param_types:
-        HashMap<String, Vec<Option<Vec<shape_ast::ast::TypeAnnotation>>>>,
-    /// WS-9b: inference-resolved per-parameter ANONYMOUS-OBJECT field
-    /// definitions for UNANNOTATED params. Keyed by function name; each
-    /// entry is a per-param optional `Vec<(field_name, FieldType)>`.
-    ///
-    /// A *named* struct parameter (`type Box`) resolves through the schema
-    /// registry — `set_local_type_info` already stamps its `schema_id` from
-    /// the `"Box"` hint name. But an *anonymous* object parameter (the shape
-    /// `fn aabb(...) { { min_x: ..., ... } }` produces) has no named schema:
-    /// its inference hint is the structural string `"{min_x: number, ...}"`,
-    /// which matches no registered schema. `compile_function_body` consumes
-    /// this map to register an inline `__inline_obj_*` schema for such a
-    /// parameter and stamp the slot's `schema_id`, so `param.field` resolves
-    /// to the proven field type the same way a named-struct field does. The
-    /// field types are projected from inference's resolved param `Type` —
-    /// proven, never fabricated; an unresolved field yields `None`.
-    pub(crate) inferred_param_object_fields:
-        HashMap<String, Vec<Option<Vec<(String, shape_runtime::type_schema::FieldType)>>>>,
-    /// WS-9c: per-function inferred RETURN type projected to a
-    /// `Vec<(field_name, FieldType)>` when that return type is an anonymous
-    /// structural object (an unannotated object-literal factory such as
-    /// `fn aabb(lo, hi) { {min: lo, max: hi} }`). `compile_expr_function_call`
-    /// consumes this to register an inline anonymous schema for the call's
-    /// result so `aabb(...).field` / `let a = aabb(...); a.field` resolves to
-    /// the proven field type — the same resolution a named-struct return type
-    /// already receives. Only unannotated functions appear here (annotated
-    /// returns resolve through the annotation path). Field types are projected
-    /// from inference's resolved return `Type` — proven, never fabricated.
-    pub(crate) inferred_return_object_fields:
-        HashMap<String, Vec<(String, shape_runtime::type_schema::FieldType)>>,
-    /// WS-9c: function name → registered inline anonymous schema id for an
-    /// unannotated function whose inferred return type is an anonymous
-    /// object. Populated once, up-front, by
-    /// `register_inferred_return_object_schemas`. Consulted by
-    /// `compile_expr_function_call` (to stamp `last_expr_schema`) and by the
-    /// read-only `infer_expr_type` property-access path (to resolve
-    /// `f(...).field` directly, with no `let` binding).
-    pub(crate) function_return_schema_ids: HashMap<String, u32>,
     /// Stack of scopes, each containing locals that need Drop calls at scope exit.
     /// Each entry is (local_index, is_async).
     pub(crate) drop_locals: Vec<Vec<(u16, bool)>>,
@@ -1679,8 +1567,15 @@ pub struct BytecodeCompiler {
     /// Module dependency graph (set during graph-driven compilation).
     pub(crate) module_graph: Option<std::sync::Arc<crate::module_graph::ModuleGraph>>,
 
-    /// Per-local-slot concrete type table for the function currently being compiled.
-    pub(crate) current_function_local_concrete_types: HashMap<u16, shape_value::v2::ConcreteType>,
+    /// Explicit concrete facts for local bindings in the current function.
+    /// This is the fact carrier consumed by monomorphization identifier lookup.
+    pub(crate) current_function_local_concrete_facts: HashMap<u16, BindingConcreteFact>,
+
+    /// Per-local-slot AST binder span for the function currently being compiled.
+    /// This bridges VM slot identity to runtime `InferenceFacts` without
+    /// re-parsing initializer expressions or keeping collection-specific
+    /// carrier tables.
+    pub(crate) local_binding_spans: HashMap<u16, shape_ast::ast::Span>,
 
     /// Capture names invoked as a callee (`g(...)`) inside the closure
     /// literal currently being compiled. Populated by `compile_expr_closure`
@@ -1694,33 +1589,14 @@ pub struct BytecodeCompiler {
     /// `call_value_immediate_nb` callee match. Cleared after each closure.
     pub(crate) current_closure_callee_captures: std::collections::BTreeSet<String>,
 
-    /// v0.3 WS-6 — per-module-binding concrete type table, populated at
-    /// let-binding time from the binding's explicit `TypeAnnotation`.
-    ///
-    /// Consumed by the monomorphization call-site resolver
-    /// (`identifier_concrete_type`) so a generic free-function call whose
-    /// argument is a variable with an explicit struct / enum / `Option<T>` /
-    /// `Result<T, E>` / `HashMap<K, V>` annotation can bind its type
-    /// parameter — `let n: Option<int> = ...; id(n)`. The array / map
-    /// element side-tables (`module_binding_array_element_types`,
-    /// `module_binding_map_key_value_types`) already cover the
-    /// container-element cases; this table covers the remaining
-    /// fully-annotated shapes.
-    pub(crate) module_binding_concrete_types: HashMap<u16, shape_value::v2::ConcreteType>,
+    /// Explicit concrete facts for module bindings, consumed by
+    /// monomorphization identifier lookup.
+    pub(crate) module_binding_concrete_facts: HashMap<u16, BindingConcreteFact>,
 
-    /// CaptureCarrier (ADR-006 §2.7.8 / Q10, 2026-06-18): per-binding-NAME
-    /// collection-carrier `ConcreteType` for closure-capture kind resolution
-    /// ONLY. Populated at the let-binding site when the initializer is a bare
-    /// collection constructor (`let mut m = HashMap()`), keyed by binding
-    /// name (works for both local and module-binding slots). Consumed solely
-    /// by `resolve_capture_concrete_type` →
-    /// `binding_collection_ctor_capture_type` to stamp the §2.7.8
-    /// closure-block capture `NativeKind` (V-erased outer discriminator).
-    /// Deliberately SEPARATE from `module_binding_concrete_types` /
-    /// `set_module_binding_type_info`: those feed the type-inference engine,
-    /// where a `HashMap<…>` tracker name trips the `HasField` constraint on a
-    /// subsequent method call (`m.remove(..)` → "HashMap cannot have fields").
-    pub(crate) binding_collection_carrier_kinds: HashMap<String, shape_value::v2::ConcreteType>,
+    /// Per-module-binding AST binder span. Closure capture kind resolution
+    /// consults `InferenceFacts` through this span when the regular concrete
+    /// slot tables do not carry a fact.
+    pub(crate) module_binding_spans: HashMap<u16, shape_ast::ast::Span>,
 
     /// Monomorphization cache for generic function specialization.
     pub(crate) monomorphization_cache: monomorphization::cache::MonomorphizationCache,
@@ -1789,7 +1665,7 @@ pub fn program_has_top_level_comptime(program: &Program) -> bool {
 pub fn infer_reference_model(
     program: &Program,
 ) -> (HashMap<String, Vec<bool>>, HashMap<String, Vec<bool>>) {
-    let (inferred_ref_params, inferred_ref_mutates, _, _, _, _, _, _, _) =
+    let (inferred_ref_params, inferred_ref_mutates, _, _) =
         BytecodeCompiler::infer_reference_model(program);
     (inferred_ref_params, inferred_ref_mutates)
 }
@@ -1797,7 +1673,7 @@ pub fn infer_reference_model(
 /// Infer effective parameter pass modes (`ByValue` / `ByRefShared` / `ByRefExclusive`)
 /// keyed by function name.
 pub fn infer_param_pass_modes(program: &Program) -> HashMap<String, Vec<ParamPassMode>> {
-    let (inferred_ref_params, inferred_ref_mutates, _, _, _, _, _, _, _) =
+    let (inferred_ref_params, inferred_ref_mutates, _, _) =
         BytecodeCompiler::infer_reference_model(program);
     BytecodeCompiler::build_param_pass_mode_map(
         program,

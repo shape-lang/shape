@@ -476,7 +476,7 @@ impl<'a> TokenCollector<'a> {
         };
 
         match pattern {
-            Pattern::Identifier(name) => {
+            Pattern::Identifier { name, .. } => {
                 if let Some(rel) = pattern_src.find(name) {
                     let start = pattern_span.start + rel;
                     let (line, col) = offset_to_line_col(self.source, start);
@@ -486,6 +486,7 @@ impl<'a> TokenCollector<'a> {
             Pattern::Typed {
                 name,
                 type_annotation,
+                ..
             } => {
                 if let Some(rel) = pattern_src.find(name) {
                     let start = pattern_span.start + rel;

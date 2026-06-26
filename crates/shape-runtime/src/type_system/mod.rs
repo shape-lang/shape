@@ -50,7 +50,10 @@ pub use checker::{
 };
 pub use environment::TypeEnvironment;
 pub use errors::{TypeError, TypeErrorWithLocation, TypeResult};
-pub use inference::{PropertyAssignment, PropertyAssignmentCollector, TypeInferenceEngine};
+pub use inference::{
+    BindingFact, InferenceFacts, PropertyAssignment, PropertyAssignmentCollector,
+    TypeInferenceEngine,
+};
 pub use semantic::{EnumVariant, FunctionParam, FunctionSignature, SemanticType, TypeVarId};
 pub use storage::StorageType;
 pub use universal_error::{ErrorDetails, ErrorLocation, UniversalError};

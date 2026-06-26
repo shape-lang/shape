@@ -602,7 +602,7 @@ impl super::BytecodeCompiler {
     }
 
     pub(crate) fn array_elements_all_typed_object(
-        &self,
+        &mut self,
         elements: &[shape_ast::ast::Expr],
     ) -> bool {
         use shape_ast::ast::Expr;
@@ -618,13 +618,11 @@ impl super::BytecodeCompiler {
                     // Construction strict-typing close (2026-06-05): a
                     // function with an INFERRED anonymous-object return
                     // (`fn aabb(lo, hi) { {min: lo, max: hi} }`) has no named
-                    // return type but DOES have a registered anonymous return
-                    // schema (`function_return_schema_ids`). That return is a
-                    // TypedObject, so the literal is `Array<TypedObject>` and
-                    // routes to the same v2-raw `TypedArray<*const
-                    // TypedObjectStorage>` carrier. Per ADR-006 §2.7.5 the
-                    // schema id IS the producer-side proof.
-                    if self.function_return_schema_ids.contains_key(name) {
+                    // return type but DOES have an inferred structural object
+                    // return. That return is a TypedObject, so the literal is
+                    // `Array<TypedObject>` and routes to the same v2-raw
+                    // `TypedArray<*const TypedObjectStorage>` carrier.
+                    if self.inferred_return_object_schema_id(name).is_some() {
                         continue;
                     }
                     self.function_call_return_concrete_type(name)
@@ -635,6 +633,9 @@ impl super::BytecodeCompiler {
                     ..
                 } => {
                     let qualified = format!("{}::{}", namespace, function);
+                    if self.inferred_return_object_schema_id(&qualified).is_some() {
+                        continue;
+                    }
                     self.function_call_return_concrete_type(&qualified)
                 }
                 _ => return false,
@@ -1096,18 +1097,23 @@ impl super::BytecodeCompiler {
             super::EmptyArrayAccumulatorKey::Local(local_idx) => {
                 self.v2_typed_array_locals.insert(local_idx, kind);
                 self.set_local_type_info(local_idx, array_type_name);
-                self.current_function_local_concrete_types
-                    .insert(local_idx, array_ct);
-                self.local_array_element_types.insert(local_idx, elem_ct);
+                crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                    self,
+                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                    array_ct,
+                    crate::compiler::BindingConcreteFactSource::EmptyArrayAccumulator,
+                );
             }
             super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx) => {
                 self.v2_typed_array_module_bindings
                     .insert(binding_idx, kind);
                 self.set_module_binding_type_info(binding_idx, array_type_name);
-                self.module_binding_concrete_types
-                    .insert(binding_idx, array_ct);
-                self.module_binding_array_element_types
-                    .insert(binding_idx, elem_ct);
+                crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                    self,
+                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::ModuleBinding(binding_idx),
+                    array_ct,
+                    crate::compiler::BindingConcreteFactSource::EmptyArrayAccumulator,
+                );
             }
         }
     }
@@ -1157,6 +1163,7 @@ impl super::BytecodeCompiler {
         // Tier 1: structural resolution (literal / type-tracked identifier).
         if let Some(kind) = self.structural_push_argument_typed_array_kind(arg) {
             self.finalize_empty_array_accumulator_kind(key, kind);
+            self.record_pushed_element_concrete_type(recv_name, arg);
             self.emit_load_accumulator_binding(key);
             self.compile_typed_array_element_value(kind, arg)?;
             self.emit(crate::bytecode::Instruction::simple(kind.push_opcode()));
@@ -1187,6 +1194,7 @@ impl super::BytecodeCompiler {
             });
         };
         self.finalize_empty_array_accumulator_kind(key, kind);
+        self.record_pushed_element_concrete_type(recv_name, arg);
         // Stack: [value]. The typed push needs [arr, value] — load the
         // array and swap it under the already-compiled value.
         self.emit_load_accumulator_binding(key);

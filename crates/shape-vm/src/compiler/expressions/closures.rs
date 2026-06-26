@@ -571,7 +571,10 @@ pub(crate) fn infer_param_type_from_body(
                         // identifier `x`, scan the guard + body for
                         // `<x> op <literal>` pairings.
                         for arm in &match_expr.arms {
-                            if let shape_ast::ast::Pattern::Identifier(bound_name) = &arm.pattern {
+                            if let shape_ast::ast::Pattern::Identifier {
+                                name: bound_name, ..
+                            } = &arm.pattern
+                            {
                                 if let Some(guard) = arm.guard.as_ref() {
                                     if let Some(t) = scan_expr(bound_name, guard) {
                                         return Some(t);
@@ -689,7 +692,7 @@ pub(crate) fn type_display_name_for_closure_inference(
     }
 }
 
-/// U4-2: closure-body return-type name, SERVED BY THE ENGINE SPAN-TABLE.
+/// U4-2: closure-body return type, SERVED BY THE ENGINE SPAN-TABLE.
 ///
 /// The hand-written `expr_type` mini-inferencer (a FOURTH stringly inference
 /// engine, with its own `strip_prefix("Vec<")` re-parse and NO `PropertyAccess`
@@ -702,8 +705,8 @@ pub(crate) fn type_display_name_for_closure_inference(
 /// 1. An explicit `-> T` return annotation is honoured verbatim (it is a
 ///    declared proof, not an inference result).
 /// 2. Otherwise the body's terminal expression span is looked up in the engine
-///    table and its resolved `Type` is rendered to the side-table's `String`
-///    name shape via `tracked_type_name_from_annotation`.
+///    table and its resolved `Type` is returned structurally. The name-returning
+///    wrapper below exists only for residual tracker/schema-keyed call sites.
 ///
 /// FORWARD BINDER (U4-0 skeptic): a generic `|p: T| p.field` records a
 /// `Basic("unknown")` sentinel that survives finalization (structurally a
@@ -712,51 +715,51 @@ pub(crate) fn type_display_name_for_closure_inference(
 /// strict checker surfaces the error rather than serving the type "unknown".
 ///
 /// `caller_arg_type_names` / `enclosing_params` are retained for ABI
-/// compatibility with the call sites but are no longer consulted: the engine
-/// resolved the closure body against the closure's declared param types during
-/// the whole-program walk, so no caller-context re-seeding is needed here.
-pub(crate) fn infer_closure_body_return_type_name(
-    compiler: &mut BytecodeCompiler,
-    params: &[shape_ast::ast::FunctionParameter],
-    body: &[shape_ast::ast::Statement],
-    explicit_return: Option<&TypeAnnotation>,
-) -> Option<String> {
-    infer_closure_body_return_type_name_with_outer(compiler, params, body, explicit_return, &[])
-}
-
-/// ABI-compatible wrapper; delegates to the engine-served implementation.
-pub(crate) fn infer_closure_body_return_type_name_with_outer(
+/// compatibility with residual call sites but are no longer consulted: the
+/// engine resolved the closure body against the closure's declared param types
+/// during the whole-program walk, so no caller-context re-seeding is needed
+/// here.
+pub(crate) fn infer_closure_body_return_type_name_with_caller_context(
     compiler: &mut BytecodeCompiler,
     params: &[shape_ast::ast::FunctionParameter],
     body: &[shape_ast::ast::Statement],
     explicit_return: Option<&TypeAnnotation>,
     enclosing_params: &[shape_ast::ast::FunctionParameter],
+    caller_arg_type_names: &[Option<String>],
 ) -> Option<String> {
-    infer_closure_body_return_type_name_with_caller_context(
+    let resolved = infer_closure_body_return_type_with_caller_context(
         compiler,
         params,
         body,
         explicit_return,
         enclosing_params,
-        &[],
-    )
+        caller_arg_type_names,
+    )?;
+
+    // Render the resolved `Type` to the legacy String name shape required by
+    // callers that still key schema/tracker state by display name.
+    match &resolved {
+        shape_runtime::type_system::Type::Concrete(ann) => {
+            BytecodeCompiler::tracked_type_name_from_annotation(ann)
+        }
+        shape_runtime::type_system::Type::Generic { .. } => {
+            BytecodeCompiler::inferred_type_to_hint_name(&resolved)
+        }
+        _ => None,
+    }
 }
 
-/// The engine-served closure-body return-type lookup (U4-2). See the doc on
-/// `infer_closure_body_return_type_name` for the design.
-pub(crate) fn infer_closure_body_return_type_name_with_caller_context(
+pub(crate) fn infer_closure_body_return_type_with_caller_context(
     compiler: &mut BytecodeCompiler,
     _params: &[shape_ast::ast::FunctionParameter],
     body: &[shape_ast::ast::Statement],
     explicit_return: Option<&TypeAnnotation>,
     _enclosing_params: &[shape_ast::ast::FunctionParameter],
     _caller_arg_type_names: &[Option<String>],
-) -> Option<String> {
+) -> Option<shape_runtime::type_system::Type> {
     // 1. Explicit `-> T` annotation is a declared proof — honour it verbatim.
     if let Some(ann) = explicit_return {
-        if let Some(name) = BytecodeCompiler::tracked_type_name_from_annotation(ann) {
-            return Some(name);
-        }
+        return Some(shape_runtime::type_system::Type::Concrete(ann.clone()));
     }
 
     // 2. Engine span-table lookup at the body's terminal-expression span.
@@ -779,18 +782,7 @@ pub(crate) fn infer_closure_body_return_type_name_with_caller_context(
         return None;
     }
 
-    // Render the resolved `Type` to the side-table's `String` name shape. The
-    // table stores `Type::Concrete(TypeAnnotation)`; project it through the same
-    // `tracked_type_name_from_annotation` the rest of the side-table plumbing
-    // uses (so `int`/`number`/`Vec<int>`/struct names all round-trip exactly as
-    // before). A non-Concrete resolved type (still-generic, function-shaped)
-    // yields `None` → genuine miss.
-    match resolved {
-        shape_runtime::type_system::Type::Concrete(ann) => {
-            BytecodeCompiler::tracked_type_name_from_annotation(ann)
-        }
-        _ => None,
-    }
+    Some(resolved.clone())
 }
 
 /// Find a closure body's terminal expression — the expression whose type IS the
@@ -1818,19 +1810,13 @@ impl BytecodeCompiler {
         if let Some(ct) = concrete_type_for_expr(self, &ident) {
             return ct;
         }
-        // CaptureCarrier (ADR-006 §2.7.8 / Q10, 2026-06-18): a bare
-        // collection-constructor binding (`let mut m = HashMap()`) records no
-        // ConcreteType in the inference side-tables, so `concrete_type_for_expr`
-        // returns `None` and the capture would fall to the `Pointer(Void)`
-        // "unknown" sentinel → `Ptr(HeapKind::NativeView)`, a wrong-carrier
-        // kind that mis-dispatches the closure-block heap-capture-mask drop
-        // (decrementing `Arc<NativeViewData>` over a live `Arc<HashMapKindedRef>`
-        // → SIGSEGV). Recover the OUTER carrier from the capture-only
-        // side-table populated at the let-binding site. The element types stay
-        // genuinely unknown (`Void` placeholders) — `native_kind_from_concrete_type`
-        // reads only the outer discriminator.
+        // U4-6: when the regular slot concrete tables miss, recover the
+        // binding's finalized type from the runtime inference facts through the
+        // binder span recorded at slot creation. This replaces the former
+        // collection-constructor side-table and keeps the capture stamp tied to
+        // the canonical inference pass.
         if let Some(ct) =
-            crate::compiler::monomorphization::type_resolution::binding_collection_ctor_capture_type(
+            crate::compiler::monomorphization::type_resolution::binding_fact_capture_type(
                 self, name,
             )
         {

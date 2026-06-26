@@ -507,7 +507,8 @@ impl BytecodeCompiler {
         // F5 (v0.3.3 strict-flip): capture the scrutinee's proven ConcreteType
         // BEFORE compiling it (compilation may clobber `last_expr_*`). Threaded
         // into `compile_match_binding` so `Ok(v)`/`Some(v)`/`Err(e)` payload
-        // unwraps stamp the binder type from `Result(T,E)` / `Option(T)`.
+        // recursion can derive binder tracker types directly from
+        // `Result(T,E)` / `Option(T)` without using match temp concrete facts.
         let scrutinee_ct =
             crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
                 self,

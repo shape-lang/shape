@@ -1419,9 +1419,11 @@ fn substitute_pattern(pat: &Pattern, subs: &HashMap<String, ConcreteType>) -> Pa
     match pat {
         Pattern::Typed {
             name,
+            name_span,
             type_annotation,
         } => Pattern::Typed {
             name: name.clone(),
+            name_span: *name_span,
             type_annotation: substitute_type_annotation(type_annotation, subs),
         },
         Pattern::Array(items) => {
@@ -1454,7 +1456,7 @@ fn substitute_pattern(pat: &Pattern, subs: &HashMap<String, ConcreteType>) -> Pa
             },
         },
         // Patterns with no nested annotations: pass through.
-        Pattern::Identifier(_) | Pattern::Literal(_) | Pattern::Wildcard => pat.clone(),
+        Pattern::Identifier { .. } | Pattern::Literal(_) | Pattern::Wildcard => pat.clone(),
     }
 }
 

@@ -671,6 +671,7 @@ fn collect_typed_pattern_bindings(pattern: &Pattern, env: &mut HashMap<String, S
         Pattern::Typed {
             name,
             type_annotation,
+            ..
         } => {
             if let Some(type_name) = type_annotation_to_string(type_annotation) {
                 env.insert(name.clone(), type_name);
@@ -699,7 +700,7 @@ fn collect_typed_pattern_bindings(pattern: &Pattern, env: &mut HashMap<String, S
             }
             shape_ast::ast::PatternConstructorFields::Unit => {}
         },
-        Pattern::Identifier(_) | Pattern::Literal(_) | Pattern::Wildcard => {}
+        Pattern::Identifier { .. } | Pattern::Literal(_) | Pattern::Wildcard => {}
     }
 }
 

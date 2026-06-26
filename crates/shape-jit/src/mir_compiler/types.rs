@@ -6,7 +6,7 @@
 
 use cranelift::prelude::types;
 use shape_value::heap_value::HeapKind;
-use shape_value::v2::ConcreteType;
+use shape_value::v2::{ConcreteType, closure_layout};
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::NativeKind;
 
@@ -136,83 +136,14 @@ pub(crate) fn is_v2_typed_array_slot(
 /// Project a `ConcreteType` to its corresponding `NativeKind` for the
 /// §2.7.7 / Q9 parallel-kind track seed.
 ///
-/// ADR-006 §2.7.11/Q12: closure-bearing slots (e.g. function return
-/// values that produce a closure value via `jit_finalize_heap_closure`)
-/// carry kind `Ptr(HeapKind::Closure)` per the slot-tier convention.
-/// `ConcreteType::Closure(_)` is the bytecode-compiler-supplied kind
-/// source for such slots; without this projection the closure-callee
-/// classification at the indirect-call entry can't be derived from
-/// MIR-observable statements alone (`infer_slot_kinds` sees only
-/// `Rvalue::Use(Copy(_))` chains, not the producing function-call's
-/// declared return type).
-///
-/// Returns `None` for `ConcreteType::Void` (the unit/no-value type)
-/// since there is no carrier-bits-shaped slot for void.
+/// U4-7: the JIT does not own a second `ConcreteType -> NativeKind` map.
+/// It calls the VM/value-layer projection and only wraps the no-slot
+/// `ConcreteType::Void` case as `None` for MIR metadata.
 pub(crate) fn native_kind_from_concrete_type(ct: &ConcreteType) -> Option<NativeKind> {
-    use shape_value::heap_value::HeapKind;
-    Some(match ct {
-        ConcreteType::F64 => NativeKind::Float64,
-        ConcreteType::I64 => NativeKind::Int64,
-        ConcreteType::I32 => NativeKind::Int32,
-        ConcreteType::I16 => NativeKind::Int16,
-        ConcreteType::I8 => NativeKind::Int8,
-        ConcreteType::U64 => NativeKind::UInt64,
-        ConcreteType::U32 => NativeKind::UInt32,
-        ConcreteType::U16 => NativeKind::UInt16,
-        ConcreteType::U8 => NativeKind::UInt8,
-        ConcreteType::Bool => NativeKind::Bool,
-        ConcreteType::String => NativeKind::String,
-        // Closure / Function carry `Arc<HeapValue::ClosureRaw>` per
-        // §2.7.11/Q12 — `Ptr(HeapKind::Closure)`.
-        ConcreteType::Closure(_) | ConcreteType::Function(_) => NativeKind::Ptr(HeapKind::Closure),
-        // Result/Option are typed-Arc heap values with their own
-        // HeapKind discriminator per §2.7.17.
-        ConcreteType::Result(_, _) => NativeKind::Ptr(HeapKind::Result),
-        ConcreteType::Option(_) => NativeKind::Ptr(HeapKind::Option),
-        // Array<T> — `Arc<TypedArrayData>` per §2.7.6 / Route A.
-        ConcreteType::Array(_) => NativeKind::Ptr(HeapKind::TypedArray),
-        // HashMap — `Arc<HashMapData>` per Stage C P1(b).
-        ConcreteType::HashMap(_, _) => NativeKind::Ptr(HeapKind::HashMap),
-        // Struct → TypedObject per §2.7.6.
-        ConcreteType::Struct(_) => NativeKind::Ptr(HeapKind::TypedObject),
-        // Enum payloads live in TypedObject too (the W14-variant-codegen
-        // single-storage-discriminator convention).
-        ConcreteType::Enum(_) => NativeKind::Ptr(HeapKind::TypedObject),
-        // Decimal / BigInt / DateTime carry typed-Arc heap values.
-        ConcreteType::Decimal => NativeKind::Ptr(HeapKind::Decimal),
-        ConcreteType::BigInt => NativeKind::Ptr(HeapKind::BigInt),
-        ConcreteType::DateTime => NativeKind::Ptr(HeapKind::Temporal),
-        // Pointer is the FFI `*const T` raw pointer — UInt64 carrier.
-        ConcreteType::Pointer(_) => NativeKind::UInt64,
-        // Tuple slots carry typed-array-style storage per the W14
-        // tuple-codegen convention; treat as TypedObject for the
-        // kind track.
-        ConcreteType::Tuple(_) => NativeKind::Ptr(HeapKind::TypedObject),
-        // ── Phase 3 cluster-0 Round 11-trinity 11E (2026-05-13) ─────────
-        // Collection / concurrency carriers — taxonomy extended in
-        // `shape-value/src/v2/concrete_type.rs` per the Round 10 surfaced
-        // item (B). Each ConcreteType arm maps to its dedicated
-        // `HeapKind` ordinal (§2.7.15 / §2.7.17 / §2.7.18 / §2.7.20 /
-        // §2.7.25) and dispatches through Round 9's `retain_func_for_place`
-        // / `release_func_for_place` 8-arm extension. Pre-11E the JIT
-        // EnumStore consumer carried out-of-band kind seeding at the
-        // `mir_compiler/types.rs` EnumStore arm because ConcreteType
-        // didn't have these variants; with 11E landed the in-band
-        // `concrete_seed` path is authoritative.
-        ConcreteType::HashSet(_) => NativeKind::Ptr(HeapKind::HashSet),
-        ConcreteType::Deque(_) => NativeKind::Ptr(HeapKind::Deque),
-        ConcreteType::PriorityQueue => NativeKind::Ptr(HeapKind::PriorityQueue),
-        ConcreteType::Channel(_) => NativeKind::Ptr(HeapKind::Channel),
-        ConcreteType::Mutex(_) => NativeKind::Ptr(HeapKind::Mutex),
-        ConcreteType::Atomic => NativeKind::Ptr(HeapKind::Atomic),
-        ConcreteType::Lazy(_) => NativeKind::Ptr(HeapKind::Lazy),
-        // ── Round 19 S1.5 W12-nativekind-scalar-additions ──────────
-        // (2026-05-14) — ADR-006 §2.7.5 amendment.
-        ConcreteType::F32 => NativeKind::Float32,
-        ConcreteType::Char => NativeKind::Char,
-        // Void has no carrier slot.
-        ConcreteType::Void => return None,
-    })
+    if matches!(ct, ConcreteType::Void) {
+        return None;
+    }
+    Some(closure_layout::native_kind_from_concrete_type(ct))
 }
 
 // ── MIR-level type inference ────────────────────────────────────────────
@@ -1993,6 +1924,75 @@ fn is_comparison_op(op: &BinOp) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn u47_jit_projection_delegates_to_shared_value_map() {
+        use shape_value::heap_value::HeapKind;
+        use shape_value::v2::concrete_type::{
+            ClosureTypeId, EnumLayoutId, FunctionTypeId, StructLayoutId,
+        };
+
+        let cases = [
+            ConcreteType::I64,
+            ConcreteType::I32,
+            ConcreteType::I16,
+            ConcreteType::I8,
+            ConcreteType::U64,
+            ConcreteType::U32,
+            ConcreteType::U16,
+            ConcreteType::U8,
+            ConcreteType::F64,
+            ConcreteType::F32,
+            ConcreteType::Char,
+            ConcreteType::Bool,
+            ConcreteType::String,
+            ConcreteType::Array(Box::new(ConcreteType::I64)),
+            ConcreteType::HashMap(Box::new(ConcreteType::String), Box::new(ConcreteType::I64)),
+            ConcreteType::Option(Box::new(ConcreteType::I64)),
+            ConcreteType::Result(Box::new(ConcreteType::I64), Box::new(ConcreteType::String)),
+            ConcreteType::placeholder_struct(StructLayoutId(0)),
+            ConcreteType::placeholder_enum(EnumLayoutId(0)),
+            ConcreteType::Closure(ClosureTypeId(0)),
+            ConcreteType::Function(FunctionTypeId(0)),
+            ConcreteType::Pointer(Box::new(ConcreteType::U8)),
+            ConcreteType::Tuple(vec![ConcreteType::I64, ConcreteType::String]),
+            ConcreteType::Decimal,
+            ConcreteType::BigInt,
+            ConcreteType::DateTime,
+            ConcreteType::HashSet(Box::new(ConcreteType::String)),
+            ConcreteType::Deque(Box::new(ConcreteType::I64)),
+            ConcreteType::PriorityQueue,
+            ConcreteType::Channel(Box::new(ConcreteType::I64)),
+            ConcreteType::Mutex(Box::new(ConcreteType::I64)),
+            ConcreteType::Atomic,
+            ConcreteType::Lazy(Box::new(ConcreteType::I64)),
+        ];
+
+        for ct in cases {
+            assert_eq!(
+                native_kind_from_concrete_type(&ct),
+                Some(shape_value::v2::closure_layout::native_kind_from_concrete_type(&ct)),
+                "JIT must not own a second ConcreteType -> NativeKind map for {ct:?}"
+            );
+        }
+
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::Option(Box::new(ConcreteType::I64))),
+            Some(NativeKind::Ptr(HeapKind::TypedObject))
+        );
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::Result(
+                Box::new(ConcreteType::I64),
+                Box::new(ConcreteType::String)
+            )),
+            Some(NativeKind::Ptr(HeapKind::TypedObject))
+        );
+        assert_eq!(
+            native_kind_from_concrete_type(&ConcreteType::Pointer(Box::new(ConcreteType::U8))),
+            Some(NativeKind::Ptr(HeapKind::NativeView))
+        );
+        assert_eq!(native_kind_from_concrete_type(&ConcreteType::Void), None);
+    }
 
     fn make_mir(stmts: Vec<MirStatement>) -> MirFunction {
         MirFunction {

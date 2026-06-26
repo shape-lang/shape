@@ -43,6 +43,7 @@
 //! slot live on the stack while handing a share out).
 
 use super::super::*;
+use crate::executor::result_option_carrier;
 use shape_value::{KindedSlot, VMError, ValueSlot};
 
 impl VirtualMachine {
@@ -627,14 +628,10 @@ impl VirtualMachine {
                 // rows, JSON navigation helpers, Window functions, Join,
                 // Reflect, MatFromFlat, MakeContent*. ─────────────────────
                 BuiltinFunction::SomeCtor => {
-                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
-                    // 2026-05-10): `Some(x)` builds a fresh
-                    // `Arc<OptionData>` carrier with `is_some=true` and
-                    // the popped argument as the typed payload share.
-                    // The `pop_builtin_args` carrier owns one strong-
-                    // count share per heap-bearing kind; ownership
-                    // transfers into the `OptionData::payload` slot
-                    // verbatim (the carrier is moved, not cloned).
+                    // L5 canonical carrier: `Some(x)` is a `__Option`
+                    // TypedObject. The payload carrier's share moves into
+                    // field 1, and TypedObjectStorage releases it via the
+                    // field_kinds track.
                     let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
                     if args.len() != 1 {
                         return Err(VMError::RuntimeError(format!(
@@ -643,15 +640,14 @@ impl VirtualMachine {
                         )));
                     }
                     let payload = args.remove(0);
-                    let opt =
-                        std::sync::Arc::new(shape_value::heap_value::OptionData::some(payload));
-                    self.push_kinded_slot(KindedSlot::from_option(opt))?;
+                    self.push_kinded_slot(result_option_carrier::build_some(
+                        &self.builtin_schemas,
+                        payload,
+                    ))?;
                 }
                 BuiltinFunction::OkCtor => {
-                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
-                    // 2026-05-10): `Ok(x)` builds a fresh
-                    // `Arc<ResultData>` carrier with `is_ok=true` and
-                    // the popped argument as the typed payload share.
+                    // L5 canonical carrier: `Ok(x)` is a `__Result`
+                    // TypedObject with the public enum tag for Ok.
                     let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
                     if args.len() != 1 {
                         return Err(VMError::RuntimeError(format!(
@@ -660,14 +656,14 @@ impl VirtualMachine {
                         )));
                     }
                     let payload = args.remove(0);
-                    let res = std::sync::Arc::new(shape_value::heap_value::ResultData::ok(payload));
-                    self.push_kinded_slot(KindedSlot::from_result(res))?;
+                    self.push_kinded_slot(result_option_carrier::build_ok(
+                        &self.builtin_schemas,
+                        payload,
+                    ))?;
                 }
                 BuiltinFunction::ErrCtor => {
-                    // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18,
-                    // 2026-05-10): `Err(e)` builds a fresh
-                    // `Arc<ResultData>` carrier with `is_ok=false` and
-                    // the popped argument as the typed payload share.
+                    // L5 canonical carrier: `Err(e)` is a `__Result`
+                    // TypedObject with the public enum tag for Err.
                     let mut args: Vec<KindedSlot> = self.pop_builtin_args()?;
                     if args.len() != 1 {
                         return Err(VMError::RuntimeError(format!(
@@ -676,9 +672,10 @@ impl VirtualMachine {
                         )));
                     }
                     let payload = args.remove(0);
-                    let res =
-                        std::sync::Arc::new(shape_value::heap_value::ResultData::err(payload));
-                    self.push_kinded_slot(KindedSlot::from_result(res))?;
+                    self.push_kinded_slot(result_option_carrier::build_err(
+                        &self.builtin_schemas,
+                        payload,
+                    ))?;
                 }
                 BuiltinFunction::HashMapCtor => {
                     // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14): per

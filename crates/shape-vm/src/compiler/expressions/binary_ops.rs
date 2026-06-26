@@ -771,8 +771,8 @@ impl BytecodeCompiler {
             Expr::Identifier(name, _) => {
                 let local_idx = self.resolve_local(name)?;
                 // Don't trust storage hints for function parameters with no explicit
-                // type annotation — their inferred types (from inferred_param_type_hints)
-                // can be wrong (e.g., a string param inferred as numeric → B19).
+                // type annotation. Even when function-signature facts pin a tracker
+                // name, typed numeric opcodes require direct operand proof (B19).
                 if self.param_locals.contains(&local_idx) {
                     return None;
                 }
@@ -1278,16 +1278,12 @@ impl BytecodeCompiler {
             // Source 2: a let-bound Option-typed local / module binding.
             Expr::Identifier(name, _) => {
                 use shape_value::v2::ConcreteType;
-                // Recorded ConcreteType from the declared annotation
-                // (`let x: int?` → `ConcreteType::Option(_)`).
-                let recorded_option = self
-                    .resolve_local(name)
-                    .and_then(|idx| self.current_function_local_concrete_types.get(&idx))
-                    .or_else(|| {
-                        self.module_bindings
-                            .get(name)
-                            .and_then(|idx| self.module_binding_concrete_types.get(idx))
-                    })
+                // Recorded ConcreteType from the binding fact or declared
+                // annotation (`let x: int?` → `ConcreteType::Option(_)`).
+                let recorded_option =
+                    crate::compiler::monomorphization::type_resolution::identifier_concrete_type_pub(
+                        self, name,
+                    )
                     .is_some_and(|ct| matches!(ct, ConcreteType::Option(_)));
                 if recorded_option {
                     return true;
@@ -1657,8 +1653,8 @@ impl BytecodeCompiler {
                 // is either a numeric literal or an immutable local whose
                 // storage hint is a numeric family.  Without that evidence the
                 // `last_expr_numeric_type` values may come from speculative
-                // inference hints (inferred_param_type_hints) which can be wrong
-                // when a param is actually a string.
+                // param-local tracker stamps which can be wrong when a param is
+                // actually a string.
                 else {
                     // Priority 1.5: dedicated StringConcat / ArrayConcat for
                     // built-in heap types whose operand kinds the compiler can
@@ -3884,16 +3880,60 @@ mod u4_4_numeric_opcode_golden {
         use OpCode::*;
         matches!(
             op,
-            AddInt | AddNumber | AddDecimal | SubInt | SubNumber | SubDecimal
-                | MulInt | MulNumber | MulDecimal | DivInt | DivNumber | DivDecimal
-                | ModInt | ModNumber | ModDecimal | PowInt | PowNumber | PowDecimal
-                | GtInt | GtNumber | GtDecimal | LtInt | LtNumber | LtDecimal
-                | GteInt | GteNumber | GteDecimal | LteInt | LteNumber | LteDecimal
-                | EqInt | EqNumber | EqDecimal | NeqInt | NeqNumber
-                | AddI32 | SubI32 | MulI32 | DivI32 | ModI32
-                | GtI32 | LtI32 | GteI32 | LteI32 | EqI32 | NeqI32
-                | AddTyped | SubTyped | MulTyped | DivTyped | ModTyped
-                | IntToNumber | NumberToInt | Swap
+            AddInt
+                | AddNumber
+                | AddDecimal
+                | SubInt
+                | SubNumber
+                | SubDecimal
+                | MulInt
+                | MulNumber
+                | MulDecimal
+                | DivInt
+                | DivNumber
+                | DivDecimal
+                | ModInt
+                | ModNumber
+                | ModDecimal
+                | PowInt
+                | PowNumber
+                | PowDecimal
+                | GtInt
+                | GtNumber
+                | GtDecimal
+                | LtInt
+                | LtNumber
+                | LtDecimal
+                | GteInt
+                | GteNumber
+                | GteDecimal
+                | LteInt
+                | LteNumber
+                | LteDecimal
+                | EqInt
+                | EqNumber
+                | EqDecimal
+                | NeqInt
+                | NeqNumber
+                | AddI32
+                | SubI32
+                | MulI32
+                | DivI32
+                | ModI32
+                | GtI32
+                | LtI32
+                | GteI32
+                | LteI32
+                | EqI32
+                | NeqI32
+                | AddTyped
+                | SubTyped
+                | MulTyped
+                | DivTyped
+                | ModTyped
+                | IntToNumber
+                | NumberToInt
+                | Swap
         )
     }
 
@@ -3977,21 +4017,36 @@ mod u4_4_numeric_opcode_golden {
 
     const CORPUS: &[(&str, &str)] = &[
         ("int_add", "let a: int = 3\nlet b: int = 4\na + b\n"),
-        ("int_sub_mul", "let a: int = 10\nlet b: int = 3\na - b * 2\n"),
-        ("number_add", "let a: number = 3.0\nlet b: number = 4.0\na + b\n"),
-        ("number_div", "let a: number = 7.0\nlet b: number = 2.0\na / b\n"),
-        ("decimal_add", "let a: decimal = 1.5D\nlet b: decimal = 2.5D\na + b\n"),
+        (
+            "int_sub_mul",
+            "let a: int = 10\nlet b: int = 3\na - b * 2\n",
+        ),
+        (
+            "number_add",
+            "let a: number = 3.0\nlet b: number = 4.0\na + b\n",
+        ),
+        (
+            "number_div",
+            "let a: number = 7.0\nlet b: number = 2.0\na / b\n",
+        ),
+        (
+            "decimal_add",
+            "let a: decimal = 1.5D\nlet b: decimal = 2.5D\na + b\n",
+        ),
         ("int_cmp", "let a: int = 3\nlet b: int = 4\na < b\n"),
-        ("number_cmp", "let a: number = 3.0\nlet b: number = 4.0\na > b\n"),
+        (
+            "number_cmp",
+            "let a: number = 3.0\nlet b: number = 4.0\na > b\n",
+        ),
         ("int_eq", "let a: int = 3\nlet b: int = 3\na == b\n"),
-        ("number_eq", "let a: number = 3.0\nlet b: number = 3.0\na == b\n"),
+        (
+            "number_eq",
+            "let a: number = 3.0\nlet b: number = 3.0\na == b\n",
+        ),
         // int + number does NOT unify under strict no-coercion (compile error),
         // so the legitimate mixed case is int-literal adopting a number sibling:
         ("number_var_plus_int_lit", "let b: number = 4.0\nb + 1\n"),
-        (
-            "closure_int",
-            "let f = |x: int| { x + 1 }\nf(23)\n",
-        ),
+        ("closure_int", "let f = |x: int| { x + 1 }\nf(23)\n"),
         (
             "closure_number",
             "let f = |x: number| { x + 1.0 }\nf(23.0)\n",

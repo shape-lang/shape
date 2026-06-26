@@ -464,19 +464,17 @@ impl BytecodeCompiler {
     /// Unproven types fall back to polymorphic `ReturnValue`.
     ///
     /// Strictly-typed contract: typed `ReturnValue<Kind>` handlers route
-    /// raw native bits through unchanged. The host-boundary return kind
-    /// comes from the compile-time `top_level_frame.return_kind` set by
-    /// `prove_native_kind` — no runtime stamping.
+    /// raw native bits through unchanged. The typed opcode is emitted only
+    /// when the return expression's proven `ConcreteType` projects exactly
+    /// to the producer-declared `NativeKind` via `prove_native_kind`; otherwise
+    /// this helper falls back to polymorphic `ReturnValue`.
     ///
     /// Mirror the same producer-side gate `infer_top_level_return_kind`
-    /// applies (`helpers.rs:2429`): only emit `ReturnValueI64`/`F64`/`Bool`
-    /// when `last_emitted_native_kind()` confirms the just-emitted opcode
-    /// is on the raw-native-producer list. The width-aware check (Int8/
-    /// .../UInt64 hint accepted against `Int64` native kind) preserves the
-    /// sub-i64 typed-return path; Float64 / Bool require an exact match.
-    /// Otherwise fall back to polymorphic `ReturnValue`, which carries no
-    /// runtime kind stamp and lets the synthesizer pass tagged bits
-    /// through.
+    /// applies: only emit a typed `ReturnValue<Kind>` when the returned
+    /// expression has a structural `ConcreteType` proof and the just-emitted
+    /// producer reports the exact same canonical `NativeKind`. There is no
+    /// width-family allowance here: `i32` proven against an `Int64` producer is
+    /// not proof. Otherwise fall back to polymorphic `ReturnValue`.
     pub(super) fn emit_return_value_with_ownership(
         &mut self,
         // U4-4: the returned expression — its resolved Type drives the numeric
@@ -486,39 +484,14 @@ impl BytecodeCompiler {
         return_expr: Option<&shape_ast::ast::Expr>,
     ) {
         use crate::bytecode::{Instruction, OpCode};
-        use crate::type_tracking::StorageHint;
         if matches!(
             self.current_function_return_ownership_mode(),
             Some(crate::mir::ReturnOwnershipMode::NewlyOwned)
         ) {
             self.emit(Instruction::simple(OpCode::ReturnOwned));
         }
-        // Per ADR-006 §2.7.5.1, the proven-hint state is carried locally
-        // as `Option<StorageHint>`. `None` ≡ "no proven kind" — the helper
-        // routes to the polymorphic legacy `ReturnValue`.
-        let hint = self.last_expr_numeric_type_to_storage_hint(return_expr);
-        let gated_hint: Option<StorageHint> = hint.and_then(|h| {
-            self.last_emitted_native_kind().and_then(|native_kind| {
-                let is_int_family = matches!(
-                    h,
-                    StorageHint::Int8
-                        | StorageHint::UInt8
-                        | StorageHint::Int16
-                        | StorageHint::UInt16
-                        | StorageHint::Int32
-                        | StorageHint::UInt32
-                        | StorageHint::Int64
-                        | StorageHint::UInt64
-                );
-                if is_int_family && native_kind == StorageHint::Int64 {
-                    Some(h)
-                } else if native_kind == h {
-                    Some(h)
-                } else {
-                    None
-                }
-            })
-        });
+        let gated_hint =
+            self.exact_scalar_return_kind_for_expr("emit_return_value_with_ownership", return_expr);
         match gated_hint {
             Some(h) => self.emit_return_value_for_hint(h),
             None => {
@@ -591,6 +564,28 @@ impl BytecodeCompiler {
         self.last_expr_type_info
             .as_ref()
             .and_then(|info| info.storage_hint)
+    }
+
+    pub(in crate::compiler) fn prove_exact_scalar_return_kind(
+        site: &'static str,
+        proven: &shape_value::v2::ConcreteType,
+        claimed_kind: crate::type_tracking::StorageHint,
+    ) -> Option<crate::type_tracking::StorageHint> {
+        let kind = crate::type_tracking::prove_native_kind(site, proven, claimed_kind).ok()?;
+        crate::compiler::helpers::typed_return_value_opcode(kind)?;
+        Some(kind)
+    }
+
+    pub(in crate::compiler) fn exact_scalar_return_kind_for_expr(
+        &self,
+        site: &'static str,
+        expr: Option<&shape_ast::ast::Expr>,
+    ) -> Option<crate::type_tracking::StorageHint> {
+        let proven = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+            self, expr?,
+        )?;
+        let claimed = self.last_emitted_native_kind()?;
+        Self::prove_exact_scalar_return_kind(site, &proven, claimed)
     }
 
     /// Phase 5.B: If the initializer is a simple (non-qualified) call to a
@@ -670,7 +665,7 @@ impl BytecodeCompiler {
 
     fn for_each_value_pattern_binding_name(pattern: &Pattern, visitor: &mut impl FnMut(&str)) {
         match pattern {
-            Pattern::Identifier(name) | Pattern::Typed { name, .. } => visitor(name),
+            Pattern::Identifier { name, .. } | Pattern::Typed { name, .. } => visitor(name),
             Pattern::Array(patterns) => {
                 for pattern in patterns {
                     Self::for_each_value_pattern_binding_name(pattern, visitor);
@@ -1071,5 +1066,89 @@ impl BytecodeCompiler {
         ownership_class
             .map(Self::default_storage_class_for_ownership_class)
             .unwrap_or(BindingStorageClass::Deferred)
+    }
+}
+
+#[cfg(test)]
+mod u2_exact_native_kind_proof_tests {
+    use super::BytecodeCompiler;
+    use crate::type_tracking::StorageHint;
+    use shape_value::HeapKind;
+    use shape_value::v2::ConcreteType;
+
+    #[test]
+    fn exact_scalar_native_kind_proof_passes() {
+        assert_eq!(
+            BytecodeCompiler::prove_exact_scalar_return_kind(
+                "test_exact_i64",
+                &ConcreteType::I64,
+                StorageHint::Int64,
+            ),
+            Some(StorageHint::Int64)
+        );
+        assert_eq!(
+            BytecodeCompiler::prove_exact_scalar_return_kind(
+                "test_exact_bool",
+                &ConcreteType::Bool,
+                StorageHint::Bool,
+            ),
+            Some(StorageHint::Bool)
+        );
+        assert_eq!(
+            BytecodeCompiler::prove_exact_scalar_return_kind(
+                "test_exact_f64",
+                &ConcreteType::F64,
+                StorageHint::Float64,
+            ),
+            Some(StorageHint::Float64)
+        );
+    }
+
+    #[test]
+    fn width_narrowing_is_not_a_native_kind_proof() {
+        assert_eq!(
+            BytecodeCompiler::prove_exact_scalar_return_kind(
+                "test_no_width_narrow",
+                &ConcreteType::I8,
+                StorageHint::Int64,
+            ),
+            None
+        );
+        assert_eq!(
+            BytecodeCompiler::prove_exact_scalar_return_kind(
+                "test_no_unsigned_width_narrow",
+                &ConcreteType::U16,
+                StorageHint::Int64,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn option_result_carriers_are_not_proven_until_l5_matches_projection() {
+        assert_eq!(
+            BytecodeCompiler::prove_exact_scalar_return_kind(
+                "test_option_blocked",
+                &ConcreteType::Option(Box::new(ConcreteType::I64)),
+                StorageHint::Ptr(HeapKind::Option),
+            ),
+            None
+        );
+        assert_eq!(
+            BytecodeCompiler::prove_exact_scalar_return_kind(
+                "test_result_blocked",
+                &ConcreteType::Result(Box::new(ConcreteType::I64), Box::new(ConcreteType::String),),
+                StorageHint::Ptr(HeapKind::Result),
+            ),
+            None
+        );
+        assert_eq!(
+            BytecodeCompiler::prove_exact_scalar_return_kind(
+                "test_option_canonical_ptr_not_scalar",
+                &ConcreteType::Option(Box::new(ConcreteType::I64)),
+                StorageHint::Ptr(HeapKind::TypedObject),
+            ),
+            None
+        );
     }
 }

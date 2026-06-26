@@ -204,26 +204,16 @@ impl BytecodeCompiler {
                 if let Some(tn) = Self::destructure_field_scalar_type_name(&field_type) {
                     let info = VariableTypeInfo::named(tn.to_string());
                     match &field_type {
-                        FieldType::I64 => {
-                        }
-                        FieldType::F64 => {
-                        }
-                        FieldType::Decimal => {
-                        }
-                        FieldType::I8 => {
-                        }
-                        FieldType::U8 => {
-                        }
-                        FieldType::I16 => {
-                        }
-                        FieldType::U16 => {
-                        }
-                        FieldType::I32 => {
-                        }
-                        FieldType::U32 => {
-                        }
-                        FieldType::U64 => {
-                        }
+                        FieldType::I64 => {}
+                        FieldType::F64 => {}
+                        FieldType::Decimal => {}
+                        FieldType::I8 => {}
+                        FieldType::U8 => {}
+                        FieldType::I16 => {}
+                        FieldType::U16 => {}
+                        FieldType::I32 => {}
+                        FieldType::U32 => {}
+                        FieldType::U64 => {}
                         _ => {}
                     }
                     self.last_expr_type_info = Some(info);
@@ -280,102 +270,31 @@ impl BytecodeCompiler {
         }
     }
 
-    /// strict-flip S1 (array-destructure element-kind, 2026-06-22): stamp a
-    /// freshly-bound array-element identifier with the array's PROVEN element
-    /// type name. The element type name is supplied by the VariableDecl
-    /// destructure site in `pending_array_destructure_element_type` (resolved
-    /// there from `concrete_type_for_expr(init) == Array(elem)` — the same
-    /// structural proof the operator path consumes; ADR-006 §2.7.5 stamp-at-
-    /// compile-time). When the receiver is not a proven concrete `Array<T>`
-    /// the pending slot is `None` and nothing is stamped — the binding keeps
-    /// its prior (possibly `unknown`) kind exactly as before, and a later
-    /// `let x: <concrete> = a` over an un-provable element meets the
-    /// let-annotation Unknown-accept guard (FIX A). NO fabrication, NO
-    /// `int`/`number` unify.
-    /// strict-flip S1 (array-destructure element-kind, 2026-06-22; nested
-    /// extension 2026-06-22): resolve the PROVEN ELEMENT `ConcreteType` of the
-    /// array produced by `init_expr`, for a `let [a, b] = init_expr` (or nested
-    /// `let [[a,b],[c,d]] = init_expr`) destructure. Returns
-    /// `concrete_type_for_expr(init).Array(elem) => *elem` when the receiver
-    /// proves a concrete `Array<T>`; `None` otherwise (genuinely-untyped or
-    /// non-array receiver — no fabrication). The destructure recursion peels one
-    /// `Array<…>` layer per nesting level from this element type.
-    pub(in crate::compiler) fn array_destructure_element_concrete_type(
-        &self,
-        init_expr: &shape_ast::ast::Expr,
-    ) -> Option<shape_value::v2::ConcreteType> {
-        use shape_value::v2::ConcreteType;
-        let ct = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
-            self, init_expr,
-        )?;
-        let ConcreteType::Array(elem) = ct else {
+    fn destructure_binding_fact_type_name(&self, span: shape_ast::ast::Span) -> Option<String> {
+        if span.is_dummy() {
             return None;
-        };
-        Some(*elem)
+        }
+        let ann = self.inference_facts.binding_type(span)?.to_annotation()?;
+        Self::tracked_type_name_from_annotation(&ann)
     }
 
-    /// Map a proven element `ConcreteType` to the type-info NAME used to stamp a
-    /// destructured leaf binding (`"int"` / `"number"` / `"string"` / struct
-    /// name / …). `None` for shapes `concrete_type_to_type_annotation` cannot
-    /// render to a `Basic`/`Reference` name (no fabrication).
-    fn destructure_element_type_name(ct: &shape_value::v2::ConcreteType) -> Option<String> {
-        let ann = crate::compiler::expressions::closures::concrete_type_to_type_annotation(ct)?;
-        match ann {
-            shape_ast::ast::TypeAnnotation::Basic(n) => Some(n),
-            shape_ast::ast::TypeAnnotation::Reference(p) => Some(p.to_string()),
-            _ => None,
+    fn stamp_local_destructure_binding_fact_type(
+        &mut self,
+        local_idx: u16,
+        span: shape_ast::ast::Span,
+    ) {
+        if let Some(type_name) = self.destructure_binding_fact_type_name(span) {
+            self.set_local_type_info(local_idx, &type_name);
         }
     }
 
-    /// strict-flip S1 (nested array-destructure element-kind, 2026-06-22):
-    /// stamp the bindings introduced by one element sub-pattern of an array
-    /// destructure. `elem_ct` is the PROVEN element `ConcreteType` of the array
-    /// at THIS nesting level (peeled one `Array<…>` layer per level by the
-    /// caller). Three sub-pattern shapes are handled:
-    ///   - leaf `Identifier(name)` — stamp `name` with `elem_ct`'s type name.
-    ///   - nested `Array(inner_pats)` — the element is itself an array; peel one
-    ///     more layer (`elem_ct == Array(inner) => *inner`) and recurse per
-    ///     inner sub-pattern, so `let [[a,b],..]` stamps a,b to the innermost
-    ///     proven element type. When `elem_ct` is not a proven `Array<…>` the
-    ///     nested level carries no hint (binding keeps its prior kind — same as
-    ///     before; a later `let x: <concrete> = a` meets the let-annotation
-    ///     Unknown-accept guard).
-    ///   - anything else (Object / Rest / …) — not stamped (owned by its own
-    ///     path).
-    /// NO fabrication, NO `int`/`number` unify.
-    fn stamp_destructure_element_binding(
+    fn stamp_module_destructure_binding_fact_type(
         &mut self,
-        pat: &shape_ast::ast::DestructurePattern,
-        elem_ct: &shape_value::v2::ConcreteType,
-        is_global: bool,
+        binding_idx: u16,
+        span: shape_ast::ast::Span,
     ) {
-        use shape_ast::ast::DestructurePattern;
-        use shape_value::v2::ConcreteType;
-        match pat {
-            DestructurePattern::Identifier(name, _) => {
-                let Some(elem_type) = Self::destructure_element_type_name(elem_ct) else {
-                    return;
-                };
-                if is_global {
-                    if let Some(slot) = self.module_bindings.get(name).copied() {
-                        self.set_module_binding_type_info(slot, &elem_type);
-                    }
-                } else if let Some(local_idx) = self.resolve_local(name) {
-                    self.set_local_type_info(local_idx, &elem_type);
-                }
-            }
-            DestructurePattern::Array(inner_pats) => {
-                // Nested array element — peel one `Array<…>` layer and stamp
-                // each inner sub-pattern with the inner element type. Only
-                // when `elem_ct` proves a concrete `Array<inner>`.
-                let ConcreteType::Array(inner) = elem_ct else {
-                    return;
-                };
-                for inner_pat in inner_pats {
-                    self.stamp_destructure_element_binding(inner_pat, inner, is_global);
-                }
-            }
-            _ => {}
+        if let Some(type_name) = self.destructure_binding_fact_type_name(span) {
+            self.set_module_binding_type_info(binding_idx, &type_name);
         }
     }
 
@@ -388,9 +307,13 @@ impl BytecodeCompiler {
         use shape_ast::ast::DestructurePattern;
 
         match pattern {
-            DestructurePattern::Identifier(name, _) => {
+            DestructurePattern::Identifier(name, span) => {
                 // Simple case - store in local
                 let local_idx = self.declare_local(name)?;
+                if !span.is_dummy() {
+                    self.local_binding_spans.insert(local_idx, *span);
+                }
+                self.stamp_local_destructure_binding_fact_type(local_idx, *span);
                 // E+5.5 Unit C step 1: emit typed `StoreLocal<Kind>` for
                 // proven Int / Bool / F64 / sub-i64-width slots so the
                 // post-Unit-A native producer (PushConst Int / typed
@@ -488,28 +411,7 @@ impl BytecodeCompiler {
                         Some(Operand::Const(idx_const)),
                     ));
                     self.emit(Instruction::simple(OpCode::GetProp));
-                    // strict-flip S1 (nested array-destructure element-kind,
-                    // 2026-06-22): the parent owns ALL element-kind stamping for
-                    // this array (via `stamp_destructure_element_binding`, which
-                    // has its own peeling recursion). Suppress the pending
-                    // element type across the bytecode recursion so a nested
-                    // `compile_destructure_pattern` does NOT stamp inner leaves
-                    // with the un-peeled OUTER element type.
-                    let saved_pending = self.pending_array_destructure_element_type.take();
                     self.compile_destructure_pattern(pat)?;
-                    self.pending_array_destructure_element_type = saved_pending;
-                    // Stamp the freshly-bound element sub-pattern with the
-                    // array's PROVEN element type (set at the VariableDecl site
-                    // from `concrete_type_for_expr(init)`). Recurses into nested
-                    // `Array` sub-patterns, peeling one `Array<…>` layer per
-                    // level so `let [[a,b],..]` stamps a,b to the innermost
-                    // proven element type. Without this the binding kept an
-                    // `unknown` kind and a later `let bad: int = a` (a: number)
-                    // was silently accepted (HOLE-1). NO fabrication: only
-                    // stamps when the receiver resolved to a concrete `Array<T>`.
-                    if let Some(elem_ct) = self.pending_array_destructure_element_type.clone() {
-                        self.stamp_destructure_element_binding(pat, &elem_ct, false);
-                    }
                 }
 
                 Ok(())
@@ -599,13 +501,13 @@ impl BytecodeCompiler {
                 let mut resolved_bindings = Vec::with_capacity(bindings.len());
                 for binding in bindings {
                     let (fields, schema_id) = self.resolve_decomposition_binding(binding)?;
-                    resolved_bindings.push((binding.name.clone(), fields, schema_id));
+                    resolved_bindings.push((binding.name.clone(), binding.span, fields, schema_id));
                 }
                 let source_schema_id = self
                     .resolve_decomposition_source_schema(
                         &resolved_bindings
                             .iter()
-                            .map(|(_, fields, schema_id)| (fields.clone(), *schema_id))
+                            .map(|(_, _, fields, schema_id)| (fields.clone(), *schema_id))
                             .collect::<Vec<_>>(),
                     )
                     .ok_or_else(|| ShapeError::SemanticError {
@@ -617,7 +519,7 @@ impl BytecodeCompiler {
                     Some(Operand::Local(value_local)),
                 ));
 
-                for (binding_name, fields, schema_id) in resolved_bindings {
+                for (binding_name, binding_span, fields, schema_id) in resolved_bindings {
                     for field_name in &fields {
                         self.emit(Instruction::new(
                             OpCode::LoadLocal,
@@ -644,6 +546,9 @@ impl BytecodeCompiler {
                     ));
 
                     let local_idx = self.declare_local(&binding_name)?;
+                    if !binding_span.is_dummy() {
+                        self.local_binding_spans.insert(local_idx, binding_span);
+                    }
                     self.emit(Instruction::new(
                         OpCode::StoreLocal,
                         Some(Operand::Local(local_idx)),
@@ -669,8 +574,12 @@ impl BytecodeCompiler {
         use shape_ast::ast::DestructurePattern;
 
         match pattern {
-            DestructurePattern::Identifier(name, _) => {
+            DestructurePattern::Identifier(name, span) => {
                 let binding_idx = self.get_or_create_module_binding(name);
+                if !span.is_dummy() {
+                    self.module_binding_spans.insert(binding_idx, *span);
+                }
+                self.stamp_module_destructure_binding_fact_type(binding_idx, *span);
                 self.emit(Instruction::new(
                     OpCode::StoreModuleBinding,
                     Some(Operand::ModuleBinding(binding_idx)),
@@ -744,20 +653,7 @@ impl BytecodeCompiler {
                         Some(Operand::Const(idx_const)),
                     ));
                     self.emit(Instruction::simple(OpCode::GetProp));
-                    // strict-flip S1 (nested array-destructure element-kind,
-                    // 2026-06-22): module-scope twin of the local-path
-                    // pending-suppression — the parent owns all element-kind
-                    // stamping for this array.
-                    let saved_pending = self.pending_array_destructure_element_type.take();
                     self.compile_destructure_pattern_global(pat)?;
-                    self.pending_array_destructure_element_type = saved_pending;
-                    // Stamp the freshly-bound element sub-pattern with the
-                    // array's PROVEN element type, recursing into nested
-                    // `Array` sub-patterns peeling one `Array<…>` layer per
-                    // level.
-                    if let Some(elem_ct) = self.pending_array_destructure_element_type.clone() {
-                        self.stamp_destructure_element_binding(pat, &elem_ct, true);
-                    }
                 }
 
                 Ok(())
@@ -841,13 +737,13 @@ impl BytecodeCompiler {
                 let mut resolved_bindings = Vec::with_capacity(bindings.len());
                 for binding in bindings {
                     let (fields, schema_id) = self.resolve_decomposition_binding(binding)?;
-                    resolved_bindings.push((binding.name.clone(), fields, schema_id));
+                    resolved_bindings.push((binding.name.clone(), binding.span, fields, schema_id));
                 }
                 let source_schema_id = self
                     .resolve_decomposition_source_schema(
                         &resolved_bindings
                             .iter()
-                            .map(|(_, fields, schema_id)| (fields.clone(), *schema_id))
+                            .map(|(_, _, fields, schema_id)| (fields.clone(), *schema_id))
                             .collect::<Vec<_>>(),
                     )
                     .ok_or_else(|| ShapeError::SemanticError {
@@ -859,7 +755,7 @@ impl BytecodeCompiler {
                     Some(Operand::Local(value_local)),
                 ));
 
-                for (binding_name, fields, schema_id) in resolved_bindings {
+                for (binding_name, binding_span, fields, schema_id) in resolved_bindings {
                     for field_name in &fields {
                         self.emit(Instruction::new(
                             OpCode::LoadLocal,
@@ -886,6 +782,9 @@ impl BytecodeCompiler {
                     ));
 
                     let binding_idx = self.get_or_create_module_binding(&binding_name);
+                    if !binding_span.is_dummy() {
+                        self.module_binding_spans.insert(binding_idx, binding_span);
+                    }
                     self.emit(Instruction::new(
                         OpCode::StoreModuleBinding,
                         Some(Operand::ModuleBinding(binding_idx)),
@@ -1162,6 +1061,7 @@ mod ws3_array_rest_tests {
     //! uncaught-exception dump. It must now reject CLEANLY at compile
     //! time with a plain `SemanticError`.
     use crate::compiler::BytecodeCompiler;
+    use crate::test_utils::eval_typed_i64;
     use shape_ast::parser::parse_program;
 
     #[test]
@@ -1211,6 +1111,26 @@ mod ws3_array_rest_tests {
             result.is_ok(),
             "non-rest array destructure must compile: {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn u4_6_array_destructure_binding_fact_rejects_number_into_int() {
+        let program =
+            parse_program("let [a, b] = [3.0, 4.0]\nlet bad: int = a\nbad").expect("parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_err(),
+            "array destructure should preserve number binding fact: {:?}",
+            result.ok()
+        );
+    }
+
+    #[test]
+    fn u4_6_nested_array_destructure_binding_fact_keeps_inner_int() {
+        assert_eq!(
+            eval_typed_i64("let [[a, b]] = [[3, 4]]\nlet s: int = a + b\ns"),
+            7
         );
     }
 }

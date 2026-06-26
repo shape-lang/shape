@@ -1282,6 +1282,11 @@ impl BytecodeCompiler {
                         });
                     }
                     let binding_idx = self.get_or_create_module_binding(name);
+                    if let Some(span) = var_decl.pattern.as_identifier_span()
+                        && !span.is_dummy()
+                    {
+                        self.module_binding_spans.insert(binding_idx, span);
+                    }
                     self.emit(Instruction::new(
                         OpCode::StoreModuleBinding,
                         Some(Operand::ModuleBinding(binding_idx)),
@@ -1359,13 +1364,7 @@ impl BytecodeCompiler {
                         self.track_drop_module_binding(binding_idx, is_async);
                     }
                 } else {
-                    self.pending_array_destructure_element_type = var_decl
-                        .value
-                        .as_ref()
-                        .and_then(|init| self.array_destructure_element_concrete_type(init));
-                    let r = self.compile_destructure_pattern_global(&var_decl.pattern);
-                    self.pending_array_destructure_element_type = None;
-                    r?;
+                    self.compile_destructure_pattern_global(&var_decl.pattern)?;
                 }
 
                 if let Some(e) = init_err {
@@ -1463,6 +1462,11 @@ impl BytecodeCompiler {
                     }
                     if let Some(name) = var_decl.pattern.as_identifier() {
                         let binding_idx = self.get_or_create_module_binding(name);
+                        if let Some(span) = var_decl.pattern.as_identifier_span()
+                            && !span.is_dummy()
+                        {
+                            self.module_binding_spans.insert(binding_idx, span);
+                        }
                         self.emit(Instruction::new(
                             OpCode::StoreModuleBinding,
                             Some(Operand::ModuleBinding(binding_idx)),
@@ -5204,25 +5208,6 @@ impl BytecodeCompiler {
                 // compile_typed_object_literal uses self to include hoisted fields in the schema.
                 self.pending_variable_name =
                     var_decl.pattern.as_identifier().map(|s| s.to_string());
-                // CaptureCarrier (ADR-006 §2.7.8 / Q10, 2026-06-18): record a
-                // bare collection-constructor initializer (`let mut m =
-                // HashMap()`) into the capture-only carrier-kind side-table so
-                // a later closure capture of this binding resolves the correct
-                // §2.7.8 heap-carrier `NativeKind` (instead of the
-                // `Pointer(Void)` "unknown" sentinel → `Ptr(NativeView)`
-                // wrong-carrier drop → SIGSEGV). Scoped to this dedicated table
-                // — NOT `module_binding_concrete_types` / the type-tracker — so
-                // it never reaches the inference engine's `HasField` check
-                // (which would reject `m.remove(..)` as "HashMap cannot have
-                // fields").
-                if let Some(name) = var_decl.pattern.as_identifier()
-                    && let Some(init) = var_decl.value.as_ref()
-                    && let Some(ct) =
-                        crate::compiler::monomorphization::type_resolution::collection_ctor_init_capture_type(init)
-                {
-                    self.binding_collection_carrier_kinds
-                        .insert(name.to_string(), ct);
-                }
                 // v2 Phase 3.1 (Agent 3): when the binding has an explicit
                 // `Array<T>` annotation whose element type maps to a
                 // typed-array kind, signal it to `compile_expr_array` so
@@ -5474,6 +5459,11 @@ impl BytecodeCompiler {
                             });
                         }
                         let binding_idx = self.get_or_create_module_binding(name);
+                        if let Some(span) = var_decl.pattern.as_identifier_span()
+                            && !span.is_dummy()
+                        {
+                            self.module_binding_spans.insert(binding_idx, span);
+                        }
 
                         // U4-6a: the former `record_binding_object_element_fields`
                         // call is deleted with the side-table; `for {x,y} in
@@ -5570,9 +5560,15 @@ impl BytecodeCompiler {
                             // call site `id(n)` can resolve the argument's
                             // type. The type-tracker only retains a lossy
                             // head-name string (e.g. "option" with no inner
-                            // type); this table carries the full ConcreteType.
+                            // type); the explicit binding fact carries the
+                            // full ConcreteType.
                             if let Some(ct) = crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(self, type_ann) {
-                                self.module_binding_concrete_types.insert(binding_idx, ct);
+                                crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                    self,
+                                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::ModuleBinding(binding_idx),
+                                    ct,
+                                    crate::compiler::BindingConcreteFactSource::DeclaredAnnotation,
+                                );
                             }
                             // Handle Table<T> generic annotation
                             self.try_track_datatable_type(type_ann, binding_idx, false)?;
@@ -5623,78 +5619,26 @@ impl BytecodeCompiler {
                                             self.set_module_binding_type_info(binding_idx, &tn);
                                         }
                                     }
-                                    self.module_binding_concrete_types.insert(binding_idx, ct);
+                                    crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                        self,
+                                        crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::ModuleBinding(binding_idx),
+                                        ct,
+                                        crate::compiler::BindingConcreteFactSource::StructuralInitializer,
+                                    );
                                 }
                             }
                         }
 
-                        // cluster-2-cw-IC-class-c (Phase 3 cluster-2 Round 3,
-                        // 2026-05-16): Class C method-chain intermediate
-                        // binding coverage at module-binding (top-level)
-                        // path. The canonical Class C fixture
-                        // (`/tmp/cw-B-class-c-method-chain.shape`) is
-                        // top-level (`let doubled = xs.map(...)` at module
-                        // scope), so the side-table to populate is
-                        // `module_binding_array_element_types` (consumed by
-                        // `identifier_concrete_type`'s module-binding
-                        // fallback arm at
-                        // `monomorphization/type_resolution.rs:1462`).
-                        //
-                        // Must run AFTER `propagate_initializer_type_to_slot`
-                        // because that path's fallback writes
-                        // `VariableTypeInfo::unknown()` when no type info is
-                        // available from the expression's compile-time
-                        // metadata (`last_expr_type_info` /
-                        // `last_expr_numeric_type` / `last_expr_schema`),
-                        // which would wipe a prior type_tracker entry. The
-                        // method call's `last_expr_type_info` is cleared at
-                        // `compile_expr_method_call` line 2197/2287/2438 per
-                        // the method-result clearing pattern, so the
-                        // initializer-propagate fallback unconditionally
-                        // hits the unknown-write arm for method-call RHS.
-                        //
-                        // Per ADR-006 §2.7.5 stamp-at-compile-time: the
-                        // specialized callee's substituted return-type
-                        // annotation IS the proof — no runtime decode, no
-                        // inference fabrication, no Bool-default. The
-                        // monomorphization site-table was populated by
-                        // `try_monomorphize_method_call` /
-                        // `_with_closures` per the V3-S6b conduit; this
-                        // walks the same side-tables used by the link-time
-                        // MIR resolver, but at bytecode-emission time so
-                        // subsequent statements see the type before the
-                        // resolver runs. Per §2.7.7 #9: when any chain link
-                        // is absent the helper returns None and the slot
-                        // stays unstamped (surface-and-stop preserved).
-                        //
-                        // The mirror set_module_binding_type_info call is
-                        // required because `resolve_receiver_extend_type`
-                        // at `helpers.rs:3826` consults the type_tracker
-                        // (not the side-table) to gate the UFCS extend-
-                        // function lookup for `Vec.map` at
-                        // `compile_expr_method_call:2116`. Without the
-                        // type_tracker mirror, the second `.map(...)` falls
-                        // through to the generic `CallMethod` path without
-                        // specializing, and the bytecode runtime hits the
-                        // ckpt-2 surface in `array_transform.rs::map`.
+                        // U4-6 post-monomorphization call-site return fact:
+                        // after initializer propagation, stamp a module binding
+                        // from the specialized method-call return recorded at
+                        // `(init_span, current_function)`.
                         if let Some(init_expr) = var_decl.value.as_ref() {
-                            if let Some(shape_value::v2::ConcreteType::Array(elem)) =
-                                crate::compiler::monomorphization::type_resolution::specialized_call_return_concrete_type(
-                                    self, init_expr,
-                                )
-                            {
-                                self.module_binding_array_element_types
-                                    .insert(binding_idx, (*elem).clone());
-                                if let Some(elem_ann) = crate::compiler::expressions::closures::concrete_type_to_type_annotation(&elem) {
-                                    let vec_ann = shape_ast::ast::TypeAnnotation::Generic {
-                                        name: shape_ast::ast::TypePath::simple("Vec"),
-                                        args: vec![elem_ann],
-                                    };
-                                    if let Some(type_name) = Self::tracked_type_name_from_annotation(&vec_ann) {
-                                        self.set_module_binding_type_info(binding_idx, &type_name);
-                                    }
-                                }
-                            }
+                            crate::compiler::monomorphization::type_resolution::stamp_binding_initializer_monomorphized_call_return(
+                                self,
+                                crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::ModuleBinding(binding_idx),
+                                init_expr,
+                            );
                         }
 
                         // Track for auto-drop at program exit
@@ -5733,13 +5677,7 @@ impl BytecodeCompiler {
                             self.clear_callable_binding(binding_idx, false);
                         }
                     } else {
-                        self.pending_array_destructure_element_type = var_decl
-                            .value
-                            .as_ref()
-                            .and_then(|init| self.array_destructure_element_concrete_type(init));
-                        let r = self.compile_destructure_pattern_global(&var_decl.pattern);
-                        self.pending_array_destructure_element_type = None;
-                        r?;
+                        self.compile_destructure_pattern_global(&var_decl.pattern)?;
                     }
 
                     for (binding_name, _) in var_decl.pattern.get_bindings() {
@@ -5767,13 +5705,7 @@ impl BytecodeCompiler {
                     );
                 } else {
                     // Inside function: create local variable
-                    self.pending_array_destructure_element_type = var_decl
-                        .value
-                        .as_ref()
-                        .and_then(|init| self.array_destructure_element_concrete_type(init));
-                    let r = self.compile_destructure_pattern(&var_decl.pattern);
-                    self.pending_array_destructure_element_type = None;
-                    r?;
+                    self.compile_destructure_pattern(&var_decl.pattern)?;
 
                     // Patch StoreLocal → StoreLocalTyped for width-typed simple bindings.
                     // compile_destructure_pattern emits StoreLocal(idx) for Identifier patterns;
@@ -5985,7 +5917,12 @@ impl BytecodeCompiler {
                             // See the mirror module-binding path above.
                             if let Some(local_idx) = self.resolve_local(name) {
                                 if let Some(ct) = crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(self, type_ann) {
-                                    self.current_function_local_concrete_types.insert(local_idx, ct);
+                                    crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                        self,
+                                        crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                                        ct,
+                                        crate::compiler::BindingConcreteFactSource::DeclaredAnnotation,
+                                    );
                                 }
                             }
                             // Handle Table<T> generic annotation
@@ -6015,8 +5952,8 @@ impl BytecodeCompiler {
                             // v0.3 WS-6b GAP A: mirror of the inferred-type
                             // module-binding path above. An inferred `let p =
                             // <expr>` local carries no annotation, so the WS-6
-                            // annotated-only `current_function_local_concrete_types`
-                            // recording never fires. Resolve the local's
+                            // annotated-only binding fact recording never
+                            // fires. Resolve the local's
                             // ConcreteType structurally from the initializer so a
                             // later generic call site `id(p)` (inside the same
                             // function) can bind its type argument. `None` for a
@@ -6042,7 +5979,12 @@ impl BytecodeCompiler {
                                             self.set_local_type_info(local_idx, &tn);
                                         }
                                     }
-                                    self.current_function_local_concrete_types.insert(local_idx, ct);
+                                    crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                        self,
+                                        crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                                        ct,
+                                        crate::compiler::BindingConcreteFactSource::StructuralInitializer,
+                                    );
                                 }
                             }
                         }
@@ -6076,64 +6018,17 @@ impl BytecodeCompiler {
                         // object's field annotations via the inference engine
                         // span-table (`infer_expr_type`).
                     }
-                    // cluster-2-cw-IC-class-c (Phase 3 cluster-2 Round 3,
-                    // 2026-05-16): Class C method-chain intermediate slot
-                    // coverage. When the RHS is a method call that just
-                    // monomorphized to a specialization whose return type
-                    // is `Array<C>`, populate `local_array_element_types`
-                    // so the next statement's
-                    // `concrete_type_for_expr(receiver_identifier)` chain
-                    // can reach the `Array<C>` annotation through
-                    // `identifier_concrete_type`'s side-table arm
-                    // (`monomorphization/type_resolution.rs:1443`). This
-                    // closes the canonical chain
-                    // `let doubled = xs.map(|x|x*2); let trebled =
-                    // doubled.map(|y|y+1); print(trebled.sum())` whose
-                    // pre-fix failure was that the SECOND `.map(...)`
-                    // could not specialize because `doubled`'s slot had
-                    // no entry in any concrete-type side-table.
-                    //
-                    // Per ADR-006 §2.7.5 stamp-at-compile-time: the
-                    // specialized callee's substituted return-type
-                    // annotation IS the proof — no runtime decode, no
-                    // inference fabrication, no Bool-default. The
-                    // monomorphization site-table was populated by
-                    // `try_monomorphize_method_call` /
-                    // `_with_closures` per the V3-S6b conduit; this
-                    // walks the same side-tables used by the link-time
-                    // MIR resolver, but at bytecode-emission time so
-                    // subsequent statements see the type before the
-                    // resolver runs. Per §2.7.7 #9: when any chain link
-                    // is absent the helper returns None and the slot
-                    // stays unstamped (surface-and-stop preserved).
+                    // U4-6 post-monomorphization call-site return fact: mirror
+                    // the module-binding path for local let-bound method-chain
+                    // intermediates.
                     if let Some(init_expr) = var_decl.value.as_ref() {
-                        if let Some(shape_value::v2::ConcreteType::Array(elem)) =
-                            crate::compiler::monomorphization::type_resolution::specialized_call_return_concrete_type(
-                                self, init_expr,
-                            )
-                        {
-                            if let Some(name) = var_decl.pattern.as_identifier() {
-                                if let Some(local_idx) = self.resolve_local(name) {
-                                    self.local_array_element_types
-                                        .insert(local_idx, (*elem).clone());
-                                    // Mirror `set_local_type_info` for the
-                                    // corresponding `Vec<elem>` type name
-                                    // — see the module-binding site above
-                                    // for the full rationale on why both
-                                    // the side-table and the type_tracker
-                                    // entry are required to close the
-                                    // `let intermediate = recv.map(...)`
-                                    // → `intermediate.map(...)` chain.
-                                    if let Some(elem_ann) = crate::compiler::expressions::closures::concrete_type_to_type_annotation(&elem) {
-                                        let vec_ann = shape_ast::ast::TypeAnnotation::Generic {
-                                            name: shape_ast::ast::TypePath::simple("Vec"),
-                                            args: vec![elem_ann],
-                                        };
-                                        if let Some(type_name) = Self::tracked_type_name_from_annotation(&vec_ann) {
-                                            self.set_local_type_info(local_idx, &type_name);
-                                        }
-                                    }
-                                }
+                        if let Some(name) = var_decl.pattern.as_identifier() {
+                            if let Some(local_idx) = self.resolve_local(name) {
+                                crate::compiler::monomorphization::type_resolution::stamp_binding_initializer_monomorphized_call_return(
+                                    self,
+                                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                                    init_expr,
+                                );
                             }
                         }
                     }
@@ -6364,22 +6259,6 @@ impl BytecodeCompiler {
                                         &args[0],
                                         Some(source_loc),
                                     )? {
-                                        // T1 sub-case (a) (strict-flip,
-                                        // 2026-06-20): record the accumulator's
-                                        // ELEMENT ConcreteType from the pushed
-                                        // value's producer-side proof. The
-                                        // unannotated `let mut rs = []` recorded
-                                        // no element type, so a later
-                                        // `rs[0].len + 1` (a struct-array element
-                                        // FIELD read in arithmetic) saw the
-                                        // element as `unknown` and rejected. The
-                                        // pushed `args[0]` ConcreteType IS the
-                                        // proof (ADR-006 §2.7.5); an unprovable
-                                        // element records nothing (surface-and-
-                                        // stop). PER-SITE-ARM, int != number
-                                        // preserved (the element kind is the
-                                        // value's own proven kind).
-                                        self.record_pushed_element_concrete_type(name, &args[0]);
                                         // The typed push left the (now-typed)
                                         // array on the stack; store it back into
                                         // the binding slot.
@@ -8089,6 +7968,43 @@ mod tests {
         // fabricated annotation).
     }
 
+    #[test]
+    fn u4_6_post_mono_module_binding_method_chain_intermediate_compiles() {
+        use crate::test_utils::compile_with_prelude;
+
+        let res = compile_with_prelude(
+            "let xs = [1, 2, 3]\n\
+             let doubled = xs.map(|x| x * 2)\n\
+             let trebled = doubled.map(|y| y + 1)\n\
+             print(trebled.len())",
+        );
+        assert!(
+            res.is_ok(),
+            "module binding method-chain intermediate should compile; got: {:?}",
+            res.err()
+        );
+    }
+
+    #[test]
+    fn u4_6_post_mono_local_binding_method_chain_intermediate_compiles() {
+        use crate::test_utils::compile_with_prelude;
+
+        let res = compile_with_prelude(
+            "fn run() {\n\
+             let xs = [1, 2, 3]\n\
+             let doubled = xs.map(|x| x * 2)\n\
+             let trebled = doubled.map(|y| y + 1)\n\
+             print(trebled.len())\n\
+             }\n\
+             run()",
+        );
+        assert!(
+            res.is_ok(),
+            "local binding method-chain intermediate should compile; got: {:?}",
+            res.err()
+        );
+    }
+
     // ── strict-flip S1: let-annotation Unknown-accept guard (STRUCTURAL) ──
     //
     // The laundering holes that previously ran rc=0 WRONG (VM==JIT) now reject
@@ -8106,9 +8022,9 @@ mod tests {
     //       over-reject, no bit-leak. `binop_operand_disagreeing_primitive`
     //       (HOLE-2) is KEPT — it only fires on a structurally-PROVEN
     //       disagreeing operand (no over-reject).
-    //   (B) array-destructure element-kind stamping
-    //       (`stamp_destructure_element_binding`), now RECURSING into nested
-    //       `[[a,b],[c,d]]` patterns (peels one `Array<…>` layer per level).
+    //   (B) array-destructure binding facts from runtime inference, now
+    //       RECURSING into nested `[[a,b],[c,d]]` patterns (peels one
+    //       `Array<…>` layer per level).
 
     fn compile_fails(source: &str) -> bool {
         let Ok(program) = parse_program(source) else {

@@ -27,7 +27,13 @@
 //! recovery, per the playbook's surface-and-stop discipline.
 
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
-use shape_runtime::type_schema::{EnumVariantKind, TypeSchema, TypeSchemaRegistry};
+use shape_runtime::type_schema::{
+    builtin_schemas::{
+        OPTION_PAYLOAD, OPTION_VARIANT, OPTION_VARIANT_NONE, OPTION_VARIANT_SOME, RESULT_PAYLOAD,
+        RESULT_VARIANT, RESULT_VARIANT_ERR, RESULT_VARIANT_OK,
+    },
+    EnumVariantKind, TypeSchema, TypeSchemaRegistry,
+};
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectStorage};
 use shape_value::{KindedSlot, NativeKind, ValueSlot};
 
@@ -751,6 +757,9 @@ impl<'a> ValueFormatter<'a> {
         // schema lookup genuinely fails (rare — runtime-built objects
         // without registered schema).
         if let Some(s) = schema {
+            if let Some(rendered) = self.format_result_option_typed_object(s, storage, depth) {
+                return rendered;
+            }
             if s.is_enum() {
                 return self.format_enum_typed_object(s, storage, depth);
             }
@@ -786,6 +795,77 @@ impl<'a> ValueFormatter<'a> {
         }
         out.push('}');
         out
+    }
+
+    /// Format the schema-backed fixed-layout `__Option` / `__Result`
+    /// TypedObject carriers as their source-level wrapper forms while the
+    /// legacy HeapKind carriers continue to use their own heap arms.
+    fn format_result_option_typed_object(
+        &self,
+        schema: &TypeSchema,
+        storage: &TypedObjectStorage,
+        depth: usize,
+    ) -> Option<String> {
+        match schema.name.as_str() {
+            "__Option" => self.format_option_typed_object(storage, depth),
+            "__Result" => self.format_result_typed_object(storage, depth),
+            _ => None,
+        }
+    }
+
+    fn format_option_typed_object(
+        &self,
+        storage: &TypedObjectStorage,
+        depth: usize,
+    ) -> Option<String> {
+        match self.read_variant_tag(storage, OPTION_VARIANT)? {
+            OPTION_VARIANT_SOME => {
+                let inner = self.format_typed_object_payload(storage, OPTION_PAYLOAD, depth)?;
+                Some(format!("Some({})", inner))
+            }
+            OPTION_VARIANT_NONE => Some("None".to_string()),
+            _ => None,
+        }
+    }
+
+    fn format_result_typed_object(
+        &self,
+        storage: &TypedObjectStorage,
+        depth: usize,
+    ) -> Option<String> {
+        let tag = self.read_variant_tag(storage, RESULT_VARIANT)?;
+        let inner = self.format_typed_object_payload(storage, RESULT_PAYLOAD, depth)?;
+        match tag {
+            RESULT_VARIANT_OK => Some(format!("Ok({})", inner)),
+            RESULT_VARIANT_ERR => Some(format!("Err({})", inner)),
+            _ => None,
+        }
+    }
+
+    fn read_variant_tag(&self, storage: &TypedObjectStorage, idx: usize) -> Option<i64> {
+        if storage.slots().len() != 2
+            || storage.field_kinds.len() != 2
+            || storage.field_kinds.get(idx).copied()? != NativeKind::Int64
+        {
+            return None;
+        }
+        Some(storage.slots()[idx].as_i64())
+    }
+
+    fn format_typed_object_payload(
+        &self,
+        storage: &TypedObjectStorage,
+        idx: usize,
+        depth: usize,
+    ) -> Option<String> {
+        if storage.slots().len() != 2 || storage.field_kinds.len() != 2 {
+            return None;
+        }
+        let slot = ValueSlot::from_raw(storage.slots().get(idx)?.raw());
+        let kinded = KindedSlot::new(slot, *storage.field_kinds.get(idx)?);
+        let rendered = self.format_kinded_inner(&kinded, depth + 1, true);
+        std::mem::forget(kinded);
+        Some(rendered)
     }
 
     /// Format an enum-typed `TypedObjectStorage` as `Variant(payload)` /
@@ -1304,6 +1384,16 @@ mod tests {
         TypeSchemaRegistry::new()
     }
 
+    fn create_builtin_test_registry() -> (
+        TypeSchemaRegistry,
+        shape_runtime::type_schema::builtin_schemas::BuiltinSchemaIds,
+    ) {
+        let mut registry = TypeSchemaRegistry::new();
+        let ids =
+            shape_runtime::type_schema::builtin_schemas::register_builtin_schemas(&mut registry);
+        (registry, ids)
+    }
+
     #[test]
     fn test_format_inline_scalars() {
         let reg = create_test_registry();
@@ -1392,6 +1482,68 @@ mod tests {
         assert_eq!(formatter.format_kinded(&c2), "λ");
     }
 
+    #[test]
+    fn test_format_schema_backed_option_carriers() {
+        let (reg, ids) = create_builtin_test_registry();
+        let formatter = ValueFormatter::new(&reg);
+
+        let some = crate::executor::result_option_carrier::build_some(
+            &ids,
+            KindedSlot::from_string_arc(Arc::new("value".to_string())),
+        );
+        assert_eq!(formatter.format_kinded(&some), "Some(\"value\")");
+        drop(some);
+
+        let none = crate::executor::result_option_carrier::build_none(&ids);
+        assert_eq!(formatter.format_kinded(&none), "None");
+        drop(none);
+    }
+
+    #[test]
+    fn test_format_schema_backed_result_carriers() {
+        let (reg, ids) = create_builtin_test_registry();
+        let formatter = ValueFormatter::new(&reg);
+
+        let ok = crate::executor::result_option_carrier::build_ok(&ids, KindedSlot::from_int(42));
+        assert_eq!(formatter.format_kinded(&ok), "Ok(42)");
+        drop(ok);
+
+        let err = crate::executor::result_option_carrier::build_err(
+            &ids,
+            KindedSlot::from_string_arc(Arc::new("boom".to_string())),
+        );
+        assert_eq!(formatter.format_kinded(&err), "Err(\"boom\")");
+        drop(err);
+    }
+
+    #[test]
+    fn test_format_legacy_option_result_carriers_still_use_heap_arms() {
+        use shape_value::heap_value::{OptionData, ResultData};
+
+        let reg = create_test_registry();
+        let formatter = ValueFormatter::new(&reg);
+
+        let legacy_some = KindedSlot::from_option(Arc::new(OptionData::some(
+            KindedSlot::from_string_arc(Arc::new("old".to_string())),
+        )));
+        assert_eq!(formatter.format_kinded(&legacy_some), "Some(\"old\")");
+        drop(legacy_some);
+
+        let legacy_none = KindedSlot::from_option(Arc::new(OptionData::none()));
+        assert_eq!(formatter.format_kinded(&legacy_none), "None");
+        drop(legacy_none);
+
+        let legacy_ok = KindedSlot::from_result(Arc::new(ResultData::ok(KindedSlot::from_int(7))));
+        assert_eq!(formatter.format_kinded(&legacy_ok), "Ok(7)");
+        drop(legacy_ok);
+
+        let legacy_err = KindedSlot::from_result(Arc::new(ResultData::err(
+            KindedSlot::from_string_arc(Arc::new("legacy".to_string())),
+        )));
+        assert_eq!(formatter.format_kinded(&legacy_err), "Err(\"legacy\")");
+        drop(legacy_err);
+    }
+
     /// r5c-2-β-CKPT-C u64-carrier-disambiguation regression guard.
     ///
     /// A `NativeKind::UInt64` slot is a genuine scalar `u64` — the
@@ -1422,7 +1574,7 @@ mod tests {
     #[test]
     fn test_format_typed_array_via_ptr_carrier() {
         use crate::executor::v2_handlers::v2_array_detect::stamp_elem_type;
-        use shape_value::v2::typed_array::{ELEM_TYPE_I64, TypedArray};
+        use shape_value::v2::typed_array::{TypedArray, ELEM_TYPE_I64};
 
         let reg = create_test_registry();
         let formatter = ValueFormatter::new(&reg);

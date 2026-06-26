@@ -1251,7 +1251,7 @@ fn lower_for_expr(builder: &mut MirBuilder, for_expr: &ast::ForExpr, temp: SlotI
         // (the common case: `for i in 0..10`), the counter IS the
         // loop variable.
         let counter_slot = match &for_expr.pattern {
-            ast::Pattern::Identifier(name) | ast::Pattern::Typed { name, .. } => {
+            ast::Pattern::Identifier { name, .. } | ast::Pattern::Typed { name, .. } => {
                 builder.alloc_local(name.clone(), LocalTypeInfo::Unknown)
             }
             _ => builder.alloc_temp(LocalTypeInfo::Unknown),
@@ -1500,7 +1500,7 @@ fn lower_for_expr(builder: &mut MirBuilder, for_expr: &ast::ForExpr, temp: SlotI
         // intermediate copy and matches the bytecode-VM-side path) or
         // an anonymous temp (compound patterns: destructured downstream).
         let elem_slot = match &for_expr.pattern {
-            ast::Pattern::Identifier(name) | ast::Pattern::Typed { name, .. } => {
+            ast::Pattern::Identifier { name, .. } | ast::Pattern::Typed { name, .. } => {
                 builder.alloc_local(name.clone(), LocalTypeInfo::Unknown)
             }
             _ => builder.alloc_temp(LocalTypeInfo::Unknown),
@@ -1531,7 +1531,7 @@ fn lower_for_expr(builder: &mut MirBuilder, for_expr: &ast::ForExpr, temp: SlotI
         // resolves to the slot we just allocated).
         if !matches!(
             &for_expr.pattern,
-            ast::Pattern::Identifier(_) | ast::Pattern::Typed { .. }
+            ast::Pattern::Identifier { .. } | ast::Pattern::Typed { .. }
         ) {
             super::stmt::lower_pattern_bindings_from_place(
                 builder,
@@ -1652,7 +1652,7 @@ pub(super) fn lower_match_expr(
         // qualified `Enum::Red`) treat it as a variant rather than a binder.
         // Genuine binders (unknown / lowercase names) are left unchanged.
         let normalized_pattern: Option<ast::Pattern> = match &arm.pattern {
-            ast::Pattern::Identifier(name)
+            ast::Pattern::Identifier { name, .. }
                 if name.chars().next().is_some_and(|c| c.is_uppercase())
                     && builder.is_known_unit_variant(name) =>
             {
@@ -1766,7 +1766,7 @@ fn lower_match_pattern_condition_operand(
     pattern_span: Span,
 ) -> Option<Operand> {
     match pattern {
-        ast::Pattern::Identifier(_) | ast::Pattern::Wildcard => None,
+        ast::Pattern::Identifier { .. } | ast::Pattern::Wildcard => None,
         ast::Pattern::Typed {
             type_annotation, ..
         } => {

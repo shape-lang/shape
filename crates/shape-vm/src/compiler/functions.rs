@@ -264,19 +264,18 @@ impl BytecodeCompiler {
     /// with. The correct disposition is to DEFER body emission (the same
     /// `return Ok(())` skip that explicit `<T>` templates take), not to widen
     /// to a default kind. When a concrete call site later exists,
-    /// `inferred_param_type_hints` carries a concrete name, this predicate is
-    /// `false`, and the body is emitted with proven kinds.
+    /// `InferenceFacts::function_signature` carries a resolved param type, this
+    /// predicate is `false`, and the body is emitted with proven kinds.
     ///
     /// Narrowing rules (avoid skipping a body that legitimately compiles):
     /// - Only unannotated, non-reference, simple-identifier value params count
     ///   (annotated params carry a proven kind; reference params re-stamp via
     ///   `infer_param_type_from_body`; destructuring params are handled
     ///   elsewhere).
-    /// - A param with a concrete `inferred_param_type_hints` entry is pinned —
-    ///   it does NOT make the function generic.
-    /// - A param with an inferred anonymous-object field schema
-    ///   (`inferred_param_object_fields`) resolves to a structural type and is
-    ///   likewise not generic.
+    /// - A param with a concrete function-signature fact is pinned — it does
+    ///   NOT make the function generic.
+    /// - A param with an inferred anonymous-object field schema resolves to a
+    ///   structural type and is likewise not generic.
     /// - The function must have at least one such unresolved param; a function
     ///   with zero unannotated value params is never implicitly generic.
     fn is_uninstantiated_implicit_generic(&self, func_def: &FunctionDef) -> bool {
@@ -311,9 +310,6 @@ impl BytecodeCompiler {
             return false;
         }
 
-        let hints = self.inferred_param_type_hints.get(&func_def.name);
-        let object_fields = self.inferred_param_object_fields.get(&func_def.name);
-
         let mut saw_unannotated_value_param = false;
         for (idx, param) in func_def.params.iter().enumerate() {
             // Only bare, by-value, unannotated identifier params can be
@@ -328,22 +324,20 @@ impl BytecodeCompiler {
             }
             saw_unannotated_value_param = true;
 
-            // A concrete program-wide hint pins this param's kind.
-            let pinned_by_hint = hints
-                .and_then(|h| h.get(idx))
-                .map(|entry| entry.is_some())
-                .unwrap_or(false);
-            if pinned_by_hint {
+            // A concrete program-wide signature fact pins this param's kind.
+            if self
+                .inferred_param_type_name_from_facts(&func_def.name, func_def, idx)
+                .is_some()
+            {
                 continue;
             }
 
             // An inferred anonymous-object field schema resolves this param to
             // a structural type (handled in `compile_function_body`).
-            let pinned_by_object_schema = object_fields
-                .and_then(|f| f.get(idx))
-                .map(|entry| entry.is_some())
-                .unwrap_or(false);
-            if pinned_by_object_schema {
+            if self
+                .inferred_param_object_fields_from_facts(&func_def.name, func_def, idx)
+                .is_some()
+            {
                 continue;
             }
 
@@ -1362,19 +1356,6 @@ impl BytecodeCompiler {
         let saved_local_callable_pass_modes = std::mem::take(&mut self.local_callable_pass_modes);
         let saved_local_callable_return_reference_summaries =
             std::mem::take(&mut self.local_callable_return_reference_summaries);
-        // Sweep phase 3c.x: snapshot/restore the closure return-type map
-        // and array-callable map alongside the existing pass-mode/summary
-        // maps. `compile_function` clears them via `clear_locals`-adjacent
-        // logic at line ~1089; without snapshot/restore, any closure
-        // recorded in the outer function before the inner-function
-        // compile is invisible after it returns. Reproduces as
-        // `let f = |…| …; let ra = f(4); ra + …` failing with
-        // `unknown + int` because f's tracked return type was wiped when
-        // a sibling closure compiled.
-        let saved_local_callable_return_types =
-            std::mem::take(&mut self.local_callable_return_types);
-        let saved_local_array_callable_return_types =
-            std::mem::take(&mut self.local_array_callable_return_types);
         // cluster-2-cw-IB-class-b: snapshot/restore retained closure
         // bodies alongside the existing callable-binding maps so the
         // outer function's `let f = |..|` peek doesn't leak into the
@@ -1429,6 +1410,13 @@ impl BytecodeCompiler {
         // `base: int` from `let base = 100`, breaking strict-typing's
         // closure-return-type inference for `let f = |x| x + base`.
         let saved_local_types = self.type_tracker.snapshot_local_types();
+        // U4-6: snapshot the VM's per-local structural proof facts alongside
+        // the type tracker local tables. Nested function / closure compilation
+        // uses the same slot numbers and must not erase the outer function's
+        // binding facts.
+        let saved_current_function_local_concrete_facts =
+            std::mem::take(&mut self.current_function_local_concrete_facts);
+        let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
         let saved_param_locals = std::mem::take(&mut self.param_locals);
         let saved_function_params =
             std::mem::replace(&mut self.current_function_params, func_def.params.clone());
@@ -1483,17 +1471,17 @@ impl BytecodeCompiler {
         self.inferred_ref_locals.clear();
         self.local_callable_pass_modes.clear();
         self.local_callable_return_reference_summaries.clear();
-        self.local_callable_return_types.clear();
         self.local_callable_closure_bodies.clear();
         self.reference_value_locals.clear();
         self.exclusive_reference_value_locals.clear();
         self.reference_value_local_referent_concrete_type.clear();
         self.immutable_locals.clear();
         self.param_locals.clear();
-        // v0.3 WS-6: per-function local ConcreteType table — local slot
-        // indices are per-function, so it must be cleared at each function
+        // v0.3 WS-6: per-function local ConcreteType facts — local slot
+        // indices are per-function, so they must be cleared at each function
         // entry to avoid a stale prior-function entry colliding.
-        self.current_function_local_concrete_types.clear();
+        self.current_function_local_concrete_facts.clear();
+        self.local_binding_spans.clear();
         self.push_scope();
         self.push_drop_scope();
         self.next_local = 0;
@@ -1616,7 +1604,12 @@ impl BytecodeCompiler {
                         // parameter slot stays unstamped and downstream
                         // ownership/field codegen mis-classifies it.
                         if let Some(ct) = crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(self, type_ann) {
-                            self.current_function_local_concrete_types.insert(local_idx, ct);
+                            crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                self,
+                                crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                                ct,
+                                crate::compiler::BindingConcreteFactSource::DeclaredAnnotation,
+                            );
                         }
                         self.try_track_datatable_type(type_ann, local_idx, true)?;
                     } else {
@@ -1641,11 +1634,11 @@ impl BytecodeCompiler {
                         // expr`, exactly the way a named-struct field
                         // resolves. The field types are inference output,
                         // never fabricated.
-                        let object_fields = self
-                            .inferred_param_object_fields
-                            .get(&func_def.name)
-                            .and_then(|fields| fields.get(idx))
-                            .and_then(|entry| entry.clone());
+                        let object_fields = self.inferred_param_object_fields_from_facts(
+                            &func_def.name,
+                            func_def,
+                            idx,
+                        );
                         let stamped_object_schema = object_fields.is_some();
                         if let Some(object_fields) = object_fields {
                             let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> =
@@ -1673,32 +1666,20 @@ impl BytecodeCompiler {
                         // W14.2-G4-derefstore-drift fix (ADR-006 §2.7.13
                         // producer-side ref-chain stamp): for ref-params
                         // (`&x`) without type annotation, the program-wide
-                        // type-inference pass at `infer_param_type_hints_
-                        // from_types` widens int-only ref-param bodies to
-                        // `"number"` because the engine's reference-erasure
-                        // path drops the integer-literal pairing signal
-                        // present in `x = x + 1`. The body-local heuristic
-                        // `infer_param_type_from_body` recovers `"int"`
-                        // from the literal pairing (closures.rs:43-50).
-                        // Prefer the body-local heuristic for ref-params
-                        // when the global inference produced the wider
-                        // `"number"` — this re-stamps the ref-param's
-                        // local-slot type tracker with the producer-side
-                        // (caller's `let a = 0`) projected kind, matching
-                        // the `RefTarget::Local { kind: Int64 }` carried
-                        // through the ref chain. Without this re-stamp,
-                        // the binop emitter at `expressions/binary_ops.rs:
-                        // 880` coerces `x + 1` to `AddNumber` (Float64
-                        // result), and the `DerefStore Local(x_slot)`
-                        // executor at `executor/variables/mod.rs:2696`
-                        // surfaces the §2.7.13 invariant violation
-                        // (`debug_assert_eq!(val_kind, projected_kind)`)
-                        // with `popped Float64, place Int64`.
-                        let global_inferred = self
-                            .inferred_param_type_hints
-                            .get(&func_def.name)
-                            .and_then(|hints| hints.get(idx))
-                            .and_then(|hint| hint.clone());
+                        // function-signature fact can widen int-only ref-param
+                        // bodies to `"number"` because the engine's
+                        // reference-erasure path drops the integer-literal
+                        // pairing signal present in `x = x + 1`. The body-local
+                        // heuristic `infer_param_type_from_body` recovers
+                        // `"int"` from the literal pairing (closures.rs:43-50).
+                        // Prefer the body-local heuristic for ref-params when
+                        // global inference produced the wider `"number"` — this
+                        // re-stamps the ref-param's local-slot type tracker with
+                        // the producer-side (caller's `let a = 0`) projected kind,
+                        // matching the `RefTarget::Local { kind: Int64 }`
+                        // carried through the ref chain.
+                        let global_inferred =
+                            self.inferred_param_type_name_from_facts(&func_def.name, func_def, idx);
                         let body_local_inferred = if param.is_reference {
                             crate::compiler::expressions::closures::infer_param_type_from_body(
                                 name,
@@ -1745,25 +1726,28 @@ impl BytecodeCompiler {
                             if Self::tracker_type_name_is_primitive(&type_name) {
                                 self.param_locals.remove(&local_idx);
                             }
-                            // U4-5: seed the STRUCTURAL array-element side-table
-                            // for an unannotated ARRAY param. The program-wide
-                            // inference pass resolved the param's `ConcreteType`
-                            // (`inferred_param_concrete_types`); when it is an
-                            // `Array(elem)`, record the element `ConcreteType` so
-                            // `identifier_concrete_type` recovers `a[0]`'s element
-                            // type STRUCTURALLY. This replaces the deleted
-                            // `strip_prefix("Vec<")` re-parse of the param's
-                            // tracker `type_name` string (the WS-9 unannotated-
-                            // param array path) — the element type IS the
-                            // inference proof, threaded structurally, not parsed
-                            // back out of a `"Vec<int>"` display string.
+                            // U4-5/U4-7: seed the STRUCTURAL whole-binding
+                            // ConcreteType for an unannotated ARRAY param. The
+                            // program-wide inference facts resolved the param's
+                            // `ConcreteType`; when it is an `Array(elem)`, record
+                            // that full carrier so `identifier_concrete_type`
+                            // recovers `a[0]`'s element type STRUCTURALLY. This
+                            // replaces the deleted `strip_prefix("Vec<")`
+                            // re-parse of the param's tracker `type_name` string.
                             if let Some(shape_value::v2::ConcreteType::Array(elem)) = self
-                                .inferred_param_concrete_types
-                                .get(&func_def.name)
-                                .and_then(|v| v.get(idx))
-                                .and_then(|opt| opt.clone())
+                                .inferred_param_concrete_type_from_facts(
+                                    &func_def.name,
+                                    func_def,
+                                    idx,
+                                )
                             {
-                                self.local_array_element_types.insert(local_idx, *elem);
+                                let ct = shape_value::v2::ConcreteType::Array(elem);
+                                crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                    self,
+                                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                                    ct,
+                                    crate::compiler::BindingConcreteFactSource::FunctionSignature,
+                                );
                             }
                         } else if let Some(ann) =
                             crate::compiler::expressions::closures::infer_param_type_from_body(
@@ -1773,7 +1757,7 @@ impl BytecodeCompiler {
                         {
                             // Strict-typing-sweep: inference engine may
                             // have produced a Type::Variable (which
-                            // inferred_type_to_hint_name discards).
+                            // inferred_param_type_name_from_facts discards).
                             // Fall back to a body-level literal-pairing
                             // scan — the same heuristic closure
                             // synthesis uses — so e.g.
@@ -1927,9 +1911,9 @@ impl BytecodeCompiler {
                         // Skip the fallback return below since we've already returned
                         // Update function locals count
                         self.program.functions[func_idx].locals_count = self.next_local;
-                        // PB1 Wave-1-extension: pass FunctionDef so
-                        // Result/Option return-kind stamps onto
-                        // `FrameDescriptor.return_kind` per audit 14a/14b.
+                        // Pass FunctionDef so return metadata stamps
+                        // both the ABI `FrameDescriptor.return_kind`
+                        // and Result/Option `return_wrapper`.
                         self.capture_function_local_storage_hints_with_def(func_idx, func_def);
                         // Finalize blob builder and store completed blob
                         self.finalize_current_blob(func_idx);
@@ -1953,6 +1937,9 @@ impl BytecodeCompiler {
                         // the (about-to-be-popped) inner-closure scope's
                         // slot indices evict outer-function entries.
                         self.type_tracker.restore_local_types(saved_local_types);
+                        self.current_function_local_concrete_facts =
+                            saved_current_function_local_concrete_facts;
+                        self.local_binding_spans = saved_local_binding_spans;
                         self.locals = saved_locals;
                         self.current_function = saved_function;
                         self.current_function_is_async = saved_is_async;
@@ -1963,12 +1950,6 @@ impl BytecodeCompiler {
                         self.local_callable_pass_modes = saved_local_callable_pass_modes.clone();
                         self.local_callable_return_reference_summaries =
                             saved_local_callable_return_reference_summaries.clone();
-                        // Sweep phase 3c.x: restore closure return-type +
-                        // array-callable maps alongside.
-                        self.local_callable_return_types =
-                            saved_local_callable_return_types.clone();
-                        self.local_array_callable_return_types =
-                            saved_local_array_callable_return_types.clone();
                         // cluster-2-cw-IB-class-b: restore retained
                         // closure bodies after the nested function
                         // compile completes.
@@ -2060,10 +2041,10 @@ impl BytecodeCompiler {
 
         // Update function locals count
         self.program.functions[func_idx].locals_count = self.next_local;
-        // PB1 Wave-1-extension: pass FunctionDef so the Result/Option
-        // return-kind stamps onto `FrameDescriptor.return_kind` per
-        // audit 14a + 14b (used by `op_try_unwrap` None-arm target
-        // discrimination).
+        // Pass FunctionDef so return metadata stamps both the ABI
+        // `FrameDescriptor.return_kind` and Result/Option
+        // `return_wrapper` used by `op_try_unwrap` None-arm target
+        // discrimination.
         self.capture_function_local_storage_hints_with_def(func_idx, func_def);
 
         // Finalize blob builder and store completed blob
@@ -2084,6 +2065,8 @@ impl BytecodeCompiler {
         // Sweep phase 3c.1: restore outer-function local types AFTER
         // pop_scope (see early-return path comment).
         self.type_tracker.restore_local_types(saved_local_types);
+        self.current_function_local_concrete_facts = saved_current_function_local_concrete_facts;
+        self.local_binding_spans = saved_local_binding_spans;
         self.locals = saved_locals;
         self.current_function = saved_function;
         self.current_function_is_async = saved_is_async;
@@ -2094,10 +2077,6 @@ impl BytecodeCompiler {
         self.local_callable_pass_modes = saved_local_callable_pass_modes;
         self.local_callable_return_reference_summaries =
             saved_local_callable_return_reference_summaries;
-        // Sweep phase 3c.x: restore closure return-type + array-callable
-        // maps alongside.
-        self.local_callable_return_types = saved_local_callable_return_types;
-        self.local_array_callable_return_types = saved_local_array_callable_return_types;
         // cluster-2-cw-IB-class-b: restore retained closure bodies.
         self.local_callable_closure_bodies = saved_local_callable_closure_bodies;
         self.reference_value_locals = saved_reference_value_locals;

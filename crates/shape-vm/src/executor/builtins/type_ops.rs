@@ -28,6 +28,7 @@
 
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::bytecode::{Constant, Instruction, Operand};
+use crate::executor::result_option_carrier;
 use crate::executor::VirtualMachine;
 use crate::executor::printing::ValueFormatter;
 use shape_runtime::type_schema::TypeSchemaRegistry;
@@ -746,11 +747,11 @@ impl VirtualMachine {
     // `TryConvertTo*` is the FALLIBLE cast opcode for `expr as Type?`.
     // Per the book (`fundamentals/error-handling.mdx` §Fallible: "result
     // type is `Result<Type, AnyError>`"), its result is a proper
-    // `Result<Target, AnyError>` carrier — `KindedSlot::from_result(
-    // Arc<ResultData>)`, kind `Ptr(HeapKind::Result)`. A successful
-    // conversion produces `Ok(v)` (the converted scalar wrapped in
-    // `ResultData::ok`); a conversion FAILURE produces `Err(AnyError)`
-    // (the conversion-failure message wrapped in `ResultData::err`)
+    // `Result<Target, AnyError>` carrier — the canonical `__Result`
+    // TypedObject. A successful conversion produces `Ok(v)` (the
+    // converted scalar moved into the payload field); a conversion
+    // FAILURE produces `Err(AnyError)` (the conversion-failure message
+    // wrapped in the Err payload)
     // rather than throwing.
     //
     // This is what makes BOTH consumers correct with ONE carrier:
@@ -768,7 +769,7 @@ impl VirtualMachine {
     // a null/bare carrier is NOT a `Result` enum, so `match` could not
     // destructure it (Stage B5). The fix below produces the real Result
     // carrier the book documents; `op_try_unwrap` already handles a
-    // `ResultData` carrier (Ok → unwrap, Err → early-return), so the
+    // `__Result` carrier (Ok → unwrap, Err → early-return), so the
     // `?`-form is preserved.
     //
     // Only a conversion-failure `VMError::RuntimeError` (the `read_as_*`
@@ -793,26 +794,29 @@ impl VirtualMachine {
         match convert(self) {
             Ok(()) => {
                 // Success: the inner body pushed the converted scalar.
-                // Re-wrap it as `Ok(v)` so the carrier kind is
-                // `Ptr(HeapKind::Result)` and `match`/`?` see a real
-                // Result enum. Transferring the share into the payload
-                // KindedSlot (no clone) keeps refcounting balanced.
+                // Re-wrap it as `Ok(v)` so `match`/`?` see a real Result
+                // enum. Transferring the share into the payload KindedSlot
+                // (no clone) keeps refcounting balanced.
                 let value = pop_one_kinded(self)?;
-                let res = Arc::new(shape_value::heap_value::ResultData::ok(value));
-                self.push_kinded_slot(KindedSlot::from_result(res))
+                self.push_kinded_slot(result_option_carrier::build_ok(
+                    &self.builtin_schemas,
+                    value,
+                ))
             }
             // Conversion failure → `Err(AnyError)`. The infallible body
             // already popped + dropped its source carrier before the
             // `read_as_*` error returned, so the stack is balanced; we
             // build a fresh AnyError carrier from the failure message
-            // and wrap it in `ResultData::err`.
+            // and wrap it in `__Result` Err.
             Err(VMError::RuntimeError(msg)) => {
                 let payload = KindedSlot::from_string_arc(Arc::new(msg));
                 let trace = self.trace_info_full()?;
                 let any_err =
                     self.build_any_error(payload, None, trace, Some("CONVERSION_FAILED"))?;
-                let res = Arc::new(shape_value::heap_value::ResultData::err(any_err));
-                self.push_kinded_slot(KindedSlot::from_result(res))
+                self.push_kinded_slot(result_option_carrier::build_err(
+                    &self.builtin_schemas,
+                    any_err,
+                ))
             }
             Err(other) => Err(other),
         }

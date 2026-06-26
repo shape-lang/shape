@@ -23,7 +23,7 @@ use super::super::{BuiltinNameResolution, BytecodeCompiler, ModuleBuiltinFunctio
 /// Strict-typing-sweep (Cluster 3): map a `NativeKind` (the type-tracker's
 /// per-slot storage hint) to an AST `TypeAnnotation`. Used by HOF dispatch
 /// to type closure user params from a bare `[1, 2, 3]`-literal receiver
-/// when no `local_array_element_types` entry exists yet.
+/// when no whole-binding `ConcreteType::Array(elem)` entry exists yet.
 fn slot_kind_to_type_annotation(
     kind: crate::type_tracking::NativeKind,
 ) -> Option<shape_ast::ast::TypeAnnotation> {
@@ -394,15 +394,81 @@ impl BytecodeCompiler {
         Some(schema_id)
     }
 
+    /// WS-9c: derive/register the inline anonymous schema for an unannotated
+    /// function whose canonical inferred signature returns a structural object.
+    ///
+    /// This is intentionally a projection from `InferenceFacts` at the read
+    /// site, not a parallel function-name side table. The schema remains
+    /// Any-uniform to match object-literal layout, while field contracts carry
+    /// the precise inferred field annotations for downstream field lookups.
+    pub(crate) fn inferred_return_object_schema_id(&mut self, call_name: &str) -> Option<u32> {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_schema::FieldType;
+
+        let mut candidates = Vec::new();
+        let mut push_candidate = |candidate: String| {
+            if !candidates.iter().any(|existing| existing == &candidate) {
+                candidates.push(candidate);
+            }
+        };
+        push_candidate(call_name.to_string());
+        if let Some(scoped) = self.resolve_scoped_module_binding_name(call_name) {
+            push_candidate(scoped);
+        }
+        if let Some((_, tail)) = call_name.rsplit_once("::") {
+            push_candidate(tail.to_string());
+        }
+
+        let fields: Vec<(String, shape_runtime::type_schema::FieldType)> =
+            candidates.iter().find_map(|candidate| {
+                let Type::Function { returns, .. } =
+                    self.inference_facts.function_signature(candidate)?
+                else {
+                    return None;
+                };
+                let Type::Concrete(TypeAnnotation::Object(obj_fields)) = returns.as_ref() else {
+                    return None;
+                };
+                if obj_fields.is_empty() {
+                    return None;
+                }
+                Some(
+                    obj_fields
+                        .iter()
+                        .map(|field| {
+                            (
+                                field.name.clone(),
+                                Self::type_annotation_to_field_type(&field.type_annotation),
+                            )
+                        })
+                        .collect(),
+                )
+            })?;
+
+        let typed_fields: Vec<(&str, FieldType)> = fields
+            .iter()
+            .map(|(name, _)| (name.as_str(), FieldType::Any))
+            .collect();
+        let schema_id = self
+            .type_tracker
+            .register_inline_object_schema_typed(&typed_fields);
+        let mut contracts = HashMap::with_capacity(fields.len());
+        for (name, field_ty) in &fields {
+            if let Some(ann) = field_type_contract_annotation(field_ty) {
+                contracts.insert(name.clone(), ann);
+            }
+        }
+        if !contracts.is_empty() {
+            self.type_tracker
+                .register_object_field_contracts(schema_id, contracts);
+        }
+        Some(schema_id)
+    }
+
     /// WS-9c: build a `VariableTypeInfo` for an unannotated function whose
     /// inferred return type is an anonymous structural object.
-    ///
-    /// The inline anonymous schema (+ per-field contracts) was registered
-    /// up-front by `register_inferred_return_object_schemas`; this just looks
-    /// up the recorded schema id. Returns `None` when the function has no
-    /// inferred anonymous-object return.
     fn inline_schema_for_inferred_return(&mut self, call_name: &str) -> Option<VariableTypeInfo> {
-        let schema_id = *self.function_return_schema_ids.get(call_name)?;
+        let schema_id = self.inferred_return_object_schema_id(call_name)?;
         let schema_name = self
             .type_tracker
             .schema_registry()
@@ -721,25 +787,15 @@ impl BytecodeCompiler {
             }
             self.last_expr_schema = None;
             self.last_expr_type_info = None;
-            // Sweep phase 3c.x: when the callee is a `let f = |…|`
-            // binding with a tracked closure return type, propagate that
-            // type onto `last_expr_numeric_type` (or `last_expr_type_info`
-            // for non-numeric primitives) so a downstream `let ra = f(4)`
-            // assignment records `ra: int` via
-            // `propagate_initializer_type_to_slot`. Without this hop,
-            // `ra + rb` fails strict-typing as `unknown + unknown`.
-            let tracked_callable_rt: Option<String> =
-                if let Some(local_idx) = self.resolve_local(name) {
-                    self.local_callable_return_types.get(&local_idx).cloned()
-                } else if let Some(scoped) = self.resolve_scoped_module_binding_name(name) {
-                    self.module_bindings
-                        .get(&scoped)
-                        .and_then(|idx| self.module_binding_callable_return_types.get(idx).cloned())
-                } else {
-                    self.module_bindings
-                        .get(name)
-                        .and_then(|idx| self.module_binding_callable_return_types.get(idx).cloned())
-                };
+            // U4-6 callable-return deletion: derive the return type of a
+            // callable binding structurally from `InferenceFacts` or a retained
+            // closure body peek, then render it only for the residual tracker
+            // display-name stamp. No slot-indexed return string map remains.
+            let tracked_callable_return_type =
+                self.callable_binding_return_type(name, Some(args.len()));
+            let tracked_callable_rt: Option<String> = tracked_callable_return_type
+                .as_ref()
+                .and_then(Self::inferred_type_to_hint_name);
             if let Some(rt_name) = tracked_callable_rt.as_ref() {
                 match rt_name.as_str() {
                     // U4-4: numeric register stamps replaced by `last_expr_type_info`
@@ -852,12 +908,8 @@ impl BytecodeCompiler {
                     // argument expression. `concrete_type_for_expr` is
                     // the same resolver the rest of the bytecode-
                     // emission layer uses (covers tracker-recorded
-                    // primitives + typed-array bindings via
-                    // `local_array_element_types` once Class C's
-                    // sibling populator lands; meanwhile annotated
-                    // typed-array bindings flow via the type-tracker's
-                    // `Vec<scalar>` name fallback at
-                    // `monomorphization/type_resolution.rs:1493`).
+                    // primitives + typed-array bindings via whole-binding
+                    // `ConcreteType::Array(elem)` records.
                     // U4-5b: keep the caller-arg ConcreteTypes STRUCTURALLY so
                     // the closure-body param seed (below) reads each arg's array
                     // element type directly from `ConcreteType::Array(elem)` —
@@ -1935,9 +1987,8 @@ impl BytecodeCompiler {
     /// which the type-tracker installs and the binary-op compile path then
     /// trusts.
     ///
-    /// The receiver was already compiled by the caller, so element-type
-    /// side-tables (`local_array_element_types`,
-    /// `module_binding_array_element_types`) are populated; an inline array
+    /// The receiver was already compiled by the caller, so whole-binding
+    /// `ConcreteType::Array(elem)` records are populated; an inline array
     /// literal receiver resolves its element type structurally via
     /// `concrete_type_for_expr` (U4-6a: the per-span `array_element_types`
     /// cache is deleted).
@@ -2128,8 +2179,9 @@ impl BytecodeCompiler {
     /// When a free user function has an UNANNOTATED param that its body USES as
     /// a callable (`fn apply2(f, x, y) { f(x, y) }`, `fn map_pair(f, a, b) {
     /// [f(a), f(b)] }`), whole-program inference resolves that param to a
-    /// concrete `Type::Function`; `infer_param_fn_param_types_from_types`
-    /// captured its argument annotations into `inferred_param_fn_param_types`.
+    /// concrete `Type::Function`; `inferred_param_fn_param_types_from_facts`
+    /// derives its argument annotations on demand from `inference_facts` plus
+    /// the callee body-use shape.
     /// Here, at the call site, if the matching argument is a CLOSURE LITERAL
     /// whose user-param count equals the inferred signature arity, we map the
     /// inferred argument annotations 1:1 onto the closure's params via
@@ -2158,19 +2210,21 @@ impl BytecodeCompiler {
         callee_name: &str,
         args: &[Expr],
     ) -> bool {
-        let Some(param_fn_types) = self.inferred_param_fn_param_types.get(callee_name) else {
+        let Some(func_def) = self.function_defs.get(callee_name).cloned() else {
             return false;
         };
         // Find the argument positions that are closure literals AND for which
         // the callee has an inferred concrete fn-type. We only seed when there
         // is exactly one such position (a single pending hint slot), matching
         // the closure compile path's single-`take()` consumption.
-        let mut seedable: Option<(usize, &Vec<shape_ast::ast::TypeAnnotation>)> = None;
+        let mut seedable: Option<(usize, Vec<shape_ast::ast::TypeAnnotation>)> = None;
         for (idx, arg) in args.iter().enumerate() {
             if !matches!(arg, Expr::FunctionExpr { .. }) {
                 continue;
             }
-            let Some(Some(sig_anns)) = param_fn_types.get(idx) else {
+            let Some(sig_anns) =
+                self.inferred_param_fn_param_types_from_facts(callee_name, &func_def, idx)
+            else {
                 continue;
             };
             if seedable.is_some() {

@@ -440,8 +440,12 @@ impl BytecodeCompiler {
                                     self.set_local_type_info(local_idx, &tn);
                                 }
                             }
-                            self.current_function_local_concrete_types
-                                .insert(local_idx, elem_ct);
+                            crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                self,
+                                crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                                elem_ct,
+                                crate::compiler::BindingConcreteFactSource::IteratorElement,
+                            );
                         }
                     }
                 }
@@ -716,7 +720,7 @@ impl BytecodeCompiler {
         // Try range counter specialization (non-async, simple identifier pattern)
         if !for_expr.is_async {
             let pattern_name = match &for_expr.pattern {
-                shape_ast::ast::Pattern::Identifier(name) => Some(name.as_str()),
+                shape_ast::ast::Pattern::Identifier { name, .. } => Some(name.as_str()),
                 _ => None,
             };
             if let Some(rcl) =
@@ -800,7 +804,7 @@ impl BytecodeCompiler {
         ));
 
         match &for_expr.pattern {
-            shape_ast::ast::Pattern::Identifier(name) => {
+            shape_ast::ast::Pattern::Identifier { name, .. } => {
                 elem_local = self.declare_local(name)?;
                 is_object_destructure = false;
             }
@@ -808,7 +812,7 @@ impl BytecodeCompiler {
                 elem_local = self.declare_local("__elem")?;
                 for (key, pat) in fields {
                     let field_name = match pat {
-                        shape_ast::ast::Pattern::Identifier(n) => n.as_str(),
+                        shape_ast::ast::Pattern::Identifier { name, .. } => name.as_str(),
                         _ => key.as_str(),
                     };
                     let local = self.declare_local(field_name)?;
@@ -820,7 +824,7 @@ impl BytecodeCompiler {
                 elem_local = self.declare_local("__elem")?;
                 for pat in patterns {
                     let name = match pat {
-                        shape_ast::ast::Pattern::Identifier(n) => n.clone(),
+                        shape_ast::ast::Pattern::Identifier { name, .. } => name.clone(),
                         shape_ast::ast::Pattern::Wildcard => "__discard".to_string(),
                         _ => {
                             return Err(ShapeError::RuntimeError {
@@ -859,7 +863,7 @@ impl BytecodeCompiler {
         // `compile_for_loop`; `for x in arr` over `Array<int>` now
         // declares `x` with tracker type `int` so `sum + x` emits
         // `AddInt` rather than falling into trait dispatch.
-        if let shape_ast::ast::Pattern::Identifier(_) = &for_expr.pattern {
+        if let shape_ast::ast::Pattern::Identifier { .. } = &for_expr.pattern {
             let name_from_string_path = self.iter_element_type_name(&for_expr.iterable);
             if let Some(ref elem_type) = name_from_string_path {
                 self.set_local_type_info(elem_local, elem_type);
@@ -882,8 +886,12 @@ impl BytecodeCompiler {
                         self.set_local_type_info(elem_local, &tn);
                     }
                 }
-                self.current_function_local_concrete_types
-                    .insert(elem_local, elem_ct);
+                crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                    self,
+                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(elem_local),
+                    elem_ct,
+                    crate::compiler::BindingConcreteFactSource::IteratorElement,
+                );
             }
         }
         // ROOT-1 (strict-flip, 2026-06-18): destructuring for-in
@@ -1942,8 +1950,8 @@ impl BytecodeCompiler {
     /// recognizes `Vec<...>` head-names — a bare struct name yields `None`, so
     /// `u.score` (and the `result.push(item)` accumulator in the monomorphized
     /// `Vec.filter` body) saw `u: unknown`. Seeding
-    /// `current_function_local_concrete_types[elem_local]` with the element
-    /// `ConcreteType::Struct(named)` carries the struct identity to the field
+    /// an explicit binding fact for `elem_local` with the element
+    /// `ConcreteType::Struct(named)` carries the struct identity to field
     /// access / accumulator resolution.
     ///
     /// Derivation is type-proven (ADR-006 §2.7.5): the element type is the

@@ -65,28 +65,26 @@ Once T1/T2 + the side-tables are gone and PropertyAccess is consulted, the ladde
 
 ### T5 — The ~16 hint side-tables (Report C: GROWN from 13, not shrunk)
 
-**None are dead post-U1/U3** — confirmed. U3 deleted the *runtime* `TypedMap` carrier, NOT these compiler-side inference hints. Map tables survived.
+**Current local status (2026-06-24):** the original inventory below is historical. The U4-6 local wave has deleted `array_element_types`, `binding_object_element_fields`, `inferred_param_concrete_types`, `inferred_param_fn_param_types`, `inferred_param_object_fields`, `inferred_return_object_fields`, `function_return_schema_ids`, `local_array_element_types`, `module_binding_array_element_types`, the map key/value table family, `binding_collection_carrier_kinds`, the local/module array-callable return tables, `inferred_param_type_hints`, the local/module callable-return string maps, and the Tier-3 whole-binding concrete table pair `current_function_local_concrete_types` / `module_binding_concrete_types` plus snapshot/restore plumbing. Empty-array first-push named-element recovery, post-monomorphized method-call `Array<T>` return stamping, match compiler-temp payload facts, declaration destructure facts, source match binders, identifier concrete lookup, residual value/tuple-index readers, option carrier detection, loop binder stamps, accumulator promotion, and synthetic pattern payload paths now use runtime `InferenceFacts` or explicit slot-scoped `BindingConcreteFact`s. `EmptyArrayAccumulator` facts are deliberately not accepted as named field proof, preserving STAGE-F1 for unannotated `[]`.
 
 | Tier | Tables | Readers to re-point | Rating |
 |---|---|---|---|
-| **Tier 1 — nearly dead, delete first** | `array_element_types` (`mod.rs:1237`, 1W+1R both in `v2_map_emission.rs`); `inferred_param_concrete_types` (`:1383`, 1R); `inferred_param_fn_param_types` (`:1406`, 1R); `inferred_param_object_fields` / `inferred_return_object_fields` (1R each); `binding_object_element_fields` (`:1254`, 1R `loops.rs:1813`) | each → per-slot engine query at the binding's defining-expr span | **LOW** |
-| **Tier 1b — soundness-coupled** | `binding_collection_carrier_kinds` (`:1724`, 1W+1R) | feeds §2.7.8 capture-kind at `type_resolution.rs:1605` — migrate to engine-Type-derived capture kind, do NOT just delete | **LOW count, MEDIUM care** |
-| **Tier 2 — single-purpose in a ladder** | `local_array_element_types`/`module_binding_array_element_types` (`:1240/:1243`, + the lockstep-upgrade hack `helpers.rs:4135-4160`); `map_key_value_types`/`local_map_key_value_types`/`module_binding_map_key_value_types` (`:1222/:1228/:1232` — **survived U3, must delete**); `function_return_schema_ids` (`:1444`, 4 narrow `f().field` readers); `local_array_callable_return_types`/`module_binding_array_callable_return_types` (`:784/:788`, `__call__` arm) | Ladder-1 (`type_resolution.rs:2675`) + Ladder-2 (`infer_expr_type`) | **MEDIUM** |
-| **Tier 3 — load-bearing, delete LAST** | `current_function_local_concrete_types`/`module_binding_concrete_types` (`:1684/:1710`, head of Ladder-1, 4 reader paths each, 6 writers, snapshot/restore in `monomorphization/cache.rs`); `inferred_param_type_hints` (`:1371`, stamps `type_name`, SB-7 keystone); `function_return_types` (`type_tracking.rs:668`)/`local_callable_return_types`/`module_binding_callable_return_types` (`:771/:775`, read by strict-typing binop dispatch) | the strict binop dispatch + the whole-binding ConcreteType ladder head | **HIGH** |
+| **Tier 1/2 + Tier-3 string tables — closed locally** | `array_element_types`; `inferred_param_concrete_types`; `inferred_param_fn_param_types`; `inferred_param_object_fields`; `inferred_return_object_fields`; `function_return_schema_ids`; `binding_object_element_fields`; `local_array_element_types`; `module_binding_array_element_types`; `map_key_value_types`; `local_map_key_value_types`; `module_binding_map_key_value_types`; `binding_collection_carrier_kinds`; `local_array_callable_return_types`; `module_binding_array_callable_return_types`; `inferred_param_type_hints`; `local_callable_return_types`; `module_binding_callable_return_types` | re-pointed to `InferenceFacts::function_signature`, span-table/structural recursion, explicit `BindingConcreteFact`s, `InferenceFacts::binding_type` via VM slot-to-binder-span maps, or retained closure-body peeks. Anonymous return schemas derive/register on demand from active `InferenceFacts::function_signature`; array-callable return typing derives from the array binding's structural `Array<Function<...>>` fact; param type-name stamping now derives directly from the function signature and rejects nested `unknown`; named callable binding return types derive structurally and only render strings at residual tracker/schema-keyed boundaries. | **DONE 2026-06-24** |
+| **Tier 3 whole-binding tables — closed locally** | `current_function_local_concrete_types`; `module_binding_concrete_types` | deleted after residual synthetic/no-span producers moved to explicit `BindingConcreteFact` sources (`EmptyArrayAccumulator`, `ArrayPushElement`, `IteratorElement`, `MatchPayload`) and duplicate legacy writers/snapshot plumbing were removed. | **DONE 2026-06-24** |
 
-**Mark dead-post-U1/U3:** none. The reports converge that U1/U3 *added* projection tables (the closure-body peeks `local_callable_closure_bodies` `:811`, `binding_collection_carrier_kinds`, the pass-modes pair `:753/:760`) rather than retiring any. **Audit's `inferred_return_type_hints` is NOT a struct field** — it is a transient local folded into the stringly tracker `function_return_types`; treat it as part of T1's stringly class.
+**Mark dead-post-U1/U3:** none. The reports converge that U1/U3 *added* projection tables (the closure-body peeks `local_callable_closure_bodies` `:811`, the now-deleted `binding_collection_carrier_kinds`, the pass-modes pair `:753/:760`) rather than retiring any. **Audit's `inferred_return_type_hints` is NOT a struct field** — it is a transient local folded into the stringly tracker `function_return_types`; treat it as part of T1's stringly class.
 
-### T6 — Reconcile the TWO divergent `ConcreteType→NativeKind` maps — **MEDIUM, a HARD PREREQUISITE for any prove_native_kind wiring**
-Confirmed they disagree on **four arms**:
+### T6 — Reconcile the TWO divergent `ConcreteType→NativeKind` maps — **U4-7a DONE 2026-06-24**
+Pre-U4-7 they disagreed on **four arms**:
 
-| ConcreteType | closure_layout.rs:944 (total) | mir_compiler/types.rs:151 (Option) |
+| ConcreteType | closure_layout.rs:944 (total) | pre-U4-7 mir_compiler/types.rs:151 (Option) |
 |---|---|---|
 | `Option(_)` | `Ptr(TypedObject)` | `Ptr(Option)` |
 | `Result(_,_)` | `Ptr(TypedObject)` | `Ptr(Result)` |
 | `Pointer(_)` | `Ptr(NativeView)` | `UInt64` |
 | `Void` | **panics** | `None` |
 
-The proof gate would project through the closure_layout copy; the JIT proves against its own copy. Until these agree, VM and JIT prove different kinds. **This must land before prove_native_kind is wired (U2).**
+U4-7a deleted the JIT copy. The JIT wrapper now delegates to the closure-layout projection and returns `None` only for `Void`; this L4 prerequisite for production `prove_native_kind` wiring is closed. This is not the L5 Option/Result carrier migration: dedicated runtime `HeapKind::Option` / `HeapKind::Result` paths still exist and must be migrated through a schema-aware TypedObject wave before those producers can be blindly proven as `Ptr(TypedObject)`.
 
 ---
 
@@ -127,7 +125,7 @@ Each wave is one deletion with a green `just check-clean` + `just test-fast` gat
 ### Wave U4-2 — Delete the closure mini-inferencer (T3)
 - **Territory:** `closures.rs:830-1131` (`infer_closure_body_return_type_name_with_caller_context` + `expr_type`).
 - **Deletes:** the fourth stringly inference engine.
-- **Re-point first:** closure-return type now read from `resolved_expr_types` at the closure-body span (enabled by U4-0/P2). The callable-return side-tables (E1-E4, `local_callable_return_types` etc.) become engine-served — staged for deletion in U4-6.
+- **Re-point first:** closure-return type now read from `resolved_expr_types` at the closure-body span (enabled by U4-0/P2). The callable-return side-tables (E1-E4, `local_callable_return_types` etc.) are now engine/facts-served and deleted in U4-6.
 - **Isolation test:** `f8`/`h1`/`h2`/`h4b` go **red→green**; `c1`/`g1` stay green.
 - **Surface-and-stop:** a closure body whose type the engine genuinely can't resolve → the call site MISSes the table → strict binop error (correct).
 
@@ -154,18 +152,32 @@ Each wave is one deletion with a green `just check-clean` + `just test-fast` gat
 
 ### Wave U4-6 — Delete the side-tables, Tier 1 → Tier 2 → Tier 3 (T5)
 Staged in three sub-waves matching the difficulty tiers (each its own green gate):
-- **U4-6a (Tier 1):** `array_element_types`, `inferred_param_*` (concrete/fn_param/object_fields), `inferred_return_object_fields`, `binding_object_element_fields`, `binding_collection_carrier_kinds` (migrate capture-kind to engine-Type-derived).
-- **U4-6b (Tier 2):** array-element + map-kv tables (delete the lockstep-upgrade hack `helpers.rs:4135-4160`), `function_return_schema_ids`, array-callable tables.
-- **U4-6c (Tier 3):** `current_function_local_concrete_types`/`module_binding_concrete_types` + snapshot/restore plumbing; `inferred_param_type_hints`; `function_return_types`/callable-return tables.
-- **Re-point first (all):** each table → `resolved_expr_types[binding-defining-expr.span]`.
-- **Isolation test:** the two consult ladders (`identifier_concrete_type` `type_resolution.rs:2675`; `infer_expr_type`) collapse to a single span-table lookup with no disagreement (the U4-0 completeness test guarantees no MISS for these slots).
-- **Surface-and-stop:** Ladder-1 and Ladder-2 no longer exist as multi-step fallbacks.
+- **U4-6a (Tier 1):** `array_element_types`, `inferred_param_*` (concrete/fn_param/object_fields), `inferred_return_object_fields`, `binding_object_element_fields`, `binding_collection_carrier_kinds` (capture-kind now engine-Type-derived through `InferenceFacts::binding_type`).
+- **U4-6b (Tier 2):** array-element + map-kv tables (delete the lockstep-upgrade hack `helpers.rs:4135-4160`), `function_return_schema_ids`, array-callable tables. **Local 2026-06-24 note:** array-element, map-kv, `function_return_schema_ids`, and array-callable tables are now closed.
+- **U4-6c (Tier 3):** `inferred_param_type_hints`, the local/module callable-return string tables, and the whole-binding concrete table pair are now deleted. Empty-array first-push, array-push recovery, loop binder stamps, post-monomorphized returns, and match payload temps now write explicit facts with source tags instead of mutating `current_function_local_concrete_types` / `module_binding_concrete_types`. The old string `function_return_types` table is already replaced by structural `function_return_concrete_types`; delete that later only after named-function return readers derive directly from `InferenceFacts::function_signature` or declared `FunctionDef` annotations.
+- **Re-point first (all):** span-bearing bindings → `InferenceFacts::binding_type` / `resolved_expr_types[binding-defining-expr.span]`; synthetic/no-span compiler projections → explicit `BindingConcreteFact` source tags.
+- **Isolation test:** the two consult ladders (`identifier_concrete_type` `type_resolution.rs:2675`; `infer_expr_type`) collapse to span-table/fact lookup with no whole-binding-table fallback. `EmptyArrayAccumulator` facts preserve the deliberate unannotated-empty-array error path.
+- **Surface-and-stop:** Ladder-1 and Ladder-2 no longer exist as multi-step fallbacks; a missing table/fact is a compile error, not a re-derived type.
 
-### Wave U4-7 — Reconcile the two `ConcreteType→NativeKind` maps (T6)
+### Wave U4-7a — Reconcile the two `ConcreteType→NativeKind` maps (T6)
 - **Territory:** `closure_layout.rs:944`, `mir_compiler/types.rs:151`.
-- **Deletes:** one of the two copies; the four divergent arms reconciled to one canonical answer (requires a decision — §7).
+- **Deletes:** one of the two copies; the four divergent arms reconciled to one canonical answer.
+- **Close 2026-06-24:** JIT now calls `shape-value`'s shared `closure_layout::native_kind_from_concrete_type` and wraps only `ConcreteType::Void` as `None` because void has no slot-shaped carrier. Canonical projection answers: `Option(_)` / `Result(_, _)` → `Ptr(TypedObject)`, `Pointer(_)` → `Ptr(NativeView)`, `Void` → no JIT slot kind. Runtime Option/Result carriers remain an open U4-7b/L5 migration and must not be treated as already relabeled.
 - **Isolation test:** the single-derivation agreement test (§5) — VM emit and JIT emit project identical NativeKind for Option/Result/Pointer/Void.
 - **Surface-and-stop:** one map; `prove_native_kind` now has a single trustworthy projection to assert against (enabling U2, **separable**).
+
+### Wave U2-1 — Exact scalar return proof wiring (local close 2026-06-25)
+- **Territory:** `compiler/helpers_binding.rs::emit_return_value_with_ownership`, `compiler/helpers.rs::{infer_top_level_return_kind,infer_top_level_return_kind_from_item}`, `type_tracking.rs` tests.
+- **Deletes:** the integer-family width-narrowing proof shortcut (`Int8/U8/.../U64` accepted against an `Int64` producer) and the temporary `StorageHint -> ConcreteType` reverse map. Storage hints are no longer proof evidence.
+- **Surviving proof shape:** returned expressions resolve structurally through `concrete_type_for_expr`; direct call fallback uses `declared_annotation_concrete_type`; the producer claim comes from `last_emitted_native_kind`; `prove_native_kind` must accept the exact canonical projection before a typed return kind is emitted/stamped.
+- **Explicit non-goal:** Option/Result carriers are not relabeled here. `ConcreteType::Option/Result` canonically projects to `Ptr(TypedObject)`, but current L5 runtime producers/consumers still use old `HeapKind::Option/Result` carriers. The scalar helper rejects both the old carriers and the canonical pointer result for typed scalar-return purposes until the L5 migration lands.
+- **Tests:** `u2_exact_native_kind_proof_tests` cover exact scalar success, width mismatch rejection, and Option/Result carrier rejection; `prove_native_kind_rejects_width_narrowing` pins the canonical projection layer itself.
+
+### Wave U4-7b / L5 — Option/Result carrier migration (open)
+- **Audit close 2026-06-25:** canonical projection already maps `Option`/`Result` to `Ptr(TypedObject)`, but live L5/JIT paths still construct and consume `ResultData` / `OptionData` through `HeapKind::{Result,Option}` and `HeapValue::{Result,Option}`.
+- **Producer clusters:** value storage + slot constructors, VM `Some`/`Ok`/`Err` builtins, fallible conversion None, error-context wrapping, typed module projection, and JIT result/option FFI producers.
+- **Consumer clusters:** `?`, `!!`, `unwrap_*`, `??`, raw `read_result`/`read_option` helpers, trait-object nested return rewrap, printing, refcount tables, JIT enum accessors/kind codes.
+- **Safe order:** tests/guards → typed-object builders/readers for `__Option`/`__Result` → VM producers → VM consumers → compiler/frame fallible metadata → JIT support or explicit deopt → delete old carriers/constructors/refcount arms/JIT FFI/obsolete tests.
 
 ---
 
@@ -201,9 +213,9 @@ Staged in three sub-waves matching the difficulty tiers (each its own green gate
 
 ## 7. RISKS / OPEN QUESTIONS — surface, do not paper over
 
-1. **`prove_native_kind` wiring: in-scope or separable? (NEEDS DECISION.)** Confirmed: `prove_native_kind` (`type_tracking.rs:1261`) is a **real** exact-equality check but has **ZERO production callers** (all 8 callers are `#[cfg(test)]`). The one production proof-gate that fires (`numeric_operand_proof_gap` → `proof_gap_unresolved_operand`, `binary_ops.rs:383`) **bypasses** it. **Recommendation:** wiring it is **U2, separable** — but the *enabling* work is U4. It cannot be wired meaningfully before U4 (you'd be checking one re-derivation against another). The doc-comment at `helpers_binding.rs:468-469` already **lies** that the return kind "comes from `prove_native_kind`" — it never does. Decide: does U4 fix the lying comment in passing, or leave it for U2?
+1. **`prove_native_kind` wiring status.** `prove_native_kind` (`type_tracking.rs:1261`) is a real exact-equality check. The first production slice is now wired locally (2026-06-25): scalar return emission and top-level return-kind inference use structural `ConcreteType` plus exact `prove_native_kind`, with no width-narrowing or hint-as-proof fallback. Remaining proof-site wiring is still U2 follow-up: typed arithmetic, typed loads/stores, capture stamps, v2 pointer stamps, and other typed opcodes. Option/Result proof sites remain blocked on U4-7b/L5 carrier migration.
 
-2. **The two `ConcreteType→NativeKind` maps disagree on Option/Result/Pointer/Void (NEEDS DECISION on canonical answer).** This is a genuine VM/JIT correctness drift, not a clone. Which is canonical — `Ptr(TypedObject)` (VM/closure_layout) or `Ptr(Option)`/`Ptr(Result)` (JIT)? `Void`: panic or `None`? `Pointer`: `Ptr(NativeView)` or `UInt64`? This must be resolved (U4-7) before any proof gate, and it is **outside the L3 inference layer** — it may belong to a JIT-owner decision. **Surface to supervisor.**
+2. **The two `ConcreteType→NativeKind` maps disagreed on Option/Result/Pointer/Void (U4-7a RESOLVED 2026-06-24).** Canonical projection answer: the `shape-value` / closure-layout projection is the single source of truth; the JIT wrapper returns `None` only for `Void`. `Option(_)` / `Result(_, _)` project to `Ptr(TypedObject)`, `Pointer(_)` projects to `Ptr(NativeView)`, and `Void` has no slot-shaped kind. Separate L5 reality remains: current VM runtime carriers still include dedicated Option/Result paths, so proof wiring for those producers is blocked on a schema-aware carrier migration.
 
 3. **Citation contradiction across all four reports: STAGE-F1 is NOT at `constraints.rs:1108`/`:1137`.** Verified: the real site is the field-access constraint arms in `crates/shape-runtime/src/type_system/inference/access.rs` (`:821/:884/:920/:1142`). The file `crates/shape-runtime/src/type_system/inference/constraints.rs` **does not exist**. Implementers of U4-1 must not waste time at the cited line.
 
@@ -211,7 +223,7 @@ Staged in three sub-waves matching the difficulty tiers (each its own green gate
 
 5. **Span-collision / dummy-span safety (P4):** desugared/synthetic nodes carry dummy spans and are never in the table. Converting "miss == error" requires auditing that no legitimate desugared expr the strict checker queries lands on a dummy span. If some do, they either need real spans or the desugarer must record their type — surface any found before U4-3.
 
-6. **Snapshot/restore plumbing for Tier-3 ConcreteType tables** (`monomorphization/cache.rs:432/438/623/626/840/843`) — deleting `current_function_local_concrete_types`/`module_binding_concrete_types` (U4-6c) requires unwinding monomorphization save/restore. Highest-blast-radius deletion; keep it last and isolated.
+6. **Snapshot/restore plumbing for Tier-3 ConcreteType tables (RESOLVED 2026-06-24).** `current_function_local_concrete_types` / `module_binding_concrete_types` and their `monomorphization/cache.rs` save/restore plumbing were deleted after residual non-identifier paths moved to explicit facts. This should remain a regression guard: do not add a replacement whole-binding side table when a span-bearing `InferenceFacts` entry or source-tagged `BindingConcreteFact` is the authority.
 
 **No contradictions between the five reports on the core thesis** — all five agree the span-table is the already-built target, the fallback is the deletion keystone, the four reps are intact (Reports B/E note it's closer to **six** with FieldKind + StorageType), and the side-tables grew rather than shrank. The only cross-report error is the shared wrong STAGE-F1 citation (#3 above).",
     "reports": {
@@ -359,7 +371,7 @@ Beyond `infer_expr_type`, the table is also read by **`keystone_scrutinee_concre
 | `inferred_param_object_fields` | `:1423` | (listed) | per-fn `Vec<Option<Vec<(String,FieldType)>>>` |
 | `inferred_return_object_fields` | `:1435` | (listed) | per-fn field lists |
 
-**NEW since audit (U3-era, NOT in SB-8 list):** `local_map_key_value_types` (`:1228`), `module_binding_map_key_value_types` (`:1232`) — U3's HashMap-carrier unification ADDED these rather than removing tables. So the side-table count GREW, not shrank. The comment at `mod.rs:1707` references them as already covering the map case.
+**Historical U3-era note (pre-2026-06-24 local deletion):** `local_map_key_value_types` (`:1228`), `module_binding_map_key_value_types` (`:1232`) were added by U3's HashMap-carrier unification rather than removed. They are now deleted locally; keep this note only as audit provenance for why the U4-6 wave targeted them.
 
 Each side-table is a **frozen projection of Engine A's output** captured at `infer_reference_model` time (`compiler_impl_reference_model.rs:824-848`) — exactly SB-8's "frozen projection of L2." Once the keystone table is consulted unconditionally (PropertyAccess included) and records method/call/index/array results (it largely does already — arms #4,#13-22 prove the table CAN serve these), these projections become redundant and are the deletion target.
 
@@ -390,7 +402,7 @@ The fallback (`mod.rs:2187`) can be deleted once these are true:
 - **`type_tracking.rs` moved.** The audit cites `type_tracking.rs:338` / `:52` / `:726`. The file is now at `crates/shape-vm/src/type_tracking.rs` (NOT under `compiler/`). All line numbers below are HEAD-verified.
 - **The single biggest change vs the audit: a FIFTH carrier has been ADDED, not removed.** The strict-flip T1 keystone (2026-06-22) added the engine span-keyed `expr_type_table: HashMap<Span, Type>` (`crates/shape-runtime/src/type_system/inference/mod.rs:268`) plus a compiler-side copy `resolved_expr_types: HashMap<Span, Type>` (`crates/shape-vm/src/compiler/mod.rs:891`). This is *exactly the canonical "one source of truth" the U4 roadmap wants to converge on* — it already exists and is already consulted FIRST in the ladder, but as an additive layer on top of the 4 reps, not a replacement. The U4 deletion target is now well-defined: collapse the 4 legacy reps onto this span table.
 - **U1 (commit `9fb34e9a`) landed:** ONE canonical `Type::Generic { base, args }` encoding + one equivalence. Visible in `type_display_name` (numeric_ops.rs:122-132) which now special-cases the canonical `Type::Generic` form.
-- **U3 (commit `ffea6ade`) landed:** TypedMap carrier DELETED, all HashMap routed to HashMapData. Map-keyed dual carriers are gone; the surviving map side-tables are now stringly/ConcreteType key-value tables (`local_map_key_value_types` mod.rs:1228, `module_binding_map_key_value_types` mod.rs:1232) — they are SB-8 hint tables, not the SB-7 carrier duality.
+- **U3 (commit `ffea6ade`) landed:** TypedMap carrier DELETED, all HashMap routed to HashMapData. At this report's historical HEAD, map-keyed dual carriers were gone and the surviving map side-tables were stringly/ConcreteType key-value tables (`local_map_key_value_types` mod.rs:1228, `module_binding_map_key_value_types` mod.rs:1232). Those SB-8 hint tables are now deleted locally.
 - The audit's "expressions/mod.rs:2188 empty fallback engine" is confirmed live at `crates/shape-vm/src/compiler/expressions/mod.rs:2187` — the terminal `self.type_inference.infer_expr(expr)` arm.
 
 ---
@@ -503,7 +515,7 @@ The audit was written at an earlier commit. Confirmed structural drift since the
 
 - **`type_tracking.rs` MOVED.** The audit cites `type_tracking.rs:52/338/726` as if inside `compiler/`. The file is at `crates/shape-vm/src/type_tracking.rs` (NOT under `compiler/`). The compiler struct itself lives in `crates/shape-vm/src/compiler/mod.rs:581` (`pub struct BytecodeCompiler`), 1829 lines.
 - **`inferred_return_type_hints` is NOT a struct field.** The audit lists it as an SB-8 side-table. At HEAD it is a **transient local** in `compiler_impl_reference_model.rs` (built at :826, returned at :916/:2052, consumed at :2085) that is folded into the TypeTracker's stringly map `TypeTracker.function_return_types: HashMap<String,String>` (`type_tracking.rs:668`) via `register_function_return_type` (`type_tracking.rs:828`). So this "table" is really an **SB-7 stringly projection inside TypeTracker**, not a standalone compiler hint table. Its single inference reader is `expressions/mod.rs:1710` (`get_function_return_type`).
-- **The HashMap element side-tables SURVIVED U3.** The prompt expected "the HashMap-related ones may be gone." They are NOT gone. U3 (`ffea6ade feat(U3/SB-9): DELETE TypedMap carrier — route all HashMap to HashMapData`) deleted the **runtime value carrier** `TypedMap`, not the **compiler-side inference hint tables** `map_key_value_types` / `local_map_key_value_types` / `module_binding_map_key_value_types`. All three are live (`v2_map_emission.rs` populators + readers; consumed in `identifier_concrete_type` `type_resolution.rs:2688/2723`). **The roadmap must still delete these three.**
+- **The HashMap element side-tables SURVIVED U3 at this report's historical HEAD.** The prompt expected "the HashMap-related ones may be gone." U3 (`ffea6ade feat(U3/SB-9): DELETE TypedMap carrier — route all HashMap to HashMapData`) deleted the **runtime value carrier** `TypedMap`, not the **compiler-side inference hint tables** `map_key_value_types` / `local_map_key_value_types` / `module_binding_map_key_value_types`. All three have since been deleted locally in the 2026-06-24 U4-6 map-key-value wave.
 - **SB-1 producer-vs-consumer correction.** The audit says the engine "currently excludes" PropertyAccess from its export. At HEAD the **engine DOES record PropertyAccess** — `infer_expr` wraps `infer_expr_inner` and unconditionally inserts every non-dummy-span expr (incl. the PropertyAccess arm at `expressions.rs:306`) into `expr_type_table` (`expressions.rs:165-174`). The exclusion is on the **CONSUMER** side: `BytecodeCompiler::infer_expr_type` deliberately skips the span-table consult for `Expr::PropertyAccess` (`expressions/mod.rs:1558`) to preserve the STAGE-F1 strictness ruling (unannotated empty-`[]` field read). This matters for the SB-8 grouping below.
 - **The T1 keystone span-table already exists and is consulted FIRST.** `BytecodeCompiler.resolved_expr_types: HashMap<Span, Type>` (`mod.rs:891`), harvested via `inference.take_expr_type_table()` (`compiler_impl_reference_model.rs:823`), assigned at `:2062`, consulted at the TOP of `infer_expr_type` (`expressions/mod.rs:1558-1577`). The engine-fallback U4-deletion target is now at **`expressions/mod.rs:2187`** (`self.type_inference.infer_expr(expr)`), audit said `:2188` — off by one. The `.strip_suffix("[]")` is at **`:1632/:2234`** (audit `:1635`); the `strip_prefix("Array<")/Vec<` re-parse is at **`:2230-2231`** (audit `:2230`).
 - **New SB-8-class table not in the audit's named list:** `inferred_param_fn_param_types` (`mod.rs:1406`, Wave-1a PART B) — a 14th projection.
@@ -516,96 +528,81 @@ For every field, format is: **field def site** → key→value · **populator(s)
 
 ### Group A — whole-binding ConcreteType tables (the `identifier_concrete_type` head of the ladder)
 
-**A1. `current_function_local_concrete_types`** — `mod.rs:1684` · `HashMap<u16, shape_value::v2::ConcreteType>`
-- **Populators (writes):** `statements.rs:5959` (annotated `let`, via `declared_annotation_concrete_type`), `statements.rs:6011` (inferred `let`, via `concrete_type_for_expr`), `functions.rs:1618` (param seeding), `helpers.rs:4158` (array-upgrade in `record_*_array_element`), `v2_typed_emission.rs:1155` (empty-array accumulator), `patterns/binding.rs:297/587`, `loops.rs:442/884`. Snapshot/restore (mem::take + restore) at `monomorphization/cache.rs:432/438/623/626/840/843`; cleared `functions.rs:1494`.
-- **Readers:** `type_resolution.rs:2679` (`identifier_concrete_type`, FIRST consult), `expressions/mod.rs:1652` (identifier value-type), `expressions/mod.rs:2003` (tuple-index `arr[k]`), `expressions/binary_ops.rs:1200` (`?? `-Option carrier detect).
+**A1. `current_function_local_concrete_types`** — DELETED 2026-06-24 (formerly `mod.rs:1684` · `HashMap<u16, shape_value::v2::ConcreteType>`)
+- **Populators/readers:** none in `crates/shape-vm/src/compiler` after the residual table deletion wave. Former annotated-let, structural initializer, function-param, array-push, accumulator, loop, and match-payload writes now populate explicit `BindingConcreteFact` sources or runtime binder facts.
 - **Engine fact duplicated:** the resolved `Type` of the binding's initializer expression — i.e. the engine's `resolved_expr_types[init_expr.span]` projected to `ConcreteType`. Frozen at let-compile time because the engine ran at module scope and never saw the function-body local.
-- **STATUS:** LIVE, load-bearing (most-read of the concrete tables). U1 changed nothing here.
-- **Difficulty:** HIGH — 4 distinct reader call paths, 6 writers, snapshot/restore plumbing.
+- **Current local status:** closed. Residual synthetic/no-span facts use `BindingConcreteFactSource::{EmptyArrayAccumulator, ArrayPushElement, IteratorElement, MatchPayload}`; span-bearing source bindings use runtime `InferenceFacts`.
+- **Difficulty:** closed; keep deleted-symbol grep as the guard.
 
-**A2. `module_binding_concrete_types`** — `mod.rs:1710` · `HashMap<u16, ConcreteType>`
-- **Populators:** `statements.rs:5551/5597` (module-binding `let`, annotated + inferred), `helpers.rs:4182` (array-upgrade), `v2_typed_emission.rs:1163` (empty-array accumulator).
-- **Readers:** `type_resolution.rs:2710` (`identifier_concrete_type`, module branch FIRST consult), `expressions/mod.rs:1656`, `expressions/mod.rs:2007`, `expressions/binary_ops.rs:1204`. Mirror of A1 for module-binding slots.
+**A2. `module_binding_concrete_types`** — DELETED 2026-06-24 (formerly `mod.rs:1710` · `HashMap<u16, ConcreteType>`)
+- **Populators/readers:** none in `crates/shape-vm/src/compiler`. Module annotated/inferred initializer, array-push, and accumulator facts now use the same explicit fact carrier as locals.
 - **Engine fact:** same as A1 (top-level binding initializer `Type`).
-- **STATUS:** LIVE. **Difficulty:** HIGH (symmetric to A1).
+- **Current local status:** closed. **Difficulty:** closed; keep deleted-symbol grep as the guard.
 
 ### Group B — array-element ConcreteType tables
 
 **B1. `array_element_types`** (span-keyed) — `mod.rs:1237` · `HashMap<Span, ConcreteType>`
 - **Populator:** `v2_map_emission.rs:155` (`record_array_element_type_for_span`). **Reader:** `v2_map_emission.rs:160` (`array_element_type_for_span`). NOTE the audit-cited grep count of 72 was substring noise; the actual `self.array_element_types` (span) sites are exactly these 2.
 - **Engine fact:** element `Type` of an array-producing expression keyed by AST span (the engine's `expr_type_table[span]` would carry `Array<elem>`).
-- **STATUS:** LIVE but NEARLY DEAD — exactly one writer + one reader, both inside `v2_map_emission.rs`. **Difficulty:** LOW.
+- **STATUS:** DELETED locally in U4-6a; retained here only as historical audit context.
 
 **B2. `local_array_element_types`** — `mod.rs:1240` · `HashMap<u16, ConcreteType>`
-- **Populators:** `helpers.rs:4149`, `v2_typed_emission.rs:1157`, `statements.rs:6085`, `patterns/binding.rs:591`. **Readers:** `helpers.rs:4146` (upgrade-guard), `type_resolution.rs:2685` (`identifier_concrete_type`, consulted AFTER `current_function_local_concrete_types`).
+- **Historical populators/readers:** `helpers.rs`, `v2_typed_emission.rs`, `statements.rs`, `patterns/binding.rs`, and `type_resolution.rs` identifier lookup before local deletion. These line numbers are stale after the U4-6 waves.
 - **Engine fact:** element `Type` of an array local (subset of A1's `Array<elem>` — a frozen projection of just the element).
-- **STATUS:** LIVE. **Difficulty:** MEDIUM (one cross-module reader in the priority ladder).
+- **STATUS:** DELETED locally. Identifier lookup consumes explicit `BindingConcreteFact`s for whole-binding array projections; residual upgrade guards moved to the Tier-3 table-pair cleanup.
 
 **B3. `module_binding_array_element_types`** — `mod.rs:1243` · `HashMap<u16, ConcreteType>`
 - **Populators:** `helpers.rs:4173`, `v2_typed_emission.rs:1165`, `statements.rs:5657`. **Readers:** `helpers.rs:4170`, `type_resolution.rs:2716` (after `module_binding_concrete_types`).
-- **STATUS:** LIVE. Mirror of B2. **Difficulty:** MEDIUM.
+- **STATUS:** DELETED locally. Mirror of B2.
 
-### Group C — HashMap key/value ConcreteType tables (SURVIVED U3 — flag)
+### Group C — HashMap key/value ConcreteType tables (historical inventory; deleted locally 2026-06-24)
 
 **C1. `map_key_value_types`** (span) — `mod.rs:1222` · `HashMap<Span,(ConcreteType,ConcreteType)>` · pop `v2_map_emission.rs:30` · read `v2_map_emission.rs:75`.
 **C2. `local_map_key_value_types`** — `mod.rs:1228` · `HashMap<u16,(CT,CT)>` · pop `v2_map_emission.rs:40`, `patterns/binding.rs:595` · read `v2_map_emission.rs:59`, `type_resolution.rs:2688`.
 **C3. `module_binding_map_key_value_types`** — `mod.rs:1232` · pop `v2_map_emission.rs:50` · read `v2_map_emission.rs:67`, `type_resolution.rs:2723`.
 - **Engine fact:** the `HashMap<K,V>` `Type` of a map binding/expression (key+value projection).
-- **STATUS:** LIVE — **NOT deleted by U3** (U3 deleted the runtime `TypedMap` carrier only). **Difficulty:** LOW-MEDIUM (each has ≤2 readers; one reader is the `identifier_concrete_type` ladder).
+- **STATUS at report HEAD:** LIVE — **NOT deleted by U3** (U3 deleted the runtime `TypedMap` carrier only). **Current local status:** deleted in the 2026-06-24 U4-6 map-key-value wave; map proof now relies on whole-binding `ConcreteType::HashMap(k,v)`.
 
 ### Group D — per-function param/return projections (stringly + structural)
 
-**D1. `inferred_param_type_hints`** — `mod.rs:1371` · `HashMap<String, Vec<Option<String>>>` (STRINGLY — SB-7)
-- **Populator:** `compiler_impl_reference_model.rs:825/2067` (from `infer_param_type_hints_from_types(program,&types)`). **Readers:** `functions.rs:312` (`compile_function_body` param seeding), `functions.rs:1697`. Referenced in rationale-comments at `binary_ops.rs:679/1584/2323`, `expressions/mod.rs:1978` (the `arr[i]` element-recovery patch reads the tracker `type_name` this stamps).
-- **Engine fact:** the engine's per-param resolved `Type`, rendered to a **string** then re-parsed downstream (`strip_suffix("[]")` at `expressions/mod.rs:2234`). Pure SB-7 stringly drift.
-- **STATUS:** LIVE. **Difficulty:** MEDIUM (stamps the tracker `type_name`, which is read indirectly all over the `[]`/`Array<` re-parse paths).
+**D1. `inferred_param_type_hints` — DELETED 2026-06-24** — formerly `mod.rs:1371` · `HashMap<String, Vec<Option<String>>>` (STRINGLY — SB-7)
+- **Former populator:** `compiler_impl_reference_model.rs` projected `InferenceFacts::top_level_types()` through `infer_param_type_hints_from_types(program,&types)`. **Former readers:** `functions.rs` implicit-generic pinning and function-body param seeding.
+- **Engine fact:** the engine's per-param resolved `Type` now stays structural. Readers call `inferred_param_type_name_from_facts`, which reads `InferenceFacts::function_signature`, keeps the annotated/destructuring-param exclusions, and rejects `unknown` anywhere inside the annotation tree before emitting a residual tracker display name.
+- **STATUS:** CLOSED. The display name remains only as the existing tracker/schema-keying stamp; the side-table and snapshot path are gone.
 
-**D2. `inferred_param_concrete_types`** — `mod.rs:1383` · `HashMap<String, Vec<Option<ConcreteType>>>`
-- **Populator:** `compiler_impl_reference_model.rs:831/2068` (`infer_param_concrete_types_from_types`). **Reader:** `compiler_impl_reference_model.rs:2705` (MIR param-slot seeding when slot is `ConcreteType::Void`).
-- **Engine fact:** per-unannotated-param resolved `Type` → `ConcreteType` (the JIT typed-array-fastpath proof). Strict subset of the engine's param solve.
-- **STATUS:** LIVE. **Difficulty:** LOW (single reader).
+**D2. `inferred_param_concrete_types` — DELETED 2026-06-24** — former per-param resolved `Type` → `ConcreteType` projection. The MIR/local array seeding reader derives on demand from `InferenceFacts::function_signature`.
 
-**D3. `inferred_param_fn_param_types`** (NOT in audit) — `mod.rs:1406` · `HashMap<String, Vec<Option<Vec<TypeAnnotation>>>>`
-- **Populator:** `compiler_impl_reference_model.rs:836/2069` (`infer_param_fn_param_types_from_types`). **Reader:** `function_calls.rs:2236` (`install_pending_closure_param_types_for_inferred_fn_param`).
-- **Engine fact:** per-param inferred `Function<A,R>` arg annotations (fn-typed unannotated params). Projection of the engine's function-type solve.
-- **STATUS:** LIVE. **Difficulty:** LOW (single reader).
+**D3. `inferred_param_fn_param_types` — DELETED 2026-06-24** (NOT in original audit) — former per-param inferred `Function<A,R>` arg projection. `install_pending_closure_param_types_for_inferred_fn_param` now derives from `InferenceFacts::function_signature` plus `callable_param_body_arg_indices`.
 
-**D4. `inferred_param_object_fields`** — `mod.rs:1423` · `HashMap<String, Vec<Option<Vec<(String,FieldType)>>>>`
-- **Populator:** `compiler_impl_reference_model.rs:842/2070` (`infer_param_object_fields_from_types`). **Reader:** `functions.rs:313` (inline anon-schema registration for anon-object params).
-- **Engine fact:** per-param anonymous-object structural `Type` → field list. Projection of param solve where the resolved type is an anon object.
-- **STATUS:** LIVE. **Difficulty:** LOW-MEDIUM (single reader, but feeds schema registration plumbing).
+**D4. `inferred_param_object_fields` — DELETED 2026-06-24** — former per-param anonymous-object structural `Type` → field list projection. Inline anon-schema registration now derives fields from `InferenceFacts::function_signature`.
 
-**D5. `inferred_return_object_fields`** — `mod.rs:1435` · `HashMap<String, Vec<(String,FieldType)>>`
-- **Populator:** `compiler_impl_reference_model.rs:847/2071` (`infer_return_object_fields_from_types`). **Readers:** `compiler_impl_reference_model.rs:1046` (`register_inferred_return_object_schemas`, the consumer that builds `function_return_schema_ids`).
-- **Engine fact:** per-function inferred anon-object RETURN `Type` → field list.
-- **STATUS:** LIVE. **Difficulty:** LOW (one reader; feeds D6).
+**D5. `inferred_return_object_fields` — DELETED 2026-06-24** — formerly `mod.rs:1435` · `HashMap<String, Vec<(String,FieldType)>>`
+- **Former populator:** `compiler_impl_reference_model.rs` projected return-object fields from inferred function types. **Former reader:** the old eager anonymous-return schema registration path that built D6.
+- **Engine fact:** per-function inferred anon-object RETURN `Type` → field list, now read directly from `InferenceFacts::function_signature`.
+- **STATUS:** CLOSED. **Difficulty:** LOW (one reader; formerly fed D6).
 
-**D6. `function_return_schema_ids`** — `mod.rs:1444` · `HashMap<String, u32>` (derived from D5)
-- **Populator:** `compiler_impl_reference_model.rs:1072` (`register_inferred_return_object_schemas`). **Readers:** `v2_typed_emission.rs:626`, `expressions/mod.rs:2320/2324` (`f(...).field` resolution), `function_calls.rs:466`.
-- **Engine fact:** a registered-schema handle for the engine's anon-object return type. Second-order projection of D5.
-- **STATUS:** LIVE. **Difficulty:** MEDIUM (4 readers, but all narrow `f(...).field` lookups).
+**D6. `function_return_schema_ids` — DELETED 2026-06-24** — formerly `mod.rs:1444` · `HashMap<String, u32>` (derived from D5)
+- **Former populator:** eager anonymous-return schema registration in `compiler_impl_reference_model.rs`. **Former readers:** `v2_typed_emission.rs`, `expressions/mod.rs` (`f(...).field` resolution), `function_calls.rs`.
+- **Engine fact:** readers now project a registered-schema handle from the engine's anon-object return type through active `InferenceFacts::function_signature`, then materialize the same Any-uniform inline schema plus field contracts on demand.
+- **STATUS:** CLOSED. **Difficulty:** MEDIUM (4 readers, but all narrow `f(...).field` / factory-array lookups).
 
-**D7. (TypeTracker) `function_return_types`** — `type_tracking.rs:668` · `HashMap<String,String>` (STRINGLY — SB-7; the audit's "`inferred_return_type_hints`")
-- **Populator:** `compiler_impl_reference_model.rs:2085-2087` (loop over the transient `inferred_return_type_hints` local → `register_function_return_type`, `type_tracking.rs:828`). **Readers:** `expressions/mod.rs:1710` (`get_function_return_type` in `infer_expr_type` FunctionCall arm), `functions_annotations.rs:1102`, `expressions/collections.rs:390` (comment). Getter `type_tracking.rs:834`.
-- **Engine fact:** the engine's per-function return `Type`, rendered to a **string**. SB-7 stringly drift.
-- **STATUS:** LIVE. **Difficulty:** MEDIUM (read directly by the strict-typing binop dispatch via `infer_expr_type`).
+**D7. (TypeTracker) old `function_return_types` string table — DELETED before this wave** — the audit's "`inferred_return_type_hints`" is no longer present as `HashMap<String,String>`. The remaining tracker table is structural `function_return_concrete_types: HashMap<String, ConcreteType>`; delete it later only after named-function return readers derive from `InferenceFacts::function_signature` or declared `FunctionDef` annotations directly.
 
 ### Group E — callable-binding return-type tables (closures via slots, STRINGLY)
 
 All four are `HashMap<u16, String>` (SB-7 stringly). Populated/cleared together by `update_callable_binding_from_expr` / `clear_callable_binding` in `helpers_reference.rs`. Snapshot/restore in `functions.rs` (per-function compile save/restore).
 
-**E1. `local_callable_return_types`** — `mod.rs:771`
-- **Populator:** `helpers_reference.rs:1103` (insert) / `:1106`,`:1172` (remove). Snapshot `functions.rs:1373/1484/1947/2078`. **Reader:** `expressions/mod.rs:1720` (`f(...)` call-result type in `infer_expr_type`), `function_calls.rs:795`.
-- **Engine fact:** return `Type` of a `let f = |…| …` local closure (string-rendered). The engine's closure-body solve.
-- **STATUS:** LIVE. **Difficulty:** MEDIUM.
+**E1. `local_callable_return_types` — DELETED 2026-06-24** — formerly `mod.rs:771`, populated by `helpers_reference.rs`, read by `expressions/mod.rs` and `function_calls.rs`, and snapshot/restored in `functions.rs`.
+- **Engine/facts source:** `callable_binding_return_type` now first projects `InferenceFacts::binding_type` for bindings structurally typed as `Function<..., R>`, then falls back to retained local closure-body peeks and returns a structural `Type`. Residual string names are rendered only for legacy tracker/schema-keyed consumers.
+- **STATUS:** CLOSED. **Difficulty:** MEDIUM.
 
-**E2. `module_binding_callable_return_types`** — `mod.rs:775` · pop `helpers_reference.rs:1144` · read `expressions/mod.rs:1727/1737`, `function_calls.rs:799/803`. Mirror of E1 for module-binding closures. **STATUS:** LIVE. **Difficulty:** MEDIUM.
+**E2. `module_binding_callable_return_types` — DELETED 2026-06-24** — mirror of E1 for module-binding closures. `callable_binding_return_type` uses module binding spans plus retained module-binding closure peeks; function-returning-closure bindings install a retained peek from the returned closure literal rather than a slot-indexed string. **STATUS:** CLOSED. **Difficulty:** MEDIUM.
 
-**E3. `local_array_callable_return_types`** — `mod.rs:784` · pop `helpers_reference.rs:952/1109` · read **`expressions/mod.rs:1838`** (the `arr[i](args)` = `MethodCall{method:"__call__"}` arm). Snapshot `functions.rs:1375/1949/2079`.
-- **Engine fact:** homogeneous element return `Type` of an array-of-closures local.
-- **STATUS:** LIVE (I initially thought dead — the reader is the non-obvious `__call__` arm). **Difficulty:** LOW-MEDIUM (single narrow reader).
+**E3. `local_array_callable_return_types` — DELETED 2026-06-24** — formerly `mod.rs:784` · pop `helpers_reference.rs` · read by the `arr[i](args)` = `MethodCall{method:"__call__"}` arm and snapshot/restore in `functions.rs`.
+- **Engine fact:** homogeneous element return `Type` of an array-of-closures local, now derived from `InferenceFacts::binding_type` on the array binding (`Array<Function<params, return>>`).
+- **STATUS:** CLOSED. The `__call__` reader now uses `indexed_callable_array_return_type`, which joins VM local/module binding slots to binder spans and projects the structural function return.
 
-**E4. `module_binding_array_callable_return_types`** — `mod.rs:788` · pop `helpers_reference.rs:960/969/1150/1153` · read `expressions/mod.rs:1848/1858`. Mirror of E3. **STATUS:** LIVE. **Difficulty:** LOW-MEDIUM.
+**E4. `module_binding_array_callable_return_types` — DELETED 2026-06-24** — mirror of E3 for module-binding arrays. **STATUS:** CLOSED via the same `InferenceFacts::binding_type` projection.
 
 ### Group F — name-keyed structural side-channels (not in audit's named list)
 
@@ -613,9 +610,9 @@ All four are `HashMap<u16, String>` (SB-7 stringly). Populated/cleared together 
 - **Engine fact:** element anon-object field `Type`s of an array binding; frozen at let-time because the engine's scope is popped.
 - **STATUS:** LIVE. **Difficulty:** LOW (single reader).
 
-**F2. `binding_collection_carrier_kinds`** — `mod.rs:1724` · `HashMap<String, ConcreteType>` · pop `statements.rs:5196` (single writer) · read `type_resolution.rs:1605` (`binding_collection_ctor_capture_type`, consumed by `resolve_capture_concrete_type` for §2.7.8 closure-capture kind).
+**F2. `binding_collection_carrier_kinds`** — historical inventory: `mod.rs:1724` · `HashMap<String, ConcreteType>` · pop `statements.rs:5196` (single writer) · read `type_resolution.rs:1605` (`binding_collection_ctor_capture_type`, consumed by `resolve_capture_concrete_type` for §2.7.8 closure-capture kind).
 - **Engine fact:** collection-carrier ConcreteType of a bare-ctor binding (`let mut m = HashMap()`), **deliberately separated** from `module_binding_concrete_types` (its comment, `mod.rs:1720-1723`, explains the `HasField` constraint collision that forced the split — a documented drift).
-- **STATUS:** LIVE. **Difficulty:** LOW (1 writer, 1 reader) but **semantically load-bearing for capture-kind soundness** — must be migrated, not just deleted.
+- **STATUS:** DELETED locally 2026-06-24. Replacement: runtime `InferenceFacts` records finalized `BindingFact`s keyed by binder/name span; VM local/module binding slots record those spans; `resolve_capture_concrete_type` calls `binding_fact_capture_type`, which converts `InferenceFacts::binding_type(span)` to `ConcreteType`. **Difficulty:** closed with focused runtime + VM tests because the capture-kind stamp is semantically load-bearing.
 
 ---
 
@@ -646,8 +643,8 @@ MODULE binding:
  2. tracker_type_name_for_identifier(name)   (SB-7 stringly + strip_suffix "[]")  :1602/:1632
  3. current_function_local_concrete_types / module_binding_concrete_types (A1/A2)  :1652/:1656
  4. type_tracker.get_function_return_type     (D7 stringly)            :1710
- 5. local_callable_return_types               (E1 stringly)           :1720
- 6. module_binding_callable_return_types       (E2 stringly)          :1727/:1737
+ 5. local_callable_return_types               (E1 stringly, deleted locally; now callable_binding_return_type)
+ 6. module_binding_callable_return_types       (E2 stringly, deleted locally; now callable_binding_return_type)
  7. local/module_binding_array_callable_return_types (E3/E4 __call__) :1838/:1848/:1858
  8. current_function_local/module_binding_concrete_types (tuple-index) (A1/A2)  :2003/:2007
  9. concrete_type_for_expr → identifier_concrete_type (Ladder 1)      :2150/:2173
@@ -665,7 +662,7 @@ Once the engine span-table is complete (every expr recorded, PropertyAccess stri
 |---|---|---|
 | **`expr_type_table[init_expr.span]`** (binding initializer resolved Type) | A1, A2, B1, B2, B3, C1, C2, C3, F1, F2 | All whole-binding / element / map / element-object tables are frozen projections of the binding's initializer expr type. Once the span-table carries the function-body local's init type (the reason it was added in T1), these are pure duplication. F2 needs the §2.7.8 capture-kind derived from the same Type. |
 | **engine per-param resolved Type** (`infer_param_*_from_types` already projects this — delete the projection, query the engine slot directly) | D1, D2, D3, D4 | D1 is the stringly version (drives the `strip_suffix("[]")` re-parse — delete with the re-parse). D2/D3/D4 are structural projections of the same param solve. |
-| **engine per-function return Type** | D5, D6, D7, E1, E2, E3, E4 | D7/E1-E4 are the stringly `HashMap<_,String>` versions (the SB-7 drift). D5/D6 are the anon-object-return structural projection + its registered-schema handle. All are the engine's function/closure-body return solve, rendered/frozen. |
+| **engine per-function return Type** | D5, D6, D7, E1, E2, E3, E4 | D7/E1-E4 were the stringly `HashMap<_,String>` versions (the SB-7 drift); E1-E4 are deleted locally. D5/D6 are the anon-object-return structural projection + its registered-schema handle. All are the engine's function/closure-body return solve, rendered/frozen. |
 
 **SB-7 collapse coupling:** D1, D7, E1-E4 are exactly the `type_name: Option<String>` (`type_tracking.rs:340`) stringly representation the U4 plan replaces with the engine `Type`. Deleting them removes the `.strip_suffix("[]")` (`expressions/mod.rs:1632/2234`) and the `strip_prefix("Array<")/Vec<` re-parse (`:2230-2231`) — the two re-parse sites the audit named. `NumericType` (`type_tracking.rs:52`, register `last_expr_numeric_type` at `mod.rs:726`, read for opcode selection at `binary_ops.rs:796` etc.) stays as the **emit-time stamp derived from the one Type**, per the U4 target — it is NOT one of these hint tables.
 
@@ -681,14 +678,13 @@ Once the engine span-table is complete (every expr recorded, PropertyAccess stri
 
 **Tier 2 — single-purpose but in a priority ladder:**
 - `local_array_element_types` (B2), `module_binding_array_element_types` (B3) — in Ladder-1 + the lockstep-upgrade hack (`helpers.rs:4141-4160`).
-- `local_map_key_value_types` (C2), `module_binding_map_key_value_types` (C3), `map_key_value_types` (C1) — survived U3; in Ladder-1.
-- `function_return_schema_ids` (D6) — 4 narrow `f(...).field` readers, depends on D5.
+- `local_map_key_value_types` (C2), `module_binding_map_key_value_types` (C3), `map_key_value_types` (C1) — survived U3 at report HEAD; deleted locally 2026-06-24.
+- `function_return_schema_ids` (D6) — closed 2026-06-24; readers derive from active `InferenceFacts::function_signature`.
 - `local_array_callable_return_types` (E3), `module_binding_array_callable_return_types` (E4) — single `__call__`-arm reader each.
 
-**Tier 3 — load-bearing (delete last, after the span-table demonstrably covers function bodies):**
-- `current_function_local_concrete_types` (A1), `module_binding_concrete_types` (A2) — head of Ladder-1, 4 reader paths each, 6 writers, snapshot/restore plumbing in `monomorphization/cache.rs`.
-- `inferred_param_type_hints` (D1) — stamps tracker `type_name`, read indirectly across all the `[]`/`Array<` re-parse sites; SB-7 keystone.
-- `function_return_types` (D7, in TypeTracker), `local_callable_return_types` (E1), `module_binding_callable_return_types` (E2) — read by the strict-typing binop dispatch via `infer_expr_type` FunctionCall arm; closure-body return solve; SB-7 stringly.
+**Tier 3 — load-bearing at report time, now partly closed locally:**
+- `current_function_local_concrete_types` (A1), `module_binding_concrete_types` (A2) — pre-deletion head of Ladder-1, 4 reader paths each, 6 writers, snapshot/restore plumbing in `monomorphization/cache.rs`; deleted locally 2026-06-24 after residual compiler paths moved to explicit facts.
+- `function_return_concrete_types` (D7 successor, in TypeTracker) — structural but still a tracker-side named-function return cache; delete after readers derive from `InferenceFacts::function_signature` / declared annotations.
 
 **Load-bearing structural caveat for the roadmap:** the SB-8 tables exist because the engine ran ONCE at module scope and could not see function-body locals; the T1 keystone span-table (`resolved_expr_types`) was the fix that lets the engine's full-program walk reach those locals. Therefore the precondition for deleting ALL of Group A/B/C/F is **the span-table must carry every function-body binding's defining-expr type** (verify the engine's `infer_program_best_effort` walks into function bodies and `finalize_expr_type_table` keeps those entries). The deliberate PropertyAccess consumer-exclusion (`expressions/mod.rs:1558`) and the STAGE-F1 strictness ruling must be **moved INTO the engine as a real error** before that exclusion can be dropped — exactly the U4 "move STAGE-F1 strictness INTO the engine" sub-goal.",
       "dRepros": "I have everything needed. The side-tables exist and have actually GROWN (now ~16+ including `local_callable_closure_bodies`, `binding_collection_carrier_kinds`, the pass-modes pair). The object-fields tables live in `compiler_impl_initialization.rs` (declared elsewhere in mod.rs as non-HashMap or in a sub-struct). Let me compile the final report.
@@ -746,7 +742,7 @@ fn main() {
 }
 main()
 ```
-→ `24`. The `number` variant (`|x: number| { x * 2.0 }`, `g(5.0)+g(7.0)`) → `24.0`. Both operands resolve via `local_callable_return_types` (`expressions/mod.rs:1719`) and the engine span-table. **No longer repros.** What changed: the T1 keystone span-table consult (`expressions/mod.rs:1561`) + the closure-return side-table.
+→ `24`. The `number` variant (`|x: number| { x * 2.0 }`, `g(5.0)+g(7.0)`) → `24.0`. Pre-U4-6, these operands resolved via `local_callable_return_types` (`expressions/mod.rs:1719`) plus the engine span-table. **No longer repros.** Current local status: the side-table is deleted; `callable_binding_return_type` derives the return structurally from `InferenceFacts::binding_type` or a retained closure-body peek.
 
 ### Class 3 — inline-vs-let asymmetry (FIXED)
 ```shape
@@ -822,9 +818,9 @@ Three structures conspire — all three are U4's named targets:
 
 1. **The closure-body return type is computed by a hand-written mini-inferencer**, NOT the engine: `infer_closure_body_return_type_name_with_caller_context` (`crates/shape-vm/src/compiler/expressions/closures.rs:830`). Its inner `expr_type` walker (`closures.rs:936`–`1131`) has arms for `Literal`, `Identifier`, `BinaryOp`, `UnaryOp`, `Return`, `Block`, `MethodCall` — and **NO `PropertyAccess`/`FieldAccess` arm**, so a field-read body falls to `_ => None` at `closures.rs:1130`. This walker is a *fourth* re-implementation of inference (on top of SB-1's three) and a *stringly-typed* one (`Option<String>` of `"int"`/`"number"`/`"Vec<int>"…`, with its own `strip_prefix("Vec<")` re-parse at `closures.rs:1104`). **This IS SB-1 + SB-7 in microcosm.**
 
-2. **The result is stored in the side-table** `local_callable_return_types: HashMap<u16, String>` (`mod.rs:771`), populated by `update_callable_binding_from_expr` (`helpers_reference.rs:910`–`921`, the `FunctionExpr` arm). When the mini-inferencer returns `None`, the slot gets `.remove(&slot)` (`helpers_reference.rs:1106`) — the binding has *no* recorded return type. **This is SB-8.**
+2. **Pre-U4-6, the result was stored in the side-table** `local_callable_return_types: HashMap<u16, String>` (`mod.rs:771`), populated by `update_callable_binding_from_expr` (`helpers_reference.rs:910`–`921`, the `FunctionExpr` arm). When the mini-inferencer returned `None`, the slot got `.remove(&slot)` (`helpers_reference.rs:1106`) — the binding had *no* recorded return type. **This was SB-8.** Current local status: the string table is deleted; the retained closure body is the only non-span projection.
 
-3. **At the use site**, `infer_expr_type`'s `FunctionCall` arm consults `local_callable_return_types` (`expressions/mod.rs:1719`), misses, and falls through. The engine span-table *would* hold the call's type — but the call `get(e)` is a `FunctionCall`, which IS consulted (not the excluded PropertyAccess), so why does it still miss? Because `finalize_expr_type_table` (`inference/mod.rs:361`) **drops any entry that stayed a free variable**, and the module-scope engine never bound the closure-local param `p: Emp`'s field projection to a concrete type at that span (the engine walks the closure body but the call-result var stays free post-solve for this shape). So the span-table entry is *dropped*, the ladder's callable-return side-table is *empty*, and the operand erases. **This is SB-1 (fallback engine returns unknown for the body local) made visible.**
+3. **At the pre-U4-6 use site**, `infer_expr_type`'s `FunctionCall` arm consulted `local_callable_return_types` (`expressions/mod.rs:1719`), missed, and fell through. The engine span-table *would* hold the call's type — but the call `get(e)` is a `FunctionCall`, which IS consulted (not the excluded PropertyAccess), so why does it still miss? Because `finalize_expr_type_table` (`inference/mod.rs:361`) **drops any entry that stayed a free variable**, and the module-scope engine never bound the closure-local param `p: Emp`'s field projection to a concrete type at that span (the engine walks the closure body but the call-result var stays free post-solve for this shape). So the span-table entry is *dropped*, the ladder's callable-return side-table is *empty*, and the operand erases. **This is SB-1 (fallback engine returns unknown for the body local) made visible.** Current local status: this specific string-table miss path is deleted; a genuine unresolved closure-body return is a structural miss.
 
 ### Why `==` differs from `+` (a real asymmetry worth a regression case)
 `h4` (`get(e) == 50`) passes but `h4b` (`get(a) == get(b)`) fails. The `==` emitter (`binary_ops.rs:1006`, `has_eq_impl`) can pick a typed `Eq*` opcode from *either* operand; one literal sibling (`50`) suffices. With both operands closure-field (`h4b`), neither is proven → `unknown == unknown`. `+` has no such sibling-recovery, so `f8` fails on the first field operand. Both should be in the U4 acceptance set — they prove the type is genuinely lost, independent of opcode-selection luck.
@@ -897,13 +893,13 @@ main()
 - `NumericType` (`type_tracking.rs:54`) — per-last-expr mutable register `last_expr_numeric_type` (set `binary_ops.rs:195,423`).
 - **Dual-read drift CONFIRMED:** `binary_ops.rs` reads `NumericType` for opcode selection (`:530,548,650,769`) AND calls `infer_expr_type` for the Type table (`:221,225,434,438,517,574,1006`) — two sources for "is this operand int or number," exactly as the audit states.
 
-**SB-8 (hint side-tables) — present and GROWN, not shrunk** (`crates/shape-vm/src/compiler/mod.rs`):
-- `local_callable_return_types` `:771`, `module_binding_callable_return_types` `:775`, `local_array_callable_return_types` `:784`, `module_binding_array_callable_return_types` `:788`
+**SB-8 (hint side-tables) — historical audit state; many now deleted locally** (`crates/shape-vm/src/compiler/mod.rs`):
+- Deleted locally 2026-06-24: `local_callable_return_types`, `module_binding_callable_return_types`, `local_array_callable_return_types`, `module_binding_array_callable_return_types`
 - `local_callable_pass_modes` `:753`, `module_binding_callable_pass_modes` `:760` (audit didn't list these)
 - `local_callable_closure_bodies` `:811`, `module_binding_callable_closure_bodies` `:819` (**NEW** — `ClosureBodyPeek` caches; SB-8 growth)
 - `array_element_types` `:1237`, `local_array_element_types` `:1240`, `module_binding_array_element_types` `:1243`
 - `inferred_param_type_hints` `:1371`
-- `function_return_schema_ids` `:1444`
+- `function_return_schema_ids` `:1444` — closed 2026-06-24
 - `current_function_local_concrete_types` `:1684`, `module_binding_concrete_types` `:1710`
 - `binding_collection_carrier_kinds` `:1724` (**NEW** since audit)
 - `inferred_param_object_fields` / `inferred_return_object_fields` — still constructed (`compiler_impl_initialization.rs:176-177`), backed by `type_tracker.get_object_field_contract` (`type_tracking.rs:848`); audit's `inferred_param_concrete_types` / `inferred_return_type_hints` names are GONE (renamed/folded).
@@ -918,7 +914,7 @@ So the SB-8 count is now **~16+ tables**, not 13 — U1/U3/strict-flip *added* p
 ## 6. Summary for the synthesis agent
 
 - **5 of 6 claimed classes no longer repro** (1, 3, 4, 6 fully; 2 mostly) — U1 (canonical Type), U2 (`prove_native_kind` now real), and the 2026-06-22 T1 keystone span-table did most of the work. The audit's repro list is stale on these; verify-pass them as *regression guards*.
-- **The one live U4 class is "closure body is a field-read":** `f8`, `f8let`, `h1`, `h2`, `h4b` all fail with `unknown` operand. Root = the hand-written `expr_type` mini-inferencer in `closures.rs:936-1131` lacks a `PropertyAccess` arm → `local_callable_return_types` side-table empty → `infer_expr_type` FunctionCall arm misses → fallback engine returns unknown for the body-local field projection. This is SB-1 + SB-7 + SB-8 in one bug.
+- **Historical live U4 class was "closure body is a field-read":** `f8`, `f8let`, `h1`, `h2`, `h4b` failed with `unknown` operand. Root = the hand-written `expr_type` mini-inferencer in `closures.rs:936-1131` lacked a `PropertyAccess` arm → `local_callable_return_types` side-table empty → `infer_expr_type` FunctionCall arm missed → fallback engine returned unknown for the body-local field projection. This was SB-1 + SB-7 + SB-8 in one bug; current local status has deleted the mini-inferencer and callable-return string table.
 - **Two consumer-side subtleties the deletion must preserve:** (a) the PropertyAccess span-table exclusion (`expressions/mod.rs:1558`) exists to NOT mask the real STAGE-F1 engine error (`constraints.rs:1137`) — deleting the ladder must keep STAGE-F1 surfacing; (b) named-fn field-returns already work via declared annotations — the fix is making the engine export the *closure* return type the same way (the engine already walks closure bodies; `finalize_expr_type_table` currently drops the still-free entry — that drop is where the closure-field result dies).
 - **SB-8b is FIXED** (not a U4 item) and **SB-22/`Json.keys`** is the cosmetic noise on every run (not a U4 item).
 
@@ -1006,19 +1002,20 @@ Used as the **gate cross-check** in `emit_return_value_with_ownership` (`helpers
 
 `typed_store_local_opcode(hint: StorageHint)` (`helpers.rs:6299`) routes through `storage_hint_to_field_kind` (`helpers.rs:6010`) — a `StorageHint→FieldKind` map — then `FieldKind→OpCode`. Same shape for `typed_load_module_binding_opcode`/`typed_store_module_binding_opcode` (`:6320`, `:6341`). So a SEVENTH conversion layer (`FieldKind`, `shape-value::v2::struct_layout`) sits between NativeKind and the opcode.
 
-### DUPLICATION: TWO disagreeing `ConcreteType → NativeKind` maps
+### U4-7a close: one `ConcreteType → NativeKind` projection map
 
-The canonical map exists in TWO copies that **DISAGREE on three arms** — a real correctness drift, not just a clone:
+This section originally identified two disagreeing copies of the projection: `shape-value/v2/closure_layout.rs::native_kind_from_concrete_type` and `shape-jit/mir_compiler/types.rs::native_kind_from_concrete_type`. U4-7a closed that drift on 2026-06-24 by deleting the JIT copy. The JIT wrapper now calls the shared `shape-value` projection and returns `None` only for `ConcreteType::Void`, because void has no slot-shaped carrier.
 
-| `ConcreteType` arm | `shape-value/v2/closure_layout.rs:944` | `shape-jit/mir_compiler/types.rs:151` |
-|---|---|---|
-| `Option(_)` | `Ptr(HeapKind::TypedObject)` (`:970`) | `Ptr(HeapKind::Option)` (`:171`) |
-| `Result(_,_)` | `Ptr(HeapKind::TypedObject)` (`:971`) | `Ptr(HeapKind::Result)` (`:170`) |
-| `Pointer(_)` | `Ptr(HeapKind::NativeView)` (`:963`) | `UInt64` (`:186`) |
-| `Void` | **panics** (`:1003`) | returns `None` (`:214`) |
-| return type | `NativeKind` (total) | `Option<NativeKind>` |
+Canonical answers for the formerly divergent arms:
 
-The closure_layout copy is the one `prove_native_kind` projects through (`type_tracking.rs:1266`). The JIT copy is used by JIT MIR (`mir_compiler/mod.rs:887`, `types.rs:1143/1147/1179/…`). U4's "one derivation" must reconcile these two before either can be the single source.
+| `ConcreteType` arm | Shared answer |
+|---|---|
+| `Option(_)` | `Ptr(HeapKind::TypedObject)` |
+| `Result(_,_)` | `Ptr(HeapKind::TypedObject)` |
+| `Pointer(_)` | `Ptr(HeapKind::NativeView)` |
+| `Void` | construction error in the total shared map; `None` in JIT metadata only |
+
+The closure-layout copy remains the one `prove_native_kind` projects through (`type_tracking.rs`). The JIT no longer re-derives a parallel answer before seeding MIR slot kinds. This is a projection-layer close only; L5 runtime storage for Option/Result still requires a separate schema-aware migration before Option/Result producer stamps can be treated as `Ptr(HeapKind::TypedObject)` unconditionally.
 
 ---
 
@@ -1037,7 +1034,7 @@ Every emit-time kind today is independently re-derived; NONE flow from the engin
 9. **`storage_hint_to_field_kind` / `native_kind_from_storage_type`** `helpers.rs:6010` / `type_tracking.rs:90` — `StorageType`→NativeKind is yet another source-type→kind map (StorageType is a runtime enum, distinct from ConcreteType).
 10. **~151 direct `NativeKind::` literal construction sites** across 19 compiler files (`v2_array_emission.rs`, `v2_typed_emission.rs`, `v2_map_emission.rs`, `typed_emission.rs`, `mutation_writeback.rs`, `loops.rs`, `closures.rs`, etc.) — many stamp `Ptr(HeapKind::…)` directly rather than projecting from a Type.
 
-**Decisive structural fact:** grep for any `ConcreteType → NativeKind/FieldKind` derivation **inside `crates/shape-vm/src/compiler/` returns EMPTY**. The SB-8 `ConcreteType` side-tables exist (`current_function_local_concrete_types` `mod.rs:1684`, `module_binding_concrete_types` `:1710`, `inferred_param_concrete_types` `:1383`) but are consumed ONLY by `infer_expr_type` for inference (`expressions/mod.rs:1652`, `:2003`; `loops.rs:442/884`) and by monomorphization save/restore (`monomorphization/cache.rs:432/438/623/626/840/843`) — **never to derive an emit-time NativeKind**. The one ConcreteType→kind map that IS reachable in shape-vm is via capture-kind layout (`closures.rs` → `from_capture_types` → closure_layout map) and the JIT copy; the VM emit path itself goes stringly.
+**Pre-deletion structural fact:** grep for any `ConcreteType → NativeKind/FieldKind` derivation **inside `crates/shape-vm/src/compiler/` returned EMPTY**. At that report point the SB-8 `ConcreteType` side-tables (`current_function_local_concrete_types`, `module_binding_concrete_types`, `inferred_param_concrete_types`) were consumed only by `infer_expr_type` and monomorphization save/restore, never to derive an emit-time `NativeKind`. The whole-binding table pair is now deleted locally; the remaining U2 proof-site work must derive kinds from `Type -> ConcreteType -> native_kind_from_concrete_type`, not from replacement side tables. The one `ConcreteType→kind` map reachable in shape-vm is via capture-kind layout (`closures.rs` → `from_capture_types` → closure_layout map); post-U4-7 the JIT wrapper delegates to the same map. The VM emit path itself still has stringly sites to retire.
 
 So U4's claim "keep NumericType/NativeKind only as a stamp DERIVED from the one Type" requires **redirecting all 10 entry points above to `native_kind_from_concrete_type(concrete_type_from_engine_Type)`**, and the SB-8 ConcreteType tables (which already hold the right structural data) become the natural input — but today they feed inference, not stamping.
 
@@ -1059,7 +1056,7 @@ In the U4 end state, `last_emitted_native_kind` (Route D, the opcode-inspection 
 1. **U4 (this root):** collapse to one derivation — make the engine `Type` (→`ConcreteType`) the sole input at every emit site; delete Routes B/C/D/E's independent re-derivations; keep `native_kind_from_concrete_type` as the only `Type→kind` map (and unify the two divergent copies first).
 2. **U2 follow-up (separable):** flip `prove_native_kind` from inert to wired — make each typed-opcode emission call it and propagate `ProofGap` as `E_TYPED_OPCODE_WITHOUT_PROOF`. This is the "Phase 2 wires call sites" step described in the dormant doc-comment at `type_tracking.rs:1188`, which has never executed.
 
-The two divergent `ConcreteType→NativeKind` maps (closure_layout vs mir_compiler, §Part 2) are a **U4 prerequisite**: the proof gate projects through the closure_layout copy, so until Option/Result/Pointer/Void arms agree, wiring the gate would make the VM and JIT prove against different expected kinds."
+The formerly divergent `ConcreteType→NativeKind` maps (closure_layout vs mir_compiler, §Part 2) were a **U4 prerequisite**; U4-7a closed that L4 prerequisite by making the JIT delegate to the closure_layout copy, with only `Void` wrapped as JIT metadata `None`. The L5 Option/Result carrier migration remains separate."
     }
   }
 }

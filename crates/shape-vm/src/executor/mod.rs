@@ -17,6 +17,7 @@ mod loops;
 pub(crate) mod objects;
 mod osr;
 mod resume;
+pub(crate) mod result_option_carrier;
 mod snapshot;
 mod stack_ops;
 pub mod state_builtins;

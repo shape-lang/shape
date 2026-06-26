@@ -672,15 +672,14 @@ fn expected_kind_from_serializable(
         SV::Number(_) => NativeKind::Float64,
         SV::Bool(_) => NativeKind::Bool,
         SV::String(_) => NativeKind::String,
-        SV::None | SV::Unit => NativeKind::Bool,
+        SV::None | SV::Unit => NativeKind::Null,
         SV::Decimal(_) => NativeKind::Ptr(HeapKind::Decimal),
         SV::BigInt(_) => NativeKind::Ptr(HeapKind::BigInt),
         SV::Char(_) => NativeKind::Ptr(HeapKind::Char),
         SV::HashSet { .. } => NativeKind::Ptr(HeapKind::HashSet),
         SV::PriorityQueueHeap { .. } => NativeKind::Ptr(HeapKind::PriorityQueue),
         SV::AtomicI64 { .. } => NativeKind::Ptr(HeapKind::Atomic),
-        SV::ResultData { .. } => NativeKind::Ptr(HeapKind::Result),
-        SV::OptionData { .. } => NativeKind::Ptr(HeapKind::Option),
+        SV::ResultData { .. } | SV::OptionData { .. } => NativeKind::Ptr(HeapKind::TypedObject),
         SV::IteratorOpaque => NativeKind::Ptr(HeapKind::Iterator),
         SV::DequeOpaque { .. } => NativeKind::Ptr(HeapKind::Deque),
         SV::ChannelOpaque { .. } => NativeKind::Ptr(HeapKind::Channel),
@@ -1104,6 +1103,56 @@ mod tests {
                 is_ok: true,
                 payload,
             } if matches!(payload.as_ref(), SV::Int(42))
+        ));
+    }
+
+    #[test]
+    fn test_l5_legacy_result_option_snapshot_restore_uses_typed_objects_without_kind_track() {
+        use crate::bytecode::BytecodeProgram;
+        use shape_runtime::snapshot::{SerializableVMValue as SV, VmSnapshot};
+
+        let (_registry, schemas) =
+            shape_runtime::type_schema::TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let snap = VmSnapshot {
+            stack: vec![
+                SV::ResultData {
+                    is_ok: true,
+                    payload: Box::new(SV::Int(42)),
+                },
+                SV::OptionData {
+                    is_some: false,
+                    payload: None,
+                },
+            ],
+            stack_kinds: vec![],
+            ..Default::default()
+        };
+
+        let restored = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store)
+            .expect("restore legacy ResultData/OptionData");
+        let restored_snap = restored.snapshot(&store).expect("re-snapshot restored");
+        assert_eq!(restored_snap.stack.len(), 2);
+        assert!(matches!(
+            &restored_snap.stack[0],
+            SV::TypedObject {
+                schema_id,
+                slot_data,
+                ..
+            } if *schema_id == schemas.result as u64
+                && matches!(slot_data.first(), Some(SV::Int(0)))
+                && matches!(slot_data.get(1), Some(SV::Int(42)))
+        ));
+        assert!(matches!(
+            &restored_snap.stack[1],
+            SV::TypedObject {
+                schema_id,
+                slot_data,
+                ..
+            } if *schema_id == schemas.option as u64
+                && matches!(slot_data.first(), Some(SV::Int(1)))
+                && matches!(slot_data.get(1), Some(SV::None))
         ));
     }
 

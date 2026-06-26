@@ -120,7 +120,9 @@
 //! of the v2 pipeline is being built out.
 
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
-use shape_ast::ast::{Expr, Statement, TypeAnnotation};
+use crate::compiler::{BindingConcreteFact, BindingConcreteFactSource};
+use shape_ast::ast::{Expr, Span, Statement, TypeAnnotation};
+use shape_runtime::type_system::Type;
 use shape_value::v2::ConcreteType;
 use shape_value::v2::concrete_type::ClosureTypeId;
 use std::collections::HashMap;
@@ -1121,9 +1123,9 @@ fn resolve_with_closure_return_inference(
             })
             .collect();
 
-        // Lightweight closure body return-type inference. Returns a name
-        // like "int", "number", "bool", "string". The function exists
-        // primarily for `local_callable_return_types` — reuse it here.
+        // Lightweight closure body return-type inference. The residual generic
+        // resolver ABI still wants a display name, so use the name-rendering
+        // wrapper over the structural engine-span lookup.
         let Some(return_type_name) =
             crate::compiler::expressions::closures::infer_closure_body_return_type_name_with_caller_context(
                 compiler,
@@ -1541,10 +1543,8 @@ fn record_binding(
 }
 
 /// Compute a best-effort [`ConcreteType`] for each argument expression in a
-/// call. Uses the existing v2 side-tables on the [`BytecodeCompiler`]
-/// (`array_element_types`, `local_array_element_types`,
-/// `map_key_value_types`, `local_map_key_value_types`,
-/// `current_function_local_concrete_types`, …) plus literal-shape inference.
+/// call. Uses explicit binding facts, runtime inference facts, tracker metadata,
+/// and literal-shape inference.
 ///
 /// Returns one entry per arg, in order. `None` for an entry means "we don't
 /// have enough info" — the caller is expected to fall back to the generic
@@ -1561,59 +1561,107 @@ pub fn extract_arg_concrete_types(
         .collect()
 }
 
-/// Best-effort `ConcreteType` for a single argument expression.
-/// CaptureCarrier (ADR-006 §2.7.8 / Q10, 2026-06-18): map a bare collection
-/// constructor identifier (`HashMap` / `Map` / `HashSet` / `Set` / `Deque` /
-/// `PriorityQueue`) to its OUTER-carrier `ConcreteType` with `Void` element
-/// placeholders.
-///
-/// This is a **capture-kind-only** resolver — used solely by
-/// `resolve_capture_concrete_type` to stamp the §2.7.8 closure-capture
-/// `NativeKind` (which reads ONLY the outer discriminator via
-/// `native_kind_from_concrete_type`, V-erased per §2.7.15). It is
-/// deliberately NOT folded into `concrete_type_for_expr` /
-/// `identifier_concrete_type`: the statement-binding type-recording path
-/// (`statements.rs`) feeds those into the type-inference engine's
-/// `set_module_binding_type_info`, and a `HashMap<…>` tracker name there
-/// trips the engine's `HasField` constraint check on a subsequent method
-/// call (`m.remove(..)` → "HashMap cannot have fields"). The capture-kind
-/// fix needs only the heap-carrier discriminator, so it stays scoped to the
-/// capture-layout resolver. No tag decode, no Bool-default (§2.7.8 #4).
-fn collection_ctor_capture_concrete_type(name: &str) -> Option<ConcreteType> {
-    match name {
-        "HashMap" | "Map" => Some(ConcreteType::HashMap(
-            Box::new(ConcreteType::Void),
-            Box::new(ConcreteType::Void),
+/// Resolve a captured binding's `ConcreteType` from the canonical runtime
+/// inference facts. The VM stores only the binding slot's AST span; the type
+/// itself is owned by `InferenceFacts`.
+pub fn binding_fact_capture_type(compiler: &BytecodeCompiler, name: &str) -> Option<ConcreteType> {
+    if let Some(local_idx) = compiler_resolve_local(compiler, name) {
+        return compiler
+            .local_binding_spans
+            .get(&local_idx)
+            .copied()
+            .and_then(|span| compiler.inference_facts.binding_type(span))
+            .and_then(|ty| concrete_type_from_inference_fact(compiler, ty));
+    }
+
+    if let Some(binding_idx) = compiler_resolve_module_binding(compiler, name) {
+        return compiler
+            .module_binding_spans
+            .get(&binding_idx)
+            .copied()
+            .and_then(|span| compiler.inference_facts.binding_type(span))
+            .and_then(|ty| concrete_type_from_inference_fact(compiler, ty));
+    }
+
+    None
+}
+
+fn concrete_type_from_inference_fact(
+    compiler: &BytecodeCompiler,
+    ty: &Type,
+) -> Option<ConcreteType> {
+    let canonical = ty.canonicalize();
+    match &canonical {
+        Type::Concrete(ann) => declared_annotation_concrete_type(compiler, ann)
+            .or_else(|| concrete_type_from_annotation(ann, &HashMap::new())),
+        Type::Generic { base, args } => {
+            let base_name = inference_fact_base_name(base)?;
+            match base_name {
+                "Array" | "Vec" if args.len() == 1 => Some(ConcreteType::Array(Box::new(
+                    concrete_type_from_inference_fact(compiler, &args[0])?,
+                ))),
+                "HashMap" | "Map" if args.len() == 2 => Some(ConcreteType::HashMap(
+                    Box::new(concrete_type_from_inference_fact(compiler, &args[0])?),
+                    Box::new(concrete_type_from_inference_fact(compiler, &args[1])?),
+                )),
+                "HashSet" | "Set" if args.len() == 1 => Some(ConcreteType::HashSet(Box::new(
+                    concrete_type_from_inference_fact(compiler, &args[0])?,
+                ))),
+                "Deque" if args.len() == 1 => Some(ConcreteType::Deque(Box::new(
+                    concrete_type_from_inference_fact(compiler, &args[0])?,
+                ))),
+                "PriorityQueue" if args.len() <= 1 => Some(ConcreteType::PriorityQueue),
+                "Option" if args.len() == 1 => Some(ConcreteType::Option(Box::new(
+                    concrete_type_from_inference_fact(compiler, &args[0])?,
+                ))),
+                "Result" if args.len() == 2 => {
+                    let ok = concrete_type_from_inference_fact(compiler, &args[0])?;
+                    let err = if inference_fact_is_any_error(&args[1]) {
+                        ConcreteType::Void
+                    } else {
+                        concrete_type_from_inference_fact(compiler, &args[1])?
+                    };
+                    Some(ConcreteType::Result(Box::new(ok), Box::new(err)))
+                }
+                "Result" if args.len() == 1 => Some(ConcreteType::Result(
+                    Box::new(concrete_type_from_inference_fact(compiler, &args[0])?),
+                    Box::new(ConcreteType::Void),
+                )),
+                _ => None,
+            }
+        }
+        Type::Function { .. } => Some(ConcreteType::Function(
+            shape_value::v2::concrete_type::FunctionTypeId(0),
         )),
-        "HashSet" | "Set" => Some(ConcreteType::HashSet(Box::new(ConcreteType::Void))),
-        "Deque" => Some(ConcreteType::Deque(Box::new(ConcreteType::Void))),
-        "PriorityQueue" => Some(ConcreteType::PriorityQueue),
+        Type::Variable(_) | Type::Constrained { .. } => None,
+    }
+}
+
+fn inference_fact_is_any_error(ty: &Type) -> bool {
+    match ty.canonicalize() {
+        Type::Concrete(TypeAnnotation::Reference(path)) => path.as_str() == "AnyError",
+        Type::Concrete(TypeAnnotation::Basic(name)) => name == "AnyError",
+        _ => false,
+    }
+}
+
+fn inference_fact_base_name(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Concrete(TypeAnnotation::Reference(path)) => Some(path.as_str()),
+        Type::Concrete(TypeAnnotation::Basic(name)) => Some(name.as_str()),
         _ => None,
     }
 }
 
-/// Resolve a binding `name`'s collection-carrier capture `ConcreteType` from
-/// the compiler's dedicated capture-only side-table
-/// (`binding_collection_carrier_kinds`), populated at the let-binding site
-/// when the initializer is a bare collection constructor. Used by
-/// `resolve_capture_concrete_type` only. Returns `None` when the binding was
-/// not a bare collection constructor.
-pub fn binding_collection_ctor_capture_type(
-    compiler: &BytecodeCompiler,
-    name: &str,
-) -> Option<ConcreteType> {
-    compiler.binding_collection_carrier_kinds.get(name).cloned()
-}
-
-/// Classify a let-binding initializer expression as a bare collection
-/// constructor and return its capture-carrier `ConcreteType`. Called at the
-/// statement-compile site to populate `binding_collection_carrier_kinds`.
-pub fn collection_ctor_init_capture_type(init: &Expr) -> Option<ConcreteType> {
-    if let Expr::FunctionCall {
-        name: ctor_name, ..
-    } = init
-    {
-        return collection_ctor_capture_concrete_type(ctor_name.as_str());
+fn compiler_resolve_module_binding(compiler: &BytecodeCompiler, name: &str) -> Option<u16> {
+    if let Some(&idx) = compiler.module_bindings.get(name) {
+        return Some(idx);
+    }
+    for module_path in compiler.module_scope_stack.iter().rev() {
+        let candidate = format!("{}::{}", module_path, name);
+        if let Some(&idx) = compiler.module_bindings.get(&candidate) {
+            return Some(idx);
+        }
     }
     None
 }
@@ -1622,7 +1670,11 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
     match expr {
         Expr::Literal(literal, _) => literal_concrete_type(literal),
 
-        Expr::Identifier(name, _) => identifier_concrete_type(compiler, name),
+        Expr::Identifier(name, span) => compiler
+            .resolved_expr_types
+            .get(span)
+            .and_then(|ty| concrete_type_from_inference_fact(compiler, ty))
+            .or_else(|| identifier_concrete_type(compiler, name)),
 
         Expr::Array(elements, _) => {
             // U4-6a: the array element ConcreteType is derived STRUCTURALLY from
@@ -2484,21 +2536,21 @@ fn adopt_int_literal(
 /// subsequent receiver-kind classification at the second `.map(...)`
 /// surfaces with `NotImplemented(SURFACE)` rather than fabricating.
 ///
-/// Class C territory closure: populates `local_array_element_types` /
-/// `module_binding_array_element_types` at let-binding-time so the next
-/// statement's `concrete_type_for_expr(receiver_identifier)` chain can
-/// reach `identifier_concrete_type`'s `local_array_element_types.get(...)`
-/// arm at `type_resolution.rs:1443`, enabling
-/// `try_monomorphize_method_call` to specialize the second `.map(...)` on
-/// the now-known `Array<C>` receiver type.
-pub fn specialized_call_return_concrete_type(
+/// Class C territory closure: populates whole-binding `ConcreteType::Array(C)`
+/// at let-binding-time so the next statement's
+/// `concrete_type_for_expr(receiver_identifier)` chain can reach
+/// `identifier_concrete_type`, enabling `try_monomorphize_method_call` to
+/// specialize the second `.map(...)` on the now-known `Array<C>` receiver type.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BindingInitializerTarget {
+    Local(u16),
+    ModuleBinding(u16),
+}
+
+pub(crate) fn monomorphized_call_site_return_concrete_type(
     compiler: &BytecodeCompiler,
-    expr: &Expr,
+    span: Span,
 ) -> Option<ConcreteType> {
-    let span = match expr {
-        Expr::MethodCall { span, .. } => *span,
-        _ => return None,
-    };
     let specialized_idx = *compiler
         .program
         .monomorphized_method_call_sites
@@ -2513,6 +2565,91 @@ pub fn specialized_call_return_concrete_type(
         .get(&specialized_name)
         .and_then(|fd| fd.return_type.as_ref())?;
     crate::compiler::v2_map_emission::concrete_type_from_annotation(return_annotation)
+}
+
+pub fn specialized_call_return_concrete_type(
+    compiler: &BytecodeCompiler,
+    expr: &Expr,
+) -> Option<ConcreteType> {
+    let span = match expr {
+        Expr::MethodCall { span, .. } => *span,
+        _ => return None,
+    };
+    monomorphized_call_site_return_concrete_type(compiler, span)
+}
+
+/// U4-6 post-monomorphization binding fact: stamp a let-binding target from the
+/// monomorphized method-call return recorded at `(call_span, current_function)`.
+///
+/// This deliberately uses `BytecodeProgram::monomorphized_method_call_sites` as
+/// the compiler-side fact carrier. It does not consult runtime `InferenceFacts`
+/// and does not fabricate a fallback when the call-site record or return
+/// annotation is absent.
+pub(crate) fn stamp_binding_initializer_monomorphized_call_return(
+    compiler: &mut BytecodeCompiler,
+    target: BindingInitializerTarget,
+    init_expr: &Expr,
+) -> bool {
+    let Some(ConcreteType::Array(elem)) =
+        specialized_call_return_concrete_type(compiler, init_expr)
+    else {
+        return false;
+    };
+
+    let concrete_type = ConcreteType::Array(elem.clone());
+    let tracker_name = tracker_name_for_array_element(elem.as_ref());
+    record_binding_concrete_fact(
+        compiler,
+        target,
+        concrete_type.clone(),
+        BindingConcreteFactSource::MonomorphizedCallReturn,
+    );
+    match target {
+        BindingInitializerTarget::Local(local_idx) => {
+            if let Some(type_name) = tracker_name {
+                compiler.set_local_type_info(local_idx, &type_name);
+            }
+        }
+        BindingInitializerTarget::ModuleBinding(binding_idx) => {
+            if let Some(type_name) = tracker_name {
+                compiler.set_module_binding_type_info(binding_idx, &type_name);
+            }
+        }
+    }
+    true
+}
+
+pub(crate) fn record_binding_concrete_fact(
+    compiler: &mut BytecodeCompiler,
+    target: BindingInitializerTarget,
+    concrete_type: ConcreteType,
+    source: BindingConcreteFactSource,
+) {
+    let fact = BindingConcreteFact {
+        concrete_type,
+        source,
+    };
+    match target {
+        BindingInitializerTarget::Local(local_idx) => {
+            compiler
+                .current_function_local_concrete_facts
+                .insert(local_idx, fact);
+        }
+        BindingInitializerTarget::ModuleBinding(binding_idx) => {
+            compiler
+                .module_binding_concrete_facts
+                .insert(binding_idx, fact);
+        }
+    }
+}
+
+fn tracker_name_for_array_element(elem: &ConcreteType) -> Option<String> {
+    let elem_ann = crate::compiler::expressions::closures::concrete_type_to_type_annotation(elem)?;
+    let vec_ann = TypeAnnotation::Generic {
+        name: shape_ast::ast::TypePath::simple("Vec"),
+        args: vec![elem_ann],
+    };
+    BytecodeCompiler::tracked_type_name_from_annotation(&vec_ann)
 }
 
 /// R3-elemerasure (strict-flip): derive the result `ConcreteType` of a builtin
@@ -2680,69 +2817,159 @@ pub(crate) fn identifier_concrete_type_pub(
 fn identifier_concrete_type(compiler: &BytecodeCompiler, name: &str) -> Option<ConcreteType> {
     // Local slot first.
     if let Some(local_idx) = compiler_resolve_local(compiler, name) {
-        if let Some(ct) = compiler
-            .current_function_local_concrete_types
-            .get(&local_idx)
-            .cloned()
+        let pending_empty_array = local_is_unannotated_empty_array_accumulator(compiler, local_idx);
+        if !pending_empty_array {
+            if let Some(ct) = binding_fact_capture_type(compiler, name) {
+                return Some(ct);
+            }
+            if compiler_resolve_module_binding(compiler, name).is_none() {
+                if let Some(ct) = unique_named_binding_fact_concrete_type(compiler, name) {
+                    return Some(ct);
+                }
+            }
+        }
+        if let Some(ct) = current_function_param_concrete_type_from_facts(compiler, name, local_idx)
         {
             return Some(ct);
         }
-        if let Some(elem) = compiler.local_array_element_types.get(&local_idx).cloned() {
-            return Some(ConcreteType::Array(Box::new(elem)));
+        if let Some(ct) = compiler
+            .current_function_local_concrete_facts
+            .get(&local_idx)
+            .map(|fact| fact.concrete_type.clone())
+        {
+            return Some(ct);
         }
-        if let Some((k, v)) = compiler.local_map_key_value_types.get(&local_idx).cloned() {
-            return Some(ConcreteType::HashMap(Box::new(k), Box::new(v)));
-        }
-        // Fallback: type tracker may have a "Vec<int>" / "Vec<number>" etc. name
-        // from which we can derive a concrete array type.
         if let Some(ct) = compiler
             .type_tracker
             .get_local_type(local_idx)
-            .and_then(|info| concrete_type_from_type_name(info.type_name.as_deref()))
+            .and_then(|info| concrete_type_from_tracker_info(compiler, info))
         {
             return Some(ct);
         }
+        return None;
     }
 
     // Module binding fallback.
-    if let Some(&binding_idx) = compiler.module_bindings.get(name) {
-        // v0.3 WS-6: a module binding declared with an explicit struct /
-        // enum / `Option<T>` / `Result<T, E>` / `HashMap<K, V>` annotation
-        // records its `ConcreteType` here at let-binding time (see
-        // `statements.rs`). This covers the variable-argument cases that
-        // the array / map element side-tables below do not.
+    if let Some(binding_idx) = compiler_resolve_module_binding(compiler, name) {
+        let pending_empty_array =
+            module_binding_is_unannotated_empty_array_accumulator(compiler, binding_idx);
+        if !pending_empty_array {
+            if let Some(ct) = compiler
+                .module_binding_spans
+                .get(&binding_idx)
+                .copied()
+                .and_then(|span| compiler.inference_facts.binding_type(span))
+                .and_then(|ty| concrete_type_from_inference_fact(compiler, ty))
+            {
+                return Some(ct);
+            }
+        }
         if let Some(ct) = compiler
-            .module_binding_concrete_types
+            .module_binding_concrete_facts
             .get(&binding_idx)
-            .cloned()
+            .map(|fact| fact.concrete_type.clone())
         {
             return Some(ct);
         }
-        if let Some(elem) = compiler
-            .module_binding_array_element_types
-            .get(&binding_idx)
-            .cloned()
-        {
-            return Some(ConcreteType::Array(Box::new(elem)));
-        }
-        if let Some((k, v)) = compiler
-            .module_binding_map_key_value_types
-            .get(&binding_idx)
-            .cloned()
-        {
-            return Some(ConcreteType::HashMap(Box::new(k), Box::new(v)));
-        }
-        // Fallback: derive concrete type from type tracker's type name.
         if let Some(ct) = compiler
             .type_tracker
             .get_binding_type(binding_idx)
-            .and_then(|info| concrete_type_from_type_name(info.type_name.as_deref()))
+            .and_then(|info| concrete_type_from_tracker_info(compiler, info))
         {
             return Some(ct);
         }
     }
 
     None
+}
+
+fn local_is_unannotated_empty_array_accumulator(
+    compiler: &BytecodeCompiler,
+    local_idx: u16,
+) -> bool {
+    compiler
+        .empty_array_accumulators
+        .contains_key(&crate::compiler::EmptyArrayAccumulatorKey::Local(local_idx))
+        || compiler
+            .current_function_local_concrete_facts
+            .get(&local_idx)
+            .is_some_and(|fact| {
+                matches!(
+                    fact.source,
+                    BindingConcreteFactSource::EmptyArrayAccumulator
+                )
+            })
+}
+
+fn module_binding_is_unannotated_empty_array_accumulator(
+    compiler: &BytecodeCompiler,
+    binding_idx: u16,
+) -> bool {
+    compiler.empty_array_accumulators.contains_key(
+        &crate::compiler::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx),
+    ) || compiler
+        .module_binding_concrete_facts
+        .get(&binding_idx)
+        .is_some_and(|fact| {
+            matches!(
+                fact.source,
+                BindingConcreteFactSource::EmptyArrayAccumulator
+            )
+        })
+}
+
+fn unique_named_binding_fact_concrete_type(
+    compiler: &BytecodeCompiler,
+    name: &str,
+) -> Option<ConcreteType> {
+    let mut matching = compiler
+        .inference_facts
+        .bindings_named(name)
+        .filter_map(|fact| concrete_type_from_inference_fact(compiler, &fact.ty));
+    let first = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    Some(first)
+}
+
+fn concrete_type_from_tracker_info(
+    compiler: &BytecodeCompiler,
+    info: &crate::type_tracking::VariableTypeInfo,
+) -> Option<ConcreteType> {
+    let type_name = info.type_name.as_deref()?;
+    concrete_type_from_type_name(Some(type_name))
+        .or_else(|| struct_or_enum_concrete_type(compiler, type_name))
+}
+
+fn current_function_param_concrete_type_from_facts(
+    compiler: &BytecodeCompiler,
+    name: &str,
+    local_idx: u16,
+) -> Option<ConcreteType> {
+    let param_idx = compiler
+        .current_function_params
+        .iter()
+        .position(|param| param.simple_name() == Some(name))?;
+    if usize::from(local_idx) != param_idx {
+        return None;
+    }
+
+    let current_fn_idx = compiler.current_function?;
+    let current_fn_name = compiler
+        .program
+        .functions
+        .get(current_fn_idx)?
+        .name
+        .as_str();
+    let Type::Function { params, .. } = compiler
+        .inference_facts
+        .function_signature(current_fn_name)?
+        .canonicalize()
+    else {
+        return None;
+    };
+    concrete_type_from_inference_fact(compiler, params.get(param_idx)?)
 }
 
 /// T1 sub-case (a) (strict-flip, 2026-06-20): map a schema `FieldType` to its
@@ -2784,14 +3011,12 @@ fn field_type_to_concrete(ft: &shape_runtime::type_schema::FieldType) -> Option<
 ///
 /// Recognises scalar primitive / temporal names (`"int"`, `"number"`,
 /// `"string"`, `"bool"`, `"decimal"`, `"DateTime"`, ...). This is the
-/// fall-through used when the structural element / concrete side-tables
-/// (`local_array_element_types`, `current_function_local_concrete_types`,
-/// consulted FIRST in `identifier_concrete_type`) miss — notably for primitive
-/// parameters whose only tracker record is a scalar name.
+/// fall-through used when explicit inference facts miss — notably for
+/// primitive parameters whose only tracker record is a scalar name.
 ///
-/// U4-5: the `"Vec<...>"` array branch is deleted. The array element
-/// `ConcreteType` is served STRUCTURALLY by `local_array_element_types` /
-/// `module_binding_array_element_types` (which run before this fallback), so the
+/// U4-5/U4-7: the `"Vec<...>"` array branch is deleted. The array element
+/// `ConcreteType` is served STRUCTURALLY by whole-binding
+/// `ConcreteType::Array(elem)` entries (which run before this fallback), so the
 /// `strip_prefix("Vec<")` re-parse — the read half of the Rep-B string
 /// round-trip — is gone. Array tracker names no longer round-trip through a
 /// string here.
@@ -2888,6 +3113,38 @@ mod tests {
         }
     }
 
+    fn unannotated_func_param(name: &str) -> FunctionParameter {
+        FunctionParameter {
+            pattern: DestructurePattern::Identifier(name.to_string(), Span::default()),
+            is_const: false,
+            is_reference: false,
+            is_mut_reference: false,
+            is_out: false,
+            type_annotation: None,
+            default_value: None,
+        }
+    }
+
+    fn bytecode_function(name: &str, arity: u16) -> crate::bytecode::Function {
+        crate::bytecode::Function {
+            name: name.to_string(),
+            arity,
+            param_names: Vec::new(),
+            locals_count: arity,
+            entry_point: 0,
+            body_length: 0,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: Vec::new(),
+            ref_mutates: Vec::new(),
+            mutable_captures: Vec::new(),
+            frame_descriptor: None,
+            osr_entry_points: Vec::new(),
+            mir_data: None,
+        }
+    }
+
     fn make_compiler_with_fn(name: &str, def: FunctionDef) -> BytecodeCompiler {
         let mut compiler = BytecodeCompiler::new();
         compiler.function_defs.insert(name.to_string(), def);
@@ -2918,6 +3175,304 @@ mod tests {
             is_async: false,
             is_comptime: false,
         }
+    }
+
+    fn fact_basic(name: &str) -> Type {
+        Type::Concrete(TypeAnnotation::Basic(name.to_string()))
+    }
+
+    fn fact_generic(name: &str, args: Vec<Type>) -> Type {
+        Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference(TypePath::simple(
+                name,
+            )))),
+            args,
+        }
+    }
+
+    fn install_inference_facts(
+        compiler: &mut BytecodeCompiler,
+        top_level_types: HashMap<String, Type>,
+        binding_facts: HashMap<Span, shape_runtime::type_system::BindingFact>,
+    ) {
+        compiler.inference_facts = shape_runtime::type_system::InferenceFacts::with_binding_facts(
+            top_level_types,
+            HashMap::new(),
+            binding_facts,
+        );
+    }
+
+    fn install_binding_fact(compiler: &mut BytecodeCompiler, name: &str, span: Span, ty: Type) {
+        let mut binding_facts = HashMap::new();
+        binding_facts.insert(
+            span,
+            shape_runtime::type_system::BindingFact {
+                name: name.to_string(),
+                binder_span: span,
+                initializer_span: None,
+                ty,
+            },
+        );
+        install_inference_facts(compiler, HashMap::new(), binding_facts);
+    }
+
+    #[test]
+    fn binding_fact_capture_type_uses_local_binder_span() {
+        let span = Span::new(10, 11);
+        let mut compiler = BytecodeCompiler::new();
+        compiler.locals = vec![HashMap::new()];
+        compiler.locals[0].insert("m".to_string(), 0);
+        compiler.local_binding_spans.insert(0, span);
+        install_binding_fact(
+            &mut compiler,
+            "m",
+            span,
+            fact_generic("HashMap", vec![fact_basic("string"), fact_basic("int")]),
+        );
+
+        assert_eq!(
+            binding_fact_capture_type(&compiler, "m"),
+            Some(ConcreteType::HashMap(
+                Box::new(ConcreteType::String),
+                Box::new(ConcreteType::I64),
+            )),
+        );
+    }
+
+    #[test]
+    fn identifier_concrete_type_prefers_runtime_binding_fact_over_local_fact() {
+        let span = Span::new(12, 14);
+        let mut compiler = BytecodeCompiler::new();
+        compiler.locals = vec![HashMap::new()];
+        compiler.locals[0].insert("xs".to_string(), 0);
+        compiler.local_binding_spans.insert(0, span);
+        record_binding_concrete_fact(
+            &mut compiler,
+            BindingInitializerTarget::Local(0),
+            ConcreteType::Array(Box::new(ConcreteType::String)),
+            BindingConcreteFactSource::StructuralInitializer,
+        );
+        install_binding_fact(
+            &mut compiler,
+            "xs",
+            span,
+            fact_generic("Array", vec![fact_basic("int")]),
+        );
+
+        assert_eq!(
+            identifier_concrete_type_pub(&compiler, "xs"),
+            Some(ConcreteType::Array(Box::new(ConcreteType::I64))),
+        );
+    }
+
+    #[test]
+    fn identifier_concrete_type_keeps_local_shadow_when_only_module_has_fact() {
+        let module_span = Span::new(30, 35);
+        let mut compiler = BytecodeCompiler::new();
+        compiler.locals = vec![HashMap::new()];
+        compiler.locals[0].insert("xs".to_string(), 0);
+        compiler.module_bindings.insert("xs".to_string(), 7);
+        compiler.module_binding_spans.insert(7, module_span);
+        install_binding_fact(
+            &mut compiler,
+            "xs",
+            module_span,
+            fact_generic("Array", vec![fact_basic("int")]),
+        );
+
+        assert_eq!(identifier_concrete_type_pub(&compiler, "xs"), None,);
+    }
+
+    #[test]
+    fn identifier_concrete_type_recovers_param_from_function_signature_fact() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.locals = vec![HashMap::new()];
+        compiler.locals[0].insert("xs".to_string(), 0);
+        compiler.current_function_params = vec![unannotated_func_param("xs")];
+        compiler
+            .program
+            .functions
+            .push(bytecode_function("takes_xs", 1));
+        compiler.current_function = Some(0);
+
+        let mut top_level_types = HashMap::new();
+        top_level_types.insert(
+            "takes_xs".to_string(),
+            Type::Function {
+                params: vec![fact_generic("Array", vec![fact_basic("int")])],
+                returns: Box::new(fact_basic("void")),
+            },
+        );
+        install_inference_facts(&mut compiler, top_level_types, HashMap::new());
+
+        assert_eq!(
+            identifier_concrete_type_pub(&compiler, "xs"),
+            Some(ConcreteType::Array(Box::new(ConcreteType::I64))),
+        );
+    }
+
+    #[test]
+    fn identifier_concrete_type_prefers_runtime_binding_fact_over_module_fact() {
+        let module_span = Span::new(40, 45);
+        let mut compiler = BytecodeCompiler::new();
+        compiler.module_bindings.insert("xs".to_string(), 7);
+        compiler.module_binding_spans.insert(7, module_span);
+        record_binding_concrete_fact(
+            &mut compiler,
+            BindingInitializerTarget::ModuleBinding(7),
+            ConcreteType::Array(Box::new(ConcreteType::String)),
+            BindingConcreteFactSource::StructuralInitializer,
+        );
+        install_binding_fact(
+            &mut compiler,
+            "xs",
+            module_span,
+            fact_generic("Array", vec![fact_basic("int")]),
+        );
+
+        assert_eq!(
+            identifier_concrete_type_pub(&compiler, "xs"),
+            Some(ConcreteType::Array(Box::new(ConcreteType::I64))),
+        );
+    }
+
+    #[test]
+    fn identifier_concrete_type_recovers_unique_binding_fact_without_local_span() {
+        let span = Span::new(50, 55);
+        let mut compiler = BytecodeCompiler::new();
+        compiler.locals = vec![HashMap::new()];
+        compiler.locals[0].insert("xs".to_string(), 0);
+        install_binding_fact(
+            &mut compiler,
+            "xs",
+            span,
+            fact_generic("Array", vec![fact_basic("int")]),
+        );
+
+        assert_eq!(
+            identifier_concrete_type_pub(&compiler, "xs"),
+            Some(ConcreteType::Array(Box::new(ConcreteType::I64))),
+        );
+    }
+
+    #[test]
+    fn identifier_concrete_type_recovers_user_type_from_tracker_name() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.locals = vec![HashMap::new()];
+        compiler.locals[0].insert("user".to_string(), 0);
+        compiler.struct_types.insert(
+            "User".to_string(),
+            (vec!["score".to_string()], Span::default()),
+        );
+        compiler.set_local_type_info(0, "User");
+
+        assert!(matches!(
+            identifier_concrete_type_pub(&compiler, "user"),
+            Some(ConcreteType::Struct(layout)) if layout.name.as_deref() == Some("User")
+        ));
+    }
+
+    #[test]
+    fn identifier_concrete_type_recovers_local_initializer_fact_without_shadow() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.locals = vec![HashMap::new()];
+        compiler.locals[0].insert("r".to_string(), 0);
+        record_binding_concrete_fact(
+            &mut compiler,
+            BindingInitializerTarget::Local(0),
+            ConcreteType::Result(Box::new(ConcreteType::I64), Box::new(ConcreteType::Void)),
+            BindingConcreteFactSource::StructuralInitializer,
+        );
+
+        assert_eq!(
+            identifier_concrete_type_pub(&compiler, "r"),
+            Some(ConcreteType::Result(
+                Box::new(ConcreteType::I64),
+                Box::new(ConcreteType::Void),
+            )),
+        );
+    }
+
+    #[test]
+    fn identifier_concrete_type_recovers_module_initializer_fact() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.module_bindings.insert("r".to_string(), 3);
+        record_binding_concrete_fact(
+            &mut compiler,
+            BindingInitializerTarget::ModuleBinding(3),
+            ConcreteType::Result(Box::new(ConcreteType::I64), Box::new(ConcreteType::Void)),
+            BindingConcreteFactSource::StructuralInitializer,
+        );
+
+        assert_eq!(
+            identifier_concrete_type_pub(&compiler, "r"),
+            Some(ConcreteType::Result(
+                Box::new(ConcreteType::I64),
+                Box::new(ConcreteType::Void),
+            )),
+        );
+    }
+
+    #[test]
+    fn identifier_concrete_type_returns_none_without_local_fact() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.locals = vec![HashMap::new()];
+        compiler.locals[0].insert("r".to_string(), 0);
+
+        assert_eq!(identifier_concrete_type_pub(&compiler, "r"), None);
+    }
+
+    #[test]
+    fn identifier_concrete_type_returns_none_without_module_fact() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.module_bindings.insert("r".to_string(), 3);
+
+        assert_eq!(identifier_concrete_type_pub(&compiler, "r"), None);
+    }
+
+    #[test]
+    fn binding_fact_capture_type_prefers_local_shadow_over_module_binding() {
+        let local_span = Span::new(20, 21);
+        let module_span = Span::new(30, 31);
+        let mut compiler = BytecodeCompiler::new();
+        compiler.locals = vec![HashMap::new()];
+        compiler.locals[0].insert("items".to_string(), 0);
+        compiler.local_binding_spans.insert(0, local_span);
+        compiler.module_bindings.insert("items".to_string(), 7);
+        compiler.module_binding_spans.insert(7, module_span);
+
+        let mut binding_facts = HashMap::new();
+        binding_facts.insert(
+            local_span,
+            shape_runtime::type_system::BindingFact {
+                name: "items".to_string(),
+                binder_span: local_span,
+                initializer_span: None,
+                ty: fact_generic("HashMap", vec![fact_basic("string"), fact_basic("int")]),
+            },
+        );
+        binding_facts.insert(
+            module_span,
+            shape_runtime::type_system::BindingFact {
+                name: "items".to_string(),
+                binder_span: module_span,
+                initializer_span: None,
+                ty: fact_generic("Deque", vec![fact_basic("int")]),
+            },
+        );
+        compiler.inference_facts = shape_runtime::type_system::InferenceFacts::with_binding_facts(
+            HashMap::new(),
+            HashMap::new(),
+            binding_facts,
+        );
+
+        assert_eq!(
+            binding_fact_capture_type(&compiler, "items"),
+            Some(ConcreteType::HashMap(
+                Box::new(ConcreteType::String),
+                Box::new(ConcreteType::I64),
+            )),
+        );
     }
 
     // ---- Required deliverable tests -------------------------------------

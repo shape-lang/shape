@@ -62,6 +62,52 @@ impl TypedFunctionSignature {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shape_value::HeapKind;
+    use shape_vm::type_tracking::{FrameDescriptor, FrameReturnWrapper};
+
+    fn function_with_frame(frame: FrameDescriptor) -> Function {
+        Function {
+            name: "callee".to_string(),
+            arity: 0,
+            param_names: Vec::new(),
+            locals_count: 0,
+            entry_point: 0,
+            body_length: 0,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: Vec::new(),
+            ref_mutates: Vec::new(),
+            mutable_captures: Vec::new(),
+            frame_descriptor: Some(frame),
+            osr_entry_points: Vec::new(),
+            mir_data: None,
+        }
+    }
+
+    #[test]
+    fn resolve_signature_uses_canonical_typed_object_return_for_result_wrapper() {
+        let mut frame = FrameDescriptor::new();
+        frame.return_kind = Some(NativeKind::Ptr(HeapKind::TypedObject));
+        frame.return_wrapper = FrameReturnWrapper::Result;
+
+        let sig = resolve_function_signature(&function_with_frame(frame), &[]);
+        assert_eq!(sig.return_type, NativeKind::Ptr(HeapKind::TypedObject));
+    }
+
+    #[test]
+    fn resolve_signature_normalizes_legacy_result_return_kind() {
+        let mut frame = FrameDescriptor::new();
+        frame.return_kind = Some(NativeKind::Ptr(HeapKind::Result));
+
+        let sig = resolve_function_signature(&function_with_frame(frame), &[]);
+        assert_eq!(sig.return_type, NativeKind::Ptr(HeapKind::TypedObject));
+    }
+}
+
 /// True when a slot kind would produce the same representation as the v1
 /// NaN-boxed ABI (I64 GPR). Per ADR-006 the deleted
 /// `NativeKind::Unknown`/`Dynamic` placeholders are gone — kind-tracked
@@ -191,7 +237,7 @@ pub fn build_cranelift_signature(sig: &TypedFunctionSignature) -> Signature {
 /// Extract a `TypedFunctionSignature` from a bytecode `Function`.
 ///
 /// When the function carries a `FrameDescriptor`, the first `arity` slots
-/// are the parameter types and `return_kind` is the return type.  When no
+/// are the parameter types and `abi_return_kind()` is the return type.  When no
 /// descriptor is present (legacy code), all slots default to `Unknown`
 /// which produces a v1-compatible all-I64 signature.
 ///
@@ -230,7 +276,7 @@ pub fn resolve_function_signature(
         let return_type = func
             .frame_descriptor
             .as_ref()
-            .and_then(|fd| fd.return_kind)
+            .and_then(|fd| fd.abi_return_kind())
             .unwrap_or(legacy_default);
 
         return TypedFunctionSignature {
@@ -251,7 +297,7 @@ pub fn resolve_function_signature(
 
         TypedFunctionSignature {
             param_types,
-            return_type: fd.return_kind.unwrap_or(legacy_default),
+            return_type: fd.abi_return_kind().unwrap_or(legacy_default),
         }
     } else {
         // No type information at all — fully I64-ABI legacy.

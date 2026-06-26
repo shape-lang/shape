@@ -2238,7 +2238,7 @@ let r = area(aabb(1, 5))
 /// a crash and not a fabricated type. Guards the marker round-trip.
 #[test]
 fn test_ws9c_unresolved_factory_field_marker_round_trips() {
-    use crate::type_system::{TypeVar, annotation_as_tyvar, tyvar_to_annotation};
+    use crate::type_system::{annotation_as_tyvar, tyvar_to_annotation, TypeVar};
 
     let var = TypeVar::new("T42".to_string());
     let ann = tyvar_to_annotation(&var);
@@ -2811,7 +2811,10 @@ if x > 0 { f(); } else { g(); }
 
 /// Recursively collect every expression node's span+kind for span lookup.
 /// Returns the FIRST span matching `pred`, walking the whole program AST.
-fn u40_find_expr_span<F>(program: &shape_ast::ast::Program, pred: &F) -> Option<shape_ast::ast::Span>
+fn u40_find_expr_span<F>(
+    program: &shape_ast::ast::Program,
+    pred: &F,
+) -> Option<shape_ast::ast::Span>
 where
     F: Fn(&shape_ast::ast::Expr) -> bool,
 {
@@ -2895,14 +2898,127 @@ where
     out
 }
 
+fn u40_find_binding_span(
+    program: &shape_ast::ast::Program,
+    name: &str,
+) -> Option<shape_ast::ast::Span> {
+    use shape_ast::ast::{BlockItem, Expr, Item, Pattern, Span, Statement};
+
+    fn decl_span(decl: &shape_ast::ast::VariableDecl, name: &str, out: &mut Option<Span>) {
+        if out.is_some() {
+            return;
+        }
+        *out = decl
+            .pattern
+            .get_bindings()
+            .into_iter()
+            .find_map(|(binding, span)| (binding == name).then_some(span));
+    }
+
+    fn pattern_span(pattern: &Pattern, name: &str, out: &mut Option<Span>) {
+        if out.is_some() {
+            return;
+        }
+        *out = pattern
+            .get_bindings()
+            .into_iter()
+            .find_map(|(binding, span)| (binding == name).then_some(span));
+    }
+
+    fn walk_expr(e: &Expr, name: &str, out: &mut Option<Span>) {
+        if out.is_some() {
+            return;
+        }
+        match e {
+            Expr::Block(block, _) => {
+                for item in &block.items {
+                    match item {
+                        BlockItem::VariableDecl(decl) => {
+                            decl_span(decl, name, out);
+                            if let Some(value) = &decl.value {
+                                walk_expr(value, name, out);
+                            }
+                        }
+                        BlockItem::Statement(stmt) => walk_stmt(stmt, name, out),
+                        BlockItem::Expression(expr) => walk_expr(expr, name, out),
+                        BlockItem::Assignment(_) => {}
+                    }
+                    if out.is_some() {
+                        break;
+                    }
+                }
+            }
+            Expr::FunctionCall { args, .. } => {
+                for arg in args {
+                    walk_expr(arg, name, out);
+                }
+            }
+            Expr::MethodCall { receiver, args, .. } => {
+                walk_expr(receiver, name, out);
+                for arg in args {
+                    walk_expr(arg, name, out);
+                }
+            }
+            Expr::Match(match_expr, _) => {
+                walk_expr(&match_expr.scrutinee, name, out);
+                for arm in &match_expr.arms {
+                    pattern_span(&arm.pattern, name, out);
+                    if let Some(guard) = &arm.guard {
+                        walk_expr(guard, name, out);
+                    }
+                    walk_expr(&arm.body, name, out);
+                    if out.is_some() {
+                        break;
+                    }
+                }
+            }
+            Expr::Return(Some(value), _) => walk_expr(value, name, out),
+            _ => {}
+        }
+    }
+
+    fn walk_stmt(s: &Statement, name: &str, out: &mut Option<Span>) {
+        if out.is_some() {
+            return;
+        }
+        match s {
+            Statement::VariableDecl(decl, _) => {
+                decl_span(decl, name, out);
+                if let Some(value) = &decl.value {
+                    walk_expr(value, name, out);
+                }
+            }
+            Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+                walk_expr(expr, name, out)
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = None;
+    for item in &program.items {
+        match item {
+            Item::VariableDecl(decl, _) => decl_span(decl, name, &mut out),
+            Item::Statement(stmt, _) => walk_stmt(stmt, name, &mut out),
+            Item::Function(func, _) => {
+                for stmt in &func.body {
+                    walk_stmt(stmt, name, &mut out);
+                    if out.is_some() {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+        if out.is_some() {
+            break;
+        }
+    }
+    out
+}
+
 /// Resolve a program through the engine and return (engine, types, errors).
-fn u40_infer(
-    code: &str,
-) -> (
-    TypeInferenceEngine,
-    HashMap<String, Type>,
-    Vec<TypeError>,
-) {
+fn u40_infer(code: &str) -> (TypeInferenceEngine, HashMap<String, Type>, Vec<TypeError>) {
     use shape_ast::parser::parse_program;
     let program = parse_program(code).expect("program should parse");
     let mut engine = TypeInferenceEngine::new();
@@ -2914,6 +3030,562 @@ fn u40_infer(
 /// for the §6 regression corpus). Accepts both `Basic("int")` carriers.
 fn u40_is_int(ty: &Type) -> bool {
     matches!(ty, Type::Concrete(TypeAnnotation::Basic(n)) if n == "int")
+}
+
+fn u40_is_number(ty: &Type) -> bool {
+    matches!(ty, Type::Concrete(TypeAnnotation::Basic(n)) if n == "number")
+}
+
+fn u40_is_string(ty: &Type) -> bool {
+    matches!(ty, Type::Concrete(TypeAnnotation::Basic(n)) if n == "string")
+}
+
+fn u40_is_array_of_int(ty: &Type) -> bool {
+    match ty.canonicalize() {
+        Type::Generic { base, args } if args.len() == 1 => {
+            matches!(
+                base.as_ref(),
+                Type::Concrete(TypeAnnotation::Reference(name)) if name.as_str() == "Array"
+            ) && u40_is_int(&args[0])
+        }
+        _ => false,
+    }
+}
+
+fn u40_is_hashmap_string_int(ty: &Type) -> bool {
+    match ty {
+        Type::Generic { base, args } if args.len() == 2 => {
+            matches!(
+                base.as_ref(),
+                Type::Concrete(TypeAnnotation::Reference(n)) if n.as_str() == "HashMap"
+            ) && u40_is_string(&args[0])
+                && u40_is_int(&args[1])
+        }
+        _ => false,
+    }
+}
+
+fn u40_match_binding_fact(code: &str, name: &str) -> BindingFact {
+    use shape_ast::parser::parse_program;
+
+    let program = parse_program(code).expect("program should parse");
+    let span =
+        u40_find_binding_span(&program, name).unwrap_or_else(|| panic!("{name} binding span"));
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "match binding fact program should infer cleanly, got {:?}",
+        errors
+    );
+    facts
+        .binding_fact(span)
+        .unwrap_or_else(|| panic!("{name} binding fact"))
+        .clone()
+}
+
+fn u40_is_function_returning_int(ty: &Type) -> bool {
+    match ty.canonicalize() {
+        Type::Function { returns, .. } => u40_is_int(&returns),
+        _ => false,
+    }
+}
+
+fn u40_is_array_of_function_returning_int(ty: &Type) -> bool {
+    match ty.canonicalize() {
+        Type::Generic { base, args } if args.len() == 1 => {
+            matches!(
+                base.as_ref(),
+                Type::Concrete(TypeAnnotation::Reference(name)) if name.as_str() == "Array"
+            ) && u40_is_function_returning_int(&args[0])
+        }
+        _ => false,
+    }
+}
+
+#[test]
+fn inference_facts_exposes_array_destructure_element_binding_types() {
+    use shape_ast::parser::parse_program;
+
+    let code = "let [a, b] = [1, 2]\nlet [n] = [1.5]\n";
+    let program = parse_program(code).expect("program should parse");
+    let a_span = u40_find_binding_span(&program, "a").expect("a binding span");
+    let b_span = u40_find_binding_span(&program, "b").expect("b binding span");
+    let n_span = u40_find_binding_span(&program, "n").expect("n binding span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "array destructure facts should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.binding_type(a_span).is_some_and(u40_is_int),
+        "a should bind to int, got {:?}",
+        facts.binding_type(a_span)
+    );
+    assert!(
+        facts.binding_type(b_span).is_some_and(u40_is_int),
+        "b should bind to int, got {:?}",
+        facts.binding_type(b_span)
+    );
+    assert!(
+        facts.binding_type(n_span).is_some_and(u40_is_number),
+        "n should bind to number, got {:?}",
+        facts.binding_type(n_span)
+    );
+}
+
+#[test]
+fn inference_facts_exposes_nested_array_destructure_binding_types() {
+    use shape_ast::parser::parse_program;
+
+    let code = "let [[a, b]] = [[1, 2]]\n";
+    let program = parse_program(code).expect("program should parse");
+    let a_span = u40_find_binding_span(&program, "a").expect("a binding span");
+    let b_span = u40_find_binding_span(&program, "b").expect("b binding span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "nested array destructure facts should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.binding_type(a_span).is_some_and(u40_is_int),
+        "nested a should bind to int, got {:?}",
+        facts.binding_type(a_span)
+    );
+    assert!(
+        facts.binding_type(b_span).is_some_and(u40_is_int),
+        "nested b should bind to int, got {:?}",
+        facts.binding_type(b_span)
+    );
+}
+
+#[test]
+fn inference_facts_exposes_array_rest_binding_type() {
+    use shape_ast::parser::parse_program;
+
+    let code = "let [head, ...tail] = [1, 2, 3]\n";
+    let program = parse_program(code).expect("program should parse");
+    let head_span = u40_find_binding_span(&program, "head").expect("head binding span");
+    let tail_span = u40_find_binding_span(&program, "tail").expect("tail binding span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "array rest destructure facts should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.binding_type(head_span).is_some_and(u40_is_int),
+        "head should bind to int, got {:?}",
+        facts.binding_type(head_span)
+    );
+    assert!(
+        facts
+            .binding_type(tail_span)
+            .is_some_and(u40_is_array_of_int),
+        "tail should bind to Array<int>, got {:?}",
+        facts.binding_type(tail_span)
+    );
+}
+
+#[test]
+fn inference_facts_best_effort_exposes_signature_and_body_expr_type() {
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn inc(x: int) -> int {
+  return x + 1
+}
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "inc should infer cleanly, got {:?}",
+        errors
+    );
+
+    let signature = facts
+        .function_signature("inc")
+        .expect("facts should expose inc signature");
+    match signature {
+        Type::Function { params, returns } => {
+            assert_eq!(params.len(), 1, "inc should have one parameter");
+            assert!(u40_is_int(&params[0]), "inc param should be int");
+            assert!(u40_is_int(returns), "inc return should be int");
+        }
+        other => panic!("expected function signature for inc, got {:?}", other),
+    }
+
+    let body_expr_span = u40_find_expr_span(&program, &|e| matches!(e, Expr::BinaryOp { .. }))
+        .expect("function-body x + 1 expression must exist");
+    assert!(
+        facts
+            .expression_type(body_expr_span)
+            .is_some_and(u40_is_int),
+        "facts should expose resolved body expression type, got {:?}",
+        facts.expression_type(body_expr_span)
+    );
+}
+
+#[test]
+fn inference_facts_exposes_anonymous_object_return_signature() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn aabb(lo: int, hi: int) {
+  { min: lo, max: hi }
+}
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "aabb should infer cleanly, got {:?}",
+        errors
+    );
+
+    let signature = facts
+        .function_signature("aabb")
+        .expect("facts should expose aabb signature");
+    match signature {
+        Type::Function { returns, .. } => match returns.as_ref() {
+            Type::Concrete(TypeAnnotation::Object(fields)) => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, "min");
+                assert!(u40_is_int(&Type::Concrete(
+                    fields[0].type_annotation.clone()
+                )));
+                assert_eq!(fields[1].name, "max");
+                assert!(u40_is_int(&Type::Concrete(
+                    fields[1].type_annotation.clone()
+                )));
+            }
+            other => panic!("expected anonymous object return, got {:?}", other),
+        },
+        other => panic!("expected function signature for aabb, got {:?}", other),
+    }
+}
+
+#[test]
+fn inference_facts_exposes_indexed_callable_array_call_type() {
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn inc(x: int) -> int { x + 1 }
+fn dbl(y: int) -> int { y + 2 }
+let arr = [inc, dbl]
+let total = arr[0](1) + arr[1](2)
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let arr_span = u40_find_binding_span(&program, "arr").expect("arr binding span");
+    let call_binop_span = u40_find_expr_span(&program, &|e| {
+        matches!(
+            e,
+            Expr::BinaryOp { left, right, .. }
+                if matches!(left.as_ref(), Expr::MethodCall { method, .. } if method == "__call__")
+                    && matches!(right.as_ref(), Expr::MethodCall { method, .. } if method == "__call__")
+        )
+    })
+    .expect("arr[0](1) + arr[1](2) span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "indexed callable array program should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts
+            .expression_type(call_binop_span)
+            .is_some_and(u40_is_int),
+        "indexed callable array call binop should resolve to int, got {:?}",
+        facts.expression_type(call_binop_span)
+    );
+    assert!(
+        facts
+            .binding_type(arr_span)
+            .is_some_and(u40_is_array_of_function_returning_int),
+        "arr binding should resolve to Array<Function<..., int>>, got {:?}",
+        facts.binding_type(arr_span)
+    );
+}
+
+#[test]
+fn inference_facts_exposes_indexed_callable_array_element_binding_type() {
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn inc(x: int) -> int { x + 1 }
+fn dbl(y: int) -> int { y + 2 }
+let arr = [inc, dbl]
+let g = arr[0]
+let total = g(4) + 1
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let g_span = u40_find_binding_span(&program, "g").expect("g binding span");
+    let call_binop_span = u40_find_expr_span(&program, &|e| {
+        matches!(
+            e,
+            Expr::BinaryOp { left, .. }
+                if matches!(left.as_ref(), Expr::FunctionCall { name, .. } if name == "g")
+        )
+    })
+    .expect("g(4) + 1 span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "indexed callable array element binding should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts
+            .binding_type(g_span)
+            .is_some_and(u40_is_function_returning_int),
+        "g binding should resolve to Function<..., int>, got {:?}",
+        facts.binding_type(g_span)
+    );
+    assert!(
+        facts
+            .expression_type(call_binop_span)
+            .is_some_and(u40_is_int),
+        "g(4) + 1 should resolve to int, got {:?}",
+        facts.expression_type(call_binop_span)
+    );
+}
+
+#[test]
+fn inference_facts_exposes_finalized_binding_facts() {
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+let module_count = 1
+
+fn build_map() {
+  let m = HashMap()
+  m.set("answer", 42)
+}
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let module_span = u40_find_binding_span(&program, "module_count").expect("module binding span");
+    let local_span = u40_find_binding_span(&program, "m").expect("local binding span");
+    let hashmap_init_span = u40_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::FunctionCall { name, .. } if name == "HashMap"),
+    )
+    .expect("HashMap initializer span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "binding facts program should infer cleanly, got {:?}",
+        errors
+    );
+
+    let local_fact = facts
+        .binding_fact(local_span)
+        .expect("facts should expose local m binding");
+    assert_eq!(local_fact.name, "m");
+    assert_eq!(local_fact.binder_span, local_span);
+    assert_eq!(local_fact.initializer_span, Some(hashmap_init_span));
+    assert!(
+        u40_is_hashmap_string_int(&local_fact.ty),
+        "m binding should finalize to HashMap<string, int>, got {:?}",
+        local_fact.ty
+    );
+    assert!(
+        facts
+            .binding_type(local_span)
+            .is_some_and(u40_is_hashmap_string_int),
+        "binding_type accessor should expose the finalized m type"
+    );
+
+    let module_fact = facts
+        .binding_fact(module_span)
+        .expect("facts should expose module_count binding");
+    assert_eq!(module_fact.name, "module_count");
+    assert!(
+        u40_is_int(&module_fact.ty),
+        "module_count should finalize to int, got {:?}",
+        module_fact.ty
+    );
+}
+
+#[test]
+fn match_binding_fact_some_payload_is_int() {
+    let fact = u40_match_binding_fact(
+        r#"
+let opt: Option<int> = Some(1)
+let out = match opt {
+  Some(n) => n,
+  None => 0
+}
+"#,
+        "n",
+    );
+    assert_eq!(fact.name, "n");
+    assert!(fact.initializer_span.is_some());
+    assert!(
+        u40_is_int(&fact.ty),
+        "Some(n) should bind n as int, got {:?}",
+        fact.ty
+    );
+}
+
+#[test]
+fn match_binding_fact_result_payloads_are_success_and_error_types() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+let res: Result<int, string> = Ok(1)
+let out = match res {
+  Ok(v) => v,
+  Err(e) => 0
+}
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let v_span = u40_find_binding_span(&program, "v").expect("v binding span");
+    let e_span = u40_find_binding_span(&program, "e").expect("e binding span");
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "Result payload match should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.binding_type(v_span).is_some_and(u40_is_int),
+        "Ok(v) should bind v as int, got {:?}",
+        facts.binding_type(v_span)
+    );
+    assert!(
+        facts.binding_type(e_span).is_some_and(u40_is_string),
+        "Err(e) should bind e as string, got {:?}",
+        facts.binding_type(e_span)
+    );
+}
+
+#[test]
+fn match_binding_fact_nested_option_result_payload_is_int() {
+    let fact = u40_match_binding_fact(
+        r#"
+let nested: Option<Result<int, string>> = Some(Ok(1))
+let out = match nested {
+  Some(Ok(v)) => v,
+  Some(Err(_)) => 0,
+  None => 0
+}
+"#,
+        "v",
+    );
+    assert!(
+        u40_is_int(&fact.ty),
+        "Some(Ok(v)) should bind v as int, got {:?}",
+        fact.ty
+    );
+}
+
+#[test]
+fn match_binding_fact_object_pattern_uses_struct_field_types() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+type Point { x: int, y: string }
+let p = Point { x: 1, y: "two" }
+let out = match p {
+  { x, y } => x,
+  _ => 0
+}
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let x_span = u40_find_binding_span(&program, "x").expect("x binding span");
+    let y_span = u40_find_binding_span(&program, "y").expect("y binding span");
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "object-pattern match should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.binding_type(x_span).is_some_and(u40_is_int),
+        "Point {{ x, y }} should bind x as int, got {:?}",
+        facts.binding_type(x_span)
+    );
+    assert!(
+        facts.binding_type(y_span).is_some_and(u40_is_string),
+        "Point {{ x, y }} should bind y as string, got {:?}",
+        facts.binding_type(y_span)
+    );
+}
+
+#[test]
+fn match_binding_fact_array_pattern_uses_element_type() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+let arr: Array<int> = [1, 2]
+let out = match arr {
+  [a, b] => a + b,
+  _ => 0
+}
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let a_span = u40_find_binding_span(&program, "a").expect("a binding span");
+    let b_span = u40_find_binding_span(&program, "b").expect("b binding span");
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "array-pattern match should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.binding_type(a_span).is_some_and(u40_is_int),
+        "[a, b] should bind a as int, got {:?}",
+        facts.binding_type(a_span)
+    );
+    assert!(
+        facts.binding_type(b_span).is_some_and(u40_is_int),
+        "[a, b] should bind b as int, got {:?}",
+        facts.binding_type(b_span)
+    );
+}
+
+#[test]
+fn match_binding_fact_typed_pattern_records_annotation_type() {
+    let fact = u40_match_binding_fact(
+        r#"
+let value: int | string = 1
+let out = match value {
+  n: int => n,
+  s: string => 0
+}
+"#,
+        "n",
+    );
+    assert!(
+        u40_is_int(&fact.ty),
+        "typed pattern n: int should bind n as int, got {:?}",
+        fact.ty
+    );
 }
 
 #[test]
@@ -2935,12 +3607,17 @@ let r = get(e) + 1
 "#;
     let program = parse_program(code).expect("parse");
     let (engine, _types, errors) = u40_infer(code);
-    assert!(errors.is_empty(), "f8 should infer cleanly, got {:?}", errors);
+    assert!(
+        errors.is_empty(),
+        "f8 should infer cleanly, got {:?}",
+        errors
+    );
 
     // The `get(e)` call-result span.
-    let call_span = u40_find_expr_span(&program, &|e| {
-        matches!(e, Expr::FunctionCall { name, .. } if name == "get")
-    })
+    let call_span = u40_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::FunctionCall { name, .. } if name == "get"),
+    )
     .expect("get(e) call site must exist");
     let resolved = engine.resolved_expr_type(call_span);
     assert!(
@@ -2950,9 +3627,10 @@ let r = get(e) + 1
     );
 
     // The closure body field-read `p.salary` span.
-    let field_span = u40_find_expr_span(&program, &|e| {
-        matches!(e, Expr::PropertyAccess { property, .. } if property == "salary")
-    })
+    let field_span = u40_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::PropertyAccess { property, .. } if property == "salary"),
+    )
     .expect("p.salary must exist");
     let field_resolved = engine.resolved_expr_type(field_span);
     assert!(
@@ -2962,12 +3640,12 @@ let r = get(e) + 1
     );
 
     // The `get(e) + 1` binop span.
-    let binop_span = u40_find_expr_span(&program, &|e| {
-        matches!(e, Expr::BinaryOp { .. })
-    })
-    .expect("get(e) + 1 must exist");
+    let binop_span = u40_find_expr_span(&program, &|e| matches!(e, Expr::BinaryOp { .. }))
+        .expect("get(e) + 1 must exist");
     assert!(
-        engine.resolved_expr_type(binop_span).is_some_and(u40_is_int),
+        engine
+            .resolved_expr_type(binop_span)
+            .is_some_and(u40_is_int),
         "f8: get(e) + 1 must resolve to `int`"
     );
 }
@@ -2987,11 +3665,16 @@ let r = getx(o) + 1
 "#;
     let program = parse_program(code).expect("parse");
     let (engine, _types, errors) = u40_infer(code);
-    assert!(errors.is_empty(), "h1 should infer cleanly, got {:?}", errors);
+    assert!(
+        errors.is_empty(),
+        "h1 should infer cleanly, got {:?}",
+        errors
+    );
 
-    let call_span = u40_find_expr_span(&program, &|e| {
-        matches!(e, Expr::FunctionCall { name, .. } if name == "getx")
-    })
+    let call_span = u40_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::FunctionCall { name, .. } if name == "getx"),
+    )
     .expect("getx(o) call site");
     assert!(
         engine.resolved_expr_type(call_span).is_some_and(u40_is_int),
@@ -3000,12 +3683,15 @@ let r = getx(o) + 1
     );
 
     // The outer field-read `.x` (terminal of `w.inner.x`).
-    let field_span = u40_find_expr_span(&program, &|e| {
-        matches!(e, Expr::PropertyAccess { property, .. } if property == "x")
-    })
+    let field_span = u40_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::PropertyAccess { property, .. } if property == "x"),
+    )
     .expect("w.inner.x must exist");
     assert!(
-        engine.resolved_expr_type(field_span).is_some_and(u40_is_int),
+        engine
+            .resolved_expr_type(field_span)
+            .is_some_and(u40_is_int),
         "h1: w.inner.x must resolve to `int`"
     );
 }
@@ -3024,11 +3710,16 @@ let r = get(e) + 1
 "#;
     let program = parse_program(code).expect("parse");
     let (engine, _types, errors) = u40_infer(code);
-    assert!(errors.is_empty(), "h2 should infer cleanly, got {:?}", errors);
+    assert!(
+        errors.is_empty(),
+        "h2 should infer cleanly, got {:?}",
+        errors
+    );
 
-    let call_span = u40_find_expr_span(&program, &|e| {
-        matches!(e, Expr::FunctionCall { name, .. } if name == "get")
-    })
+    let call_span = u40_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::FunctionCall { name, .. } if name == "get"),
+    )
     .expect("get(e) call site");
     assert!(
         engine.resolved_expr_type(call_span).is_some_and(u40_is_int),
@@ -3053,14 +3744,15 @@ let r = get(a) == get(b)
 "#;
     let program = parse_program(code).expect("parse");
     let (engine, _types, errors) = u40_infer(code);
-    assert!(errors.is_empty(), "h4b should infer cleanly, got {:?}", errors);
+    assert!(
+        errors.is_empty(),
+        "h4b should infer cleanly, got {:?}",
+        errors
+    );
 
     // Find BOTH get(...) call sites by collecting all matching spans.
     let mut call_spans: Vec<shape_ast::ast::Span> = Vec::new();
-    fn collect_calls(
-        program: &shape_ast::ast::Program,
-        out: &mut Vec<shape_ast::ast::Span>,
-    ) {
+    fn collect_calls(program: &shape_ast::ast::Program, out: &mut Vec<shape_ast::ast::Span>) {
         use shape_ast::ast::{Expr, Item, Spanned, Statement};
         fn we(e: &Expr, out: &mut Vec<shape_ast::ast::Span>) {
             if let Expr::FunctionCall { name, .. } = e {
@@ -3116,15 +3808,22 @@ let s = ref_a + 1
 "#;
     let program = parse_program(code).expect("parse");
     let (engine, _types, errors) = u40_infer(code);
-    assert!(errors.is_empty(), "P3 ref read should infer cleanly, got {:?}", errors);
+    assert!(
+        errors.is_empty(),
+        "P3 ref read should infer cleanly, got {:?}",
+        errors
+    );
 
     // `ref_a` operand inside `ref_a + 1` → referent `int`.
-    let operand_span = u40_find_expr_span(&program, &|e| {
-        matches!(e, Expr::Identifier(n, _) if n == "ref_a")
-    })
+    let operand_span = u40_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::Identifier(n, _) if n == "ref_a"),
+    )
     .expect("ref_a operand");
     assert!(
-        engine.resolved_expr_type(operand_span).is_some_and(u40_is_int),
+        engine
+            .resolved_expr_type(operand_span)
+            .is_some_and(u40_is_int),
         "P3: ref_a operand read must record the referent `int`, got {:?}",
         engine.resolved_expr_type(operand_span)
     );
@@ -3173,8 +3872,11 @@ let xs = []
 "#;
         let program = parse_program(code).expect("parse");
         let (engine, _types, _errors) = u40_infer(code);
-        let aspan = u40_find_expr_span(&program, &|e| matches!(e, Expr::Array(els, _) if els.is_empty()))
-            .expect("empty array literal");
+        let aspan = u40_find_expr_span(
+            &program,
+            &|e| matches!(e, Expr::Array(els, _) if els.is_empty()),
+        )
+        .expect("empty array literal");
         assert!(
             engine.resolved_expr_type(aspan).is_none(),
             "tail: an un-pinned empty `[]` must stay DROPPED (None), got {:?}",
@@ -3190,8 +3892,9 @@ let v = somemod::compute(1)
 "#;
         let program = parse_program(code).expect("parse");
         let (engine, _types, _errors) = u40_infer(code);
-        let qspan =
-            u40_find_expr_span(&program, &|e| matches!(e, Expr::QualifiedFunctionCall { .. }));
+        let qspan = u40_find_expr_span(&program, &|e| {
+            matches!(e, Expr::QualifiedFunctionCall { .. })
+        });
         if let Some(span) = qspan {
             assert!(
                 engine.resolved_expr_type(span).is_none(),
@@ -3217,7 +3920,9 @@ for r in rs { r.n + 1 }
 "#;
     let (engine, _types, errors) = u40_infer(code);
     assert!(
-        errors.iter().any(|e| matches!(e, TypeError::ConstraintViolation(_))),
+        errors
+            .iter()
+            .any(|e| matches!(e, TypeError::ConstraintViolation(_))),
         "f1: an unannotated [] field read must still produce a ConstraintViolation (STAGE-F1), got {:?}",
         errors
     );
@@ -3226,9 +3931,10 @@ for r in rs { r.n + 1 }
     use shape_ast::ast::Expr;
     use shape_ast::parser::parse_program;
     let program = parse_program(code).expect("parse");
-    if let Some(span) = u40_find_expr_span(&program, &|e| {
-        matches!(e, Expr::PropertyAccess { property, .. } if property == "n")
-    }) {
+    if let Some(span) = u40_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::PropertyAccess { property, .. } if property == "n"),
+    ) {
         assert!(
             engine.resolved_expr_type(span).is_none(),
             "f1: the un-annotatable field read must stay DROPPED (None), got {:?}",
@@ -3258,11 +3964,16 @@ let r = f(xs) + 1
 "#;
     let program = parse_program(code).expect("parse");
     let (engine, _types, errors) = u40_infer(code);
-    assert!(errors.is_empty(), "g1 should infer cleanly, got {:?}", errors);
+    assert!(
+        errors.is_empty(),
+        "g1 should infer cleanly, got {:?}",
+        errors
+    );
 
-    let sum_span = u40_find_expr_span(&program, &|e| {
-        matches!(e, Expr::MethodCall { method, .. } if method == "sum")
-    })
+    let sum_span = u40_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::MethodCall { method, .. } if method == "sum"),
+    )
     .expect("a.sum() must exist");
     assert!(
         engine.resolved_expr_type(sum_span).is_some_and(u40_is_int),
@@ -3270,9 +3981,10 @@ let r = f(xs) + 1
         engine.resolved_expr_type(sum_span)
     );
 
-    let call_span = u40_find_expr_span(&program, &|e| {
-        matches!(e, Expr::FunctionCall { name, .. } if name == "f")
-    })
+    let call_span = u40_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::FunctionCall { name, .. } if name == "f"),
+    )
     .expect("f(xs) must exist");
     assert!(
         engine.resolved_expr_type(call_span).is_some_and(u40_is_int),
@@ -3446,9 +4158,10 @@ fn handle() -> string {
 
     // The arm-body string literal `"saved: "` is a trivially-typed child that
     // MUST be recorded (zero OK_RESOLVED user-source miss).
-    let lit_span = u43_find_expr_span(&program, &|e| {
-        matches!(e, Expr::Literal(shape_ast::ast::Literal::String(s), _) if s == "saved: ")
-    })
+    let lit_span = u43_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::Literal(shape_ast::ast::Literal::String(s), _) if s == "saved: "),
+    )
     .expect("the `\"saved: \"` literal must exist in the AST");
     assert!(
         engine
@@ -3461,9 +4174,10 @@ fn handle() -> string {
 
     // The genuinely-un-inferable scrutinee `snapshot()` stays ABSENT (a MISS the
     // compiler boundary later turns into a surface-and-stop). No Unknown-default.
-    let scrut_span = u43_find_expr_span(&program, &|e| {
-        matches!(e, Expr::FunctionCall { name, .. } if name == "snapshot")
-    })
+    let scrut_span = u43_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::FunctionCall { name, .. } if name == "snapshot"),
+    )
     .expect("snapshot() scrutinee must exist");
     assert!(
         engine.resolved_expr_type(scrut_span).is_none(),
@@ -3504,9 +4218,10 @@ let z = mystery() + 7
     );
 
     // The un-inferable operand `mystery()` stays a MISS.
-    let call_span = u43_find_expr_span(&program, &|e| {
-        matches!(e, Expr::FunctionCall { name, .. } if name == "mystery")
-    })
+    let call_span = u43_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::FunctionCall { name, .. } if name == "mystery"),
+    )
     .expect("mystery() must exist");
     assert!(
         engine.resolved_expr_type(call_span).is_none(),
@@ -3540,12 +4255,15 @@ fn handle() -> string {
         "u43pre: an un-inferable scrutinee/arm must still ERROR"
     );
 
-    let ok_span = u43_find_expr_span(&program, &|e| {
-        matches!(e, Expr::Literal(shape_ast::ast::Literal::String(s), _) if s == "ok")
-    })
+    let ok_span = u43_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::Literal(shape_ast::ast::Literal::String(s), _) if s == "ok"),
+    )
     .expect("the `\"ok\"` literal must exist");
     assert!(
-        engine.resolved_expr_type(ok_span).is_some_and(u43_is_string),
+        engine
+            .resolved_expr_type(ok_span)
+            .is_some_and(u43_is_string),
         "u43pre: the sibling arm-body literal `\"ok\"` MUST be recorded as `string`, got {:?}",
         engine.resolved_expr_type(ok_span)
     );
@@ -3579,12 +4297,15 @@ fn name(c: Color) -> string {
         errors
     );
 
-    let red_span = u43_find_expr_span(&program, &|e| {
-        matches!(e, Expr::Literal(shape_ast::ast::Literal::String(s), _) if s == "red")
-    })
+    let red_span = u43_find_expr_span(
+        &program,
+        &|e| matches!(e, Expr::Literal(shape_ast::ast::Literal::String(s), _) if s == "red"),
+    )
     .expect("`\"red\"` literal must exist");
     assert!(
-        engine.resolved_expr_type(red_span).is_some_and(u43_is_string),
+        engine
+            .resolved_expr_type(red_span)
+            .is_some_and(u43_is_string),
         "u43pre: clean-match arm literal must still be recorded, got {:?}",
         engine.resolved_expr_type(red_span)
     );

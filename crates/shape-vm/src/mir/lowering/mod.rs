@@ -2963,7 +2963,7 @@ mod tests {
                     type_annotation: None,
                     value: Some(Expr::Let(
                         Box::new(ast::LetExpr {
-                            pattern: ast::Pattern::Identifier("inner".to_string()),
+                            pattern: ast::Pattern::synthetic_identifier("inner".to_string()),
                             type_annotation: None,
                             value: Some(Box::new(Expr::Reference {
                                 expr: Box::new(Expr::Identifier("x".to_string(), span())),

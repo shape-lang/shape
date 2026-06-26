@@ -53,7 +53,7 @@ impl BytecodeCompiler {
         &self,
         pattern: &shape_ast::ast::Pattern,
     ) -> Option<shape_ast::ast::Pattern> {
-        let shape_ast::ast::Pattern::Identifier(name) = pattern else {
+        let shape_ast::ast::Pattern::Identifier { name, .. } = pattern else {
             return None;
         };
         // Only capitalized identifiers can name a variant; lowercase names

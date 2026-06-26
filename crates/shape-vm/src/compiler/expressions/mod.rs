@@ -122,6 +122,236 @@ fn get_expr_span(expr: &Expr) -> Option<Span> {
     }
 }
 
+#[cfg(test)]
+mod u4_6_array_callable_tests {
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::ast::{BlockItem, Expr, Item, Program, Statement, TypeAnnotation};
+    use shape_ast::parser::parse_program;
+    use shape_runtime::type_system::Type;
+    use shape_runtime::type_system::inference::TypeInferenceEngine;
+
+    fn find_expr<'a>(program: &'a Program, pred: &impl Fn(&Expr) -> bool) -> Option<&'a Expr> {
+        fn walk_expr<'a>(expr: &'a Expr, pred: &impl Fn(&Expr) -> bool) -> Option<&'a Expr> {
+            if pred(expr) {
+                return Some(expr);
+            }
+            match expr {
+                Expr::BinaryOp { left, right, .. } => {
+                    walk_expr(left, pred).or_else(|| walk_expr(right, pred))
+                }
+                Expr::MethodCall { receiver, args, .. } => walk_expr(receiver, pred)
+                    .or_else(|| args.iter().find_map(|arg| walk_expr(arg, pred))),
+                Expr::FunctionCall { args, .. } => args.iter().find_map(|arg| walk_expr(arg, pred)),
+                Expr::IndexAccess { object, index, .. } => {
+                    walk_expr(object, pred).or_else(|| walk_expr(index, pred))
+                }
+                Expr::Array(elements, _) => elements.iter().find_map(|elem| walk_expr(elem, pred)),
+                Expr::Block(block, _) => block.items.iter().find_map(|item| match item {
+                    BlockItem::VariableDecl(decl) => {
+                        decl.value.as_ref().and_then(|value| walk_expr(value, pred))
+                    }
+                    BlockItem::Statement(stmt) => walk_stmt(stmt, pred),
+                    BlockItem::Expression(expr) => walk_expr(expr, pred),
+                    BlockItem::Assignment(_) => None,
+                }),
+                Expr::FunctionExpr { body, .. } => {
+                    body.iter().find_map(|stmt| walk_stmt(stmt, pred))
+                }
+                _ => None,
+            }
+        }
+
+        fn walk_stmt<'a>(stmt: &'a Statement, pred: &impl Fn(&Expr) -> bool) -> Option<&'a Expr> {
+            match stmt {
+                Statement::VariableDecl(decl, _) => {
+                    decl.value.as_ref().and_then(|value| walk_expr(value, pred))
+                }
+                Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+                    walk_expr(expr, pred)
+                }
+                _ => None,
+            }
+        }
+
+        program.items.iter().find_map(|item| match item {
+            Item::VariableDecl(decl, _) => {
+                decl.value.as_ref().and_then(|value| walk_expr(value, pred))
+            }
+            Item::Statement(stmt, _) => walk_stmt(stmt, pred),
+            Item::Function(func, _) => func.body.iter().find_map(|stmt| walk_stmt(stmt, pred)),
+            Item::Expression(expr, _) => walk_expr(expr, pred),
+            _ => None,
+        })
+    }
+
+    fn is_int(ty: &Type) -> bool {
+        matches!(ty, Type::Concrete(TypeAnnotation::Basic(name)) if name == "int")
+    }
+
+    #[test]
+    fn indexed_callable_array_return_type_derives_from_inference_facts() {
+        let program = parse_program(
+            r#"
+fn inc(x: int) -> int { x + 1 }
+fn dbl(y: int) -> int { y + 2 }
+let arr = [inc, dbl]
+let total = arr[0](1) + arr[1](2)
+"#,
+        )
+        .expect("program should parse");
+        let total_expr = find_expr(&program, &|expr| {
+            matches!(
+                expr,
+                Expr::BinaryOp { left, right, .. }
+                    if matches!(left.as_ref(), Expr::MethodCall { method, .. } if method == "__call__")
+                        && matches!(right.as_ref(), Expr::MethodCall { method, .. } if method == "__call__")
+            )
+        })
+        .expect("total initializer");
+
+        let mut engine = TypeInferenceEngine::new();
+        let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+        assert!(
+            errors.is_empty(),
+            "indexed callable array program should infer cleanly, got {:?}",
+            errors
+        );
+        let arr_span = facts
+            .bindings_named("arr")
+            .next()
+            .expect("arr binding fact")
+            .binder_span;
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler.inference_facts = facts;
+        compiler.module_bindings.insert("arr".to_string(), 0);
+        compiler.module_binding_spans.insert(0, arr_span);
+
+        let Expr::BinaryOp { left, .. } = total_expr else {
+            panic!("total should be a binary op");
+        };
+        let helper_return = compiler
+            .indexed_callable_array_return_type("arr", Some(1))
+            .expect("indexed callable array helper should derive return type");
+        assert!(
+            is_int(&helper_return),
+            "expected helper to derive int, got {:?}",
+            helper_return
+        );
+
+        let call_return = compiler
+            .infer_expr_type(left)
+            .expect("left indexed callable call should type");
+        assert!(
+            is_int(&call_return),
+            "expected arr[0](1) to infer int, got {:?}",
+            call_return
+        );
+    }
+
+    #[test]
+    fn named_callable_binding_return_type_derives_from_inference_facts() {
+        let program = parse_program(
+            r#"
+fn inc(x: int) -> int { x + 1 }
+fn dbl(y: int) -> int { y + 2 }
+let arr = [inc, dbl]
+let g = arr[0]
+let total = g(4) + 1
+"#,
+        )
+        .expect("program should parse");
+        let total_expr = find_expr(&program, &|expr| {
+            matches!(
+                expr,
+                Expr::BinaryOp { left, .. }
+                    if matches!(left.as_ref(), Expr::FunctionCall { name, .. } if name == "g")
+            )
+        })
+        .expect("total initializer");
+
+        let mut engine = TypeInferenceEngine::new();
+        let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+        assert!(
+            errors.is_empty(),
+            "named callable binding program should infer cleanly, got {:?}",
+            errors
+        );
+        let g_span = facts
+            .bindings_named("g")
+            .next()
+            .expect("g binding fact")
+            .binder_span;
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler.inference_facts = facts;
+        compiler.module_bindings.insert("g".to_string(), 0);
+        compiler.module_binding_spans.insert(0, g_span);
+
+        let helper_return = compiler
+            .callable_binding_return_type("g", Some(1))
+            .expect("callable binding helper should derive return type");
+        assert!(
+            is_int(&helper_return),
+            "expected helper to derive int, got {:?}",
+            helper_return
+        );
+
+        let Expr::BinaryOp { left, .. } = total_expr else {
+            panic!("total should be a binary op");
+        };
+        let call_return = compiler
+            .infer_expr_type(left)
+            .expect("g(4) should type from binding facts");
+        assert!(
+            is_int(&call_return),
+            "expected g(4) to infer int, got {:?}",
+            call_return
+        );
+    }
+
+    #[test]
+    fn function_returning_closure_binding_compiles_without_return_string_map() {
+        let program = parse_program(
+            r#"
+fn make(n: int) -> any {
+    return fn(x: int) -> int { return x + 1 }
+}
+let f = make(7)
+"#,
+        )
+        .expect("program should parse");
+
+        let make_def = program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Function(func, _) if func.name == "make" => Some(func.clone()),
+                _ => None,
+            })
+            .expect("make function definition");
+        let make_call = find_expr(
+            &program,
+            &|expr| matches!(expr, Expr::FunctionCall { name, .. } if name == "make"),
+        )
+        .expect("make call expression");
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler.function_defs.insert("make".to_string(), make_def);
+        compiler.module_bindings.insert("f".to_string(), 0);
+        compiler.update_callable_binding_from_expr(0, false, make_call);
+
+        let return_ty = compiler
+            .callable_binding_return_type("f", Some(1))
+            .expect("returned closure binding should derive return type from retained facts");
+        assert!(
+            is_int(&return_ty),
+            "expected returned closure binding to derive int, got {:?}",
+            return_ty
+        );
+    }
+}
+
 // Sub-modules organized by expression category
 mod advanced;
 mod assignment;
@@ -144,6 +374,204 @@ mod type_ops;
 mod unary_ops;
 
 impl BytecodeCompiler {
+    pub(crate) fn indexed_callable_array_return_type(
+        &self,
+        arr_name: &str,
+        arg_count: Option<usize>,
+    ) -> Option<shape_runtime::type_system::Type> {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+
+        let local_span = self
+            .resolve_local(arr_name)
+            .and_then(|local_idx| self.local_binding_spans.get(&local_idx).copied());
+        let module_span = self
+            .resolve_scoped_module_binding_name(arr_name)
+            .and_then(|scoped| {
+                self.module_bindings
+                    .get(&scoped)
+                    .and_then(|binding_idx| self.module_binding_spans.get(binding_idx).copied())
+            })
+            .or_else(|| {
+                self.module_bindings
+                    .get(arr_name)
+                    .and_then(|binding_idx| self.module_binding_spans.get(binding_idx).copied())
+            });
+        let binding_type = local_span
+            .or(module_span)
+            .and_then(|span| self.inference_facts.binding_type(span))?;
+
+        let canonical = binding_type.canonicalize();
+        let element_ty = match canonical {
+            Type::Generic { base, args } if args.len() == 1 => {
+                let is_array = matches!(
+                    base.as_ref(),
+                    Type::Concrete(TypeAnnotation::Reference(name))
+                        if name.as_str() == "Array" || name.as_str() == "Vec"
+                );
+                if !is_array {
+                    return None;
+                }
+                args.into_iter().next()?
+            }
+            _ => return None,
+        };
+        Self::callable_return_type_from_type(&element_ty, arg_count)
+    }
+
+    fn callable_return_type_from_type(
+        callable_ty: &shape_runtime::type_system::Type,
+        arg_count: Option<usize>,
+    ) -> Option<shape_runtime::type_system::Type> {
+        use shape_runtime::type_system::Type;
+        let canonical = callable_ty.canonicalize();
+        let Type::Function { params, returns } = canonical else {
+            return None;
+        };
+        if let Some(expected) = arg_count
+            && params.len() != expected
+        {
+            return None;
+        }
+        Some(*returns)
+    }
+
+    pub(crate) fn callable_binding_return_type(
+        &mut self,
+        name: &str,
+        arg_count: Option<usize>,
+    ) -> Option<shape_runtime::type_system::Type> {
+        if let Some(local_idx) = self.resolve_local(name)
+            && let Some(ty) = self.callable_local_slot_return_type(local_idx, arg_count)
+        {
+            return Some(ty);
+        }
+        if let Some(scoped) = self.resolve_scoped_module_binding_name(name)
+            && let Some(binding_idx) = self.module_bindings.get(&scoped).copied()
+            && let Some(ty) = self.callable_module_slot_return_type(binding_idx, arg_count)
+        {
+            return Some(ty);
+        }
+        if let Some(binding_idx) = self.module_bindings.get(name).copied()
+            && let Some(ty) = self.callable_module_slot_return_type(binding_idx, arg_count)
+        {
+            return Some(ty);
+        }
+        None
+    }
+
+    fn callable_local_slot_return_type(
+        &mut self,
+        local_idx: u16,
+        arg_count: Option<usize>,
+    ) -> Option<shape_runtime::type_system::Type> {
+        if let Some(span) = self.local_binding_spans.get(&local_idx).copied()
+            && let Some(binding_ty) = self.inference_facts.binding_type(span)
+            && let Some(return_ty) = Self::callable_return_type_from_type(binding_ty, arg_count)
+            && !Self::type_contains_unknown(&return_ty)
+        {
+            return Some(return_ty);
+        }
+
+        let peek = self
+            .local_callable_closure_bodies
+            .get(&local_idx)
+            .cloned()?;
+        let return_ty =
+            crate::compiler::expressions::closures::infer_closure_body_return_type_with_caller_context(
+                self,
+                &peek.params,
+                &peek.body,
+                peek.return_type.as_ref(),
+                &[],
+                &[],
+            )?;
+        if Self::type_contains_unknown(&return_ty) {
+            return None;
+        }
+        Some(return_ty)
+    }
+
+    fn callable_module_slot_return_type(
+        &mut self,
+        binding_idx: u16,
+        arg_count: Option<usize>,
+    ) -> Option<shape_runtime::type_system::Type> {
+        if let Some(span) = self.module_binding_spans.get(&binding_idx).copied()
+            && let Some(binding_ty) = self.inference_facts.binding_type(span)
+            && let Some(return_ty) = Self::callable_return_type_from_type(binding_ty, arg_count)
+            && !Self::type_contains_unknown(&return_ty)
+        {
+            return Some(return_ty);
+        }
+
+        let peek = self
+            .module_binding_callable_closure_bodies
+            .get(&binding_idx)
+            .cloned()?;
+        let return_ty =
+            crate::compiler::expressions::closures::infer_closure_body_return_type_with_caller_context(
+                self,
+                &peek.params,
+                &peek.body,
+                peek.return_type.as_ref(),
+                &[],
+                &[],
+            )?;
+        if Self::type_contains_unknown(&return_ty) {
+            return None;
+        }
+        Some(return_ty)
+    }
+
+    fn type_contains_unknown(ty: &shape_runtime::type_system::Type) -> bool {
+        use shape_runtime::type_system::Type;
+        match ty {
+            Type::Concrete(ann) => Self::annotation_contains_unknown(ann),
+            Type::Generic { base, args } => {
+                Self::type_contains_unknown(base) || args.iter().any(Self::type_contains_unknown)
+            }
+            Type::Function { params, returns } => {
+                params.iter().any(Self::type_contains_unknown)
+                    || Self::type_contains_unknown(returns)
+            }
+            Type::Variable(_) | Type::Constrained { .. } => true,
+        }
+    }
+
+    fn annotation_contains_unknown(ann: &shape_ast::ast::TypeAnnotation) -> bool {
+        use shape_ast::ast::TypeAnnotation;
+        match ann {
+            TypeAnnotation::Basic(name) => name == "unknown",
+            TypeAnnotation::Reference(path) => path.as_str() == "unknown",
+            TypeAnnotation::Array(inner) | TypeAnnotation::Borrow { inner, .. } => {
+                Self::annotation_contains_unknown(inner)
+            }
+            TypeAnnotation::Tuple(items)
+            | TypeAnnotation::Union(items)
+            | TypeAnnotation::Intersection(items) => {
+                items.iter().any(Self::annotation_contains_unknown)
+            }
+            TypeAnnotation::Object(fields) => fields
+                .iter()
+                .any(|field| Self::annotation_contains_unknown(&field.type_annotation)),
+            TypeAnnotation::Function { params, returns } => {
+                params
+                    .iter()
+                    .any(|param| Self::annotation_contains_unknown(&param.type_annotation))
+                    || Self::annotation_contains_unknown(returns)
+            }
+            TypeAnnotation::Generic { name, args } => {
+                name.as_str() == "unknown" || args.iter().any(Self::annotation_contains_unknown)
+            }
+            TypeAnnotation::Dyn(paths) => paths.iter().any(|path| path.as_str() == "unknown"),
+            TypeAnnotation::Void
+            | TypeAnnotation::Never
+            | TypeAnnotation::Null
+            | TypeAnnotation::Undefined => false,
+        }
+    }
+
     fn annotation_target_kind_for_expr(
         target: &Expr,
         forced_kind: Option<shape_ast::ast::functions::AnnotationTargetKind>,
@@ -1567,12 +1995,89 @@ impl BytecodeCompiler {
     /// inferred type), but we scope the tracker short-circuit narrowly to
     /// temporal names to avoid changing any existing non-temporal
     /// `infer_expr_type` behavior.
+    pub(super) fn pending_empty_array_accumulator_name_for_expr<'a>(
+        &self,
+        expr: &'a Expr,
+    ) -> Option<&'a str> {
+        match expr {
+            Expr::PropertyAccess { object, .. } => {
+                self.pending_empty_array_accumulator_name_for_expr(object)
+            }
+            Expr::IndexAccess { object, .. } => {
+                self.empty_array_accumulator_root_name_for_expr(object)
+            }
+            _ => None,
+        }
+    }
+
+    fn empty_array_accumulator_root_name_for_expr<'a>(&self, expr: &'a Expr) -> Option<&'a str> {
+        match expr {
+            Expr::IndexAccess { object, .. } => {
+                self.empty_array_accumulator_root_name_for_expr(object)
+            }
+            Expr::Identifier(name, _) if self.is_pending_empty_array_accumulator_name(name) => {
+                Some(name.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    fn is_pending_empty_array_accumulator_name(&self, name: &str) -> bool {
+        if let Some(local_idx) = self.resolve_local(name) {
+            return self
+                .empty_array_accumulators
+                .contains_key(&crate::compiler::EmptyArrayAccumulatorKey::Local(local_idx))
+                || self
+                    .current_function_local_concrete_facts
+                    .get(&local_idx)
+                    .is_some_and(|fact| {
+                        matches!(
+                            fact.source,
+                            crate::compiler::BindingConcreteFactSource::EmptyArrayAccumulator
+                        )
+                    });
+        }
+        let scoped_name = self
+            .resolve_scoped_module_binding_name(name)
+            .unwrap_or_else(|| name.to_string());
+        self.module_bindings
+            .get(&scoped_name)
+            .is_some_and(|binding_idx| {
+                self.empty_array_accumulators.contains_key(
+                    &crate::compiler::EmptyArrayAccumulatorKey::ModuleBinding(*binding_idx),
+                ) || self
+                    .module_binding_concrete_facts
+                    .get(binding_idx)
+                    .is_some_and(|fact| {
+                        matches!(
+                            fact.source,
+                            crate::compiler::BindingConcreteFactSource::EmptyArrayAccumulator
+                        )
+                    })
+            })
+    }
+
     pub(super) fn infer_expr_type(
         &mut self,
         expr: &Expr,
     ) -> Result<shape_runtime::type_system::Type> {
         use shape_ast::ast::TypeAnnotation;
         use shape_runtime::type_system::Type;
+
+        if let Expr::PropertyAccess { .. } = expr {
+            if let Some(name) = self.pending_empty_array_accumulator_name_for_expr(expr) {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "cannot infer the type of field read from `{name}` because it was \
+                         created from an unannotated empty array (`[]`); annotate the array \
+                         (`let mut {name}: Array<T> = []`) before reading element fields"
+                    ),
+                    location: Some(
+                        self.span_to_source_location(shape_ast::ast::Spanned::span(expr)),
+                    ),
+                });
+            }
+        }
 
         // T1 KEYSTONE (strict-flip, 2026-06-22): consult the inference engine's
         // POST-SOLVE per-expression type table FIRST, before the per-context
@@ -1687,9 +2192,8 @@ impl BytecodeCompiler {
             // U4-5: array-shaped identifier recovery, STRUCTURAL. The runtime
             // inference engine returns `Variable` (→ `unknown`) for function-body
             // `let xs: Array<T>` locals because it never saw the body declaration;
-            // the compiler did, and recorded the element `ConcreteType` in the
-            // structural side-tables (`local_array_element_types` /
-            // `current_function_local_concrete_types`). Read it back through
+            // the compiler did, and recorded the full `ConcreteType::Array(elem)`
+            // as an explicit binding fact. Read it back through
             // `identifier_concrete_type` so a downstream `xs + [..]` resolves to
             // the array shape and routes to `ArrayConcat` instead of erroring as
             // `unknown + T[]`. Replaces the deleted `type_name.strip_suffix("[]")`
@@ -1707,9 +2211,9 @@ impl BytecodeCompiler {
             }
             // R3-elemerasure (strict-flip): a `let x = a.first()` (scalar
             // element-returning builtin method) records the result
-            // `ConcreteType` into `current_function_local_concrete_types` (via
-            // the let-binding `concrete_type_for_expr` recording, now element-
-            // aware), but its tracker `type_name` stays `Unknown` because the
+            // `ConcreteType` as an explicit binding fact (via the let-binding
+            // `concrete_type_for_expr` recording, now element-aware), but its
+            // tracker `type_name` stays `Unknown` because the
             // method-call compile path doesn't stamp `last_expr_numeric_type`
             // for the receiver-derived element type. Consult the recorded
             // ConcreteType so a downstream `x + 1` / `x == y` resolves the
@@ -1717,14 +2221,10 @@ impl BytecodeCompiler {
             // existing array/schema side-table paths. The recorded ConcreteType
             // IS the proof (per ADR-006 §2.7.5); absent recording yields the
             // engine fallthrough below (no fabrication).
-            let recorded_ct = self
-                .resolve_local(name)
-                .and_then(|idx| self.current_function_local_concrete_types.get(&idx))
-                .or_else(|| {
-                    self.module_bindings
-                        .get(name)
-                        .and_then(|idx| self.module_binding_concrete_types.get(idx))
-                });
+            let recorded_ct =
+                crate::compiler::monomorphization::type_resolution::identifier_concrete_type_pub(
+                    self, name,
+                );
             if let Some(ct) = recorded_ct {
                 // An array-typed local (`let xs: Array<T>`) reads back as
                 // `Array<T>` in value position. The recorded element
@@ -1737,7 +2237,7 @@ impl BytecodeCompiler {
                 // `unknown + T[]`. Use the canonical `Array(_)` annotation
                 // (not the `Vec<_>` generic render) so `type_display_name`
                 // produces the `T[]` form that the ArrayConcat dispatch keys on.
-                if let shape_value::v2::ConcreteType::Array(inner_ct) = ct {
+                if let shape_value::v2::ConcreteType::Array(inner_ct) = &ct {
                     if let Some(inner_ann) =
                         crate::compiler::expressions::closures::concrete_type_to_type_annotation(
                             inner_ct,
@@ -1747,7 +2247,7 @@ impl BytecodeCompiler {
                     }
                 }
                 if let Some(ann) =
-                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(ct)
+                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
                 {
                     if matches!(&ann, TypeAnnotation::Basic(_)) {
                         return Ok(Type::Concrete(ann));
@@ -1763,7 +2263,7 @@ impl BytecodeCompiler {
         // pre-pass (`infer_return_concrete_types_from_types`) and serves
         // as the authoritative STRUCTURAL source for inferred return types
         // in the compiler's strict-typing decisions.
-        if let Expr::FunctionCall { name, .. } = expr {
+        if let Expr::FunctionCall { name, args, .. } = expr {
             // ADR-006 §2.7.30 (GapA): a `-> &T` callee's result is read THROUGH
             // the reference in value position (where `infer_expr_type` is asked —
             // binop operands, comparison sides). Project the declared `&T` return
@@ -1835,36 +2335,12 @@ impl BytecodeCompiler {
             {
                 return Ok(ty);
             }
-            // Sweep phase 3c.1: closure-binding return type. When the
-            // call target is a `let f = |…| …` local or module binding,
-            // its return type is recorded by
-            // `update_callable_binding_from_expr`. Without this lookup,
-            // `f(5) + f(7)` would fail strict typing as
-            // `unknown + unknown`.
-            if let Some(local_idx) = self.resolve_local(name) {
-                if let Some(rt_name) = self.local_callable_return_types.get(&local_idx).cloned() {
-                    return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
-                }
-            }
-            if let Some(scoped) = self.resolve_scoped_module_binding_name(name) {
-                if let Some(&binding_idx) = self.module_bindings.get(&scoped) {
-                    if let Some(rt_name) = self
-                        .module_binding_callable_return_types
-                        .get(&binding_idx)
-                        .cloned()
-                    {
-                        return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
-                    }
-                }
-            }
-            if let Some(&binding_idx) = self.module_bindings.get(name) {
-                if let Some(rt_name) = self
-                    .module_binding_callable_return_types
-                    .get(&binding_idx)
-                    .cloned()
-                {
-                    return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
-                }
+            // U4-6 callable-return deletion: local/module callable binding
+            // calls derive their return type from the binding's canonical
+            // `InferenceFacts::binding_type` or retained closure body peek.
+            // There is no slot-indexed return-name table to drift.
+            if let Some(return_ty) = self.callable_binding_return_type(name, Some(args.len())) {
+                return Ok(return_ty);
             }
         }
 
@@ -1943,49 +2419,25 @@ impl BytecodeCompiler {
             }
         }
 
-        // Sweep phase 3c.x: callable-array-element invocation. The parser
-        // models `arr[i](args...)` as
-        // `MethodCall { method: "__call__", receiver: IndexAccess { object: Identifier(arr), .. }, .. }`.
-        // When `arr` is a `let arr = [|...| ..., ...]` binding whose elements
-        // are closures with a homogeneous return type, recover that type
-        // from `local_array_callable_return_types` /
-        // `module_binding_array_callable_return_types` so binops like
-        // `arr[0](1) + arr[1](1)` can dispatch under strict typing.
+        // U4-6 Tier 2: callable-array-element invocation. The parser models
+        // `arr[i](args...)` as `MethodCall { method: "__call__", receiver:
+        // IndexAccess { object: Identifier(arr), .. }, .. }`. Derive the
+        // return type from the active `InferenceFacts` binding type
+        // (`Array<Function<...>>`) instead of the deleted per-slot string map.
         if let Expr::MethodCall {
-            receiver, method, ..
+            receiver,
+            method,
+            args,
+            ..
         } = expr
         {
             if method == "__call__" {
                 if let Expr::IndexAccess { object, .. } = receiver.as_ref() {
                     if let Expr::Identifier(arr_name, _) = object.as_ref() {
-                        if let Some(local_idx) = self.resolve_local(arr_name) {
-                            if let Some(rt_name) = self
-                                .local_array_callable_return_types
-                                .get(&local_idx)
-                                .cloned()
-                            {
-                                return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
-                            }
-                        }
-                        if let Some(scoped) = self.resolve_scoped_module_binding_name(arr_name) {
-                            if let Some(&binding_idx) = self.module_bindings.get(&scoped) {
-                                if let Some(rt_name) = self
-                                    .module_binding_array_callable_return_types
-                                    .get(&binding_idx)
-                                    .cloned()
-                                {
-                                    return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
-                                }
-                            }
-                        }
-                        if let Some(&binding_idx) = self.module_bindings.get(arr_name) {
-                            if let Some(rt_name) = self
-                                .module_binding_array_callable_return_types
-                                .get(&binding_idx)
-                                .cloned()
-                            {
-                                return Ok(Type::Concrete(TypeAnnotation::Basic(rt_name)));
-                            }
+                        if let Some(return_ty) =
+                            self.indexed_callable_array_return_type(arr_name, Some(args.len()))
+                        {
+                            return Ok(return_ty);
                         }
                     }
                 }
@@ -2039,14 +2491,14 @@ impl BytecodeCompiler {
         // producing a spurious `unknown + unknown` reject.
         //
         // The program-wide inference pass DOES resolve the parameter — via
-        // callsite unification of the concrete argument — and records its
-        // type in `inferred_param_type_hints`, which `compile_function_body`
-        // stamps onto the local slot's tracker `type_name` (e.g.
-        // `"Array<int>"`). Recovering the element type from that proven
-        // array type name is reading inference's own output, not fabricating
-        // a kind: if inference could not prove the parameter is an array the
-        // tracker name is absent and this returns `None`, so the operand
-        // stays unproven and the binop emitter raises a loud compile error.
+        // callsite unification of the concrete argument — and exposes its
+        // Type through `InferenceFacts::function_signature`. `compile_function_body`
+        // stamps the structural `ConcreteType::Array(elem)` onto the local slot
+        // from that fact, so recovering the element type reads inference's own
+        // output, not a string re-parse or fabricated kind. If inference could
+        // not prove the parameter is an array this returns `None`, so the
+        // operand stays unproven and the binop emitter raises a loud compile
+        // error.
         // Tuple element access (book `fundamentals/variables` §Tuple Types):
         // a `[T0, T1, ...]`-annotated binding records a `ConcreteType::Tuple`
         // (via `declared_annotation_concrete_type`). `pair[k]` at a CONSTANT
@@ -2063,14 +2515,10 @@ impl BytecodeCompiler {
         } = expr
         {
             if let Expr::Identifier(obj_name, _) = object.as_ref() {
-                let recorded_ct = self
-                    .resolve_local(obj_name)
-                    .and_then(|idx| self.current_function_local_concrete_types.get(&idx))
-                    .or_else(|| {
-                        self.module_bindings
-                            .get(obj_name)
-                            .and_then(|idx| self.module_binding_concrete_types.get(idx))
-                    });
+                let recorded_ct =
+                    crate::compiler::monomorphization::type_resolution::identifier_concrete_type_pub(
+                        self, obj_name,
+                    );
                 if let Some(shape_value::v2::ConcreteType::Tuple(elems)) = recorded_ct {
                     let k = match index.as_ref() {
                         Expr::Literal(shape_ast::ast::Literal::Int(i), _) => Some(*i),
@@ -2289,10 +2737,9 @@ impl BytecodeCompiler {
     /// concrete inference `Type`. Returns `None` for non-identifier
     /// receivers, untracked names, and non-array receivers.
     ///
-    /// U4-5: reads the element type STRUCTURALLY from the recorded
-    /// `ConcreteType` (`identifier_concrete_type` consults
-    /// `local_array_element_types` / `module_binding_array_element_types` /
-    /// `current_function_local_concrete_types`), not by stripping a
+    /// U4-5/U4-7: reads the element type STRUCTURALLY from the recorded
+    /// `ConcreteType` (`identifier_concrete_type` consults whole-binding
+    /// concrete tables), not by stripping a
     /// `"Vec<...>"`/`"int[]"` tracker string. The old `strip_prefix("Array<")`
     /// / `strip_suffix("[]")` re-parse (the read half of the Rep-B string
     /// round-trip whose write half is `tracked_type_name_from_annotation`)
@@ -2351,49 +2798,51 @@ impl BytecodeCompiler {
     /// expression. Currently handles the identifier case (locals + module
     /// bindings), which covers the `self.field` use case in trait method
     /// bodies.
-    fn tracker_schema_id_for_expr(&self, expr: &Expr) -> Option<u32> {
-        let lookup_by_name = |tn: &str| -> Option<u32> {
-            self.type_tracker
-                .schema_registry()
-                .get(tn)
-                .map(|s| s.id)
-                .or_else(|| {
-                    // Phase 3e: fall back to module-scope-resolved name
-                    // (e.g. `A` inside `mod m` resolves to `m::A`). The
-                    // schema is registered under the qualified form;
-                    // local/binding type_name often holds the bare form.
-                    let qualified = self.resolve_type_name(tn);
-                    if qualified != tn {
-                        self.type_tracker
-                            .schema_registry()
-                            .get(&qualified)
-                            .map(|s| s.id)
-                    } else {
-                        None
-                    }
-                })
-        };
-        if let Expr::Identifier(name, _) = expr {
-            if let Some(local_idx) = self.resolve_local(name) {
-                if let Some(info) = self.type_tracker.get_local_type(local_idx) {
-                    if let Some(id) = info.schema_id {
-                        return Some(id);
-                    }
-                    if let Some(ref tn) = info.type_name {
-                        if let Some(id) = lookup_by_name(tn) {
+    fn tracker_schema_id_for_expr(&mut self, expr: &Expr) -> Option<u32> {
+        {
+            let lookup_by_name = |tn: &str| -> Option<u32> {
+                self.type_tracker
+                    .schema_registry()
+                    .get(tn)
+                    .map(|s| s.id)
+                    .or_else(|| {
+                        // Phase 3e: fall back to module-scope-resolved name
+                        // (e.g. `A` inside `mod m` resolves to `m::A`). The
+                        // schema is registered under the qualified form;
+                        // local/binding type_name often holds the bare form.
+                        let qualified = self.resolve_type_name(tn);
+                        if qualified != tn {
+                            self.type_tracker
+                                .schema_registry()
+                                .get(&qualified)
+                                .map(|s| s.id)
+                        } else {
+                            None
+                        }
+                    })
+            };
+            if let Expr::Identifier(name, _) = expr {
+                if let Some(local_idx) = self.resolve_local(name) {
+                    if let Some(info) = self.type_tracker.get_local_type(local_idx) {
+                        if let Some(id) = info.schema_id {
                             return Some(id);
+                        }
+                        if let Some(ref tn) = info.type_name {
+                            if let Some(id) = lookup_by_name(tn) {
+                                return Some(id);
+                            }
                         }
                     }
                 }
-            }
-            if let Some(&binding_idx) = self.module_bindings.get(name) {
-                if let Some(info) = self.type_tracker.get_binding_type(binding_idx) {
-                    if let Some(id) = info.schema_id {
-                        return Some(id);
-                    }
-                    if let Some(ref tn) = info.type_name {
-                        if let Some(id) = lookup_by_name(tn) {
+                if let Some(&binding_idx) = self.module_bindings.get(name) {
+                    if let Some(info) = self.type_tracker.get_binding_type(binding_idx) {
+                        if let Some(id) = info.schema_id {
                             return Some(id);
+                        }
+                        if let Some(ref tn) = info.type_name {
+                            if let Some(id) = lookup_by_name(tn) {
+                                return Some(id);
+                            }
                         }
                     }
                 }
@@ -2401,16 +2850,12 @@ impl BytecodeCompiler {
         }
         // WS-9c: a direct `f(...).field` access — the receiver is a call to
         // an unannotated function whose inferred return type is an anonymous
-        // object. The return-object schema was registered up-front; resolve
-        // it here so the property access types without an intervening `let`.
+        // object. Derive/register the return-object schema from the active
+        // inference facts so the property access types without an intervening
+        // `let`.
         if let Expr::FunctionCall { name, .. } = expr {
-            if let Some(&schema_id) = self.function_return_schema_ids.get(name) {
+            if let Some(schema_id) = self.inferred_return_object_schema_id(name) {
                 return Some(schema_id);
-            }
-            if let Some(scoped) = self.resolve_scoped_module_binding_name(name) {
-                if let Some(&schema_id) = self.function_return_schema_ids.get(&scoped) {
-                    return Some(schema_id);
-                }
             }
         }
         None

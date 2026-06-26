@@ -2079,6 +2079,7 @@ impl TypeInferenceEngine {
         } else {
             self.bind_decl_pattern(&decl.pattern, declared_type.clone());
         }
+        self.record_binding_facts_for_decl(decl, &declared_type);
 
         Ok(declared_type)
     }
@@ -2096,9 +2097,18 @@ impl TypeInferenceEngine {
                 }
             }
             DestructurePattern::Array(patterns) => {
+                let elem_ty = Self::decl_array_element_type(&fallback_type);
                 for pattern in patterns {
-                    let fallback = self.fresh_type_var();
-                    self.bind_decl_pattern(pattern, fallback);
+                    match (pattern, elem_ty.as_ref()) {
+                        (DestructurePattern::Rest(inner), Some(elem)) => {
+                            self.bind_decl_pattern(inner, BuiltinTypes::array(elem.clone()));
+                        }
+                        _ => {
+                            let fallback =
+                                elem_ty.clone().unwrap_or_else(|| self.fresh_type_var());
+                            self.bind_decl_pattern(pattern, fallback);
+                        }
+                    }
                 }
             }
             DestructurePattern::Object(fields) => {
@@ -2124,6 +2134,22 @@ impl TypeInferenceEngine {
                 let elem = self.fresh_type_var();
                 self.bind_decl_pattern(pattern, BuiltinTypes::array(elem));
             }
+        }
+    }
+
+    fn decl_array_element_type(ty: &Type) -> Option<Type> {
+        match ty.canonicalize() {
+            Type::Generic { base, args }
+                if args.len() == 1
+                    && matches!(
+                        base.as_ref(),
+                        Type::Concrete(TypeAnnotation::Reference(name))
+                            if name.as_str() == "Array" || name.as_str() == "Vec"
+                    ) =>
+            {
+                args.into_iter().next()
+            }
+            _ => None,
         }
     }
 

@@ -121,6 +121,17 @@ impl BytecodeCompiler {
             });
         }
 
+        if let Some(name) = self.pending_empty_array_accumulator_name_for_expr(object) {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "cannot infer the type of field read from `{name}` because it was \
+                     created from an unannotated empty array (`[]`); annotate the array \
+                     (`let mut {name}: Array<T> = []`) before reading element fields"
+                ),
+                location: Some(self.span_to_source_location(object.span())),
+            });
+        }
+
         // SC1 (R8 — supervisor): style-spec namespace member access.
         // `Color.red` / `Border.rounded` / `ChartType.line` etc. are NOT
         // variables — they are compile-time-constant style specs. The
@@ -618,8 +629,7 @@ impl BytecodeCompiler {
             && v2_load_opcode.is_none()
             && typed_field.is_none()
             && field_numeric_type.is_none()
-        {
-        }
+        {}
         Ok(())
     }
 

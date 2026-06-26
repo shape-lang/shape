@@ -647,7 +647,7 @@ fn execute_inner(
     // expected kind is read from the callee's `frame_descriptor.slots`
     // (i.e. the per-slot proven `NativeKind` per ADR-006 §2.7.5.1 — no
     // `Unknown` placeholder). The return-kind is read from the callee's
-    // `frame_descriptor.return_kind`.
+    // `frame_descriptor.abi_return_kind()`.
     //
     // Per the §0.A.iv supervisor ruling, frame-descriptor absence
     // produces a structured `RemoteCallError` (no silent-degrade): a
@@ -679,7 +679,7 @@ fn execute_inner_with_runtimes(
 /// 2. Build a `VirtualMachine`, load the program, populate module objects.
 /// 3. Resolve the callee (hash → id → name precedence).
 /// 4. Read the callee's per-slot `NativeKind` from `frame_descriptor.slots`
-///    and the return kind from `frame_descriptor.return_kind`.
+///    and the return ABI kind from `frame_descriptor.abi_return_kind()`.
 /// 5. Materialize each `SerializableVMValue` arg into a `KindedSlot` via
 ///    `serializable_to_slot(arg, expected_kind, store)`.
 /// 6. Invoke the callee through the kinded ABI (`execute_function_by_id`).
@@ -831,7 +831,7 @@ fn run_remote_call(
         });
     };
 
-    let return_kind = frame_desc.as_ref().and_then(|fd| fd.return_kind);
+    let return_kind = frame_desc.as_ref().and_then(|fd| fd.abi_return_kind());
     let function_name_owned = function.name.clone();
     let _ = function; // release the borrow before moving vm into call
 
@@ -870,9 +870,10 @@ fn run_remote_call(
     // serialization (slot_to_serializable does NOT consume the share —
     // it borrows). `KindedSlot::Drop` retires it at scope exit.
     let (bits, kind) = (result.slot.raw(), result.kind);
-    // Cross-check: if the program declared a top-level return_kind, the
-    // returned slot's kind must agree. Mismatch is a structured error
-    // rather than a silent reinterpretation (ADR-006 §2.7.7 / Q9).
+    // Cross-check: if the callee declared an ABI return kind, the returned
+    // slot's kind must agree. Wrapper semantics live in
+    // FrameDescriptor.return_wrapper and are intentionally not consulted
+    // by the marshal boundary.
     if let Some(declared) = return_kind {
         if kind != declared {
             return Err(RemoteCallError {

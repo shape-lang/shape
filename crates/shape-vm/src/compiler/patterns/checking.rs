@@ -76,7 +76,7 @@ impl BytecodeCompiler {
         hint_span: Option<shape_ast::ast::Span>,
     ) -> Result<()> {
         match pattern {
-            Pattern::Wildcard | Pattern::Identifier(_) => Ok(()),
+            Pattern::Wildcard | Pattern::Identifier { .. } => Ok(()),
             Pattern::Typed {
                 type_annotation, ..
             } => {

@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::executor::result_option_carrier;
 // `VMError` is intentionally left out of the executor/mod.rs star-import
 // (see executor/mod.rs:126 comment); name it locally for the
 // `invoke_module_fn_id_stub` surface.
@@ -9,7 +10,8 @@ use shape_value::VMError;
 /// **STAGE K1 (2026-06-02).** The leaf projector shared by both
 /// `project_typed_return`'s `Concrete` arm and the wrapper arms
 /// (`Ok`/`Err`/`Some`) — those build their payload through this function
-/// and then wrap the resulting `KindedSlot` in `ResultData` / `OptionData`.
+/// and then wrap the resulting `KindedSlot` in canonical `__Result` /
+/// `__Option` TypedObjects.
 /// Every arm builds the typed-Arc carrier directly per ADR-005 §1 /
 /// ADR-006 §2.7 — no `Box<HeapValue>` wrapping, no value synthesis, no
 /// `ValueWord`. Arms that genuinely cannot project typed-Arc-direct at
@@ -199,22 +201,20 @@ fn project_concrete_return(
 /// scalar/leaf base established by the W17-snapshot-roundtrip work
 /// (Phase 2d Wave 2.6, 2026-05-11). Wrapper arms build their inner
 /// payload through [`project_concrete_return`] and wrap the resulting
-/// `KindedSlot` in the typed-Arc `ResultData` / `OptionData` carriers
-/// (kinds `Ptr(HeapKind::Result)` / `Ptr(HeapKind::Option)`); typed-object
-/// arms build a `TypedObjectStorage` via
+/// `KindedSlot` in canonical `__Result` / `__Option` TypedObjects;
+/// typed-object arms build a `TypedObjectStorage` via
 /// [`shape_runtime::type_schema::typed_object_from_pairs`]. Each arm picks
 /// its `NativeKind` from the discriminator without value synthesis per
 /// ADR-006 §2.7.4. `ArrayObjectPairs` (array of typed objects) needs the
 /// typed-object-array element-construction path that pairs with the K2
 /// array-of-heap-value producer and surfaces clean pending that landing.
 fn project_typed_return(
+    schemas: &shape_runtime::type_schema::BuiltinSchemaIds,
     tr: shape_runtime::typed_module_exports::TypedReturn,
 ) -> Result<shape_value::KindedSlot, VMError> {
     use shape_runtime::type_schema::typed_object_from_pairs;
     use shape_runtime::typed_module_exports::{ConcreteReturn, TypedReturn};
     use shape_value::KindedSlot;
-    use shape_value::heap_value::{OptionData, ResultData};
-    use std::sync::Arc;
 
     // Build a `TypedObjectStorage`-backed KindedSlot from string→leaf
     // pairs. Each leaf projects through `project_concrete_return`; the
@@ -251,23 +251,17 @@ fn project_typed_return(
         // ── Result / Option wrappers (ADR-006 §2.7.17 / Q18) ───────────
         TypedReturn::Ok(c) => {
             let payload = project_concrete_return(c)?;
-            let res = Arc::new(ResultData::ok(payload));
-            Ok(KindedSlot::from_result(res))
+            Ok(result_option_carrier::build_ok(schemas, payload))
         }
         TypedReturn::Err(c) => {
             let payload = project_concrete_return(c)?;
-            let res = Arc::new(ResultData::err(payload));
-            Ok(KindedSlot::from_result(res))
+            Ok(result_option_carrier::build_err(schemas, payload))
         }
         TypedReturn::Some(c) => {
             let payload = project_concrete_return(c)?;
-            let opt = Arc::new(OptionData::some(payload));
-            Ok(KindedSlot::from_option(opt))
+            Ok(result_option_carrier::build_some(schemas, payload))
         }
-        TypedReturn::None => {
-            let opt = Arc::new(OptionData::none());
-            Ok(KindedSlot::from_option(opt))
-        }
+        TypedReturn::None => Ok(result_option_carrier::build_none(schemas)),
 
         // ── Typed-object wrappers (TypedObjectStorage builder) ─────────
         TypedReturn::ObjectPairs(pairs) | TypedReturn::TypedObject(pairs) => {
@@ -275,18 +269,15 @@ fn project_typed_return(
         }
         TypedReturn::SomeObjectPairs(pairs) => {
             let payload = typed_object_from_concrete_pairs(pairs)?;
-            let opt = Arc::new(OptionData::some(payload));
-            Ok(KindedSlot::from_option(opt))
+            Ok(result_option_carrier::build_some(schemas, payload))
         }
         TypedReturn::OkObjectPairs(pairs) => {
             let payload = typed_object_from_concrete_pairs(pairs)?;
-            let res = Arc::new(ResultData::ok(payload));
-            Ok(KindedSlot::from_result(res))
+            Ok(result_option_carrier::build_ok(schemas, payload))
         }
         TypedReturn::ErrObjectPairs(pairs) => {
             let payload = typed_object_from_concrete_pairs(pairs)?;
-            let res = Arc::new(ResultData::err(payload));
-            Ok(KindedSlot::from_result(res))
+            Ok(result_option_carrier::build_err(schemas, payload))
         }
 
         // ── ArrayObjectPairs: SURFACE pending typed-object-array prod ──
@@ -440,7 +431,7 @@ impl VirtualMachine {
                 let raw_bits: Vec<u64> = args.iter().map(|s| s.slot().raw()).collect();
                 let typed_return =
                     (typed.invoke)(&raw_bits, &ctx).map_err(VMError::RuntimeError)?;
-                project_typed_return(typed_return)
+                project_typed_return(&self.builtin_schemas, typed_return)
             }
             shape_runtime::module_exports::ModuleFnEntry::TypedAsync(async_entry) => {
                 let raw_bits: Vec<u64> = args.iter().map(|s| s.slot().raw()).collect();
@@ -464,7 +455,7 @@ impl VirtualMachine {
                         ));
                     }
                 };
-                project_typed_return(typed_return)
+                project_typed_return(&self.builtin_schemas, typed_return)
             }
         }
     }
@@ -689,9 +680,8 @@ mod stage_k1_tests {
     //! routes through), and recovers the projected `KindedSlot` to assert the
     //! value survived the projection.
     //!
-    //! Recovery reads the typed-Arc / v2-raw carriers directly (ADR-005 §1):
-    //! `Arc::from_raw` + `into_raw` for `ResultData` / `OptionData` (restores
-    //! the share), and a borrow through the raw `*const TypedArray<T>` /
+    //! Recovery reads wrapper carriers through the same `result_option_carrier`
+    //! helper as production opcodes, and borrows raw `*const TypedArray<T>` /
     //! `*const TypedObjectStorage` / `*const HashMapKindedRef` for the heap
     //! carriers. The recovered `KindedSlot`'s own `Drop` retires the carrier.
 
@@ -699,7 +689,7 @@ mod stage_k1_tests {
     use shape_runtime::typed_module_exports::{
         ConcreteReturn, ConcreteType, TypedModuleFunction, TypedReturn,
     };
-    use shape_value::heap_value::{HashMapKindedRef, OptionData, ResultData, TypedObjectStorage};
+    use shape_value::heap_value::{HashMapKindedRef, TypedObjectStorage};
     use shape_value::v2::string_obj::StringObj;
     use shape_value::v2::typed_array::TypedArray;
     use shape_value::{HeapKind, KindedSlot, NativeKind};
@@ -708,8 +698,14 @@ mod stage_k1_tests {
     /// Register a typed module-fn whose 0-arg body returns `tr`, then invoke
     /// it through the real `invoke_module_fn_id_stub` dispatch path. Returns
     /// the projected `KindedSlot`.
-    fn roundtrip(tr: TypedReturn) -> KindedSlot {
+    fn roundtrip_with_schemas(
+        tr: TypedReturn,
+    ) -> (
+        KindedSlot,
+        shape_runtime::type_schema::BuiltinSchemaIds,
+    ) {
         let mut vm = VirtualMachine::new(VMConfig::default());
+        let schemas = vm.builtin_schemas.clone();
         let tr_cell = std::sync::Mutex::new(Some(tr));
         let tmf = TypedModuleFunction {
             invoke: Arc::new(move |_slots, _ctx| {
@@ -725,8 +721,14 @@ mod stage_k1_tests {
         };
         let entry = shape_runtime::module_exports::ModuleFnEntry::Typed(tmf);
         let fn_id = vm.register_module_fn_entry(entry);
-        vm.invoke_module_fn_id_stub(fn_id, &[])
-            .expect("module-fn invocation projects cleanly")
+        let slot = vm
+            .invoke_module_fn_id_stub(fn_id, &[])
+            .expect("module-fn invocation projects cleanly");
+        (slot, schemas)
+    }
+
+    fn roundtrip(tr: TypedReturn) -> KindedSlot {
+        roundtrip_with_schemas(tr).0
     }
 
     #[test]
@@ -826,53 +828,55 @@ mod stage_k1_tests {
 
     #[test]
     fn ok_wrapper_roundtrips() {
-        let slot = roundtrip(TypedReturn::Ok(ConcreteReturn::I64(99)));
-        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::Result));
-        unsafe {
-            let arc = Arc::<ResultData>::from_raw(slot.raw() as *const ResultData);
-            assert!(arc.is_ok);
-            assert_eq!(arc.payload.kind(), NativeKind::Int64);
-            assert_eq!(arc.payload.slot().raw() as i64, 99);
-            let _ = Arc::into_raw(arc);
-        }
+        let (slot, schemas) = roundtrip_with_schemas(TypedReturn::Ok(ConcreteReturn::I64(99)));
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        let view = result_option_carrier::read_result(&schemas, &slot)
+            .unwrap()
+            .unwrap();
+        assert!(view.is_ok());
+        let payload = view.clone_payload().unwrap();
+        assert_eq!(payload.kind(), NativeKind::Int64);
+        assert_eq!(payload.slot().raw() as i64, 99);
+        drop(payload);
     }
 
     #[test]
     fn err_wrapper_roundtrips() {
-        let slot = roundtrip(TypedReturn::Err(ConcreteReturn::String("boom".to_string())));
-        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::Result));
-        unsafe {
-            let arc = Arc::<ResultData>::from_raw(slot.raw() as *const ResultData);
-            assert!(!arc.is_ok);
-            assert_eq!(arc.payload.kind(), NativeKind::String);
-            let s = arc.payload.slot().raw() as *const String;
-            assert_eq!(&**(&*s), "boom");
-            let _ = Arc::into_raw(arc);
-        }
+        let (slot, schemas) =
+            roundtrip_with_schemas(TypedReturn::Err(ConcreteReturn::String("boom".to_string())));
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        let view = result_option_carrier::read_result(&schemas, &slot)
+            .unwrap()
+            .unwrap();
+        assert!(!view.is_ok());
+        let payload = view.clone_payload().unwrap();
+        assert_eq!(payload.kind(), NativeKind::String);
+        assert_eq!(payload.as_str(), Some("boom"));
+        drop(payload);
     }
 
     #[test]
     fn some_wrapper_roundtrips() {
-        let slot = roundtrip(TypedReturn::Some(ConcreteReturn::Bool(true)));
-        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::Option));
-        unsafe {
-            let arc = Arc::<OptionData>::from_raw(slot.raw() as *const OptionData);
-            assert!(arc.is_some);
-            assert_eq!(arc.payload.kind(), NativeKind::Bool);
-            assert_eq!(arc.payload.slot().raw(), 1);
-            let _ = Arc::into_raw(arc);
-        }
+        let (slot, schemas) = roundtrip_with_schemas(TypedReturn::Some(ConcreteReturn::Bool(true)));
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        let view = result_option_carrier::read_option(&schemas, &slot)
+            .unwrap()
+            .unwrap();
+        assert!(view.is_some());
+        let payload = view.clone_payload().unwrap();
+        assert_eq!(payload.kind(), NativeKind::Bool);
+        assert_eq!(payload.slot().raw(), 1);
+        drop(payload);
     }
 
     #[test]
     fn none_wrapper_roundtrips() {
-        let slot = roundtrip(TypedReturn::None);
-        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::Option));
-        unsafe {
-            let arc = Arc::<OptionData>::from_raw(slot.raw() as *const OptionData);
-            assert!(!arc.is_some);
-            let _ = Arc::into_raw(arc);
-        }
+        let (slot, schemas) = roundtrip_with_schemas(TypedReturn::None);
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        let view = result_option_carrier::read_option(&schemas, &slot)
+            .unwrap()
+            .unwrap();
+        assert!(!view.is_some());
     }
 
     #[test]
@@ -889,17 +893,18 @@ mod stage_k1_tests {
 
     #[test]
     fn ok_object_pairs_roundtrips() {
-        let slot = roundtrip(TypedReturn::OkObjectPairs(vec![(
+        let (slot, schemas) = roundtrip_with_schemas(TypedReturn::OkObjectPairs(vec![(
             "x".to_string(),
             ConcreteReturn::I64(1),
         )]));
-        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::Result));
-        unsafe {
-            let arc = Arc::<ResultData>::from_raw(slot.raw() as *const ResultData);
-            assert!(arc.is_ok);
-            assert_eq!(arc.payload.kind(), NativeKind::Ptr(HeapKind::TypedObject));
-            let _ = Arc::into_raw(arc);
-        }
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        let view = result_option_carrier::read_result(&schemas, &slot)
+            .unwrap()
+            .unwrap();
+        assert!(view.is_ok());
+        let payload = view.clone_payload().unwrap();
+        assert_eq!(payload.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        drop(payload);
     }
 
     #[test]

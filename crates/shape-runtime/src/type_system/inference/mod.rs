@@ -52,6 +52,131 @@ use std::collections::HashMap;
 use crate::type_system::semantic::{EnumVariant, SemanticType};
 use std::collections::HashSet;
 
+/// Finalized type fact for one source binding.
+///
+/// The key in `InferenceFacts::binding_facts` is the binder/name span. The
+/// duplicated `binder_span` keeps the record self-describing for consumers that
+/// collect facts by name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BindingFact {
+    pub name: String,
+    pub binder_span: Span,
+    pub initializer_span: Option<Span>,
+    pub ty: Type,
+}
+
+/// Canonical type-inference facts produced by one best-effort program pass.
+///
+/// This is the named handoff for downstream compiler consumers that need both
+/// top-level inferred signatures and the finalized per-expression span table.
+/// Both maps come from the same `infer_program_best_effort` run; constructing
+/// this carrier must not trigger a second inference pass.
+#[derive(Debug, Clone, Default)]
+pub struct InferenceFacts {
+    top_level_types: HashMap<String, Type>,
+    expression_types: HashMap<Span, Type>,
+    binding_facts: HashMap<Span, BindingFact>,
+}
+
+impl InferenceFacts {
+    pub fn new(
+        top_level_types: HashMap<String, Type>,
+        expression_types: HashMap<Span, Type>,
+    ) -> Self {
+        Self {
+            top_level_types,
+            expression_types,
+            binding_facts: HashMap::new(),
+        }
+    }
+
+    pub fn with_binding_facts(
+        top_level_types: HashMap<String, Type>,
+        expression_types: HashMap<Span, Type>,
+        binding_facts: HashMap<Span, BindingFact>,
+    ) -> Self {
+        Self {
+            top_level_types,
+            expression_types,
+            binding_facts,
+        }
+    }
+
+    /// Lookup a finalized expression type by source span.
+    pub fn expression_type(&self, span: Span) -> Option<&Type> {
+        if span.is_dummy() {
+            return None;
+        }
+        self.expression_types.get(&span)
+    }
+
+    /// Lookup a top-level function signature inferred for `name`.
+    pub fn function_signature(&self, name: &str) -> Option<&Type> {
+        match self.top_level_types.get(name) {
+            Some(ty @ Type::Function { .. }) => Some(ty),
+            _ => None,
+        }
+    }
+
+    /// Lookup any top-level inferred type by symbol name.
+    pub fn top_level_type(&self, name: &str) -> Option<&Type> {
+        self.top_level_types.get(name)
+    }
+
+    pub fn top_level_types(&self) -> &HashMap<String, Type> {
+        &self.top_level_types
+    }
+
+    pub fn expression_types(&self) -> &HashMap<Span, Type> {
+        &self.expression_types
+    }
+
+    /// Lookup a finalized binding fact by binder/name span.
+    pub fn binding_fact(&self, span: Span) -> Option<&BindingFact> {
+        if span.is_dummy() {
+            return None;
+        }
+        self.binding_facts.get(&span)
+    }
+
+    /// Lookup a finalized binding type by binder/name span.
+    pub fn binding_type(&self, span: Span) -> Option<&Type> {
+        self.binding_fact(span).map(|fact| &fact.ty)
+    }
+
+    pub fn binding_facts(&self) -> &HashMap<Span, BindingFact> {
+        &self.binding_facts
+    }
+
+    pub fn bindings_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a BindingFact> {
+        self.binding_facts
+            .values()
+            .filter(move |fact| fact.name == name)
+    }
+
+    pub fn into_expression_types(self) -> HashMap<Span, Type> {
+        self.expression_types
+    }
+
+    pub fn into_parts(self) -> (HashMap<String, Type>, HashMap<Span, Type>) {
+        (self.top_level_types, self.expression_types)
+    }
+
+    pub fn into_parts_with_bindings(
+        self,
+    ) -> (
+        HashMap<String, Type>,
+        HashMap<Span, Type>,
+        HashMap<Span, BindingFact>,
+    ) {
+        (
+            self.top_level_types,
+            self.expression_types,
+            self.binding_facts,
+        )
+    }
+}
+
 pub struct TypeInferenceEngine {
     /// Type environment tracking variable types
     pub env: TypeEnvironment,
@@ -266,6 +391,10 @@ pub struct TypeInferenceEngine {
     /// `BytecodeCompiler::infer_expr_type` (consulted FIRST, before the
     /// per-context patch ladder) via `resolved_expr_type`.
     pub(crate) expr_type_table: HashMap<Span, Type>,
+    /// Post-solve binding facts keyed by binder/name span. Populated with the
+    /// pre-solve type from `infer_variable_decl`, then finalized through the
+    /// same substitution/drop policy as `expr_type_table`.
+    pub(crate) binding_fact_table: HashMap<Span, BindingFact>,
 }
 
 impl Default for TypeInferenceEngine {
@@ -326,6 +455,7 @@ impl TypeInferenceEngine {
             comptime_depth: 0,
             unannotated_let_binding_origins: HashMap::new(),
             expr_type_table: HashMap::new(),
+            binding_fact_table: HashMap::new(),
         }
     }
 
@@ -353,6 +483,10 @@ impl TypeInferenceEngine {
         std::mem::take(&mut self.expr_type_table)
     }
 
+    pub fn take_binding_fact_table(&mut self) -> HashMap<Span, BindingFact> {
+        std::mem::take(&mut self.binding_fact_table)
+    }
+
     /// T1 keystone post-solve finalization: rewrite every recorded expression
     /// type through the final substitution and DROP entries that remain
     /// un-inferable (still a free variable after substitution). Called once,
@@ -375,6 +509,77 @@ impl TypeInferenceEngine {
             })
             .collect();
         self.expr_type_table = resolved;
+    }
+
+    fn finalize_binding_fact_table(&mut self) {
+        let resolved: HashMap<Span, BindingFact> = self
+            .binding_fact_table
+            .drain()
+            .filter_map(|(span, mut fact)| {
+                if span.is_dummy() {
+                    return None;
+                }
+                let resolved_ty = self.solver.unifier().apply_substitutions(&fact.ty);
+                if Self::type_is_fully_resolved(&resolved_ty) {
+                    fact.ty = resolved_ty;
+                    Some((span, fact))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.binding_fact_table = resolved;
+    }
+
+    fn record_binding_facts_for_decl(&mut self, decl: &shape_ast::ast::VariableDecl, ty: &Type) {
+        let initializer_span = decl
+            .value
+            .as_ref()
+            .map(shape_ast::ast::Spanned::span)
+            .filter(|span| !span.is_dummy());
+
+        for (name, binder_span) in decl.pattern.get_bindings() {
+            let fact_ty = self
+                .env
+                .lookup(&name)
+                .map(|scheme| scheme.ty.clone())
+                .unwrap_or_else(|| ty.clone());
+            self.binding_fact_table.insert(
+                binder_span,
+                BindingFact {
+                    name,
+                    binder_span,
+                    initializer_span,
+                    ty: fact_ty,
+                },
+            );
+        }
+    }
+
+    fn record_binding_facts_for_match_pattern(
+        &mut self,
+        pattern: &shape_ast::ast::Pattern,
+        scrutinee_span: Span,
+    ) {
+        let initializer_span = (!scrutinee_span.is_dummy()).then_some(scrutinee_span);
+
+        for (name, binder_span) in pattern.get_bindings() {
+            if binder_span.is_dummy() {
+                continue;
+            }
+            let Some(scheme) = self.env.lookup(&name) else {
+                continue;
+            };
+            self.binding_fact_table.insert(
+                binder_span,
+                BindingFact {
+                    name,
+                    binder_span,
+                    initializer_span,
+                    ty: scheme.ty.clone(),
+                },
+            );
+        }
     }
 
     /// Whether a (post-substitution) type is fully resolved — i.e. contains no
@@ -1627,6 +1832,7 @@ impl TypeInferenceEngine {
         self.implicit_return_scopes.clear();
         self.unannotated_let_binding_origins.clear();
         self.expr_type_table.clear();
+        self.binding_fact_table.clear();
 
         // Hoisting pre-pass over the consumer (mirrors production).
         self.run_hoisting_prepass(consumer);
@@ -1679,6 +1885,7 @@ impl TypeInferenceEngine {
         // T1 keystone: rewrite the per-expression type table through the final
         // substitution and drop un-inferable entries (parity with production).
         self.finalize_expr_type_table();
+        self.finalize_binding_fact_table();
 
         (types, errors)
     }
@@ -1714,6 +1921,7 @@ impl TypeInferenceEngine {
         self.non_exhaustive_match_origins.clear();
         self.unannotated_let_binding_origins.clear();
         self.expr_type_table.clear();
+        self.binding_fact_table.clear();
         // Run hoisting pre-pass first
         self.run_hoisting_prepass(program);
 
@@ -1906,8 +2114,23 @@ impl TypeInferenceEngine {
         // every solver binding, rewrite the per-expression type table through
         // the final substitution and drop entries that remain un-inferable.
         self.finalize_expr_type_table();
+        self.finalize_binding_fact_table();
 
         (types, errors)
+    }
+
+    /// Infer a program once and package the finalized handoff facts.
+    pub fn infer_program_facts_best_effort(
+        &mut self,
+        program: &Program,
+    ) -> (InferenceFacts, Vec<TypeError>) {
+        let (types, errors) = self.infer_program_best_effort(program);
+        let expression_types = self.take_expr_type_table();
+        let binding_facts = self.take_binding_fact_table();
+        (
+            InferenceFacts::with_binding_facts(types, expression_types, binding_facts),
+            errors,
+        )
     }
 
     /// Extend `callable_return_from_fn_param` across one-named-function-hop

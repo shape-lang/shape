@@ -73,7 +73,8 @@ fn test_for_in_statement() {
     match &items[0] {
         crate::ast::Item::Statement(crate::ast::Statement::Expression(expr, _), _) => match expr {
             crate::ast::Expr::For(fe, _) => {
-                assert_eq!(fe.pattern, crate::ast::Pattern::Identifier("x".to_string()));
+                assert_eq!(fe.pattern.as_simple_name(), Some("x"));
+                assert_eq!(fe.pattern.binder_span(), Some(crate::ast::Span::new(4, 5)));
             }
             other => panic!("Expected For expression, got {:?}", other),
         },

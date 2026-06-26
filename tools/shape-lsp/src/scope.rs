@@ -320,7 +320,7 @@ impl ScopeTree {
             Expr::For(for_expr, span) => {
                 let for_scope = self.push_scope(span.start, span.end, Some(scope_idx));
                 // Loop variable from pattern
-                if let Pattern::Identifier(name) = &for_expr.pattern {
+                if let Pattern::Identifier { name, .. } = &for_expr.pattern {
                     // Use the span start to approximate the variable position
                     // (Pattern doesn't carry its own span, use the for-expr span start)
                     let name_start = span.start;
@@ -378,7 +378,7 @@ impl ScopeTree {
         scope_idx: usize,
     ) {
         match pattern {
-            shape_ast::ast::Pattern::Identifier(name) => {
+            shape_ast::ast::Pattern::Identifier { name, .. } => {
                 if let Some(span) = pattern_span {
                     if !span.is_dummy() {
                         let start = span.start;
@@ -390,6 +390,7 @@ impl ScopeTree {
             shape_ast::ast::Pattern::Typed {
                 name,
                 type_annotation: _,
+                ..
             } => {
                 if let Some(span) = pattern_span {
                     if !span.is_dummy() {

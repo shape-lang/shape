@@ -211,9 +211,12 @@ fn test_match_typed_pattern_parses() {
             match &match_expr.arms[0].pattern {
                 crate::ast::Pattern::Typed {
                     name,
+                    name_span,
                     type_annotation,
                 } => {
                     assert_eq!(name, "n");
+                    let n_start = content.find("n: int").expect("typed binder in input");
+                    assert_eq!(*name_span, crate::ast::Span::new(n_start, n_start + 1));
                     assert_eq!(
                         type_annotation,
                         &crate::ast::TypeAnnotation::Basic("int".to_string())
@@ -999,6 +1002,67 @@ fn test_object_pattern_shorthand_parses() {
 }
 
 #[test]
+fn test_object_pattern_shorthand_binder_span() {
+    let input = r#"let out = match p { {x, y} => x + y };"#;
+    let items = parse_program_helper(input).expect("object shorthand should parse");
+    let crate::ast::Item::Statement(crate::ast::Statement::VariableDecl(decl, _), _) = &items[0]
+    else {
+        panic!("Expected Statement(VariableDecl)");
+    };
+    let crate::ast::Expr::Match(match_expr, _) = decl.value.as_ref().expect("expected match value")
+    else {
+        panic!("Expected match expression");
+    };
+    let crate::ast::Pattern::Object(fields) = &match_expr.arms[0].pattern else {
+        panic!("Expected object pattern");
+    };
+
+    let x_start = input.find("{x, y}").expect("object shorthand in input") + 1;
+    let y_start = input.find(", y}").expect("second shorthand field in input") + 2;
+    assert_eq!(fields[0].0, "x");
+    assert_eq!(
+        fields[0].1.binder_span(),
+        Some(crate::ast::Span::new(x_start, x_start + 1))
+    );
+    assert_eq!(fields[1].0, "y");
+    assert_eq!(
+        fields[1].1.binder_span(),
+        Some(crate::ast::Span::new(y_start, y_start + 1))
+    );
+}
+
+#[test]
+fn test_constructor_struct_shorthand_binder_span() {
+    let input = r#"let out = match shape { Circle { radius } => radius, _ => 0 };"#;
+    let items = parse_program_helper(input).expect("constructor shorthand should parse");
+    let crate::ast::Item::Statement(crate::ast::Statement::VariableDecl(decl, _), _) = &items[0]
+    else {
+        panic!("Expected Statement(VariableDecl)");
+    };
+    let crate::ast::Expr::Match(match_expr, _) = decl.value.as_ref().expect("expected match value")
+    else {
+        panic!("Expected match expression");
+    };
+    let crate::ast::Pattern::Constructor { fields, .. } = &match_expr.arms[0].pattern else {
+        panic!("Expected constructor pattern");
+    };
+    let crate::ast::PatternConstructorFields::Struct(fields) = fields else {
+        panic!("Expected struct constructor fields");
+    };
+    let radius_start = input
+        .find("radius")
+        .expect("constructor shorthand in input");
+    assert_eq!(fields[0].0, "radius");
+    assert_eq!(
+        fields[0].1.binder_span(),
+        Some(crate::ast::Span::new(
+            radius_start,
+            radius_start + "radius".len()
+        ))
+    );
+}
+
+#[test]
 fn test_object_pattern_shorthand_full_program() {
     let input = r#"
         let p = { x: 5, y: 3 }
@@ -1265,8 +1329,19 @@ fn test_keyword_prefixed_ident_bare_if_condition() {
 fn test_keyword_prefixed_identifiers_as_bindings() {
     // Identifiers that start with each control-flow keyword must all bind.
     for name in &[
-        "ifX", "elseX", "whileX", "forEach", "loopZ", "matchY", "letX", "inItem",
-        "asValue", "comptimeFlag", "returnCode", "breakPoint", "continueFrom",
+        "ifX",
+        "elseX",
+        "whileX",
+        "forEach",
+        "loopZ",
+        "matchY",
+        "letX",
+        "inItem",
+        "asValue",
+        "comptimeFlag",
+        "returnCode",
+        "breakPoint",
+        "continueFrom",
     ] {
         let content = format!("fn f() {{ let {name} = 1; print({name}); }}");
         let result = parse_program_helper(&content);

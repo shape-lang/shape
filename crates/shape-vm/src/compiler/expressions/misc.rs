@@ -768,7 +768,7 @@ impl BytecodeCompiler {
             }
 
             let for_expr = shape_ast::ast::ForExpr {
-                pattern: shape_ast::ast::Pattern::Identifier(cf.variable.clone()),
+                pattern: shape_ast::ast::Pattern::synthetic_identifier(cf.variable.clone()),
                 iterable: cf.iterable.clone(),
                 body: Box::new(Expr::Block(
                     shape_ast::ast::BlockExpr { items },

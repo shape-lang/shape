@@ -9,7 +9,7 @@ use shape_ast::error::{Result, ShapeError, SourceLocation};
 use shape_runtime::type_schema::FieldType;
 use std::collections::HashSet;
 
-use super::{BytecodeCompiler, FunctionReturnReferenceSummary, ParamPassMode};
+use super::{BytecodeCompiler, ClosureBodyPeek, FunctionReturnReferenceSummary, ParamPassMode};
 
 pub(super) struct TypedFieldPlace {
     pub root_name: String,
@@ -919,161 +919,21 @@ impl BytecodeCompiler {
     ) {
         let pass_modes = self.callable_pass_modes_from_expr(expr);
         let return_summary = self.callable_return_reference_summary_from_expr(expr);
-        // Sweep phase 3c.1: when the initializer is a `FunctionExpr` (a
-        // closure literal), infer its body's return type so a later
-        // `FunctionCall { name: <slot's binding>, .. }` can recover the
-        // type for strict-typing binop dispatch. `f(5) + f(7)` over
-        // `let f = |x: int| x + base` previously failed with
-        // "unknown + unknown" because the call expression's return type
-        // wasn't tracked anywhere — only top-level function returns are
-        // registered in `function_return_types`.
-        let return_type_name: Option<String> = match expr {
-            shape_ast::ast::Expr::FunctionExpr {
-                params,
-                body,
-                return_type,
-                ..
-            } => crate::compiler::expressions::closures::infer_closure_body_return_type_name(
-                self,
-                params,
-                body,
-                return_type.as_ref(),
-            ),
-            // Sweep phase 3c.x: when the initializer is a call to a user
-            // function whose only `return` statement returns a closure
-            // literal, drill in to recover that closure's return type. This
-            // fixes patterns like:
-            //   fn make(n: int) -> any { return |x| x + n }
-            //   let f = make(7)
-            //   f(3) + f(4)
-            // where the function's declared return type `any` would
-            // otherwise leave `f`'s callable return type unknown.
-            shape_ast::ast::Expr::FunctionCall { name, .. } => {
-                if let Some(func_def) = self.function_defs.get(name).cloned() {
-                    extract_returned_closure_return_type_name(
-                        self,
-                        &func_def.body,
-                        &func_def.params,
-                    )
-                } else {
-                    None
-                }
-            }
-            // Sweep phase 3c.x: when the initializer is `arr[i]` and `arr`
-            // is a `let arr = [|...|, ...]` binding tracked in the
-            // array-callable map, propagate the element callable return
-            // type to this binding so a later `g(args)` call recovers it.
-            shape_ast::ast::Expr::IndexAccess { object, .. } => {
-                if let shape_ast::ast::Expr::Identifier(arr_name, _) = object.as_ref() {
-                    let mut from_arr: Option<String> = None;
-                    let local_idx_opt = self.resolve_local(arr_name);
-                    if let Some(local_idx) = local_idx_opt {
-                        from_arr = self
-                            .local_array_callable_return_types
-                            .get(&local_idx)
-                            .cloned();
-                    }
-                    if from_arr.is_none() {
-                        if let Some(scoped) = self.resolve_scoped_module_binding_name(arr_name) {
-                            if let Some(&binding_idx) = self.module_bindings.get(&scoped) {
-                                from_arr = self
-                                    .module_binding_array_callable_return_types
-                                    .get(&binding_idx)
-                                    .cloned();
-                            }
-                        }
-                    }
-                    if from_arr.is_none() {
-                        if let Some(&binding_idx) = self.module_bindings.get(arr_name) {
-                            from_arr = self
-                                .module_binding_array_callable_return_types
-                                .get(&binding_idx)
-                                .cloned();
-                        }
-                    }
-                    let _ = local_idx_opt;
-                    from_arr
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        // Sweep phase 3c.x: when the initializer is an array literal of
-        // closure expressions with a homogeneous return type, record that
-        // type so `arr[i](args...)` can recover it for strict-typing binop
-        // dispatch. The parser models `arr[0](1)` as
-        // `MethodCall { method: "__call__", receiver: IndexAccess { object: arr, .. } }`,
-        // so the lookup in `infer_expr_type` keys on the receiver's
-        // `IndexAccess.object` identifier.
-        let array_callable_return_type_name: Option<String> = match expr {
-            shape_ast::ast::Expr::Array(elements, _) if !elements.is_empty() => {
-                let mut common: Option<String> = None;
-                for elem in elements {
-                    let rt: Option<String> = match elem {
-                        shape_ast::ast::Expr::FunctionExpr {
-                            params,
-                            body,
-                            return_type,
-                            ..
-                        } => crate::compiler::expressions::closures::infer_closure_body_return_type_name(
-                            self,
-                            params,
-                            body,
-                            return_type.as_ref(),
-                        ),
-                        // Sweep phase 3c.x: array element is an identifier
-                        // bound to a known callable (e.g.
-                        // `let f = make(...)` followed by `let arr = [f]`).
-                        // Look up the binding's callable return type.
-                        shape_ast::ast::Expr::Identifier(elem_name, _) => {
-                            let mut t: Option<String> = None;
-                            if let Some(local_idx) = self.resolve_local(elem_name) {
-                                t = self
-                                    .local_callable_return_types
-                                    .get(&local_idx)
-                                    .cloned();
-                            }
-                            if t.is_none() {
-                                if let Some(&binding_idx) =
-                                    self.module_bindings.get(elem_name)
-                                {
-                                    t = self
-                                        .module_binding_callable_return_types
-                                        .get(&binding_idx)
-                                        .cloned();
-                                }
-                            }
-                            t
-                        }
-                        _ => None,
-                    };
-                    match (&common, rt) {
-                        (None, Some(t)) => common = Some(t),
-                        (Some(prev), Some(t)) if *prev == t => {}
-                        _ => {
-                            common = None;
-                            break;
-                        }
-                    }
-                }
-                common
-            }
-            _ => None,
-        };
         // cluster-2-cw-IB-class-b: when the initializer is a FunctionExpr
-        // (closure literal), retain its body so the value-call site can
-        // re-run return-type inference with caller-context arg types.
+        // (closure literal), or a call to a function returning a closure
+        // literal, retain that closure body so the value-call site can derive
+        // the return type structurally from the engine facts. This replaces
+        // the deleted callable-return string maps.
         // Cleared (set to None below) for non-FunctionExpr initializers
         // so a same-slot reassignment with a non-closure RHS doesn't
         // leak a stale closure peek.
-        let closure_body_peek: Option<super::ClosureBodyPeek> = match expr {
+        let closure_body_peek: Option<ClosureBodyPeek> = match expr {
             shape_ast::ast::Expr::FunctionExpr {
                 params,
                 body,
                 return_type,
                 ..
-            } => Some(super::ClosureBodyPeek {
+            } => Some(ClosureBodyPeek {
                 params: params.clone(),
                 body: body.clone(),
                 return_type: return_type.clone(),
@@ -1104,6 +964,10 @@ impl BytecodeCompiler {
                     }
                 },
             }),
+            shape_ast::ast::Expr::FunctionCall { name, .. } => self
+                .function_defs
+                .get(name)
+                .and_then(|func_def| extract_returned_closure_peek(&func_def.body)),
             _ => None,
         };
 
@@ -1118,18 +982,6 @@ impl BytecodeCompiler {
                     .insert(slot, return_summary);
             } else {
                 self.local_callable_return_reference_summaries.remove(&slot);
-            }
-            if let Some(return_type_name) = return_type_name {
-                self.local_callable_return_types
-                    .insert(slot, return_type_name);
-            } else {
-                self.local_callable_return_types.remove(&slot);
-            }
-            if let Some(array_rt) = array_callable_return_type_name {
-                self.local_array_callable_return_types
-                    .insert(slot, array_rt);
-            } else {
-                self.local_array_callable_return_types.remove(&slot);
             }
             // cluster-2-cw-IB-class-b: install / clear the closure body
             // peek on this local slot. Same write discipline as the
@@ -1154,25 +1006,6 @@ impl BytecodeCompiler {
                 self.module_binding_callable_return_reference_summaries
                     .remove(&slot);
             }
-            // Sweep phase 3c.x: previously this branch keyed on `pass_modes
-            // is Some` and only updated the return-type maps in that case,
-            // which broke the `let f = make(...) -> any` chain (no pass
-            // modes → f's callable return type is never recorded → the
-            // downstream `[f]` array can't recover the closure return type
-            // either). Always update independently.
-            if let Some(return_type_name) = return_type_name {
-                self.module_binding_callable_return_types
-                    .insert(slot, return_type_name);
-            } else {
-                self.module_binding_callable_return_types.remove(&slot);
-            }
-            if let Some(array_rt) = array_callable_return_type_name {
-                self.module_binding_array_callable_return_types
-                    .insert(slot, array_rt);
-            } else {
-                self.module_binding_array_callable_return_types
-                    .remove(&slot);
-            }
             // cluster-2-cw-IB-class-b: install / clear the closure body
             // peek on the module-binding side. Parallels the local-slot
             // branch above.
@@ -1189,17 +1022,12 @@ impl BytecodeCompiler {
         if is_local {
             self.local_callable_pass_modes.remove(&slot);
             self.local_callable_return_reference_summaries.remove(&slot);
-            self.local_callable_return_types.remove(&slot);
-            self.local_array_callable_return_types.remove(&slot);
             // cluster-2-cw-IB-class-b: release retained closure body
             // peek alongside the other callable-binding state.
             self.local_callable_closure_bodies.remove(&slot);
         } else {
             self.module_binding_callable_pass_modes.remove(&slot);
             self.module_binding_callable_return_reference_summaries
-                .remove(&slot);
-            self.module_binding_callable_return_types.remove(&slot);
-            self.module_binding_array_callable_return_types
                 .remove(&slot);
             // cluster-2-cw-IB-class-b: release retained module-binding
             // closure body peek alongside the other module-binding
@@ -1698,18 +1526,29 @@ impl BytecodeCompiler {
     }
 }
 
-/// Sweep phase 3c.x: walk a function body looking for a single
-/// `return |params| body` and infer the closure's return type. Returns
-/// None when the body is not a clean closure-returning shape (multiple
-/// returns, non-closure return, missing return, etc.). Used by
-/// `update_callable_binding_from_expr` to fix the `let f = make(...)` →
-/// `f(arg) + f(arg)` strict-typing chain when `make`'s declared return is
-/// `any`.
-fn extract_returned_closure_return_type_name(
-    compiler: &mut BytecodeCompiler,
-    body: &[Statement],
-    enclosing_params: &[shape_ast::ast::FunctionParameter],
-) -> Option<String> {
+/// Walk a function body looking for a single `return |params| body` shape.
+/// Returns the retained closure peek so callable-return consumers can derive
+/// its return type from the canonical engine facts rather than a string map.
+fn extract_returned_closure_peek(body: &[Statement]) -> Option<ClosureBodyPeek> {
+    let closure_expr = find_returned_closure_expr(body)?;
+    let Expr::FunctionExpr {
+        params,
+        body,
+        return_type,
+        ..
+    } = closure_expr
+    else {
+        return None;
+    };
+    Some(ClosureBodyPeek {
+        params: params.clone(),
+        body: body.clone(),
+        return_type: return_type.clone(),
+        function_index: None,
+    })
+}
+
+fn find_returned_closure_expr(body: &[Statement]) -> Option<&Expr> {
     fn find_returned_closure_in_stmt(stmt: &Statement) -> Option<&Expr> {
         match stmt {
             Statement::Return(Some(expr), _) => match expr {
@@ -1730,7 +1569,6 @@ fn extract_returned_closure_return_type_name(
     // statements once and accept the first matching shape from the tail
     // outward; mismatches abort.
     let mut returned_closure: Option<&Expr> = None;
-    let mut last_stmt_is_terminal = false;
     for (i, stmt) in body.iter().enumerate() {
         let is_last = i + 1 == body.len();
         match stmt {
@@ -1744,30 +1582,10 @@ fn extract_returned_closure_return_type_name(
             _ if is_last => {
                 if let Some(expr) = find_returned_closure_in_stmt(stmt) {
                     returned_closure = Some(expr);
-                    last_stmt_is_terminal = true;
                 }
             }
             _ => {}
         }
-        let _ = last_stmt_is_terminal;
     }
-
-    let closure_expr = returned_closure?;
-    if let Expr::FunctionExpr {
-        params,
-        body,
-        return_type,
-        ..
-    } = closure_expr
-    {
-        crate::compiler::expressions::closures::infer_closure_body_return_type_name_with_outer(
-            compiler,
-            params,
-            body,
-            return_type.as_ref(),
-            enclosing_params,
-        )
-    } else {
-        None
-    }
+    returned_closure
 }

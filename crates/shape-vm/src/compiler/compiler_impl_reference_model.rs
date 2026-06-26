@@ -801,52 +801,16 @@ impl BytecodeCompiler {
     ) -> (
         HashMap<String, Vec<bool>>,
         HashMap<String, Vec<bool>>,
-        HashMap<String, Vec<Option<String>>>,
         HashMap<String, shape_ast::ast::TypeAnnotation>,
-        HashMap<String, Vec<Option<shape_value::v2::ConcreteType>>>,
-        HashMap<String, Vec<Option<Vec<(String, shape_runtime::type_schema::FieldType)>>>>,
-        HashMap<String, Vec<(String, shape_runtime::type_schema::FieldType)>>,
-        HashMap<String, Vec<Option<Vec<shape_ast::ast::TypeAnnotation>>>>,
-        // T1 keystone: the post-solve per-expression type table (span -> resolved type).
-        HashMap<shape_ast::ast::Span, shape_runtime::type_system::Type>,
+        // Canonical post-solve facts from the single best-effort inference pass.
+        InferenceFacts,
     ) {
         let funcs = Self::collect_program_functions(program);
         let mut inference = shape_runtime::type_system::inference::TypeInferenceEngine::new();
-        let (types, _) = inference.infer_program_best_effort(program);
-        // T1 keystone: harvest the post-solve per-expression type table from the
-        // same reference-model pass that walked the full program (no second
-        // inference run). The table holds ONLY fully-resolved types (the engine
-        // drops any entry that stayed a free variable post-solve). The
-        // `infer_expr_type` consumer EXCLUDES `PropertyAccess` from the consult
-        // so a deliberate strictness ruling (STAGE-F1 unannotated-empty-`[]`
-        // field read) is preserved; see the scope comment there.
-        let resolved_expr_types = inference.take_expr_type_table();
-        let inferred_ref_params = Self::infer_reference_params_from_types(program, &types);
-        let inferred_param_type_hints = Self::infer_param_type_hints_from_types(program, &types);
-        let inferred_return_annotations =
-            Self::infer_return_annotations_from_types(program, &types);
-        // v0.3 WS-7: project the inference engine's per-parameter `Type`
-        // for UNANNOTATED params into a `ConcreteType`. This is the JIT's
-        // proof source for the v2 typed-array fast path on unannotated
-        // array params.
-        let inferred_param_concrete_types =
-            Self::infer_param_concrete_types_from_types(program, &types);
-        // Wave 1a PART B: project fn-typed unannotated params (used-as-callable
-        // in the body) into their concrete argument annotations, for call-site
-        // closure-argument seeding.
-        let inferred_param_fn_param_types =
-            Self::infer_param_fn_param_types_from_types(program, &types);
-        // WS-9b: project anonymous-object param types into per-field
-        // `FieldType` lists so `compile_function_body` can register an
-        // inline schema and resolve `param.field` for unannotated
-        // object-literal-shaped parameters.
-        let inferred_param_object_fields =
-            Self::infer_param_object_fields_from_types(program, &types);
-        // WS-9c: project anonymous-object inferred RETURN types so
-        // `compile_expr_function_call` can register an inline schema and
-        // resolve `f(...).field` for unannotated object-literal factories.
-        let inferred_return_object_fields =
-            Self::infer_return_object_fields_from_types(program, &types);
+        let (facts, _) = inference.infer_program_facts_best_effort(program);
+        let types = facts.top_level_types();
+        let inferred_ref_params = Self::infer_reference_params_from_types(program, types);
+        let inferred_return_annotations = Self::infer_return_annotations_from_types(program, types);
 
         let mut effective_ref_params: HashMap<String, Vec<bool>> = HashMap::new();
         for (name, func) in &funcs {
@@ -913,195 +877,20 @@ impl BytecodeCompiler {
         (
             inferred_ref_params,
             result,
-            inferred_param_type_hints,
             inferred_return_annotations,
-            inferred_param_concrete_types,
-            inferred_param_object_fields,
-            inferred_return_object_fields,
-            inferred_param_fn_param_types,
-            resolved_expr_types,
+            facts,
         )
     }
 
-    /// WS-9b: project the program-wide type-inference engine's per-parameter
-    /// `Type` into a `Vec<(field_name, FieldType)>` for UNANNOTATED params
-    /// whose resolved type is an anonymous structural object.
+    /// Wave 1a PART B: derive, for an unannotated param used as a callable,
+    /// the concrete argument annotations that should seed a closure literal
+    /// at the call site.
     ///
-    /// Mirrors `infer_param_concrete_types_from_types` — same
-    /// `Type::Function`-keyed lookup, same annotated-param / non-simple-name
-    /// skip. Only `Type::Concrete(TypeAnnotation::Object(_))` params produce
-    /// `Some`; named structs (which resolve through the schema registry via
-    /// their hint name) and every non-object param keep `None`. A field
-    /// whose annotation projects to `FieldType::Any` is still recorded —
-    /// `Any` is the honest "field exists, kind not narrowed" marker, not a
-    /// fabricated primitive.
-    pub(super) fn infer_param_object_fields_from_types(
-        program: &Program,
-        inferred_types: &HashMap<String, Type>,
-    ) -> HashMap<String, Vec<Option<Vec<(String, shape_runtime::type_schema::FieldType)>>>> {
-        use shape_ast::ast::TypeAnnotation;
-        let funcs = Self::collect_program_functions(program);
-        let mut out = HashMap::new();
-
-        for (name, func) in funcs {
-            let mut param_fields: Vec<
-                Option<Vec<(String, shape_runtime::type_schema::FieldType)>>,
-            > = vec![None; func.params.len()];
-            let Some(Type::Function { params, .. }) = inferred_types.get(&name) else {
-                out.insert(name, param_fields);
-                continue;
-            };
-
-            for (idx, param) in func.params.iter().enumerate() {
-                if param.type_annotation.is_some() || param.simple_name().is_none() {
-                    continue;
-                }
-                let Some(inferred_param_ty) = params.get(idx) else {
-                    continue;
-                };
-                if let Type::Concrete(TypeAnnotation::Object(obj_fields)) = inferred_param_ty {
-                    let fields: Vec<(String, shape_runtime::type_schema::FieldType)> = obj_fields
-                        .iter()
-                        .map(|f| {
-                            (
-                                f.name.clone(),
-                                Self::type_annotation_to_field_type(&f.type_annotation),
-                            )
-                        })
-                        .collect();
-                    if !fields.is_empty() {
-                        param_fields[idx] = Some(fields);
-                    }
-                }
-            }
-
-            out.insert(name, param_fields);
-        }
-
-        out
-    }
-
-    /// WS-9c: project each function's inferred RETURN type into a
-    /// `Vec<(field_name, FieldType)>` when that return type is an anonymous
-    /// structural object.
-    ///
-    /// Mirrors `infer_param_object_fields_from_types` for the return
-    /// position. The motivating shape is an anonymous-object factory:
-    /// `fn aabb(lo, hi) { {min: lo, max: hi} }`. The program-wide inference
-    /// pass resolves the return type to `Object({min: int, max: int})` once
-    /// callsite propagation binds the parameters; this projection hands the
-    /// bytecode compiler the per-field types so it can register an anonymous
-    /// schema for the return value and resolve `aabb(...).field` /
-    /// `let a = aabb(...); a.field` — exactly the resolution a named struct
-    /// return type already gets. A return type that is not an anonymous
-    /// object (a primitive, a named struct, an array, or still-unresolved)
-    /// keeps `None`.
-    pub(super) fn infer_return_object_fields_from_types(
-        program: &Program,
-        inferred_types: &HashMap<String, Type>,
-    ) -> HashMap<String, Vec<(String, shape_runtime::type_schema::FieldType)>> {
-        use shape_ast::ast::TypeAnnotation;
-        let funcs = Self::collect_program_functions(program);
-        let mut out = HashMap::new();
-
-        for (name, func) in funcs {
-            // A function with an explicit return-type annotation already
-            // resolves through the annotation path in
-            // `compile_expr_function_call`; only unannotated functions need
-            // the inferred-return projection.
-            if func.return_type.is_some() {
-                continue;
-            }
-            let Some(Type::Function { returns, .. }) = inferred_types.get(&name) else {
-                continue;
-            };
-            if let Type::Concrete(TypeAnnotation::Object(obj_fields)) = returns.as_ref() {
-                let fields: Vec<(String, shape_runtime::type_schema::FieldType)> = obj_fields
-                    .iter()
-                    .map(|f| {
-                        (
-                            f.name.clone(),
-                            Self::type_annotation_to_field_type(&f.type_annotation),
-                        )
-                    })
-                    .collect();
-                if !fields.is_empty() {
-                    out.insert(name, fields);
-                }
-            }
-        }
-        out
-    }
-
-    /// WS-9c: register an inline anonymous schema for every unannotated
-    /// function whose inferred return type is an anonymous object, recording
-    /// the schema id under the function name in `function_return_schema_ids`
-    /// and the precise per-field types as schema field contracts.
-    ///
-    /// The schema is Any-uniform (mirroring
-    /// `extract_object_schema_id_from_annotation` so the layout matches the
-    /// pre-existing inline-object shape); the precise field types live in the
-    /// parallel field-contract side table consulted by `infer_expr_type`.
-    fn register_inferred_return_object_schemas(&mut self) {
-        use shape_runtime::type_schema::FieldType;
-        let return_fields = self.inferred_return_object_fields.clone();
-        for (fn_name, fields) in return_fields {
-            if fields.is_empty() {
-                continue;
-            }
-            let typed_fields: Vec<(&str, FieldType)> = fields
-                .iter()
-                .map(|(name, _)| (name.as_str(), FieldType::Any))
-                .collect();
-            let schema_id = self
-                .type_tracker
-                .register_inline_object_schema_typed(&typed_fields);
-            let mut contracts = std::collections::HashMap::with_capacity(fields.len());
-            for (name, field_ty) in &fields {
-                if let Some(ann) =
-                    crate::compiler::expressions::function_calls::field_type_contract_annotation(
-                        field_ty,
-                    )
-                {
-                    contracts.insert(name.clone(), ann);
-                }
-            }
-            if !contracts.is_empty() {
-                self.type_tracker
-                    .register_object_field_contracts(schema_id, contracts);
-            }
-            self.function_return_schema_ids.insert(fn_name, schema_id);
-        }
-    }
-
-    /// v0.3 WS-7: project the program-wide type-inference engine's
-    /// per-parameter `Type` into a `ConcreteType` for UNANNOTATED params.
-    ///
-    /// The JIT's v2 typed-array fast path is gated on
-    /// `function_local_concrete_types[fn][param_slot]` carrying a precise
-    /// `ConcreteType::Array(elem)`. For an annotated param that stamp comes
-    /// from the annotation; for an UNANNOTATED param (`fn get(xs, i) {
-    /// xs[i] }`) there is no annotation to read, so without this projection
-    /// the slot stays `ConcreteType::Void`. The JIT then mis-takes the v2
-    /// `TypedArray<T>` pointer (data@+8/len@+16) for a NaN-boxed v1 array
-    /// (data@+0/len@+8 after an 8-byte header) and the inline index load
-    /// reads garbage / SIGSEGVs even on a valid in-bounds access.
-    ///
-    /// Mirrors `infer_param_type_hints_from_types` exactly — same
-    /// `Type::Function`-keyed lookup, same annotated-param skip — but
-    /// projects to `ConcreteType` (the JIT's proof carrier) instead of a
-    /// display string. Annotated params keep `None`; their `ConcreteType`
-    /// is stamped from the annotation in the per-fn seeding pass.
-    /// Wave 1a PART B: project the program-wide type-inference engine's
-    /// per-parameter `Type` into, for each UNANNOTATED param the engine
-    /// resolved to a `Type::Function`, the list of CONCRETE param
-    /// `TypeAnnotation`s of that function type.
-    ///
-    /// This is the producer for fn-typed-parameter call-site closure seeding:
+    /// This is the on-demand producer for fn-typed-parameter call-site closure seeding:
     /// `fn apply2(f, x, y) { f(x, y) }` USES `f` as a callable, so the engine
     /// (via its callable-param-source-var machinery) infers `f`'s type from
     /// the body usage + the call-site arg types, yielding e.g.
-    /// `fn(int,int)->_`. We capture only the ARGUMENT annotations (the closure
+    /// `fn(int,int)->_`. We return only the ARGUMENT annotations (the closure
     /// seeding consumer maps them onto the closure's user params 1:1).
     ///
     /// Soundness (strict-typing core):
@@ -1115,133 +904,80 @@ impl BytecodeCompiler {
     /// * `int` and `number` stay distinct (each is its own `Basic` name); a
     ///   later inconsistency surfaces as the engine's own conflict, not a
     ///   silent pick here.
-    pub(super) fn infer_param_fn_param_types_from_types(
-        program: &Program,
-        inferred_types: &HashMap<String, Type>,
-    ) -> HashMap<String, Vec<Option<Vec<shape_ast::ast::TypeAnnotation>>>> {
-        let funcs = Self::collect_program_functions(program);
-        let mut out = HashMap::new();
-
-        for (name, func) in funcs {
-            let mut param_fns: Vec<Option<Vec<shape_ast::ast::TypeAnnotation>>> =
-                vec![None; func.params.len()];
-            let Some(Type::Function { params, .. }) = inferred_types.get(&name) else {
-                out.insert(name, param_fns);
-                continue;
-            };
-
-            // Map each param NAME to its positional index, so a body call
-            // `f(x, y)` whose args are bare param identifiers can be mapped
-            // back to the OUTER param positions (`x`→1, `y`→2).
-            let mut param_name_to_index: HashMap<&str, usize> = HashMap::new();
-            for (i, p) in func.params.iter().enumerate() {
-                if let Some(n) = p.simple_name() {
-                    param_name_to_index.insert(n, i);
-                }
-            }
-
-            for (idx, param) in func.params.iter().enumerate() {
-                // Only fill UNANNOTATED, single-identifier params. An
-                // explicitly-annotated callable param already drives the
-                // closure seeding through its own annotation.
-                let Some(param_name) = param.simple_name() else {
-                    continue;
-                };
-                if param.type_annotation.is_some() {
-                    continue;
-                }
-
-                // PRIMARY (sound) path: derive the callable's argument
-                // annotations from the OUTER function's own resolved parameter
-                // types, following the body usage `f(x, y)`.
-                //
-                // The engine resolves the OUTER params (`x`, `y`) precisely
-                // (call-site `apply2(.., 6, 7)` pins them to `int`), but the
-                // engine's projection of the CALLABLE param `f` is NOT a
-                // reliable source: it can collapse a `Numeric`-bounded slot to
-                // `number` when the only sites that pin it are closure-eager
-                // (`|a,b| a*b`), AND — when the SAME wrapper is called more than
-                // once with DIFFERENT closure literals — the solver unifies the
-                // distinct closure fn-types into the shared `f` source var as a
-                // `Concrete(Union([fn(unknown,unknown)->unknown, …]))`. Reading
-                // that shared, cross-call-site projection is exactly the
-                // multi-call clobber: it is neither a `Type::Function` nor
-                // concrete. So the PRIMARY path is derived ENTIRELY from the
-                // body-call shape + the OUTER params' own resolved types — each
-                // of which the engine pins per call site (`int`) and which the
-                // closure-arg union never corrupts. This is the
-                // let-generalization instantiation discipline: the wrapper's
-                // closure-param signature is reconstructed per use from the
-                // proven outer-param types, not from a mutated shared `f` slot.
-                //
-                // Arity comes from the body-call shape itself
-                // (`callable_param_body_arg_indices` only returns `Some` for a
-                // consistent `f(<outer-param>, …)` usage), so it does NOT depend
-                // on the corrupted `f` projection.
-                //
-                // `int` and `number` stay distinct: we copy whatever concrete
-                // name the engine proved for the outer param; no defaulting.
-                let body_arg_indices =
-                    Self::callable_param_body_arg_indices(&func, param_name, &param_name_to_index);
-                if let Some(outer_indices) = body_arg_indices {
-                    if !outer_indices.is_empty() {
-                        let mut arg_anns: Vec<shape_ast::ast::TypeAnnotation> =
-                            Vec::with_capacity(outer_indices.len());
-                        let mut all_concrete = true;
-                        for &outer_idx in &outer_indices {
-                            match params.get(outer_idx).and_then(|t| t.to_annotation()) {
-                                Some(ann) if !Self::annotation_is_unknown(&ann) => {
-                                    arg_anns.push(ann)
-                                }
-                                _ => {
-                                    all_concrete = false;
-                                    break;
-                                }
-                            }
-                        }
-                        if all_concrete && !arg_anns.is_empty() {
-                            param_fns[idx] = Some(arg_anns);
-                            continue;
-                        }
-                    }
-                }
-
-                // FALLBACK: when the body usage is not a simple
-                // `f(<param>, <param>)` call (so no sound outer mapping is
-                // available), fall back to the engine's projection of the
-                // callable param itself — but ONLY when that projection is a
-                // clean `Type::Function`. A multi-call union / non-function
-                // projection has no usable per-arg type here ⇒ no entry (the
-                // closure keeps its existing rejection; no fabrication).
-                // Require EVERY argument position concrete — a single unresolved
-                // (Variable / Constrained / `unknown`) arg ⇒ bail to `None`.
-                let Some(Type::Function {
-                    params: fn_params, ..
-                }) = params.get(idx)
-                else {
-                    continue;
-                };
-                let mut arg_anns: Vec<shape_ast::ast::TypeAnnotation> =
-                    Vec::with_capacity(fn_params.len());
-                let mut all_concrete = true;
-                for fp in fn_params {
-                    match fp.to_annotation() {
-                        Some(ann) if !Self::annotation_is_unknown(&ann) => arg_anns.push(ann),
-                        _ => {
-                            all_concrete = false;
-                            break;
-                        }
-                    }
-                }
-                if all_concrete && !arg_anns.is_empty() {
-                    param_fns[idx] = Some(arg_anns);
-                }
-            }
-
-            out.insert(name, param_fns);
+    pub(crate) fn inferred_param_fn_param_types_from_facts(
+        &self,
+        func_name: &str,
+        func: &FunctionDef,
+        param_idx: usize,
+    ) -> Option<Vec<shape_ast::ast::TypeAnnotation>> {
+        let param = func.params.get(param_idx)?;
+        // Only fill UNANNOTATED, single-identifier params. An explicitly
+        // annotated callable param already drives closure seeding through its
+        // own annotation; destructuring params have no single callable slot.
+        let param_name = param.simple_name()?;
+        if param.type_annotation.is_some() {
+            return None;
         }
 
-        out
+        let Type::Function { params, .. } = self.inference_facts.function_signature(func_name)?
+        else {
+            return None;
+        };
+
+        // Map each param NAME to its positional index, so a body call
+        // `f(x, y)` whose args are bare param identifiers can be mapped back
+        // to the OUTER param positions (`x`→1, `y`→2).
+        let mut param_name_to_index: HashMap<&str, usize> = HashMap::new();
+        for (i, p) in func.params.iter().enumerate() {
+            if let Some(n) = p.simple_name() {
+                param_name_to_index.insert(n, i);
+            }
+        }
+
+        // PRIMARY (sound) path: derive the callable's argument annotations
+        // from the OUTER function's own resolved parameter types, following
+        // the body usage `f(x, y)`. The callable param's own projection can be
+        // clobbered by multi-call closure unions, so do not read it unless no
+        // simple body mapping exists.
+        let body_arg_indices =
+            Self::callable_param_body_arg_indices(func, param_name, &param_name_to_index);
+        if let Some(outer_indices) = body_arg_indices
+            && !outer_indices.is_empty()
+        {
+            let mut arg_anns: Vec<shape_ast::ast::TypeAnnotation> =
+                Vec::with_capacity(outer_indices.len());
+            for &outer_idx in &outer_indices {
+                let ann = params.get(outer_idx).and_then(|t| t.to_annotation())?;
+                if Self::annotation_is_unknown(&ann) {
+                    return None;
+                }
+                arg_anns.push(ann);
+            }
+            return Some(arg_anns);
+        }
+
+        // FALLBACK: when the body usage is not a simple `f(<param>, <param>)`
+        // call, fall back to the engine's projection of the callable param
+        // itself — but ONLY when that projection is a clean `Type::Function`.
+        // Require EVERY argument position concrete.
+        let Type::Function {
+            params: fn_params, ..
+        } = params.get(param_idx)?
+        else {
+            return None;
+        };
+        if fn_params.is_empty() {
+            return None;
+        }
+        let mut arg_anns: Vec<shape_ast::ast::TypeAnnotation> = Vec::with_capacity(fn_params.len());
+        for fp in fn_params {
+            let ann = fp.to_annotation()?;
+            if Self::annotation_is_unknown(&ann) {
+                return None;
+            }
+            arg_anns.push(ann);
+        }
+        Some(arg_anns)
     }
 
     /// Wave 1a PART B (soundness fix): find the OUTER-parameter index that each
@@ -1466,60 +1202,121 @@ impl BytecodeCompiler {
     }
 
     /// Reject the `"unknown"` sentinel that `Type::to_annotation()` substitutes
-    /// for unresolved inner type variables inside a `Type::Function`. A `Basic`
-    /// or `Reference` literally named `unknown` is treated as not-concrete so
-    /// we never seed a closure param from a fabricated type.
+    /// for unresolved type variables. A `Basic` or `Reference` literally named
+    /// `unknown` is treated as not-concrete anywhere in the annotation tree so
+    /// we never seed a param from a fabricated type like `Array<unknown>`.
     fn annotation_is_unknown(ann: &shape_ast::ast::TypeAnnotation) -> bool {
         use shape_ast::ast::TypeAnnotation;
         match ann {
             TypeAnnotation::Basic(n) => n == "unknown",
             TypeAnnotation::Reference(path) => path.to_string() == "unknown",
+            TypeAnnotation::Array(inner) | TypeAnnotation::Borrow { inner, .. } => {
+                Self::annotation_is_unknown(inner)
+            }
+            TypeAnnotation::Tuple(items)
+            | TypeAnnotation::Union(items)
+            | TypeAnnotation::Intersection(items) => items.iter().any(Self::annotation_is_unknown),
+            TypeAnnotation::Object(fields) => fields
+                .iter()
+                .any(|field| Self::annotation_is_unknown(&field.type_annotation)),
+            TypeAnnotation::Function { params, returns } => {
+                params
+                    .iter()
+                    .any(|param| Self::annotation_is_unknown(&param.type_annotation))
+                    || Self::annotation_is_unknown(returns)
+            }
+            TypeAnnotation::Generic { name, args } => {
+                name.to_string() == "unknown" || args.iter().any(Self::annotation_is_unknown)
+            }
+            TypeAnnotation::Dyn(paths) => paths.iter().any(|path| path.to_string() == "unknown"),
             _ => false,
         }
     }
 
-    pub(super) fn infer_param_concrete_types_from_types(
-        program: &Program,
-        inferred_types: &HashMap<String, Type>,
-    ) -> HashMap<String, Vec<Option<shape_value::v2::ConcreteType>>> {
-        let funcs = Self::collect_program_functions(program);
-        let mut out = HashMap::new();
-
-        for (name, func) in funcs {
-            let mut param_cts: Vec<Option<shape_value::v2::ConcreteType>> =
-                vec![None; func.params.len()];
-            let Some(Type::Function { params, .. }) = inferred_types.get(&name) else {
-                out.insert(name, param_cts);
-                continue;
-            };
-
-            for (idx, param) in func.params.iter().enumerate() {
-                // Annotated params are stamped from the annotation directly
-                // in the `function_local_concrete_types` per-fn seeding pass;
-                // a destructuring param has no single slot ConcreteType.
-                if param.type_annotation.is_some() || param.simple_name().is_none() {
-                    continue;
-                }
-                let Some(inferred_param_ty) = params.get(idx) else {
-                    continue;
-                };
-                // `Type::to_annotation()` reconstructs the `TypeAnnotation`
-                // for resolved concrete / generic types and yields `None`
-                // for unresolved type variables — exactly the gate we want
-                // (no fabricated kind, no Bool-default). The existing
-                // `concrete_type_from_annotation` then projects
-                // `Array<int>` → `ConcreteType::Array(I64)`.
-                let Some(ann) = inferred_param_ty.to_annotation() else {
-                    continue;
-                };
-                param_cts[idx] =
-                    crate::compiler::v2_map_emission::concrete_type_from_annotation(&ann);
-            }
-
-            out.insert(name, param_cts);
+    pub(super) fn inferred_param_concrete_type_from_facts(
+        &self,
+        func_name: &str,
+        func: &FunctionDef,
+        param_idx: usize,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        let param = func.params.get(param_idx)?;
+        // Annotated params are stamped from their declaration directly in the
+        // per-fn seeding pass; destructuring params have no single slot
+        // ConcreteType.
+        if param.type_annotation.is_some() || param.simple_name().is_none() {
+            return None;
         }
 
-        out
+        let Type::Function { params, .. } = self.inference_facts.function_signature(func_name)?
+        else {
+            return None;
+        };
+        let ann = params.get(param_idx)?.to_annotation()?;
+        if Self::annotation_is_unknown(&ann) {
+            return None;
+        }
+        crate::compiler::v2_map_emission::concrete_type_from_annotation(&ann)
+    }
+
+    pub(super) fn inferred_param_object_fields_from_facts(
+        &self,
+        func_name: &str,
+        func: &FunctionDef,
+        param_idx: usize,
+    ) -> Option<Vec<(String, shape_runtime::type_schema::FieldType)>> {
+        use shape_ast::ast::TypeAnnotation;
+
+        let param = func.params.get(param_idx)?;
+        if param.type_annotation.is_some() || param.simple_name().is_none() {
+            return None;
+        }
+
+        let Type::Function { params, .. } = self.inference_facts.function_signature(func_name)?
+        else {
+            return None;
+        };
+        let Type::Concrete(TypeAnnotation::Object(obj_fields)) = params.get(param_idx)? else {
+            return None;
+        };
+
+        let fields: Vec<(String, shape_runtime::type_schema::FieldType)> = obj_fields
+            .iter()
+            .map(|field| {
+                (
+                    field.name.clone(),
+                    Self::type_annotation_to_field_type(&field.type_annotation),
+                )
+            })
+            .collect();
+        if fields.is_empty() {
+            return None;
+        }
+        Some(fields)
+    }
+
+    pub(super) fn inferred_param_type_name_from_facts(
+        &self,
+        func_name: &str,
+        func: &FunctionDef,
+        param_idx: usize,
+    ) -> Option<String> {
+        let param = func.params.get(param_idx)?;
+        // Annotated params are stamped from their declaration; destructuring
+        // params do not have one tracker slot to seed.
+        if param.type_annotation.is_some() || param.simple_name().is_none() {
+            return None;
+        }
+
+        let Type::Function { params, .. } = self.inference_facts.function_signature(func_name)?
+        else {
+            return None;
+        };
+        let param_ty = params.get(param_idx)?;
+        let ann = param_ty.to_annotation()?;
+        if Self::annotation_is_unknown(&ann) {
+            return None;
+        }
+        Self::inferred_type_to_hint_name(param_ty)
     }
 
     pub(crate) fn inferred_type_to_hint_name(ty: &Type) -> Option<String> {
@@ -1538,35 +1335,6 @@ impl BytecodeCompiler {
             }
             Type::Variable(_) | Type::Constrained { .. } | Type::Function { .. } => None,
         }
-    }
-
-    pub(super) fn infer_param_type_hints_from_types(
-        program: &Program,
-        inferred_types: &HashMap<String, Type>,
-    ) -> HashMap<String, Vec<Option<String>>> {
-        let funcs = Self::collect_program_functions(program);
-        let mut hints = HashMap::new();
-
-        for (name, func) in funcs {
-            let mut param_hints = vec![None; func.params.len()];
-            let Some(Type::Function { params, .. }) = inferred_types.get(&name) else {
-                hints.insert(name, param_hints);
-                continue;
-            };
-
-            for (idx, param) in func.params.iter().enumerate() {
-                if param.type_annotation.is_some() || param.simple_name().is_none() {
-                    continue;
-                }
-                if let Some(inferred_param_ty) = params.get(idx) {
-                    param_hints[idx] = Self::inferred_type_to_hint_name(inferred_param_ty);
-                }
-            }
-
-            hints.insert(name, param_hints);
-        }
-
-        hints
     }
 
     /// U4-5b: extract each function's inferred return `TypeAnnotation` (for
@@ -2060,37 +1828,18 @@ impl BytecodeCompiler {
         let (
             inferred_ref_params,
             inferred_ref_mutates,
-            inferred_param_type_hints,
             inferred_return_annotations,
-            inferred_param_concrete_types,
-            inferred_param_object_fields,
-            inferred_return_object_fields,
-            inferred_param_fn_param_types,
-            resolved_expr_types,
+            inference_facts,
         ) = Self::infer_reference_model(&program);
         // T1 KEYSTONE: store the post-solve per-expression type table so
         // `infer_expr_type` can consult it first (root fix for static
         // type-erasure of function-body collection-dispatch / match-arm locals).
-        self.resolved_expr_types = resolved_expr_types;
+        self.resolved_expr_types = inference_facts.expression_types().clone();
+        self.inference_facts = inference_facts;
         self.inferred_param_pass_modes =
             Self::build_param_pass_mode_map(&program, &inferred_ref_params, &inferred_ref_mutates);
         self.inferred_ref_params = inferred_ref_params;
         self.inferred_ref_mutates = inferred_ref_mutates;
-        self.inferred_param_type_hints = inferred_param_type_hints;
-        self.inferred_param_concrete_types = inferred_param_concrete_types;
-        self.inferred_param_fn_param_types = inferred_param_fn_param_types;
-        self.inferred_param_object_fields = inferred_param_object_fields;
-        self.inferred_return_object_fields = inferred_return_object_fields;
-        // WS-9c: eagerly register an inline anonymous schema (+ per-field
-        // contracts) for every unannotated function whose inferred return
-        // type is an anonymous object. Registering up-front — before any
-        // body compiles — makes the return-object schema available both to
-        // `compile_expr_function_call` (which stamps it on the call's
-        // `last_expr_schema` so a `let` binding inherits it) and to the
-        // read-only `infer_expr_type` property-access path (which resolves
-        // `f(...).field` directly). `register_inline_object_schema_typed` is
-        // idempotent on the field set, so this never duplicates a schema.
-        self.register_inferred_return_object_schemas();
         // U4-5b: register inferred return ConcreteTypes so function-call
         // compilation can recover the return type STRUCTURALLY even for sources
         // with no explicit `-> T` annotation. Resolved SCHEMA-AWARELY
@@ -2731,11 +2480,6 @@ impl BytecodeCompiler {
                 // MIR-walk inference's classifications dominate when both
                 // sources are present.
                 if let Some(def) = self.function_defs.get(&func.name) {
-                    // v0.3 WS-7: inference-resolved per-param `ConcreteType`
-                    // for UNANNOTATED params (projected in
-                    // `infer_param_concrete_types_from_types`). Used as the
-                    // seed source when a param has no annotation to read.
-                    let inferred_param_cts = self.inferred_param_concrete_types.get(&func.name);
                     for (i, &param_slot) in mir_data.mir.param_slots.iter().enumerate() {
                         let idx = param_slot.0 as usize;
                         if idx >= concrete_types.len() {
@@ -2774,9 +2518,8 @@ impl BytecodeCompiler {
                                 // paths use the SAME proven type the VM
                                 // uses, instead of mis-classifying a v2
                                 // heap pointer as a NaN-boxed v1 value.
-                                if let Some(ct) = inferred_param_cts
-                                    .and_then(|v| v.get(i))
-                                    .and_then(|opt| opt.clone())
+                                if let Some(ct) =
+                                    self.inferred_param_concrete_type_from_facts(&func.name, def, i)
                                 {
                                     concrete_types[idx] = ct;
                                 }
@@ -3056,8 +2799,12 @@ impl BytecodeCompiler {
         // cross-module span aliasing. This is an engine re-point, NOT the deleted
         // re-derivation ladder: a field read the engine cannot resolve stays a
         // genuine miss → STAGE-F1 surface-and-stop, identical to the root path.
-        let (.., module_expr_types) = Self::infer_reference_model(&ast);
-        let saved_expr_types = std::mem::replace(&mut self.resolved_expr_types, module_expr_types);
+        let (.., module_facts) = Self::infer_reference_model(&ast);
+        let saved_expr_types = std::mem::replace(
+            &mut self.resolved_expr_types,
+            module_facts.expression_types().clone(),
+        );
+        let saved_inference_facts = std::mem::replace(&mut self.inference_facts, module_facts);
 
         // 1. Register this module's imports from the graph
         self.register_graph_imports_for_module(module_id, graph)?;
@@ -3097,8 +2844,9 @@ impl BytecodeCompiler {
         // U4-1: restore the caller's span-table (the per-module table was active
         // only across this module's body compilation; see the swap above). On an
         // error path `compile_result?` aborts the whole compilation, so the
-        // not-yet-restored table is discarded with the compiler instance.
+        // not-yet-restored tables are discarded with the compiler instance.
         self.resolved_expr_types = saved_expr_types;
+        self.inference_facts = saved_inference_facts;
         compile_result?;
 
         // 5. Build module object and store in canonical binding

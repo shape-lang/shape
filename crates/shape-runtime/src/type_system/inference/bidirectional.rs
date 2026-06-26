@@ -27,7 +27,7 @@
 
 use super::TypeInferenceEngine;
 use crate::type_system::*;
-use shape_ast::ast::{Expr, FunctionParameter, ObjectEntry, TypeAnnotation};
+use shape_ast::ast::{Expr, FunctionParameter, ObjectEntry, Spanned, TypeAnnotation};
 
 /// Mode for bidirectional type checking
 #[derive(Debug, Clone)]
@@ -203,6 +203,10 @@ impl TypeInferenceEngine {
                     any_arm = true;
                     self.env.push_scope();
                     self.bind_pattern_vars_typed(&arm.pattern, Some(&scrutinee_type))?;
+                    self.record_binding_facts_for_match_pattern(
+                        &arm.pattern,
+                        Spanned::span(match_expr.scrutinee.as_ref()),
+                    );
 
                     // A DIVERGING arm (`return`/`break`/`continue`) is NEVER and
                     // is EXCLUDED from the arm-type unification (still inferred

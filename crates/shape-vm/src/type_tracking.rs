@@ -109,6 +109,28 @@ pub fn native_kind_from_storage_type(st: &StorageType) -> Option<NativeKind> {
     }
 }
 
+/// Fallible-wrapper semantics for a frame's return value.
+///
+/// This is deliberately separate from [`FrameDescriptor::return_kind`]:
+/// `return_kind` is the ABI carrier kind for the value on the stack,
+/// while `return_wrapper` tells the `?` operator whether a `None`
+/// early-return should be propagated as `None` or lifted into
+/// `Err(AnyError { code: "OPTION_NONE", ... })`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FrameReturnWrapper {
+    /// Missing metadata. New compiler producers should stamp `Plain`,
+    /// `Option`, or `Result`; this variant exists for old serialized
+    /// descriptors and partially migrated producers.
+    #[default]
+    Unknown,
+    /// The frame does not return a fallible wrapper.
+    Plain,
+    /// The frame returns `Option<T>`.
+    Option,
+    /// The frame returns `Result<T, E>`.
+    Result,
+}
+
 /// Typed frame layout metadata.
 ///
 /// A `FrameDescriptor` describes the storage layout for every local slot
@@ -130,13 +152,18 @@ pub fn native_kind_from_storage_type(st: &StorageType) -> Option<NativeKind> {
 /// proven; an unproven slot is a compile error per CLAUDE.md type-system
 /// rules.
 ///
-/// `return_kind: Option<NativeKind>` is the single-slot field carrying
-/// the function's return-value kind, or `None` for "no return value /
-/// kind not yet stamped". The single-slot `Option<NativeKind>` shape is
-/// the §2.7.8 / Q10 cell-storage pattern (single-slot fields take
-/// `Option<NativeKind>`); §2.7.5.1's "no `Option<NativeKind>` wrapping"
-/// rule targets the bulk `slots` Vec, not single-slot fields where
-/// `None` distinguishes "no return value" from "return value of kind X".
+/// `return_kind: Option<NativeKind>` is the ABI kind for the value a
+/// function returns, or `None` for "no return value / kind not yet
+/// stamped". It must not encode source-level wrapper semantics:
+/// `Option<T>` and `Result<T, E>` both use the canonical ABI carrier
+/// `NativeKind::Ptr(HeapKind::TypedObject)` and record the wrapper in
+/// `return_wrapper`.
+///
+/// The single-slot `Option<NativeKind>` shape is the §2.7.8 / Q10
+/// cell-storage pattern (single-slot fields take `Option<NativeKind>`);
+/// §2.7.5.1's "no `Option<NativeKind>` wrapping" rule targets the bulk
+/// `slots` Vec, not single-slot fields where `None` distinguishes "no
+/// return value" from "return value of kind X".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameDescriptor {
     /// One entry per local slot (index 0 = first param or local).
@@ -152,6 +179,11 @@ pub struct FrameDescriptor {
     /// unmarshal (e.g. top-level program with no terminal expression).
     #[serde(default)]
     pub return_kind: Option<NativeKind>,
+
+    /// Source-level fallible wrapper semantics for the returned value.
+    /// Defaults to `Unknown` for old serialized descriptors.
+    #[serde(default)]
+    pub return_wrapper: FrameReturnWrapper,
 }
 
 impl FrameDescriptor {
@@ -162,6 +194,7 @@ impl FrameDescriptor {
         Self {
             slots: Vec::new(),
             return_kind: None,
+            return_wrapper: FrameReturnWrapper::Unknown,
         }
     }
 
@@ -171,6 +204,7 @@ impl FrameDescriptor {
         Self {
             slots,
             return_kind: None,
+            return_wrapper: FrameReturnWrapper::Unknown,
         }
     }
 
@@ -192,6 +226,40 @@ impl FrameDescriptor {
     #[inline]
     pub fn slot(&self, index: usize) -> Option<NativeKind> {
         self.slots.get(index).copied()
+    }
+
+    /// Return wrapper semantics, with compatibility for descriptors
+    /// written before the metadata split. New descriptors should stamp
+    /// `return_wrapper` directly; legacy descriptors overloaded
+    /// `return_kind = Ptr(HeapKind::Option/Result)` for this purpose.
+    #[inline]
+    pub fn effective_return_wrapper(&self) -> FrameReturnWrapper {
+        match self.return_wrapper {
+            FrameReturnWrapper::Unknown => match self.return_kind {
+                Some(NativeKind::Ptr(shape_value::HeapKind::Option)) => FrameReturnWrapper::Option,
+                Some(NativeKind::Ptr(shape_value::HeapKind::Result)) => FrameReturnWrapper::Result,
+                _ => FrameReturnWrapper::Unknown,
+            },
+            wrapper => wrapper,
+        }
+    }
+
+    /// Return the ABI carrier kind for this frame's return value. New
+    /// descriptors store this directly in `return_kind`. Old descriptors
+    /// could overload `return_kind = Ptr(Option/Result)` as wrapper
+    /// semantics; normalize those to the canonical typed-object carrier
+    /// for ABI consumers.
+    #[inline]
+    pub fn abi_return_kind(&self) -> Option<NativeKind> {
+        match (self.return_wrapper, self.return_kind) {
+            (
+                FrameReturnWrapper::Unknown,
+                Some(NativeKind::Ptr(
+                    shape_value::HeapKind::Option | shape_value::HeapKind::Result,
+                )),
+            ) => Some(NativeKind::Ptr(shape_value::HeapKind::TypedObject)),
+            _ => self.return_kind,
+        }
     }
 }
 
@@ -1367,6 +1435,94 @@ mod tests {
     }
 
     #[test]
+    fn prove_native_kind_rejects_old_jit_option_result_carriers() {
+        let opt_ty = ConcreteType::Option(Box::new(ConcreteType::I64));
+        let res_ty =
+            ConcreteType::Result(Box::new(ConcreteType::I64), Box::new(ConcreteType::String));
+
+        assert_eq!(
+            prove_native_kind(
+                "test_option_typed_object",
+                &opt_ty,
+                NativeKind::Ptr(HeapKind::TypedObject)
+            )
+            .unwrap(),
+            NativeKind::Ptr(HeapKind::TypedObject)
+        );
+        assert_eq!(
+            prove_native_kind(
+                "test_result_typed_object",
+                &res_ty,
+                NativeKind::Ptr(HeapKind::TypedObject)
+            )
+            .unwrap(),
+            NativeKind::Ptr(HeapKind::TypedObject)
+        );
+
+        prove_native_kind(
+            "test_old_option_heapkind",
+            &opt_ty,
+            NativeKind::Ptr(HeapKind::Option),
+        )
+        .expect_err("old JIT Option carrier must not pass the shared projection");
+        prove_native_kind(
+            "test_old_result_heapkind",
+            &res_ty,
+            NativeKind::Ptr(HeapKind::Result),
+        )
+        .expect_err("old JIT Result carrier must not pass the shared projection");
+    }
+
+    #[test]
+    fn frame_descriptor_default_return_wrapper_is_unknown() {
+        let fd = FrameDescriptor::new();
+        assert_eq!(fd.return_kind, None);
+        assert_eq!(fd.return_wrapper, FrameReturnWrapper::Unknown);
+        assert_eq!(fd.effective_return_wrapper(), FrameReturnWrapper::Unknown);
+        assert_eq!(fd.abi_return_kind(), None);
+    }
+
+    #[test]
+    fn frame_descriptor_legacy_result_kind_implies_wrapper_only() {
+        let mut fd = FrameDescriptor::new();
+        fd.return_kind = Some(NativeKind::Ptr(HeapKind::Result));
+
+        assert_eq!(fd.return_wrapper, FrameReturnWrapper::Unknown);
+        assert_eq!(fd.effective_return_wrapper(), FrameReturnWrapper::Result);
+        assert_eq!(
+            fd.abi_return_kind(),
+            Some(NativeKind::Ptr(HeapKind::TypedObject))
+        );
+    }
+
+    #[test]
+    fn frame_descriptor_explicit_wrapper_keeps_abi_kind_authoritative() {
+        let mut fd = FrameDescriptor::new();
+        fd.return_kind = Some(NativeKind::Ptr(HeapKind::TypedObject));
+        fd.return_wrapper = FrameReturnWrapper::Option;
+
+        assert_eq!(fd.effective_return_wrapper(), FrameReturnWrapper::Option);
+        assert_eq!(
+            fd.abi_return_kind(),
+            Some(NativeKind::Ptr(HeapKind::TypedObject))
+        );
+    }
+
+    #[test]
+    fn frame_descriptor_deserializes_old_shape_with_unknown_wrapper() {
+        let json = r#"{"slots":[],"return_kind":{"Ptr":"Result"}}"#;
+        let fd: FrameDescriptor =
+            serde_json::from_str(json).expect("old descriptor should deserialize");
+
+        assert_eq!(fd.return_wrapper, FrameReturnWrapper::Unknown);
+        assert_eq!(fd.effective_return_wrapper(), FrameReturnWrapper::Result);
+        assert_eq!(
+            fd.abi_return_kind(),
+            Some(NativeKind::Ptr(HeapKind::TypedObject))
+        );
+    }
+
+    #[test]
     fn prove_native_kind_does_not_unify_int_and_number() {
         // CLAUDE.md: int and number are separate. A Float64 claim on a proven
         // I64 (and vice versa) is a hard reject — no implicit numeric coercion.
@@ -1374,6 +1530,16 @@ mod tests {
             .expect_err("Float64 claim on a proven I64 must be refused (int≠number)");
         prove_native_kind("test_num_int", &ConcreteType::F64, NativeKind::Int64)
             .expect_err("Int64 claim on a proven F64 must be refused (number≠int)");
+    }
+
+    #[test]
+    fn prove_native_kind_rejects_width_narrowing() {
+        prove_native_kind("test_i32_not_i64", &ConcreteType::I32, NativeKind::Int64)
+            .expect_err("I32 proven type must not pass against an Int64 producer");
+        prove_native_kind("test_u8_not_i64", &ConcreteType::U8, NativeKind::Int64)
+            .expect_err("U8 proven type must not pass against an Int64 producer");
+        prove_native_kind("test_i64_not_i32", &ConcreteType::I64, NativeKind::Int32)
+            .expect_err("I64 proven type must not pass against an Int32 producer");
     }
 
     #[test]
