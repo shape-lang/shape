@@ -61,7 +61,7 @@ pub fn median(series: Array<number>) -> number {
 /// @returns `std(series) / mean(series)` when the mean is non-zero, otherwise `None`.
 /// @see std::core::math::std
 /// @see std::core::math::mean
-pub fn coefficient_of_variation(series) {
+pub fn coefficient_of_variation(series: Array<number>) -> Option<number> {
     let std_val = __intrinsic_std(series);
     let mean_val = __intrinsic_mean(series);
 
@@ -100,7 +100,7 @@ pub fn zscore(series: Array<number>) -> Array<number> {
 ///
 /// Uses the sequential `.map()` method.  A parallel intrinsic path is planned
 /// but not yet wired up, so all sizes take the same code path for now.
-pub fn parallel_map(array, fn) {
+pub fn parallel_map<T, U>(array: Array<T>, fn: (T) => U) -> Array<U> {
     array.map(fn)
 }
 
@@ -108,7 +108,7 @@ pub fn parallel_map(array, fn) {
 ///
 /// Uses the sequential `.filter()` method.  A parallel intrinsic path is planned
 /// but not yet wired up, so all sizes take the same code path for now.
-pub fn parallel_filter(array, predicate) {
+pub fn parallel_filter<T>(array: Array<T>, predicate: (T) => bool) -> Array<T> {
     array.filter(predicate)
 }
 
