@@ -562,7 +562,11 @@ impl ProgramExecutor for BytecodeExecutor {
             Ok(completion) => completion,
             Err(e) => {
                 let payload = vm.take_last_uncaught_exception().map(|payload| {
-                    wire_conversion::slot_to_wire(payload.raw(), payload.kind(), ctx_borrow)
+                    uncaught_exception_payload_to_wire(
+                        payload,
+                        vm.builtin_schemas.any_error as u64,
+                        ctx_borrow,
+                    )
                 });
                 runtime.set_last_runtime_error(payload);
                 return Err(shape_runtime::error::ShapeError::RuntimeError {
@@ -629,6 +633,36 @@ impl ProgramExecutor for BytecodeExecutor {
             content_terminal,
         })
     }
+}
+
+fn uncaught_exception_payload_to_wire(
+    payload: KindedSlot,
+    any_error_schema_id: u64,
+    ctx: &ExecutionContext,
+) -> shape_wire::WireValue {
+    let is_any_error = match payload.kind() {
+        shape_value::NativeKind::Ptr(shape_value::HeapKind::TypedObject) if payload.raw() != 0 => {
+            // SAFETY: kind says Ptr(TypedObject); bits are a live
+            // TypedObjectStorage pointer owned by `payload`. This is a
+            // transient schema-id read only, matching the exception
+            // normalizer's already-AnyError check.
+            let obj: &shape_value::TypedObjectStorage =
+                unsafe { &*(payload.raw() as *const shape_value::TypedObjectStorage) };
+            obj.schema_id == any_error_schema_id
+        }
+        _ => false,
+    };
+
+    let mut wire = wire_conversion::slot_to_wire(payload.raw(), payload.kind(), ctx);
+    if is_any_error {
+        if let shape_wire::WireValue::Object(ref mut obj) = wire {
+            obj.insert(
+                "category".to_string(),
+                shape_wire::WireValue::String("AnyError".to_string()),
+            );
+        }
+    }
+    wire
 }
 
 #[cfg(test)]
