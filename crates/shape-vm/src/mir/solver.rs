@@ -630,6 +630,10 @@ fn statement_read_places(kind: &StatementKind) -> Vec<Place> {
                 operand_read_places(lhs, &mut reads);
                 operand_read_places(rhs, &mut reads);
             }
+            Rvalue::FuzzyComparison { lhs, rhs, .. } => {
+                operand_read_places(lhs, &mut reads);
+                operand_read_places(rhs, &mut reads);
+            }
             Rvalue::UnaryOp(_, operand) => operand_read_places(operand, &mut reads),
             Rvalue::Aggregate(operands) => {
                 for operand in operands {
@@ -1640,6 +1644,9 @@ fn rvalue_uses_any(rvalue: &Rvalue, slots: &HashSet<SlotId>) -> bool {
         Rvalue::BinaryOp(_, lhs, rhs) => {
             operand_uses_any(lhs, slots) || operand_uses_any(rhs, slots)
         }
+        Rvalue::FuzzyComparison { lhs, rhs, .. } => {
+            operand_uses_any(lhs, slots) || operand_uses_any(rhs, slots)
+        }
         Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_any(op, slots)),
         Rvalue::EnumTest { operand, .. }
         | Rvalue::EnumPayload { operand, .. }
@@ -1678,6 +1685,9 @@ fn rvalue_uses_param(rvalue: &Rvalue, param_slot: SlotId) -> bool {
         }
         Rvalue::Borrow(_, place) => place.root_local() == param_slot,
         Rvalue::BinaryOp(_, lhs, rhs) => {
+            operand_uses_param(lhs, param_slot) || operand_uses_param(rhs, param_slot)
+        }
+        Rvalue::FuzzyComparison { lhs, rhs, .. } => {
             operand_uses_param(lhs, param_slot) || operand_uses_param(rhs, param_slot)
         }
         Rvalue::Aggregate(ops) => ops.iter().any(|op| operand_uses_param(op, param_slot)),

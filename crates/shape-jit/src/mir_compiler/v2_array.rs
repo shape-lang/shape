@@ -207,6 +207,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             match rv {
                 Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => matches_slot(op),
                 Rvalue::BinaryOp(_, lhs, rhs) => matches_slot(lhs) || matches_slot(rhs),
+                Rvalue::FuzzyComparison { lhs, rhs, .. } => {
+                    matches_slot(lhs) || matches_slot(rhs)
+                }
                 Rvalue::Aggregate(ops) => ops.iter().any(&matches_slot),
                 Rvalue::Borrow(_, _) => false,
                 Rvalue::EnumTest { operand, .. }
@@ -345,6 +348,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     record_operand(op, bi, si, moves, reads);
                 }
                 Rvalue::BinaryOp(_, lhs, rhs) => {
+                    record_operand(lhs, bi, si, moves, reads);
+                    record_operand(rhs, bi, si, moves, reads);
+                }
+                Rvalue::FuzzyComparison { lhs, rhs, .. } => {
                     record_operand(lhs, bi, si, moves, reads);
                     record_operand(rhs, bi, si, moves, reads);
                 }

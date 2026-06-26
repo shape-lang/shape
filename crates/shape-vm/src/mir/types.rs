@@ -4,6 +4,7 @@
 //! Places track what can be borrowed (locals, fields, indices).
 //! Statements and terminators form basic blocks in a control flow graph.
 
+use shape_ast::ast::operators::{FuzzyOp, FuzzyTolerance};
 use shape_ast::ast::{Span, TypeAnnotation};
 use std::fmt;
 
@@ -329,6 +330,24 @@ pub enum Rvalue {
     Borrow(BorrowKind, Place),
     /// Binary operation.
     BinaryOp(BinOp, Operand, Operand),
+    /// Tolerance-aware fuzzy comparison (`~=` / `~>` / `~<`).
+    ///
+    /// Unlike `BinaryOp(Eq|Gt|Lt, lhs, rhs)`, this preserves the source
+    /// `within` tolerance through MIR so native consumers can emit the same
+    /// arithmetic shape as the bytecode VM compiler:
+    ///
+    /// - `a ~= b within abs` => `abs(a - b) <= abs`
+    /// - `a ~> b within abs` => `a > b || abs(a - b) <= abs`
+    /// - `a ~< b within abs` => `a < b || abs(a - b) <= abs`
+    ///
+    /// Percentage tolerance mirrors the bytecode compiler's denominator:
+    /// `abs(a - b) / ((abs(a) + abs(b)) / 2) <= pct`.
+    FuzzyComparison {
+        op: FuzzyOp,
+        lhs: Operand,
+        rhs: Operand,
+        tolerance: FuzzyTolerance,
+    },
     /// Unary operation.
     UnaryOp(UnOp, Operand),
     /// Function call result (arguments passed via terminator).

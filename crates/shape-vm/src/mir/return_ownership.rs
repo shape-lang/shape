@@ -145,7 +145,9 @@ fn classify_rvalue(
         Rvalue::Use(operand) => classify_operand(operand, mir, callee_modes),
         // Binary/unary ops produce primitives (int/bool/float) — treat as NewlyOwned:
         // no Arc wrap is needed for primitives, so the caller can consume directly.
-        Rvalue::BinaryOp(_, _, _) | Rvalue::UnaryOp(_, _) => ReturnOwnershipMode::NewlyOwned,
+        Rvalue::BinaryOp(_, _, _) | Rvalue::FuzzyComparison { .. } | Rvalue::UnaryOp(_, _) => {
+            ReturnOwnershipMode::NewlyOwned
+        }
         // EnumTest produces a fresh native Bool — NewlyOwned by construction.
         // EnumPayload extracts an owned share from the wrapped Result/Option
         // payload per §2.7.17 receiver-recovery soundness; also NewlyOwned.
@@ -316,7 +318,9 @@ fn classify_defining_rvalue(
 ) -> ReturnOwnershipMode {
     match rvalue {
         Rvalue::Aggregate(_) | Rvalue::Clone(_) => ReturnOwnershipMode::NewlyOwned,
-        Rvalue::BinaryOp(_, _, _) | Rvalue::UnaryOp(_, _) => ReturnOwnershipMode::NewlyOwned,
+        Rvalue::BinaryOp(_, _, _) | Rvalue::FuzzyComparison { .. } | Rvalue::UnaryOp(_, _) => {
+            ReturnOwnershipMode::NewlyOwned
+        }
         // EnumTest emits a Bool; EnumPayload emits an owned-share payload.
         // TypePatternTest emits a fresh native Bool (W15.2-LANG-5).
         // EnumDiscriminantTest emits a fresh native Bool (W15.2-LANG-1).

@@ -175,6 +175,10 @@ fn collect_rvalue_field_reads(rvalue: &Rvalue, reads: &mut HashSet<FieldKey>) {
             collect_operand_field_reads(lhs, reads);
             collect_operand_field_reads(rhs, reads);
         }
+        Rvalue::FuzzyComparison { lhs, rhs, .. } => {
+            collect_operand_field_reads(lhs, reads);
+            collect_operand_field_reads(rhs, reads);
+        }
         Rvalue::Aggregate(ops) => {
             for op in ops {
                 collect_operand_field_reads(op, reads);
