@@ -170,6 +170,7 @@ impl VirtualMachine {
             // is a v0.4 follow-up (`trace_info_*` builders return empty
             // strings today) — a clean message simply omits the trace.
             let message = self.uncaught_error_message(&payload);
+            self.set_last_uncaught_exception(payload.clone());
             // Release the payload share via `KindedSlot::Drop`
             // (kind-dispatched refcount retire per §2.7.6 / Q8) so the
             // kind track stays balanced.

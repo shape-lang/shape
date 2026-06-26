@@ -1,11 +1,15 @@
 //! Tests for unified `?` semantics (Result + Option + nullable Option encoding).
 
+use crate::VMConfig;
 use crate::bytecode::*;
 use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
-use crate::VMConfig;
+use crate::executor::result_option_carrier;
 use shape_ast::parser::parse_program;
-use shape_value::VMError;
+use shape_runtime::type_schema::builtin_schemas::{
+    ANYERROR_CATEGORY, ANYERROR_CAUSE, ANYERROR_MESSAGE, ANYERROR_PAYLOAD, BuiltinSchemaIds,
+};
+use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, VMError};
 
 // Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
 
@@ -26,17 +30,91 @@ fn compile_source(source: &str) -> Result<BytecodeProgram, VMError> {
     Ok(bytecode)
 }
 
-// Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
+fn execute_source(source: &str) -> Result<KindedSlot, VMError> {
+    let bytecode = compile_source(source)?;
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(bytecode);
+    vm.execute(None)
+}
+
+fn execute_with_preloaded_slots(
+    instructions: Vec<Instruction>,
+    make_slots: impl FnOnce(&BuiltinSchemaIds) -> Vec<KindedSlot>,
+) -> Result<(KindedSlot, BuiltinSchemaIds), VMError> {
+    let program = BytecodeProgram {
+        instructions,
+        ..Default::default()
+    };
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let schemas = vm.builtin_schemas.clone();
+    for slot in make_slots(&schemas) {
+        vm.push_kinded_slot(slot)?;
+    }
+    let result = vm.execute(None)?;
+    Ok((result, schemas))
+}
 
 /// Slot-based TypedObject to HashMap conversion for test assertions.
 /// Looks up schemas from: program registry, then runtime registry.
-// Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
+fn typed_object_storage(slot: &KindedSlot) -> &TypedObjectStorage {
+    assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+    slot.as_typed_object_storage()
+        .expect("TypedObject carrier should have provenance")
+}
 
-// Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
+fn anyerror_field(storage: &TypedObjectStorage, idx: usize) -> Option<String> {
+    if ((storage.heap_mask >> idx) & 1) == 0 {
+        return None;
+    }
+    let bits = storage.slots()[idx].raw();
+    if bits == 0 {
+        return None;
+    }
+    // SAFETY: __AnyError declares all fields as String and heap_mask marks
+    // this slot as owning a live Arc<String> payload.
+    Some(unsafe { (&*(bits as *const String)).clone() })
+}
+
+fn assert_anyerror_field(
+    slot: &KindedSlot,
+    schemas: &BuiltinSchemaIds,
+    idx: usize,
+    expected: &str,
+) {
+    let storage = typed_object_storage(slot);
+    assert_eq!(storage.schema_id, schemas.any_error as u64);
+    assert_eq!(
+        anyerror_field(storage, idx).as_deref(),
+        Some(expected),
+        "unexpected AnyError field {idx}"
+    );
+}
+
+fn runtime_error_message(err: VMError) -> String {
+    match err {
+        VMError::RuntimeError(message) => message,
+        other => panic!("expected RuntimeError, got {other:?}"),
+    }
+}
 
 #[test]
 fn test_try_unwrap_ok_extracts_inner_value() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let (slot, _) = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::TryUnwrap),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| {
+            vec![result_option_carrier::build_ok(
+                schemas,
+                KindedSlot::from_int(42),
+            )]
+        },
+    )
+    .expect("Ok carrier should unwrap");
+
+    assert_eq!(slot.as_i64(), Some(42));
 }
 
 #[test]
@@ -72,24 +150,73 @@ match parse("12") {
 
 #[test]
 fn test_try_unwrap_err_raises_uncaught_exception_at_top_level() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let err = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::TryUnwrap),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| {
+            vec![result_option_carrier::build_err(
+                schemas,
+                KindedSlot::from_string("boom"),
+            )]
+        },
+    )
+    .expect_err("Err carrier at top level should become uncaught error");
+
+    let message = runtime_error_message(err);
+    assert!(message.contains("Uncaught error: boom"), "{message}");
 }
 
 #[test]
 fn test_try_unwrap_none_raises_uncaught_exception_at_top_level() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted execute_bytecode_with_vm helper)"
+    let err = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::TryUnwrap),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| vec![result_option_carrier::build_none(schemas)],
     )
+    .expect_err("None carrier at top level should become uncaught error");
+
+    let message = runtime_error_message(err);
+    assert!(
+        message.contains("Uncaught error: Value was None"),
+        "{message}"
+    );
 }
 
 #[test]
 fn test_try_unwrap_passes_through_plain_non_none_values() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let (slot, _) = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::TryUnwrap),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |_| vec![KindedSlot::from_int(7)],
+    )
+    .expect("plain non-null value should pass through");
+
+    assert_eq!(slot.as_i64(), Some(7));
 }
 
 #[test]
 fn test_try_unwrap_unwraps_explicit_some() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let (slot, _) = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::TryUnwrap),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| {
+            vec![result_option_carrier::build_some(
+                schemas,
+                KindedSlot::from_int(9),
+            )]
+        },
+    )
+    .expect("Some carrier should unwrap");
+
+    assert_eq!(slot.as_i64(), Some(9));
 }
 
 #[test]
@@ -239,29 +366,115 @@ fn test_infallible_type_assertion_compiles_to_into_dispatch_metadata() {
 
 #[test]
 fn test_error_context_lifts_ok_into_result_ok() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let (slot, schemas) = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::ErrorContext),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| {
+            vec![
+                result_option_carrier::build_ok(schemas, KindedSlot::from_int(5)),
+                KindedSlot::from_string("ignored context"),
+            ]
+        },
+    )
+    .expect("ErrorContext on Ok should produce Ok");
+
+    let result = result_option_carrier::read_result(&schemas, &slot)
+        .expect("Result read should succeed")
+        .expect("ErrorContext should produce __Result");
+    assert!(result.is_ok());
+    let payload = result.clone_payload().expect("Ok payload should clone");
+    assert_eq!(payload.as_i64(), Some(5));
 }
 
 #[test]
 fn test_error_context_wraps_err_with_context_and_cause() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let (slot, schemas) = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::ErrorContext),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| {
+            vec![
+                result_option_carrier::build_err(schemas, KindedSlot::from_string("root")),
+                KindedSlot::from_string("outer"),
+            ]
+        },
+    )
+    .expect("ErrorContext on Err should produce Err");
+
+    let result = result_option_carrier::read_result(&schemas, &slot)
+        .expect("Result read should succeed")
+        .expect("ErrorContext should produce __Result");
+    assert!(!result.is_ok());
+    let payload = result.clone_payload().expect("Err payload should clone");
+    assert_anyerror_field(&payload, &schemas, ANYERROR_MESSAGE, "outer");
+    assert_anyerror_field(&payload, &schemas, ANYERROR_PAYLOAD, "outer");
+    assert_anyerror_field(&payload, &schemas, ANYERROR_CAUSE, "root");
+    assert_anyerror_field(&payload, &schemas, ANYERROR_CATEGORY, "RuntimeError");
 }
 
 #[test]
 fn test_error_context_wraps_none_with_synthetic_cause() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let (slot, schemas) = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::ErrorContext),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| {
+            vec![
+                result_option_carrier::build_none(schemas),
+                KindedSlot::from_string("missing value"),
+            ]
+        },
+    )
+    .expect("ErrorContext on None should produce Err");
+
+    let result = result_option_carrier::read_result(&schemas, &slot)
+        .expect("Result read should succeed")
+        .expect("ErrorContext should produce __Result");
+    assert!(!result.is_ok());
+    let payload = result.clone_payload().expect("Err payload should clone");
+    assert_anyerror_field(&payload, &schemas, ANYERROR_MESSAGE, "missing value");
+    assert_anyerror_field(&payload, &schemas, ANYERROR_CAUSE, "Value was None");
 }
 
 #[test]
 fn test_error_context_then_try_short_circuits_with_err() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let err = execute_with_preloaded_slots(
+        vec![
+            Instruction::simple(OpCode::ErrorContext),
+            Instruction::simple(OpCode::TryUnwrap),
+            Instruction::simple(OpCode::Halt),
+        ],
+        |schemas| {
+            vec![
+                result_option_carrier::build_err(schemas, KindedSlot::from_string("root")),
+                KindedSlot::from_string("outer"),
+            ]
+        },
+    )
+    .expect_err("ErrorContext followed by TryUnwrap should surface Err");
+
+    let message = runtime_error_message(err);
+    assert!(message.contains("Uncaught error: outer"), "{message}");
+    assert!(message.contains("Caused by: root"), "{message}");
 }
 
 #[test]
 fn test_error_context_inline_try_syntax_without_parentheses() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted execute_source_with_vm helper)"
-    )
+    let source = r#"
+fn fail() -> Result<int> {
+    Err("root")
+}
+
+fail() !! "outer"?
+"#;
+    let err = execute_source(source).expect_err("inline !!? should surface the contexted Err");
+    let message = runtime_error_message(err);
+    assert!(message.contains("Uncaught error: outer"), "{message}");
+    assert!(message.contains("Caused by: root"), "{message}");
 }
 
 /// Create a TraceFrame object matching the builtin schema field order:
@@ -280,7 +493,33 @@ fn test_error_context_inline_try_syntax_without_parentheses() {
 
 #[test]
 fn test_uncaught_any_error_formats_chain_and_trace() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(BytecodeProgram::default());
+    let schemas = vm.builtin_schemas.clone();
+    let trace = vm
+        .trace_info_full()
+        .expect("trace placeholder should build");
+    let any_error = vm
+        .build_any_error(
+            KindedSlot::from_string("outer"),
+            Some(KindedSlot::from_string("root")),
+            trace,
+            Some("E_TEST"),
+        )
+        .expect("AnyError should build");
+
+    let err = vm
+        .handle_exception(any_error)
+        .expect_err("uncaught AnyError should surface as RuntimeError");
+    let message = runtime_error_message(err);
+    assert!(message.contains("Uncaught error: outer"), "{message}");
+    assert!(message.contains("Caused by: root"), "{message}");
+
+    let captured = vm
+        .take_last_uncaught_exception()
+        .expect("VM should retain structured uncaught payload");
+    assert_anyerror_field(&captured, &schemas, ANYERROR_MESSAGE, "outer");
+    assert_anyerror_field(&captured, &schemas, ANYERROR_CAUSE, "root");
 }
 
 // =========================================================================
@@ -584,7 +823,13 @@ let y = x as int
 
 #[test]
 fn test_uncaught_non_any_error_uses_value_formatting() {
-    todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(BytecodeProgram::default());
+    let err = vm
+        .handle_exception(KindedSlot::from_int(42))
+        .expect_err("uncaught non-AnyError should surface as RuntimeError");
+    let message = runtime_error_message(err);
+    assert_eq!(message, "Uncaught error: 42");
 }
 
 #[test]
