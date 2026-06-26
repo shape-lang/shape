@@ -99,8 +99,7 @@ fn test_closure_edge_inside_loop_body() {
         let mut results: Array<int> = []
         for i in [1, 2, 3] {
             let f = |x| x * i
-            let value: int = f(10)
-            results = results + [value]
+            results = results + [f(10)]
         }
         results.length
     "#,

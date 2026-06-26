@@ -633,13 +633,10 @@ fn test_large_pipeline() {
             }
             arr
         }
-        fn add_int(acc: int, x: int) -> int {
-            acc + x
-        }
         make_array()
             .filter(|x| x % 3 == 0)
             .map(|x| x * x)
-            .reduce(|acc, x| add_int(acc, x), 0)
+            .reduce(|acc, x| acc + x, 0)
     "#,
     )
     .expect_number(112761.0);
