@@ -524,6 +524,32 @@ impl IoHandleData {
 // (`e58218c`). 4-table lockstep landed there; HeapKind::TraitObject = 29
 // is the assigned ordinal.
 
+/// Miri-only provenance lane for raw pointer slots whose normal ABI is still
+/// an 8-byte address. Strict provenance cannot recover a pointer from the
+/// integer bits alone, so focused Miri tests carry the original pointer next to
+/// the unchanged `ValueSlot` bits.
+#[cfg(miri)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MiriSlotProvenance {
+    None,
+    String(*const String),
+    TypedObject(*const TypedObjectStorage),
+}
+
+#[cfg(miri)]
+impl Default for MiriSlotProvenance {
+    #[inline]
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[cfg(miri)]
+unsafe impl Send for MiriSlotProvenance {}
+
+#[cfg(miri)]
+unsafe impl Sync for MiriSlotProvenance {}
+
 /// Owning newtype around `*const TypedObjectStorage` carrying one
 /// v2-raw refcount share on the pointed-to allocation's HeapHeader.
 ///
@@ -1506,9 +1532,8 @@ impl<V: HashMapValueElem> HashMapData<V> {
             for &idx in bucket {
                 let i = idx as usize;
                 // SAFETY: keys live + index points into keys range.
-                let stored_ptr = unsafe {
-                    crate::v2::typed_array::TypedArray::get_unchecked((*this).keys, idx)
-                };
+                let stored_ptr =
+                    unsafe { crate::v2::typed_array::TypedArray::get_unchecked((*this).keys, idx) };
                 let stored_str = unsafe { crate::v2::string_obj::StringObj::as_str(stored_ptr) };
                 if stored_str == key {
                     // Overwrite: read+drop the old value (SB-13), write new.
@@ -3671,6 +3696,12 @@ pub struct TypedObjectStorage {
     /// Consulted by `Drop` to dispatch per-slot `Arc::decrement_strong_count`
     /// without any schema-registry probe.
     pub field_kinds: std::sync::Arc<[crate::native_kind::NativeKind]>,
+    /// Miri-only pointer provenance sidecar for heap-bearing field slots.
+    /// Normal builds keep the original 8-byte slot ABI; strict Miri runs use
+    /// this sidecar to avoid integer-to-pointer reconstruction when a field is
+    /// cloned or dropped.
+    #[cfg(miri)]
+    pub field_provenance: Box<[MiriSlotProvenance]>,
 }
 
 impl TypedObjectStorage {
@@ -3706,6 +3737,8 @@ impl TypedObjectStorage {
             slots.len(),
             field_kinds.len(),
         );
+        #[cfg(miri)]
+        let slot_len = slots.len();
         Self {
             header: crate::v2::heap_header::HeapHeader::new(
                 crate::v2::heap_header::HEAP_KIND_V2_TYPED_OBJECT,
@@ -3714,7 +3747,15 @@ impl TypedObjectStorage {
             slot_cells: Self::wrap_slot_cells(slots),
             heap_mask,
             field_kinds,
+            #[cfg(miri)]
+            field_provenance: Self::empty_field_provenance(slot_len),
         }
+    }
+
+    #[cfg(miri)]
+    #[inline]
+    fn empty_field_provenance(len: usize) -> Box<[MiriSlotProvenance]> {
+        vec![MiriSlotProvenance::None; len].into_boxed_slice()
     }
 
     /// Convert an owned `Box<[ValueSlot]>` (the public constructor param) into
@@ -3747,10 +3788,79 @@ impl TypedObjectStorage {
         let cells: &[std::cell::UnsafeCell<crate::slot::ValueSlot>] = &self.slot_cells;
         // SAFETY: transparent newtype; read-only reborrow of the same bytes.
         unsafe {
-            std::slice::from_raw_parts(
-                cells.as_ptr() as *const crate::slot::ValueSlot,
-                cells.len(),
-            )
+            std::slice::from_raw_parts(cells.as_ptr() as *const crate::slot::ValueSlot, cells.len())
+        }
+    }
+
+    /// Clone a field into an owned `KindedSlot` while preserving Miri pointer
+    /// provenance for field payloads that still store raw address bits.
+    #[inline]
+    pub fn clone_field_kinded(&self, idx: usize) -> Option<crate::kinded_slot::KindedSlot> {
+        let slot = *self.slots().get(idx)?;
+        let kind = *self.field_kinds.get(idx)?;
+        #[cfg(miri)]
+        let borrowed = crate::kinded_slot::KindedSlot::new_with_miri_provenance(
+            slot,
+            kind,
+            self.field_provenance
+                .get(idx)
+                .copied()
+                .unwrap_or(MiriSlotProvenance::None),
+        );
+        #[cfg(not(miri))]
+        let borrowed = crate::kinded_slot::KindedSlot::new(slot, kind);
+
+        let cloned = borrowed.clone();
+        std::mem::forget(borrowed);
+        Some(cloned)
+    }
+
+    #[inline]
+    unsafe fn decrement_string_field(&self, idx: usize, bits: u64) {
+        #[cfg(not(miri))]
+        let _ = idx;
+        #[cfg(miri)]
+        let _ = bits;
+        #[cfg(miri)]
+        match self.field_provenance.get(idx).copied() {
+            Some(MiriSlotProvenance::String(ptr)) if !ptr.is_null() => {
+                unsafe { std::sync::Arc::decrement_strong_count(ptr) };
+            }
+            _ => {
+                panic!(
+                    "TypedObjectStorage::drop_fields: missing Miri provenance for String field {}",
+                    idx
+                );
+            }
+        }
+        #[cfg(not(miri))]
+        {
+            unsafe { std::sync::Arc::decrement_strong_count(bits as *const String) };
+        }
+    }
+
+    #[inline]
+    unsafe fn release_typed_object_field(&self, idx: usize, bits: u64) {
+        use crate::v2::heap_element::HeapElement;
+        #[cfg(not(miri))]
+        let _ = idx;
+        #[cfg(miri)]
+        let _ = bits;
+        #[cfg(miri)]
+        match self.field_provenance.get(idx).copied() {
+            Some(MiriSlotProvenance::TypedObject(ptr)) if !ptr.is_null() => {
+                unsafe { TypedObjectStorage::release_elem(ptr) };
+            }
+            _ => {
+                panic!(
+                    "TypedObjectStorage::drop_fields: missing Miri provenance for TypedObject field {}",
+                    idx
+                );
+            }
+        }
+        #[cfg(not(miri))]
+        {
+            unsafe { TypedObjectStorage::release_elem(bits as *const TypedObjectStorage) };
         }
     }
 
@@ -3781,6 +3891,38 @@ impl TypedObjectStorage {
         heap_mask: u64,
         field_kinds: std::sync::Arc<[crate::native_kind::NativeKind]>,
     ) -> *mut Self {
+        #[cfg(miri)]
+        let field_provenance = Self::empty_field_provenance(slots.len());
+        Self::_new_inner(
+            schema_id,
+            slots,
+            heap_mask,
+            field_kinds,
+            #[cfg(miri)]
+            field_provenance,
+        )
+    }
+
+    /// Miri-only allocator variant that preserves field pointer provenance
+    /// alongside the unchanged `ValueSlot` bits.
+    #[cfg(miri)]
+    pub fn _new_with_miri_field_provenance(
+        schema_id: u64,
+        slots: Box<[crate::slot::ValueSlot]>,
+        heap_mask: u64,
+        field_kinds: std::sync::Arc<[crate::native_kind::NativeKind]>,
+        field_provenance: Box<[MiriSlotProvenance]>,
+    ) -> *mut Self {
+        Self::_new_inner(schema_id, slots, heap_mask, field_kinds, field_provenance)
+    }
+
+    fn _new_inner(
+        schema_id: u64,
+        slots: Box<[crate::slot::ValueSlot]>,
+        heap_mask: u64,
+        field_kinds: std::sync::Arc<[crate::native_kind::NativeKind]>,
+        #[cfg(miri)] field_provenance: Box<[MiriSlotProvenance]>,
+    ) -> *mut Self {
         debug_assert_eq!(
             slots.len(),
             field_kinds.len(),
@@ -3788,6 +3930,15 @@ impl TypedObjectStorage {
              (slots={}, field_kinds={}) — every slot must have a proven NativeKind",
             slots.len(),
             field_kinds.len(),
+        );
+        #[cfg(miri)]
+        debug_assert_eq!(
+            slots.len(),
+            field_provenance.len(),
+            "TypedObjectStorage::_new: slots/field_provenance length mismatch \
+             (slots={}, field_provenance={})",
+            slots.len(),
+            field_provenance.len(),
         );
         let layout = std::alloc::Layout::new::<Self>();
         let ptr = unsafe { std::alloc::alloc(layout) as *mut Self };
@@ -3807,6 +3958,8 @@ impl TypedObjectStorage {
             std::ptr::write(&mut (*ptr).slot_cells, Self::wrap_slot_cells(slots));
             std::ptr::write(&mut (*ptr).heap_mask, heap_mask);
             std::ptr::write(&mut (*ptr).field_kinds, field_kinds);
+            #[cfg(miri)]
+            std::ptr::write(&mut (*ptr).field_provenance, field_provenance);
         }
         ptr
     }
@@ -3840,6 +3993,8 @@ impl TypedObjectStorage {
             // primitive) — no Drop work owed.
             std::ptr::drop_in_place(&mut (*ptr).slot_cells);
             std::ptr::drop_in_place(&mut (*ptr).field_kinds);
+            #[cfg(miri)]
+            std::ptr::drop_in_place(&mut (*ptr).field_provenance);
             // Deallocate the struct's heap memory.
             let layout = std::alloc::Layout::new::<Self>();
             std::alloc::dealloc(ptr as *mut u8, layout);
@@ -3891,7 +4046,7 @@ impl TypedObjectStorage {
             unsafe {
                 match self.field_kinds[i] {
                     NativeKind::String => {
-                        std::sync::Arc::decrement_strong_count(bits as *const String);
+                        self.decrement_string_field(i, bits);
                     }
                     // Wave 2 Agent B (ADR-006 §2.7.5 amendment, 2026-05-14):
                     // A TypedObject field of kind `NativeKind::StringV2` /
@@ -3918,7 +4073,7 @@ impl TypedObjectStorage {
                     }
                     NativeKind::Ptr(hk) => match hk {
                         HeapKind::String => {
-                            std::sync::Arc::decrement_strong_count(bits as *const String);
+                            self.decrement_string_field(i, bits);
                         }
                         // r5c-2-β-δ-(α) (2026-05-20): `HeapKind::TypedArray`
                         // dispatch arm RE-INSTATED. The V3-S5 ckpt-5-prime
@@ -3953,8 +4108,7 @@ impl TypedObjectStorage {
                         // struct). Mirror of the §2.7.5 StringV2 /
                         // DecimalV2 release arms above (Agent B precedent).
                         HeapKind::TypedObject => {
-                            use crate::v2::heap_element::HeapElement;
-                            TypedObjectStorage::release_elem(bits as *const TypedObjectStorage);
+                            self.release_typed_object_field(i, bits);
                         }
                         HeapKind::HashMap => {
                             // Wave 2 Round 3b C2-joint ckpt-2 (2026-05-14):
@@ -4220,8 +4374,7 @@ impl TypedObjectStorage {
                 (cells_ptr as *const std::cell::UnsafeCell<crate::slot::ValueSlot>).add(idx);
             // `UnsafeCell::raw_get` yields a `*mut ValueSlot` carrying the
             // cell's interior-mutable provenance — never a shared-ref tag.
-            let slot_ptr: *mut crate::slot::ValueSlot =
-                std::cell::UnsafeCell::raw_get(cell_ptr);
+            let slot_ptr: *mut crate::slot::ValueSlot = std::cell::UnsafeCell::raw_get(cell_ptr);
             let prior = (*slot_ptr).raw();
             *slot_ptr = crate::slot::ValueSlot::from_raw(new_bits);
             prior
@@ -6852,8 +7005,7 @@ mod trait_object_storage {
         // `storage` + the slot's share. Borrow it transiently as a
         // shared reference for the read — no refcount touch, no
         // `Arc::from_raw`/`byte_sub(16)`.
-        let recovered: &TraitObjectStorage =
-            unsafe { &*(bits as *const TraitObjectStorage) };
+        let recovered: &TraitObjectStorage = unsafe { &*(bits as *const TraitObjectStorage) };
 
         // Recovered borrow points to the same storage — same vtable Arc.
         assert!(Arc::ptr_eq(&recovered.vtable, &storage.vtable));

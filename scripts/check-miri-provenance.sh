@@ -38,44 +38,6 @@ run_miri() {
   fi
 }
 
-run_expected_strict_failure() {
-  local out
-  out="$(mktemp "${TMPDIR:-/tmp}/shape-miri-strict-provenance.XXXXXX")"
-
-  echo
-  echo "==> strict provenance expected failure"
-  echo "    crate: shape-vm"
-  echo "    filter: result_option_carrier"
-  echo "    MIRIFLAGS=-Zmiri-strict-provenance"
-
-  set +e
-  env MIRIFLAGS="-Zmiri-strict-provenance" "$RUSTUP" run nightly cargo miri test \
-    -p shape-vm --lib result_option_carrier >"$out" 2>&1
-  local status=$?
-  set -e
-
-  if [[ "$status" -eq 0 ]]; then
-    cat "$out"
-    rm -f "$out"
-    echo "unexpected strict-provenance pass; update the audit/gate after the blocker is fixed" >&2
-    return 1
-  fi
-
-  if grep -Fq "integer-to-pointer casts" "$out" \
-    && grep -Fq "crates/shape-vm/src/executor/result_option_carrier.rs:229" "$out"; then
-    echo "expected strict-provenance failure observed:"
-    grep -F "integer-to-pointer casts" "$out" | head -n 1
-    grep -F "crates/shape-vm/src/executor/result_option_carrier.rs:229" "$out" | head -n 2
-    rm -f "$out"
-    return 0
-  fi
-
-  cat "$out"
-  rm -f "$out"
-  echo "unexpected strict-provenance failure signature" >&2
-  return 1
-}
-
 run_miri "shape-value provenance anchors, Stacked Borrows" "" \
   shape-value provenance
 run_miri "shape-value provenance anchors, Tree Borrows" "-Zmiri-tree-borrows" \
@@ -91,7 +53,8 @@ run_miri "shape-vm typed-object get_prop raw read, Stacked Borrows" "" \
 run_miri "shape-vm typed-object get_prop raw read, Tree Borrows" "-Zmiri-tree-borrows" \
   shape-vm get_prop_typed_object_int_field_reads_via_raw
 
-run_expected_strict_failure
+run_miri "shape-vm Result/Option carrier, Strict Provenance" "-Zmiri-strict-provenance" \
+  shape-vm result_option_carrier
 
 echo
 echo "Miri provenance gate complete."
