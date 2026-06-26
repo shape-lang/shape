@@ -1303,12 +1303,19 @@ mod tests {
     }
 
     #[test]
-    fn legacy_result_option_heap_kind_rewrap_surfaces() {
+    fn legacy_result_option_heap_kind_rewrap_surfaces_and_retires_share() {
+        use shape_value::heap_value::{OptionData, ResultData};
+
         let schemas = schemas();
         let vtable = test_vtable();
 
+        let result_carrier = Arc::new(ResultData::ok(KindedSlot::from_int(7)));
+        let result_baseline = Arc::strong_count(&result_carrier);
+        let result_bits = Arc::into_raw(Arc::clone(&result_carrier)) as u64;
+        assert_eq!(Arc::strong_count(&result_carrier), result_baseline + 1);
+
         let result_err = rewrap_return_value(
-            0,
+            result_bits,
             NativeKind::Ptr(HeapKind::Result),
             &[wrap(&[0])],
             &vtable,
@@ -1321,9 +1328,15 @@ mod tests {
                 if msg.contains("legacy HeapKind::Result")
                     && msg.contains("__Result")
         ));
+        assert_eq!(Arc::strong_count(&result_carrier), result_baseline);
+
+        let option_carrier = Arc::new(OptionData::some(KindedSlot::from_int(9)));
+        let option_baseline = Arc::strong_count(&option_carrier);
+        let option_bits = Arc::into_raw(Arc::clone(&option_carrier)) as u64;
+        assert_eq!(Arc::strong_count(&option_carrier), option_baseline + 1);
 
         let option_err = rewrap_return_value(
-            0,
+            option_bits,
             NativeKind::Ptr(HeapKind::Option),
             &[wrap(&[0])],
             &vtable,
@@ -1336,5 +1349,6 @@ mod tests {
                 if msg.contains("legacy HeapKind::Option")
                     && msg.contains("__Option")
         ));
+        assert_eq!(Arc::strong_count(&option_carrier), option_baseline);
     }
 }
