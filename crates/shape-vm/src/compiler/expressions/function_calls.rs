@@ -157,48 +157,37 @@ fn is_compile_time_const_expr(expr: &Expr) -> bool {
     }
 }
 
-/// Comptime const-folding produced a `ValueWord` carrier that is now
-/// deleted. The whole const-fold pipeline (literal → carrier, arith
-/// folding, fingerprint, specialization-key build) lives behind the
-/// `ConstFoldValue` placeholder until the phase-2c carrier shape lands
-/// (ADR-006 §2.4). Out-of-territory consumers in `compiler/statements.rs`
-/// (overflow-range check) and `compiler/expressions/function_calls.rs`
-/// (`ensure_const_specialization`) cascade off this stub.
+fn literal_const_slot(literal: &Literal) -> Option<shape_value::KindedSlot> {
+    use shape_value::{KindedSlot, NativeKind, ValueSlot};
+    Some(match literal {
+        Literal::Int(value) => KindedSlot::from_int(*value),
+        Literal::UInt(value) => KindedSlot::new(ValueSlot::from_u64(*value), NativeKind::UInt64),
+        Literal::TypedInt(value, _) => KindedSlot::from_int(*value),
+        Literal::Number(value) => KindedSlot::from_number(*value),
+        Literal::String(value) => KindedSlot::from_string(value),
+        Literal::Char(value) => KindedSlot::from_char(*value),
+        Literal::Bool(value) => KindedSlot::from_bool(*value),
+        Literal::None | Literal::Unit => KindedSlot::none(),
+        Literal::Decimal(_) | Literal::FormattedString { .. } | Literal::Timeframe(_) => {
+            return None;
+        }
+    })
+}
+
+fn const_expr_literal(expr: &Expr) -> Option<&Literal> {
+    match expr {
+        Expr::Literal(literal, _) => Some(literal),
+        _ => None,
+    }
+}
+
+fn const_expr_fingerprint(expr: &Expr) -> Option<String> {
+    const_expr_literal(expr).map(|literal| format!("{:?}", literal))
+}
+
 pub(crate) enum ConstFoldValue {}
 
-// Const-fold projections produce `Option<ConstFoldValue>`, where
-// `ConstFoldValue` is intentionally uninhabited until the phase-2c carrier
-// shape lands (ADR-006 §2.4 — the deleted `ValueWord` shape backed the
-// previous `Literal → Carrier → fingerprint → specialization-key`
-// pipeline). Returning `None` is the type-correct surface-and-stop
-// response: callers branch on `Some`/`None` and the matching arm on the
-// uninhabited type is statically unreachable, so no caller behaviour
-// changes when the kinded carrier lands and `Some(_)` becomes reachable.
-//
-// Returning `None` here is NOT a Bool-default fallback: `None` is a
-// well-defined arm of the function's `Option` return type, semantically
-// meaning "no foldable constant was projected", which is the correct
-// answer while the projection pipeline is dormant. Bool-default would be
-// fabricating a kind for a slot whose kind is unknown — different shape,
-// different rejection per §2.7.7 #4. The cite is preserved as a comment
-// for the phase-2c rebuild grep gate.
-
-#[allow(dead_code)]
-fn literal_to_nanboxed(literal: &Literal) -> Option<ConstFoldValue> {
-    // phase-2c — see ADR-006 §2.4 (kinded literal-to-carrier projection).
-    let _ = literal;
-    None
-}
-
 pub(crate) fn eval_const_expr_to_nanboxed(expr: &Expr) -> Option<ConstFoldValue> {
-    // phase-2c — see ADR-006 §2.4 (kinded const-fold evaluator).
-    let _ = expr;
-    None
-}
-
-#[allow(dead_code)]
-fn const_expr_fingerprint(expr: &Expr) -> Option<String> {
-    // phase-2c — see ADR-006 §2.4 (kinded const-fold fingerprint key).
     let _ = expr;
     None
 }
@@ -590,29 +579,119 @@ impl BytecodeCompiler {
             return Ok(None);
         }
 
-        // The const-specialization machinery folds each call-site
-        // argument into a `ConstFoldValue` carrier, fingerprints it, and
-        // stores the resulting `Vec<(String, <carrier>)>` in
-        // `self.specialization_const_bindings` so comptime handlers can
-        // read it back as a typed module binding. The carrier shape
-        // lands in phase-2c (ADR-006 §2.4); the
-        // `specialization_const_bindings` field type itself is defined
-        // in `compiler/mod.rs` (out-of-territory), so this path stays
-        // surfaced rather than partially migrated. Const specialization
-        // is therefore a no-op until the carrier sweep reaches the
-        // out-of-territory storage shape.
-        //
-        // Returning `Ok(None)` here means "no specialization was produced
-        // at this call site": the caller (`compile_expr_function_call`)
-        // then keeps the base `call_name` / `call_func_idx` and emits a
-        // plain `Call` against the un-specialized symbol. The literal-
-        // const argument check at the caller (lines 670-686) still runs,
-        // so const-param invariants stay enforced; only the specialized-
-        // body rewrite is dormant. This preserves the public surface
-        // (`Result<Option<(String, usize)>>`) — no caller signature
-        // change is needed when phase-2c re-introduces the carrier.
-        let _ = (name, args, const_param_indices);
-        Ok(None)
+        let original_def =
+            self.function_defs
+                .get(name)
+                .cloned()
+                .ok_or_else(|| ShapeError::SemanticError {
+                    message: format!(
+                        "const specialization requested for unknown function '{}'",
+                        name
+                    ),
+                    location: None,
+                })?;
+
+        let mut key_parts = Vec::with_capacity(const_param_indices.len());
+        let mut const_bindings = Vec::with_capacity(const_param_indices.len());
+        for idx in const_param_indices {
+            let Some(arg) = args.get(idx) else {
+                continue;
+            };
+            let Some(fingerprint) = const_expr_fingerprint(arg) else {
+                return Ok(None);
+            };
+            let Some(literal) = const_expr_literal(arg) else {
+                return Ok(None);
+            };
+            let Some(value) = literal_const_slot(literal) else {
+                return Ok(None);
+            };
+            let param_name = original_def
+                .params
+                .get(idx)
+                .and_then(|p| p.simple_name())
+                .ok_or_else(|| ShapeError::SemanticError {
+                    message: format!(
+                        "const specialization for '{}' requires a named const parameter at position {}",
+                        name,
+                        idx + 1
+                    ),
+                    location: None,
+                })?
+                .to_string();
+            key_parts.push(format!("{}={}", param_name, fingerprint));
+            const_bindings.push((param_name, value));
+        }
+
+        if const_bindings.is_empty() {
+            return Ok(None);
+        }
+
+        let specialization_key = format!("{}::{}", name, key_parts.join("|"));
+        if let Some(&existing_idx) = self.const_specializations.get(&specialization_key) {
+            let existing_name = self
+                .program
+                .functions
+                .get(existing_idx)
+                .map(|f| f.name.clone())
+                .ok_or_else(|| ShapeError::SemanticError {
+                    message: format!(
+                        "const specialization cache for '{}' points at missing function index {}",
+                        name, existing_idx
+                    ),
+                    location: None,
+                })?;
+            return Ok(Some((existing_name, existing_idx)));
+        }
+
+        let mut specialized_def = original_def;
+        specialized_def.name = format!("{}__const_{}", name, self.next_const_specialization_id);
+        self.next_const_specialization_id = self.next_const_specialization_id.saturating_add(1);
+        if let Some(module_path) = specialized_def.declaring_module_path.clone() {
+            for ann in &mut specialized_def.annotations {
+                if ann.name.contains("::") {
+                    continue;
+                }
+                let qualified = Self::qualify_module_symbol(&module_path, &ann.name);
+                if self.program.compiled_annotations.contains_key(&qualified) {
+                    ann.name = qualified;
+                }
+            }
+        }
+        let specialized_name = specialized_def.name.clone();
+
+        self.specialization_const_bindings
+            .insert(specialized_name.clone(), const_bindings);
+        self.register_function(&specialized_def)?;
+        let specialized_idx =
+            self.find_function(&specialized_name)
+                .ok_or_else(|| ShapeError::SemanticError {
+                    message: format!(
+                        "const specialization failed to register function '{}'",
+                        specialized_name
+                    ),
+                    location: None,
+                })?;
+        self.const_specializations
+            .insert(specialization_key.clone(), specialized_idx);
+
+        let compile_result = if specialized_def.declaring_module_path.is_some() {
+            // Imported namespace-call specializations are consumer-side clones:
+            // the exporting module already compiled definition annotations.
+            let mut body_def = specialized_def.clone();
+            body_def.annotations.clear();
+            self.compile_function(&body_def)
+        } else {
+            self.compile_function(&specialized_def)
+        };
+
+        if let Err(err) = compile_result {
+            self.specialization_const_bindings.remove(&specialized_name);
+            self.const_specializations.remove(&specialization_key);
+            return Err(err);
+        }
+
+        Ok(Some((specialized_name, specialized_idx)))
     }
 
     /// Compile a function call expression
@@ -1510,7 +1589,10 @@ impl BytecodeCompiler {
             return Ok(());
         }
 
-        if let Some(builtin_decl) = self.resolve_scoped_module_builtin_function(name) {
+        if let Some(builtin_decl) = self.resolve_scoped_module_builtin_function(name)
+            && !(self.allow_internal_builtins
+                && Self::is_internal_intrinsic_name(&builtin_decl.export_name))
+        {
             return self.compile_module_builtin_function_call(&builtin_decl, args, span);
         }
 
