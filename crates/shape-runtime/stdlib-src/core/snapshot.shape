@@ -10,6 +10,8 @@ pub enum Snapshot {
     Resumed
 }
 
+builtin fn __intrinsic_snapshot() -> Snapshot;
+
 /// Create a snapshot of the current execution state.
 /// This is a suspension point: the engine saves all state and returns `Snapshot::Hash(id)`.
 /// When resumed from a snapshot, execution continues here and returns `Snapshot::Resumed`.

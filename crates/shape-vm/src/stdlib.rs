@@ -282,6 +282,9 @@ pub fn build_core_prelude_bundle() -> Result<PackageBundle> {
     let trace = stdlib_compile_logs_enabled();
     let mut loader = ModuleLoader::new();
     let core_modules = loader.list_core_stdlib_module_imports()?;
+    let schema_registry =
+        Arc::new(shape_runtime::type_schema::TypeSchemaRegistry::new_with_stdlib());
+    let _schema_scope = shape_runtime::type_schema::SyncRegistryScope::enter(schema_registry);
 
     let mut merged = BytecodeProgram::new();
     let mut interface_items: Vec<shape_ast::ast::Item> = Vec::new();
@@ -398,6 +401,9 @@ pub fn compile_core_modules_from_source() -> Result<BytecodeProgram> {
     if core_modules.is_empty() {
         return Ok(BytecodeProgram::new());
     }
+    let schema_registry =
+        Arc::new(shape_runtime::type_schema::TypeSchemaRegistry::new_with_stdlib());
+    let _schema_scope = shape_runtime::type_schema::SyncRegistryScope::enter(schema_registry);
 
     let mut merged = BytecodeProgram::new();
     for import_path in core_modules {

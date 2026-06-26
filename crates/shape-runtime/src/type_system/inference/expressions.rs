@@ -10,6 +10,82 @@ use shape_ast::ast::{BinaryOp, Expr, Literal, Span, TypeAnnotation};
 use shape_ast::interpolation::{InterpolationPart, parse_interpolation_with_mode};
 
 impl TypeInferenceEngine {
+    fn substitute_trait_self_annotation(
+        ann: &TypeAnnotation,
+        self_ann: &TypeAnnotation,
+    ) -> TypeAnnotation {
+        match ann {
+            TypeAnnotation::Basic(name) if name == "Self" => self_ann.clone(),
+            TypeAnnotation::Reference(path) if path.as_str() == "Self" => self_ann.clone(),
+            TypeAnnotation::Array(inner) => TypeAnnotation::Array(Box::new(
+                Self::substitute_trait_self_annotation(inner, self_ann),
+            )),
+            TypeAnnotation::Tuple(items) => TypeAnnotation::Tuple(
+                items
+                    .iter()
+                    .map(|item| Self::substitute_trait_self_annotation(item, self_ann))
+                    .collect(),
+            ),
+            TypeAnnotation::Object(fields) => TypeAnnotation::Object(
+                fields
+                    .iter()
+                    .cloned()
+                    .map(|mut field| {
+                        field.type_annotation = Self::substitute_trait_self_annotation(
+                            &field.type_annotation,
+                            self_ann,
+                        );
+                        field
+                    })
+                    .collect(),
+            ),
+            TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+                params: params
+                    .iter()
+                    .cloned()
+                    .map(|mut param| {
+                        param.type_annotation = Self::substitute_trait_self_annotation(
+                            &param.type_annotation,
+                            self_ann,
+                        );
+                        param
+                    })
+                    .collect(),
+                returns: Box::new(Self::substitute_trait_self_annotation(returns, self_ann)),
+            },
+            TypeAnnotation::Union(items) => TypeAnnotation::Union(
+                items
+                    .iter()
+                    .map(|item| Self::substitute_trait_self_annotation(item, self_ann))
+                    .collect(),
+            ),
+            TypeAnnotation::Intersection(items) => TypeAnnotation::Intersection(
+                items
+                    .iter()
+                    .map(|item| Self::substitute_trait_self_annotation(item, self_ann))
+                    .collect(),
+            ),
+            TypeAnnotation::Generic { name, args } => TypeAnnotation::Generic {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| Self::substitute_trait_self_annotation(arg, self_ann))
+                    .collect(),
+            },
+            TypeAnnotation::Borrow { mutable, inner } => TypeAnnotation::Borrow {
+                mutable: *mutable,
+                inner: Box::new(Self::substitute_trait_self_annotation(inner, self_ann)),
+            },
+            TypeAnnotation::Dyn(traits) => TypeAnnotation::Dyn(traits.clone()),
+            TypeAnnotation::Basic(_)
+            | TypeAnnotation::Reference(_)
+            | TypeAnnotation::Void
+            | TypeAnnotation::Never
+            | TypeAnnotation::Null
+            | TypeAnnotation::Undefined => ann.clone(),
+        }
+    }
+
     /// True for an exact built-in NAMESPACE static-constructor pair
     /// (`DateTime.now`, `Content.text`, `Table.new`, …) that the bytecode
     /// compiler lowers to a dedicated `BuiltinFunction` via
@@ -1399,34 +1475,74 @@ impl TypeInferenceEngine {
 
                 // STRICT-FLIP (v0.3.3, SMOKE-s5): method call on a `dyn Trait`
                 // receiver resolves against the trait's declared method
-                // signatures. `let arr: Array<dyn HasX> = [...]` makes
-                // `arr[0]` a `dyn HasX`; `arr[0].x_str()` must find `x_str`'s
-                // return type on the trait. Without this the call falls through
-                // to `infer_property_access` → a `HasField` constraint on the
-                // Dyn type → "cannot have fields". Look up each trait in the
-                // dyn set and return the first matching method's return type.
-                // Sound: only resolves a method the trait actually declares
-                // (required signature or default body); an unknown method still
-                // falls through and is rejected.
+                // signatures. Soundness hinges on using the trait signature
+                // itself: params are arity-checked and constrained, and every
+                // occurrence of `Self` is statically substituted with the dyn
+                // receiver type. A return like `Self` therefore stays callable
+                // as `dyn Trait`; it never leaks literal `Self` into later
+                // method resolution and never asks runtime dispatch to guess.
                 if let Type::Concrete(TypeAnnotation::Dyn(traits)) = &receiver_type {
                     use shape_ast::ast::{TraitMember, TraitMemberSignature};
+                    let self_ann = TypeAnnotation::Dyn(traits.clone());
                     for trait_path in traits {
                         let Some(trait_def) = self.env.lookup_trait(trait_path.as_str()) else {
                             continue;
                         };
                         for member in &trait_def.members {
-                            let method_return = match member {
+                            let signature = match member {
                                 TraitMember::Required(TraitMemberSignature::Method {
                                     name,
+                                    params,
                                     return_type,
                                     ..
-                                }) if name == method => Some(return_type.clone()),
-                                TraitMember::Default(method_def) if method_def.name == *method => {
-                                    method_def.return_type.clone()
-                                }
+                                }) if name == method => Some((
+                                    params
+                                        .iter()
+                                        .filter(|p| p.name.as_deref() != Some("self"))
+                                        .map(|p| p.type_annotation.clone())
+                                        .collect::<Vec<_>>(),
+                                    return_type.clone(),
+                                )),
+                                TraitMember::Default(method_def) if method_def.name == *method => method_def
+                                    .return_type
+                                    .clone()
+                                    .map(|return_type| {
+                                        (
+                                            method_def
+                                                .params
+                                                .iter()
+                                                .filter(|p| {
+                                                    !matches!(
+                                                        &p.pattern,
+                                                        shape_ast::ast::DestructurePattern::Identifier(
+                                                            name,
+                                                            _
+                                                        ) if name == "self"
+                                                    )
+                                                })
+                                                .filter_map(|p| p.type_annotation.clone())
+                                                .collect::<Vec<_>>(),
+                                            return_type,
+                                        )
+                                    }),
                                 _ => None,
                             };
-                            if let Some(ret_ann) = method_return {
+                            if let Some((params, ret_ann)) = signature {
+                                if params.len() != arg_types.len() {
+                                    return Err(TypeError::ArityMismatch(
+                                        params.len(),
+                                        arg_types.len(),
+                                    ));
+                                }
+                                for (arg_ty, param_ann) in arg_types.iter().zip(params.iter()) {
+                                    let param_ann = Self::substitute_trait_self_annotation(
+                                        param_ann, &self_ann,
+                                    );
+                                    self.constraints
+                                        .push((arg_ty.clone(), Type::Concrete(param_ann)));
+                                }
+                                let ret_ann =
+                                    Self::substitute_trait_self_annotation(&ret_ann, &self_ann);
                                 return Ok(Type::Concrete(ret_ann));
                             }
                         }
