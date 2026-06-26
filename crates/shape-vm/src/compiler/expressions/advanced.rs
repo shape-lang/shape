@@ -66,6 +66,28 @@ impl BytecodeCompiler {
                 .filter(|&idx| self.local_drop_kind(idx).is_some()),
             _ => None,
         };
+        self.emit_try_unwrap_current_value(skip_local)?;
+
+        // WS-3 F2a: stamp the compile-time type tracker with the type of the
+        // UNWRAPPED success value. The `?` operator yields the inner `T` of a
+        // `Result<T, E>` / `Option<T>` (or `T?`); the runtime inference engine
+        // already does this (`try_unwrap_inner_type`,
+        // `type_system/inference/expressions.rs`), but the bytecode compiler's
+        // parallel tracker did not. Without this stamp, a `let v = expr?`
+        // binding records slot `v` with no type, and a later `v + 1` fails
+        // strict typing as `unknown + int`. We mirror the runtime engine's
+        // unwrap onto `last_expr_*` so `propagate_initializer_type_to_slot`
+        // records the unwrapped type on the binding's slot.
+        self.stamp_unwrapped_success_type(inner);
+        Ok(())
+    }
+
+    /// Consume the current top-of-stack fallible carrier with the same
+    /// unwrap/early-return sequence used by `?`.
+    pub(super) fn emit_try_unwrap_current_value(
+        &mut self,
+        skip_local: Option<u16>,
+    ) -> Result<()> {
         if self.has_failure_drop_locals(skip_local) {
             self.emit(Instruction::simple(OpCode::Dup));
             self.emit(Instruction::simple(OpCode::IsTryFailure));
@@ -105,18 +127,6 @@ impl BytecodeCompiler {
         // `docs/cluster-audits/v0.3.3/04-pointer-as-float-leak.md` §4B
         // Sub-cluster — FN-REG-CORRECTNESS / RELEASE-BLOCKING).
         self.program.has_try_unwrap_residual = true;
-
-        // WS-3 F2a: stamp the compile-time type tracker with the type of the
-        // UNWRAPPED success value. The `?` operator yields the inner `T` of a
-        // `Result<T, E>` / `Option<T>` (or `T?`); the runtime inference engine
-        // already does this (`try_unwrap_inner_type`,
-        // `type_system/inference/expressions.rs`), but the bytecode compiler's
-        // parallel tracker did not. Without this stamp, a `let v = expr?`
-        // binding records slot `v` with no type, and a later `v + 1` fails
-        // strict typing as `unknown + int`. We mirror the runtime engine's
-        // unwrap onto `last_expr_*` so `propagate_initializer_type_to_slot`
-        // records the unwrapped type on the binding's slot.
-        self.stamp_unwrapped_success_type(inner);
         Ok(())
     }
 
