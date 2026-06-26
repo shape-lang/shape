@@ -242,22 +242,14 @@ impl ToSlot for Arc<shape_value::DataTable> {
 // ────────────────────── IoHandle FromSlot/ToSlot (option γ) ───────────────
 //
 // Cluster #2 (docs/defections.md 2026-05-06): IoHandle marshal extension
-// via Arc<IoHandleData>. Mirrors the Arc<DataTable> shape exactly.
+// via Arc<IoHandleData>.
 //
-// `HeapValue::IoHandle` payload was changed from Box<IoHandleData> to
-// Arc<IoHandleData> in the prior commit specifically so the FromSlot
-// projection here is one atomic op (Arc::clone of the inner Arc) rather
-// than a Box clone (alloc + memcpy). Bodies declare
-// `handle: Arc<IoHandleData>` and call methods on it via Arc::deref —
-// `handle.is_open()`, `handle.close()`, `handle.resource.lock()`.
-//
-// Same consistency-check residual as Arc<DataTable> at marshal.rs:193 —
-// the body's `Arc<IoHandleData>` parameter type pins the expected
-// `HeapValue::IoHandle` variant; the panic-on-mismatch arm is
-// unreachable in a well-typed system per
-// `docs/runtime-v2-spec.md` ("consistency check, not probe").
+// Strict IoHandle slots use the direct `Arc::into_raw(Arc<IoHandleData>)`
+// carrier that `KindedSlot::from_io_handle` and the HeapKind::IoHandle
+// clone/drop arms retain and release. Bodies declare
+// `handle: Arc<IoHandleData>` and call methods on it via Arc::deref.
 
-/// Read the inner `Arc<IoHandleData>` from a `NativeKind::Ptr(HeapKind::IoHandle)` slot.
+/// Read the direct `Arc<IoHandleData>` from a `NativeKind::Ptr(HeapKind::IoHandle)` slot.
 impl FromSlot for Arc<shape_value::heap_value::IoHandleData>
 where
     Self: Sized,
@@ -265,33 +257,24 @@ where
     const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::IoHandle);
     #[inline]
     fn from_slot(bits: u64) -> Self {
-        let ptr = bits as *const shape_value::HeapValue;
-        // SAFETY: NATIVE_KIND::Ptr(HeapKind::IoHandle) pins the bits to
-        // an Arc<HeapValue> with the IoHandle variant. We clone the
-        // inner Arc<IoHandleData> without consuming the slot's strong ref.
+        let ptr = bits as *const shape_value::heap_value::IoHandleData;
+        // SAFETY: KindedSlot::from_io_handle and the HeapKind::IoHandle
+        // clone/drop tables store a direct Arc<IoHandleData> carrier.
+        // Increment then rebuild an Arc from that retained share, leaving
+        // the caller-owned slot share untouched.
         unsafe {
             Arc::increment_strong_count(ptr);
-            let arc_hv = Arc::from_raw(ptr);
-            match &*arc_hv {
-                shape_value::HeapValue::IoHandle(arc_io) => Arc::clone(arc_io),
-                other => panic!(
-                    "FromSlot<Arc<IoHandleData>>: slot bits decoded to HeapValue::{:?}, \
-                     not IoHandle. Marshal kind contract violated by caller.",
-                    other.kind()
-                ),
-            }
+            Arc::from_raw(ptr)
         }
     }
 }
 
-/// Write an `Arc<IoHandleData>` into a heap slot by wrapping in
-/// `HeapValue::IoHandle` and producing the raw `Arc<HeapValue>` pointer.
+/// Write an `Arc<IoHandleData>` using the strict direct-Arc IoHandle carrier.
 impl ToSlot for Arc<shape_value::heap_value::IoHandleData> {
     const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::IoHandle);
     #[inline]
     fn to_slot(self) -> u64 {
-        let hv = Arc::new(shape_value::HeapValue::IoHandle(self));
-        Arc::into_raw(hv) as u64
+        Arc::into_raw(self) as u64
     }
 }
 
@@ -558,6 +541,12 @@ impl ToSlot for Vec<Arc<String>> {
         let arr = shape_value::v2::typed_array::TypedArray::<
             *const shape_value::v2::string_obj::StringObj,
         >::from_slice(&elems);
+        unsafe {
+            shape_value::v2::typed_array::stamp_elem_type(
+                arr as *mut u8,
+                shape_value::v2::typed_array::ELEM_TYPE_STRING,
+            );
+        }
         arr as usize as u64
     }
 }

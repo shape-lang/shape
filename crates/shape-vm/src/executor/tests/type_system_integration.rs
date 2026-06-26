@@ -26,6 +26,11 @@ fn compile_and_execute(source: &str) -> Result<KindedSlot, VMError> {
     vm.execute(None)
 }
 
+fn assert_int_result(result: &KindedSlot, expected: i64, context: &str) {
+    assert_eq!(result.kind(), shape_value::NativeKind::Int64, "{context}");
+    assert_eq!(result.as_i64(), Some(expected), "{context}");
+}
+
 /// Assert that source code compiles successfully (may not need to run).
 fn assert_compiles(source: &str) {
     let program = parse_program(source).expect("Parse failed");
@@ -302,9 +307,18 @@ fn test_extend_number_method_chaining() {
 
 #[test]
 fn test_bug1_type_annotated_variable_arithmetic() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
-    )
+    // BUG-1: `let x: int = 3; let y = 1; x + y` should produce 4.
+    let source = r#"{
+        let x: int = 3
+        let y = 1
+        x + y
+    }"#;
+    let result = compile_and_execute(source).unwrap();
+    assert_int_result(
+        &result,
+        4,
+        "Type-annotated int should participate in arithmetic",
+    );
 }
 
 #[test]
@@ -339,9 +353,18 @@ fn test_bug1_type_annotated_string_length() {
 
 #[test]
 fn test_bug1_toplevel_type_annotated_arithmetic() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
-    )
+    // Top-level module-binding type-annotated variables must work in arithmetic.
+    let source = r#"
+        let x: int = 3
+        let y = 1
+        x + y
+    "#;
+    let result = compile_and_execute(source).unwrap();
+    assert_int_result(
+        &result,
+        4,
+        "Top-level type-annotated int should participate in arithmetic",
+    );
 }
 
 #[test]
@@ -361,9 +384,12 @@ fn test_bug2_toplevel_type_annotated_comparison() {
 
 #[test]
 fn test_bug1_type_annotated_value_not_wrapped() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
-    )
+    let source = r#"
+        let x: int = 42
+        x
+    "#;
+    let result = compile_and_execute(source).unwrap();
+    assert_int_result(&result, 42, "Type-annotated int should be a plain integer");
 }
 
 #[test]
