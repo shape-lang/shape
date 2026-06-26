@@ -86,6 +86,64 @@ impl TypeInferenceEngine {
         }
     }
 
+    fn trait_signature_annotation_type(
+        ann: &TypeAnnotation,
+        self_ann: &TypeAnnotation,
+        generic_bindings: &std::collections::HashMap<String, Type>,
+    ) -> Type {
+        match ann {
+            TypeAnnotation::Basic(name) if name == "Self" => Type::Concrete(self_ann.clone()),
+            TypeAnnotation::Reference(path) if path.as_str() == "Self" => {
+                Type::Concrete(self_ann.clone())
+            }
+            TypeAnnotation::Basic(name) => generic_bindings
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| Type::Concrete(ann.clone())),
+            TypeAnnotation::Reference(path) => generic_bindings
+                .get(path.as_str())
+                .cloned()
+                .unwrap_or_else(|| Type::Concrete(ann.clone())),
+            TypeAnnotation::Array(inner) => Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference("Array".into()))),
+                args: vec![Self::trait_signature_annotation_type(
+                    inner,
+                    self_ann,
+                    generic_bindings,
+                )],
+            },
+            TypeAnnotation::Generic { name, args } => Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference(
+                    name.as_str().into(),
+                ))),
+                args: args
+                    .iter()
+                    .map(|arg| {
+                        Self::trait_signature_annotation_type(arg, self_ann, generic_bindings)
+                    })
+                    .collect(),
+            },
+            TypeAnnotation::Function { params, returns } => Type::Function {
+                params: params
+                    .iter()
+                    .map(|param| {
+                        Self::trait_signature_annotation_type(
+                            &param.type_annotation,
+                            self_ann,
+                            generic_bindings,
+                        )
+                    })
+                    .collect(),
+                returns: Box::new(Self::trait_signature_annotation_type(
+                    returns,
+                    self_ann,
+                    generic_bindings,
+                )),
+            },
+            _ => Type::Concrete(Self::substitute_trait_self_annotation(ann, self_ann)),
+        }
+    }
+
     /// True for an exact built-in NAMESPACE static-constructor pair
     /// (`DateTime.now`, `Content.text`, `Table.new`, …) that the bytecode
     /// compiler lowers to a dedicated `BuiltinFunction` via
@@ -1485,66 +1543,86 @@ impl TypeInferenceEngine {
                     use shape_ast::ast::{TraitMember, TraitMemberSignature};
                     let self_ann = TypeAnnotation::Dyn(traits.clone());
                     for trait_path in traits {
-                        let Some(trait_def) = self.env.lookup_trait(trait_path.as_str()) else {
-                            continue;
-                        };
-                        for member in &trait_def.members {
-                            let signature = match member {
-                                TraitMember::Required(TraitMemberSignature::Method {
-                                    name,
-                                    params,
-                                    return_type,
-                                    ..
-                                }) if name == method => Some((
-                                    params
-                                        .iter()
-                                        .filter(|p| p.name.as_deref() != Some("self"))
-                                        .map(|p| p.type_annotation.clone())
-                                        .collect::<Vec<_>>(),
-                                    return_type.clone(),
-                                )),
-                                TraitMember::Default(method_def) if method_def.name == *method => method_def
-                                    .return_type
-                                    .clone()
-                                    .map(|return_type| {
-                                        (
-                                            method_def
-                                                .params
-                                                .iter()
-                                                .filter(|p| {
-                                                    !matches!(
-                                                        &p.pattern,
-                                                        shape_ast::ast::DestructurePattern::Identifier(
-                                                            name,
-                                                            _
-                                                        ) if name == "self"
-                                                    )
-                                                })
-                                                .filter_map(|p| p.type_annotation.clone())
-                                                .collect::<Vec<_>>(),
+                        let signature =
+                            self.env
+                                .lookup_trait(trait_path.as_str())
+                                .and_then(|trait_def| {
+                                    trait_def.members.iter().find_map(|member| match member {
+                                        TraitMember::Required(TraitMemberSignature::Method {
+                                            name,
+                                            params,
                                             return_type,
-                                        )
-                                    }),
-                                _ => None,
-                            };
-                            if let Some((params, ret_ann)) = signature {
-                                if params.len() != arg_types.len() {
-                                    return Err(TypeError::ArityMismatch(
-                                        params.len(),
-                                        arg_types.len(),
-                                    ));
-                                }
-                                for (arg_ty, param_ann) in arg_types.iter().zip(params.iter()) {
-                                    let param_ann = Self::substitute_trait_self_annotation(
-                                        param_ann, &self_ann,
-                                    );
-                                    self.constraints
-                                        .push((arg_ty.clone(), Type::Concrete(param_ann)));
-                                }
-                                let ret_ann =
-                                    Self::substitute_trait_self_annotation(&ret_ann, &self_ann);
-                                return Ok(Type::Concrete(ret_ann));
+                                            ..
+                                        }) if name == method => Some((
+                                            params
+                                                .iter()
+                                                .filter(|p| p.name.as_deref() != Some("self"))
+                                                .map(|p| Some(p.type_annotation.clone()))
+                                                .collect::<Vec<_>>(),
+                                            return_type.clone(),
+                                            Vec::new(),
+                                        )),
+                                        TraitMember::Default(method_def)
+                                            if method_def.name == *method =>
+                                        {
+                                            method_def.return_type.clone().map(|return_type| {
+                                                let method_type_params = method_def
+                                                    .type_params
+                                                    .as_ref()
+                                                    .map(|tps| {
+                                                        tps.iter()
+                                                            .map(|tp| tp.name().to_string())
+                                                            .collect::<Vec<_>>()
+                                                    })
+                                                    .unwrap_or_default();
+                                                let params = method_def
+                                                    .params
+                                                    .iter()
+                                                    .filter(|p| {
+                                                        !matches!(
+                                                            &p.pattern,
+                                                            shape_ast::ast::DestructurePattern::Identifier(
+                                                                name,
+                                                                _
+                                                            ) if name == "self"
+                                                        )
+                                                    })
+                                                    .map(|p| p.type_annotation.clone())
+                                                    .collect::<Vec<_>>();
+                                                (params, return_type, method_type_params)
+                                            })
+                                        }
+                                        _ => None,
+                                    })
+                                });
+                        if let Some((params, ret_ann, method_type_params)) = signature {
+                            if params.len() != arg_types.len() {
+                                return Err(TypeError::ArityMismatch(
+                                    params.len(),
+                                    arg_types.len(),
+                                ));
                             }
+                            let mut generic_bindings = std::collections::HashMap::new();
+                            for name in method_type_params {
+                                generic_bindings.insert(name, self.type_var_gen.fresh_type());
+                            }
+                            for (arg_ty, param_ann) in arg_types.iter().zip(params.iter()) {
+                                let param_ty = match param_ann {
+                                    Some(param_ann) => Self::trait_signature_annotation_type(
+                                        param_ann,
+                                        &self_ann,
+                                        &generic_bindings,
+                                    ),
+                                    None => self.type_var_gen.fresh_type(),
+                                };
+                                self.constraints.push((arg_ty.clone(), param_ty));
+                            }
+                            let ret_ty = Self::trait_signature_annotation_type(
+                                &ret_ann,
+                                &self_ann,
+                                &generic_bindings,
+                            );
+                            return Ok(ret_ty);
                         }
                     }
                 }
