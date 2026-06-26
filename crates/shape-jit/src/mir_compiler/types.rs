@@ -1511,6 +1511,7 @@ fn infer_rvalue_kind_with_projections(
                 }
             }
         }
+        Rvalue::FuzzyComparison { .. } => Some(NativeKind::Bool),
         Rvalue::UnaryOp(UnOp::Neg, operand) => infer_operand_kind_with_projections(
             operand,
             kinds,

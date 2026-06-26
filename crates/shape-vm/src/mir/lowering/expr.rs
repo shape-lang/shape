@@ -2233,17 +2233,24 @@ pub(crate) fn lower_expr_to_temp(builder: &mut MirBuilder, expr: &Expr) -> SlotI
             }
         }
         Expr::FuzzyComparison {
-            left, op, right, ..
+            left,
+            op,
+            right,
+            tolerance,
+            ..
         } => {
             let l = lower_expr_to_operand(builder, left, false);
             let r = lower_expr_to_operand(builder, right, false);
-            let mir_op = match op {
-                ast::operators::FuzzyOp::Equal => BinOp::Eq,
-                ast::operators::FuzzyOp::Greater => BinOp::Gt,
-                ast::operators::FuzzyOp::Less => BinOp::Lt,
-            };
             builder.push_stmt(
-                StatementKind::Assign(Place::Local(temp), Rvalue::BinaryOp(mir_op, l, r)),
+                StatementKind::Assign(
+                    Place::Local(temp),
+                    Rvalue::FuzzyComparison {
+                        op: *op,
+                        lhs: l,
+                        rhs: r,
+                        tolerance: tolerance.clone(),
+                    },
+                ),
                 span,
             );
         }

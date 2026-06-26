@@ -11,6 +11,7 @@
 use cranelift::prelude::*;
 
 use super::MirToIR;
+use shape_ast::ast::operators::{FuzzyOp, FuzzyTolerance};
 use shape_vm::mir::types::*;
 
 impl<'a, 'b> MirToIR<'a, 'b> {
@@ -131,6 +132,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.compile_binop(op, l, r)
                 }
             }
+
+            Rvalue::FuzzyComparison {
+                op,
+                lhs,
+                rhs,
+                tolerance,
+            } => self.compile_fuzzy_comparison(*op, lhs, rhs, tolerance),
 
             Rvalue::UnaryOp(op, operand) => {
                 let val = self.compile_operand(operand)?;
@@ -955,6 +963,144 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .ins()
             .call(self.ffi.string_concat, &[a, a_code_val, b, b_code_val]);
         Ok(self.builder.inst_results(inst)[0])
+    }
+
+    // ── Fuzzy comparisons ───────────────────────────────────────────
+
+    /// Compile Shape fuzzy comparison (`~=` / `~>` / `~<`) using the same
+    /// tolerance arithmetic as the bytecode VM's fuzzy desugaring. Operand
+    /// conversion is driven only by producer-stamped `NativeKind`; unsupported
+    /// non-numeric kinds surface instead of probing runtime tags.
+    fn compile_fuzzy_comparison(
+        &mut self,
+        op: FuzzyOp,
+        lhs: &Operand,
+        rhs: &Operand,
+        tolerance: &FuzzyTolerance,
+    ) -> Result<Value, String> {
+        let lhs_kind = self.operand_slot_kind(lhs);
+        let rhs_kind = self.operand_slot_kind(rhs);
+        let lhs_val = self.compile_operand(lhs)?;
+        let rhs_val = self.compile_operand(rhs)?;
+        let lhs_f64 = self.compile_numeric_operand_as_f64(lhs, lhs_val, lhs_kind)?;
+        let rhs_f64 = self.compile_numeric_operand_as_f64(rhs, rhs_val, rhs_kind)?;
+
+        let within = self.compile_fuzzy_within(lhs_f64, rhs_f64, tolerance);
+        match op {
+            FuzzyOp::Equal => Ok(within),
+            FuzzyOp::Greater => {
+                let gt = self
+                    .builder
+                    .ins()
+                    .fcmp(FloatCC::GreaterThan, lhs_f64, rhs_f64);
+                Ok(self.builder.ins().bor(gt, within))
+            }
+            FuzzyOp::Less => {
+                let lt = self.builder.ins().fcmp(FloatCC::LessThan, lhs_f64, rhs_f64);
+                Ok(self.builder.ins().bor(lt, within))
+            }
+        }
+    }
+
+    fn compile_fuzzy_within(
+        &mut self,
+        lhs: Value,
+        rhs: Value,
+        tolerance: &FuzzyTolerance,
+    ) -> Value {
+        let diff = self.builder.ins().fsub(lhs, rhs);
+        let abs_diff = self.compile_f64_abs(diff);
+        let tolerance_value = match tolerance {
+            FuzzyTolerance::Absolute(tol) => *tol,
+            FuzzyTolerance::Percentage(tol) => *tol,
+        };
+        let tol = self.builder.ins().f64const(tolerance_value);
+        let compare_value = match tolerance {
+            FuzzyTolerance::Absolute(_) => abs_diff,
+            FuzzyTolerance::Percentage(_) => {
+                let abs_lhs = self.compile_f64_abs(lhs);
+                let abs_rhs = self.compile_f64_abs(rhs);
+                let sum = self.builder.ins().fadd(abs_lhs, abs_rhs);
+                let two = self.builder.ins().f64const(2.0);
+                let denominator = self.builder.ins().fdiv(sum, two);
+                self.builder.ins().fdiv(abs_diff, denominator)
+            }
+        };
+        self.builder
+            .ins()
+            .fcmp(FloatCC::LessThanOrEqual, compare_value, tol)
+    }
+
+    fn compile_f64_abs(&mut self, value: Value) -> Value {
+        let zero = self.builder.ins().f64const(0.0);
+        let is_negative = self.builder.ins().fcmp(FloatCC::LessThan, value, zero);
+        let negated = self.builder.ins().fneg(value);
+        self.builder.ins().select(is_negative, negated, value)
+    }
+
+    fn compile_numeric_operand_as_f64(
+        &mut self,
+        operand: &Operand,
+        value: Value,
+        kind: Option<shape_vm::type_tracking::NativeKind>,
+    ) -> Result<Value, String> {
+        use shape_vm::type_tracking::NativeKind;
+        let ty = self.builder.func.dfg.value_type(value);
+        match kind {
+            Some(NativeKind::Float64) => {
+                if ty == types::F64 {
+                    Ok(value)
+                } else if ty == types::I64 {
+                    Ok(self
+                        .builder
+                        .ins()
+                        .bitcast(types::F64, MemFlags::new(), value))
+                } else {
+                    Err(format!(
+                        "compile_fuzzy_comparison: Float64 operand {:?} lowered to \
+                         unexpected Cranelift type {:?}; producer kind/SSA type mismatch",
+                        operand, ty
+                    ))
+                }
+            }
+            Some(NativeKind::Float32) => {
+                let f32_val = if ty == types::F32 {
+                    value
+                } else if ty == types::I32 {
+                    self.builder
+                        .ins()
+                        .bitcast(types::F32, MemFlags::new(), value)
+                } else {
+                    return Err(format!(
+                        "compile_fuzzy_comparison: Float32 operand {:?} lowered to \
+                         unexpected Cranelift type {:?}; producer kind/SSA type mismatch",
+                        operand, ty
+                    ));
+                };
+                Ok(self.builder.ins().fpromote(types::F64, f32_val))
+            }
+            Some(
+                NativeKind::Int8
+                | NativeKind::Int16
+                | NativeKind::Int32
+                | NativeKind::Int64
+                | NativeKind::IntSize,
+            ) => Ok(self.builder.ins().fcvt_from_sint(types::F64, value)),
+            Some(
+                NativeKind::UInt8
+                | NativeKind::UInt16
+                | NativeKind::UInt32
+                | NativeKind::UInt64
+                | NativeKind::UIntSize
+                | NativeKind::Char,
+            ) => Ok(self.builder.ins().fcvt_from_uint(types::F64, value)),
+            other => Err(format!(
+                "compile_fuzzy_comparison: unsupported operand kind {:?} for \
+                 {:?}; fuzzy comparison is numeric-only and must be lowered \
+                 from compile-time NativeKind facts, not runtime tag probes",
+                other, operand
+            )),
+        }
     }
 
     // ── Inline Float64 arithmetic and comparisons ──────────────────

@@ -175,6 +175,10 @@ fn add_rvalue_uses(live: &mut HashSet<SlotId>, rvalue: &Rvalue) {
             add_operand_uses(live, lhs);
             add_operand_uses(live, rhs);
         }
+        Rvalue::FuzzyComparison { lhs, rhs, .. } => {
+            add_operand_uses(live, lhs);
+            add_operand_uses(live, rhs);
+        }
         Rvalue::Aggregate(ops) => {
             for op in ops {
                 add_operand_uses(live, op);
