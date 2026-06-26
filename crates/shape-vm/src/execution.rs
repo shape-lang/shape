@@ -640,18 +640,9 @@ fn uncaught_exception_payload_to_wire(
     any_error_schema_id: u64,
     ctx: &ExecutionContext,
 ) -> shape_wire::WireValue {
-    let is_any_error = match payload.kind() {
-        shape_value::NativeKind::Ptr(shape_value::HeapKind::TypedObject) if payload.raw() != 0 => {
-            // SAFETY: kind says Ptr(TypedObject); bits are a live
-            // TypedObjectStorage pointer owned by `payload`. This is a
-            // transient schema-id read only, matching the exception
-            // normalizer's already-AnyError check.
-            let obj: &shape_value::TypedObjectStorage =
-                unsafe { &*(payload.raw() as *const shape_value::TypedObjectStorage) };
-            obj.schema_id == any_error_schema_id
-        }
-        _ => false,
-    };
+    let is_any_error = payload
+        .as_typed_object_storage()
+        .is_some_and(|obj| obj.schema_id == any_error_schema_id);
 
     let mut wire = wire_conversion::slot_to_wire(payload.raw(), payload.kind(), ctx);
     if is_any_error {
