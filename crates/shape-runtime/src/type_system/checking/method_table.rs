@@ -306,6 +306,10 @@ impl MethodTable {
             name: "Vec".to_string(),
             args: vec![arg],
         };
+        let table_of = |arg: E| E::GenericContainer {
+            name: "Table".to_string(),
+            args: vec![arg],
+        };
         let opt_of = |arg: E| E::GenericContainer {
             name: "Option".to_string(),
             args: vec![arg],
@@ -520,6 +524,77 @@ impl MethodTable {
         for (name, mtp, params, ret) in vec_methods {
             self.register_user_generic_method("Vec", name, mtp, params, ret, vec![]);
         }
+
+        // ---- Table<T> (receiver param 0 = row T) -----------------------
+        //
+        // The strict checker runs over the user program without loading the
+        // stdlib `extend Table<T>` block, so Table query methods must be seeded
+        // here just like Vec/String/HashMap. These signatures are compile-time
+        // contracts only; the runtime still dispatches through the DataTable PHF
+        // registry and unsupported projections surface there or in the compiler.
+        let table_methods: Vec<(&str, usize, Vec<E>, E)> = vec![
+            ("count", 0, vec![], int()),
+            ("len", 0, vec![], int()),
+            ("length", 0, vec![], int()),
+            ("execute", 0, vec![], E::SelfType),
+            ("head", 0, vec![int()], E::SelfType),
+            ("tail", 0, vec![int()], E::SelfType),
+            ("limit", 0, vec![int()], E::SelfType),
+            ("first", 0, vec![], E::ReceiverParam(0)),
+            ("last", 0, vec![], E::ReceiverParam(0)),
+            (
+                "filter",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                E::SelfType,
+            ),
+            (
+                "where",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], boolean())],
+                E::SelfType,
+            ),
+            (
+                "map",
+                1,
+                vec![func(vec![E::ReceiverParam(0)], E::MethodParam(0))],
+                table_of(E::MethodParam(0)),
+            ),
+            (
+                "select",
+                1,
+                vec![func(vec![E::ReceiverParam(0)], E::MethodParam(0))],
+                table_of(E::MethodParam(0)),
+            ),
+            (
+                "orderBy",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], num())],
+                E::SelfType,
+            ),
+            (
+                "groupBy",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], num())],
+                E::SelfType,
+            ),
+            (
+                "indexBy",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], num())],
+                E::SelfType,
+            ),
+            (
+                "forEach",
+                0,
+                vec![func(vec![E::ReceiverParam(0)], void())],
+                void(),
+            ),
+        ];
+        for (name, mtp, params, ret) in table_methods {
+            self.register_user_generic_method("Table", name, mtp, params, ret, vec![]);
+        }
+
         // Numeric-vector aggregates (`impl NumericVec for Vec`). Receiver-param
         // generic so they register in the generic table alongside the rest.
         // D1 (S4): the receiver-element-dependent aggregates return the

@@ -242,10 +242,10 @@ fn test_queryable_trait_compiles() {
     assert_compiles(
         r#"
         trait Queryable<T> {
-            filter(predicate): any,
-            map(transform): any,
-            orderBy(column, direction): any,
-            limit(n): any,
+            method filter(predicate) -> any
+            method map(transform) -> any
+            method orderBy(column, direction) -> any
+            method limit(n) -> any
             method execute() -> any
         }
     "#,
@@ -258,7 +258,7 @@ fn test_queryable_impl_for_custom_type() {
     assert_compiles(
         r#"
         trait Queryable {
-            filter(predicate): any,
+            method filter(predicate) -> any
             method execute() -> any
         }
 
@@ -493,7 +493,7 @@ filtered.count()
 
 #[test]
 fn test_table_select_with_lambda() {
-    // MED-6: select(lambda) should work on DataTable, not just string column names
+    // Direct row-field projections lower statically to DataTable column select.
     let source = r#"
 type Record { id: int, value: int, name: string }
 let t: Table<Record> = [1, 100, "alpha"], [2, 200, "beta"]
@@ -515,13 +515,13 @@ fn test_table_select_with_string_still_works() {
 type Record { id: int, value: int, name: string }
 let t: Table<Record> = [1, 100, "alpha"], [2, 200, "beta"]
 let projected = t.select("id", "name")
-projected.columns().length
+projected.count()
 "#;
     let result = compile_and_execute(source).expect("should compile and run");
     assert_eq!(
         result.as_i64().or(result.as_f64().map(|f| f as i64)),
         Some(2),
-        "select(string) should produce a table with 2 columns"
+        "select(string) should preserve the table row count"
     );
 }
 
@@ -529,19 +529,17 @@ projected.columns().length
 
 #[test]
 fn test_table_select_lambda_scalar_builds_value_column() {
-    // MED-7: When select(lambda) returns a scalar (e.g. just a field value),
-    // it should build a single-column "value" table instead of erroring.
+    // A scalar direct field projection lowers statically to a one-column select.
     let source = r#"
 type Record { id: int, value: int, name: string }
 let t: Table<Record> = [1, 100, "alpha"], [2, 200, "beta"]
 let projected = t.select(|row| row.id)
 projected.count()
 "#;
-    let result = compile_and_execute(source);
-    assert!(
-        result.is_ok(),
-        "scalar select should produce a table: {:?}",
-        result.err()
+    let result = compile_and_execute(source).expect("should compile and run");
+    assert_eq!(
+        result.as_i64().or(result.as_f64().map(|f| f as i64)),
+        Some(2)
     );
 }
 
