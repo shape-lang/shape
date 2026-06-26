@@ -16,23 +16,22 @@
 //! builtin_range / builtin_slice`) cascade-breaks here as the deletion's
 //! consumer cascade tier 2.
 //!
-//! Public builtin bodies are replaced with structured surface-and-stop
-//! returning `VMError::NotImplemented`. Local helpers (`as_typed_array /
-//! typed_array_to_slot / typed_array_element / heap_value_to_slot`) are
-//! DELETED — every one took `&TypedArrayData` / produced `&Arc<TypedArrayData>`
-//! or `TypedArrayData`; with the type gone they cannot exist.
+//! Legacy helpers (`as_typed_array / typed_array_to_slot /
+//! typed_array_element / heap_value_to_slot`) are DELETED — every one took
+//! `&TypedArrayData` / produced `&Arc<TypedArrayData>` or `TypedArrayData`;
+//! with the type gone they cannot exist. Builtins that still depend on those
+//! helper shapes remain structured surface-and-stop bodies. `builtin_range`
+//! is rebuilt below on the v2-raw `TypedArray<i64>` carrier.
 //!
 //! PRESERVED:
 //! - `slot_to_heap_arc` — produces `Arc<HeapValue>` (no `TypedArrayData`
 //!   dependency); shared by `object_creation::op_new_array` (Round 11A,
 //!   ADR-006 §2.7.24 Q25.A) and stays live across the cascade.
-//! - `builtin_range_int` (called by `builtin_range`) — operates on int
-//!   primitives only, no `TypedArrayData` dependency until the int-array
-//!   construction path; the construction path is replaced with
-//!   surface-and-stop and the helper is preserved for the post-ckpt-6
-//!   v2-raw `TypedArray<i64>` construction landing.
+//! - `builtin_range` — consumes already-proven integer arguments and
+//!   constructs a stamped v2-raw `TypedArray<i64>` directly; it does not infer
+//!   element kind from runtime values.
 //!
-//! ## Cascade migration target (post-ckpt-6 STRICT close)
+//! ## Cascade migration target for remaining legacy bodies
 //!
 //! Per W12-typed-array-data-deletion audit §A.3 + §2.2 + §3.1 scalar recipe,
 //! every previous `TypedArrayData::X(buf)` match arm migrates to the v2-raw
@@ -56,7 +55,8 @@
 //! `TypedBuffer<T>` wrapper enum, etc. per ckpt-1 close-marker at
 //! `crates/shape-value/src/heap_value.rs:3956`).
 
-use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, VMError};
+use shape_value::v2::typed_array::{ELEM_TYPE_I64, TypedArray, stamp_elem_type};
+use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, VMError, ValueSlot};
 use std::sync::Arc;
 
 #[inline]
@@ -68,7 +68,8 @@ fn type_error(msg: impl Into<String>) -> VMError {
 // V3-S5 ckpt-3 surface-and-stop builder
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Common surface-and-stop body for every public builtin in this file.
+/// Common surface-and-stop body for the public builtins in this file that
+/// still depend on the deleted `TypedArrayData` receiver shape.
 ///
 /// Returns a structured `VMError::NotImplemented` citing the V3-S5 ckpt-3
 /// cascade-broken state: the previous per-`TypedArrayData::X` variant
@@ -164,7 +165,7 @@ pub(in crate::executor) fn slot_to_heap_arc(slot: &KindedSlot) -> Result<Arc<Hea
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Public builtin entry-points — ckpt-3 surface-and-stop stubs
+// Public builtin entry-points — remaining ckpt-3 stubs plus rebuilt range
 // Signatures preserved for `vm_impl/builtins.rs` dispatch integrity
 // (`vm_impl/builtins.rs:257-292`).
 // ═══════════════════════════════════════════════════════════════════════════
@@ -220,12 +221,60 @@ pub(in crate::executor) fn builtin_filled(args: &[KindedSlot]) -> Result<KindedS
 }
 
 /// `range(n)` / `range(start, end)` / `range(start, end, step)` — produce
-/// an `Array<int>` (when all args are Int) or `Array<number>` otherwise.
+/// an `Array<int>`.
 pub(in crate::executor) fn builtin_range(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     if args.is_empty() || args.len() > 3 {
         return Err(type_error("range() requires 1, 2, or 3 arguments"));
     }
-    Err(ckpt3_surface("range", args))
+
+    let int_arg = |idx: usize| -> Result<i64, VMError> {
+        let arg = &args[idx];
+        if arg.kind().is_integer_family() {
+            crate::executor::builtins::kind_coerce::int_operand(arg)
+                .map_err(|_| type_error("range() integer argument could not be decoded"))
+        } else {
+            Err(type_error(format!(
+                "range() argument {} must be an integer; got {:?}",
+                idx + 1,
+                arg.kind()
+            )))
+        }
+    };
+
+    let (start, end, step) = match args.len() {
+        1 => (0, int_arg(0)?, 1),
+        2 => (int_arg(0)?, int_arg(1)?, 1),
+        3 => (int_arg(0)?, int_arg(1)?, int_arg(2)?),
+        _ => unreachable!(),
+    };
+    if step == 0 {
+        return Err(type_error("range() step cannot be 0"));
+    }
+
+    let mut values = Vec::new();
+    let mut i = start;
+    if step > 0 {
+        while i < end {
+            values.push(i);
+            i = i
+                .checked_add(step)
+                .ok_or_else(|| type_error("range() overflow while advancing"))?;
+        }
+    } else {
+        while i > end {
+            values.push(i);
+            i = i
+                .checked_add(step)
+                .ok_or_else(|| type_error("range() overflow while advancing"))?;
+        }
+    }
+
+    let arr = TypedArray::<i64>::from_slice(&values);
+    unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64) };
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(arr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
 }
 
 /// `slice(arr, start, [end])` — return a subarray. Preserves element shape.
@@ -237,4 +286,30 @@ pub(in crate::executor) fn builtin_slice(args: &[KindedSlot]) -> Result<KindedSl
     }
     let _ = HeapKind::TypedArray; // Preserve import-touch for future v2-raw path.
     Err(ckpt3_surface("slice", args))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_range_returns_stamped_i64_typed_array() {
+        let slot = builtin_range(&[KindedSlot::from_int(1), KindedSlot::from_int(5)]).unwrap();
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedArray));
+
+        let arr = slot.raw() as *const TypedArray<i64>;
+        let got = unsafe { TypedArray::<i64>::as_slice(arr) };
+        assert_eq!(got, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn builtin_range_rejects_zero_step() {
+        let err = builtin_range(&[
+            KindedSlot::from_int(0),
+            KindedSlot::from_int(5),
+            KindedSlot::from_int(0),
+        ])
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("step cannot be 0"));
+    }
 }
