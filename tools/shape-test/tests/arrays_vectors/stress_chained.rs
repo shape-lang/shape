@@ -24,7 +24,7 @@ fn test_flatten_nested() {
 fn test_flatten_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.flatten().length
     "#,
     )
@@ -239,11 +239,11 @@ fn test_first_basic() {
 fn test_first_empty() {
     ShapeTest::new(
         r#"
-        let empty = []
+        let empty: Array<int> = []
         empty.first()
     "#,
     )
-    .expect_none();
+    .expect_run_err_contains("Index 0 out of bounds");
 }
 
 /// Verifies last basic.
@@ -257,7 +257,7 @@ fn test_last_basic() {
     .expect_number(30.0);
 }
 
-/// Verifies last empty.
+/// Verifies last empty requires a known element type before method dispatch.
 #[test]
 fn test_last_empty() {
     ShapeTest::new(
@@ -266,7 +266,7 @@ fn test_last_empty() {
         empty.last()
     "#,
     )
-    .expect_none();
+    .expect_run_err_contains("has an un-resolvable element type");
 }
 
 /// Verifies pipeline top 3 squares.

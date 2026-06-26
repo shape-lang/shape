@@ -96,10 +96,11 @@ fn test_closure_edge_inside_else() {
 fn test_closure_edge_inside_loop_body() {
     ShapeTest::new(
         r#"
-        let mut results = []
+        let mut results: Array<int> = []
         for i in [1, 2, 3] {
             let f = |x| x * i
-            results = results + [f(10)]
+            let value: int = f(10)
+            results = results + [value]
         }
         results.length
     "#,

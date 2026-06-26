@@ -563,7 +563,8 @@ true"#,
 fn test_reduce_empty_array() {
     ShapeTest::new(
         r#"
-        [].reduce(|acc, x| acc + x, 42)
+        let empty: Array<int> = []
+        empty.reduce(|acc, x| acc + x, 42)
     "#,
     )
     .expect_number(42.0);

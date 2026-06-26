@@ -290,9 +290,9 @@ fn test_iife_multi_param() {
 #[test]
 fn test_empty_array_map() {
     ShapeTest::new(
-        r#"(
-        [].map(|x| x * 2)
-    ).length"#,
+        r#"
+        let empty: Array<int> = []
+        empty.map(|x| x * 2).length"#,
     )
     .expect_number(0.0);
 }
@@ -301,9 +301,9 @@ fn test_empty_array_map() {
 #[test]
 fn test_empty_array_filter() {
     ShapeTest::new(
-        r#"(
-        [].filter(|x| x > 0)
-    ).length"#,
+        r#"
+        let empty: Array<int> = []
+        empty.filter(|x| x > 0).length"#,
     )
     .expect_number(0.0);
 }
@@ -313,7 +313,8 @@ fn test_empty_array_filter() {
 fn test_empty_array_some() {
     ShapeTest::new(
         r#"
-        [].some(|x| x > 0)
+        let empty: Array<int> = []
+        empty.some(|x| x > 0)
     "#,
     )
     .expect_bool(false);
@@ -324,7 +325,8 @@ fn test_empty_array_some() {
 fn test_empty_array_every() {
     ShapeTest::new(
         r#"
-        [].every(|x| x > 0)
+        let empty: Array<int> = []
+        empty.every(|x| x > 0)
     "#,
     )
     .expect_bool(true);

@@ -300,7 +300,7 @@ fn test_mutable_capture_bug_with_condition() {
 fn test_mutable_capture_bug_array_push() {
     ShapeTest::new(
         r#"
-        let mut items = []
+        let mut items: Array<int> = []
         let push = |x| { items = items + [x] }
         push(1)
         push(2)
