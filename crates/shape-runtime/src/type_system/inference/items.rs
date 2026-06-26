@@ -912,7 +912,7 @@ impl TypeInferenceEngine {
                 // structural `Object` via `set_struct_schemas`, so keeping the
                 // nominal form is sound. (operators slice)
                 if self.struct_type_defs.contains_key(name) {
-                    return Type::Concrete(ann.clone());
+                    return Type::Concrete(TypeAnnotation::Reference(name.into()));
                 }
                 if let Some(alias_entry) = self.env.lookup_type_alias(name) {
                     return self.resolve_type_annotation(&alias_entry.type_annotation);
