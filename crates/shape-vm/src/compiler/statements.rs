@@ -352,9 +352,15 @@ impl BytecodeCompiler {
     ) -> Result<()> {
         use shape_value::v2::ConcreteType;
 
-        // Array-literal initializers adopt element types per-element (lossless
-        // literal adoption); never reject them here.
-        if matches!(init_expr, Expr::Array(..)) {
+        // Flat array-literal initializers adopt element types per-element
+        // (lossless literal adoption); never reject them here. Nested array
+        // literals still have structural element shape, so `Array<number> =
+        // [[...]]` must reject instead of bypassing this check.
+        if matches!(
+            init_expr,
+            Expr::Array(elements, _)
+                if !elements.iter().any(|e| matches!(e, Expr::Array(..)))
+        ) {
             return Ok(());
         }
 
@@ -394,12 +400,20 @@ impl BytecodeCompiler {
         };
 
         if *decl_elem != *init_elem {
+            let reason = match (decl_elem.as_ref(), init_elem.as_ref()) {
+                (ConcreteType::I64, ConcreteType::F64) | (ConcreteType::F64, ConcreteType::I64) => {
+                    "`int` and `number` do not unify, so the element type must match exactly \
+                     (cast explicitly with `as` if a conversion is intended)"
+                }
+                _ => {
+                    "the initializer's element structure must match the annotation exactly \
+                     (nested arrays require an array-of-array or matrix-shaped annotation)"
+                }
+            };
             return Err(ShapeError::SemanticError {
                 message: format!(
                     "type mismatch: binding annotated `Array<{}>` but the \
-                     initializer produces `Array<{}>` — `int` and `number` \
-                     do not unify, so the element type must match exactly \
-                     (cast explicitly with `as` if a conversion is intended)",
+                     initializer produces `Array<{}>` — {reason}",
                     decl_elem.mono_key(),
                     init_elem.mono_key(),
                 ),

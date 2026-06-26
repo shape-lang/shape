@@ -1150,6 +1150,49 @@ impl TypeInferenceEngine {
                     }
                 }
 
+                // Strict homogeneous-array policy for accumulator mutation.
+                // Empty array literals start with an unresolved element var; the
+                // first `.push(T)` binds that var, and every later push must
+                // match the resolved element type exactly. Reject here with the
+                // array policy diagnostic instead of letting the deferred generic
+                // solver report `T is not compatible with unknown`.
+                if method == "push" && args.len() == 1 {
+                    let resolved_receiver =
+                        self.solver.unifier().apply_substitutions(&receiver_type);
+                    if let Some(element_type) =
+                        Self::array_element_type_from_collection(&resolved_receiver)
+                    {
+                        let resolved_element =
+                            self.solver.unifier().apply_substitutions(&element_type);
+                        let resolved_arg = self.solver.unifier().apply_substitutions(&arg_types[0]);
+                        match &resolved_element {
+                            Type::Variable(var) | Type::Constrained { var, .. }
+                                if !self.type_contains_unresolved_vars(&resolved_arg) =>
+                            {
+                                if self.solver.unifier().lookup(var).is_none() {
+                                    self.solver
+                                        .unifier_mut()
+                                        .bind(var.clone(), resolved_arg.clone());
+                                }
+                            }
+                            _ if !Self::is_unknown_marker_type(&resolved_element)
+                                && !self.type_contains_unresolved_vars(&resolved_element)
+                                && !self.type_contains_unresolved_vars(&resolved_arg)
+                                && !self.solver.probe_equal(&resolved_arg, &resolved_element) =>
+                            {
+                                return Err(TypeError::ConstraintViolation(format!(
+                                    "type mismatch: cannot push a `{}` value into an array whose \
+                                     element type is `{}`. An array's element type is fixed; every \
+                                     pushed value must match the compile-time element type.",
+                                    self.render_type_for_diag(&resolved_arg),
+                                    self.render_type_for_diag(&resolved_element),
+                                )));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
                 // STRICT-FLIP (v0.3.3 map/collect OUTPUT element stamp): bind the
                 // method's RETURN-position `MethodParam` vars from the actual
                 // closure argument's proven type. `map`'s signature is
@@ -2560,6 +2603,30 @@ impl TypeInferenceEngine {
         if all_adoptable { Some(number_ty) } else { None }
     }
 
+    fn array_element_type_from_collection(ty: &Type) -> Option<Type> {
+        let canon = ty.canonicalize();
+        match canon {
+            Type::Generic { base, mut args }
+                if args.len() == 1
+                    && matches!(
+                        base.as_ref(),
+                        Type::Concrete(ann)
+                            if matches!(ann.as_type_name_str(), Some("Array") | Some("Vec"))
+                    ) =>
+            {
+                Some(args.remove(0))
+            }
+            _ => None,
+        }
+    }
+
+    fn is_unknown_marker_type(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Concrete(TypeAnnotation::Basic(name)) if name == "unknown"
+        )
+    }
+
     fn array_literal_element_contribution(&mut self, elem: &Expr) -> TypeResult<Type> {
         if let Expr::Spread(inner, _) = elem {
             let spread_type = self.infer_expr(inner)?;
@@ -2574,12 +2641,26 @@ impl TypeInferenceEngine {
                 {
                     return Ok(Type::Concrete(args[0].clone()));
                 }
+                Type::Concrete(TypeAnnotation::Generic { name, args })
+                    if name == "Range" && args.len() == 1 =>
+                {
+                    return Ok(Type::Concrete(args[0].clone()));
+                }
                 Type::Generic { base, args }
                     if args.len() == 1
                         && matches!(
                             base.as_ref(),
                             Type::Concrete(ann)
                                 if matches!(ann.as_type_name_str(), Some("Array") | Some("Vec"))
+                        ) =>
+                {
+                    return Ok(args[0].clone());
+                }
+                Type::Generic { base, args }
+                    if args.len() == 1
+                        && matches!(
+                            base.as_ref(),
+                            Type::Concrete(ann) if ann.as_type_name_str() == Some("Range")
                         ) =>
                 {
                     return Ok(args[0].clone());

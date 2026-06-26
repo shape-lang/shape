@@ -13,10 +13,10 @@
 //! - `i32`
 //! - `bool`
 //!
-//! Anything else (heap types like `string`, structs, arrays of arrays, sized
-//! ints we don't yet have opcodes for, etc.) returns `None`. The compiler is
-//! expected to fail soft and emit the legacy NaN-boxed `NewArray` opcode for
-//! those cases — Phase 3.1 is intentionally narrow on the typed-fast-path.
+//! Anything else returns `None`. Under the strict-typing policy, callers must
+//! either route to a statically specified carrier or surface a compile-time
+//! diagnostic; `None` is not permission to resurrect a dynamic `NewArray`
+//! fallback.
 //!
 //! As more typed array opcodes land (`u8`, `i16`, etc.) this helper will grow
 //! more `Some(...)` arms; callers don't need to change.
@@ -235,10 +235,10 @@ impl TypedArrayKind {
 /// Map a `ConcreteType` element type to a `TypedArrayKind`, if a typed-array
 /// fast path exists for that element type.
 ///
-/// Returns `None` for element types that have no typed array opcode yet
-/// (heap types like `string`/`struct`/nested arrays, sized integer widths
-/// like `i8`/`u16`/etc.). Callers must fall back to the legacy NaN-boxed
-/// `NewArray` opcode in that case.
+/// Returns `None` for element types that have no direct scalar/heap typed-array
+/// opcode in this mapper. Strict callers must either prove a separate
+/// structural carrier (for example the nested-array literal path) or reject at
+/// compile time; this is not a runtime fallback signal.
 ///
 /// **Important**: this function is the *single source of truth* for the
 /// "do we have a typed-array opcode for this element type?"
@@ -386,11 +386,9 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
 /// `NativeKind`, so `compile_expr_array` calls this variant to look up a
 /// typed array kind directly.
 ///
-/// The mapping mirrors [`should_use_typed_array`]: only the four element
-/// types backed by typed array opcodes today (`Float64`/`Int64`/`Int32`/
-/// `Bool`) return `Some`. Anything else (`String`, sized ints other than
-/// i32/i64, nullable variants, `Dynamic`/`Unknown`) falls back to the
-/// legacy NaN-boxed `NewArray` path.
+/// The mapping mirrors [`should_use_typed_array`]. A `None` result means this
+/// slot kind has no typed-array carrier in this mapper; callers must use an
+/// explicit static policy, not a dynamic array fallback.
 #[inline]
 pub fn should_use_typed_array_from_slot_kind(
     slot: crate::type_tracking::NativeKind,
@@ -936,9 +934,8 @@ impl super::BytecodeCompiler {
     ///
     /// Returns `None` for non-identifier receivers, for unresolved names, for
     /// receivers tracked as something other than a homogeneous typed array,
-    /// and for element types that have no typed opcode kind today (`string`,
-    /// sized ints other than `i32`/`i64`, etc). The caller is expected to
-    /// fall back to the legacy NaN-boxed path in those cases.
+    /// and for element types that have no typed opcode kind. Callers must not
+    /// infer a carrier from runtime bits in those cases.
     ///
     /// Phase 3.1 Agent 3 entry point — used by `compile_expr_method_call`,
     /// `compile_expr_index_access`, and `compile_expr_assign` to gate typed
@@ -1348,9 +1345,9 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_array_falls_back_to_legacy() {
-        // Array<Array<int>> — element type is Array<int>, not yet handled
-        // by typed opcodes (would need TypedArray<*const TypedArray<i64>>).
+    fn test_nested_array_is_not_direct_scalar_mapper_kind() {
+        // `Array<Array<int>>` is handled by the array-literal structural branch
+        // as `TypedArrayKind::TypedArray`, not by the scalar ConcreteType mapper.
         let nested = ConcreteType::Array(Box::new(ConcreteType::I64));
         assert_eq!(should_use_typed_array(&nested), None);
     }
@@ -1638,6 +1635,14 @@ mod compile_integration_tests {
             .expect("compile should succeed")
     }
 
+    fn compile_error(src: &str) -> String {
+        let program = shape_ast::parser::parse_program(src).expect("parse should succeed");
+        let err = BytecodeCompiler::new()
+            .compile_with_source(&program, src)
+            .expect_err("compile should fail");
+        format!("{err:?}")
+    }
+
     fn has_opcode(prog: &BytecodeProgram, op: OpCode) -> bool {
         prog.instructions.iter().any(|i| i.opcode == op)
     }
@@ -1704,7 +1709,8 @@ mod compile_integration_tests {
         );
         let msg = format!("{:?}", result.unwrap_err());
         assert!(
-            msg.contains("spread element types could not be reconciled"),
+            msg.contains("spread element types could not be reconciled")
+                || (msg.contains("int") && msg.contains("string")),
             "heterogeneous spread error must be the clean structured message, got: {msg}"
         );
     }
@@ -1866,7 +1872,10 @@ mod compile_integration_tests {
         );
         let msg = format!("{:?}", result.unwrap_err());
         assert!(
-            msg.contains("type mismatch") && msg.contains("element type"),
+            (msg.contains("type mismatch") && msg.contains("element type"))
+                || msg.contains(
+                    "cannot push a `string` value into an array whose element type is `int`"
+                ),
             "heterogeneous accumulator error must be the clean structured message, got: {msg}"
         );
     }
@@ -1951,25 +1960,14 @@ mod compile_integration_tests {
     }
 
     #[test]
-    fn test_heterogeneous_literal_falls_back_to_legacy_new_array() {
-        // `[1, "x", true]` is heterogeneous → no typed array fast path,
-        // falls back to legacy `NewArray` (NaN-boxed Vec<ValueWord>).
-        let prog = compile("[1, \"x\", true]");
+    fn test_heterogeneous_literal_is_clean_compile_error() {
+        // `[1, "x", true]` is heterogeneous and has no union/tuple/object
+        // carrier. Strict typing rejects it at compile time instead of
+        // falling back to a dynamic legacy array.
+        let msg = compile_error("[1, \"x\", true]");
         assert!(
-            has_opcode(&prog, OpCode::NewArray),
-            "heterogeneous literal must emit legacy NewArray"
-        );
-        assert!(
-            !has_opcode(&prog, OpCode::NewTypedArrayI64),
-            "heterogeneous literal must not emit NewTypedArrayI64"
-        );
-        assert!(
-            !has_opcode(&prog, OpCode::NewTypedArrayF64),
-            "heterogeneous literal must not emit NewTypedArrayF64"
-        );
-        assert!(
-            !has_opcode(&prog, OpCode::NewTypedArrayBool),
-            "heterogeneous literal must not emit NewTypedArrayBool"
+            msg.contains("int") && (msg.contains("string") || msg.contains("bool")),
+            "heterogeneous literal must be rejected with a static type diagnostic, got: {msg}"
         );
     }
 
@@ -2026,31 +2024,19 @@ mod compile_integration_tests {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // R5.4B: nested-array-literal guard.
+    // Nested-array literal policy.
     //
-    // The typed `NewTypedArrayF64/I64/I32/Bool` opcodes store scalars
-    // (raw f64/i64/i32/bool bits). An outer array whose rows are
-    // themselves arrays cannot use the typed fast path — it would store
-    // inner typed-array pointers as scalar bits, which downstream
-    // consumers (`intrinsic_matmul_mat`, `as_any_array()`) can't decode.
-    //
-    // The regression guard refuses typed emission at both:
-    //   - inference: `infer_array_element_type` returns None when any
-    //     element is `Expr::Array`.
-    //   - annotation override: `compile_expr_array` refuses the typed
-    //     path when any element is `Expr::Array`, regardless of
-    //     `pending_variable_typed_array_kind`.
-    //   - recursion: the inner rows compile with
-    //     `nested_array_literal_depth > 0`, which forces them back to
-    //     the legacy `NewArray` path so they round-trip as heap-ref
-    //     ValueWords, not as `NativeScalar::Ptr` words.
+    // Homogeneous nested arrays use the dedicated typed nested-array carrier:
+    // the outer array stores inner typed-array pointers as
+    // `TypedArray<*const TypedArrayElem>`, while each row keeps its own scalar
+    // typed carrier. A scalar annotation such as `Array<number>` is
+    // structurally wrong for `[[...]]` and must reject cleanly.
     // ──────────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_nested_array_literal_mat_number_emits_new_array_for_outer_and_inner() {
-        // `let m: Mat<number> = [[1.0, 2.0], [3.0, 4.0]]` — outer AND
-        // inner must fall back to the generic `NewArray` path (not the
-        // typed `NewTypedArrayF64` path).
+    fn test_nested_array_literal_mat_number_uses_nested_typed_carrier() {
+        // `Mat<number>` is structurally a numeric row matrix: the outer array
+        // uses the nested typed-array carrier, and inner rows use F64.
         let prog = compile(
             r#"
             let m: Mat<number> = [[1.0, 2.0], [3.0, 4.0]]
@@ -2058,18 +2044,24 @@ mod compile_integration_tests {
             "#,
         );
         assert!(
-            has_opcode(&prog, OpCode::NewArray),
-            "nested `Mat<number>` literal must emit legacy NewArray, got opcodes: {:?}",
+            has_opcode(&prog, OpCode::NewTypedArrayNested),
+            "nested `Mat<number>` literal must emit NewTypedArrayNested, got opcodes: {:?}",
             prog.instructions
                 .iter()
                 .map(|i| i.opcode)
                 .collect::<Vec<_>>()
         );
         assert!(
-            !has_opcode(&prog, OpCode::NewTypedArrayF64),
-            "nested `Mat<number>` literal must NOT emit NewTypedArrayF64 \
-             (would splice inner typed-array pointers into f64 slots); \
-             got opcodes: {:?}",
+            has_opcode(&prog, OpCode::NewTypedArrayF64),
+            "nested `Mat<number>` rows must emit NewTypedArrayF64, got opcodes: {:?}",
+            prog.instructions
+                .iter()
+                .map(|i| i.opcode)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "nested `Mat<number>` literal must not emit legacy NewArray, got opcodes: {:?}",
             prog.instructions
                 .iter()
                 .map(|i| i.opcode)
@@ -2078,34 +2070,22 @@ mod compile_integration_tests {
     }
 
     #[test]
-    fn test_nested_array_literal_array_number_annotation_refuses_typed() {
-        // Same nested shape but with an `Array<number>` annotation —
-        // without the R5.4B guard this path took the annotation-driven
-        // typed branch (`pending_variable_typed_array_kind = Some(F64)`)
-        // and emitted `NewTypedArrayF64` for BOTH outer and inner,
-        // splicing inner pointers into f64 slots of the outer.
-        let prog = compile(
+    fn test_nested_array_literal_array_number_annotation_rejects() {
+        // `Array<number>` promises scalar number elements; `[[...]]`
+        // contributes array elements. There is no dynamic fallback that can
+        // make that structurally correct.
+        let msg = compile_error(
             r#"
             let m: Array<number> = [[1.0, 2.0], [3.0, 4.0]]
             m
             "#,
         );
         assert!(
-            has_opcode(&prog, OpCode::NewArray),
-            "nested `Array<number>` literal must emit legacy NewArray, got opcodes: {:?}",
-            prog.instructions
-                .iter()
-                .map(|i| i.opcode)
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            !has_opcode(&prog, OpCode::NewTypedArrayF64),
-            "nested `Array<number>` annotation with nested rows must NOT \
-             emit NewTypedArrayF64; got opcodes: {:?}",
-            prog.instructions
-                .iter()
-                .map(|i| i.opcode)
-                .collect::<Vec<_>>()
+            msg.contains("type mismatch")
+                && msg.contains("Array<f64>")
+                && msg.contains("Array<array_f64>")
+                && msg.contains("nested arrays require"),
+            "nested `Array<number>` annotation must reject structurally, got: {msg}"
         );
     }
 
@@ -2211,25 +2191,17 @@ mod compile_integration_tests {
     }
 
     #[test]
-    fn test_index_access_untyped_falls_back_to_get_prop() {
-        // Empty / heterogeneous array → no typed kind → falls back.
-        let prog = compile(
+    fn test_index_access_heterogeneous_array_is_compile_error() {
+        // Heterogeneous arrays have no typed carrier and no runtime fallback.
+        let msg = compile_error(
             r#"
             let arr = [1, "x", true]
             arr[0]
             "#,
         );
         assert!(
-            has_opcode(&prog, OpCode::GetProp),
-            "expected legacy GetProp for untyped array index access"
-        );
-        assert!(
-            !has_opcode(&prog, OpCode::TypedArrayGetI64),
-            "untyped array must not emit TypedArrayGetI64"
-        );
-        assert!(
-            !has_opcode(&prog, OpCode::TypedArrayGetF64),
-            "untyped array must not emit TypedArrayGetF64"
+            msg.contains("int") && (msg.contains("string") || msg.contains("bool")),
+            "heterogeneous array index source must reject before GetProp fallback, got: {msg}"
         );
     }
 
@@ -2341,20 +2313,16 @@ mod compile_integration_tests {
     }
 
     #[test]
-    fn test_length_untyped_array_falls_back_to_legacy_length() {
-        let prog = compile(
+    fn test_length_heterogeneous_array_is_compile_error() {
+        let msg = compile_error(
             r#"
             let arr = [1, "x", true]
             arr.length
             "#,
         );
         assert!(
-            has_opcode(&prog, OpCode::Length),
-            "expected legacy Length for untyped array"
-        );
-        assert!(
-            !has_opcode(&prog, OpCode::TypedArrayLen),
-            "untyped array must not emit TypedArrayLen"
+            msg.contains("int") && (msg.contains("string") || msg.contains("bool")),
+            "heterogeneous array length source must reject before Length fallback, got: {msg}"
         );
     }
 
