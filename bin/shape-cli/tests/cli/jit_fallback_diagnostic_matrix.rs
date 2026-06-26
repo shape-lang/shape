@@ -135,22 +135,18 @@ fn fallback_f1_baseline_preserved_jit_falls_through_to_vm() {
     );
 }
 
-/// SharedModuleBinding preflight rejection class — the canonical W12
-/// `JitPreflightReport { vm_only_opcodes: [AllocSharedModuleBinding, ...] }`
-/// shape. Closure captures `counter` -> compiler promotes the slot to a
-/// shared cell -> `AllocSharedModuleBinding` + `LoadSharedModuleBinding`
-/// opcodes emitted at top-level main code -> `preflight_instructions` at
-/// `crates/shape-jit/src/compiler/accessors.rs:605` rejects.
+/// Historical SharedModuleBinding fixture. At HEAD this program reaches the
+/// root JIT ModuleFn dispatch / kinded handler ABI debt first and falls back
+/// with the `R8 W9 B1 W17-marshal-return-arms` class; the old
+/// SharedModuleBinding preflight string is no longer part of this fixture's
+/// observable CLI contract.
 #[test]
 fn fallback_f2_preflight_shared_module_binding_diagnostic_emits() {
     let vm = run_shape("vm", "f2-preflight-shared-binding.shape");
     let jit = run_shape("jit", "f2-preflight-shared-binding.shape");
 
-    // Both modes hit a pre-existing VM runtime error at line 9
-    // ("mutable/shared capture access in a frame without upvalues"); the
-    // W12 fall-through contract is "exit code matches VM" — the
-    // architectural fix is in JIT mode behaviorally equivalent to VM
-    // mode for this class.
+    // The fall-through contract is behavioral VM/JIT parity plus exactly one
+    // JIT fallback diagnostic.
     assert_eq!(
         jit.exit_code, vm.exit_code,
         "f2 JIT exit code must match VM exit code via fall-through; \
@@ -158,14 +154,23 @@ fn fallback_f2_preflight_shared_module_binding_diagnostic_emits() {
         vm.exit_code, vm.stderr, jit.exit_code, jit.stderr
     );
     assert_eq!(
+        jit.stdout, vm.stdout,
+        "f2 JIT stdout must match VM stdout via fall-through; \
+         vm_stdout={}, jit_stdout={}, jit_stderr={}",
+        vm.stdout, jit.stdout, jit.stderr
+    );
+    assert_eq!(
         count_fallback_lines(&jit.stderr),
         1,
         "f2 JIT mode should emit exactly one [jit-fallback] line; stderr={}",
         jit.stderr
     );
-    // Class signature: the diagnostic mentions the SharedModuleBinding
-    // opcode class so a drift in the JIT-Err class behind the fixture
-    // surfaces.
+    assert_eq!(
+        count_fallback_lines(&vm.stderr),
+        0,
+        "f2 VM mode must not emit [jit-fallback]; stderr={}",
+        vm.stderr
+    );
     let fallback_line: String = jit
         .stderr
         .lines()
@@ -173,11 +178,11 @@ fn fallback_f2_preflight_shared_module_binding_diagnostic_emits() {
         .unwrap_or("")
         .to_string();
     assert!(
-        fallback_line.contains("SharedModuleBinding")
-            || fallback_line.contains("AllocSharedModuleBinding")
-            || fallback_line.contains("LoadSharedModuleBinding"),
-        "f2 fallback diagnostic should mention the SharedModuleBinding \
-         preflight class; got: {}",
+        fallback_line.contains("R8 W9 B1 W17-marshal-return-arms")
+            && fallback_line.contains("JIT ModuleFn dispatch")
+            && fallback_line.contains("kinded handler ABI"),
+        "f2 fallback diagnostic should mention the current ModuleFn/kinded \
+         ABI fallback class; got: {}",
         fallback_line
     );
 }
@@ -447,53 +452,63 @@ fn fallback_f5_null_coalesce_let_bound_option_falls_through_to_vm() {
     );
 }
 
-/// Move-then-read divergence class — a struct (TypedObject) whole-value bind
-/// `let q = p` lowers as `Use(Move(Local(p)))` (JIT `compile_operand` nulls
-/// the source) while the VM keeps `p` live (Clone). A SUBSEQUENT field read
-/// `print(p.x)` lowers as `Copy(Field(Local(p), 0))` — a PROJECTED read of
-/// `p`. Pre-fix the `mir_has_move_then_read_divergence` detector keyed reads
-/// on a bare `Place::Local`, so the projected later read was missed and the
-/// whole-function deopt never fired — the JIT read the nulled struct pointer
-/// and SIGSEGV'd (exit 139). The detector now keys reads on the place ROOT
-/// local, so the program deopts to the interpreter: VM == JIT, both print `1`.
+/// Move-then-read ownership class — `let q = p` consumes the struct value,
+/// and the later projected read `print(p.x)` is rejected as B0005
+/// use-after-move before either VM execution or JIT fallback.
 #[test]
 fn fallback_f6_struct_move_then_read_falls_through_to_vm() {
     let vm = run_shape("vm", "f6-struct-move-then-read.shape");
     let jit = run_shape("jit", "f6-struct-move-then-read.shape");
 
-    // VM mode prints the original `p.x` (`1`) and exits 0 — `let q = p` does
-    // NOT consume `p` under the VM ownership model.
+    // Ownership/book semantics: the move is real, so VM mode rejects the
+    // subsequent `p.x` read with B0005 instead of printing `1`.
     assert_eq!(
         vm.exit_code,
-        Some(0),
-        "f6 VM mode should exit 0; stderr={}",
+        Some(1),
+        "f6 VM mode should reject use-after-move with exit 1; stderr={}",
         vm.stderr
     );
-    // The load-bearing assertion: JIT mode must NOT SIGSEGV (exit 139). The
-    // whole-function deopt routes through the interpreter, so the JIT exit
-    // code matches the VM exit code.
     assert_eq!(
         jit.exit_code, vm.exit_code,
-        "f6 JIT exit code must match VM via fall-through (NOT a SIGSEGV/139); \
+        "f6 JIT exit code must match VM for the same B0005 compile failure; \
          vm={:?} stderr={}, jit={:?} stderr={}",
         vm.exit_code, vm.stderr, jit.exit_code, jit.stderr
     );
-    // VM == JIT on the printed value: the original `p` is unchanged, so both
-    // print `1`.
     assert!(
-        vm.stdout.contains('1'),
-        "f6 VM stdout should print `1`; stdout={}",
+        vm.stdout.is_empty(),
+        "f6 VM stdout should be empty on B0005; stdout={}",
         vm.stdout
     );
     assert!(
-        jit.stdout.contains('1'),
-        "f6 JIT stdout should print `1` via VM fall-through; stdout={}",
+        jit.stdout.is_empty(),
+        "f6 JIT stdout should be empty on B0005; stdout={}",
         jit.stdout
+    );
+    assert!(
+        vm.stderr.contains("[B0005]")
+            && vm
+                .stderr
+                .contains("cannot use this value after it was moved")
+            && vm.stderr.contains("value was moved here"),
+        "f6 VM stderr should contain the structured B0005 use-after-move \
+         diagnostic; stderr={}",
+        vm.stderr
+    );
+    assert!(
+        jit.stderr.contains("[B0005]")
+            && jit.stderr.contains("Bytecode compilation failed")
+            && jit
+                .stderr
+                .contains("cannot use this value after it was moved"),
+        "f6 JIT stderr should report the same B0005 bytecode compile \
+         failure; stderr={}",
+        jit.stderr
     );
     assert_eq!(
         count_fallback_lines(&jit.stderr),
-        1,
-        "f6 JIT mode should emit exactly one [jit-fallback] line; stderr={}",
+        0,
+        "f6 B0005 is raised before JIT fallback, so no [jit-fallback] line \
+         should emit; stderr={}",
         jit.stderr
     );
     assert_eq!(
@@ -501,17 +516,5 @@ fn fallback_f6_struct_move_then_read_falls_through_to_vm() {
         0,
         "f6 VM mode must not emit [jit-fallback]; stderr={}",
         vm.stderr
-    );
-    let fallback_line: String = jit
-        .stderr
-        .lines()
-        .find(|l| l.starts_with("[jit-fallback]"))
-        .unwrap_or("")
-        .to_string();
-    assert!(
-        fallback_line.contains("move-semantics") || fallback_line.contains("§2.7.14"),
-        "f6 fallback diagnostic should mention the move-semantics SURFACE \
-         class; got: {}",
-        fallback_line
     );
 }
