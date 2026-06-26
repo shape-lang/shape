@@ -957,8 +957,22 @@ impl BytecodeCompiler {
         // Canonical post-solve facts from the single best-effort inference pass.
         InferenceFacts,
     ) {
+        Self::infer_reference_model_with_comptime_context(program, false)
+    }
+
+    pub(super) fn infer_reference_model_with_comptime_context(
+        program: &Program,
+        root_comptime_context: bool,
+    ) -> (
+        HashMap<String, Vec<bool>>,
+        HashMap<String, Vec<bool>>,
+        HashMap<String, shape_ast::ast::TypeAnnotation>,
+        // Canonical post-solve facts from the single best-effort inference pass.
+        InferenceFacts,
+    ) {
         let funcs = Self::collect_program_functions(program);
         let mut inference = shape_runtime::type_system::inference::TypeInferenceEngine::new();
+        inference.set_root_comptime_context(root_comptime_context);
         let (facts, _) = inference.infer_program_facts_best_effort(program);
         let types = facts.top_level_types();
         let inferred_ref_params = Self::infer_reference_params_from_types(program, types);
@@ -1953,12 +1967,13 @@ impl BytecodeCompiler {
         } else {
             TypeAnalysisMode::FailFast
         };
-        if let Err(errors) = analyze_program_with_mode(
+        if let Err(errors) = analyze_program_with_mode_and_comptime_context(
             &analysis_program,
             self.source_text.as_deref(),
             None,
             Some(&known_bindings),
             analysis_mode,
+            self.comptime_mode,
         ) {
             match self.type_diagnostic_mode {
                 TypeDiagnosticMode::Strict => {
@@ -1988,7 +2003,7 @@ impl BytecodeCompiler {
             inferred_ref_mutates,
             inferred_return_annotations,
             inference_facts,
-        ) = Self::infer_reference_model(&program);
+        ) = Self::infer_reference_model_with_comptime_context(&program, self.comptime_mode);
         // T1 KEYSTONE: store the post-solve per-expression type table so
         // `infer_expr_type` can consult it first (root fix for static
         // type-erasure of function-body collection-dispatch / match-arm locals).

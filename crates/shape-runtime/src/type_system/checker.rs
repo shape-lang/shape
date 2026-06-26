@@ -74,6 +74,12 @@ impl TypeChecker {
         self
     }
 
+    /// Treat the analyzed program as a compiler-proven comptime mini-program.
+    pub fn with_root_comptime_context(mut self, enabled: bool) -> Self {
+        self.inference_engine.set_root_comptime_context(enabled);
+        self
+    }
+
     /// Type check a complete program
     pub fn check_program(
         &mut self,
@@ -633,6 +639,25 @@ pub fn analyze_program_with_mode(
     known_bindings: Option<&[String]>,
     analysis_mode: TypeAnalysisMode,
 ) -> Result<TypeCheckResult, Vec<TypeErrorWithLocation>> {
+    analyze_program_with_mode_and_comptime_context(
+        program,
+        source,
+        filename,
+        known_bindings,
+        analysis_mode,
+        false,
+    )
+}
+
+/// Shared type analysis with explicit recovery behavior and root comptime proof.
+pub fn analyze_program_with_mode_and_comptime_context(
+    program: &Program,
+    source: Option<&str>,
+    filename: Option<&str>,
+    known_bindings: Option<&[String]>,
+    analysis_mode: TypeAnalysisMode,
+    root_comptime_context: bool,
+) -> Result<TypeCheckResult, Vec<TypeErrorWithLocation>> {
     let mut checker = TypeChecker::new();
     if let Some(src) = source {
         checker = checker.with_source(src.to_string());
@@ -643,6 +668,7 @@ pub fn analyze_program_with_mode(
     if let Some(names) = known_bindings {
         checker = checker.with_known_bindings(names);
     }
+    checker = checker.with_root_comptime_context(root_comptime_context);
     checker = checker.with_analysis_mode(analysis_mode);
     checker.check_program(program)
 }
@@ -714,6 +740,42 @@ pub fn quick_check(source: &str) -> Result<TypeCheckResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_root_comptime_context_allows_comptime_builtin_forwarder() {
+        let source = r#"
+            fn build_config() -> int { 1 }
+            build_config()
+        "#;
+        let program = shape_ast::parser::parse_program(source).expect("parse");
+
+        let outside = analyze_program_with_mode(
+            &program,
+            Some(source),
+            None,
+            None,
+            TypeAnalysisMode::FailFast,
+        );
+        assert!(
+            format!("{:?}", outside.err().expect("outside comptime must fail"))
+                .contains("comptime-only builtin"),
+            "ordinary source must still reject comptime-only builtin calls"
+        );
+
+        let inside = analyze_program_with_mode_and_comptime_context(
+            &program,
+            Some(source),
+            None,
+            None,
+            TypeAnalysisMode::FailFast,
+            true,
+        );
+        assert!(
+            inside.is_ok(),
+            "compiler-proven comptime mini-program should type-check: {:?}",
+            inside.err()
+        );
+    }
 
     #[test]
     fn test_exhaustiveness_integration_non_exhaustive_match_produces_error() {

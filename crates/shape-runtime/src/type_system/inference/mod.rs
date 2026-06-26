@@ -625,6 +625,14 @@ impl TypeInferenceEngine {
         self.comptime_depth = self.comptime_depth.saturating_add(1);
     }
 
+    /// Mark the whole current inference run as already proven comptime.
+    ///
+    /// This is for compiler-synthesized comptime mini-programs whose caller
+    /// has already established they came from an actual `comptime { }` path.
+    pub fn set_root_comptime_context(&mut self, enabled: bool) {
+        self.comptime_depth = usize::from(enabled);
+    }
+
     /// J-CT.1: exit a comptime context.
     pub(crate) fn exit_comptime(&mut self) {
         self.comptime_depth = self.comptime_depth.saturating_sub(1);
