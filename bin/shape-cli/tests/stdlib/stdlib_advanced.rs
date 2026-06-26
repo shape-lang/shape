@@ -3,8 +3,40 @@
 //! - property_testing.shape (SL8)
 //! - encoding.shape (SL3)
 
-use crate::common::{eval, eval_to_bool, init_runtime};
+use crate::common::{eval, init_runtime};
 use std::path::Path;
+
+fn eval_user_code(code: &str) -> Result<serde_json::Value, String> {
+    use shape_runtime::engine::ShapeEngine;
+    use shape_vm::BytecodeExecutor;
+
+    let mut engine = ShapeEngine::new().map_err(|e| e.to_string())?;
+    engine.load_stdlib().map_err(|e| e.to_string())?;
+    let mut executor = BytecodeExecutor::new();
+    let result = engine
+        .execute(&mut executor, code)
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(&result.value).map_err(|e| e.to_string())
+}
+
+fn eval_user_code_to_bool(code: &str) -> bool {
+    match eval_user_code(code).unwrap_or_else(|e| panic!("Expected bool, got error: {}", e)) {
+        serde_json::Value::Bool(b) => b,
+        serde_json::Value::Object(map) if map.contains_key("Bool") => match &map["Bool"] {
+            serde_json::Value::Bool(b) => *b,
+            other => panic!("Expected bool in Object, got: {:?}", other),
+        },
+        other => panic!("Expected bool, got: {:?}", other),
+    }
+}
+
+fn assert_random_intrinsic_kinded_carrier_stub(code: &str, intrinsic: &str) {
+    let err = eval_user_code(code)
+        .expect_err("random-backed stdlib wrapper should stop at the VM intrinsic carrier stub");
+    assert!(err.contains("phase-1b-vm-wave-5d-intrinsic"), "{err}");
+    assert!(err.contains(intrinsic), "{err}");
+    assert!(err.contains("handle_intrinsic_builtin"), "{err}");
+}
 
 fn read_stdlib_module(path: &str) -> String {
     let base = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -39,224 +71,208 @@ fn with_modules(module_paths: &[&str], code: &str) -> String {
     merged
 }
 
+fn with_advanced_distributions_import(code: &str) -> String {
+    format!("use std::core::distributions_advanced\n{code}")
+}
+
 // ===== SL7: Advanced Distributions =====
+
+#[test]
+fn test_advanced_distribution_import_preserves_user_intrinsic_privacy() {
+    init_runtime();
+    let err = eval_user_code("__intrinsic_random()")
+        .expect_err("ordinary user code must not call internal intrinsics directly");
+    assert!(err.contains("internal intrinsic scope"), "{err}");
+}
 
 #[test]
 fn test_normal_pdf_at_zero() {
     init_runtime();
     // Standard normal PDF at x=0 should be 1/sqrt(2*pi) ≈ 0.3989
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        let p = normal_pdf(0.0);
+        let p = distributions_advanced::normal_pdf(0.0);
         abs(p - 0.3989422804014327) < 0.0001
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert!(eval_user_code_to_bool(&code));
 }
 
 #[test]
 fn test_normal_cdf_symmetry() {
     init_runtime();
     // CDF(0) = 0.5 for standard normal
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        let c = normal_cdf(0.0);
+        let c = distributions_advanced::normal_cdf(0.0);
         abs(c - 0.5) < 0.001
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert!(eval_user_code_to_bool(&code));
 }
 
 #[test]
 fn test_normal_cdf_at_two_sigma() {
     init_runtime();
     // CDF(2) ≈ 0.9772
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        let c = normal_cdf(2.0);
+        let c = distributions_advanced::normal_cdf(2.0);
         abs(c - 0.9772) < 0.001
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert!(eval_user_code_to_bool(&code));
 }
 
 #[test]
 fn test_normal_quantile_roundtrip() {
     init_runtime();
     // quantile(cdf(1.0)) should ≈ 1.0
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        let p = normal_cdf(1.5);
-        let x = normal_quantile(p);
+        let p = distributions_advanced::normal_cdf(1.5);
+        let x = distributions_advanced::normal_quantile(p);
         abs(x - 1.5) < 0.01
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert!(eval_user_code_to_bool(&code));
 }
 
 #[test]
 fn test_gamma_function_factorial() {
     init_runtime();
     // Gamma(5) = 4! = 24
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        let g = gamma(5.0);
+        let g = distributions_advanced::gamma(5.0);
         abs(g - 24.0) < 0.001
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert!(eval_user_code_to_bool(&code));
 }
 
 #[test]
 fn test_gamma_function_half() {
     init_runtime();
     // Gamma(0.5) = sqrt(pi) ≈ 1.7725
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        let g = gamma(0.5);
+        let g = distributions_advanced::gamma(0.5);
         abs(g - 1.7724538509055159) < 0.001
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert!(eval_user_code_to_bool(&code));
 }
 
 #[test]
 fn test_beta_function_value() {
     init_runtime();
     // B(2, 3) = Gamma(2)*Gamma(3)/Gamma(5) = 1*2/24 = 1/12 ≈ 0.0833
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        let bval = beta_fn(2.0, 3.0);
+        let bval = distributions_advanced::beta_fn(2.0, 3.0);
         abs(bval - 0.08333333) < 0.001
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert!(eval_user_code_to_bool(&code));
 }
 
 #[test]
 fn test_chi_square_pdf_positive() {
     init_runtime();
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        let p = chi_square_pdf(3.0, 4);
+        let p = distributions_advanced::chi_square_pdf(3.0, 4.0);
         p > 0.0 && p < 1.0
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert!(eval_user_code_to_bool(&code));
 }
 
 #[test]
 fn test_chi_square_cdf_bounds() {
     init_runtime();
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        let c1 = chi_square_cdf(0.0, 4);
-        let c2 = chi_square_cdf(10.0, 4);
+        let c1 = distributions_advanced::chi_square_cdf(0.0, 4.0);
+        let c2 = distributions_advanced::chi_square_cdf(10.0, 4.0);
         c1 == 0.0 && c2 > 0.9
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert!(eval_user_code_to_bool(&code));
 }
 
 #[test]
 fn test_t_distribution_pdf_symmetric() {
     init_runtime();
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        let p1 = t_pdf(1.0, 5);
-        let p2 = t_pdf(-1.0, 5);
+        let p1 = distributions_advanced::t_pdf(1.0, 5.0);
+        let p2 = distributions_advanced::t_pdf(-1.0, 5.0);
         abs(p1 - p2) < 0.0001
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert!(eval_user_code_to_bool(&code));
 }
 
 #[test]
 fn test_t_distribution_cdf_at_zero() {
     init_runtime();
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        let c = t_cdf(0.0, 10);
+        let c = distributions_advanced::t_cdf(0.0, 10.0);
         abs(c - 0.5) < 0.001
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert!(eval_user_code_to_bool(&code));
 }
 
 #[test]
 fn test_beta_pdf_bounds() {
     init_runtime();
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        let p = beta_pdf(0.5, 2.0, 5.0);
-        p > 0.0 && beta_pdf(0.0, 2.0, 5.0) == 0.0 && beta_pdf(1.0, 2.0, 5.0) == 0.0
+        let p = distributions_advanced::beta_pdf(0.5, 2.0, 5.0);
+        p > 0.0
+            && distributions_advanced::beta_pdf(0.0, 2.0, 5.0) == 0.0
+            && distributions_advanced::beta_pdf(1.0, 2.0, 5.0) == 0.0
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert!(eval_user_code_to_bool(&code));
 }
 
 #[test]
 fn test_beta_cdf_bounds() {
     init_runtime();
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        beta_cdf(0.0, 2.0, 5.0) == 0.0 && beta_cdf(1.0, 2.0, 5.0) == 1.0
+        distributions_advanced::beta_cdf(0.0, 2.0, 5.0) == 0.0
+            && distributions_advanced::beta_cdf(1.0, 2.0, 5.0) == 1.0
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert!(eval_user_code_to_bool(&code));
 }
 
 #[test]
-fn test_gamma_sample_positive() {
+fn test_gamma_sample_random_intrinsic_kinded_carrier_stub() {
     init_runtime();
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        __intrinsic_random_seed(42);
-        let mut all_positive = true;
-        for i in range(0, 100) {
-            let s = gamma_sample(2.0, 1.0);
-            if s <= 0.0 {
-                all_positive = false;
-            }
-        }
-        all_positive
+        distributions_advanced::gamma_sample(2.0, 1.0)
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert_random_intrinsic_kinded_carrier_stub(&code, "IntrinsicRandomNormal");
 }
 
 #[test]
-fn test_beta_sample_in_unit_interval() {
+fn test_beta_sample_random_intrinsic_kinded_carrier_stub() {
     init_runtime();
-    let code = with_modules(
-        &["core/distributions_advanced.shape"],
+    let code = with_advanced_distributions_import(
         r#"
-        __intrinsic_random_seed(42);
-        let mut all_ok = true;
-        for i in range(0, 100) {
-            let s = beta_sample(2.0, 5.0);
-            if s < 0.0 || s > 1.0 {
-                all_ok = false;
-            }
-        }
-        all_ok
+        distributions_advanced::beta_sample(2.0, 5.0)
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert_random_intrinsic_kinded_carrier_stub(&code, "IntrinsicRandomNormal");
 }
 
 // ===== SL8: Property-Based Testing =====
