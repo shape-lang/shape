@@ -875,6 +875,45 @@ impl KindedConstant {
         }
     }
 
+    /// Construct a `HashSet`-kinded constant from an `Arc<HashSetData>`.
+    pub fn from_hashset(set: Arc<shape_value::heap_value::HashSetData>) -> Self {
+        let bits = Arc::into_raw(set) as u64;
+        Self {
+            bits,
+            kind: NativeKind::Ptr(HeapKind::HashSet),
+        }
+    }
+
+    /// Construct a `Deque`-kinded constant from an `Arc<DequeData>`.
+    pub fn from_deque(deque: Arc<shape_value::heap_value::DequeData>) -> Self {
+        let bits = Arc::into_raw(deque) as u64;
+        Self {
+            bits,
+            kind: NativeKind::Ptr(HeapKind::Deque),
+        }
+    }
+
+    /// Construct a `Channel`-kinded constant from an `Arc<ChannelData>`.
+    pub fn from_channel(channel: Arc<shape_value::heap_value::ChannelData>) -> Self {
+        let bits = Arc::into_raw(channel) as u64;
+        Self {
+            bits,
+            kind: NativeKind::Ptr(HeapKind::Channel),
+        }
+    }
+
+    /// Construct a `PriorityQueue`-kinded constant from an
+    /// `Arc<PriorityQueueData>`.
+    pub fn from_priority_queue(
+        priority_queue: Arc<shape_value::heap_value::PriorityQueueData>,
+    ) -> Self {
+        let bits = Arc::into_raw(priority_queue) as u64;
+        Self {
+            bits,
+            kind: NativeKind::Ptr(HeapKind::PriorityQueue),
+        }
+    }
+
     /// The raw slot bits.
     #[inline]
     pub fn bits(&self) -> u64 {
@@ -939,6 +978,84 @@ impl PartialEq for KindedConstant {
     /// content comparison).
     fn eq(&self, other: &Self) -> bool {
         self.bits == other.bits && self.kind == other.kind
+    }
+}
+
+#[cfg(test)]
+mod kinded_constant_tests {
+    use super::*;
+    use shape_value::heap_value::{ChannelData, DequeData, HashSetData, PriorityQueueData};
+
+    #[test]
+    fn hashset_constant_preserves_kind_bits_and_refcount() {
+        let carrier = Arc::new(HashSetData::new());
+        let raw = Arc::as_ptr(&carrier) as u64;
+
+        let constant = KindedConstant::from_hashset(Arc::clone(&carrier));
+        assert_eq!(constant.bits(), raw);
+        assert_eq!(constant.kind(), NativeKind::Ptr(HeapKind::HashSet));
+        assert_eq!(Arc::strong_count(&carrier), 2);
+
+        let cloned = constant.clone();
+        assert_eq!(Arc::strong_count(&carrier), 3);
+        drop(cloned);
+        assert_eq!(Arc::strong_count(&carrier), 2);
+        drop(constant);
+        assert_eq!(Arc::strong_count(&carrier), 1);
+    }
+
+    #[test]
+    fn deque_constant_preserves_kind_bits_and_refcount() {
+        let carrier = Arc::new(DequeData::new());
+        let raw = Arc::as_ptr(&carrier) as u64;
+
+        let constant = KindedConstant::from_deque(Arc::clone(&carrier));
+        assert_eq!(constant.bits(), raw);
+        assert_eq!(constant.kind(), NativeKind::Ptr(HeapKind::Deque));
+        assert_eq!(Arc::strong_count(&carrier), 2);
+
+        let cloned = constant.clone();
+        assert_eq!(Arc::strong_count(&carrier), 3);
+        drop(cloned);
+        assert_eq!(Arc::strong_count(&carrier), 2);
+        drop(constant);
+        assert_eq!(Arc::strong_count(&carrier), 1);
+    }
+
+    #[test]
+    fn channel_constant_preserves_kind_bits_and_refcount() {
+        let carrier = Arc::new(ChannelData::new());
+        let raw = Arc::as_ptr(&carrier) as u64;
+
+        let constant = KindedConstant::from_channel(Arc::clone(&carrier));
+        assert_eq!(constant.bits(), raw);
+        assert_eq!(constant.kind(), NativeKind::Ptr(HeapKind::Channel));
+        assert_eq!(Arc::strong_count(&carrier), 2);
+
+        let cloned = constant.clone();
+        assert_eq!(Arc::strong_count(&carrier), 3);
+        drop(cloned);
+        assert_eq!(Arc::strong_count(&carrier), 2);
+        drop(constant);
+        assert_eq!(Arc::strong_count(&carrier), 1);
+    }
+
+    #[test]
+    fn priority_queue_constant_preserves_kind_bits_and_refcount() {
+        let carrier = Arc::new(PriorityQueueData::new());
+        let raw = Arc::as_ptr(&carrier) as u64;
+
+        let constant = KindedConstant::from_priority_queue(Arc::clone(&carrier));
+        assert_eq!(constant.bits(), raw);
+        assert_eq!(constant.kind(), NativeKind::Ptr(HeapKind::PriorityQueue));
+        assert_eq!(Arc::strong_count(&carrier), 2);
+
+        let cloned = constant.clone();
+        assert_eq!(Arc::strong_count(&carrier), 3);
+        drop(cloned);
+        assert_eq!(Arc::strong_count(&carrier), 2);
+        drop(constant);
+        assert_eq!(Arc::strong_count(&carrier), 1);
     }
 }
 
