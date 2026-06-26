@@ -288,22 +288,13 @@ impl JITCompiler {
             exp_f64: r!("jit_exp_f64"),
             ln_f64: r!("jit_ln_f64"),
 
-            // ADR-006 §2.7.5 — kinded EnumStore producers
-            // (W12-jit-aggregate-non-array, 2026-05-12). Dispatched from
-            // the EnumStore consumer based on the MIR statement's
-            // `variant_name` field.
-            make_ok: r!("jit_make_ok"),
-            make_err: r!("jit_make_err"),
-            make_some: r!("jit_make_some"),
-
             // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers +
             // accessors (W12-jit-result-option-trinity, Phase 3 cluster-0
             // Round 7A, 2026-05-12). These are the trinity's strict-typed
-            // EnumStore producers + match-codegen consumers — the legacy
-            // `make_ok` / `make_err` / `make_some` NaN-box family is NOT
-            // referenced by the new trinity codegen path (those FuncRefs
-            // remain for the JIT↔VM trampoline conversion in
-            // ffi/conversion.rs only).
+            // EnumStore producers + match-codegen consumers. The legacy
+            // `make_ok` / `make_err` / `make_some` NaN-box family is not
+            // imported into `FFIFuncRefs`; generated code must not produce
+            // retired HK_OK/HK_ERR/HK_SOME carriers.
             v2_make_result_ok: r!("jit_v2_make_result_ok"),
             v2_make_result_err: r!("jit_v2_make_result_err"),
             v2_make_option_some: r!("jit_v2_make_option_some"),

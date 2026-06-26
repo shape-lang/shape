@@ -357,11 +357,11 @@ pub fn unbox_heap_pointer(bits: u64) -> *const u8 {
 // Result Type (Ok/Err) Helper Functions
 // ============================================================================
 //
-// JIT-internal Ok/Err carriers. Each wraps a single u64 inner-bits payload
-// in a `UnifiedValue<u64>` heap allocation with prefix kind=HK_OK/HK_ERR.
-// The strict-typed `HeapValue::Reference` / typed-Result rebuild is in a
-// later W10/Phase-2c sub-cluster; until then, JIT-emitted code stays on
-// the raw-u64 wrapper shape per §2.7.5 stable-FFI rule.
+// Retired JIT-internal Ok/Err carriers. Each wraps a single u64 inner-bits
+// payload in a `UnifiedValue<u64>` heap allocation with prefix kind=HK_OK/HK_ERR.
+// Generated JIT code must produce `Arc<ResultData>` / `Arc<OptionData>` through
+// `ffi/result.rs::jit_v2_make_*`; these helpers remain only as compatibility
+// definitions for old boundary conversion/tests until that surface is deleted.
 
 #[inline]
 pub fn is_ok_tag(bits: u64) -> bool {

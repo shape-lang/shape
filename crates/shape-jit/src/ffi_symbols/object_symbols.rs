@@ -58,28 +58,16 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_to_number", jit_to_number as *const u8);
     // F5.a/F5.b: string `+` for `"a" + "b"` and `f"..."`-desugared concat chains.
     builder.symbol("jit_string_concat", jit_string_concat as *const u8);
-    // ADR-006 §2.7.5 — kinded EnumStore producers (W12-jit-aggregate-non-array)
-    builder.symbol(
-        "jit_make_ok",
-        super::super::ffi::result::jit_make_ok as *const u8,
-    );
-    builder.symbol(
-        "jit_make_err",
-        super::super::ffi::result::jit_make_err as *const u8,
-    );
-    builder.symbol(
-        "jit_make_some",
-        super::super::ffi::result::jit_make_some as *const u8,
-    );
     // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers + accessors
     // (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A, 2026-05-12).
     // Match the VM-side `BuiltinFunction::OkCtor` / `ErrCtor` / `SomeCtor` /
     // `NoneCtor` output shape — `Arc::into_raw(Arc<ResultData>) as u64` /
     // `Arc::into_raw(Arc<OptionData>) as u64` with kind labels
     // `NativeKind::Ptr(HeapKind::Result)` / `NativeKind::Ptr(HeapKind::Option)`.
-    // Replaces the legacy `jit_make_ok` etc. NaN-box producer family at the
-    // JIT EnumStore consumer (the production-code consumer migration gap the
-    // pre-trinity result.rs:178-200 deletion comment documented).
+    // The legacy `jit_make_ok` / `_err` / `_some` UnifiedValue<u64> producer
+    // family is intentionally NOT registered with Cranelift. Keeping those
+    // symbols importable would allow new native code to produce retired
+    // HK_OK/HK_ERR/HK_SOME carriers instead of the strict Arc carriers below.
     builder.symbol(
         "jit_v2_make_result_ok",
         super::super::ffi::result::jit_v2_make_result_ok as *const u8,
@@ -634,25 +622,6 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_string_concat", Linkage::Import, &sig)
             .expect("Failed to declare jit_string_concat");
         ffi_funcs.insert("jit_string_concat".to_string(), func_id);
-    }
-
-    // ADR-006 §2.7.5 — kinded EnumStore producers
-    // (W12-jit-aggregate-non-array, 2026-05-12). Signature:
-    // `(inner_bits: u64) -> u64`. The JIT EnumStore consumer widens
-    // every operand to I64 bits (via `widen_to_i64`) per the §2.7.5
-    // stable-FFI carrier convention before calling. Return is the
-    // heap-pointer bits with HK_OK / HK_ERR / HK_SOME prefix tag —
-    // `jit_bits_to_nanboxed` at the JIT↔VM boundary converts to
-    // `Arc<ResultData>` / `Arc<OptionData>` (`crates/shape-jit/src/
-    // ffi/conversion.rs:246-258`).
-    for name in ["jit_make_ok", "jit_make_err", "jit_make_some"] {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // inner_bits
-        sig.returns.push(AbiParam::new(types::I64));
-        let func_id = module
-            .declare_function(name, Linkage::Import, &sig)
-            .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
-        ffi_funcs.insert(name.to_string(), func_id);
     }
 
     // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers
