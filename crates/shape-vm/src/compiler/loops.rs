@@ -307,6 +307,10 @@ impl BytecodeCompiler {
 
         match &for_loop.init {
             ForInit::ForIn { pattern, iter } => {
+                if matches!(iter, Expr::Array(elements, _) if elements.is_empty()) {
+                    return Ok(());
+                }
+
                 self.push_scope();
 
                 // Try range counter loop specialization (non-async only)
@@ -713,6 +717,11 @@ impl BytecodeCompiler {
                 message: "'for await' can only be used inside an async function".to_string(),
                 location: None,
             });
+        }
+
+        if matches!(&*for_expr.iterable, Expr::Array(elements, _) if elements.is_empty()) {
+            self.emit(Instruction::simple(OpCode::PushNull));
+            return Ok(());
         }
 
         self.push_scope();
@@ -2105,6 +2114,26 @@ mod tests {
             !opcodes.contains(&crate::bytecode::OpCode::IterDone),
             "Range counter loop must not emit IterDone"
         );
+    }
+
+    #[test]
+    fn test_empty_array_for_loop_no_new_array() {
+        let program =
+            parse_program("fn t() { let mut s = 7; for x in [] { s = 0 }; s } t()").unwrap();
+        let bytecode = BytecodeCompiler::new().compile(&program).unwrap();
+        let generic_new_array_sites: Vec<_> = bytecode
+            .instructions
+            .iter()
+            .enumerate()
+            .filter(|(_, ins)| matches!(ins.opcode, crate::bytecode::OpCode::NewArray))
+            .collect();
+        assert!(
+            generic_new_array_sites.is_empty(),
+            "empty array for-in must not emit generic NewArray without a proven element kind: {generic_new_array_sites:?}"
+        );
+
+        let result = compile_and_run_i64("fn t() { let mut s = 7; for x in [] { s = 0 }; s } t()");
+        assert_eq!(result, 7);
     }
 
     #[test]

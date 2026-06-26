@@ -56,7 +56,8 @@
 //! `TypedBuffer<T>` wrapper enum, etc. per ckpt-1 close-marker at
 //! `crates/shape-value/src/heap_value.rs:3956`).
 
-use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, VMError};
+use shape_value::v2::typed_array::{ELEM_TYPE_I64, TypedArray, stamp_elem_type};
+use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, VMError, ValueSlot};
 use std::sync::Arc;
 
 #[inline]
@@ -220,12 +221,60 @@ pub(in crate::executor) fn builtin_filled(args: &[KindedSlot]) -> Result<KindedS
 }
 
 /// `range(n)` / `range(start, end)` / `range(start, end, step)` — produce
-/// an `Array<int>` (when all args are Int) or `Array<number>` otherwise.
+/// an `Array<int>`.
 pub(in crate::executor) fn builtin_range(args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
     if args.is_empty() || args.len() > 3 {
         return Err(type_error("range() requires 1, 2, or 3 arguments"));
     }
-    Err(ckpt3_surface("range", args))
+
+    let int_arg = |idx: usize| -> Result<i64, VMError> {
+        let arg = &args[idx];
+        if arg.kind().is_integer_family() {
+            crate::executor::builtins::kind_coerce::int_operand(arg)
+                .map_err(|_| type_error("range() integer argument could not be decoded"))
+        } else {
+            Err(type_error(format!(
+                "range() argument {} must be an integer; got {:?}",
+                idx + 1,
+                arg.kind()
+            )))
+        }
+    };
+
+    let (start, end, step) = match args.len() {
+        1 => (0, int_arg(0)?, 1),
+        2 => (int_arg(0)?, int_arg(1)?, 1),
+        3 => (int_arg(0)?, int_arg(1)?, int_arg(2)?),
+        _ => unreachable!(),
+    };
+    if step == 0 {
+        return Err(type_error("range() step cannot be 0"));
+    }
+
+    let mut values = Vec::new();
+    let mut i = start;
+    if step > 0 {
+        while i < end {
+            values.push(i);
+            i = i
+                .checked_add(step)
+                .ok_or_else(|| type_error("range() overflow while advancing"))?;
+        }
+    } else {
+        while i > end {
+            values.push(i);
+            i = i
+                .checked_add(step)
+                .ok_or_else(|| type_error("range() overflow while advancing"))?;
+        }
+    }
+
+    let arr = TypedArray::<i64>::from_slice(&values);
+    unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64) };
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(arr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
 }
 
 /// `slice(arr, start, [end])` — return a subarray. Preserves element shape.
@@ -237,4 +286,30 @@ pub(in crate::executor) fn builtin_slice(args: &[KindedSlot]) -> Result<KindedSl
     }
     let _ = HeapKind::TypedArray; // Preserve import-touch for future v2-raw path.
     Err(ckpt3_surface("slice", args))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_range_returns_stamped_i64_typed_array() {
+        let slot = builtin_range(&[KindedSlot::from_int(1), KindedSlot::from_int(5)]).unwrap();
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedArray));
+
+        let arr = slot.raw() as *const TypedArray<i64>;
+        let got = unsafe { TypedArray::<i64>::as_slice(arr) };
+        assert_eq!(got, &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn builtin_range_rejects_zero_step() {
+        let err = builtin_range(&[
+            KindedSlot::from_int(0),
+            KindedSlot::from_int(5),
+            KindedSlot::from_int(0),
+        ])
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("step cannot be 0"));
+    }
 }
