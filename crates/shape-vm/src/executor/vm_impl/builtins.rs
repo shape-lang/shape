@@ -44,7 +44,7 @@
 
 use super::super::*;
 use crate::executor::result_option_carrier;
-use shape_value::{KindedSlot, VMError, ValueSlot};
+use shape_value::{HeapKind, KindedSlot, NativeKind, VMError, ValueSlot};
 
 impl VirtualMachine {
     /// Pop the builtin call's args off the typed VM stack into a
@@ -562,14 +562,18 @@ impl VirtualMachine {
                     let r = super::super::builtins::math::builtin_tanh(&args)?;
                     self.push_kinded_slot(r)?;
                 }
-                BuiltinFunction::IntrinsicBspline2_3dBatch
-                | BuiltinFunction::IntrinsicMin
-                | BuiltinFunction::IntrinsicMax
-                | BuiltinFunction::IntrinsicRandom
+                BuiltinFunction::IntrinsicRandom
                 | BuiltinFunction::IntrinsicRandomInt
                 | BuiltinFunction::IntrinsicRandomSeed
                 | BuiltinFunction::IntrinsicRandomNormal
-                | BuiltinFunction::IntrinsicRandomArray
+                | BuiltinFunction::IntrinsicRandomArray => {
+                    let args = self.pop_builtin_args()?;
+                    let r = vm_random_intrinsic_slot(builtin, &args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicBspline2_3dBatch
+                | BuiltinFunction::IntrinsicMin
+                | BuiltinFunction::IntrinsicMax
                 | BuiltinFunction::IntrinsicDistUniform
                 | BuiltinFunction::IntrinsicDistLognormal
                 | BuiltinFunction::IntrinsicDistExponential
@@ -601,11 +605,11 @@ impl VirtualMachine {
                 | BuiltinFunction::IntrinsicFromCharCode
                 | BuiltinFunction::IntrinsicSeries => {
                     // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5d —
-                    // stats / random / stochastic / rolling / scalar-math /
+                    // stats / distribution / stochastic / rolling / scalar-math /
                     // series intrinsic body migration
                     // (`handle_intrinsic_builtin`) deferred. Covers the
                     // ~37-variant cluster (Bspline2_3dBatch, Mean, Min,
-                    // Max, Std, Variance, Random*, Dist*, BrownianMotion,
+                    // Max, Std, Variance, Dist*, BrownianMotion,
                     // Gbm, OuProcess, RandomWalk, Rolling*, Ema,
                     // LinearRecurrence, Shift, Diff, PctChange, Fillna,
                     // Cumsum, Cumprod, Clip, Correlation, Covariance,
@@ -1674,6 +1678,145 @@ impl VirtualMachine {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Wave 8 random intrinsic carriers.
+//
+// The RNG state itself stays in shape-runtime's thread-local `with_rng`
+// hook so VM intrinsics and typed runtime modules observe one deterministic
+// sequence. Carrier construction stays here and is statically known:
+// Float64, Null/void, or v2 `TypedArray<f64>`.
+// ─────────────────────────────────────────────────────────────────────────
+
+fn random_intrinsic_arity(
+    builtin: crate::bytecode::BuiltinFunction,
+    args: &[KindedSlot],
+    expected: usize,
+) -> Result<(), VMError> {
+    if args.len() == expected {
+        Ok(())
+    } else {
+        Err(VMError::RuntimeError(format!(
+            "{:?} expects {} argument(s), got {}",
+            builtin,
+            expected,
+            args.len()
+        )))
+    }
+}
+
+fn random_number_arg(
+    builtin: crate::bytecode::BuiltinFunction,
+    args: &[KindedSlot],
+    idx: usize,
+    name: &str,
+) -> Result<f64, VMError> {
+    crate::executor::builtins::kind_coerce::number_operand(&args[idx]).map_err(|_| {
+        VMError::RuntimeError(format!(
+            "{:?}: argument '{}' must be number (got kind {:?})",
+            builtin, name, args[idx].kind
+        ))
+    })
+}
+
+fn random_int_arg(
+    builtin: crate::bytecode::BuiltinFunction,
+    args: &[KindedSlot],
+    idx: usize,
+    name: &str,
+) -> Result<i64, VMError> {
+    crate::executor::builtins::kind_coerce::int_operand(&args[idx]).map_err(|_| {
+        VMError::RuntimeError(format!(
+            "{:?}: argument '{}' must be int (got kind {:?})",
+            builtin, name, args[idx].kind
+        ))
+    })
+}
+
+fn random_array_number_slot(values: Vec<f64>) -> KindedSlot {
+    use shape_value::v2::typed_array::{stamp_elem_type, TypedArray, ELEM_TYPE_F64};
+
+    let ptr = TypedArray::<f64>::from_slice(&values);
+    unsafe {
+        stamp_elem_type(ptr as *mut u8, ELEM_TYPE_F64);
+    }
+    KindedSlot::new(
+        ValueSlot::from_u64(ptr as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    )
+}
+
+fn vm_random_intrinsic_slot(
+    builtin: crate::bytecode::BuiltinFunction,
+    args: &[KindedSlot],
+) -> Result<KindedSlot, VMError> {
+    use rand::{Rng as _, SeedableRng as _};
+
+    match builtin {
+        crate::bytecode::BuiltinFunction::IntrinsicRandom => {
+            random_intrinsic_arity(builtin, args, 0)?;
+            let value = shape_runtime::intrinsics::random::with_rng(|rng| rng.r#gen::<f64>());
+            Ok(KindedSlot::from_number(value))
+        }
+        crate::bytecode::BuiltinFunction::IntrinsicRandomInt => {
+            random_intrinsic_arity(builtin, args, 2)?;
+            let lo = random_number_arg(builtin, args, 0, "lo")? as i64;
+            let hi = random_number_arg(builtin, args, 1, "hi")? as i64;
+            if lo > hi {
+                return Err(VMError::RuntimeError(format!(
+                    "__intrinsic_random_int: lo ({}) must be <= hi ({})",
+                    lo, hi
+                )));
+            }
+            let value = shape_runtime::intrinsics::random::with_rng(|rng| rng.gen_range(lo..=hi));
+            Ok(KindedSlot::from_number(value as f64))
+        }
+        crate::bytecode::BuiltinFunction::IntrinsicRandomSeed => {
+            random_intrinsic_arity(builtin, args, 1)?;
+            let seed = random_number_arg(builtin, args, 0, "seed")? as u64;
+            shape_runtime::intrinsics::random::with_rng(|rng| {
+                *rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+            });
+            Ok(KindedSlot::none())
+        }
+        crate::bytecode::BuiltinFunction::IntrinsicRandomNormal => {
+            random_intrinsic_arity(builtin, args, 2)?;
+            let mean = random_number_arg(builtin, args, 0, "mean")?;
+            let std = random_number_arg(builtin, args, 1, "std")?;
+            if std < 0.0 {
+                return Err(VMError::RuntimeError(
+                    "__intrinsic_random_normal: std must be non-negative".to_string(),
+                ));
+            }
+            let value = shape_runtime::intrinsics::random::with_rng(|rng| {
+                let u1: f64 = rng.r#gen();
+                let u2: f64 = rng.r#gen();
+                let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+                mean + std * z
+            });
+            Ok(KindedSlot::from_number(value))
+        }
+        crate::bytecode::BuiltinFunction::IntrinsicRandomArray => {
+            random_intrinsic_arity(builtin, args, 1)?;
+            let n = random_int_arg(builtin, args, 0, "n")?;
+            if n < 0 {
+                return Err(VMError::RuntimeError(
+                    "__intrinsic_random_array: n must be non-negative".to_string(),
+                ));
+            }
+            let values = shape_runtime::intrinsics::random::with_rng(|rng| {
+                (0..n as usize)
+                    .map(|_| rng.r#gen::<f64>())
+                    .collect::<Vec<f64>>()
+            });
+            Ok(random_array_number_slot(values))
+        }
+        other => Err(VMError::RuntimeError(format!(
+            "vm_random_intrinsic_slot called with non-random builtin {:?}",
+            other
+        ))),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // W18.5 content builder helpers (R8 W4, 2026-05-24 — supervisor D4).
 //
 // Free-function helpers (not VirtualMachine methods) used by the
@@ -2413,6 +2556,52 @@ fn decode_fstring_style(
         underline: (flags & FSTRING_FLAG_UNDERLINE) != 0,
         dim: (flags & FSTRING_FLAG_DIM) != 0,
     })
+}
+
+#[cfg(test)]
+mod random_intrinsic_tests {
+    use super::*;
+    use crate::bytecode::BuiltinFunction;
+
+    #[test]
+    fn random_seed_restarts_shared_runtime_rng_sequence() {
+        let seed_args = [KindedSlot::from_number(42.0)];
+        let seed_slot =
+            vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandomSeed, &seed_args).unwrap();
+        assert_eq!(seed_slot.kind, NativeKind::Null);
+
+        let first = vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandom, &[]).unwrap();
+        let first_value = first.as_f64().unwrap();
+
+        let seed_args = [KindedSlot::from_number(42.0)];
+        let _ = vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandomSeed, &seed_args).unwrap();
+        let second = vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandom, &[]).unwrap();
+        assert_eq!(second.as_f64().unwrap(), first_value);
+    }
+
+    #[test]
+    fn random_normal_returns_float64_slot() {
+        let seed_args = [KindedSlot::from_number(7.0)];
+        let _ = vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandomSeed, &seed_args).unwrap();
+        let args = [KindedSlot::from_number(10.0), KindedSlot::from_number(2.0)];
+        let slot = vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandomNormal, &args).unwrap();
+        assert_eq!(slot.kind, NativeKind::Float64);
+        assert!(slot.as_f64().unwrap().is_finite());
+    }
+
+    #[test]
+    fn random_array_returns_v2_f64_typed_array_carrier() {
+        let seed_args = [KindedSlot::from_number(11.0)];
+        let _ = vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandomSeed, &seed_args).unwrap();
+        let args = [KindedSlot::from_int(3)];
+        let slot = vm_random_intrinsic_slot(BuiltinFunction::IntrinsicRandomArray, &args).unwrap();
+        assert_eq!(slot.kind, NativeKind::Ptr(HeapKind::TypedArray));
+
+        let ptr = slot.slot().raw() as *const shape_value::v2::typed_array::TypedArray<f64>;
+        let values = unsafe { shape_value::v2::typed_array::TypedArray::<f64>::as_slice(ptr) };
+        assert_eq!(values.len(), 3);
+        assert!(values.iter().all(|v| *v >= 0.0 && *v < 1.0));
+    }
 }
 
 #[cfg(test)]
