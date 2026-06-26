@@ -285,6 +285,8 @@ impl BytecodeCompiler {
     ) {
         if let Some(type_name) = self.destructure_binding_fact_type_name(span) {
             self.set_local_type_info(local_idx, &type_name);
+            self.last_expr_schema = None;
+            self.last_expr_type_info = Some(VariableTypeInfo::named(type_name));
         }
     }
 

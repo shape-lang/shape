@@ -395,6 +395,15 @@ pub struct TypeInferenceEngine {
     /// pre-solve type from `infer_variable_decl`, then finalized through the
     /// same substitution/drop policy as `expr_type_table`.
     pub(crate) binding_fact_table: HashMap<Span, BindingFact>,
+    /// Array/object parameter destructure links created while binding function
+    /// parameter patterns. Once the whole parameter resolves to a statically
+    /// known array/object/struct type, these links bind child binder variables
+    /// to the proven element/field type. This is a compile-time fact path only;
+    /// it exists because child binder variables can also carry body-local
+    /// constraints (e.g. Numeric), and the solver's bound propagation may leave
+    /// the original binder var unfinalized.
+    pub(crate) param_destructure_array_element_links: Vec<(Type, TypeVar)>,
+    pub(crate) param_destructure_field_links: Vec<(Type, String, TypeVar)>,
 }
 
 impl Default for TypeInferenceEngine {
@@ -456,6 +465,8 @@ impl TypeInferenceEngine {
             unannotated_let_binding_origins: HashMap::new(),
             expr_type_table: HashMap::new(),
             binding_fact_table: HashMap::new(),
+            param_destructure_array_element_links: Vec::new(),
+            param_destructure_field_links: Vec::new(),
         }
     }
 
@@ -1853,6 +1864,8 @@ impl TypeInferenceEngine {
         self.unannotated_let_binding_origins.clear();
         self.expr_type_table.clear();
         self.binding_fact_table.clear();
+        self.param_destructure_array_element_links.clear();
+        self.param_destructure_field_links.clear();
 
         // Hoisting pre-pass over the consumer (mirrors production).
         self.run_hoisting_prepass(consumer);
@@ -1894,6 +1907,7 @@ impl TypeInferenceEngine {
         // user call but never pinned — see `escaping_closure_numeric_param_vars`).
         errors.extend(self.default_unresolved_closure_numeric_params());
         self.default_unresolved_constructor_literal_payload_vars();
+        errors.extend(self.propagate_param_destructure_field_links());
 
         for (_name, ty) in types.iter_mut() {
             *ty = self.solver.unifier().apply_substitutions(ty);
@@ -1942,6 +1956,8 @@ impl TypeInferenceEngine {
         self.unannotated_let_binding_origins.clear();
         self.expr_type_table.clear();
         self.binding_fact_table.clear();
+        self.param_destructure_array_element_links.clear();
+        self.param_destructure_field_links.clear();
         // Run hoisting pre-pass first
         self.run_hoisting_prepass(program);
 
@@ -2068,6 +2084,7 @@ impl TypeInferenceEngine {
         // more — no new opcode, no fabricated kind, no value widening; a
         // CONFLICTING observed pair still produces the genuine union mismatch.
         self.apply_callsite_unions(&mut types);
+        errors.extend(self.propagate_param_destructure_field_links());
 
         // HOF return-type soundness re-check (the sg2 root, int/number guard).
         //
@@ -2828,9 +2845,14 @@ impl TypeInferenceEngine {
             }
             match self.solver.unifier().lookup(var) {
                 Some(existing) if !matches!(existing, Type::Variable(_)) => {
-                    // Already concretely bound — leave the prior binding;
-                    // a real conflict is reported by constraint solving.
-                    let _ = existing;
+                    // Already structurally bound — refine its inner variables
+                    // with the callsite-proven type when possible. This is the
+                    // parameter-destructure case: the function body first proves
+                    // `p: Array<T_elem>` from `[a, b]`, then callsite union proves
+                    // `p: Array<int>` from `sum_pair([10, 20])`; unifying those
+                    // two static facts binds `T_elem = int` for binder facts.
+                    let mut refinement = vec![(existing.clone(), ty.clone())];
+                    let _ = self.solver.solve(&mut refinement);
                 }
                 _ => self.solver.unifier_mut().bind(var.clone(), ty.clone()),
             }
@@ -3148,6 +3170,94 @@ impl TypeInferenceEngine {
         }
     }
 
+    fn propagate_param_destructure_field_links(&mut self) -> Vec<TypeError> {
+        let mut constraints = Vec::new();
+        for (scrutinee, elem_var) in self.param_destructure_array_element_links.clone() {
+            let resolved_elem_var = self
+                .solver
+                .unifier()
+                .apply_substitutions(&Type::Variable(elem_var.clone()));
+            if Self::type_is_fully_resolved(&resolved_elem_var) {
+                continue;
+            }
+
+            let Some(elem_ty) = self.param_destructure_resolved_array_element_type(&scrutinee)
+            else {
+                continue;
+            };
+            constraints.push((Type::Variable(elem_var), elem_ty));
+        }
+
+        for (scrutinee, field_name, field_var) in self.param_destructure_field_links.clone() {
+            let resolved_field_var = self
+                .solver
+                .unifier()
+                .apply_substitutions(&Type::Variable(field_var.clone()));
+            if Self::type_is_fully_resolved(&resolved_field_var) {
+                continue;
+            }
+
+            let Some(field_ty) =
+                self.param_destructure_resolved_field_type(&scrutinee, &field_name)
+            else {
+                continue;
+            };
+            constraints.push((Type::Variable(field_var), field_ty));
+        }
+
+        if constraints.is_empty() {
+            return Vec::new();
+        }
+
+        match self.solver.solve(&mut constraints) {
+            Ok(()) => Vec::new(),
+            Err(err) => vec![err],
+        }
+    }
+
+    fn param_destructure_resolved_array_element_type(&self, scrutinee: &Type) -> Option<Type> {
+        let resolved = self.solver.unifier().apply_substitutions(scrutinee);
+        match resolved.canonicalize() {
+            Type::Generic { base, args }
+                if args.len() == 1
+                    && matches!(
+                        base.as_ref(),
+                        Type::Concrete(TypeAnnotation::Reference(name))
+                            if name.as_str() == "Array" || name.as_str() == "Vec"
+                    ) =>
+            {
+                args.into_iter().next()
+            }
+            Type::Concrete(TypeAnnotation::Array(elem)) => {
+                Some(Self::callsite_type_from_annotation_preserving_tyvars(&elem))
+            }
+            _ => None,
+        }
+    }
+
+    fn param_destructure_resolved_field_type(
+        &self,
+        scrutinee: &Type,
+        field_name: &str,
+    ) -> Option<Type> {
+        let resolved = self.solver.unifier().apply_substitutions(scrutinee);
+        match &resolved {
+            Type::Concrete(TypeAnnotation::Object(fields)) => fields
+                .iter()
+                .find(|field| field.name == field_name)
+                .map(|field| {
+                    Self::callsite_type_from_annotation_preserving_tyvars(&field.type_annotation)
+                }),
+            _ => {
+                let struct_name = self
+                    .struct_name_of_type(&resolved)
+                    .or_else(|| self.struct_name_of_type(scrutinee))?;
+                self.struct_field_annotation(&struct_name, field_name)
+                    .map(|ann| self.resolve_type_annotation(&ann))
+            }
+        }
+    }
+
     /// Infer a single expression's type AND finalize it the way `infer_program`
     /// does for the whole-program pass: solve the accumulated constraints,
     /// ground any DEFERRED `Ok`/`Err`/`Some` bare-int-literal payload var to its
@@ -3310,6 +3420,50 @@ impl TypeInferenceEngine {
                     unique.iter().filter_map(|t| t.to_annotation()).collect();
                 Some(Type::Concrete(TypeAnnotation::Union(variants)))
             }),
+        }
+    }
+
+    fn callsite_type_from_annotation_preserving_tyvars(ann: &TypeAnnotation) -> Type {
+        if let Some(var) = annotation_as_tyvar(ann) {
+            return Type::Variable(var);
+        }
+
+        match ann {
+            TypeAnnotation::Array(elem) => {
+                BuiltinTypes::array(Self::callsite_type_from_annotation_preserving_tyvars(elem))
+            }
+            TypeAnnotation::Generic { name, args } => Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference(name.clone()))),
+                args: args
+                    .iter()
+                    .map(Self::callsite_type_from_annotation_preserving_tyvars)
+                    .collect(),
+            },
+            TypeAnnotation::Function { params, returns } => Type::Function {
+                params: params
+                    .iter()
+                    .map(|param| {
+                        Self::callsite_type_from_annotation_preserving_tyvars(
+                            &param.type_annotation,
+                        )
+                    })
+                    .collect(),
+                returns: Box::new(Self::callsite_type_from_annotation_preserving_tyvars(
+                    returns,
+                )),
+            },
+            TypeAnnotation::Object(fields) => Type::Concrete(TypeAnnotation::Object(
+                fields
+                    .iter()
+                    .map(|field| ObjectTypeField {
+                        name: field.name.clone(),
+                        optional: field.optional,
+                        type_annotation: field.type_annotation.clone(),
+                        annotations: field.annotations.clone(),
+                    })
+                    .collect(),
+            )),
+            other => Type::Concrete(other.clone()),
         }
     }
 
