@@ -3,12 +3,17 @@
 ///
 /// Convenience wrappers for iterating mechanics step functions.
 
-from std::physics::mechanics use { projectile_step, spring_mass_step, n_body_step }
+from std::physics::types use { OscillatorState, ProjectileState }
+from std::physics::mechanics use { NBodyParticle, projectile_step, spring_mass_step, n_body_step }
+
+pub type NBodyFrame {
+    particles: Array<NBodyParticle>
+}
 
 /// Simulate projectile motion until t_end or y < 0
-pub fn simulate_projectile(initial_state, t_end, dt, g = 9.81) {
-    let mut state = initial_state;
-    let mut results = [];
+pub fn simulate_projectile(initial_state: ProjectileState, t_end: number, dt: number, g: number = 9.81) -> Array<ProjectileState> {
+    let mut state: ProjectileState = initial_state;
+    let mut results: Array<ProjectileState> = [];
 
     while state.t <= t_end && state.y >= 0.0 {
         results.push(state);
@@ -19,10 +24,10 @@ pub fn simulate_projectile(initial_state, t_end, dt, g = 9.81) {
 }
 
 /// Simulate spring-mass oscillator for a fixed duration
-pub fn simulate_oscillator(initial_state, k, m, t_end, dt, damping = 0.0) {
-    let steps = floor(t_end / dt);
-    let mut state = initial_state;
-    let mut results = [];
+pub fn simulate_oscillator(initial_state: OscillatorState, k: number, m: number, t_end: number, dt: number, damping: number = 0.0) -> Array<OscillatorState> {
+    let steps: int = floor(t_end / dt) as int;
+    let mut state: OscillatorState = initial_state;
+    let mut results: Array<OscillatorState> = [];
 
     for i in range(0, steps + 1) {
         results.push(state);
@@ -33,12 +38,13 @@ pub fn simulate_oscillator(initial_state, k, m, t_end, dt, damping = 0.0) {
 }
 
 /// Simulate n-body system for a number of steps
-pub fn simulate_n_body(particles, steps, dt, G = 1.0) {
-    let mut state = particles;
-    let mut results = [];
+pub fn simulate_n_body(particles: Array<NBodyParticle>, steps: int, dt: number, G: number = 1.0) -> Array<NBodyFrame> {
+    let mut state: Array<NBodyParticle> = particles;
+    let mut results: Array<NBodyFrame> = [];
 
     for i in range(0, steps + 1) {
-        results.push(state);
+        let frame: NBodyFrame = { particles: state };
+        results.push(frame);
         state = n_body_step(state, dt, G);
     }
 
