@@ -159,7 +159,9 @@ fn test_pq_to_array_surfaces_missing_typed_array_carrier() {
     let err = call_pq_method(pq_const(&[3, 1, 2]), "toArray", vec![]).unwrap_err();
     let message = not_implemented_message(err);
     assert!(message.contains("PriorityQueue.toArray: SURFACE"));
-    assert!(message.contains("TypedArrayData"));
+    assert!(message.contains("typed-array-data I64"));
+    assert!(message.contains("KindedSlot::from_typed_array"));
+    assert!(message.contains("REFUSED ON SIGHT"));
 }
 
 #[test]

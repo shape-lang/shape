@@ -198,7 +198,9 @@ fn test_set_to_array_surfaces_missing_typed_array_carrier() {
     let err = call_set_method(set_const(&["a", "b"]), "toArray", vec![]).unwrap_err();
     let message = not_implemented_message(err);
     assert!(message.contains("Set.toArray: SURFACE"));
-    assert!(message.contains("TypedArrayData"));
+    assert!(message.contains("typed-array-data String"));
+    assert!(message.contains("KindedSlot::from_typed_array"));
+    assert!(message.contains("REFUSED ON SIGHT"));
 }
 
 #[test]
