@@ -44,8 +44,9 @@ fn test_csv_parse() {
         rows[1][0] == "1"
     "#,
     )
-    .expect_err("csv::parse is blocked until nested Array<Array<string>> has a typed carrier");
+    .expect_err("csv::parse is blocked until typed native returns can project nested rows");
     assert!(err.contains("Array<Array<string>>"), "{err}");
+    assert!(err.contains("typed-return ABI"), "{err}");
 }
 
 #[test]
@@ -63,26 +64,23 @@ fn test_csv_parse_records() {
 #[test]
 fn test_csv_stringify() {
     init_runtime();
-    let panic = std::panic::catch_unwind(|| {
-        let _ = eval_with_csv(
-            r#"
-            use std::core::csv
-            csv::stringify([["x", "y"], ["1", "2"]], ",")
-        "#,
-        );
-    })
-    .expect_err("csv::stringify should classify the nested typed-array marshal gap");
+    assert!(eval_with_csv_to_bool(
+        r#"
+        use std::core::csv
+        csv::stringify([["x", "y"], ["1", "2"]], ",") == "x,y\n1,2\n"
+    "#
+    ));
+}
 
-    let message = panic
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| panic.downcast_ref::<&str>().copied())
-        .unwrap_or("<non-string panic>");
-    assert!(
-        message.contains("FromSlot<Vec<Arc<HeapValue>>>"),
-        "{message}"
-    );
-    assert!(message.contains("TypedArray element-type"), "{message}");
+#[test]
+fn test_csv_stringify_custom_delimiter() {
+    init_runtime();
+    assert!(eval_with_csv_to_bool(
+        r#"
+            use std::core::csv
+            csv::stringify([["x", "y"], ["1", "2"]], "|") == "x|y\n1|2\n"
+        "#
+    ));
 }
 
 #[test]

@@ -1,9 +1,9 @@
 //! Native `csv` module for CSV parsing and serialization.
 //!
-//! Phase 2d Array cluster migration: `parse`, `stringify`, `read_file`,
-//! and `is_valid` ported to the typed marshal layer using
-//! `TypedArrayData::String` (rows of strings) inside
-//! `the-deleted-heterogeneous-element-carrier` (array of rows).
+//! Phase 2d Array cluster migration: `stringify` and `is_valid` are on the
+//! typed marshal layer. `stringify` consumes the v2 nested typed-array
+//! carrier directly: outer `TypedArray<*const TypedArrayElem>`, inner
+//! `TypedArray<*const StringObj>`.
 //!
 //! Stage C HashMap-marshal P1(b) activation (2026-05-07): `parse_records`
 //! and `stringify_records` activated using `HeapValue::HashMap(HashMapData)`
@@ -23,39 +23,6 @@ use shape_value::heap_value::{HeapValue, TypedObjectStorage};
 use shape_value::{NativeKind, ValueSlot};
 use std::sync::Arc;
 
-// W17-out-of-bundle-A-followups (2026-05-12): `row_to_heap` was the
-// per-row `Arc<HeapValue::TypedArray(TypedArrayData::String)>` builder
-// for the pre-rewire `csv.parse` / `csv.read_file` `Array<Array<string>>`
-// shape. Both now surface-and-stop pending the
-// W17-typed-carrier-array-typedarray follow-up; the helper is removed
-// alongside its construction call sites.
-
-/// Read a `Vec<Vec<String>>` from a `Vec<Arc<HeapValue>>` whose elements
-/// are each the deleted outer typed-array arm.
-///
-/// V3-S5 ckpt-5-prime²c (2026-05-15) SURFACE-AND-STOP: this consumer
-/// pattern-matched `HeapValue::TypedArray(Arc<TypedArrayData>)` to extract
-/// the per-row `Vec<String>`. Both the outer arm and the inner
-/// `TypedArrayData::String` shape are deleted (V3-S5 ckpt-1/ckpt-4/ckpt-5)
-/// — the per-row carrier is now a `*mut TypedArray<*const StringObj>` raw
-/// pointer with no `HeapValue::*` wrapper, so `Vec<Arc<HeapValue>>` cannot
-/// express it. Pairs with the Round 2 `Vec<Arc<HeapValue>>` rewire
-/// follow-up at `marshal.rs:FromSlot<Vec<Arc<HeapValue>>>` and the
-/// `from_typed_array_<T>` constructor wave at `slot.rs:142`.
-fn rows_from_heap_array(
-    rows: &[Arc<HeapValue>],
-    fn_name: &str,
-) -> Result<Vec<Vec<String>>, String> {
-    let _ = rows;
-    Err(format!(
-        "{}: V3-S5 ckpt-5-prime²c SURFACE — per-row outer-array-arm \
-         consumer needs Vec<Arc<HeapValue>> rewire for the deleted \
-         outer-array-arm. Round 2 follow-up. ADR-006 §2.7.24 Q25.A \
-         SUPERSEDED.",
-        fn_name
-    ))
-}
-
 /// Create the `csv` module with CSV parsing and serialization functions.
 pub fn create_csv_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::csv");
@@ -63,16 +30,13 @@ pub fn create_csv_module() -> ModuleExports {
 
     // csv.parse(text: string) -> Array<Array<string>>
     //
-    // W17-out-of-bundle-A-followups (2026-05-12): surface-and-stop.
-    // `Array<Array<string>>` is homogeneous in
-    // `HeapKind::TypedArray (TypedArrayData::String)` — the natural
-    // Q25.A specialized variant is
-    // `TypedArrayData::TypedArray(Arc<TypedBuffer<Arc<TypedArrayData>>>)`,
-    // but adding a nested-TypedArray variant is out of bundle-A-followups
-    // scope (the prompt forbids new HeapKind variants and an added
-    // TypedArrayData variant cascades through ~40 exhaustive matches).
-    // Users wanting per-record dispatch should use `csv.parse_records`
-    // which lowers to `Array<TypedObject>` via the C+ precedent.
+    // Argument marshal for `Array<Array<string>>` is live via
+    // `FromSlot<Vec<Vec<Arc<String>>>>`. Native typed returns still lack a
+    // leaf for `Vec<Vec<Arc<String>>>`; `ConcreteReturn::ArrayHeapValue`
+    // projects through `Vec<Arc<HeapValue>>`, but `HeapValue::TypedArray`
+    // is intentionally deleted. Keep this as a precise return-projection
+    // classification until the typed-return ABI grows an exact nested array
+    // leaf.
     register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "parse",
@@ -82,23 +46,22 @@ pub fn create_csv_module() -> ModuleExports {
         ConcreteType::ArrayHeapValue("Array<Array<string>>".to_string()),
         |text, _ctx| {
             let _ = text;
-            // phase-2d-hardening:(f) — csv.parse surface-and-stop:
-            // Array<Array<string>> needs TypedArrayData::TypedArray
-            // (nested-TypedArray) variant. Use csv.parse_records for
-            // per-record TypedObject dispatch in the meantime.
             Err(format!(
-                "csv.method parse() -> SURFACE — `Array<Array<string>>` needs a \
-                 nested-array variant in ADR-006 \
-                 §2.7.24 Q25.A's spec list. Tracked as \
-                 W17-typed-carrier-array-typedarray follow-up (out of \
-                 bundle-A-followups scope). Use `csv.parse_records` for \
-                 per-record TypedObject access. ADR-006 §2.7.24 Q25.A."
+                "csv.method parse() -> SURFACE — Array<Array<string>> argument \
+                 marshal is live via ELEM_TYPE_TYPED_ARRAY / ELEM_TYPE_STRING, \
+                 but the native typed-return ABI has no ConcreteReturn leaf \
+                 that projects Vec<Vec<Arc<String>>>. ConcreteReturn::ArrayHeapValue \
+                 still requires Arc<HeapValue> elements, and HeapValue::TypedArray \
+                 is intentionally deleted; using a NativeScalar pointer token \
+                 would violate the strict carrier contract. Needs a typed-return \
+                 Array<Array<string>> projection. Use csv.parse_records for \
+                 per-record TypedObject access."
             ))
         },
     );
 
     // csv.stringify(data: Array<Array<string>>, delimiter?: string) -> string
-    register_typed_fn_2_full::<_, Vec<Arc<HeapValue>>, Arc<String>>(
+    register_typed_fn_2_full::<_, Vec<Vec<Arc<String>>>, Arc<String>>(
         &mut module,
         "stringify",
         "Convert an array of rows to a CSV string",
@@ -121,17 +84,15 @@ pub fn create_csv_module() -> ModuleExports {
         ],
         ConcreteType::String,
         |data, delimiter, _ctx| {
-            let rows = rows_from_heap_array(&data, "csv.stringify()")?;
-
             let delim_byte = delimiter.as_bytes().first().copied().unwrap_or(b',');
 
             let mut writer = csv::WriterBuilder::new()
                 .delimiter(delim_byte)
                 .from_writer(Vec::new());
 
-            for row in &rows {
+            for row in &data {
                 writer
-                    .write_record(row)
+                    .write_record(row.iter().map(|cell| cell.as_str()))
                     .map_err(|e| format!("csv.stringify() failed: {}", e))?;
             }
 
@@ -147,10 +108,7 @@ pub fn create_csv_module() -> ModuleExports {
 
     // csv.read_file(path: string) -> Result<Array<Array<string>>>
     //
-    // W17-out-of-bundle-A-followups (2026-05-12): surface-and-stop, same
-    // shape as csv.parse above — `Array<Array<string>>` needs the
-    // nested-TypedArray variant in Q25.A's spec list. Tracked as
-    // W17-typed-carrier-array-typedarray follow-up.
+    // Same remaining return-projection gap as csv.parse.
     register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "read_file",
@@ -162,13 +120,11 @@ pub fn create_csv_module() -> ModuleExports {
         ))),
         |path, _ctx| {
             let _ = path;
-            // phase-2d-hardening:(f) — csv.read_file surface-and-stop:
-            // same nested-TypedArray gap as csv.parse.
             Err(format!(
-                "csv.method read_file() -> SURFACE — `Array<Array<string>>` needs a \
-                 nested-array variant in ADR-006 \
-                 §2.7.24 Q25.A's spec list. Tracked as \
-                 W17-typed-carrier-array-typedarray follow-up. ADR-006 §2.7.24 Q25.A."
+                "csv.method read_file() -> SURFACE — Array<Array<string>> \
+                 argument marshal is live, but typed native returns cannot yet \
+                 project Vec<Vec<Arc<String>>> without a dedicated \
+                 ConcreteReturn leaf. See csv.parse classification."
             ))
         },
     );
