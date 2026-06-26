@@ -862,6 +862,19 @@ impl KindedConstant {
         }
     }
 
+    /// Construct a `Matrix`-kinded constant from an `Arc<MatrixData>`.
+    ///
+    /// The Arc share is transferred into the constant. Every `PushConst`
+    /// of this value retains a stack share via `clone_with_kind`, matching
+    /// the direct `KindedSlot::from_matrix` carrier contract.
+    pub fn from_matrix(matrix: Arc<shape_value::heap_value::MatrixData>) -> Self {
+        let bits = Arc::into_raw(matrix) as u64;
+        Self {
+            bits,
+            kind: NativeKind::Ptr(HeapKind::Matrix),
+        }
+    }
+
     /// The raw slot bits.
     #[inline]
     pub fn bits(&self) -> u64 {
