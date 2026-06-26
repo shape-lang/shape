@@ -11,6 +11,39 @@ use shape_ast::ast::{
 use std::collections::HashMap;
 
 impl TypeInferenceEngine {
+    /// Predeclare nominal type definitions that function signatures may refer to.
+    ///
+    /// This runs before callable-signature predeclaration, so a function can
+    /// mention a type alias or struct declared later in the same source unit.
+    pub(crate) fn predeclare_nominal_type_item(&mut self, item: &Item) -> TypeResult<()> {
+        match item {
+            Item::TypeAlias(alias, _) => {
+                self.env.define_type_alias(
+                    &alias.name,
+                    &alias.type_annotation,
+                    alias.meta_param_overrides.clone(),
+                );
+                Ok(())
+            }
+            Item::StructType(struct_def, _) => self.predeclare_struct_type(struct_def),
+            Item::Export(export, _) => match &export.item {
+                shape_ast::ast::ExportItem::TypeAlias(alias) => {
+                    self.env.define_type_alias(
+                        &alias.name,
+                        &alias.type_annotation,
+                        alias.meta_param_overrides.clone(),
+                    );
+                    Ok(())
+                }
+                shape_ast::ast::ExportItem::Struct(struct_def) => {
+                    self.predeclare_struct_type(struct_def)
+                }
+                _ => Ok(()),
+            },
+            _ => Ok(()),
+        }
+    }
+
     /// Predeclare symbols needed for order-independent inference.
     ///
     /// This mirrors the compiler's first-pass registration so functions and
@@ -467,6 +500,14 @@ impl TypeInferenceEngine {
     /// set); callers may collect or assert-empty per the §3.3 binder.
     pub fn replay_resolved_interface(&mut self, items: &[Item]) -> Vec<TypeError> {
         let mut errors = Vec::new();
+
+        // Pass 0: predeclare nominal type definitions that signatures may
+        // reference, preserving from-source forward-alias behavior.
+        for item in items {
+            if let Err(err) = self.predeclare_nominal_type_item(item) {
+                errors.push(err);
+            }
+        }
 
         // Pass 1: predeclare signatures (fn / foreign / struct) + extend, in order.
         for item in items {
