@@ -13,12 +13,12 @@
 //!
 //! Per playbook §1 W8-WJ: window functions over a typed buffer
 //! (`Array<number>` / `Array<int>` / `Array<TypedObject>`) materialize
-//! per-element kind via the `TypedArrayData` arm match (§2.7.7 stack
-//! parallel-kind), and bodies follow the W6.5 §2.7.10 precedent +
-//! `array_sort.rs::handle_join_str_v2` recipe — receiver classification
-//! on `args[0].kind`, payload recovery via `args[i].slot.as_heap_value()`
-//! (ADR-005 §1 single-discriminator), per-arm dispatch on
-//! `TypedArrayData::*`, kinded result via `KindedSlot::from_*`.
+//! per-element kind from the v2 raw `TypedArray<T>` header stamp
+//! (`NativeKind::Ptr(HeapKind::TypedArray)` plus
+//! `v2_array_detect::as_v2_typed_array`). Aggregate bodies dispatch on
+//! the slot kind, recover a `V2TypedArrayView`, then delegate to the
+//! per-T reducers in `v2_array_detect` (`sum_elements`, `avg_elements`,
+//! `min_elements`, `max_elements`) or read the view length for count.
 //!
 //! `exec_bind_schema` and `exec_load_col` are live opcode handlers
 //! (dispatched from `dispatch.rs`). They are migrated to the kinded API.
@@ -94,9 +94,10 @@ fn pair_to_slot((bits, kind): (u64, NativeKind)) -> KindedSlot {
 // `&[KindedSlot]` borrowed slice flows from that shell. Each handler
 // returns a kinded result; the shell pushes via `push_kinded_slot`.
 //
-// All bodies follow the §2.7.6 / Q8 heterogeneous-kind body pattern: kind
-// classification on `args[i].kind` first, payload recovery via
-// `args[i].slot.as_heap_value()` (ADR-005 §1) for heap arms.
+// All bodies follow the §2.7.6 / Q8 heterogeneous-kind body pattern:
+// classify `args[i].kind` first, then use the carrier-specific recovery
+// path. Window frames use `as_v2_typed_array` over the per-T raw
+// `TypedArray<T>` carrier; scalar window values stay inline.
 
 /// `handle_window_row_number_v2` — Wave 8 W8-WJ.
 ///
@@ -151,11 +152,11 @@ pub(crate) fn handle_window_first_value_v2(
 /// Args: `[value]` where `value` is either:
 ///   - a scalar (Int64 / Float64) — the per-row pre-aggregated value;
 ///   - a `Vec<number>` / `Vec<int>` window frame — sum reduces the
-///     numeric arm via per-element `TypedArrayData::*` dispatch
-///     (§2.7.7).
+///     numeric arm through `as_v2_typed_array` plus
+///     `v2_array_detect::sum_elements`.
 ///
-/// Result kind: `NativeKind::Float64` (legacy semantics — sum widens to
-/// number to avoid integer-overflow).
+/// Result kind matches the scalar input or the per-T reducer result
+/// (`Float64` for `Array<number>`, `Int64` for integer frames).
 pub(crate) fn handle_window_sum_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -181,9 +182,9 @@ pub(crate) fn handle_window_sum_v2(
 
 /// `handle_window_avg_v2` — Wave 8 W8-WJ.
 ///
-/// Args: `[value]` with the same scalar / `Vec<number>` shape as
-/// `WindowSum`. Empty array yields `null`. Result kind:
-/// `NativeKind::Float64`.
+/// Args: `[value]` with the same scalar / v2 `TypedArray<T>` frame shape
+/// as `WindowSum`. Frame inputs use `v2_array_detect::avg_elements`;
+/// integer scalar inputs widen to `Float64`.
 pub(crate) fn handle_window_avg_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -214,9 +215,10 @@ pub(crate) fn handle_window_avg_v2(
 /// `handle_window_min_max_v2` — Wave 8 W8-WJ.
 ///
 /// Covers `WindowMin` and `WindowMax`. The `pick_max` flag selects the
-/// reducer: `false` → `f64::min`, `true` → `f64::max`. Args:
-///   `[value]` (scalar or `Vec<number>` / `Vec<int>`).
-/// Empty array yields `null`. Result kind: `NativeKind::Float64`.
+/// reducer: `false` → min, `true` → max. Args:
+///   `[value]` (scalar or v2 `TypedArray<T>` frame).
+/// Frame inputs use `v2_array_detect::{min_elements,max_elements}`;
+/// result kind follows the scalar input or reducer result.
 pub(crate) fn handle_window_min_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -260,10 +262,10 @@ fn handle_window_min_max_inner(args: &[KindedSlot], pick_max: bool) -> Result<Ki
 
 /// `handle_window_count_v2` — Wave 8 W8-WJ.
 ///
-/// Args: `[value]`. For an array input, count non-null entries via the
-/// `TypedArrayData` arm (per §2.7.7 every element of a typed buffer is
-/// non-null by definition — `Vec<number?>` would be a separate
-/// `Nullable*` track). For a scalar input, count `1` for non-null
+/// Args: `[value]`. For a v2 `TypedArray<T>` frame input, count the
+/// stamped raw array view length from `as_v2_typed_array` (typed-buffer
+/// elements are non-null by construction; nullable element tracks would
+/// be separate carriers). For a scalar input, count `1` for non-null
 /// values, `0` for null. Result kind: `NativeKind::Int64`.
 pub(crate) fn handle_window_count_v2(
     _vm: &mut VirtualMachine,
@@ -672,13 +674,10 @@ impl VirtualMachine {
     }
 }
 
-// V3-S5 ckpt-5 (2026-05-15): test module gated. The tests asserted on
-// `typed_array_len` and `typed_array_to_f64_vec` (deleted helpers) and
-// constructed `Arc<TypedArrayData>` via `TypedBuffer::from(values)` /
-// `AlignedTypedBuffer::from(av)` (deleted carriers per V3-S5 ckpt-1..
-// ckpt-4 per W12-typed-array-data-deletion-audit §3.5 + §B + ADR-006
-// §2.7.24 Q25.A SUPERSEDED). Tests preserved in git history at the
-// W8-WJ landing commit. Rebuild lands at ckpt-6 STRICT close per the
-// per-element-kind v2-raw `TypedArray<T>` direct-access target.
+// Historical gated test module. Runtime coverage now lives in
+// `executor::tests::*window*` and constructs frames through the current
+// per-T v2 raw `TypedArray<T>` opcodes (`NewTypedArray*` +
+// `TypedArrayPush*`), matching the `as_v2_typed_array` consumer path
+// above.
 #[cfg(any())]
 mod tests {}
