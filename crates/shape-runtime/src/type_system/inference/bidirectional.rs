@@ -93,12 +93,18 @@ impl TypeInferenceEngine {
                 // annotation produced.
                 let canon_expected = expected.canonicalize();
                 if let Type::Generic { base, args } = &canon_expected {
-                    let is_array_base = matches!(
-                        base.as_ref(),
-                        Type::Concrete(TypeAnnotation::Reference(tp))
-                            if { let n = tp.to_string(); n == "Array" || n == "Vec" }
-                    );
-                    if is_array_base && args.len() == 1 {
+                    if Self::array_policy_generic_base_name(base.as_ref()) == Some("Mat")
+                        && args.len() == 1
+                    {
+                        let row_type = BuiltinTypes::array(args[0].clone());
+                        self.check_array_against(elements, &row_type)?;
+                        return Ok(canon_expected);
+                    }
+                    if matches!(
+                        Self::array_policy_generic_base_name(base.as_ref()),
+                        Some("Array" | "Vec")
+                    ) && args.len() == 1
+                    {
                         return self.check_array_against(elements, &args[0]);
                     }
                 }
@@ -713,10 +719,97 @@ impl TypeInferenceEngine {
 
     /// Check array elements against expected element type
     fn check_array_against(&mut self, elements: &[Expr], elem_type: &Type) -> TypeResult<Type> {
+        let resolved_elem_type = self.solver.unifier().apply_substitutions(elem_type);
+        if !Self::array_policy_element_accepts_array_literal(&resolved_elem_type) {
+            if let Some(nested_elem) = elements
+                .iter()
+                .find(|elem| matches!(elem, Expr::Array(_, _)))
+            {
+                let nested_type = self.infer_expr(nested_elem)?;
+                return Err(TypeError::ConstraintViolation(format!(
+                    "type mismatch: binding annotated `{}` but the initializer produces `{}`; \
+                     the initializer's element structure must match the annotation exactly \
+                     (nested arrays require an array-of-array or matrix-shaped annotation)",
+                    Self::array_policy_outer_key(&resolved_elem_type),
+                    Self::array_policy_outer_key(&nested_type),
+                )));
+            }
+        }
+
         for elem in elements {
             self.check_against(elem, elem_type)?;
         }
         Ok(BuiltinTypes::array(elem_type.clone()))
+    }
+
+    fn array_policy_element_accepts_array_literal(elem_type: &Type) -> bool {
+        matches!(elem_type, Type::Variable(_) | Type::Constrained { .. })
+            || Self::array_policy_array_element_type(elem_type).is_some()
+    }
+
+    fn array_policy_array_element_type(ty: &Type) -> Option<Type> {
+        let canon = ty.canonicalize();
+        match canon {
+            Type::Generic { base, mut args }
+                if args.len() == 1
+                    && matches!(
+                        Self::array_policy_generic_base_name(base.as_ref()),
+                        Some("Array" | "Vec")
+                    ) =>
+            {
+                Some(args.remove(0))
+            }
+            _ => None,
+        }
+    }
+
+    fn array_policy_outer_key(elem_type: &Type) -> String {
+        format!("Array<{}>", Self::array_policy_type_key(elem_type))
+    }
+
+    fn array_policy_type_key(ty: &Type) -> String {
+        let canon = ty.canonicalize();
+        match canon {
+            Type::Concrete(TypeAnnotation::Basic(name)) => {
+                BuiltinTypes::canonical_numeric_runtime_name(&name)
+                    .unwrap_or(&name)
+                    .to_string()
+            }
+            Type::Concrete(TypeAnnotation::Reference(name)) => name.to_string(),
+            Type::Concrete(ann) => ann.to_type_string(),
+            Type::Generic { base, args }
+                if args.len() == 1
+                    && matches!(
+                        Self::array_policy_generic_base_name(base.as_ref()),
+                        Some("Array" | "Vec")
+                    ) =>
+            {
+                format!("array_{}", Self::array_policy_type_key(&args[0]))
+            }
+            Type::Generic { base, args } => {
+                let base_name =
+                    Self::array_policy_generic_base_name(base.as_ref()).unwrap_or("generic");
+                let rendered_args = args
+                    .iter()
+                    .map(Self::array_policy_type_key)
+                    .collect::<Vec<_>>()
+                    .join("_");
+                if rendered_args.is_empty() {
+                    base_name.to_string()
+                } else {
+                    format!("{base_name}_{rendered_args}")
+                }
+            }
+            Type::Variable(_) | Type::Constrained { .. } => "unknown".to_string(),
+            Type::Function { .. } => "function".to_string(),
+        }
+    }
+
+    fn array_policy_generic_base_name(ty: &Type) -> Option<&str> {
+        match ty {
+            Type::Concrete(ann) => ann.as_type_name_str(),
+            _ => None,
+        }
     }
 
     /// Check a bracket literal `[v1, v2, ...]` against an expected bracket type
