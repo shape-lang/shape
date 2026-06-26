@@ -3162,15 +3162,21 @@ impl TypeInferenceEngine {
             )
         })?;
 
-        if self.has_try_into_impl(&source_name, &target_selector) {
+        if self.has_try_into_impl(&source_name, &target_selector)
+            || self.has_into_impl(&source_name, &target_selector)
+        {
             return Ok(());
         }
 
-        // Check Option/Result lifting: Option<T> as M? is valid if T has TryInto<M>
+        // Check Option/Result lifting: Option<T> as M? is valid when the
+        // proven success type can feed the fallible conversion path.
         if source_name == "Option" || source_name == "Result" {
             if let Some(inner_type) = self.try_unwrap_inner_type(source) {
                 if let Some(inner_name) = self.try_into_type_name(&inner_type) {
-                    if self.has_try_into_impl(&inner_name, &target_selector) {
+                    if inner_name == target_selector
+                        || self.has_try_into_impl(&inner_name, &target_selector)
+                        || self.has_into_impl(&inner_name, &target_selector)
+                    {
                         return Ok(());
                     }
                 }
@@ -3210,11 +3216,16 @@ impl TypeInferenceEngine {
             return Ok(());
         }
 
-        // Check Option/Result lifting: Option<T> as M is valid if T has Into<M>
+        // Check Option/Result lifting: Option<T> as M is valid when the
+        // proven success type can feed the infallible conversion path.
         if source_name == "Option" || source_name == "Result" {
             if let Some(inner_type) = self.try_unwrap_inner_type(source) {
                 if let Some(inner_name) = self.try_into_type_name(&inner_type) {
-                    if self.has_into_impl(&inner_name, &target_selector) {
+                    if inner_name == target_selector
+                        || (BuiltinTypes::is_numeric_type_name(&inner_name)
+                            && BuiltinTypes::is_numeric_type_name(&target_selector))
+                        || self.has_into_impl(&inner_name, &target_selector)
+                    {
                         return Ok(());
                     }
                 }
@@ -3467,6 +3478,44 @@ mod tests {
         let err = engine
             .infer_expr(&expr)
             .expect_err("object -> int cast should fail without Into impl");
+        assert!(
+            matches!(err, TypeError::InvalidAssertion(_, _)),
+            "expected InvalidAssertion, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn infallible_type_assertion_lifts_option_inner_identity() {
+        let mut engine = TypeInferenceEngine::new();
+        let optional_int = Type::Concrete(TypeAnnotation::Generic {
+            name: "Option".into(),
+            args: vec![TypeAnnotation::Basic("int".to_string())],
+        });
+        engine.env.define("value", TypeScheme::mono(optional_int));
+
+        let expr =
+            shape_ast::parser::parse_expression_str("value as int").expect("expression parses");
+        let inferred = engine
+            .infer_expr(&expr)
+            .expect("Option<int> as int should infer via proven inner identity");
+        assert_eq!(inferred, BuiltinTypes::integer());
+    }
+
+    #[test]
+    fn infallible_type_assertion_rejects_invalid_option_inner_conversion() {
+        let mut engine = TypeInferenceEngine::new();
+        let optional_string = Type::Concrete(TypeAnnotation::Generic {
+            name: "Option".into(),
+            args: vec![TypeAnnotation::Basic("string".to_string())],
+        });
+        engine.env.define("value", TypeScheme::mono(optional_string));
+
+        let expr =
+            shape_ast::parser::parse_expression_str("value as int").expect("expression parses");
+        let err = engine
+            .infer_expr(&expr)
+            .expect_err("Option<string> as int must fail static validation");
         assert!(
             matches!(err, TypeError::InvalidAssertion(_, _)),
             "expected InvalidAssertion, got {:?}",
