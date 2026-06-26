@@ -37,11 +37,9 @@
 //! §2.7.4 — never papered over with a Bool-default fallback (the
 //! W-series rationalization §2.7.7 #9 names verbatim).
 //!
-//! `RowView` / `TypedTable` row materialization at `IterNext` requires
-//! the deleted `ValueWord::from_row_view` packed-tag carrier; the
-//! kinded redesign of the row-view payload is Phase 2c work
-//! (ADR-006 §2.7.4). Same disposition as the existing
-//! `executor/tests/table_iteration.rs` `todo!("phase-2c …")` markers.
+//! DataTable / TypedTable row materialization at `IterNext` produces an
+//! `Arc<TableViewData::RowView>` carried as `Ptr(HeapKind::TableView)`,
+//! the same kinded row carrier used by LoadCol* host-injected constants.
 
 use crate::executor::vm_impl::stack::drop_with_kind;
 use crate::{
@@ -340,15 +338,22 @@ impl VirtualMachine {
             // Per playbook §7 #4: legacy `HeapValue::Array` / `Range` /
             // `Iterator` variants were deleted from the heap layout
             // (post-§2.7.6 typed-Arc payload migration). Iteration over
-            // those shapes is Phase 2c work — the kinded carrier for
-            // ranges + the boxed-Vec `Array` payload both need redesign.
-            // Surface, do not invent a Bool-default fallback (§2.7.7 #9).
-            _ => Err(VMError::NotImplemented(format!(
+            // unsupported heap carriers remains Phase 2c work — the
+            // kinded carrier for ranges + the boxed-Vec `Array` payload
+            // both need redesign. Surface, do not invent a Bool-default
+            // fallback (§2.7.7 #9).
+            NativeKind::Ptr(_) => Err(VMError::NotImplemented(format!(
                 "op_iter_done SURFACE: iter_kind={:?} not supported as iterator \
                  in the kinded API (legacy Array/Range/Iterator HeapValue \
                  variants deleted) — phase-2c, see ADR-006 §2.7.4",
                 iter_kind
             ))),
+            // Known scalar non-iterators are not missing host-boundary
+            // carriers; they are ordinary type errors.
+            _ => Err(VMError::TypeError {
+                expected: "table, table view, string, hashmap, or iterator",
+                got: "scalar",
+            }),
         };
 
         // Retire both popped shares. Idx kind has no heap payload; iter
@@ -606,29 +611,51 @@ impl VirtualMachine {
                 result
             }
             NativeKind::Ptr(HeapKind::DataTable) => {
-                // Phase-2c surface: DataTable row materialization at
-                // `IterNext` used the deleted `ValueWord::from_row_view`
-                // packed-tag carrier; the kinded redesign of the row-view
-                // payload is pending. Same disposition as
-                // `executor/tests/table_iteration.rs` `todo!("phase-2c …")`
-                // markers.
-                Err(VMError::NotImplemented(
-                    "op_iter_next SURFACE: DataTable row materialization \
-                     — phase-2c, see ADR-006 §2.7.4 \
-                     (RowView carrier pending kinded redesign)"
-                        .to_string(),
-                ))
+                // SAFETY: slot bits are `Arc::into_raw(Arc<DataTable>)`.
+                let arc = unsafe { Arc::<DataTable>::from_raw(iter_bits as *const DataTable) };
+                let result = if idx < 0 || idx as usize >= arc.row_count() {
+                    self.push_kinded(Self::NONE_BITS, NativeKind::Bool)
+                } else {
+                    let tv = Arc::new(TableViewData::RowView {
+                        schema_id: arc.schema_id().unwrap_or(0) as u64,
+                        table: Arc::clone(&arc),
+                        row_idx: idx as usize,
+                    });
+                    let bits = Arc::into_raw(tv) as u64;
+                    self.push_kinded(bits, NativeKind::Ptr(HeapKind::TableView))
+                };
+                let _ = Arc::into_raw(arc);
+                result
             }
             NativeKind::Ptr(HeapKind::TableView) => {
-                // Phase-2c surface: TableView row materialization at
-                // `IterNext` used the deleted `ValueWord::from_row_view`
-                // packed-tag carrier. Same disposition as DataTable.
-                Err(VMError::NotImplemented(
-                    "op_iter_next SURFACE: TableView row materialization \
-                     — phase-2c, see ADR-006 §2.7.4 \
-                     (RowView carrier pending kinded redesign)"
-                        .to_string(),
-                ))
+                // SAFETY: slot bits are `Arc::into_raw(Arc<TableViewData>)`.
+                let arc =
+                    unsafe { Arc::<TableViewData>::from_raw(iter_bits as *const TableViewData) };
+                let result = match arc.as_ref() {
+                    TableViewData::TypedTable { schema_id, table } => {
+                        if idx < 0 || idx as usize >= table.row_count() {
+                            self.push_kinded(Self::NONE_BITS, NativeKind::Bool)
+                        } else {
+                            let tv = Arc::new(TableViewData::RowView {
+                                schema_id: *schema_id,
+                                table: Arc::clone(table),
+                                row_idx: idx as usize,
+                            });
+                            let bits = Arc::into_raw(tv) as u64;
+                            self.push_kinded(bits, NativeKind::Ptr(HeapKind::TableView))
+                        }
+                    }
+                    // Phase-2c surface: RowView / ColumnRef / IndexedTable
+                    // iteration semantics weren't part of the kinded
+                    // for-loop redesign. ADR-006 §2.7.4.
+                    _ => Err(VMError::NotImplemented(
+                        "op_iter_next SURFACE: TableViewData::{RowView,ColumnRef,\
+                         IndexedTable} iteration — phase-2c, see ADR-006 §2.7.4"
+                            .to_string(),
+                    )),
+                };
+                let _ = Arc::into_raw(arc);
+                result
             }
             NativeKind::Ptr(HeapKind::HashMap) => {
                 // Phase-2c surface: HashMap iteration yields a

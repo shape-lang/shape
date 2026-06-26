@@ -9,11 +9,12 @@
 //! - rows() and columnsRef() methods work end-to-end
 
 use super::*;
+use crate::bytecode::{BytecodeProgram, Constant, Instruction, KindedConstant, OpCode, Operand};
 use crate::executor::{VMConfig, VirtualMachine};
 use arrow_schema::{DataType, Field, Schema};
-use shape_value::NativeKind;
 use shape_value::datatable::{DataTable, DataTableBuilder};
-use shape_value::heap_value::HeapKind;
+use shape_value::heap_value::{HeapKind, TableViewData};
+use shape_value::NativeKind;
 use std::sync::Arc;
 
 /// Build a sample DataTable with 3 rows: price=[10.0, 20.0, 30.0], name=["a","b","c"]
@@ -56,7 +57,6 @@ fn make_single_row_table() -> Arc<DataTable> {
 ///   StoreLocal(1)
 ///   PushConst(0)        ; local 2 = count = 0
 ///   StoreLocal(2)
-///   LoopStart(offset)   ; marks loop
 ///   LoadLocal(0)        ; Dup the iterator (table)
 ///   LoadLocal(1)        ; Load idx
 ///   IterDone            ; push bool
@@ -67,28 +67,64 @@ fn make_single_row_table() -> Arc<DataTable> {
 ///   Pop                 ; discard row_view (just counting)
 ///   LoadLocal(2)        ; count
 ///   PushConst(1)        ; 1
-///   Add                 ; count + 1
+///   AddInt              ; count + 1
 ///   StoreLocal(2)       ; count = count + 1
 ///   LoadLocal(1)        ; idx
 ///   PushConst(1)        ; 1
-///   Add                 ; idx + 1
+///   AddInt              ; idx + 1
 ///   StoreLocal(1)       ; idx = idx + 1
 ///   Jump(loop_start)    ; back to IterDone check
-///   LoopEnd
 ///   LoadLocal(2)        ; push count as result
-/// Phase-2c surface: this helper builds a `Constant::Value(ValueWord)` to
-/// inject the table into bytecode. The `Constant::Value` variant carries
-/// the deleted `ValueWord` carrier; rebuilding it as a kinded constant
-/// (raw bits + `NativeKind::Ptr(HeapKind::DataTable)`) requires extending
-/// the bytecode `Constant` enum with a kinded variant. That extension is
-/// out-of-scope for E-tests sub-cluster (territory: 3 test files); see
-/// ADR-006 §2.7.4 (host-tier API rebuild) and the `Constant::Value`
-/// downstream cascade pinned for Phase 2c.
 #[allow(dead_code)]
-fn run_table_count_loop(_table_arc: Arc<DataTable>) -> i64 {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (Constant::Value(ValueWord) carrier deleted; kinded constant variant pending)"
-    )
+fn run_table_count_loop(table_arc: Arc<DataTable>) -> i64 {
+    run_table_count_loop_with_constant(Constant::Value(KindedConstant::from_datatable(table_arc)))
+}
+
+fn run_typed_table_count_loop(schema_id: u64, table_arc: Arc<DataTable>) -> i64 {
+    run_table_count_loop_with_constant(Constant::Value(KindedConstant::from_typed_table(
+        schema_id, table_arc,
+    )))
+}
+
+fn run_table_count_loop_with_constant(table: Constant) -> i64 {
+    let instructions = vec![
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))),
+        Instruction::simple(OpCode::IterDone),
+        Instruction::new(OpCode::JumpIfTrue, Some(Operand::Offset(13))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))),
+        Instruction::simple(OpCode::IterNext),
+        Instruction::simple(OpCode::Pop),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(2))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
+        Instruction::simple(OpCode::AddInt),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(2))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(1))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
+        Instruction::simple(OpCode::AddInt),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(1))),
+        Instruction::new(OpCode::Jump, Some(Operand::Offset(-17))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(2))),
+        Instruction::simple(OpCode::Halt),
+    ];
+    let constants = vec![table, Constant::Int(0), Constant::Int(1)];
+    let program = BytecodeProgram {
+        instructions,
+        constants,
+        top_level_locals_count: 3,
+        ..Default::default()
+    };
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    let result = vm.execute(None).unwrap();
+    result.as_i64().expect("table count loop returns Int64")
 }
 
 // =========================================================================
@@ -107,10 +143,12 @@ fn test_datatable_for_loop_counts_rows() {
 
 #[test]
 fn test_typed_table_for_loop_counts_rows() {
-    // Phase-2c surface: TypedTable(schema_id, table) packed-encoding lived
-    // inside the deleted ValueWord; no kinded equivalent exists at the
-    // test boundary. See ADR-006 §2.7.4.
-    todo!("phase-2c — see ADR-006 §2.7.4 (TypedTable carrier pending kinded redesign)");
+    let table = make_sample_table();
+    let result = run_typed_table_count_loop(42, table);
+    assert_eq!(
+        result, 3,
+        "for-loop over 3-row TypedTable should iterate 3 times"
+    );
 }
 
 #[test]
@@ -147,6 +185,14 @@ fn push_datatable(vm: &mut VirtualMachine, table: Arc<DataTable>) {
         .unwrap();
 }
 
+#[inline]
+fn push_typed_table(vm: &mut VirtualMachine, schema_id: u64, table: Arc<DataTable>) {
+    let tv = Arc::new(TableViewData::TypedTable { schema_id, table });
+    let bits = Arc::into_raw(tv) as u64;
+    vm.push_kinded(bits, NativeKind::Ptr(HeapKind::TableView))
+        .unwrap();
+}
+
 /// Push a raw `i64` onto the typed VM stack as `NativeKind::Int64`
 /// (ADR-006 §2.7.7).
 #[inline]
@@ -175,6 +221,29 @@ fn pop_bool(vm: &mut VirtualMachine) -> bool {
     bits != 0
 }
 
+fn pop_table_view(vm: &mut VirtualMachine) -> TableViewData {
+    let (bits, kind) = vm.pop_kinded().unwrap();
+    assert_eq!(
+        kind,
+        NativeKind::Ptr(HeapKind::TableView),
+        "expected TableView result on top-of-stack, got {:?}",
+        kind
+    );
+    assert_ne!(bits, 0, "TableView result must be non-null");
+    let arc = unsafe { Arc::<TableViewData>::from_raw(bits as *const TableViewData) };
+    arc.as_ref().clone()
+}
+
+fn assert_none_slot(vm: &mut VirtualMachine) {
+    let (bits, kind) = vm.pop_kinded().unwrap();
+    assert_eq!(bits, VirtualMachine::NONE_BITS);
+    assert_eq!(
+        kind,
+        NativeKind::Bool,
+        "IterNext out-of-range sentinel should match existing loop none carrier"
+    );
+}
+
 #[test]
 fn test_iter_done_datatable_false_when_in_bounds() {
     let table = make_sample_table();
@@ -198,10 +267,15 @@ fn test_iter_done_datatable_true_at_end() {
 
 #[test]
 fn test_iter_done_typed_table_boundary() {
-    // Phase-2c surface: TypedTable(schema_id, table) packed-encoding lived
-    // inside the deleted ValueWord; no kinded equivalent exists at the
-    // test boundary. See ADR-006 §2.7.4.
-    todo!("phase-2c — see ADR-006 §2.7.4 (TypedTable carrier pending kinded redesign)");
+    let table = make_sample_table();
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    push_typed_table(&mut vm, 42, table);
+    push_int(&mut vm, 0);
+    vm.op_iter_done(None).unwrap();
+    assert!(
+        !pop_bool(&mut vm),
+        "idx=0 with 3-row TypedTable should not be done"
+    );
 }
 
 #[test]
@@ -219,41 +293,76 @@ fn test_iter_done_negative_index() {
 
 #[test]
 fn test_iter_next_datatable_returns_row_view() {
-    // Phase-2c surface: `IterNext` on a DataTable produces a RowView whose
-    // (schema_id, table, row_idx) tuple lived inside the deleted
-    // ValueWord packed-tag encoding. The kinded redesign of RowView is
-    // out-of-scope for the E-tests sub-cluster. See ADR-006 §2.7.4.
-    todo!("phase-2c — see ADR-006 §2.7.4 (RowView carrier pending kinded redesign)");
+    let table = make_sample_table();
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    push_datatable(&mut vm, table);
+    push_int(&mut vm, 1);
+    vm.op_iter_next(None).unwrap();
+    match pop_table_view(&mut vm) {
+        TableViewData::RowView {
+            schema_id,
+            table,
+            row_idx,
+        } => {
+            assert_eq!(schema_id, 0);
+            assert_eq!(row_idx, 1);
+            assert_eq!(table.row_count(), 3);
+        }
+        other => panic!("expected RowView, got {:?}", other),
+    }
 }
 
 #[test]
 fn test_iter_next_typed_table_preserves_schema_id() {
-    // Phase-2c surface: TypedTable + RowView packed encodings — see
-    // ADR-006 §2.7.4.
-    todo!("phase-2c — see ADR-006 §2.7.4 (TypedTable + RowView carrier pending kinded redesign)");
+    let table = make_sample_table();
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    push_typed_table(&mut vm, 42, table);
+    push_int(&mut vm, 2);
+    vm.op_iter_next(None).unwrap();
+    match pop_table_view(&mut vm) {
+        TableViewData::RowView {
+            schema_id, row_idx, ..
+        } => {
+            assert_eq!(schema_id, 42);
+            assert_eq!(row_idx, 2);
+        }
+        other => panic!("expected RowView, got {:?}", other),
+    }
 }
 
 #[test]
 fn test_iter_next_out_of_bounds_returns_none() {
-    // Phase-2c surface: `is_none()` on an `IterNext` result depends on the
-    // deleted ValueWord null-tag encoding. The kinded equivalent reads
-    // the popped `(bits, kind)` and matches on a kinded null sentinel,
-    // but the producing opcode (`IterNext` on a DataTable) currently
-    // emits the legacy ValueWord null-tag form. See ADR-006 §2.7.4.
-    todo!("phase-2c — see ADR-006 §2.7.4 (IterNext null-result carrier pending kinded redesign)");
+    let table = make_sample_table();
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    push_datatable(&mut vm, table);
+    push_int(&mut vm, 3);
+    vm.op_iter_next(None).unwrap();
+    assert_none_slot(&mut vm);
 }
 
 #[test]
 fn test_iter_next_negative_index_returns_none() {
-    // Phase-2c surface: same as test_iter_next_out_of_bounds_returns_none.
-    todo!("phase-2c — see ADR-006 §2.7.4 (IterNext null-result carrier pending kinded redesign)");
+    let table = make_sample_table();
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    push_datatable(&mut vm, table);
+    push_int(&mut vm, -1);
+    vm.op_iter_next(None).unwrap();
+    assert_none_slot(&mut vm);
 }
 
 #[test]
 fn test_iter_next_all_rows_sequential() {
-    // Phase-2c surface: RowView packed encoding — see
-    // ADR-006 §2.7.4.
-    todo!("phase-2c — see ADR-006 §2.7.4 (RowView carrier pending kinded redesign)");
+    let table = make_sample_table();
+    for row in 0..3 {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        push_datatable(&mut vm, Arc::clone(&table));
+        push_int(&mut vm, row);
+        vm.op_iter_next(None).unwrap();
+        match pop_table_view(&mut vm) {
+            TableViewData::RowView { row_idx, .. } => assert_eq!(row_idx, row as usize),
+            other => panic!("expected RowView, got {:?}", other),
+        }
+    }
 }
 
 // =========================================================================
@@ -285,8 +394,26 @@ fn test_iter_done_error_message_includes_table() {
 
 #[test]
 fn test_row_view_from_iter_next_has_correct_data() {
-    // Phase-2c surface: RowView packed encoding — see ADR-006 §2.7.4.
-    todo!("phase-2c — see ADR-006 §2.7.4 (RowView carrier pending kinded redesign)");
+    let table = make_sample_table();
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    push_datatable(&mut vm, table);
+    push_int(&mut vm, 2);
+    vm.op_iter_next(None).unwrap();
+    match pop_table_view(&mut vm) {
+        TableViewData::RowView { table, row_idx, .. } => {
+            let price = table
+                .get_f64_column("price")
+                .expect("price column should exist")
+                .value(row_idx);
+            let name = table
+                .get_string_column("name")
+                .expect("name column should exist")
+                .value(row_idx);
+            assert_eq!(price, 30.0);
+            assert_eq!(name, "c");
+        }
+        other => panic!("expected RowView, got {:?}", other),
+    }
 }
 
 // =========================================================================
@@ -314,6 +441,10 @@ fn test_large_table_iteration() {
 
 #[test]
 fn test_empty_typed_table_iteration() {
-    // Phase-2c surface: TypedTable packed encoding — see ADR-006 §2.7.4.
-    todo!("phase-2c — see ADR-006 §2.7.4 (TypedTable carrier pending kinded redesign)");
+    let table = make_empty_table();
+    let result = run_typed_table_count_loop(42, table);
+    assert_eq!(
+        result, 0,
+        "for-loop over empty TypedTable should iterate 0 times"
+    );
 }
