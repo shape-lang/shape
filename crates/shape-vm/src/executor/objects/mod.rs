@@ -193,62 +193,28 @@ use shape_value::{HeapKind, KindedSlot, NativeKind, TemporalData, VMError, Value
 /// Select the method-registry PHF lookup for a v2-raw `TypedArray<T>`
 /// receiver, classified by its stamped element-type discriminant.
 ///
-/// **W16.2-J.1 (2026-05-22):** the per-kind PHF registries
-/// `TYPED_INT_ARRAY_METHODS` + `TYPED_NUMBER_ARRAY_METHODS` were deleted
-/// alongside their handler module files (`typed_int_array_methods.rs` /
-/// `typed_number_array_methods.rs`, 667 LoC combined). The prereq W16.2-J.0
-/// (commit `fbe86020`) migrated the kind-generic counterparts in
-/// `array_aggregation::handle_{sum,avg,min,max,count,reduce}_v2` +
-/// `array_basic::handle_{len,is_empty,first,last,push,pop,get,set,clone}_v2`
-/// from `ckpt[2-5]_surface` stubs to real bodies delegating to the
-/// `v2_array_detect::{sum,avg,min,max,push,pop,read,write}_element(s)`
-/// primitives — those entries live in `ARRAY_METHODS`.
-///
-/// Result: every numeric `V2ElemType` arm now returns `None`; the caller
-/// falls back to `ARRAY_METHODS` for the kind-generic implementation. The
-/// surviving non-`None` arm is `V2ElemType::Bool` → `BOOL_ARRAY_METHODS`,
-/// which carries closure-callback / aggregation residuals (`count`, `any`,
-/// `all`, `toArray`) tracked by the W17 typed-carrier-monomorphization
-/// workstream and still routes through the bool-specific handler set.
+/// Numeric and bool element kinds use typed-specific PHFs only where the
+/// method surface has typed-array semantics (`dot`, `norm`, `abs`, bool
+/// `count`, no-arg `any`/`all`, `toArray`, etc.). Any name absent from a
+/// typed-specific PHF falls through to `ARRAY_METHODS`, whose handlers are
+/// kind-generic over the same stamped v2 carrier.
 fn typed_array_method_registry(
     elem_type: crate::executor::v2_handlers::v2_array_detect::V2ElemType,
     method_name: &str,
 ) -> Option<method_registry::MethodHandler> {
     use crate::executor::v2_handlers::v2_array_detect::V2ElemType;
     match elem_type {
-        // Numeric element kinds — fall through to ARRAY_METHODS via the
-        // caller's `.or_else(...)` chain. W16.2-J.1 deleted the per-kind
-        // PHFs that previously lived here; the kind-generic
-        // `array_aggregation::*` / `array_basic::*` handlers in
-        // ARRAY_METHODS now cover len/length/push/pop/first/last/get/set/
-        // sum/avg/mean/min/max/clone uniformly.
-        //
-        // strict-flip c7 SURFACE-AND-STOP (2026-06-22): the numeric-transform
-        // surface (cumsum/diff/abs/dot/norm/normalize/sqrt/ln/exp/std/variance)
-        // is NOT restored here. Routing F64→FLOAT_ARRAY_METHODS reaches only
-        // `typed_array_methods::*` ckpt3_surface STUBS — every entry in that
-        // module is `Err(ckpt3_surface(...))` pending the V3-S5 ckpt-6 v2-raw
-        // `TypedArray<T>` per-T carrier migration (~40 entry points). Worse,
-        // FLOAT_ARRAY_METHODS's `sum`/`avg`/`min`/`max` are ALSO stubs, so
-        // routing there REGRESSES the working kind-generic
-        // `array_aggregation::handle_{sum,avg,min,max}_v2` in ARRAY_METHODS.
-        // Restoring real numeric transforms requires the ckpt-6 carrier, not
-        // a routing flip — surfaced, not forced.
-        V2ElemType::I64
-        | V2ElemType::I32
+        V2ElemType::F64 => method_registry::FLOAT_ARRAY_METHODS
+            .get(method_name)
+            .copied(),
+        V2ElemType::I64 => method_registry::INT_ARRAY_METHODS.get(method_name).copied(),
+        V2ElemType::I32
         | V2ElemType::I8
         | V2ElemType::U8
         | V2ElemType::I16
         | V2ElemType::U16
         | V2ElemType::U32
-        | V2ElemType::F64
         | V2ElemType::F32 => None,
-        // Bool carries closure-callback / aggregation residuals
-        // (count / any / all / toArray) — W17 typed-carrier-
-        // monomorphization territory. The kind-generic len/first/last/
-        // isEmpty entries in BOOL_ARRAY_METHODS still alias to
-        // `array_basic::handle_*_v2`, so semantics are uniform with
-        // ARRAY_METHODS for those names.
         V2ElemType::Bool => method_registry::BOOL_ARRAY_METHODS
             .get(method_name)
             .copied(),

@@ -858,7 +858,7 @@ fn v2_stack_frame_with_typed_locals() {
     //    12: ReturnValue
 
     // Layout:
-    //   0: PushConst(3)   -- push arg count (0.0)
+    //   0: PushConst(3)   -- push arg count (0)
     //   1: Call func_0    -- calls function, return_ip = 2
     //   2: Jump +11       -- skip over function body (ip after dispatch = 3, 3+11=14 = past end)
     //
@@ -897,7 +897,7 @@ fn v2_stack_frame_with_typed_locals() {
             Constant::Number(3.14), // 0
             Constant::Int(42),      // 1
             Constant::Bool(true),   // 2
-            Constant::Number(0.0),  // 3 -- arg count
+            Constant::Int(0),       // 3 -- arg count
         ],
         functions: vec![Function {
             name: "__v2_test_locals".to_string(),
@@ -952,7 +952,7 @@ fn v2_stack_frame_locals_isolation() {
 
     // Layout:
     //   0: PushConst(0)   -- sentinel = 999
-    //   1: PushConst(3)   -- arg count = 0.0
+    //   1: PushConst(3)   -- arg count = 0
     //   2: Call func_0    -- return_ip = 3
     //   3: Pop            -- discard function result (77), sentinel remains
     //   4: Jump +6        -- skip function body (ip after dispatch = 5, 5+6 = 11 = past end)
@@ -981,10 +981,10 @@ fn v2_stack_frame_locals_isolation() {
             Instruction::simple(OpCode::ReturnValue),                     // 10
         ],
         constants: vec![
-            Constant::Int(999),    // 0: sentinel
-            Constant::Int(77),     // 1: function local value
-            Constant::Int(-1),     // 2: second local value
-            Constant::Number(0.0), // 3: arg count
+            Constant::Int(999), // 0: sentinel
+            Constant::Int(77),  // 1: function local value
+            Constant::Int(-1),  // 2: second local value
+            Constant::Int(0),   // 3: arg count
         ],
         functions: vec![Function {
             name: "__v2_test_isolation".to_string(),
