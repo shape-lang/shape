@@ -3218,6 +3218,28 @@ impl BytecodeCompiler {
         use shape_ast::ast::Literal;
         use shape_runtime::type_schema::FieldAnnotation;
 
+        let runtime_field_names: Vec<String> = struct_def
+            .fields
+            .iter()
+            .filter(|f| !f.is_comptime)
+            .map(|f| f.name.clone())
+            .collect();
+        let runtime_field_types = struct_def
+            .fields
+            .iter()
+            .filter(|f| !f.is_comptime)
+            .map(|f| (f.name.clone(), f.type_annotation.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        self.struct_types
+            .entry(struct_def.name.clone())
+            .or_insert_with(|| (runtime_field_names, Span::DUMMY));
+        self.struct_generic_info
+            .entry(struct_def.name.clone())
+            .or_insert_with(|| StructGenericInfo {
+                type_params: struct_def.type_params.clone().unwrap_or_default(),
+                runtime_field_types,
+            });
+
         if self
             .type_tracker
             .schema_registry()
