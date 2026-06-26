@@ -50,9 +50,9 @@
 
 use crate::bytecode::{Instruction, Operand};
 use crate::executor::VirtualMachine;
-use crate::executor::vm_impl::stack::{clone_with_kind, drop_with_kind};
+use crate::executor::vm_impl::stack::drop_with_kind;
 use shape_value::{
-    NativeKind, VMError,
+    KindedSlot, NativeKind, VMError,
     heap_value::{HashMapKindedRef, HeapKind},
 };
 use std::sync::Arc;
@@ -63,35 +63,21 @@ impl VirtualMachine {
         &mut self,
         _ctx: Option<&mut shape_runtime::context::ExecutionContext>,
     ) -> Result<(), VMError> {
-        let (key_bits, key_kind) = self.pop_kinded()?;
-        let (obj_bits, obj_kind) = self.pop_kinded()?;
+        let key_slot = self.pop_kinded_slot_preserving_miri()?;
+        let obj_slot = self.pop_kinded_slot_preserving_miri()?;
+        let key_bits = key_slot.raw();
+        let key_kind = key_slot.kind();
 
         // Borrow the key as &str when its kind is `NativeKind::String`. The
         // key carries one strong-count share per WB2.4; we drop it after
         // the dispatch completes.
-        let key_str: Option<&str> = match key_kind {
-            NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
-                if key_bits == 0 {
-                    None
-                } else {
-                    // SAFETY: `NativeKind::String` means `key_bits` is
-                    // `Arc::into_raw::<String>` and the slot owns one
-                    // strong-count share. The borrow is valid for the
-                    // remainder of this scope (we only release the share
-                    // via `drop_with_kind` at the end).
-                    let s: &String = unsafe { &*(key_bits as *const String) };
-                    Some(s.as_str())
-                }
-            }
-            _ => None,
-        };
+        let key_str: Option<&str> = string_key_slot_as_str(&key_slot);
 
-        let result = self.dispatch_get_prop(obj_bits, obj_kind, key_bits, key_kind, key_str);
+        let result = self.dispatch_get_prop(&obj_slot, key_bits, key_kind, key_str);
 
         // Retire the popped key + object shares per WB2.4 drop discipline.
-        drop_with_kind(key_bits, key_kind);
-        drop_with_kind(obj_bits, obj_kind);
-
+        drop(key_slot);
+        drop(obj_slot);
         result
     }
 
@@ -99,12 +85,13 @@ impl VirtualMachine {
     #[inline]
     fn dispatch_get_prop(
         &mut self,
-        obj_bits: u64,
-        obj_kind: NativeKind,
+        obj_slot: &KindedSlot,
         key_bits: u64,
         key_kind: NativeKind,
         key_str: Option<&str>,
     ) -> Result<(), VMError> {
+        let obj_bits = obj_slot.raw();
+        let obj_kind = obj_slot.kind();
         match obj_kind {
             // ── TypedObject: schema-driven field read ────────────────────
             NativeKind::Ptr(HeapKind::TypedObject) => {
@@ -134,11 +121,11 @@ impl VirtualMachine {
                 // — no `Arc::from_raw`, no refcount touch (the popped share is
                 // retired exactly once by `drop_with_kind(obj_bits, obj_kind)`
                 // in `op_get_prop` after dispatch).
-                // SAFETY: `obj_bits` is a live `_new` pointer (non-null,
-                // checked above) owned by the popped slot; the borrow is a
-                // read-only field read that does not escape and forms no `&mut`.
-                let storage: &shape_value::heap_value::TypedObjectStorage =
-                    unsafe { &*(obj_bits as *const shape_value::heap_value::TypedObjectStorage) };
+                let storage = obj_slot.as_typed_object_storage().ok_or_else(|| {
+                    VMError::RuntimeError(
+                        "GetProp TypedObject carrier missing pointer provenance".to_string(),
+                    )
+                })?;
                 self.read_typed_object_field(storage, ks)
             }
 
@@ -242,8 +229,20 @@ impl VirtualMachine {
                         None => String::new(),
                     }
                 };
-                let bits = Arc::into_raw(Arc::new(ch_str)) as u64;
-                self.push_kinded(bits, NativeKind::String)
+                let ptr = Arc::into_raw(Arc::new(ch_str));
+                let bits = ptr as u64;
+                #[cfg(miri)]
+                {
+                    self.push_kinded_with_miri_provenance(
+                        bits,
+                        NativeKind::String,
+                        shape_value::heap_value::MiriSlotProvenance::String(ptr),
+                    )
+                }
+                #[cfg(not(miri))]
+                {
+                    self.push_kinded(bits, NativeKind::String)
+                }
             }
 
             // ── HashMap, NativeView, Temporal, TableView,
@@ -309,12 +308,10 @@ impl VirtualMachine {
             )));
         }
 
-        let bits = storage.slots()[idx].raw();
-        let kind = storage.field_kinds[idx];
-
-        // WB2.4 retain-on-read.
-        clone_with_kind(bits, kind);
-        self.push_kinded(bits, kind)
+        let cloned = storage.clone_field_kinded(idx).ok_or_else(|| {
+            VMError::RuntimeError(format!("Field '{}' index {} missing", key, idx))
+        })?;
+        self.push_kinded_slot_preserving_miri(cloned)
     }
 
     /// `SetProp`: write a property on a heap object. Pops value, key,
@@ -497,9 +494,8 @@ impl VirtualMachine {
         let prior_bits = unsafe {
             let cells_ptr: *const [std::cell::UnsafeCell<shape_value::slot::ValueSlot>] =
                 &raw const *(*storage_ptr).slot_cells;
-            let cell_ptr = (cells_ptr
-                as *const std::cell::UnsafeCell<shape_value::slot::ValueSlot>)
-                .add(idx);
+            let cell_ptr =
+                (cells_ptr as *const std::cell::UnsafeCell<shape_value::slot::ValueSlot>).add(idx);
             let slot_ptr = std::cell::UnsafeCell::raw_get(cell_ptr);
             (*slot_ptr).raw()
         };
@@ -679,8 +675,7 @@ impl VirtualMachine {
                     // checked above) owned by the popped slot; the borrow is
                     // a read-only `.slots()` access that does not escape and
                     // forms no `&mut`.
-                    let storage_ptr =
-                        bits as *const shape_value::heap_value::TypedObjectStorage;
+                    let storage_ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
                     let len = unsafe { (*storage_ptr).slots().len() } as i64;
                     self.push_kinded(len as u64, NativeKind::Int64)
                 }
@@ -883,12 +878,79 @@ fn borrow_string_for_index(bits: u64, kind: NativeKind) -> Option<String> {
     }
 }
 
+#[inline]
+fn string_key_slot_as_str(slot: &KindedSlot) -> Option<&str> {
+    match slot.kind() {
+        NativeKind::String | NativeKind::StringV2 => slot.as_str(),
+        NativeKind::Ptr(HeapKind::String) => {
+            let bits = slot.raw();
+            if bits == 0 {
+                return None;
+            }
+            #[cfg(miri)]
+            {
+                match slot.miri_provenance() {
+                    shape_value::heap_value::MiriSlotProvenance::String(ptr) if !ptr.is_null() => {
+                        let s: &String = unsafe { &*ptr };
+                        Some(s.as_str())
+                    }
+                    _ => None,
+                }
+            }
+            #[cfg(not(miri))]
+            {
+                let s: &String = unsafe { &*(bits as *const String) };
+                Some(s.as_str())
+            }
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::executor::VMConfig;
     use shape_value::ValueSlot;
+    #[cfg(miri)]
+    use shape_value::heap_value::MiriSlotProvenance;
     use shape_value::heap_value::TypedObjectStorage;
+
+    fn push_typed_object_raw(vm: &mut VirtualMachine, ptr: *mut TypedObjectStorage) {
+        let bits = ptr as u64;
+        #[cfg(miri)]
+        {
+            vm.push_kinded_with_miri_provenance(
+                bits,
+                NativeKind::Ptr(HeapKind::TypedObject),
+                MiriSlotProvenance::TypedObject(ptr),
+            )
+            .unwrap();
+        }
+        #[cfg(not(miri))]
+        {
+            vm.push_kinded(bits, NativeKind::Ptr(HeapKind::TypedObject))
+                .unwrap();
+        }
+    }
+
+    fn push_string_arc(vm: &mut VirtualMachine, value: Arc<String>) {
+        let ptr = Arc::into_raw(value);
+        let bits = ptr as u64;
+        #[cfg(miri)]
+        {
+            vm.push_kinded_with_miri_provenance(
+                bits,
+                NativeKind::String,
+                MiriSlotProvenance::String(ptr),
+            )
+            .unwrap();
+        }
+        #[cfg(not(miri))]
+        {
+            vm.push_kinded(bits, NativeKind::String).unwrap();
+        }
+    }
 
     /// A standalone `op_length` call on a TypedObject built with empty
     /// slots returns 0 + `NativeKind::Int64`.
@@ -1012,25 +1074,21 @@ mod tests {
             0, // heap_mask: no heap fields
             Arc::from(vec![NativeKind::Int64].into_boxed_slice()),
         );
-        let recv_bits = ptr as u64;
 
         // Push (recv, key) to match `op_get_prop`'s pop order (obj first,
         // key second on the stack — popped key then obj).
-        vm.push_kinded(recv_bits, NativeKind::Ptr(HeapKind::TypedObject))
-            .unwrap();
-        let key_arc: Arc<String> = Arc::new("x".to_string());
-        let key_bits = Arc::into_raw(key_arc) as u64;
-        vm.push_kinded(key_bits, NativeKind::String).unwrap();
+        push_typed_object_raw(&mut vm, ptr);
+        push_string_arc(&mut vm, Arc::new("x".to_string()));
 
         vm.op_get_prop(None).unwrap();
 
         // The field read pushes the int field value back (retain-on-read
         // bumped no refcount for an inline scalar).
-        let (val_bits, val_kind) = vm.pop_kinded().unwrap();
-        assert_eq!(val_kind, NativeKind::Int64);
-        assert_eq!(val_bits, 99u64);
+        let val = vm.pop_kinded_slot_preserving_miri().unwrap();
+        assert_eq!(val.kind(), NativeKind::Int64);
+        assert_eq!(val.raw(), 99u64);
         // op_get_prop already retired the popped receiver + key shares via
-        // drop_with_kind; the `_new` carrier's last share (refcount=1) is
+        // kinded drop; the `_new` carrier's last share (refcount=1) is
         // released by that dispatch (release_elem → _drop).
     }
 
@@ -1052,32 +1110,34 @@ mod tests {
 
         // name field holds an Arc<String> raw pointer; heap_mask bit 0 set.
         let name_arc: Arc<String> = Arc::new("hi".to_string());
-        let name_bits = Arc::into_raw(name_arc) as u64;
+        let name_ptr = Arc::into_raw(name_arc);
+        let name_bits = name_ptr as u64;
         let slot = ValueSlot::from_raw(name_bits);
+        #[cfg(miri)]
+        let ptr = TypedObjectStorage::_new_with_miri_field_provenance(
+            schema_id as u64,
+            vec![slot].into_boxed_slice(),
+            1, // heap_mask: field 0 is heap
+            Arc::from(vec![NativeKind::String].into_boxed_slice()),
+            vec![MiriSlotProvenance::String(name_ptr)].into_boxed_slice(),
+        );
+        #[cfg(not(miri))]
         let ptr = TypedObjectStorage::_new(
             schema_id as u64,
             vec![slot].into_boxed_slice(),
             1, // heap_mask: field 0 is heap
             Arc::from(vec![NativeKind::String].into_boxed_slice()),
         );
-        let recv_bits = ptr as u64;
 
-        vm.push_kinded(recv_bits, NativeKind::Ptr(HeapKind::TypedObject))
-            .unwrap();
-        let key_arc: Arc<String> = Arc::new("name".to_string());
-        let key_bits = Arc::into_raw(key_arc) as u64;
-        vm.push_kinded(key_bits, NativeKind::String).unwrap();
+        push_typed_object_raw(&mut vm, ptr);
+        push_string_arc(&mut vm, Arc::new("name".to_string()));
 
         vm.op_get_prop(None).unwrap();
 
-        let (val_bits, val_kind) = vm.pop_kinded().unwrap();
-        assert_eq!(val_kind, NativeKind::String);
-        // SAFETY: val_kind == String ⇒ val_bits is an Arc::into_raw<String>;
-        // the retain-on-read in read_typed_object_field bumped the share, so
-        // we own this one and retire it via drop_with_kind below.
-        let s: &String = unsafe { &*(val_bits as *const String) };
-        assert_eq!(s.as_str(), "hi");
-        crate::executor::vm_impl::stack::drop_with_kind(val_bits, val_kind);
+        let val = vm.pop_kinded_slot_preserving_miri().unwrap();
+        assert_eq!(val.kind(), NativeKind::String);
+        assert_eq!(val.as_str(), Some("hi"));
+        drop(val);
     }
 
     /// `op_set_prop` on a TypedObject with a non-string key returns a
