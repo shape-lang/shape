@@ -16,23 +16,22 @@
 //! builtin_range / builtin_slice`) cascade-breaks here as the deletion's
 //! consumer cascade tier 2.
 //!
-//! Public builtin bodies are replaced with structured surface-and-stop
-//! returning `VMError::NotImplemented`. Local helpers (`as_typed_array /
-//! typed_array_to_slot / typed_array_element / heap_value_to_slot`) are
-//! DELETED — every one took `&TypedArrayData` / produced `&Arc<TypedArrayData>`
-//! or `TypedArrayData`; with the type gone they cannot exist.
+//! Legacy helpers (`as_typed_array / typed_array_to_slot /
+//! typed_array_element / heap_value_to_slot`) are DELETED — every one took
+//! `&TypedArrayData` / produced `&Arc<TypedArrayData>` or `TypedArrayData`;
+//! with the type gone they cannot exist. Builtins that still depend on those
+//! helper shapes remain structured surface-and-stop bodies. `builtin_range`
+//! is rebuilt below on the v2-raw `TypedArray<i64>` carrier.
 //!
 //! PRESERVED:
 //! - `slot_to_heap_arc` — produces `Arc<HeapValue>` (no `TypedArrayData`
 //!   dependency); shared by `object_creation::op_new_array` (Round 11A,
 //!   ADR-006 §2.7.24 Q25.A) and stays live across the cascade.
-//! - `builtin_range_int` (called by `builtin_range`) — operates on int
-//!   primitives only, no `TypedArrayData` dependency until the int-array
-//!   construction path; the construction path is replaced with
-//!   surface-and-stop and the helper is preserved for the post-ckpt-6
-//!   v2-raw `TypedArray<i64>` construction landing.
+//! - `builtin_range` — consumes already-proven integer arguments and
+//!   constructs a stamped v2-raw `TypedArray<i64>` directly; it does not infer
+//!   element kind from runtime values.
 //!
-//! ## Cascade migration target (post-ckpt-6 STRICT close)
+//! ## Cascade migration target for remaining legacy bodies
 //!
 //! Per W12-typed-array-data-deletion audit §A.3 + §2.2 + §3.1 scalar recipe,
 //! every previous `TypedArrayData::X(buf)` match arm migrates to the v2-raw
@@ -69,7 +68,8 @@ fn type_error(msg: impl Into<String>) -> VMError {
 // V3-S5 ckpt-3 surface-and-stop builder
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Common surface-and-stop body for every public builtin in this file.
+/// Common surface-and-stop body for the public builtins in this file that
+/// still depend on the deleted `TypedArrayData` receiver shape.
 ///
 /// Returns a structured `VMError::NotImplemented` citing the V3-S5 ckpt-3
 /// cascade-broken state: the previous per-`TypedArrayData::X` variant
@@ -165,7 +165,7 @@ pub(in crate::executor) fn slot_to_heap_arc(slot: &KindedSlot) -> Result<Arc<Hea
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Public builtin entry-points — ckpt-3 surface-and-stop stubs
+// Public builtin entry-points — remaining ckpt-3 stubs plus rebuilt range
 // Signatures preserved for `vm_impl/builtins.rs` dispatch integrity
 // (`vm_impl/builtins.rs:257-292`).
 // ═══════════════════════════════════════════════════════════════════════════
