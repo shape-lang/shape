@@ -538,14 +538,7 @@ impl BytecodeCompiler {
                     // `Pattern::Object` struct-pattern codegen. The
                     // bare-enum-variant reject stays only for the genuine
                     // case (no schema, or an enum schema).
-                    let resolved_name = self.resolve_type_name(variant);
-                    let is_struct_schema = self
-                        .type_tracker
-                        .schema_registry()
-                        .get(resolved_name.as_str())
-                        .map(|s| !s.is_enum())
-                        .unwrap_or(false);
-                    if is_struct_schema {
+                    if self.resolve_struct_constructor_pattern(variant).is_some() {
                         if let PatternConstructorFields::Struct(field_pats) = fields {
                             return self.compile_match_binding_local(
                                 &Pattern::Object(field_pats.clone()),

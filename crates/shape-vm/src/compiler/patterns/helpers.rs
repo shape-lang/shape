@@ -34,6 +34,26 @@ pub(super) fn typed_eq_opcode_for_literal(lit: &Literal) -> Option<OpCode> {
 }
 
 impl BytecodeCompiler {
+    /// Resolve a bare constructor pattern name as a statically-known struct.
+    ///
+    /// This is intentionally a positive proof, not a fallback: enum schemas
+    /// return `None`, unknown names return `None`, and callers must keep the
+    /// enum-variant rejection path for those cases.
+    pub(in crate::compiler) fn resolve_struct_constructor_pattern(
+        &self,
+        constructor: &str,
+    ) -> Option<String> {
+        let resolved_name = self.resolve_type_name(constructor);
+
+        if let Some(schema) = self.type_tracker.schema_registry().get(&resolved_name) {
+            return (!schema.is_enum()).then_some(resolved_name);
+        }
+
+        self.struct_types
+            .contains_key(&resolved_name)
+            .then_some(resolved_name)
+    }
+
     /// Resolve the pattern-identifier-vs-unit-variant ambiguity.
     ///
     /// A bare capitalized identifier in pattern position (e.g. `Red` in

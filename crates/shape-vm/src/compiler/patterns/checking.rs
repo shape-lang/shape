@@ -361,14 +361,7 @@ impl BytecodeCompiler {
                         // struct payload, route to the `Pattern::Object`
                         // struct-pattern check. Otherwise fail the arm
                         // (the genuine bare-enum-variant case).
-                        let resolved_name = self.resolve_type_name(variant);
-                        let is_struct_schema = self
-                            .type_tracker
-                            .schema_registry()
-                            .get(resolved_name.as_str())
-                            .map(|s| !s.is_enum())
-                            .unwrap_or(false);
-                        if is_struct_schema {
+                        if self.resolve_struct_constructor_pattern(variant).is_some() {
                             if let PatternConstructorFields::Struct(field_pats) = fields {
                                 return self.compile_pattern_check_local(
                                     &Pattern::Object(field_pats.clone()),

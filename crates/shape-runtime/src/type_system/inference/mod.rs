@@ -1874,6 +1874,11 @@ impl TypeInferenceEngine {
         let mut errors = Vec::new();
 
         for item in &consumer.items {
+            if let Err(err) = self.predeclare_nominal_type_item(item) {
+                errors.push(err);
+            }
+        }
+        for item in &consumer.items {
             if let Err(err) = self.predeclare_item(item) {
                 errors.push(err);
             }
@@ -1964,8 +1969,14 @@ impl TypeInferenceEngine {
         let mut types = HashMap::new();
         let mut errors = Vec::new();
 
-        // First pass: predeclare callable symbols/methods so references are
-        // order-independent (matches compiler front-end behavior).
+        // First pass: predeclare nominal type definitions, then callable
+        // symbols/methods so references are order-independent (matches compiler
+        // front-end behavior).
+        for item in &program.items {
+            if let Err(err) = self.predeclare_nominal_type_item(item) {
+                errors.push(err);
+            }
+        }
         for item in &program.items {
             if let Err(err) = self.predeclare_item(item) {
                 errors.push(err);
