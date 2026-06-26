@@ -5,14 +5,11 @@
 /// beyond the basic ones in distributions.shape.
 /// Built on top of random.shape intrinsics using standard mathematical methods.
 
-const PI: number = 3.141592653589793;
-const E: number = 2.718281828459045;
-const SQRT_2PI: number = 2.5066282746310002;
-
 // ===== Helper: Gamma function (Lanczos approximation) =====
 
 /// Log-gamma function via Lanczos approximation (g=7, n=9)
 function ln_gamma(x: number) -> number {
+    let pi: number = 3.141592653589793;
     let g = 7.0;
     let coefs: Array<number> = [
         0.99999999999980993,
@@ -32,7 +29,7 @@ function ln_gamma(x: number) -> number {
         // engine does not propagate return-type annotations through self-
         // recursive calls (v0.4 bidirectional-inference followup).
         let recur_g: number = ln_gamma(1.0 - x);
-        let reflect: number = ln(PI / sin(PI * x)) - recur_g;
+        let reflect: number = ln(pi / sin(pi * x)) - recur_g;
         return reflect;
     }
 
@@ -43,7 +40,7 @@ function ln_gamma(x: number) -> number {
     }
 
     let t = z + g + 0.5;
-    0.5 * ln(2.0 * PI) + (z + 0.5) * ln(t) - t + ln(ag)
+    0.5 * ln(2.0 * pi) + (z + 0.5) * ln(t) - t + ln(ag)
 }
 
 /// Gamma function
@@ -66,8 +63,9 @@ pub fn beta_fn(a: number, b: number) -> number {
 
 /// Standard normal PDF: phi(x)
 pub fn normal_pdf(x: number, mu: number = 0.0, sigma: number = 1.0) -> number {
+    let sqrt_2pi: number = 2.5066282746310002;
     let z = (x - mu) / sigma;
-    exp(-0.5 * z * z) / (sigma * SQRT_2PI)
+    exp(-0.5 * z * z) / (sigma * sqrt_2pi)
 }
 
 /// Standard normal CDF using rational approximation (Abramowitz & Stegun)
@@ -197,11 +195,12 @@ pub fn chi_square_sample(k: int) -> number {
 
 /// Student's t PDF
 pub fn t_pdf(x: number, df: number) -> number {
+    let pi: number = 3.141592653589793;
     let half_df_plus: number = (df + 1.0) / 2.0;
     let half_df: number = df / 2.0;
     let lg_plus: number = ln_gamma(half_df_plus);
     let lg_half: number = ln_gamma(half_df);
-    let coeff: number = exp(lg_plus - lg_half) / sqrt(df * PI);
+    let coeff: number = exp(lg_plus - lg_half) / sqrt(df * pi);
     coeff * pow(1.0 + x * x / df, -half_df_plus)
 }
 
