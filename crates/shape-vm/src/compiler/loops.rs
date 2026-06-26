@@ -1536,6 +1536,8 @@ impl BytecodeCompiler {
                 });
             }
         }
+        let accumulator_kind =
+            accumulator_kind.expect("spread accumulator kind was validated above");
         self.emit(Instruction::new(
             OpCode::StoreLocal,
             Some(Operand::Local(result_local)),
@@ -1608,11 +1610,7 @@ impl BytecodeCompiler {
                             OpCode::LoadLocal,
                             Some(Operand::Local(counter_local)),
                         ));
-                        self.emit(Instruction::simple(OpCode::ArrayPush));
-                        self.emit(Instruction::new(
-                            OpCode::StoreLocal,
-                            Some(Operand::Local(result_local)),
-                        ));
+                        self.emit(Instruction::simple(accumulator_kind.push_opcode()));
 
                         // Increment counter
                         self.emit(Instruction::new(
@@ -1685,11 +1683,7 @@ impl BytecodeCompiler {
                             Some(Operand::Local(idx_local)),
                         ));
                         self.emit(Instruction::simple(OpCode::IterNext));
-                        self.emit(Instruction::simple(OpCode::ArrayPush));
-                        self.emit(Instruction::new(
-                            OpCode::StoreLocal,
-                            Some(Operand::Local(result_local)),
-                        ));
+                        self.emit(Instruction::simple(accumulator_kind.push_opcode()));
 
                         self.emit(Instruction::new(
                             OpCode::LoadLocal,
@@ -1722,11 +1716,7 @@ impl BytecodeCompiler {
                     ));
                     self.plan_flexible_binding_escape_from_expr(elem);
                     self.compile_expr(elem)?;
-                    self.emit(Instruction::simple(OpCode::ArrayPush));
-                    self.emit(Instruction::new(
-                        OpCode::StoreLocal,
-                        Some(Operand::Local(result_local)),
-                    ));
+                    self.emit(Instruction::simple(accumulator_kind.push_opcode()));
                 }
             }
         }
@@ -1739,13 +1729,10 @@ impl BytecodeCompiler {
         // Reset `last_expr_*` to the array shape so the enclosing
         // `let b = [...spread]` binding records `b` as an array, not as
         // the bare element scalar the last spread element left behind.
-        if let Some(kind) = accumulator_kind {
-            self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
-                super::v2_typed_emission::vec_type_name_for_typed_array_kind(kind).to_string(),
-            ));
-        } else {
-            self.last_expr_type_info = None;
-        }
+        self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::named(
+            super::v2_typed_emission::vec_type_name_for_typed_array_kind(accumulator_kind)
+                .to_string(),
+        ));
         self.last_expr_schema = None;
 
         self.pop_scope();
