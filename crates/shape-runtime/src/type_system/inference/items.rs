@@ -2262,6 +2262,28 @@ impl TypeInferenceEngine {
         }
 
         if let Some(name) = decl.pattern.as_identifier() {
+            if let Type::Function { params, .. } = &declared_type {
+                let hints: Vec<(bool, Option<Type>)> = params
+                    .iter()
+                    .map(|param| match param {
+                        Type::Variable(var) | Type::Constrained { var, .. }
+                            if self.deferred_closure_numeric_param_vars.contains(var) =>
+                        {
+                            (
+                                true,
+                                self.deferred_closure_numeric_param_body_hint
+                                    .get(var)
+                                    .cloned(),
+                            )
+                        }
+                        _ => (false, None),
+                    })
+                    .collect();
+                if hints.iter().any(|(is_deferred, _)| *is_deferred) {
+                    self.deferred_closure_numeric_binding_hints
+                        .insert(name.to_string(), hints);
+                }
+            }
             self.env
                 .define(name, TypeScheme::mono(declared_type.clone()));
         } else {

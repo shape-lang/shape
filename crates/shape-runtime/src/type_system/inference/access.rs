@@ -8,6 +8,22 @@ use shape_ast::ast::{Expr, Span, TypeAnnotation};
 use std::collections::HashMap;
 
 impl TypeInferenceEngine {
+    fn type_source_var(ty: &Type) -> Option<TypeVar> {
+        match ty {
+            Type::Variable(var) | Type::Constrained { var, .. } => Some(var.clone()),
+            _ => None,
+        }
+    }
+
+    fn deferred_closure_numeric_source_var(&self, ty: &Type) -> Option<TypeVar> {
+        let var = Self::type_source_var(ty)?;
+        if self.deferred_closure_numeric_param_vars.contains(&var) {
+            Some(var)
+        } else {
+            None
+        }
+    }
+
     /// Infer type of property access
     pub(crate) fn infer_property_access(
         &mut self,
@@ -777,13 +793,19 @@ impl TypeInferenceEngine {
                     // default: the closure either gets pinned by a downstream
                     // concrete call site (via `escaping_closure_arg_sites`
                     // follow-the-callable) or is REJECTED cleanly.
+                    let forwarded_binding_hints = if let Expr::Identifier(arg_name, _) = arg {
+                        self.deferred_closure_numeric_binding_hints
+                            .get(arg_name)
+                            .cloned()
+                    } else {
+                        None
+                    };
                     let arg_carries_deferred_closure_param = matches!(arg, Expr::Identifier(..))
-                        && matches!(&inferred, Type::Function { params, .. }
-                        if params.iter().any(|p| matches!(
-                            p,
-                            Type::Variable(v)
-                                if self.deferred_closure_numeric_param_vars.contains(v)
-                        )));
+                        && (forwarded_binding_hints.is_some()
+                            || matches!(&inferred, Type::Function { params, .. }
+                                if params
+                                    .iter()
+                                    .any(|p| self.deferred_closure_numeric_source_var(p).is_some())));
                     if (matches!(arg, Expr::FunctionExpr { .. })
                         || arg_carries_deferred_closure_param)
                         && self.lookup_callable_origin_for_name(name).is_some()
@@ -791,10 +813,21 @@ impl TypeInferenceEngine {
                         if let Type::Function { params, .. } = &inferred {
                             let mut site_vars: Vec<TypeVar> = Vec::with_capacity(params.len());
                             let mut all_param_vars = !params.is_empty();
-                            for p in params {
-                                if let Type::Variable(v) = p {
-                                    if self.deferred_closure_numeric_param_vars.contains(v) {
+                            for (param_index, p) in params.iter().enumerate() {
+                                if let Some(v) = Self::type_source_var(p) {
+                                    if self.deferred_closure_numeric_source_var(p).is_some() {
                                         self.escaping_closure_numeric_param_vars.insert(v.clone());
+                                    } else if let Some(hints) = forwarded_binding_hints.as_ref() {
+                                        if let Some((true, hint)) = hints.get(param_index) {
+                                            self.deferred_closure_numeric_param_vars
+                                                .insert(v.clone());
+                                            self.escaping_closure_numeric_param_vars
+                                                .insert(v.clone());
+                                            if let Some(hint) = hint {
+                                                self.deferred_closure_numeric_param_body_hint
+                                                    .insert(v.clone(), hint.clone());
+                                            }
+                                        }
                                     }
                                     site_vars.push(v.clone());
                                 } else {
@@ -954,6 +987,14 @@ impl TypeInferenceEngine {
 
         // Look up function type after argument inference so argument errors
         // (e.g. unknown property access) surface even when callee is undefined.
+        if crate::builtin_metadata::is_comptime_builtin_function(name)
+            && !self.in_comptime_context()
+        {
+            return Err(TypeError::ConstraintViolation(format!(
+                "'{}' is a comptime-only builtin and can only be called inside a `comptime {{ }}` block",
+                name
+            )));
+        }
         let func_scheme = self
             .env
             .lookup(name)

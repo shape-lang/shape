@@ -615,6 +615,96 @@ pub(crate) fn infer_param_type_from_body(
     body.iter().find_map(|s| scan_stmt(param_name, s))
 }
 
+fn closure_body_requires_numeric_param(
+    param_name: &str,
+    body: &[shape_ast::ast::Statement],
+) -> bool {
+    use shape_ast::ast::{BinaryOp, Expr, Statement};
+
+    fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
+        match expr {
+            Expr::Identifier(n, _) => n == name,
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                expr_mentions_name(left, name) || expr_mentions_name(right, name)
+            }
+            Expr::UnaryOp { operand, .. } => expr_mentions_name(operand, name),
+            Expr::FunctionCall { args, .. } => args.iter().any(|a| expr_mentions_name(a, name)),
+            Expr::MethodCall { receiver, args, .. } => {
+                expr_mentions_name(receiver, name)
+                    || args.iter().any(|a| expr_mentions_name(a, name))
+            }
+            Expr::Array(elements, _) => elements.iter().any(|e| expr_mentions_name(e, name)),
+            Expr::Return(Some(e), _) => expr_mentions_name(e, name),
+            Expr::Match(match_expr, _) => {
+                expr_mentions_name(&match_expr.scrutinee, name)
+                    || match_expr.arms.iter().any(|arm| {
+                        arm.guard
+                            .as_ref()
+                            .is_some_and(|g| expr_mentions_name(g, name))
+                            || expr_mentions_name(&arm.body, name)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    fn scan_expr(expr: &Expr, name: &str) -> bool {
+        match expr {
+            Expr::BinaryOp {
+                left, op, right, ..
+            } => {
+                let numeric_op = matches!(
+                    op,
+                    BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::Mod
+                        | BinaryOp::Pow
+                        | BinaryOp::BitAnd
+                        | BinaryOp::BitOr
+                        | BinaryOp::BitXor
+                        | BinaryOp::BitShl
+                        | BinaryOp::BitShr
+                );
+                (numeric_op && (expr_mentions_name(left, name) || expr_mentions_name(right, name)))
+                    || scan_expr(left, name)
+                    || scan_expr(right, name)
+            }
+            Expr::UnaryOp { operand, .. } => scan_expr(operand, name),
+            Expr::FunctionCall { args, .. } => args.iter().any(|a| scan_expr(a, name)),
+            Expr::MethodCall { receiver, args, .. } => {
+                scan_expr(receiver, name) || args.iter().any(|a| scan_expr(a, name))
+            }
+            Expr::Array(elements, _) => elements.iter().any(|e| scan_expr(e, name)),
+            Expr::Return(Some(e), _) => scan_expr(e, name),
+            Expr::Match(match_expr, _) => {
+                scan_expr(&match_expr.scrutinee, name)
+                    || match_expr.arms.iter().any(|arm| {
+                        arm.guard.as_ref().is_some_and(|g| scan_expr(g, name))
+                            || scan_expr(&arm.body, name)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    fn scan_stmt(stmt: &Statement, name: &str) -> bool {
+        match stmt {
+            Statement::Expression(expr, _) => scan_expr(expr, name),
+            Statement::Return(Some(expr), _) => scan_expr(expr, name),
+            Statement::VariableDecl(decl, _) => decl
+                .value
+                .as_ref()
+                .is_some_and(|expr| scan_expr(expr, name)),
+            Statement::Assignment(asgn, _) => scan_expr(&asgn.value, name),
+            _ => false,
+        }
+    }
+
+    body.iter().any(|stmt| scan_stmt(stmt, param_name))
+}
+
 /// Strict-typing-sweep (Cluster 1): convert a `ConcreteType` (the v2 typed
 /// value-representation type) back into an AST `TypeAnnotation` so it can be
 /// attached to a synthetic capture parameter. Returning `None` falls back to
@@ -1034,6 +1124,17 @@ impl BytecodeCompiler {
                             self.infer_param_type_from_body_with_outer_idents(name, body)
                         {
                             p.type_annotation = Some(ann);
+                        }
+                        if p.type_annotation.is_none()
+                            && closure_body_requires_numeric_param(name, body)
+                        {
+                            return Err(ShapeError::SemanticError {
+                                message: format!(
+                                    "cannot infer the numeric type of closure parameter `{}` at compile time; annotate the parameter as `int` or `number`",
+                                    name
+                                ),
+                                location: Some(self.span_to_source_location(closure_span)),
+                            });
                         }
                     }
                 }
