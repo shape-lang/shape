@@ -1623,6 +1623,17 @@ impl TypeInferenceEngine {
             let mut concrete_candidates = Vec::new();
             let mut unresolved_candidates = Vec::new();
             for arg in arg_candidates {
+                if self.is_deferred_constructor_literal_payload_type(&arg) {
+                    let literal_default = BuiltinTypes::integer();
+                    if !concrete_candidates
+                        .iter()
+                        .any(|existing| self.types_equal(existing, &literal_default))
+                    {
+                        concrete_candidates.push(literal_default);
+                    }
+                    unresolved_candidates.push(arg);
+                    continue;
+                }
                 if self.type_contains_unresolved_vars(&arg) {
                     unresolved_candidates.push(arg);
                     continue;
@@ -1739,6 +1750,15 @@ impl TypeInferenceEngine {
         candidates: &[Type],
     ) -> TypeResult<Type> {
         self.combine_return_types_internal(candidates, true)
+    }
+
+    fn is_deferred_constructor_literal_payload_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Variable(var) | Type::Constrained { var, .. } => {
+                self.deferred_constructor_literal_payload_vars.contains(var)
+            }
+            _ => false,
+        }
     }
 
     /// Infer types for a complete program
