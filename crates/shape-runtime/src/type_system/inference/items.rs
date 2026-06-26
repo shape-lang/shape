@@ -5,7 +5,7 @@
 use super::TypeInferenceEngine;
 use crate::type_system::*;
 use shape_ast::ast::{
-    DestructurePattern, Expr, ForeignFunctionDef, FunctionDef, Item, Literal, Statement,
+    DestructurePattern, Expr, ForeignFunctionDef, FunctionDef, Item, Literal, Span, Statement,
     TraitMember, TraitMemberSignature, TypeAnnotation, TypeName, VarKind, VariableDecl,
 };
 use std::collections::HashMap;
@@ -324,6 +324,7 @@ impl TypeInferenceEngine {
             }
             Item::Impl(impl_block, _) => {
                 self.register_impl(impl_block)?;
+                self.infer_impl_method_bodies(impl_block)?;
             }
             Item::Extend(extend, _) => {
                 self.register_extend(extend)?;
@@ -1382,6 +1383,205 @@ impl TypeInferenceEngine {
         }
 
         Ok(())
+    }
+
+    /// Type-check impl method bodies with the receiver type in scope.
+    ///
+    /// Impl registration alone only publishes the method surface. Strict
+    /// bytecode lowering consumes finalized expression facts for method bodies
+    /// too, so inference must also walk those bodies with the same implicit
+    /// receiver the compiler later desugars: `method eq(other: Self)` in
+    /// `impl Eq for Money` is checked as an inference-only
+    /// `fn Money::eq(self: Money, other: Money) -> bool { ... }`.
+    fn infer_impl_method_bodies(
+        &mut self,
+        impl_block: &shape_ast::ast::ImplBlock,
+    ) -> TypeResult<()> {
+        if !Self::impl_target_is_concrete(&impl_block.target_type) {
+            return Ok(());
+        }
+
+        let type_name = Self::type_name_str(&impl_block.target_type);
+        let trait_name = Self::type_name_str(&impl_block.trait_name);
+        let self_ann = Self::type_name_to_annotation_for_impl(&impl_block.target_type);
+        let trait_def = self.env.lookup_trait(&trait_name).cloned();
+
+        for method in &impl_block.methods {
+            let func = self.inference_function_for_impl_method(
+                method,
+                &type_name,
+                &self_ann,
+                trait_def.as_ref(),
+            )?;
+            let _ = self.infer_function(&func)?;
+        }
+
+        if let Some(trait_def) = trait_def {
+            let overridden: std::collections::HashSet<&str> =
+                impl_block.methods.iter().map(|m| m.name.as_str()).collect();
+            for member in &trait_def.members {
+                if let TraitMember::Default(default_method) = member {
+                    if overridden.contains(default_method.name.as_str()) {
+                        continue;
+                    }
+                    let func = self.inference_function_for_impl_method(
+                        default_method,
+                        &type_name,
+                        &self_ann,
+                        Some(&trait_def),
+                    )?;
+                    let _ = self.infer_function(&func)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn inference_function_for_impl_method(
+        &mut self,
+        method: &shape_ast::ast::MethodDef,
+        type_name: &str,
+        self_ann: &TypeAnnotation,
+        trait_def: Option<&shape_ast::ast::TraitDef>,
+    ) -> TypeResult<FunctionDef> {
+        let mut params = Vec::with_capacity(method.params.len() + 1);
+        params.push(shape_ast::ast::FunctionParameter {
+            pattern: DestructurePattern::Identifier("self".to_string(), Span::DUMMY),
+            is_const: false,
+            is_reference: false,
+            is_mut_reference: false,
+            is_out: false,
+            type_annotation: Some(self_ann.clone()),
+            default_value: None,
+        });
+
+        for (idx, param) in method.params.iter().enumerate() {
+            let mut param = param.clone();
+            if let Some(ann) = param.type_annotation.as_ref() {
+                param.type_annotation = Some(Self::substitute_trait_self_annotation(ann, self_ann));
+            } else if let Some(sig_param) = trait_def
+                .and_then(|def| Self::trait_method_value_param_annotation(def, &method.name, idx))
+            {
+                param.type_annotation =
+                    Some(Self::substitute_trait_self_annotation(sig_param, self_ann));
+            }
+            params.push(param);
+        }
+
+        let return_type = method
+            .return_type
+            .as_ref()
+            .map(|ann| Self::substitute_trait_self_annotation(ann, self_ann))
+            .or_else(|| {
+                trait_def
+                    .and_then(|def| Self::trait_method_return_annotation(def, &method.name))
+                    .map(|ret| Self::substitute_trait_self_annotation(ret, self_ann))
+            });
+
+        Ok(FunctionDef {
+            name: format!("{}::{}", type_name, method.name),
+            name_span: method.span,
+            declaring_module_path: method.declaring_module_path.clone(),
+            doc_comment: None,
+            params,
+            return_type,
+            body: method.body.clone(),
+            type_params: method.type_params.clone(),
+            annotations: method.annotations.clone(),
+            is_async: method.is_async,
+            is_comptime: false,
+            where_clause: None,
+        })
+    }
+
+    fn trait_method_value_param_annotation<'a>(
+        trait_def: &'a shape_ast::ast::TraitDef,
+        method_name: &str,
+        value_param_index: usize,
+    ) -> Option<&'a TypeAnnotation> {
+        for member in &trait_def.members {
+            match member {
+                TraitMember::Required(TraitMemberSignature::Method { name, params, .. })
+                    if name == method_name =>
+                {
+                    return params
+                        .iter()
+                        .filter(|p| p.name.as_deref() != Some("self"))
+                        .nth(value_param_index)
+                        .map(|p| &p.type_annotation);
+                }
+                TraitMember::Default(default_method) if default_method.name == method_name => {
+                    return default_method
+                        .params
+                        .iter()
+                        .filter(|p| {
+                            !matches!(&p.pattern, DestructurePattern::Identifier(n, _) if n == "self")
+                        })
+                        .nth(value_param_index)
+                        .and_then(|p| p.type_annotation.as_ref());
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn trait_method_return_annotation<'a>(
+        trait_def: &'a shape_ast::ast::TraitDef,
+        method_name: &str,
+    ) -> Option<&'a TypeAnnotation> {
+        for member in &trait_def.members {
+            match member {
+                TraitMember::Required(TraitMemberSignature::Method {
+                    name, return_type, ..
+                }) if name == method_name => {
+                    return Some(return_type);
+                }
+                TraitMember::Default(default_method) if default_method.name == method_name => {
+                    return default_method.return_type.as_ref();
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn type_name_to_annotation_for_impl(type_name: &TypeName) -> TypeAnnotation {
+        match type_name {
+            TypeName::Simple(name) => TypeAnnotation::Reference(name.as_str().into()),
+            TypeName::Generic { name, type_args } => TypeAnnotation::Generic {
+                name: name.clone(),
+                args: type_args.clone(),
+            },
+        }
+    }
+
+    fn impl_target_is_concrete(type_name: &TypeName) -> bool {
+        match type_name {
+            TypeName::Simple(name) => !matches!(
+                name.as_str(),
+                "Array"
+                    | "Vec"
+                    | "Table"
+                    | "DataTable"
+                    | "HashMap"
+                    | "Map"
+                    | "Set"
+                    | "Option"
+                    | "Result"
+                    | "Iterator"
+            ),
+            TypeName::Generic { type_args, .. } => type_args.iter().all(|arg| {
+                if let Some(name) = arg.as_type_name_str() {
+                    let is_short_upper_param =
+                        name.len() <= 2 && name.chars().next().is_some_and(|ch| ch.is_uppercase());
+                    !is_short_upper_param
+                } else {
+                    true
+                }
+            }),
+        }
     }
 
     /// Register a single method from an impl block in the method table,
@@ -2789,6 +2989,124 @@ mod tests {
         assert!(
             sig.is_some(),
             "apply method should be in method table for Table"
+        );
+    }
+
+    #[test]
+    fn impl_eq_body_field_equality_records_concrete_expression_facts() {
+        use shape_ast::ast::{BinaryOp, Expr, Spanned, Statement};
+        use shape_ast::parser::parse_program;
+
+        let code = r#"
+            type Money { cents: int }
+
+            impl Eq for Money {
+                method eq(other: Money) -> bool {
+                    self.cents == other.cents
+                }
+            }
+        "#;
+
+        let program = parse_program(code).expect("Failed to parse");
+        let (eq_span, field_spans) = impl_eq_body_spans(&program);
+
+        let mut engine = TypeInferenceEngine::new();
+        let result = engine.infer_program(&program);
+        assert!(
+            result.is_ok(),
+            "impl Eq body should type-check with concrete receiver facts: {:?}",
+            result.err()
+        );
+
+        assert_eq!(
+            engine.resolved_expr_type(eq_span),
+            Some(&Type::Concrete(TypeAnnotation::Basic("bool".to_string()))),
+            "`self.cents == other.cents` should finalize as bool"
+        );
+        assert_eq!(field_spans.len(), 2);
+        for span in field_spans {
+            assert_eq!(
+                engine.resolved_expr_type(span),
+                Some(&Type::Concrete(TypeAnnotation::Basic("int".to_string()))),
+                "Money.cents field read should finalize as int"
+            );
+        }
+
+        fn impl_eq_body_spans(program: &shape_ast::ast::Program) -> (Span, Vec<Span>) {
+            for item in &program.items {
+                if let shape_ast::ast::Item::Impl(impl_block, _) = item {
+                    if !matches!(&impl_block.trait_name, TypeName::Simple(name) if name.as_str() == "Eq")
+                    {
+                        continue;
+                    }
+                    let method = impl_block
+                        .methods
+                        .iter()
+                        .find(|method| method.name == "eq")
+                        .expect("eq method");
+                    for stmt in &method.body {
+                        let expr = match stmt {
+                            Statement::Expression(expr, _) => expr,
+                            Statement::Return(Some(expr), _) => expr,
+                            _ => continue,
+                        };
+                        if let Expr::BinaryOp { op, span, .. } = expr {
+                            assert_eq!(*op, BinaryOp::Equal);
+                            let mut fields = Vec::new();
+                            collect_cents_field_spans(expr, &mut fields);
+                            return (*span, fields);
+                        }
+                    }
+                }
+            }
+            panic!("expected impl Eq method body");
+        }
+
+        fn collect_cents_field_spans(expr: &Expr, spans: &mut Vec<Span>) {
+            match expr {
+                Expr::PropertyAccess {
+                    object,
+                    property,
+                    span,
+                    ..
+                } => {
+                    collect_cents_field_spans(object, spans);
+                    if property == "cents" {
+                        spans.push(*span);
+                    }
+                }
+                Expr::BinaryOp { left, right, .. } => {
+                    collect_cents_field_spans(left, spans);
+                    collect_cents_field_spans(right, spans);
+                }
+                _ => {
+                    let _ = expr.span();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn impl_eq_body_uses_trait_self_signature_for_unannotated_other() {
+        use shape_ast::parser::parse_program;
+
+        let code = r#"
+            type Money { cents: int }
+
+            impl Eq for Money {
+                method eq(other) {
+                    self.cents == other.cents
+                }
+            }
+        "#;
+
+        let program = parse_program(code).expect("Failed to parse");
+        let mut engine = TypeInferenceEngine::new();
+        let result = engine.infer_program(&program);
+        assert!(
+            result.is_ok(),
+            "impl Eq should inherit `other: Self` and `-> bool` from the trait: {:?}",
+            result.err()
         );
     }
 

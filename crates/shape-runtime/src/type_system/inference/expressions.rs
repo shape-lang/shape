@@ -10,7 +10,7 @@ use shape_ast::ast::{BinaryOp, Expr, Literal, Span, TypeAnnotation};
 use shape_ast::interpolation::{InterpolationPart, parse_interpolation_with_mode};
 
 impl TypeInferenceEngine {
-    fn substitute_trait_self_annotation(
+    pub(crate) fn substitute_trait_self_annotation(
         ann: &TypeAnnotation,
         self_ann: &TypeAnnotation,
     ) -> TypeAnnotation {
