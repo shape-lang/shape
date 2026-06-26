@@ -1,8 +1,9 @@
 //! Native `csv` module for CSV parsing and serialization.
 //!
-//! Phase 2d Array cluster migration: `stringify` and `is_valid` are on the
-//! typed marshal layer. `stringify` consumes the v2 nested typed-array
-//! carrier directly: outer `TypedArray<*const TypedArrayElem>`, inner
+//! Phase 2d Array cluster migration: `parse`, `read_file`, `stringify`, and
+//! `is_valid` are on the typed marshal layer. `parse` / `read_file` project
+//! the v2 nested typed-array carrier directly, and `stringify` consumes the
+//! same shape: outer `TypedArray<*const TypedArrayElem>`, inner
 //! `TypedArray<*const StringObj>`.
 //!
 //! Stage C HashMap-marshal P1(b) activation (2026-05-07): `parse_records`
@@ -23,40 +24,41 @@ use shape_value::heap_value::{HeapValue, TypedObjectStorage};
 use shape_value::{NativeKind, ValueSlot};
 use std::sync::Arc;
 
+fn parse_csv_rows(text: &str, fn_name: &str) -> Result<Vec<Vec<Arc<String>>>, String> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(text.as_bytes());
+    let mut rows = Vec::new();
+
+    for result in reader.records() {
+        let record = result.map_err(|e| format!("{} failed: {}", fn_name, e))?;
+        rows.push(
+            record
+                .iter()
+                .map(|cell| Arc::new(cell.to_string()))
+                .collect(),
+        );
+    }
+
+    Ok(rows)
+}
+
 /// Create the `csv` module with CSV parsing and serialization functions.
 pub fn create_csv_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::csv");
     module.description = "CSV parsing and serialization".to_string();
 
     // csv.parse(text: string) -> Array<Array<string>>
-    //
-    // Argument marshal for `Array<Array<string>>` is live via
-    // `FromSlot<Vec<Vec<Arc<String>>>>`. Native typed returns still lack a
-    // leaf for `Vec<Vec<Arc<String>>>`; `ConcreteReturn::ArrayHeapValue`
-    // projects through `Vec<Arc<HeapValue>>`, but `HeapValue::TypedArray`
-    // is intentionally deleted. Keep this as a precise return-projection
-    // classification until the typed-return ABI grows an exact nested array
-    // leaf.
     register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "parse",
         "Parse CSV text into an array of rows (each row is an array of strings)",
         "text",
         "string",
-        ConcreteType::ArrayHeapValue("Array<Array<string>>".to_string()),
+        ConcreteType::ArrayStringRows,
         |text, _ctx| {
-            let _ = text;
-            Err(format!(
-                "csv.method parse() -> SURFACE — Array<Array<string>> argument \
-                 marshal is live via ELEM_TYPE_TYPED_ARRAY / ELEM_TYPE_STRING, \
-                 but the native typed-return ABI has no ConcreteReturn leaf \
-                 that projects Vec<Vec<Arc<String>>>. ConcreteReturn::ArrayHeapValue \
-                 still requires Arc<HeapValue> elements, and HeapValue::TypedArray \
-                 is intentionally deleted; using a NativeScalar pointer token \
-                 would violate the strict carrier contract. Needs a typed-return \
-                 Array<Array<string>> projection. Use csv.parse_records for \
-                 per-record TypedObject access."
-            ))
+            let rows = parse_csv_rows(text.as_str(), "csv.parse()")?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::ArrayStringRows(rows)))
         },
     );
 
@@ -107,25 +109,34 @@ pub fn create_csv_module() -> ModuleExports {
     );
 
     // csv.read_file(path: string) -> Result<Array<Array<string>>>
-    //
-    // Same remaining return-projection gap as csv.parse.
     register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "read_file",
         "Read and parse a CSV file into an array of rows",
         "path",
         "string",
-        ConcreteType::Result(Box::new(ConcreteType::ArrayHeapValue(
-            "Array<Array<string>>".to_string(),
-        ))),
-        |path, _ctx| {
-            let _ = path;
-            Err(format!(
-                "csv.method read_file() -> SURFACE — Array<Array<string>> \
-                 argument marshal is live, but typed native returns cannot yet \
-                 project Vec<Vec<Arc<String>>> without a dedicated \
-                 ConcreteReturn leaf. See csv.parse classification."
-            ))
+        ConcreteType::Result(Box::new(ConcreteType::ArrayStringRows)),
+        |path, ctx| {
+            crate::module_exports::check_fs_permission(
+                ctx,
+                shape_abi_v1::Permission::FsRead,
+                path.as_str(),
+            )?;
+
+            let text = match std::fs::read_to_string(path.as_str()) {
+                Ok(text) => text,
+                Err(e) => {
+                    return Ok(TypedReturn::Err(ConcreteReturn::String(format!(
+                        "csv.read_file() failed to read {}: {}",
+                        path, e
+                    ))));
+                }
+            };
+
+            match parse_csv_rows(text.as_str(), "csv.read_file()") {
+                Ok(rows) => Ok(TypedReturn::Ok(ConcreteReturn::ArrayStringRows(rows))),
+                Err(e) => Ok(TypedReturn::Err(ConcreteReturn::String(e))),
+            }
         },
     );
 
@@ -310,16 +321,15 @@ pub fn create_csv_module() -> ModuleExports {
                             .collect()
                     }
                     HeapValue::TypedObject(s) => {
-                        let schema = crate::type_schema::lookup_schema_by_id_public(
-                            s.schema_id as u32,
-                        )
-                        .ok_or_else(|| {
-                            format!(
+                        let schema =
+                            crate::type_schema::lookup_schema_by_id_public(s.schema_id as u32)
+                                .ok_or_else(|| {
+                                    format!(
                                 "csv.method stringify_records() -> TypedObject schema id {} \
                                  not registered",
                                 s.schema_id
                             )
-                        })?;
+                                })?;
                         schema.fields.iter().map(|f| f.name.clone()).collect()
                     }
                     other => {
