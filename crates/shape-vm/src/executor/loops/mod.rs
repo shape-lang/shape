@@ -338,15 +338,22 @@ impl VirtualMachine {
             // Per playbook §7 #4: legacy `HeapValue::Array` / `Range` /
             // `Iterator` variants were deleted from the heap layout
             // (post-§2.7.6 typed-Arc payload migration). Iteration over
-            // those shapes is Phase 2c work — the kinded carrier for
-            // ranges + the boxed-Vec `Array` payload both need redesign.
-            // Surface, do not invent a Bool-default fallback (§2.7.7 #9).
-            _ => Err(VMError::NotImplemented(format!(
+            // unsupported heap carriers remains Phase 2c work — the
+            // kinded carrier for ranges + the boxed-Vec `Array` payload
+            // both need redesign. Surface, do not invent a Bool-default
+            // fallback (§2.7.7 #9).
+            NativeKind::Ptr(_) => Err(VMError::NotImplemented(format!(
                 "op_iter_done SURFACE: iter_kind={:?} not supported as iterator \
                  in the kinded API (legacy Array/Range/Iterator HeapValue \
                  variants deleted) — phase-2c, see ADR-006 §2.7.4",
                 iter_kind
             ))),
+            // Known scalar non-iterators are not missing host-boundary
+            // carriers; they are ordinary type errors.
+            _ => Err(VMError::TypeError {
+                expected: "table, table view, string, hashmap, or iterator",
+                got: "scalar",
+            }),
         };
 
         // Retire both popped shares. Idx kind has no heap payload; iter
