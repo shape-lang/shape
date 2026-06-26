@@ -1,6 +1,158 @@
 use super::*;
 
 impl BytecodeCompiler {
+    fn native_auto_symbol_part(name: &str) -> String {
+        let mut out = String::with_capacity(name.len());
+        for ch in name.chars() {
+            if ch.is_ascii_alphanumeric() {
+                out.push(ch);
+            } else {
+                out.push('_');
+            }
+        }
+        out
+    }
+
+    fn native_auto_object_name_for_layout(name: &str) -> Option<String> {
+        if let Some(base) = name.strip_suffix("Layout")
+            && !base.is_empty()
+        {
+            return Some(base.to_string());
+        }
+        if let Some(base) = name.strip_suffix('C')
+            && !base.is_empty()
+        {
+            return Some(base.to_string());
+        }
+        if let Some(base) = name.strip_prefix('C')
+            && !base.is_empty()
+            && base
+                .chars()
+                .next()
+                .map(|ch| ch.is_ascii_uppercase())
+                .unwrap_or(false)
+        {
+            return Some(base.to_string());
+        }
+        None
+    }
+
+    fn native_auto_fields_match(
+        native: &shape_ast::ast::StructTypeDef,
+        object: &shape_ast::ast::StructTypeDef,
+    ) -> bool {
+        if native
+            .type_params
+            .as_ref()
+            .is_some_and(|params| !params.is_empty())
+            || object
+                .type_params
+                .as_ref()
+                .is_some_and(|params| !params.is_empty())
+        {
+            return false;
+        }
+
+        let native_fields = native
+            .fields
+            .iter()
+            .filter(|field| !field.is_comptime)
+            .map(|field| (field.name.as_str(), &field.type_annotation))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let object_fields = object
+            .fields
+            .iter()
+            .filter(|field| !field.is_comptime)
+            .map(|field| (field.name.as_str(), &field.type_annotation))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        native_fields == object_fields
+    }
+
+    fn native_auto_conversion_decl(source_type: &str, target_type: &str) -> shape_ast::ast::Item {
+        let fn_name = format!(
+            "__auto_native_from_{}_to_{}",
+            Self::native_auto_symbol_part(source_type),
+            Self::native_auto_symbol_part(target_type)
+        );
+        shape_ast::ast::Item::BuiltinFunctionDecl(
+            shape_ast::ast::BuiltinFunctionDecl {
+                name: fn_name,
+                name_span: shape_ast::ast::Span::DUMMY,
+                doc_comment: None,
+                type_params: None,
+                params: vec![shape_ast::ast::FunctionParameter {
+                    pattern: shape_ast::ast::DestructurePattern::Identifier(
+                        "value".to_string(),
+                        shape_ast::ast::Span::DUMMY,
+                    ),
+                    is_const: false,
+                    is_reference: false,
+                    is_mut_reference: false,
+                    is_out: false,
+                    type_annotation: Some(shape_ast::ast::TypeAnnotation::Reference(
+                        source_type.into(),
+                    )),
+                    default_value: None,
+                }],
+                return_type: shape_ast::ast::TypeAnnotation::Reference(target_type.into()),
+            },
+            shape_ast::ast::Span::DUMMY,
+        )
+    }
+
+    fn native_auto_conversion_analysis_items(program: &Program) -> Vec<shape_ast::ast::Item> {
+        fn collect_structs<'a>(
+            items: &'a [shape_ast::ast::Item],
+            out: &mut std::collections::BTreeMap<String, &'a shape_ast::ast::StructTypeDef>,
+        ) {
+            for item in items {
+                match item {
+                    shape_ast::ast::Item::StructType(def, _) => {
+                        out.insert(def.name.clone(), def);
+                    }
+                    shape_ast::ast::Item::Export(export, _) => {
+                        if let shape_ast::ast::ExportItem::Struct(def) = &export.item {
+                            out.insert(def.name.clone(), def);
+                        }
+                    }
+                    shape_ast::ast::Item::Module(module, _) => {
+                        collect_structs(&module.items, out);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut structs = std::collections::BTreeMap::new();
+        collect_structs(&program.items, &mut structs);
+
+        let mut seen = std::collections::BTreeSet::new();
+        let mut items = Vec::new();
+        for (native_name, native_def) in &structs {
+            if native_def.native_layout.is_none() {
+                continue;
+            }
+            let Some(object_name) = Self::native_auto_object_name_for_layout(native_name) else {
+                continue;
+            };
+            let Some(object_def) = structs.get(&object_name) else {
+                continue;
+            };
+            if object_def.native_layout.is_some()
+                || !Self::native_auto_fields_match(native_def, object_def)
+            {
+                continue;
+            }
+            let pair_key = format!("{}::{}", native_name, object_name);
+            if !seen.insert(pair_key) {
+                continue;
+            }
+            items.push(Self::native_auto_conversion_decl(native_name, &object_name));
+            items.push(Self::native_auto_conversion_decl(&object_name, native_name));
+        }
+        items
+    }
+
     pub(super) fn infer_reference_params_from_types(
         program: &Program,
         inferred_types: &HashMap<String, Type>,
@@ -1718,6 +1870,12 @@ impl BytecodeCompiler {
             crate::compiler::expressions::closures::collect_closure_callsite_param_hints(&program);
         let mut analysis_program =
             shape_ast::transform::augment_program_with_generated_extends(&program);
+        let native_auto_items = Self::native_auto_conversion_analysis_items(&analysis_program);
+        if !native_auto_items.is_empty() {
+            let mut merged = native_auto_items;
+            merged.extend(analysis_program.items.drain(..));
+            analysis_program.items = merged;
+        }
 
         // STAGE Modules: teach the type checker (and the reference-model
         // inference) about IMPORTED module symbols. The module graph is the

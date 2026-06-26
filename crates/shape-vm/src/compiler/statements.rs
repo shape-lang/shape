@@ -3845,7 +3845,7 @@ impl BytecodeCompiler {
             Self::sanitize_auto_symbol(source_type),
             Self::sanitize_auto_symbol(target_type)
         );
-        if self.function_defs.contains_key(&fn_name) {
+        if self.function_defs.contains_key(&fn_name) && self.find_function(&fn_name).is_some() {
             return Ok(());
         }
 

@@ -288,6 +288,11 @@ pub struct TypeInferenceEngine {
     /// default pass and is skipped, so §4 literal-adoption at a real call site
     /// (`Array<number>.map(|x| x / 2)`) is untouched.
     pub(crate) deferred_closure_numeric_param_body_hint: std::collections::HashMap<TypeVar, Type>,
+    /// Let-bound closures are stored as schemes and instantiated with fresh
+    /// TypeVars when forwarded by identifier. Preserve the original closure's
+    /// per-param body-literal proof facts by binding name so the fresh vars
+    /// inherit the same strict default/reject behavior.
+    pub(crate) deferred_closure_numeric_binding_hints: HashMap<String, Vec<(bool, Option<Type>)>>,
     /// Indirected-callable COMPLETENESS extension (full-inference ruling). Each
     /// entry records a closure LITERAL passed as a value argument to a USER
     /// function call (`applyx(|a,b| a*b,6,7)`, `id(|a,b| a*b)`,
@@ -450,6 +455,7 @@ impl TypeInferenceEngine {
             callable_numeric_param_indices: HashMap::new(),
             deferred_closure_numeric_param_vars: std::collections::HashSet::new(),
             deferred_closure_numeric_param_body_hint: std::collections::HashMap::new(),
+            deferred_closure_numeric_binding_hints: HashMap::new(),
             escaping_closure_numeric_param_vars: std::collections::HashSet::new(),
             escaping_closure_arg_sites: Vec::new(),
             deferred_constructor_literal_payload_vars: std::collections::HashSet::new(),
@@ -1854,6 +1860,7 @@ impl TypeInferenceEngine {
         self.callable_numeric_param_indices.clear();
         self.deferred_closure_numeric_param_vars.clear();
         self.deferred_closure_numeric_param_body_hint.clear();
+        self.deferred_closure_numeric_binding_hints.clear();
         self.escaping_closure_numeric_param_vars.clear();
         self.escaping_closure_arg_sites.clear();
         self.deferred_constructor_literal_payload_vars.clear();
@@ -1945,6 +1952,7 @@ impl TypeInferenceEngine {
         self.callable_numeric_param_indices.clear();
         self.deferred_closure_numeric_param_vars.clear();
         self.deferred_closure_numeric_param_body_hint.clear();
+        self.deferred_closure_numeric_binding_hints.clear();
         self.escaping_closure_numeric_param_vars.clear();
         self.escaping_closure_arg_sites.clear();
         self.deferred_constructor_literal_payload_vars.clear();

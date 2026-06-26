@@ -124,7 +124,9 @@ pub enum TypeError {
     },
 
     /// Trait bound violation: type does not implement required trait
-    #[error("Type '{type_name}' does not implement trait '{trait_name}'")]
+    #[error(
+        "trait bound not satisfied: Type '{type_name}' does not implement trait '{trait_name}'"
+    )]
     TraitBoundViolation {
         type_name: String,
         trait_name: String,
