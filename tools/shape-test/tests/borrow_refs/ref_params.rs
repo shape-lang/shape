@@ -66,6 +66,21 @@ fn test_ref_array_mutation_through_ref() {
 }
 
 #[test]
+fn test_ref_array_push_through_mut_ref_returns_array() {
+    ShapeTest::new(
+        r#"
+        fn append(&mut arr, value) {
+            arr.push(value)
+        }
+        let mut items = [1, 2, 3]
+        append(&mut items, 4)
+        items
+    "#,
+    )
+    .expect_run_ok();
+}
+
+#[test]
 fn test_ref_set_object_field_through_ref() {
     // BUG: Assignment through ref to typed object field requires compile-time
     // field resolution which is not yet supported for ref params.

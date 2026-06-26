@@ -24,8 +24,8 @@
 //! - [`datatable_to_wire`] / [`datatable_to_ipc_bytes`] /
 //!   [`datatable_from_ipc_bytes`] — typed `DataTable` ↔ wire/IPC.
 
-use crate::Context;
 use crate::marshal::MarshalError;
+use crate::Context;
 use arrow_ipc::{reader::FileReader, writer::FileWriter};
 use shape_value::heap_value::HeapValue;
 use shape_value::{DataTable, HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot};
@@ -268,6 +268,9 @@ fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
         }
         return WireValue::String(format!("<typed_object:schema#{}>", schema_id));
     }
+    if hk == HeapKind::TypedArray {
+        return v2_typed_array_to_wire(bits, ctx);
+    }
     let ptr = bits as *const HeapValue;
     // SAFETY: NativeKind::Ptr(hk) contract — bits is a valid Arc<HeapValue> ptr.
     let hv = unsafe { &*ptr };
@@ -279,6 +282,124 @@ fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
         hv.kind()
     );
     heap_value_to_wire(hv, ctx)
+}
+
+fn v2_typed_array_to_wire(bits: u64, ctx: &Context) -> WireValue {
+    use shape_value::v2::heap_header::{HeapHeader, HEAP_KIND_V2_TYPED_ARRAY};
+    use shape_value::v2::typed_array::{
+        read_elem_type, TypedArray, TypedArrayElem, ELEM_TYPE_BOOL, ELEM_TYPE_CHAR,
+        ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I16, ELEM_TYPE_I32,
+        ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT,
+        ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8,
+    };
+    use shape_value::v2::{decimal_obj::DecimalObj, string_obj::StringObj};
+
+    if bits == 0 {
+        return WireValue::Null;
+    }
+
+    let ptr = bits as *const u8;
+    // SAFETY: `HeapKind::TypedArray` is the v2-raw typed-array carrier
+    // contract: bits point at a `TypedArray<T>` whose first field is
+    // `HeapHeader`.
+    let header = unsafe { &*(ptr as *const HeapHeader) };
+    assert_eq!(
+        header.kind, HEAP_KIND_V2_TYPED_ARRAY,
+        "slot kind TypedArray does not point at a v2 TypedArray header"
+    );
+
+    // SAFETY: the header check above proves the common 24-byte
+    // `TypedArray<T>` layout. Reading `len` through `TypedArray<u8>` only
+    // touches the monomorphization-independent header/data/len/cap fields.
+    let len = unsafe { (*(ptr as *const TypedArray<u8>)).len };
+    // SAFETY: the producer-side stamp lives in the HeapHeader pad byte.
+    let elem_type = unsafe { read_elem_type(ptr) };
+    let mut values = Vec::with_capacity(len as usize);
+
+    for index in 0..len {
+        let value = match elem_type {
+            ELEM_TYPE_F64 => unsafe {
+                let arr = ptr as *const TypedArray<f64>;
+                WireValue::Number(TypedArray::<f64>::get_unchecked(arr, index))
+            },
+            ELEM_TYPE_I64 => unsafe {
+                let arr = ptr as *const TypedArray<i64>;
+                WireValue::Integer(TypedArray::<i64>::get_unchecked(arr, index))
+            },
+            ELEM_TYPE_I32 => unsafe {
+                let arr = ptr as *const TypedArray<i32>;
+                WireValue::I32(TypedArray::<i32>::get_unchecked(arr, index))
+            },
+            ELEM_TYPE_BOOL => unsafe {
+                let arr = ptr as *const TypedArray<u8>;
+                WireValue::Bool(TypedArray::<u8>::get_unchecked(arr, index) != 0)
+            },
+            ELEM_TYPE_I8 => unsafe {
+                let arr = ptr as *const TypedArray<i8>;
+                WireValue::I8(TypedArray::<i8>::get_unchecked(arr, index))
+            },
+            ELEM_TYPE_U8 => unsafe {
+                let arr = ptr as *const TypedArray<u8>;
+                WireValue::U8(TypedArray::<u8>::get_unchecked(arr, index))
+            },
+            ELEM_TYPE_I16 => unsafe {
+                let arr = ptr as *const TypedArray<i16>;
+                WireValue::I16(TypedArray::<i16>::get_unchecked(arr, index))
+            },
+            ELEM_TYPE_U16 => unsafe {
+                let arr = ptr as *const TypedArray<u16>;
+                WireValue::U16(TypedArray::<u16>::get_unchecked(arr, index))
+            },
+            ELEM_TYPE_U32 => unsafe {
+                let arr = ptr as *const TypedArray<u32>;
+                WireValue::U32(TypedArray::<u32>::get_unchecked(arr, index))
+            },
+            ELEM_TYPE_F32 => unsafe {
+                let arr = ptr as *const TypedArray<f32>;
+                WireValue::F32(TypedArray::<f32>::get_unchecked(arr, index))
+            },
+            ELEM_TYPE_CHAR => unsafe {
+                let arr = ptr as *const TypedArray<char>;
+                WireValue::String(TypedArray::<char>::get_unchecked(arr, index).to_string())
+            },
+            ELEM_TYPE_STRING => unsafe {
+                let arr = ptr as *const TypedArray<*const StringObj>;
+                let elem = TypedArray::<*const StringObj>::get_unchecked(arr, index);
+                slot_to_wire(elem as u64, NativeKind::StringV2, ctx)
+            },
+            ELEM_TYPE_DECIMAL => unsafe {
+                let arr = ptr as *const TypedArray<*const DecimalObj>;
+                let elem = TypedArray::<*const DecimalObj>::get_unchecked(arr, index);
+                slot_to_wire(elem as u64, NativeKind::DecimalV2, ctx)
+            },
+            ELEM_TYPE_TYPED_OBJECT => unsafe {
+                let arr = ptr as *const TypedArray<*const TypedObjectStorage>;
+                let elem = TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, index);
+                slot_to_wire(elem as u64, NativeKind::Ptr(HeapKind::TypedObject), ctx)
+            },
+            ELEM_TYPE_TRAIT_OBJECT => {
+                panic!(
+                    "TypedArray wire conversion cannot serialize Array<dyn Trait>: \
+                     TraitObjectStorage has no wire-stable representation. \
+                     Refusing to fabricate a placeholder value."
+                );
+            }
+            ELEM_TYPE_TYPED_ARRAY => unsafe {
+                let arr = ptr as *const TypedArray<*const TypedArrayElem>;
+                let elem = TypedArray::<*const TypedArrayElem>::get_unchecked(arr, index);
+                v2_typed_array_to_wire(elem as u64, ctx)
+            },
+            other => {
+                panic!(
+                    "TypedArray wire conversion requires a known producer-side \
+                     element stamp, got discriminant {other}"
+                );
+            }
+        };
+        values.push(value);
+    }
+
+    WireValue::Array(values)
 }
 
 fn typed_object_result_option_to_wire(
@@ -990,6 +1111,37 @@ mod u64_wire_tests {
 }
 
 #[cfg(test)]
+mod typed_array_wire_tests {
+    use super::slot_to_wire;
+    use crate::context::ExecutionContext;
+    use shape_value::v2::typed_array::{
+        release_v2_typed_array, stamp_elem_type, TypedArray, ELEM_TYPE_I64,
+    };
+    use shape_value::{HeapKind, NativeKind};
+    use shape_wire::WireValue;
+
+    #[test]
+    fn v2_i64_typed_array_projects_to_wire_array() {
+        let ctx = ExecutionContext::new_empty();
+        let arr = TypedArray::<i64>::from_slice(&[1, 2, 3, 4]);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64) };
+
+        let wire = slot_to_wire(arr as u64, NativeKind::Ptr(HeapKind::TypedArray), &ctx);
+        assert_eq!(
+            wire,
+            WireValue::Array(vec![
+                WireValue::Integer(1),
+                WireValue::Integer(2),
+                WireValue::Integer(3),
+                WireValue::Integer(4),
+            ])
+        );
+
+        unsafe { release_v2_typed_array(arr as *mut u8) };
+    }
+}
+
+#[cfg(test)]
 mod char_wire_tests {
     //! β-fix CKPT-A char-carrier — `charAt` return-value wire projection.
     //!
@@ -1143,8 +1295,8 @@ mod l5_typed_object_result_option_wire_tests {
     use super::{slot_to_wire, wire_to_slot};
     use crate::context::ExecutionContext;
     use crate::type_schema::builtin_schemas::{
-        OPTION_PAYLOAD, OPTION_VARIANT_NONE, OPTION_VARIANT_SOME, RESULT_VARIANT_ERR,
-        RESULT_VARIANT_OK, resolve_builtin_schema_ids,
+        resolve_builtin_schema_ids, OPTION_PAYLOAD, OPTION_VARIANT_NONE, OPTION_VARIANT_SOME,
+        RESULT_VARIANT_ERR, RESULT_VARIANT_OK,
     };
     use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot};
     use shape_wire::WireValue;
