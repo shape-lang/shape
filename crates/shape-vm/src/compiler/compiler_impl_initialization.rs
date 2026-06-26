@@ -211,6 +211,7 @@ impl BytecodeCompiler {
     /// Enable comptime compilation mode for this compiler instance.
     pub fn set_comptime_mode(&mut self, enabled: bool) {
         self.comptime_mode = enabled;
+        self.type_inference.set_root_comptime_context(enabled);
     }
 
     /// Attach a blob-level cache for incremental compilation.

@@ -53,7 +53,7 @@ use shape_ast::ast::{FunctionDef, Program, Span, TypeAnnotation};
 use shape_runtime::type_schema::SchemaId;
 use shape_runtime::type_system::{
     InferenceFacts, Type, TypeAnalysisMode, TypeError, TypeErrorWithLocation,
-    analyze_program_with_mode, checking::MethodTable,
+    analyze_program_with_mode_and_comptime_context, checking::MethodTable,
 };
 
 // Sub-modules
