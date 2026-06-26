@@ -359,28 +359,6 @@ pub struct FFIFuncRefs {
     pub(crate) exp_f64: FuncRef,
     pub(crate) ln_f64: FuncRef,
 
-    // ADR-006 §2.7.5 — kinded EnumStore producers
-    // (W12-jit-aggregate-non-array, 2026-05-12). Three entry points
-    // matching the VM-side `BuiltinFunction::OkCtor` / `ErrCtor` /
-    // `SomeCtor` shapes (`crates/shape-vm/src/executor/vm_impl/
-    // builtins.rs:551-586`). The JIT-side bodies use the existing
-    // `box_ok` / `box_err` / `box_some` heap-pointer encoding (legacy
-    // NaN-box shape with HK_OK / HK_ERR / HK_SOME prefix); conversion
-    // to the post-strict-typing `Arc<ResultData>` / `Arc<OptionData>`
-    // carrier happens at the JIT↔VM boundary via the existing
-    // `jit_bits_to_nanboxed` conversion infrastructure
-    // (`crates/shape-jit/src/ffi/conversion.rs:246-258` — same path as
-    // `jit_unwrap_ok` / `jit_is_ok` etc.).
-    //
-    // The JIT EnumStore consumer dispatches on the MIR statement's
-    // `variant_name` field to pick the right entry. Slot kind stamped
-    // from the conduit (`concrete_types[container_slot]` →
-    // `Ptr(HeapKind::Result)` / `Ptr(HeapKind::Option)`); no
-    // Bool-default per §2.7.7 #9.
-    pub(crate) make_ok: FuncRef,
-    pub(crate) make_err: FuncRef,
-    pub(crate) make_some: FuncRef,
-
     // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers
     // (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A,
     // 2026-05-12). These produce `Arc::into_raw(Arc<ResultData>) as u64`
@@ -390,10 +368,9 @@ pub struct FFIFuncRefs {
     // signature is `(payload_bits: u64, payload_kind_code: u8) -> u64`
     // where the kind code is the §2.7.7 / Q9 parallel-track byte
     // (`stack_kind_code::encode(payload_kind)`) stamped at JIT-compile
-    // time from the EnumStore operand's MIR-inferred kind. Replaces the
-    // legacy `make_ok` / `make_err` / `make_some` NaN-box family at the
-    // strict-typed EnumStore consumer (those FFI fields above remain
-    // referenced by ffi/conversion.rs for the JIT↔VM trampoline boundary).
+    // time from the EnumStore operand's MIR-inferred kind. The legacy
+    // `make_ok` / `make_err` / `make_some` NaN-box family is not present in
+    // `FFIFuncRefs`; generated code must use these strict carriers.
     pub(crate) v2_make_result_ok: FuncRef,
     pub(crate) v2_make_result_err: FuncRef,
     pub(crate) v2_make_option_some: FuncRef,

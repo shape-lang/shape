@@ -25,7 +25,6 @@ pub mod duration;
 pub mod matrix;
 pub mod number;
 pub mod object;
-pub mod result;
 pub mod string;
 pub mod time;
 
@@ -35,7 +34,6 @@ pub use duration::call_duration_method;
 pub use matrix::call_matrix_method;
 pub use number::call_number_method;
 pub use object::call_object_method;
-pub use result::call_result_method;
 pub use string::call_string_method;
 pub use time::call_time_method;
 
@@ -1039,8 +1037,28 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                     return TAG_NULL;
                 } else {
                     match read_heap_kind(receiver_bits) {
-                        HK_OK | HK_ERR => {
-                            call_result_method(receiver_bits, &method_name, &args)
+                        HK_OK | HK_ERR | HK_SOME => {
+                            tracing::debug!(
+                                target: "shape_jit",
+                                method_name = %method_name,
+                                receiver_bits,
+                                "jit-call-method SURFACE: legacy Result/Option \
+                                 carrier (HK_OK/HK_ERR/HK_SOME) reached the \
+                                 UInt64 JIT-format dispatch path. Strict \
+                                 Result/Option receivers must be stamped as \
+                                 Ptr(HeapKind::Result) / Ptr(HeapKind::Option) \
+                                 and delegated to the VM trampoline; deopting \
+                                 to interpreter instead of using the retired \
+                                 UnifiedValue<u64> method helper.",
+                            );
+                            super::control::set_jit_runtime_error(format!(
+                                "JIT method dispatch for `.{}()` reached a \
+                                 legacy Result/Option carrier — deopting to \
+                                 interpreter",
+                                method_name,
+                            ));
+                            ctx_ref.pending_call_error = 1;
+                            return TAG_NULL;
                         }
                         HK_ARRAY => call_array_method(receiver_bits, &method_name, &args),
                         HK_STRING => call_string_method(receiver_bits, &method_name, &args),

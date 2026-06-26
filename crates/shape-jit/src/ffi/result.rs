@@ -32,9 +32,10 @@
 //! "Forbidden code" — runtime tag_bits dispatch deleted with the W-series).
 //!
 //! The legacy `jit_make_ok` / `_err` / `_some` + `jit_is_ok` / etc. above are
-//! retained for the bytecode-VM-trampoline conversion path (`ffi/conversion.rs`)
-//! but are NOT called from the new MIR EnumStore consumer — the producers below
-//! are the §2.7.5 stamp-at-compile-time path.
+//! retained as Rust-side compatibility helpers for old boundary conversion/tests.
+//! They are NOT registered as Cranelift imports, are absent from `FFIFuncRefs`,
+//! and are NOT called from the MIR EnumStore consumer — the producers below are
+//! the §2.7.5 stamp-at-compile-time path.
 
 use super::jit_kinds::*;
 use super::value_ffi::*;
