@@ -80,8 +80,19 @@ impl TypeInferenceEngine {
                 span: _span,
             } => self.check_function_expr_against(params, return_type.as_ref(), body, expected),
 
+            // Table row literals: `[a, b], [c, d]` is only valid when an
+            // expected `Table<T>` annotation supplies the row struct. The VM
+            // compiler already lowers this syntax from that annotation; mirror
+            // the same static proof here so inference does not reject the
+            // initializer as an unconstrained fresh type before lowering.
+            Expr::TableRows(rows, _) => self.check_table_rows_against(rows, expected),
+
             // Array: propagate element type to elements
             Expr::Array(elements, _) => {
+                if Self::table_row_type_name_from_expected(expected).is_some() {
+                    return self.check_table_rows_against(std::slice::from_ref(elements), expected);
+                }
+
                 // U1: the expected array type may arrive in ANY encoding — the
                 // canonical `Generic{Array, [elem]}` (now produced by every array
                 // literal + `BuiltinTypes::array`), the annotation
@@ -810,6 +821,72 @@ impl TypeInferenceEngine {
             Type::Concrete(ann) => ann.as_type_name_str(),
             _ => None,
         }
+    }
+
+    fn table_row_type_name_from_expected(expected: &Type) -> Option<String> {
+        let canon = expected.canonicalize();
+        let Type::Generic { base, args } = canon else {
+            return None;
+        };
+        if args.len() != 1 || Self::array_policy_generic_base_name(base.as_ref()) != Some("Table") {
+            return None;
+        }
+        Self::table_row_type_name_from_type(&args[0])
+    }
+
+    fn table_row_type_name_from_type(ty: &Type) -> Option<String> {
+        match ty.canonicalize() {
+            Type::Concrete(TypeAnnotation::Basic(name)) => Some(name),
+            Type::Concrete(TypeAnnotation::Reference(name)) => Some(name.to_string()),
+            _ => None,
+        }
+    }
+
+    fn check_table_rows_against(
+        &mut self,
+        rows: &[Vec<Expr>],
+        expected: &Type,
+    ) -> TypeResult<Type> {
+        let row_type_name = Self::table_row_type_name_from_expected(expected).ok_or_else(|| {
+            TypeError::ConstraintViolation(
+                "table row literal requires a `Table<T>` type annotation".to_string(),
+            )
+        })?;
+        let struct_def = self
+            .struct_type_defs
+            .get(&row_type_name)
+            .cloned()
+            .ok_or_else(|| TypeError::UndefinedType(row_type_name.clone()))?;
+        let fields: Vec<_> = struct_def
+            .fields
+            .iter()
+            .filter(|field| !field.is_comptime)
+            .collect();
+
+        for (row_idx, row) in rows.iter().enumerate() {
+            if row.len() != fields.len() {
+                let field_names = fields
+                    .iter()
+                    .map(|field| field.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(TypeError::ConstraintViolation(format!(
+                    "row {} has {} values but type '{}' has {} fields ({})",
+                    row_idx + 1,
+                    row.len(),
+                    row_type_name,
+                    fields.len(),
+                    field_names
+                )));
+            }
+
+            for (expr, field) in row.iter().zip(fields.iter()) {
+                let field_type = self.resolve_type_annotation(&field.type_annotation);
+                self.check_against(expr, &field_type)?;
+            }
+        }
+
+        Ok(expected.canonicalize())
     }
 
     /// Check a bracket literal `[v1, v2, ...]` against an expected bracket type

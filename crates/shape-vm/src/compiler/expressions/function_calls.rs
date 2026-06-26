@@ -9,7 +9,7 @@ use crate::compiler::monomorphization::type_resolution::{
 use crate::compiler::string_interpolation::has_interpolation;
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::{VariableKind, VariableTypeInfo};
-use shape_ast::ast::{Expr, InterpolationMode, Literal, Span, Spanned};
+use shape_ast::ast::{Expr, InterpolationMode, Literal, ObjectEntry, Span, Spanned, Statement};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::closure::EnvironmentAnalyzer;
 use shape_runtime::type_system::Type;
@@ -536,6 +536,94 @@ impl BytecodeCompiler {
         } else {
             None
         }
+    }
+
+    fn table_select_body_expr(body: &[Statement]) -> Option<&Expr> {
+        match body {
+            [Statement::Expression(expr, _)] => Some(expr),
+            [Statement::Return(Some(expr), _)] => Some(expr),
+            _ => None,
+        }
+    }
+
+    fn row_field_projection_column<'a>(expr: &'a Expr, row_param: &str) -> Option<&'a str> {
+        let Expr::PropertyAccess {
+            object, property, ..
+        } = expr
+        else {
+            return None;
+        };
+        match object.as_ref() {
+            Expr::Identifier(name, _) if name == row_param => Some(property.as_str()),
+            _ => None,
+        }
+    }
+
+    fn static_table_select_columns(
+        &self,
+        arg: &Expr,
+        schema_id: u32,
+        type_name: &str,
+    ) -> Result<Option<Vec<String>>> {
+        let Expr::FunctionExpr { params, body, .. } = arg else {
+            return Ok(None);
+        };
+        if params.len() != 1 {
+            return Ok(None);
+        }
+        let Some(row_param) = params[0].pattern.as_identifier() else {
+            return Ok(None);
+        };
+        let Some(body_expr) = Self::table_select_body_expr(body) else {
+            return Ok(None);
+        };
+
+        let mut columns = Vec::new();
+        match body_expr {
+            Expr::Object(entries, _) => {
+                if entries.is_empty() {
+                    return Ok(None);
+                }
+                for entry in entries {
+                    let ObjectEntry::Field { key, value, .. } = entry else {
+                        return Ok(None);
+                    };
+                    let Some(column) = Self::row_field_projection_column(value, row_param) else {
+                        return Ok(None);
+                    };
+                    if key != column {
+                        return Ok(None);
+                    }
+                    columns.push(column.to_string());
+                }
+            }
+            _ => {
+                let Some(column) = Self::row_field_projection_column(body_expr, row_param) else {
+                    return Ok(None);
+                };
+                columns.push(column.to_string());
+            }
+        }
+
+        let Some(schema) = self.type_tracker.schema_registry().get_by_id(schema_id) else {
+            return Err(ShapeError::SemanticError {
+                message: format!("Table.select: schema for '{}' is not registered", type_name),
+                location: Some(self.span_to_source_location(arg.span())),
+            });
+        };
+        for column in &columns {
+            if !schema.has_field(column) {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Table.select: type '{}' has no field '{}'",
+                        type_name, column
+                    ),
+                    location: Some(self.span_to_source_location(arg.span())),
+                });
+            }
+        }
+
+        Ok(Some(columns))
     }
 
     fn value_schema_from_type_info(type_info: &VariableTypeInfo) -> Option<u32> {
@@ -3230,6 +3318,44 @@ impl BytecodeCompiler {
         let receiver_table_schema = receiver_type_info
             .as_ref()
             .and_then(Self::table_schema_from_type_info);
+
+        if method == "select" && args.len() == 1 {
+            if let Some((schema_id, ref type_name)) = receiver_table_schema {
+                if matches!(args.first(), Some(Expr::FunctionExpr { .. })) {
+                    let Some(columns) =
+                        self.static_table_select_columns(&args[0], schema_id, type_name)?
+                    else {
+                        return Err(ShapeError::SemanticError {
+                            message:
+                                "Table.select(lambda) requires a statically provable direct row-field projection"
+                                    .to_string(),
+                            location: Some(self.span_to_source_location(args[0].span())),
+                        });
+                    };
+                    for column in &columns {
+                        self.compile_literal(&Literal::String(column.clone()))?;
+                    }
+                    let method_id = shape_value::MethodId::from_name(method);
+                    let string_idx = self.program.add_string(method.to_string());
+                    let rtt = Self::resolve_type_tag(receiver_numeric_type, &receiver_type_info);
+                    self.emit(Instruction::new(
+                        OpCode::CallMethod,
+                        Some(Operand::TypedMethodCall {
+                            method_id: method_id.0,
+                            arg_count: columns.len() as u16,
+                            string_id: string_idx,
+                            receiver_type_tag: rtt,
+                        }),
+                    ));
+                    self.last_expr_schema = None;
+                    self.last_expr_type_info = None;
+                    self.closure_row_schema = None;
+                    self.pending_closure_param_types = None;
+                    self.clear_last_expr_reference_result();
+                    return Ok(());
+                }
+            }
+        }
 
         // Typed-object callable field dispatch:
         // `obj.field(args...)` where `field` is a typed property that stores a closure/function.

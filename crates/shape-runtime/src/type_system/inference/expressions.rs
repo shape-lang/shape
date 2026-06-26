@@ -1032,6 +1032,15 @@ impl TypeInferenceEngine {
                         .lookup_generic_signature(tn, method)
                         .cloned()
                 });
+                if matches!(type_name.as_deref(), Some("Table"))
+                    && method == "select"
+                    && !args.is_empty()
+                    && args
+                        .iter()
+                        .all(|arg| matches!(arg, Expr::Literal(Literal::String(_), _)))
+                {
+                    return Ok(receiver_type.clone());
+                }
                 // Retain the gsig + the per-callsite fresh `method_vars` so the
                 // method's RETURN type can be resolved against the SAME vars the
                 // expected param types reference. This is what lets a closure's
