@@ -3391,6 +3391,18 @@ impl BytecodeCompiler {
         // Capture receiver's extend type before args compilation overwrites compiler state.
         let receiver_extend_type =
             self.resolve_receiver_extend_type(receiver, &receiver_type_info, receiver_schema);
+        // Array `clone` is a native typed-array method. Letting the stdlib
+        // `Vec.clone` UFCS body win routes through `Vec.slice`, whose integer
+        // comparisons require a Number.cmp surface that is not the array clone
+        // carrier proof.
+        let prefer_native_array_clone = method == "clone"
+            && args.is_empty()
+            && matches!(
+                crate::compiler::monomorphization::type_resolution::method_call_receiver_derived_concrete_type(
+                    self, receiver, method,
+                ),
+                Some(shape_value::v2::ConcreteType::Array(_))
+            );
 
         // Resolve closure-row schema from the receiver contract.
         // `receiver` was compiled immediately above and may carry Table<T> metadata.
@@ -3550,20 +3562,29 @@ impl BytecodeCompiler {
         // extend-method qualified name "Type.method" using the captured receiver type.
         // For numeric types, also check parent type: Int → Number (Int is a subtype of
         // Number for method dispatch, so `extend Number` methods apply to Int values).
-        let extend_func_idx = receiver_extend_type.as_deref().and_then(|type_name| {
-            let qualified = format!("{}.{}", type_name, method);
-            self.find_function(&qualified).or_else(|| {
-                // Try parent type for subtypes (Int → Number)
-                let parent = match type_name {
-                    "Int" => Some("Number"),
-                    _ => None,
-                };
-                parent.and_then(|p| {
-                    let parent_qualified = format!("{}.{}", p, method);
-                    self.find_function(&parent_qualified)
+        let extend_func_idx = if prefer_native_array_clone {
+            None
+        } else {
+            receiver_extend_type.as_deref().and_then(|type_name| {
+                let qualified = format!("{}.{}", type_name, method);
+                self.find_function(&qualified).or_else(|| {
+                    // Try parent type for subtypes (Int → Number)
+                    let parent = match type_name {
+                        "Int" => Some("Number"),
+                        _ => None,
+                    };
+                    parent.and_then(|p| {
+                        let parent_qualified = format!("{}.{}", p, method);
+                        self.find_function(&parent_qualified)
+                    })
                 })
             })
-        });
+        };
+        let free_func_idx = if prefer_native_array_clone {
+            None
+        } else {
+            self.find_function(method)
+        };
         // D-γ window_over_partition_by hang fix (v0.3 KC #6(e), 2026-05-22):
         // a UFCS-resolved generic extend method (e.g. `Vec.map<T,U>`) has
         // its body skipped at compile time (functions.rs:201-207 — generic
@@ -3585,7 +3606,7 @@ impl BytecodeCompiler {
         // registry (e.g. ckpt2_surface for typed-array methods), preserving
         // the surface-and-stop discipline rather than silently hanging.
         let is_generic_unmonomorphizable = extend_func_idx
-            .or_else(|| self.find_function(method))
+            .or(free_func_idx)
             .filter(|&idx| self.current_function != Some(idx))
             .and_then(|idx| {
                 let func_name = self.program.functions[idx].name.clone();
@@ -3606,7 +3627,7 @@ impl BytecodeCompiler {
                 if mono_idx.is_none() { Some(idx) } else { None }
             });
         if let Some(func_idx) = extend_func_idx
-            .or_else(|| self.find_function(method))
+            .or(free_func_idx)
             .filter(|&idx| self.current_function != Some(idx))
             .filter(|&idx| Some(idx) != is_generic_unmonomorphizable)
         {
@@ -3699,22 +3720,30 @@ impl BytecodeCompiler {
                 None => vec![],
             };
             // Check impl methods (Type::method) and extend methods (Type.method)
-            let scoped_func_idx = extend_type_names.iter().find_map(|type_name| {
-                let scoped_name = format!("{}::{}", type_name, method);
-                let extend_name = format!("{}.{}", type_name, method);
-                self.find_function(&scoped_name)
-                    .or_else(|| self.find_function(&extend_name))
-            });
+            let scoped_func_idx = if prefer_native_array_clone {
+                None
+            } else {
+                extend_type_names.iter().find_map(|type_name| {
+                    let scoped_name = format!("{}::{}", type_name, method);
+                    let extend_name = format!("{}.{}", type_name, method);
+                    self.find_function(&scoped_name)
+                        .or_else(|| self.find_function(&extend_name))
+                })
+            };
             // Also check trait_method_symbols for named impls
             let trait_func_idx = scoped_func_idx
                 .is_none()
                 .then(|| {
-                    extend_type_names.iter().find_map(|type_name| {
-                        self.program
-                            .find_default_trait_impl_for_type_method(type_name, method)
-                            .map(|s| s.to_string())
-                            .and_then(|impl_func_name| self.find_function(&impl_func_name))
-                    })
+                    if prefer_native_array_clone {
+                        None
+                    } else {
+                        extend_type_names.iter().find_map(|type_name| {
+                            self.program
+                                .find_default_trait_impl_for_type_method(type_name, method)
+                                .map(|s| s.to_string())
+                                .and_then(|impl_func_name| self.find_function(&impl_func_name))
+                        })
+                    }
                 })
                 .flatten();
 
@@ -3947,6 +3976,12 @@ impl BytecodeCompiler {
 
         // Propagate known return type for standard method calls
         self.last_expr_schema = None;
+
+        if prefer_native_array_clone {
+            self.last_expr_type_info = receiver_type_info.clone();
+            self.clear_last_expr_reference_result();
+            return Ok(());
+        }
 
         // REAL-MOVE keep-both (v0.3.3, user 2026-06-21): `clone` returns
         // `Self`. For a struct (`TypedObject`) receiver carrying a known

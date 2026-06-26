@@ -19,9 +19,9 @@
 //! sub-clusters (W17-array-typed-receiver, W17-typed-carrier-monomorphization).
 //! Those are unblocked once their respective sub-clusters land.
 
-use super::test_utils::{eval, eval_result, eval_typed_i64};
+use super::test_utils::{eval, eval_result, eval_typed_i64, eval_with_prelude};
 use crate::executor::v2_handlers::v2_array_detect::{
-    V2ElemType, V2TypedArrayView, as_v2_typed_array, read_element,
+    as_v2_typed_array, read_element, V2ElemType, V2TypedArrayView,
 };
 use shape_value::{HeapKind, KindedSlot, NativeKind};
 
@@ -217,6 +217,16 @@ fn test_int_array_abs() {
 #[test]
 fn test_int_array_to_array() {
     assert_i64_array("[1, 2, 3].toArray()", &[1, 2, 3]);
+}
+
+#[test]
+fn test_int_array_clone_keyword_prefers_native_method_with_prelude() {
+    let result = eval_with_prelude(
+        "let c = [4, 5, 6]\n\
+         let d = clone c\n\
+         c[0] + d[0]",
+    );
+    assert_eq!(result.as_i64(), Some(8));
 }
 
 #[test]
