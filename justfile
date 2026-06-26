@@ -158,6 +158,11 @@ verify-phase-2:
 verify-phase-5: check-no-dynamic
 	@echo "TODO: invoke sentinel test when crates/shape-vm/src/executor/tests/no_dynamic.rs lands"
 
+# Narrow provenance/Miri gate. This wraps the script in direnv because the
+# active devenv cargo is stable-only; the script uses rustup-run nightly.
+miri-provenance:
+	direnv exec {{justfile_directory()}} bash scripts/check-miri-provenance.sh
+
 # --- Phase 4c CI coverage gate (cargo-tarpaulin) ---
 #
 # Per docs/cluster-audits/v0.3-w14-test-coverage-audit.md §1-§6 + Phase 4
