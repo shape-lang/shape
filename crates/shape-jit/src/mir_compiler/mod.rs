@@ -106,6 +106,13 @@ mod array_builder_regression_tests;
 #[cfg(all(test, feature = "deep-tests"))]
 mod groupby_surface_regression_tests;
 
+// W10 fuzzy-comparison VM/JIT divergence regression. The bytecode VM carries
+// tolerance-aware fuzzy semantics; current JIT MIR drops the tolerance, so the
+// executor must deopt before MIR codegen. Gated behind `deep-tests` for the
+// same JITExecutor full-pipeline cost as the adjacent modules.
+#[cfg(all(test, feature = "deep-tests"))]
+mod fuzzy_comparison_regression_tests;
+
 // γ-CP5 jit-typedarray-ptr regression tests (v0.3-gating
 // NO-KNOWN-INCORRECTNESS). Pin two JIT bugs un-masked by the Family-α
 // TypedArray fix: 7a — `Place::Index` codegen on a `Place::Field` base
