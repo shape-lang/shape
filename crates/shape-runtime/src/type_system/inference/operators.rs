@@ -962,23 +962,21 @@ impl TypeInferenceEngine {
             }
 
             BinaryOp::ErrorContext => {
-                // Context wrapping always returns Result<SuccessType>.
-                // - Result<T> !! ctx -> Result<T>
-                // - Option<T>/T? !! ctx -> Result<T>
-                // - T !! ctx -> Result<T>
+                // `!!` builds a contexted Result/AnyError carrier and then
+                // consumes it through the same success path as `?`, so the
+                // expression type is the compile-time-proven success arm:
+                // - Result<T> !! ctx -> T
+                // - Option<T>/T? !! ctx -> T
+                // - T !! ctx -> T
                 let success = if let Some(inner) = Self::unwrap_result_or_option_type(left) {
                     inner
                 } else if Self::is_unresolved_var(left) {
                     // The left operand is still an unresolved inference variable
                     // (e.g. `g() !! ctx` where `g`'s return type has not been
-                    // resolved yet). Wrapping the bare var as `Result<Variable>`
-                    // and then unwrapping it via a following `?` would yield the
-                    // still-unconstrained var, dropping the success type entirely
-                    // (finding 5). Instead, link the operand to `Result<T>` by
-                    // pushing a constraint `left = Result<T, AnyError>` with a
-                    // fresh success var `T`, and thread `T` through. Once `g`'s
-                    // return type resolves, `T` resolves with it — so
-                    // `(g() !! ctx)?` yields `g`'s success type.
+                    // resolved yet). Link the operand to `Result<T>` by pushing
+                    // `left = Result<T, AnyError>` with a fresh success var `T`,
+                    // and return that same `T`. Once `g`'s return type resolves,
+                    // `T` resolves with it; no runtime carrier guessing is used.
                     let success_var = self.fresh_type_var();
                     let constrained = self.wrap_in_result(success_var.clone());
                     self.push_constraint_with_origin(left.clone(), constrained, span);
@@ -986,7 +984,7 @@ impl TypeInferenceEngine {
                 } else {
                     left.clone()
                 };
-                Ok(self.wrap_in_result(success))
+                Ok(success)
             }
 
             BinaryOp::Pipe => {
@@ -1322,7 +1320,7 @@ mod tests {
     }
 
     #[test]
-    fn test_error_context_promotes_option_to_result() {
+    fn test_error_context_unwraps_option_success_type() {
         let mut engine = TypeInferenceEngine::new();
         let option_num = Type::Concrete(TypeAnnotation::Generic {
             name: "Option".into(),
@@ -1337,18 +1335,11 @@ mod tests {
             )
             .expect("option !! context should infer");
 
-        let expected = Type::Generic {
-            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
-            args: vec![
-                BuiltinTypes::number(),
-                Type::Concrete(TypeAnnotation::Reference("AnyError".into())),
-            ],
-        };
-        assert_eq!(inferred, expected);
+        assert_eq!(inferred, BuiltinTypes::number());
     }
 
     #[test]
-    fn test_error_context_keeps_result_inner_type() {
+    fn test_error_context_unwraps_result_success_type() {
         let mut engine = TypeInferenceEngine::new();
         let result_num = Type::Generic {
             base: Box::new(Type::Concrete(TypeAnnotation::Reference("Result".into()))),
@@ -1365,7 +1356,7 @@ mod tests {
                 Span::DUMMY,
             )
             .expect("result !! context should infer");
-        assert_eq!(inferred, result_num);
+        assert_eq!(inferred, BuiltinTypes::number());
     }
 
     #[test]

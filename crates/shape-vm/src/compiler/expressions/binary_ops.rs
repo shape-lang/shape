@@ -1491,16 +1491,15 @@ impl BytecodeCompiler {
                 // `value !! context`: the `op_error_context` handler
                 // (`executor/exceptions/mod.rs`) pops `context` (top of
                 // stack) then `value`, so we compile `left` (value) then
-                // `right` (context). On the success leg the handler
-                // unwraps to the inner value (`Ok(v) => v`, `Some(v) => v`,
-                // bare `v => v`); on the failure leg it builds an AnyError
-                // and throws. The opcode + handler already exist; this arm
-                // is the only missing dispatch piece.
+                // `right` (context). That opcode builds the contexted
+                // Result/AnyError carrier; `!!` then immediately consumes it
+                // through the same `TryUnwrap` path as `?`, so the expression
+                // value that reaches a binding is the success arm `T`.
                 self.compile_expr(left)?;
                 self.compile_expr(right)?;
                 self.emit(Instruction::simple(OpCode::ErrorContext));
-                // `!!` yields the UNWRAPPED success value `T` (same as `?`
-                // — both unwrap `Ok(v)`/`Some(v)` to `v` on success).
+                self.emit_try_unwrap_current_value(None)?;
+                // `!!` yields the UNWRAPPED success value `T` (same as `?`).
                 // Stamp the tracker with the unwrapped success type so a
                 // downstream `let v = expr !! "ctx"` records `v`'s type.
                 self.stamp_unwrapped_success_type(left);
