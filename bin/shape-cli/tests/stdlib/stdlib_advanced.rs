@@ -30,14 +30,6 @@ fn eval_user_code_to_bool(code: &str) -> bool {
     }
 }
 
-fn assert_random_intrinsic_kinded_carrier_stub(code: &str, intrinsic: &str) {
-    let err = eval_user_code(code)
-        .expect_err("random-backed stdlib wrapper should stop at the VM intrinsic carrier stub");
-    assert!(err.contains("phase-1b-vm-wave-5d-intrinsic"), "{err}");
-    assert!(err.contains(intrinsic), "{err}");
-    assert!(err.contains("handle_intrinsic_builtin"), "{err}");
-}
-
 fn read_stdlib_module(path: &str) -> String {
     let base = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -73,6 +65,10 @@ fn with_modules(module_paths: &[&str], code: &str) -> String {
 
 fn with_advanced_distributions_import(code: &str) -> String {
     format!("use std::core::distributions_advanced\n{code}")
+}
+
+fn with_advanced_distributions_and_random_import(code: &str) -> String {
+    format!("use std::core::distributions_advanced\nuse std::core::random\n{code}")
 }
 
 // ===== SL7: Advanced Distributions =====
@@ -254,25 +250,29 @@ fn test_beta_cdf_bounds() {
 }
 
 #[test]
-fn test_gamma_sample_random_intrinsic_kinded_carrier_stub() {
+fn test_gamma_sample_via_stdlib_import() {
     init_runtime();
-    let code = with_advanced_distributions_import(
+    let code = with_advanced_distributions_and_random_import(
         r#"
-        distributions_advanced::gamma_sample(2.0, 1.0)
+        random::random_seed(123.0);
+        let sample = distributions_advanced::gamma_sample(2.0, 1.0);
+        sample > 0.0
         "#,
     );
-    assert_random_intrinsic_kinded_carrier_stub(&code, "IntrinsicRandomNormal");
+    assert!(eval_user_code_to_bool(&code));
 }
 
 #[test]
-fn test_beta_sample_random_intrinsic_kinded_carrier_stub() {
+fn test_beta_sample_via_stdlib_import() {
     init_runtime();
-    let code = with_advanced_distributions_import(
+    let code = with_advanced_distributions_and_random_import(
         r#"
-        distributions_advanced::beta_sample(2.0, 5.0)
+        random::random_seed(123.0);
+        let sample = distributions_advanced::beta_sample(2.0, 5.0);
+        sample > 0.0 && sample < 1.0
         "#,
     );
-    assert_random_intrinsic_kinded_carrier_stub(&code, "IntrinsicRandomNormal");
+    assert!(eval_user_code_to_bool(&code));
 }
 
 // ===== SL8: Property-Based Testing =====
