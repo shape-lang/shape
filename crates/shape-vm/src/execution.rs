@@ -523,6 +523,7 @@ impl ProgramExecutor for BytecodeExecutor {
         };
 
         let runtime = engine.get_runtime_mut();
+        runtime.clear_last_runtime_error();
         let mut owned_ctx_fallback;
         let ctx_borrow: &mut ExecutionContext = match runtime.persistent_context_mut() {
             Some(ctx) => ctx,
@@ -557,12 +558,19 @@ impl ProgramExecutor for BytecodeExecutor {
                 .and_then(|l| l.max_memory_bytes),
         );
 
-        let completion: KindedSlot = vm.execute(Some(ctx_borrow)).map_err(|e| {
-            shape_runtime::error::ShapeError::RuntimeError {
-                message: e.to_string(),
-                location: None,
+        let completion: KindedSlot = match vm.execute(Some(ctx_borrow)) {
+            Ok(completion) => completion,
+            Err(e) => {
+                let payload = vm.take_last_uncaught_exception().map(|payload| {
+                    wire_conversion::slot_to_wire(payload.raw(), payload.kind(), ctx_borrow)
+                });
+                runtime.set_last_runtime_error(payload);
+                return Err(shape_runtime::error::ShapeError::RuntimeError {
+                    message: e.to_string(),
+                    location: None,
+                });
             }
-        })?;
+        };
 
         // REPL save-side: copy this cell's value bindings back into the
         // context so the next cell can reference them.
