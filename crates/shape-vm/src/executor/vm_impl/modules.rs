@@ -25,7 +25,7 @@ fn project_concrete_return(
     use shape_value::heap_value::{HashMapData, HashMapKindedRef};
     use shape_value::v2::string_obj::StringObj;
     use shape_value::v2::typed_array::{
-        ELEM_TYPE_F64, ELEM_TYPE_I64, ELEM_TYPE_STRING, TypedArray, stamp_elem_type,
+        stamp_elem_type, TypedArray, ELEM_TYPE_F64, ELEM_TYPE_I64, ELEM_TYPE_STRING,
     };
     use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
     use std::sync::Arc;
@@ -121,6 +121,18 @@ fn project_concrete_return(
             }
             Ok(KindedSlot::new(
                 ValueSlot::from_raw(arr as usize as u64),
+                NativeKind::Ptr(HeapKind::TypedArray),
+            ))
+        }
+        ConcreteReturn::ArrayStringRows(rows) => {
+            // Nested string rows use the marshal-layer v2 nested typed-array
+            // producer: outer TypedArray<*const TypedArrayElem>, inner
+            // TypedArray<*const StringObj>. This is not an ArrayHeapValue
+            // projection; the elements are slot-level typed arrays.
+            use shape_runtime::marshal::ToSlot;
+            let bits = rows.to_slot();
+            Ok(KindedSlot::new(
+                ValueSlot::from_raw(bits),
                 NativeKind::Ptr(HeapKind::TypedArray),
             ))
         }
@@ -686,6 +698,7 @@ mod stage_k1_tests {
     //! carriers. The recovered `KindedSlot`'s own `Drop` retires the carrier.
 
     use super::*;
+    use shape_runtime::marshal::FromSlot;
     use shape_runtime::typed_module_exports::{
         ConcreteReturn, ConcreteType, TypedModuleFunction, TypedReturn,
     };
@@ -700,10 +713,7 @@ mod stage_k1_tests {
     /// the projected `KindedSlot`.
     fn roundtrip_with_schemas(
         tr: TypedReturn,
-    ) -> (
-        KindedSlot,
-        shape_runtime::type_schema::BuiltinSchemaIds,
-    ) {
+    ) -> (KindedSlot, shape_runtime::type_schema::BuiltinSchemaIds) {
         let mut vm = VirtualMachine::new(VMConfig::default());
         let schemas = vm.builtin_schemas.clone();
         let tr_cell = std::sync::Mutex::new(Some(tr));
@@ -779,6 +789,30 @@ mod stage_k1_tests {
             .map(|&p| unsafe { StringObj::as_str(p) })
             .collect();
         assert_eq!(got, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn array_string_rows_roundtrips() {
+        let slot = roundtrip(TypedReturn::Concrete(ConcreteReturn::ArrayStringRows(
+            vec![
+                vec![Arc::new("a".to_string()), Arc::new("b".to_string())],
+                vec![Arc::new("1".to_string()), Arc::new("2".to_string())],
+            ],
+        )));
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedArray));
+
+        let rows = <Vec<Vec<Arc<String>>> as FromSlot>::from_slot(slot.raw());
+        let got: Vec<Vec<String>> = rows
+            .into_iter()
+            .map(|row| row.into_iter().map(|cell| (*cell).clone()).collect())
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["1".to_string(), "2".to_string()],
+            ]
+        );
     }
 
     #[test]
@@ -960,11 +994,11 @@ mod stage_k1_tests {
 /// the `#[cfg(test)]` module so it can be a `super::` reference from the
 /// nested test module while still being compiled only under `cfg(test)`.
 #[cfg(test)]
-fn project_concrete_return_for_test_typed_object()
--> std::sync::Arc<shape_value::heap_value::HeapValue> {
+fn project_concrete_return_for_test_typed_object(
+) -> std::sync::Arc<shape_value::heap_value::HeapValue> {
     use shape_runtime::type_schema::typed_object_from_pairs;
-    use shape_value::KindedSlot;
     use shape_value::heap_value::HeapValue;
+    use shape_value::KindedSlot;
     // Build a 1-field typed object via the shared builder, then recover its
     // raw TypedObject pointer into an Arc<HeapValue::TypedObject> carrier
     // (the ArrayHeapValue / HashMapStringHeapValue element shape).

@@ -37,16 +37,37 @@ fn eval_with_csv_to_bool(code: &str) -> bool {
 #[test]
 fn test_csv_parse() {
     init_runtime();
-    let err = eval_with_csv(
+    assert!(eval_with_csv_to_bool(
         r#"
         use std::core::csv
         let rows = csv::parse("a,b,c\n1,2,3")
         rows[1][0] == "1"
+    "#
+    ));
+}
+
+#[test]
+fn test_csv_read_file() {
+    init_runtime();
+    let file = tempfile::NamedTempFile::new().expect("temp csv file");
+    std::fs::write(file.path(), "a,b\n3,4\n").expect("write temp csv");
+    let path = file
+        .path()
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let code = format!(
+        r#"
+        use std::core::csv
+        let result = csv::read_file("{}")
+        match result {{
+            Ok(rows) => rows[1][1] == "4"
+            Err(_) => false,
+        }}
     "#,
-    )
-    .expect_err("csv::parse is blocked until typed native returns can project nested rows");
-    assert!(err.contains("Array<Array<string>>"), "{err}");
-    assert!(err.contains("typed-return ABI"), "{err}");
+        path
+    );
+    assert!(eval_with_csv_to_bool(&code));
 }
 
 #[test]
