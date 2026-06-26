@@ -437,10 +437,10 @@ impl FromSlot for Vec<Arc<String>> {
 /// marshal via the dedicated `Arc<Vec<T>>` impls; reaching this reader with a
 /// scalar-stamped array is a marshal kind-contract violation by the caller and
 /// SURFACEs (panic with a precise message — the established surface mechanism
-/// for a `from_slot` that cannot return `Result`). A nested-array element
-/// (`Array<Array<...>>`) has no `ELEM_TYPE_*` discriminant at the producer
-/// (`stamp_elem_type` never stamps one), so it cannot reach this reader; if a
-/// nested-array carrier is ever added it lands here as a new arm, not a shim.
+/// for a `from_slot` that cannot return `Result`). Nested-array elements
+/// (`Array<Array<...>>`) are slot-level carriers (`ELEM_TYPE_TYPED_ARRAY`),
+/// not `HeapValue` arms; exact nested consumers use a concrete body type such
+/// as `Vec<Vec<Arc<String>>>`.
 impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
     const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
     #[inline]
@@ -450,8 +450,8 @@ impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
         use shape_value::v2::refcount::v2_retain;
         use shape_value::v2::string_obj::StringObj;
         use shape_value::v2::typed_array::{
-            ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_STRING, ELEM_TYPE_TYPED_OBJECT,
-            TypedArray, read_elem_type,
+            ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_STRING, ELEM_TYPE_TYPED_ARRAY,
+            ELEM_TYPE_TYPED_OBJECT, TypedArray, read_elem_type,
         };
 
         let base = bits as usize as *const u8;
@@ -504,6 +504,14 @@ impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
                         })
                         .collect()
                 }
+                ELEM_TYPE_TYPED_ARRAY => panic!(
+                    "FromSlot<Vec<Arc<HeapValue>>>: TypedArray element-type \
+                     ELEM_TYPE_TYPED_ARRAY is a slot-level nested-array \
+                     carrier, not a canonical HeapValue arm. Use an exact \
+                     body type such as Vec<Vec<Arc<String>>> for \
+                     Array<Array<string>> so the inner element contract \
+                     stays producer-stamped and monomorphic (STAGE K2)."
+                ),
                 other => panic!(
                     "FromSlot<Vec<Arc<HeapValue>>>: TypedArray element-type \
                      discriminant {} has no canonical Arc<HeapValue> arm. \
@@ -515,6 +523,81 @@ impl FromSlot for Vec<Arc<shape_value::heap_value::HeapValue>> {
                     other
                 ),
             }
+        }
+    }
+}
+
+/// Read an `Array<Array<string>>` from a `NativeKind::Ptr(HeapKind::TypedArray)`
+/// slot.
+///
+/// The outer slot must be a v2-raw
+/// `TypedArray<*const TypedArrayElem>` stamped `ELEM_TYPE_TYPED_ARRAY`.
+/// Every inner row must be a v2-raw `TypedArray<*const StringObj>` stamped
+/// `ELEM_TYPE_STRING`. The stamps are producer-side element contracts; this
+/// reader does not infer element kinds from payload bits.
+impl FromSlot for Vec<Vec<Arc<String>>> {
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        use shape_value::v2::string_obj::StringObj;
+        use shape_value::v2::typed_array::{
+            ELEM_TYPE_STRING, ELEM_TYPE_TYPED_ARRAY, TypedArray, TypedArrayElem, read_elem_type,
+        };
+
+        let base = bits as usize as *const u8;
+        if base.is_null() {
+            return Vec::new();
+        }
+
+        unsafe {
+            let outer_elem_type = read_elem_type(base);
+            if outer_elem_type != ELEM_TYPE_TYPED_ARRAY {
+                panic!(
+                    "FromSlot<Vec<Vec<Arc<String>>>>: expected outer \
+                     Array<Array<string>> carrier stamped \
+                     ELEM_TYPE_TYPED_ARRAY ({}), got element-type \
+                     discriminant {}.",
+                    ELEM_TYPE_TYPED_ARRAY, outer_elem_type
+                );
+            }
+
+            let outer = base as *const TypedArray<*const TypedArrayElem>;
+            let outer_slice = TypedArray::<*const TypedArrayElem>::as_slice(outer);
+            let mut rows = Vec::with_capacity(outer_slice.len());
+
+            for (row_index, &row_ptr) in outer_slice.iter().enumerate() {
+                if row_ptr.is_null() {
+                    panic!(
+                        "FromSlot<Vec<Vec<Arc<String>>>>: row {} is a null \
+                         inner typed-array pointer; Array<Array<string>> rows \
+                         must be stamped Array<string> carriers.",
+                        row_index
+                    );
+                }
+
+                let row_base = row_ptr as *const u8;
+                let inner_elem_type = read_elem_type(row_base);
+                if inner_elem_type != ELEM_TYPE_STRING {
+                    panic!(
+                        "FromSlot<Vec<Vec<Arc<String>>>>: row {} expected \
+                         inner Array<string> carrier stamped \
+                         ELEM_TYPE_STRING ({}), got element-type \
+                         discriminant {}.",
+                        row_index, ELEM_TYPE_STRING, inner_elem_type
+                    );
+                }
+
+                let row_arr = row_ptr as *const TypedArray<*const StringObj>;
+                let row_slice = TypedArray::<*const StringObj>::as_slice(row_arr);
+                let row = row_slice
+                    .iter()
+                    .map(|&p| Arc::new(StringObj::as_str(p).to_owned()))
+                    .collect();
+                rows.push(row);
+            }
+
+            rows
         }
     }
 }
@@ -548,6 +631,45 @@ impl ToSlot for Vec<Arc<String>> {
             );
         }
         arr as usize as u64
+    }
+}
+
+/// Project an `Array<Array<string>>` into the v2-raw nested typed-array
+/// carrier.
+///
+/// The outer allocation is `TypedArray<*const TypedArrayElem>` stamped
+/// `ELEM_TYPE_TYPED_ARRAY`. Each row is a freshly allocated
+/// `TypedArray<*const StringObj>` stamped `ELEM_TYPE_STRING`; the row's
+/// initial refcount share transfers into the outer array, whose drop path
+/// releases inner rows via `TypedArrayElem::release_elem`.
+impl ToSlot for Vec<Vec<Arc<String>>> {
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedArray);
+
+    #[inline]
+    fn to_slot(self) -> u64 {
+        use shape_value::v2::string_obj::StringObj;
+        use shape_value::v2::typed_array::{
+            ELEM_TYPE_STRING, ELEM_TYPE_TYPED_ARRAY, TypedArray, TypedArrayElem, stamp_elem_type,
+        };
+
+        let outer = TypedArray::<*const TypedArrayElem>::with_capacity(self.len() as u32);
+        unsafe {
+            stamp_elem_type(outer as *mut u8, ELEM_TYPE_TYPED_ARRAY);
+
+            for row in self {
+                let row_arr = TypedArray::<*const StringObj>::with_capacity(row.len() as u32);
+                stamp_elem_type(row_arr as *mut u8, ELEM_TYPE_STRING);
+
+                for cell in row {
+                    let p = StringObj::new(cell.as_str()) as *const StringObj;
+                    TypedArray::<*const StringObj>::push(row_arr, p);
+                }
+
+                TypedArray::<*const TypedArrayElem>::push(outer, row_arr as *const TypedArrayElem);
+            }
+        }
+
+        outer as usize as u64
     }
 }
 
@@ -2364,6 +2486,35 @@ mod heap_value_vec_marshal_tests {
                 (x, _) => panic!("expected Char/Char, got {:?}", x.kind()),
             }
         }
+        unsafe { release_v2_typed_array(bits as usize as *mut u8) };
+    }
+
+    #[test]
+    fn nested_array_string_round_trips_fromslot_toslot_identity() {
+        type NestedRows = Vec<Vec<Arc<String>>>;
+
+        let original: NestedRows = vec![
+            vec![Arc::new("x".to_string()), Arc::new("y".to_string())],
+            vec![Arc::new("1".to_string()), Arc::new("2".to_string())],
+            vec![Arc::new(String::new())],
+        ];
+
+        let bits = original.clone().to_slot();
+        assert_ne!(
+            bits, 0,
+            "Array<Array<string>> must carry a stamped outer typed array"
+        );
+
+        let round: NestedRows = <NestedRows as FromSlot>::from_slot(bits);
+
+        assert_eq!(round.len(), original.len());
+        for (row_a, row_b) in original.iter().zip(round.iter()) {
+            assert_eq!(row_a.len(), row_b.len());
+            for (a, b) in row_a.iter().zip(row_b.iter()) {
+                assert_eq!(a.as_str(), b.as_str());
+            }
+        }
+
         unsafe { release_v2_typed_array(bits as usize as *mut u8) };
     }
 
