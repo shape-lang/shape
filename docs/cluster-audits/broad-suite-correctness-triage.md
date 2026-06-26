@@ -102,9 +102,12 @@ the local coordination base:
 - `test_best_effort_preserves_callsite_unions_under_numeric_conflict`: same
   numeric/object conflict is not emitted in best-effort mode.
 
-Likely owner: runtime inference solver, especially fallible constructor
-unwrapping, callsite-union preservation, and numeric body-constraint
-propagation. These are real strict-typing semantics failures, not stale tests.
+Likely owner: the compile-time type-system solver housed in the
+`shape-runtime` crate, especially fallible constructor unwrapping,
+callsite-union preservation, and numeric body-constraint propagation. These
+are real strict-typing semantics failures, not stale tests. They are not an
+execution-tier inference path; VM/JIT runtime execution must consume proven
+kinds and schemas, not infer them.
 
 ## VM failure taxonomy
 
@@ -149,7 +152,7 @@ Non-surface bucket counts:
 | 4 | `compiler::patterns` | Struct constructor-pattern tests rejected as enum-only variant patterns. | Pattern/object destructuring. Current truth-set says object destructuring is v0.3 scope. |
 | 3 | `executor::tests::pop_mutation` | PriorityQueue generic/reference mismatch and bytecode writeback assertions. | Mutable receiver writeback + generic container normalization. |
 | 2 | `executor::v2_stack_tests` | Hand-built tests push arg count as `Constant::Number(0.0)`; executor now expects integer arg count. | Likely isolated test-harness update to `Constant::Int(0)`, but tests are outside this cluster's write scope. |
-| 2 | `executor::tests::try_operator` | Invalid infallible Option cast and `Some/None as int` symmetry assertions fail. | Result/Option cast/assert pipeline; overlaps runtime inference and error-handling correctness. |
+| 2 | `executor::tests::try_operator` | Invalid infallible Option cast and `Some/None as int` symmetry assertions fail. | Result/Option cast/assert pipeline; overlaps compile-time type-system inference and error-handling correctness. |
 | 2 | `executor::tests::trait_object_thunks` | `Self` method lookup fails (`Method 'name' not found on type 'Self'`). | Trait-object thunk/self-type method resolution. |
 | 2 | compiler expression diagnostics | `type_info` gate reports undefined function; enum pattern error highlights wrong semantic; `!!` unwrap loses type into binop. | Comptime builtin diagnostics, pattern diagnostics, Result `!!` type propagation. |
 | 1 each | loops, monomorphization, statements, module resolution, stdlib, extension integration, runtime error payload, IO export | See raw log lines in artifacts. | Narrow owners listed in backlog. |
@@ -161,8 +164,9 @@ is green.
 
 Failures that do contradict current documented or classified semantics:
 
-1. Runtime inference's five failures contradict the strict-typing inference
-   promise and are also base-stable. These are current correctness issues.
+1. The `shape-runtime::type_system::inference` compile-time solver's five
+   failures contradict the strict-typing inference promise and are also
+   base-stable. These are current correctness issues.
 2. Result/Option `?` and `!!` failures in runtime/VM contradict the
    `error_handling` classification, which treats Result `?`/`!!` runtime
    behavior as FN-REG-CORRECTNESS.
@@ -182,17 +186,18 @@ Failures that do contradict current documented or classified semantics:
 
 ## Ranked correctness backlog
 
-1. **Runtime inference core (5 runtime failures, plus VM cascades).**
-   Owner: `shape-runtime::type_system::inference`. Fix fallible constructor
+1. **Compile-time type-system inference core (5 `shape-runtime` crate test
+   failures, plus VM cascades).** Owner:
+   `shape-runtime::type_system::inference`. Fix fallible constructor
    unwrapping, numeric body constraints, and callsite-union conflict recording.
    This is the smallest high-leverage correctness cluster and is entirely real
-   semantics.
+   compile-time semantics.
 
 2. **Result/Option error pipeline and typed propagation.**
    Owner: VM compiler/executor around `?`, `!!`, `result_option_carrier`, and
    runtime error payload normalization. Covers `ws3_f3_error_context...`,
    try-operator non-surface failures, `runtime_error_payload_tests`, and likely
-   parts of the runtime inference bucket.
+   parts of the compile-time inference bucket.
 
 3. **Phase-2c host-tier kinded eval/marshal/constant API restoration.**
    Owner: VM host boundary/test utilities plus kinded constant-table support.
