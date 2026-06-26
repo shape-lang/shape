@@ -401,6 +401,24 @@ impl ConstraintSolver {
                 Ok(())
             }
 
+            // Bare collection/concurrency annotations are accepted as the
+            // erased shorthand for the same structural generic carrier. This
+            // keeps `fn mk() -> Deque { return Deque().pushBack("x") }`
+            // statically typed without widening the rule to arbitrary nominal
+            // types.
+            (Type::Generic { base, .. }, Type::Concrete(TypeAnnotation::Reference(name)))
+            | (Type::Concrete(TypeAnnotation::Reference(name)), Type::Generic { base, .. })
+                if Self::is_erased_structural_carrier(base.as_ref(), name.as_str()) =>
+            {
+                Ok(())
+            }
+            (Type::Generic { base, .. }, Type::Concrete(TypeAnnotation::Basic(name)))
+            | (Type::Concrete(TypeAnnotation::Basic(name)), Type::Generic { base, .. })
+                if Self::is_erased_structural_carrier(base.as_ref(), name.as_str()) =>
+            {
+                Ok(())
+            }
+
             // Function ~ Function: pairwise unify params + returns
             (
                 Type::Function {
@@ -458,6 +476,26 @@ impl ConstraintSolver {
             }
             Type::Concrete(_) => false,
         }
+    }
+
+    fn is_erased_structural_carrier(base: &Type, name: &str) -> bool {
+        let Type::Concrete(TypeAnnotation::Reference(base_name)) = base else {
+            return false;
+        };
+        let base_name = base_name.as_str();
+        base_name == name
+            && matches!(
+                name,
+                "Set"
+                    | "HashSet"
+                    | "HashMap"
+                    | "Map"
+                    | "Deque"
+                    | "PriorityQueue"
+                    | "Channel"
+                    | "Mutex"
+                    | "Lazy"
+            )
     }
 
     /// The numeric-conversion lossless lattice (numeric-conversion-spec §2).
