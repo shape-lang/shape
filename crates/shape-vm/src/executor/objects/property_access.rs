@@ -49,11 +49,12 @@
 //! per ckpt-1 close-marker at `heap_value.rs:3956`).
 
 use crate::bytecode::{Instruction, Operand};
-use crate::executor::VirtualMachine;
 use crate::executor::vm_impl::stack::drop_with_kind;
+use crate::executor::VirtualMachine;
+use shape_value::aligned_vec::AlignedVec;
 use shape_value::{
+    heap_value::{HashMapKindedRef, HeapKind, MatrixData},
     KindedSlot, NativeKind, VMError,
-    heap_value::{HashMapKindedRef, HeapKind},
 };
 use std::sync::Arc;
 
@@ -189,6 +190,36 @@ impl VirtualMachine {
                         length: view.len as usize,
                     }),
                 }
+            }
+
+            // ── Matrix property/index access ────────────────────────────
+            NativeKind::Ptr(HeapKind::Matrix) => {
+                if obj_bits == 0 {
+                    return Err(VMError::RuntimeError("GetProp on null Matrix".to_string()));
+                }
+                // Matrix slots in this worktree carry `Arc<MatrixData>` bits.
+                // Borrow read-only; the popped object share is retired by
+                // `op_get_prop` after this dispatch returns.
+                let matrix: &MatrixData = unsafe { &*(obj_bits as *const MatrixData) };
+                if let Some(name) = key_str {
+                    let value = match name {
+                        "rows" => matrix.rows as u64,
+                        "cols" => matrix.cols as u64,
+                        "length" | "len" => matrix.rows as u64,
+                        _ => return Err(VMError::UndefinedProperty(name.to_string())),
+                    };
+                    return self.push_kinded(value, NativeKind::Int64);
+                }
+
+                let idx = numeric_index_from_kinded(key_bits, key_kind)?;
+                if idx >= matrix.rows as usize {
+                    return Err(VMError::IndexOutOfBounds {
+                        index: idx as i32,
+                        length: matrix.rows as usize,
+                    });
+                }
+                let row = matrix_row_array_slot(matrix, idx as u32)?;
+                self.push_kinded_slot_preserving_miri(row)
             }
 
             // ── String index `s[i]` — the i-th character ────────────────
@@ -704,6 +735,15 @@ impl VirtualMachine {
                     }
                 }
             }
+            NativeKind::Ptr(HeapKind::Matrix) => {
+                if bits == 0 {
+                    Err(VMError::RuntimeError("length() on null Matrix".to_string()))
+                } else {
+                    // SAFETY: kind == Ptr(Matrix); bits are `Arc<MatrixData>`.
+                    let matrix: &MatrixData = unsafe { &*(bits as *const MatrixData) };
+                    self.push_kinded(matrix.rows as u64, NativeKind::Int64)
+                }
+            }
             NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
                 if bits == 0 {
                     Err(VMError::RuntimeError("length() on null string".to_string()))
@@ -765,6 +805,15 @@ impl VirtualMachine {
         drop_with_kind(bits, kind);
         result
     }
+}
+
+fn matrix_row_array_slot(matrix: &MatrixData, row: u32) -> Result<KindedSlot, VMError> {
+    let cols = matrix.cols as usize;
+    let mut data = AlignedVec::<f64>::with_capacity(cols);
+    for v in matrix.row_slice(row).iter() {
+        data.push(*v);
+    }
+    super::matrix_methods::float_array_slot(data)
 }
 
 /// Convert a kinded `(bits, kind)` pair into a `usize` index. Accepts
@@ -911,10 +960,10 @@ fn string_key_slot_as_str(slot: &KindedSlot) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::executor::VMConfig;
-    use shape_value::ValueSlot;
     #[cfg(miri)]
     use shape_value::heap_value::MiriSlotProvenance;
     use shape_value::heap_value::TypedObjectStorage;
+    use shape_value::ValueSlot;
 
     fn push_typed_object_raw(vm: &mut VirtualMachine, ptr: *mut TypedObjectStorage) {
         let bits = ptr as u64;
