@@ -3067,7 +3067,11 @@ impl TypeInferenceEngine {
                 // otherwise structurally collide by discriminant slot and bind
                 // its payload binder to RAW heap-pointer bits without a type
                 // check — a catastrophic reinterpret. Reject cleanly here.
-                self.check_constructor_pattern_ownership(scrutinee, variant)?;
+                self.check_constructor_pattern_ownership(
+                    scrutinee,
+                    enum_name.as_ref().map(|name| name.as_str()),
+                    variant,
+                )?;
 
                 // R8 W7: resolve the enum's `EnumDef` from the scrutinee
                 // type so enum-payload binders carry the variant's

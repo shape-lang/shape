@@ -2404,8 +2404,17 @@ impl TypeInferenceEngine {
     pub(crate) fn check_constructor_pattern_ownership(
         &self,
         scrutinee: Option<&Type>,
+        pattern_enum_name: Option<&str>,
         variant: &str,
     ) -> TypeResult<()> {
+        if let Some(pattern_enum_name) = pattern_enum_name {
+            let known_builtin = matches!(pattern_enum_name, "Option" | "Result");
+            let known_user_enum = self.env.get_enum(pattern_enum_name).is_some();
+            if !known_builtin && !known_user_enum {
+                return Ok(());
+            }
+        }
+
         let Some(scrutinee) = scrutinee else {
             return Ok(());
         };
@@ -2429,6 +2438,13 @@ impl TypeInferenceEngine {
         };
 
         if let Some(name) = builtin_name {
+            if pattern_enum_name.is_some_and(|pattern_enum| pattern_enum != name) {
+                return Err(TypeError::InvalidPatternType(format!(
+                    "variant pattern '{variant}' belongs to enum '{}', but the matched \
+                     position has type '{name}'",
+                    pattern_enum_name.unwrap()
+                )));
+            }
             let owned = match name.as_str() {
                 "Result" => matches!(variant, "Ok" | "Err"),
                 "Option" => matches!(variant, "Some" | "None"),
@@ -2447,6 +2463,13 @@ impl TypeInferenceEngine {
         // declared members.
         if let Some(enum_name) = self.enum_name_of_type(scrutinee) {
             if let Some(def) = self.env.get_enum(&enum_name) {
+                if pattern_enum_name.is_some_and(|pattern_enum| pattern_enum != enum_name) {
+                    return Err(TypeError::InvalidPatternType(format!(
+                        "variant pattern '{variant}' belongs to enum '{}', but the matched \
+                         position has type '{enum_name}'",
+                        pattern_enum_name.unwrap()
+                    )));
+                }
                 let owned = def.members.iter().any(|m| m.name == variant);
                 if owned {
                     return Ok(());
@@ -2456,6 +2479,18 @@ impl TypeInferenceEngine {
                      (an '{enum_name}' value can only be matched with its own variants)"
                 )));
             }
+        }
+
+        // WS-4 4c: a bare constructor pattern with struct fields can be a
+        // registered struct constructor (`Point { x, y }`), not an enum
+        // variant. The parser carries both through `Pattern::Constructor`, so
+        // the ownership gate must not reject when the matched position is
+        // statically the same registered non-enum struct named by the
+        // constructor. This is still a positive compile-time proof: unknown
+        // names, registered enums, and mismatched struct names fall through to
+        // the non-enum rejection below.
+        if self.constructor_pattern_matches_registered_struct(scrutinee, variant) {
+            return Ok(());
         }
 
         // R2 (v0.3.3 strict-flip): nested-inner reinterpret hole.
@@ -2495,6 +2530,14 @@ impl TypeInferenceEngine {
         // Scrutinee identity not positively classifiable as non-enum. Do not
         // reject — leaves prior surface-and-stop behaviour intact.
         Ok(())
+    }
+
+    fn constructor_pattern_matches_registered_struct(&self, scrutinee: &Type, name: &str) -> bool {
+        let Some(struct_name) = self.struct_name_of_type(scrutinee) else {
+            return false;
+        };
+
+        struct_name == name && self.is_registered_non_enum_nominal(&struct_name)
     }
 
     /// POSITIVE classification for R2's nested-inner reinterpret guard: true
