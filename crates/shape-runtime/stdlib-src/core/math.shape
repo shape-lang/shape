@@ -81,10 +81,14 @@ pub fn spread(series: Array<number>) -> number {
 ///
 /// @see std::core::math::mean
 /// @see std::core::math::std
-pub fn zscore(series) {
-    let mean_val = __intrinsic_mean(series);
-    let std_val = __intrinsic_std(series);
-    (series - mean_val) / std_val
+pub fn zscore(series: Array<number>) -> Array<number> {
+    let mean_val: number = __intrinsic_mean(series);
+    let std_val: number = __intrinsic_std(series);
+    let mut scores: Array<number> = [];
+    for x in series {
+        scores.push((x - mean_val) / std_val);
+    }
+    scores
 }
 
 // ===== Vec Operations =====

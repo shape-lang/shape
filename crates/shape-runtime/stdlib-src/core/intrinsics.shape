@@ -80,8 +80,8 @@ builtin fn tanh(value: number) -> number;
 builtin fn print<T>(values: T) -> void;
 /// Alias for len().
 builtin fn length<T>(value: T) -> number;
-/// Generate an array of numbers from start to end.
-builtin fn range(start: number, end: number, step: number = 1) -> Vec<number>;
+/// Generate an array of integers from start to end.
+builtin fn range(start: int, end: int, step: int = 1) -> Vec<int>;
 
 /// Compute rolling mean.
 builtin fn rolling_mean<T>(

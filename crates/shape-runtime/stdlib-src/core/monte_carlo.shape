@@ -27,7 +27,7 @@ pub fn monte_carlo(
     let cfg: MonteCarloConfig = config;
 
     if cfg.seed != 0 {
-        __intrinsic_random_seed(cfg.seed);
+        __intrinsic_random_seed(cfg.seed as number);
     }
 
     let mut results: Array<number> = [];
@@ -66,7 +66,7 @@ pub fn monte_carlo_antithetic(
     let cfg: MonteCarloConfig = config;
 
     if cfg.seed != 0 {
-        __intrinsic_random_seed(cfg.seed);
+        __intrinsic_random_seed(cfg.seed as number);
     }
 
     let mut results: Array<number> = [];
@@ -107,7 +107,7 @@ pub fn monte_carlo_control_variate(
     let cfg: MonteCarloConfig = config;
 
     if cfg.seed != 0 {
-        __intrinsic_random_seed(cfg.seed);
+        __intrinsic_random_seed(cfg.seed as number);
     }
 
     let mut values: Array<number> = [];
@@ -183,7 +183,7 @@ pub fn monte_carlo_stratified(
     let cfg: MonteCarloConfig = config;
 
     if cfg.seed != 0 {
-        __intrinsic_random_seed(cfg.seed);
+        __intrinsic_random_seed(cfg.seed as number);
     }
 
     let mut results: Array<number> = [];

@@ -4,6 +4,31 @@
 /// Generates random inputs to test invariants (properties) that should
 /// hold for all inputs. Inspired by QuickCheck/Hypothesis.
 
+builtin fn __intrinsic_random() -> number;
+builtin fn __intrinsic_random_int(lo: number, hi: number) -> number;
+builtin fn __intrinsic_random_seed(seed: number) -> void;
+
+type PropertyResult<T> {
+    passed: bool,
+    name: string,
+    trials: int,
+    counterexample: T?
+}
+
+type PropertySpec<T> {
+    name: string,
+    trials: int,
+    gen: () => T,
+    prop: (T) => bool
+}
+
+type PropertySummary<T> {
+    passed: int,
+    failed: int,
+    total: int,
+    results: Array<PropertyResult<T>>
+}
+
 /// Run a property test with random inputs.
 ///
 /// @param name - Test name for reporting
@@ -11,13 +36,13 @@
 /// @param gen_fn - Generator function () => input value
 /// @param prop_fn - Property function (input) => bool
 /// @returns { passed, name, trials, counterexample }
-pub fn property(name, n_trials, gen_fn, prop_fn) {
-    var counterexample = None;
-    var passed = true;
+pub fn property<T>(name: string, n_trials: int, gen_fn: () => T, prop_fn: (T) => bool) -> PropertyResult<T> {
+    var counterexample: T? = None;
+    var passed: bool = true;
 
     for i in range(0, n_trials) {
-        let input = gen_fn();
-        let result = prop_fn(input);
+        let input: T = gen_fn();
+        let result: bool = prop_fn(input);
         if !result {
             counterexample = input;
             passed = false;
@@ -37,23 +62,13 @@ pub fn property(name, n_trials, gen_fn, prop_fn) {
 ///
 /// @param tests - Array of { name, trials, gen, prop } objects
 /// @returns { passed, failed, results }
-///
-/// Note: `Array<int>` is the strict-typing-required concrete element type
-/// for the empty-array accumulator (Cluster C of R8 W6 audit). The real
-/// payload is the TypedObject returned by `property()`, but the strict
-/// typing pass rejects anonymous typed-object and named typed-object
-/// empty-array bindings at module-load time; only primitive element
-/// annotations are honored. End-to-end behaviour for this function is
-/// blocked by Cluster B (generic-arithmetic inference loss in `property`
-/// callees) and is tracked alongside the broader pure-shape stdlib
-/// inference fix follow-up.
-pub fn run_properties(tests) {
-    let mut results: Array<int> = [];
-    var passed_count = 0;
-    var failed_count = 0;
+pub fn run_properties<T>(tests: Array<PropertySpec<T>>) -> PropertySummary<T> {
+    let mut results: Array<PropertyResult<T>> = [];
+    var passed_count: int = 0;
+    var failed_count: int = 0;
 
     for test in tests {
-        let result = property(test.name, test.trials, test.gen, test.prop);
+        let result: PropertyResult<T> = property(test.name, test.trials, test.gen, test.prop);
         results.push(result);
         if result.passed {
             passed_count = passed_count + 1;
@@ -98,10 +113,10 @@ pub fn gen_bool() {
 pub fn gen_string(max_len: number) {
     || {
         let chars: string = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        let n: number = __intrinsic_random_int(0, max_len);
+        let n: int = floor(__intrinsic_random_int(0.0, max_len));
         var s: string = "";
         for i in range(0, n) {
-            let idx: number = __intrinsic_random_int(0, 61);
+            let idx: int = floor(__intrinsic_random_int(0.0, 61.0));
             let ch: string = chars[idx];
             s = s + ch;
         }
@@ -116,9 +131,9 @@ pub fn gen_string(max_len: number) {
 /// (matches `gen_int`); generators returning other types are v0.3-gating until
 /// generic empty-array element-type inference (Cluster C of R8 W6 audit, with
 /// the broader generic-arithmetic inference loss in Cluster B) is implemented.
-pub fn gen_array(max_len: number, elem_gen) {
+pub fn gen_array(max_len: number, elem_gen: () => int) {
     || {
-        let n = __intrinsic_random_int(0, max_len);
+        let n: int = floor(__intrinsic_random_int(0.0, max_len));
         let mut arr: Array<int> = [];
         for i in range(0, n) {
             arr.push(elem_gen());
@@ -130,7 +145,8 @@ pub fn gen_array(max_len: number, elem_gen) {
 /// Generate a value picked uniformly from a list of choices
 pub fn gen_one_of(choices: Array<int>) {
     || {
-        let idx = __intrinsic_random_int(0, choices.len() - 1);
+        let hi: number = (choices.len() - 1) as number;
+        let idx: int = floor(__intrinsic_random_int(0.0, hi));
         choices[idx]
     }
 }

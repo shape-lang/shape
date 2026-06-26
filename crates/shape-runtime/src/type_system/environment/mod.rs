@@ -1265,8 +1265,168 @@ impl TypeEnvironment {
         // Note: __into_*/__try_into_* type registrations removed — primitive conversions
         // now use typed ConvertTo*/TryConvertTo* opcodes emitted directly by the compiler.
 
+        // Wave 7 strict-flip: stdlib source and stdlib tests compile some
+        // internal `__intrinsic_*` calls under `allow_internal_builtins`, which
+        // bypasses local `builtin fn` declarations at the bytecode layer. Keep
+        // the checker honest by registering only signatures that already have a
+        // static typed-marshal shape (or a legacy fixed signature for char code).
+        self.define_builtin("__intrinsic_random", vec![], BuiltinTypes::number());
+        self.define_builtin(
+            "__intrinsic_random_int",
+            vec![BuiltinTypes::number(), BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_random_seed",
+            vec![BuiltinTypes::number()],
+            BuiltinTypes::void(),
+        );
+        self.define_builtin(
+            "__intrinsic_random_normal",
+            vec![BuiltinTypes::number(), BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_random_array",
+            vec![BuiltinTypes::integer()],
+            BuiltinTypes::array(BuiltinTypes::number()),
+        );
+
+        self.define_builtin(
+            "__intrinsic_dist_uniform",
+            vec![BuiltinTypes::number(), BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_dist_lognormal",
+            vec![BuiltinTypes::number(), BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_dist_exponential",
+            vec![BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_dist_poisson",
+            vec![BuiltinTypes::number()],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_dist_sample_n",
+            vec![
+                BuiltinTypes::string(),
+                BuiltinTypes::array(BuiltinTypes::number()),
+                BuiltinTypes::integer(),
+            ],
+            BuiltinTypes::array(BuiltinTypes::number()),
+        );
+
+        self.define_builtin(
+            "__intrinsic_mean",
+            vec![BuiltinTypes::array(BuiltinTypes::number())],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_variance",
+            vec![BuiltinTypes::array(BuiltinTypes::number())],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_std",
+            vec![BuiltinTypes::array(BuiltinTypes::number())],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_correlation",
+            vec![
+                BuiltinTypes::array(BuiltinTypes::number()),
+                BuiltinTypes::array(BuiltinTypes::number()),
+            ],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_covariance",
+            vec![
+                BuiltinTypes::array(BuiltinTypes::number()),
+                BuiltinTypes::array(BuiltinTypes::number()),
+            ],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_percentile",
+            vec![
+                BuiltinTypes::array(BuiltinTypes::number()),
+                BuiltinTypes::number(),
+            ],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_median",
+            vec![BuiltinTypes::array(BuiltinTypes::number())],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_min",
+            vec![BuiltinTypes::array(BuiltinTypes::number())],
+            BuiltinTypes::number(),
+        );
+        self.define_builtin(
+            "__intrinsic_max",
+            vec![BuiltinTypes::array(BuiltinTypes::number())],
+            BuiltinTypes::number(),
+        );
+
+        self.define_builtin(
+            "__intrinsic_brownian_motion",
+            vec![
+                BuiltinTypes::integer(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+            ],
+            BuiltinTypes::array(BuiltinTypes::number()),
+        );
+        self.define_builtin(
+            "__intrinsic_gbm",
+            vec![
+                BuiltinTypes::integer(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+            ],
+            BuiltinTypes::array(BuiltinTypes::number()),
+        );
+        self.define_builtin(
+            "__intrinsic_ou_process",
+            vec![
+                BuiltinTypes::integer(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+                BuiltinTypes::number(),
+            ],
+            BuiltinTypes::array(BuiltinTypes::number()),
+        );
+        self.define_builtin(
+            "__intrinsic_random_walk",
+            vec![BuiltinTypes::integer(), BuiltinTypes::number()],
+            BuiltinTypes::array(BuiltinTypes::number()),
+        );
+
+        self.define_builtin(
+            "__intrinsic_char_code",
+            vec![BuiltinTypes::string()],
+            BuiltinTypes::integer(),
+        );
+        self.define_builtin(
+            "__intrinsic_from_char_code",
+            vec![BuiltinTypes::number()],
+            BuiltinTypes::string(),
+        );
+
         // Note: trading builtins (open_position, close_position, etc.) removed — use packages.
-        // Note: __intrinsic_* type registrations removed — stdlib has allow_internal_builtins.
         // Note: top-level map/filter/reduce removed — use method syntax: arr.map(fn).
     }
 
@@ -1931,6 +2091,58 @@ mod tests {
         assert!(env.lookup_trait("Serializable").is_none());
         assert!(env.lookup_trait("Distributable").is_none());
         assert!(!env.type_implements_trait("number", "Serializable"));
+    }
+
+    #[test]
+    fn test_internal_intrinsic_signatures_registered() {
+        let mut env = TypeEnvironment::new();
+        env.define_builtin_functions();
+
+        let random = env.lookup("__intrinsic_random").unwrap();
+        assert_eq!(
+            random.ty,
+            BuiltinTypes::function(vec![], BuiltinTypes::number())
+        );
+
+        let random_int = env.lookup("__intrinsic_random_int").unwrap();
+        assert_eq!(
+            random_int.ty,
+            BuiltinTypes::function(
+                vec![BuiltinTypes::number(), BuiltinTypes::number()],
+                BuiltinTypes::number()
+            )
+        );
+
+        let brownian = env.lookup("__intrinsic_brownian_motion").unwrap();
+        assert_eq!(
+            brownian.ty,
+            BuiltinTypes::function(
+                vec![
+                    BuiltinTypes::integer(),
+                    BuiltinTypes::number(),
+                    BuiltinTypes::number()
+                ],
+                BuiltinTypes::array(BuiltinTypes::number())
+            )
+        );
+
+        let char_code = env.lookup("__intrinsic_char_code").unwrap();
+        assert_eq!(
+            char_code.ty,
+            BuiltinTypes::function(vec![BuiltinTypes::string()], BuiltinTypes::integer())
+        );
+
+        let percentile = env.lookup("__intrinsic_percentile").unwrap();
+        assert_eq!(
+            percentile.ty,
+            BuiltinTypes::function(
+                vec![
+                    BuiltinTypes::array(BuiltinTypes::number()),
+                    BuiltinTypes::number()
+                ],
+                BuiltinTypes::number()
+            )
+        );
     }
 
     #[test]

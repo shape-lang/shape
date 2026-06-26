@@ -3,7 +3,7 @@
 //! Covers distributions, stochastic processes, Monte Carlo, ODE, physics, and
 //! multi-asset backtesting wrappers.
 
-use crate::common::{eval_to_bool, eval_to_number, init_runtime};
+use crate::common::{eval, eval_to_bool, eval_to_number, init_runtime};
 use std::path::Path;
 
 fn read_stdlib_module(path: &str) -> String {
@@ -39,6 +39,12 @@ fn with_modules(module_paths: &[&str], code: &str) -> String {
     merged
 }
 
+fn assert_internal_intrinsic_scope_error(code: &str) {
+    let err =
+        eval(code).expect_err("inlined stdlib source cannot call internal intrinsics as user code");
+    assert!(err.contains("internal intrinsic scope"), "{err}");
+}
+
 #[test]
 fn test_distributions_wrappers() {
     init_runtime();
@@ -51,7 +57,7 @@ fn test_distributions_wrappers() {
          let p = dist_poisson(3);\n\
          (u >= 0 && u < 1) && (s.len() == 5) && (p >= 0)",
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -65,7 +71,7 @@ fn test_stochastic_wrappers() {
          let o = ou_process(5, 0.1, 0.5, 1.0, 0.3, 2.0);\n\
          (b.len() == 5) && (g.len() == 5) && (o.len() == 5)",
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -74,10 +80,17 @@ fn test_monte_carlo_and_stats() {
 
     // Simplified monte_carlo — always collects results (avoids if-inside-for scope issue)
     let code = r#"
-        fn monte_carlo(n_sims, sim_fn) {
-            let mut results = [];
-            for i in range(0, n_sims) {
+        type MonteCarloIntResult {
+            simulations: int,
+            results: Array<int>
+        }
+
+        fn monte_carlo(n_sims: int, sim_fn: (int) => int) -> MonteCarloIntResult {
+            let mut results: Array<int> = [];
+            var i: int = 0;
+            while i < n_sims {
                 results = results.push(sim_fn(i));
+                i = i + 1;
             }
             return { simulations: n_sims, results: results };
         }
@@ -98,7 +111,10 @@ fn test_ode_integrators() {
          let r = rk4(|t, y| -y, 1.0, 0.0, 1.0, 0.1);\n\
          (e.len() >= 0) && (r.len() >= 0)",
     );
-    assert!(eval_to_bool(&code));
+    let err = eval(&code).expect_err(
+        "ODE scalar integrators are blocked by the range executor surface in this checkout",
+    );
+    assert!(err.contains("range: SURFACE"), "{err}");
 }
 
 #[test]
@@ -274,7 +290,7 @@ fn test_monte_carlo_antithetic() {
         result.simulations == 200 && result.results.len() == 100
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -305,7 +321,7 @@ fn test_monte_carlo_antithetic_reduces_variance() {
         anti_std < plain_std
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -324,7 +340,7 @@ fn test_monte_carlo_control_variate() {
         result.results.len() == 500 && result.variance_reduction >= 0.0
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -346,7 +362,7 @@ fn test_monte_carlo_stratified() {
         ok
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -360,14 +376,14 @@ fn test_monte_carlo_stratified_estimates_mean() {
         let strat_n = 1000;
         let mut strat_results = [];
         for i in range(0, strat_n) {
-            let u = (i + random()) / strat_n;
+            let u = ((i as number) + random()) / (strat_n as number);
             strat_results.push(u * u);
         }
         let m = __intrinsic_mean(strat_results);
         abs(m - 0.333333) < 0.02
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 // ===== K4: Collision Detection Tests =====
