@@ -396,7 +396,10 @@ impl BytecodeCompiler {
         // Option<T> as M → lift if T has Into<M>
         if let Some(inner_ann) = Self::unwrap_option_inner(&source_ann) {
             if let Some(inner_name) = Self::try_into_name_from_annotation(inner_ann) {
-                if inner_name == target_name || self.has_into_impl(&inner_name, target_name) {
+                if inner_name == target_name
+                    || Self::is_builtin_primitive_numeric_cast(&inner_name, target_name)
+                    || self.has_into_impl(&inner_name, target_name)
+                {
                     return Ok(Some(CastLiftKind::LiftOption));
                 }
             }
@@ -415,7 +418,10 @@ impl BytecodeCompiler {
         // Result<T, E> as M → lift if T has Into<M>
         if let Some(inner_ann) = Self::unwrap_result_inner(&source_ann) {
             if let Some(inner_name) = Self::try_into_name_from_annotation(inner_ann) {
-                if inner_name == target_name || self.has_into_impl(&inner_name, target_name) {
+                if inner_name == target_name
+                    || Self::is_builtin_primitive_numeric_cast(&inner_name, target_name)
+                    || self.has_into_impl(&inner_name, target_name)
+                {
                     return Ok(Some(CastLiftKind::LiftResult));
                 }
             }

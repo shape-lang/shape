@@ -1,9 +1,9 @@
 //! Tests for unified `?` semantics (Result + Option + nullable Option encoding).
 
-use crate::VMConfig;
 use crate::bytecode::*;
 use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
+use crate::VMConfig;
 use shape_ast::parser::parse_program;
 use shape_value::VMError;
 
@@ -349,22 +349,23 @@ val
 }
 
 #[test]
-fn invalid_infallible_cast_option_string_as_int_fails_at_runtime() {
-    // Option<string> as int: string has no Into<int>, but the type tracker
-    // loses generic args for locals so the compiler emits lifting code and
-    // the inner conversion fails at runtime.
+fn invalid_infallible_cast_option_string_as_int_fails_at_compile_time() {
+    // Option<string> as int: string has no infallible Into<int>, so strict
+    // typing rejects the lifted cast before bytecode emission.
     let source = r#"
 let opt: Option<string> = Some("hello")
 let val = opt as int
 "#;
-    let bytecode = compile_source(source).expect("compile should succeed with bare wrapper");
-    let mut vm = VirtualMachine::new(VMConfig::default());
-    vm.load_program(bytecode);
-    let result = vm.execute(None);
+    let result = compile_source(source);
     assert!(
         result.is_err(),
-        "Option<string> as int should fail at runtime, got: {:?}",
+        "Option<string> as int should fail static validation, got: {:?}",
         result.ok()
+    );
+    let msg = format!("{:?}", result.err().unwrap());
+    assert!(
+        msg.contains("Cannot assert type") && msg.contains("Option") && msg.contains("int"),
+        "unexpected error for invalid Option cast: {msg}"
     );
 }
 
