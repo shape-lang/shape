@@ -18,7 +18,7 @@
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use super::*;
 use crate::bytecode::*;
-use shape_value::VMError;
+use shape_value::{KindedSlot, VMError};
 
 /// Shared test helpers (eval, eval_result, compile, etc.)
 pub(crate) mod test_utils;
@@ -133,6 +133,63 @@ fn execute_bytecode_typed(
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(program);
     vm.execute_raw(None)
+}
+
+/// Helper to execute hand-built bytecode through the post-strict-typing
+/// host boundary, preserving the actual top-of-stack [`KindedSlot`].
+#[allow(dead_code)]
+fn execute_bytecode_slot(
+    instructions: Vec<Instruction>,
+    constants: Vec<Constant>,
+) -> Result<KindedSlot, VMError> {
+    let program = BytecodeProgram {
+        instructions,
+        constants,
+        ..Default::default()
+    };
+
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    vm.execute(None)
+}
+
+/// [`execute_bytecode_slot`] variant for programs that use top-level locals.
+#[allow(dead_code)]
+fn execute_bytecode_slot_with_locals(
+    instructions: Vec<Instruction>,
+    constants: Vec<Constant>,
+    num_locals: u16,
+) -> Result<KindedSlot, VMError> {
+    let program = BytecodeProgram {
+        instructions,
+        constants,
+        top_level_locals_count: num_locals,
+        ..Default::default()
+    };
+
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    vm.execute(None)
+}
+
+/// [`execute_bytecode_slot`] variant for hand-built bytecode that references
+/// the program string pool, such as typed `CallMethod` instructions.
+#[allow(dead_code)]
+fn execute_bytecode_slot_with_strings(
+    instructions: Vec<Instruction>,
+    constants: Vec<Constant>,
+    strings: Vec<String>,
+) -> Result<KindedSlot, VMError> {
+    let program = BytecodeProgram {
+        instructions,
+        constants,
+        strings,
+        ..Default::default()
+    };
+
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    vm.execute(None)
 }
 
 #[test]
