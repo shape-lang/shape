@@ -1915,19 +1915,14 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
             if let Some(ct) = specialized_call_return_concrete_type(compiler, expr) {
                 return Some(ct);
             }
-            // R3-elemerasure (strict-flip): the builtin (PHF) array methods that
-            // return `Self` (`sort`/`reverse`/`take`/`drop`/`slice`/`skip`/
-            // `clone`/`unique`/`flatten`/`distinct`/`sortBy`/`concat`) or the
-            // receiver element type (`first`/`last`/`pop`/`find`) are NOT
+            // R3-elemerasure (strict-flip): builtin (PHF) array methods are NOT
             // monomorphized stdlib functions, so the chain above finds nothing
-            // and the result type was lost — a downstream `.map(|x| x*x)` saw
-            // `x: unknown` and surfaced "Cannot infer types for binary
-            // operation". Recover the result `ConcreteType` from the receiver's
-            // proven `ConcreteType`, driven by the method's REGISTERED
-            // `GenericMethodSignature` return shape (no hardcoded method list —
-            // the signature IS the proof, per ADR-006 §2.7.5). Only fires for an
-            // Array receiver whose element type is already known; an unproven
-            // receiver yields `None` (no fabrication).
+            // and receiver-derived result types were lost. Recover the result
+            // `ConcreteType` from the receiver's proven `ConcreteType`, driven by
+            // the method's REGISTERED `GenericMethodSignature` return shape (no
+            // hardcoded method list — the signature IS the proof, per ADR-006
+            // §2.7.5). Only fires for an Array receiver whose element type is
+            // already known; an unproven receiver yields `None` (no fabrication).
             method_call_receiver_derived_concrete_type(compiler, receiver, method)
         }
 
@@ -2665,13 +2660,12 @@ fn tracker_name_for_array_element(elem: &ConcreteType) -> Option<String> {
 ///
 /// Recovery is type-proven, NOT broad-suppression: the receiver's element type
 /// must already be known (an `Array<T>` `ConcreteType`), and the result is
-/// computed strictly from the method's registered return shape —
-/// `TypeParamExpr::SelfType` → the receiver's own `Array<T>`,
-/// `TypeParamExpr::ReceiverParam(0)` → the element `T`. Any other return shape
-/// (`int`/`bool`/`Vec<MethodParam(0)>`/etc.), an unregistered method, or an
-/// unproven receiver yields `None` (the resolver falls back cleanly — no
-/// fabrication, no Bool-default; per ADR-006 §2.7.5 the registered signature IS
-/// the proof).
+/// computed strictly from the method's registered return shape. Concrete
+/// returns (`int`, `bool`, etc.), `SelfType`, `ReceiverParam(0)`, and fully
+/// resolvable containers are projected structurally. Method-generic returns
+/// (`Vec<MethodParam(0)>`, etc.), an unregistered method, or an unproven
+/// receiver yields `None` (the resolver falls back cleanly — no fabrication, no
+/// Bool-default; per ADR-006 §2.7.5 the registered signature IS the proof).
 pub fn method_call_receiver_derived_concrete_type(
     compiler: &BytecodeCompiler,
     receiver: &Expr,
@@ -2694,6 +2688,14 @@ pub fn method_call_receiver_derived_concrete_type(
             .method_table
             .lookup_generic_signature("Vec", method)
         {
+            if let Some(ct) = resolve_registered_generic_method_return(
+                compiler,
+                &receiver_ct,
+                &sig.return_type,
+                sig.method_type_params,
+            ) {
+                return Some(ct);
+            }
             return match &sig.return_type {
                 // `Self` → the receiver array type unchanged (sort/reverse/take/…).
                 TypeParamExpr::SelfType => Some(receiver_ct),
@@ -2772,6 +2774,32 @@ pub fn method_call_receiver_derived_concrete_type(
         return concrete_type_from_annotation(ann, &HashMap::new());
     }
     None
+}
+
+fn type_for_concrete_type(ct: &ConcreteType) -> Option<Type> {
+    crate::compiler::expressions::closures::concrete_type_to_type_annotation(ct).map(Type::Concrete)
+}
+
+fn resolve_registered_generic_method_return(
+    compiler: &BytecodeCompiler,
+    receiver_ct: &ConcreteType,
+    return_expr: &shape_runtime::type_system::checking::TypeParamExpr,
+    method_type_params: usize,
+) -> Option<ConcreteType> {
+    if method_type_params != 0 {
+        return None;
+    }
+
+    let receiver_type = type_for_concrete_type(receiver_ct)?;
+    let (_, receiver_params) =
+        shape_runtime::type_system::checking::MethodTable::extract_receiver_info(&receiver_type);
+    let resolved = shape_runtime::type_system::checking::MethodTable::resolve_type_param_expr(
+        return_expr,
+        &receiver_type,
+        &receiver_params,
+        &[],
+    );
+    concrete_type_from_inference_fact(compiler, &resolved)
 }
 
 fn literal_concrete_type(literal: &shape_ast::ast::Literal) -> Option<ConcreteType> {
