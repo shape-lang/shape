@@ -4,7 +4,6 @@
 //! fixed-layout TypedObjects, not separate `HeapKind` variants. This module is
 //! the single VM helper for constructing and reading those objects.
 
-use crate::executor::vm_impl::stack::clone_with_kind;
 use shape_runtime::type_schema::builtin_schemas::{
     BuiltinSchemaIds, OPTION_PAYLOAD, OPTION_VARIANT, OPTION_VARIANT_NONE, OPTION_VARIANT_SOME,
     RESULT_PAYLOAD, RESULT_VARIANT, RESULT_VARIANT_ERR, RESULT_VARIANT_OK,
@@ -63,7 +62,11 @@ pub(crate) fn build_some(schemas: &BuiltinSchemaIds, payload: KindedSlot) -> Kin
 
 #[inline]
 pub(crate) fn build_none(schemas: &BuiltinSchemaIds) -> KindedSlot {
-    build_variant_object(schemas.option as u64, OPTION_VARIANT_NONE, KindedSlot::none())
+    build_variant_object(
+        schemas.option as u64,
+        OPTION_VARIANT_NONE,
+        KindedSlot::none(),
+    )
 }
 
 pub(crate) fn read_result<'a>(
@@ -102,6 +105,8 @@ fn build_variant_object(schema_id: u64, variant: i64, payload: KindedSlot) -> Ki
     let payload_slot = payload.slot();
     let payload_kind = payload.kind();
     let payload_bits = payload_slot.raw();
+    #[cfg(miri)]
+    let payload_provenance = payload.miri_provenance();
 
     let slots = vec![ValueSlot::from_int(variant), payload_slot].into_boxed_slice();
     let heap_mask = if payload_field_owns_heap_share(payload_bits, payload_kind) {
@@ -113,6 +118,19 @@ fn build_variant_object(schema_id: u64, variant: i64, payload: KindedSlot) -> Ki
         Arc::from(vec![NativeKind::Int64, payload_kind].into_boxed_slice());
 
     std::mem::forget(payload);
+    #[cfg(miri)]
+    let ptr = TypedObjectStorage::_new_with_miri_field_provenance(
+        schema_id,
+        slots,
+        heap_mask,
+        field_kinds,
+        vec![
+            shape_value::heap_value::MiriSlotProvenance::None,
+            payload_provenance,
+        ]
+        .into_boxed_slice(),
+    );
+    #[cfg(not(miri))]
     let ptr = TypedObjectStorage::_new(schema_id, slots, heap_mask, field_kinds);
     KindedSlot::from_typed_object_raw(ptr)
 }
@@ -133,9 +151,9 @@ fn read_variant_storage<'a>(
         )));
     }
 
-    // SAFETY: kind == Ptr(TypedObject); the slot owns a live `_new`
-    // TypedObjectStorage share. This is a read-only borrow bounded by `slot`.
-    let storage: &TypedObjectStorage = unsafe { &*(bits as *const TypedObjectStorage) };
+    let storage = slot.as_typed_object_storage().ok_or_else(|| {
+        VMError::RuntimeError(format!("{name}: missing TypedObject pointer provenance"))
+    })?;
     if storage.schema_id != schema_id {
         return Ok(None);
     }
@@ -190,10 +208,9 @@ fn clone_payload(
             "{name}: payload index {idx} outside storage layout"
         )));
     }
-    let slot = storage.slots()[idx];
-    let kind = storage.field_kinds[idx];
-    clone_with_kind(slot.raw(), kind);
-    Ok(KindedSlot::new(slot, kind))
+    storage
+        .clone_field_kinded(idx)
+        .ok_or_else(|| VMError::RuntimeError(format!("{name}: payload index {idx} missing")))
 }
 
 fn payload_field_owns_heap_share(bits: u64, kind: NativeKind) -> bool {
@@ -224,9 +241,8 @@ mod tests {
         assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
         let bits = slot.slot().raw();
         assert_ne!(bits, 0);
-        // SAFETY: test helper only receives `from_typed_object_raw` carriers
-        // built by this module and borrows while `slot` owns the share.
-        unsafe { &*(bits as *const TypedObjectStorage) }
+        slot.as_typed_object_storage()
+            .expect("from_typed_object_raw carrier has provenance")
     }
 
     #[test]
@@ -280,7 +296,10 @@ mod tests {
         let storage = storage(&option);
 
         assert_eq!(storage.schema_id, schemas.option as u64);
-        assert_eq!(storage.slots()[OPTION_VARIANT].as_i64(), OPTION_VARIANT_NONE);
+        assert_eq!(
+            storage.slots()[OPTION_VARIANT].as_i64(),
+            OPTION_VARIANT_NONE
+        );
         assert_eq!(storage.field_kinds[OPTION_PAYLOAD], NativeKind::Null);
         assert_eq!((storage.heap_mask >> OPTION_PAYLOAD) & 1, 0);
 
