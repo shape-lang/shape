@@ -6,8 +6,12 @@
 //! - Compiler heuristic elimination (MethodTable-driven type queries)
 //! - Parser multi-generic support
 
+use crate::bytecode::{
+    BuiltinFunction, BytecodeProgram, Constant, Instruction, KindedConstant, OpCode, Operand,
+};
 use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
+use crate::type_tracking::FrameDescriptor;
 use crate::{VMConfig, VMError};
 use shape_ast::parser::parse_program;
 use shape_value::content::{ChartSpec, ChartType, ContentNode};
@@ -72,6 +76,44 @@ fn assert_channel(spec: &ChartSpec, name: &str, label: &str, values: &[f64]) {
         spec.channels
     );
     assert_eq!(matches[0].values, values);
+}
+
+fn execute_chart_for_bound_table(
+    datatable: std::sync::Arc<shape_value::DataTable>,
+    registry: shape_runtime::type_schema::TypeSchemaRegistry,
+    schema_id: u32,
+) -> Result<KindedSlot, VMError> {
+    let mut frame = FrameDescriptor::new();
+    frame.return_kind = Some(NativeKind::Ptr(HeapKind::Content));
+    let mut program = BytecodeProgram {
+        instructions: vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+            Instruction::new(OpCode::BindSchema, Some(Operand::Count(schema_id as u16))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(4))),
+            Instruction::new(
+                OpCode::BuiltinCall,
+                Some(Operand::Builtin(BuiltinFunction::FStringContentChart)),
+            ),
+            Instruction::simple(OpCode::Halt),
+        ],
+        constants: vec![
+            Constant::Value(KindedConstant::from_datatable(datatable)),
+            Constant::String("line".to_string()),
+            Constant::String("idx".to_string()),
+            Constant::String("amount".to_string()),
+            Constant::Int(4),
+        ],
+        top_level_frame: Some(frame),
+        ..Default::default()
+    };
+    program.type_schema_registry = registry;
+
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.load_program(program);
+    vm.execute(None)
 }
 
 /// Assert that source code compiles successfully (may not need to run).
@@ -505,6 +547,46 @@ f"{data: chart(line), x(x), y(revenue, cost)}"
     assert_channel(spec, "x", "x", &[1.0, 2.0]);
     assert_channel(spec, "y", "revenue", &[100.0, 120.0]);
     assert_channel(spec, "y", "cost", &[60.0, 70.0]);
+}
+
+#[test]
+fn test_content_chart_from_bound_table_int32_float32_columns() {
+    use arrow_array::{Float32Array, Int32Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+    use shape_runtime::type_schema::{TypeSchemaBuilder, TypeSchemaRegistry};
+    use shape_value::DataTable;
+    use std::sync::Arc;
+
+    let mut registry = TypeSchemaRegistry::new();
+    let schema_id = TypeSchemaBuilder::new("ExternalMetric")
+        .i64_field("idx")
+        .f64_field("amount")
+        .register(&mut registry);
+
+    let arrow_schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("idx", DataType::Int32, false),
+        Field::new("amount", DataType::Float32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        arrow_schema,
+        vec![
+            Arc::new(Int32Array::from(vec![1, 2, 3])),
+            Arc::new(Float32Array::from(vec![1.25f32, 2.5f32, 3.75f32])),
+        ],
+    )
+    .expect("record batch");
+    let table = Arc::new(DataTable::new(batch).with_schema_id(schema_id));
+
+    let result = execute_chart_for_bound_table(table, registry, schema_id)
+        .expect("Int32/I64 and Float32/F64 typed table chart projection should succeed");
+    let spec = chart_result(
+        &result,
+        "bound typed tables should project admitted Arrow numeric carriers",
+    );
+    assert_eq!(spec.chart_type, ChartType::Line);
+    assert_eq!(spec.x_label.as_deref(), Some("idx"));
+    assert_channel(spec, "x", "idx", &[1.0, 2.0, 3.0]);
+    assert_channel(spec, "y", "amount", &[1.25, 2.5, 3.75]);
 }
 
 #[test]

@@ -2093,7 +2093,17 @@ fn table_numeric_column(
     if let Some(values) = column.as_any().downcast_ref::<arrow_array::Float64Array>() {
         return Ok((0..values.len()).map(|idx| values.value(idx)).collect());
     }
+    if let Some(values) = column.as_any().downcast_ref::<arrow_array::Float32Array>() {
+        return Ok((0..values.len())
+            .map(|idx| values.value(idx) as f64)
+            .collect());
+    }
     if let Some(values) = column.as_any().downcast_ref::<arrow_array::Int64Array>() {
+        return Ok((0..values.len())
+            .map(|idx| values.value(idx) as f64)
+            .collect());
+    }
+    if let Some(values) = column.as_any().downcast_ref::<arrow_array::Int32Array>() {
         return Ok((0..values.len())
             .map(|idx| values.value(idx) as f64)
             .collect());
