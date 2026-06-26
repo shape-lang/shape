@@ -435,7 +435,7 @@ fn test_avg_single() {
     .expect_number(10.0);
 }
 
-/// Verifies avg empty.
+/// Verifies avg on a bare empty array requires a known element type.
 #[test]
 fn test_avg_empty() {
     ShapeTest::new(
@@ -444,7 +444,7 @@ fn test_avg_empty() {
         empty.avg()
     "#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains("has an un-resolvable element type");
 }
 
 /// Verifies avg same values.

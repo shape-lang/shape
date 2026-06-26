@@ -1,5 +1,5 @@
 //! Array indexing tests
-//! Covers zero-based indexing, negative indexing, out-of-bounds, and slicing.
+//! Covers zero-based indexing, strict bounds errors, and slicing.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -44,43 +44,40 @@ fn array_index_last() {
 }
 
 // =========================================================================
-// Negative Indexing
+// Negative Indices
 // =========================================================================
 
 #[test]
-fn array_negative_index_last() {
+fn array_negative_index_last_errors() {
     ShapeTest::new(
         r#"
         let arr = [10, 20, 30, 40]
         print(arr[-1])
     "#,
     )
-    .expect_run_ok()
-    .expect_output("40");
+    .expect_run_err_contains("Index -1 out of bounds");
 }
 
 #[test]
-fn array_negative_index_second_last() {
+fn array_negative_index_second_last_errors() {
     ShapeTest::new(
         r#"
         let arr = [10, 20, 30, 40]
         print(arr[-2])
     "#,
     )
-    .expect_run_ok()
-    .expect_output("30");
+    .expect_run_err_contains("Index -2 out of bounds");
 }
 
 #[test]
-fn array_negative_index_first_element() {
+fn array_negative_index_first_element_errors() {
     ShapeTest::new(
         r#"
         let arr = [10, 20, 30, 40]
         print(arr[-4])
     "#,
     )
-    .expect_run_ok()
-    .expect_output("10");
+    .expect_run_err_contains("Index -4 out of bounds");
 }
 
 // =========================================================================
@@ -88,27 +85,25 @@ fn array_negative_index_first_element() {
 // =========================================================================
 
 #[test]
-fn array_out_of_bounds_positive() {
+fn array_out_of_bounds_positive_errors() {
     ShapeTest::new(
         r#"
         let arr = [1, 2, 3]
         print(arr[10])
     "#,
     )
-    .expect_run_ok()
-    .expect_output("None");
+    .expect_run_err_contains("Index 10 out of bounds");
 }
 
 #[test]
-fn array_out_of_bounds_negative() {
+fn array_out_of_bounds_negative_errors() {
     ShapeTest::new(
         r#"
         let arr = [1, 2, 3]
         print(arr[-10])
     "#,
     )
-    .expect_run_ok()
-    .expect_output("None");
+    .expect_run_err_contains("Index -10 out of bounds");
 }
 
 // =========================================================================
