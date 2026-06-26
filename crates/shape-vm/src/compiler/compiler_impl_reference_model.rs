@@ -2013,29 +2013,6 @@ impl BytecodeCompiler {
             Self::build_param_pass_mode_map(&program, &inferred_ref_params, &inferred_ref_mutates);
         self.inferred_ref_params = inferred_ref_params;
         self.inferred_ref_mutates = inferred_ref_mutates;
-        // U4-5b: register inferred return ConcreteTypes so function-call
-        // compilation can recover the return type STRUCTURALLY even for sources
-        // with no explicit `-> T` annotation. Resolved SCHEMA-AWARELY
-        // (`declared_annotation_concrete_type`) so a named-struct/enum inferred
-        // return resolves to `ConcreteType::Struct`/`Enum` (the v2-typed-array
-        // element-carrier detection needs the struct identity). An unresolvable
-        // inferred annotation registers nothing (surface-and-stop).
-        let self_ref: &Self = &self;
-        let inferred_return_cts: Vec<(String, shape_value::v2::ConcreteType)> =
-            inferred_return_annotations
-                .iter()
-                .filter_map(|(fn_name, ann)| {
-                    crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
-                        self_ref, ann,
-                    )
-                    .map(|ct| (fn_name.clone(), ct))
-                })
-                .collect();
-        for (fn_name, ret_ty) in inferred_return_cts {
-            self.type_tracker
-                .register_function_return_concrete_type(&fn_name, ret_ty);
-        }
-
         // Two-phase TypedObject field hoisting:
         //
         // Phase 1 (here, AST pre-pass): Collect all property assignments (e.g.,
@@ -2111,6 +2088,31 @@ impl BytecodeCompiler {
         // types as `unknown`.
         for item in &program.items {
             self.predeclare_item_struct_schemas(item);
+        }
+
+        // U4-5b: register inferred return ConcreteTypes so function-call
+        // compilation can recover the return type STRUCTURALLY even for sources
+        // with no explicit `-> T` annotation. Resolve this after the schema
+        // predeclare pass above; otherwise an inferred user-struct return like
+        // `fn mk() { P { ... } }` sees `P` as unresolved and never gets the
+        // `NonCopy` move seed used by top-level MIR.
+        //
+        // An unresolvable inferred annotation still registers nothing
+        // (surface-and-stop).
+        let self_ref: &Self = &self;
+        let inferred_return_cts: Vec<(String, shape_value::v2::ConcreteType)> =
+            inferred_return_annotations
+                .iter()
+                .filter_map(|(fn_name, ann)| {
+                    crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                        self_ref, ann,
+                    )
+                    .map(|ct| (fn_name.clone(), ct))
+                })
+                .collect();
+        for (fn_name, ret_ty) in inferred_return_cts {
+            self.type_tracker
+                .register_function_return_concrete_type(&fn_name, ret_ty);
         }
 
         // MIR authority for non-function items: run borrow analysis on top-level
