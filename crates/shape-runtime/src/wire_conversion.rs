@@ -377,7 +377,13 @@ fn v2_typed_array_to_wire(bits: u64, ctx: &Context) -> WireValue {
                 let elem = TypedArray::<*const TypedObjectStorage>::get_unchecked(arr, index);
                 slot_to_wire(elem as u64, NativeKind::Ptr(HeapKind::TypedObject), ctx)
             },
-            ELEM_TYPE_TRAIT_OBJECT => WireValue::String("<trait_object:phase-2c>".to_string()),
+            ELEM_TYPE_TRAIT_OBJECT => {
+                panic!(
+                    "TypedArray wire conversion cannot serialize Array<dyn Trait>: \
+                     TraitObjectStorage has no wire-stable representation. \
+                     Refusing to fabricate a placeholder value."
+                );
+            }
             ELEM_TYPE_TYPED_ARRAY => unsafe {
                 let arr = ptr as *const TypedArray<*const TypedArrayElem>;
                 let elem = TypedArray::<*const TypedArrayElem>::get_unchecked(arr, index);
