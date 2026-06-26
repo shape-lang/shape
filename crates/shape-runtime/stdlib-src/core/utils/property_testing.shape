@@ -4,9 +4,7 @@
 /// Generates random inputs to test invariants (properties) that should
 /// hold for all inputs. Inspired by QuickCheck/Hypothesis.
 
-builtin fn __intrinsic_random() -> number;
-builtin fn __intrinsic_random_int(lo: number, hi: number) -> number;
-builtin fn __intrinsic_random_seed(seed: number) -> void;
+use std::core::random
 
 type PropertyResult<T> {
     passed: bool,
@@ -44,13 +42,13 @@ pub fn property<T>(name: string, n_trials: int, gen_fn: () => T, prop_fn: (T) =>
         let input: T = gen_fn();
         let result: bool = prop_fn(input);
         if !result {
-            counterexample = input;
+            counterexample = Some(input);
             passed = false;
             break;
         }
     }
 
-    {
+    PropertyResult {
         passed: passed,
         name: name,
         trials: n_trials,
@@ -77,7 +75,7 @@ pub fn run_properties<T>(tests: Array<PropertySpec<T>>) -> PropertySummary<T> {
         }
     }
 
-    {
+    PropertySummary {
         passed: passed_count,
         failed: failed_count,
         total: tests.len(),
@@ -88,14 +86,14 @@ pub fn run_properties<T>(tests: Array<PropertySpec<T>>) -> PropertySummary<T> {
 // ===== Built-in Generators =====
 
 /// Generate random integer in [lo, hi]
-pub fn gen_int(lo: number, hi: number) {
-    || __intrinsic_random_int(lo, hi)
+pub fn gen_int(lo: number, hi: number) -> () => number {
+    || random::random_int(lo, hi)
 }
 
 /// Generate random float in [lo, hi)
-pub fn gen_float(lo: number, hi: number) {
+pub fn gen_float(lo: number, hi: number) -> () => number {
     || {
-        let r: number = __intrinsic_random();
+        let r: number = random::random();
         let span: number = hi - lo;
         lo + r * span
     }
@@ -104,7 +102,7 @@ pub fn gen_float(lo: number, hi: number) {
 /// Generate random boolean
 pub fn gen_bool() {
     || {
-        let r: number = __intrinsic_random();
+        let r: number = random::random();
         r < 0.5
     }
 }
@@ -113,10 +111,10 @@ pub fn gen_bool() {
 pub fn gen_string(max_len: number) {
     || {
         let chars: string = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        let n: int = floor(__intrinsic_random_int(0.0, max_len));
+        let n: int = floor(random::random_int(0.0, max_len));
         var s: string = "";
         for i in range(0, n) {
-            let idx: int = floor(__intrinsic_random_int(0.0, 61.0));
+            let idx: int = floor(random::random_int(0.0, 61.0));
             let ch: string = chars[idx];
             s = s + ch;
         }
@@ -133,7 +131,7 @@ pub fn gen_string(max_len: number) {
 /// the broader generic-arithmetic inference loss in Cluster B) is implemented.
 pub fn gen_array(max_len: number, elem_gen: () => int) {
     || {
-        let n: int = floor(__intrinsic_random_int(0.0, max_len));
+        let n: int = floor(random::random_int(0.0, max_len));
         let mut arr: Array<int> = [];
         for i in range(0, n) {
             arr.push(elem_gen());
@@ -146,7 +144,7 @@ pub fn gen_array(max_len: number, elem_gen: () => int) {
 pub fn gen_one_of(choices: Array<int>) {
     || {
         let hi: number = (choices.len() - 1) as number;
-        let idx: int = floor(__intrinsic_random_int(0.0, hi));
+        let idx: int = floor(random::random_int(0.0, hi));
         choices[idx]
     }
 }

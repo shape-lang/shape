@@ -27,7 +27,7 @@
 
 use super::TypeInferenceEngine;
 use crate::type_system::*;
-use shape_ast::ast::{Expr, FunctionParameter, ObjectEntry, Spanned, TypeAnnotation};
+use shape_ast::ast::{Expr, FunctionParameter, Literal, ObjectEntry, Spanned, TypeAnnotation};
 
 /// Mode for bidirectional type checking
 #[derive(Debug, Clone)]
@@ -339,6 +339,14 @@ impl TypeInferenceEngine {
                     self.check_against(arg, payload)?;
                 }
                 Ok(expected.clone())
+            }
+
+            // `None` is polymorphic, but in a hard expected Option context
+            // (`let x: T? = None`) the context already proves the carrier and
+            // payload type. Preserve that proof instead of synthesizing an
+            // unrelated `Option<fresh>` that later renders as `unknown`.
+            Expr::Literal(Literal::None, _) if self.is_option_type(&expected.canonicalize()) => {
+                Ok(expected.canonicalize())
             }
 
             // Numeric-conversion LITERAL ADOPTION (spec §4): a bare integer

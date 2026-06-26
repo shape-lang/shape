@@ -71,6 +71,23 @@ fn with_advanced_distributions_and_random_import(code: &str) -> String {
     format!("use std::core::distributions_advanced\nuse std::core::random\n{code}")
 }
 
+fn assert_property_spec_function_field_schema_error(code: &str) {
+    let err = eval(code)
+        .expect_err("PropertySpec<T> function fields are not representable in schemas yet");
+    assert!(err.contains("post-inference FieldType::Any"), "{err}");
+    assert!(err.contains("PropertySpec"), "{err}");
+    assert!(err.contains("field `gen`"), "{err}");
+    assert!(err.contains("field `prop`"), "{err}");
+}
+
+fn assert_run_properties_specialization_error(code: &str) {
+    let err =
+        eval(code).expect_err("run_properties<T> still requires end-to-end specialization work");
+    assert!(err.contains("cannot infer type argument"), "{err}");
+    assert!(err.contains("run_properties"), "{err}");
+    assert!(err.contains("empty array `results`"), "{err}");
+}
+
 // ===== SL7: Advanced Distributions =====
 
 #[test]
@@ -283,20 +300,17 @@ fn test_property_passing() {
     let code = with_modules(
         &["core/utils/property_testing.shape"],
         r#"
-        __intrinsic_random_seed(42);
-        let result = property("addition commutes", 100,
-            || __intrinsic_random_int(0.0, 1000.0),
-            |x| {
-                let y = __intrinsic_random_int(0.0, 1000.0);
+        random::random_seed(42.0);
+        let gen: () => number = || random::random_int(0.0, 1000.0);
+        let prop: (number) => bool = |x| {
+                let y: number = random::random_int(0.0, 1000.0);
                 x + y == y + x
-            }
-        );
+        };
+        let result: PropertyResult<number> = property("addition commutes", 100, gen, prop);
         result.passed && result.counterexample == None
         "#,
     );
-    let err = eval(&code)
-        .expect_err("generic PropertyResult<T> object proof is still a type-system blocker");
-    assert!(err.contains("PropertyResult"), "{err}");
+    assert_property_spec_function_field_schema_error(&code);
 }
 
 #[test]
@@ -305,17 +319,14 @@ fn test_property_failing() {
     let code = with_modules(
         &["core/utils/property_testing.shape"],
         r#"
-        __intrinsic_random_seed(42);
-        let result = property("always less than 50", 100,
-            || __intrinsic_random_int(0.0, 100.0),
-            |x| x < 50.0
-        );
+        random::random_seed(42.0);
+        let gen: () => number = || random::random_int(0.0, 100.0);
+        let prop: (number) => bool = |x| x < 50.0;
+        let result: PropertyResult<number> = property("always less than 50", 100, gen, prop);
         !result.passed && result.counterexample != None
         "#,
     );
-    let err = eval(&code)
-        .expect_err("generic PropertyResult<T> object proof is still a type-system blocker");
-    assert!(err.contains("PropertyResult"), "{err}");
+    assert_property_spec_function_field_schema_error(&code);
 }
 
 #[test]
@@ -324,17 +335,20 @@ fn test_run_properties_summary() {
     let code = with_modules(
         &["core/utils/property_testing.shape"],
         r#"
-        __intrinsic_random_seed(42);
-        let results = run_properties([
-            { name: "positive", trials: 50, gen: || __intrinsic_random_int(1.0, 100.0), prop: |x| x > 0.0 },
-            { name: "negative", trials: 50, gen: || __intrinsic_random_int(1.0, 100.0), prop: |x| x < 0.0 }
-        ]);
+        random::random_seed(42.0);
+        let gen_positive: () => number = || random::random_int(1.0, 100.0);
+        let prop_positive: (number) => bool = |x| x > 0.0;
+        let gen_negative: () => number = || random::random_int(1.0, 100.0);
+        let prop_negative: (number) => bool = |x| x < 0.0;
+        let tests: Array<PropertySpec<number>> = [
+            PropertySpec { name: "positive", trials: 50, gen: gen_positive, prop: prop_positive },
+            PropertySpec { name: "negative", trials: 50, gen: gen_negative, prop: prop_negative }
+        ];
+        let results: PropertySummary<number> = run_properties(tests);
         results.passed == 1 && results.failed == 1 && results.total == 2
         "#,
     );
-    let err = eval(&code)
-        .expect_err("generic PropertySummary<T> object proof is still a type-system blocker");
-    assert!(err.contains("PropertySummary"), "{err}");
+    assert_run_properties_specialization_error(&code);
 }
 
 #[test]
@@ -343,21 +357,19 @@ fn test_gen_int_range() {
     let code = with_modules(
         &["core/utils/property_testing.shape"],
         r#"
-        __intrinsic_random_seed(42);
-        let gen = gen_int(10, 20);
+        random::random_seed(42.0);
+        let gen: () => number = gen_int(10.0, 20.0);
         let mut all_in_range = true;
         for i in range(0, 50) {
-            let v = gen();
-            if v < 10 || v > 20 {
+            let v: number = gen();
+            if v < 10.0 || v > 20.0 {
                 all_in_range = false;
             }
         }
         all_in_range
         "#,
     );
-    let err =
-        eval(&code).expect_err("property_testing module is blocked before generator execution");
-    assert!(err.contains("PropertyResult"), "{err}");
+    assert_property_spec_function_field_schema_error(&code);
 }
 
 #[test]
@@ -366,11 +378,11 @@ fn test_gen_float_range() {
     let code = with_modules(
         &["core/utils/property_testing.shape"],
         r#"
-        __intrinsic_random_seed(42);
-        let gen = gen_float(0.0, 1.0);
+        random::random_seed(42.0);
+        let gen: () => number = gen_float(0.0, 1.0);
         let mut all_ok = true;
         for i in range(0, 50) {
-            let v = gen();
+            let v: number = gen();
             if v < 0.0 || v >= 1.0 {
                 all_ok = false;
             }
@@ -378,9 +390,7 @@ fn test_gen_float_range() {
         all_ok
         "#,
     );
-    let err =
-        eval(&code).expect_err("property_testing module is blocked before generator execution");
-    assert!(err.contains("PropertyResult"), "{err}");
+    assert_property_spec_function_field_schema_error(&code);
 }
 
 // ===== SL3: Encoding =====

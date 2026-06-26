@@ -4540,9 +4540,13 @@ impl BytecodeCompiler {
 
         // 3. Unify call-site arg types against the declared param annotations
         //    to bind each type param to a concrete type.
-        let Some(resolution) =
-            resolve_call_site_type_args(self, func_name, &arg_types, &type_params)
-        else {
+        let Some(resolution) = crate::compiler::monomorphization::type_resolution::resolve_call_site_type_args_from_exprs(
+            self,
+            func_name,
+            args,
+            &arg_types,
+            &type_params,
+        ) else {
             return Ok(None);
         };
 
