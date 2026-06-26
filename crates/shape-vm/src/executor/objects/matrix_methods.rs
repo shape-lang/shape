@@ -49,6 +49,8 @@ use shape_runtime::context::ExecutionContext;
 use shape_runtime::intrinsics::matrix_kernels;
 use shape_value::aligned_vec::AlignedVec;
 use shape_value::heap_value::{HeapKind, MatrixData};
+use shape_value::slot::ValueSlot;
+use shape_value::v2::typed_array::TypedArray;
 // V3-S5 ckpt-5 (2026-05-15): `typed_buffer::{AlignedTypedBuffer, TypedBuffer}`
 // imports removed; the wrappers were deleted at ckpt-4 per W12 audit §B.
 use shape_value::{KindedSlot, NativeKind, VMError};
@@ -78,7 +80,7 @@ fn type_error(msg: impl Into<String>) -> VMError {
 /// match `TypedArrayData::Matrix(m)`) is retired — Matrix is a
 /// first-class HeapKind, not buried inside `TypedArrayData`.
 #[inline]
-fn as_matrix(slot: &KindedSlot) -> Result<Arc<MatrixData>, VMError> {
+pub(crate) fn as_matrix(slot: &KindedSlot) -> Result<Arc<MatrixData>, VMError> {
     if !matches!(slot.kind, NativeKind::Ptr(HeapKind::Matrix)) {
         return Err(type_error(format!(
             "Matrix method receiver must be a Matrix (got kind {:?})",
@@ -104,42 +106,33 @@ fn as_matrix(slot: &KindedSlot) -> Result<Arc<MatrixData>, VMError> {
 /// `Ptr(HeapKind::Matrix)` — mirror of `op_new_matrix`'s post-amendment
 /// emit path so dispatch tables and stack-side retain/release see one shape.
 #[inline]
-fn matrix_slot(m: MatrixData) -> KindedSlot {
+pub(crate) fn matrix_slot(m: MatrixData) -> KindedSlot {
     KindedSlot::from_matrix(Arc::new(m))
 }
 
-/// Wrap a flat `AlignedVec<f64>` into a `KindedSlot`.
-///
-/// V3-S5 ckpt-5: `TypedArrayData::F64` constructor deleted at ckpt-1..
-/// ckpt-4. Surface — the eight matrix-method callers that depend on a
-/// flat `Array<number>` result (shape/diag/flatten/row/col/rowSum/etc.)
-/// surface-and-stop. Rebuild lands at ckpt-6 STRICT close per the v2-raw
-/// `TypedArray<f64>` direct-access target.
-fn float_array_slot(data: AlignedVec<f64>) -> Result<KindedSlot, VMError> {
-    let _ = data;
-    Err(VMError::NotImplemented(
-        "matrix: float_array_slot SURFACE — V3-S5 ckpt-5 consumer-cascade \
-         tier 3. The deleted typed-array-data F64 constructor + outer \
-         `HeapValue::TypedArray` arm DELETED at ckpt-1..ckpt-4 per W12-typed-array-\
-         data-deletion audit §3.5 + §3.6. Rebuild lands at ckpt-6 STRICT \
-         close per v2-raw `TypedArray<f64>` direct-access. REFUSED ON \
-         SIGHT: TypedArrayData resurrection under any rename (Refusal #1)."
-            .to_string(),
+/// Wrap a flat f64 buffer into the current v2 typed-array carrier.
+pub(crate) fn float_array_slot(data: AlignedVec<f64>) -> Result<KindedSlot, VMError> {
+    use crate::executor::v2_handlers::v2_array_detect::{stamp_elem_type, ELEM_TYPE_F64};
+    let arr = TypedArray::<f64>::from_slice(data.as_slice());
+    unsafe {
+        stamp_elem_type(arr as *mut u8, ELEM_TYPE_F64);
+    }
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(arr as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
     ))
 }
 
-/// Wrap a `Vec<i64>` into a `KindedSlot`.
-///
-/// V3-S5 ckpt-5: TypedArrayData::I64 constructor deleted; surface.
+/// Wrap an i64 vector into the current v2 typed-array carrier.
 fn int_array_slot(data: Vec<i64>) -> Result<KindedSlot, VMError> {
-    let _ = data;
-    Err(VMError::NotImplemented(
-        "matrix: int_array_slot SURFACE — V3-S5 ckpt-5 consumer-cascade \
-         tier 3. The deleted typed-array-data I64 constructor DELETED at ckpt-1..\
-         ckpt-4 per W12-typed-array-data-deletion audit §3.5. Rebuild \
-         lands at ckpt-6 STRICT close per v2-raw `TypedArray<i64>` \
-         direct-access. REFUSED ON SIGHT (Refusal #1)."
-            .to_string(),
+    use crate::executor::v2_handlers::v2_array_detect::{stamp_elem_type, ELEM_TYPE_I64};
+    let arr = TypedArray::<i64>::from_slice(&data);
+    unsafe {
+        stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+    }
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(arr as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
     ))
 }
 

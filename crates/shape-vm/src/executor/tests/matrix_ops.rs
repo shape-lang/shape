@@ -1,10 +1,15 @@
 //! Matrix integration tests for the post-strict-typing host/test boundary.
 
 use crate::bytecode::{Constant, Instruction, KindedConstant, OpCode, Operand};
+use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, V2ElemType};
+use crate::executor::vm_impl::stack::clone_with_kind;
+use crate::executor::{VMConfig, VirtualMachine};
 use crate::type_tracking::NativeKind;
-use shape_value::KindedSlot;
 use shape_value::aligned_vec::AlignedVec;
 use shape_value::heap_value::{HeapKind, MatrixData};
+use shape_value::slot::ValueSlot;
+use shape_value::v2::typed_array::TypedArray;
+use shape_value::{KindedSlot, RefTarget, VMError};
 use std::sync::Arc;
 
 fn matrix_data(values: &[f64], rows: u32, cols: u32) -> Arc<MatrixData> {
@@ -25,6 +30,14 @@ fn matrix_2x3_const() -> Constant {
 
 fn matrix_2x2_const(a: f64, b: f64, c: f64, d: f64) -> Constant {
     matrix_const(&[a, b, c, d], 2, 2)
+}
+
+fn string_const(value: &str) -> Constant {
+    Constant::String(value.to_string())
+}
+
+fn int_const(value: i64) -> Constant {
+    Constant::Int(value)
 }
 
 fn matrix_from_slot(slot: &KindedSlot) -> &MatrixData {
@@ -78,6 +91,101 @@ fn assert_f64(slot: &KindedSlot, expected: f64) {
     );
 }
 
+fn assert_i64(slot: &KindedSlot, expected: i64) {
+    assert_eq!(slot.kind(), NativeKind::Int64);
+    assert_eq!(slot.as_i64().unwrap(), expected);
+}
+
+fn f64_array_values(slot: &KindedSlot) -> Vec<f64> {
+    assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedArray));
+    let view = as_v2_typed_array(slot.raw(), slot.kind()).expect("v2 f64 typed array");
+    assert_eq!(view.elem_type, V2ElemType::F64);
+    let arr = view.ptr as *const TypedArray<f64>;
+    unsafe { TypedArray::<f64>::as_slice(arr).to_vec() }
+}
+
+fn i64_array_values(slot: &KindedSlot) -> Vec<i64> {
+    assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedArray));
+    let view = as_v2_typed_array(slot.raw(), slot.kind()).expect("v2 i64 typed array");
+    assert_eq!(view.elem_type, V2ElemType::I64);
+    let arr = view.ptr as *const TypedArray<i64>;
+    unsafe { TypedArray::<i64>::as_slice(arr).to_vec() }
+}
+
+fn assert_f64_array(slot: &KindedSlot, expected: &[f64]) {
+    assert_eq!(f64_array_values(slot), expected);
+}
+
+fn assert_i64_array(slot: &KindedSlot, expected: &[i64]) {
+    assert_eq!(i64_array_values(slot), expected);
+}
+
+fn matrix_property(prop: &str) -> Result<KindedSlot, VMError> {
+    super::execute_bytecode_slot(
+        vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+            Instruction::new(OpCode::GetProp, None),
+        ],
+        vec![matrix_2x3_const(), string_const(prop)],
+    )
+}
+
+fn matrix_index(index: Constant) -> Result<KindedSlot, VMError> {
+    super::execute_bytecode_slot(
+        vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+            Instruction::new(OpCode::GetProp, None),
+        ],
+        vec![matrix_2x3_const(), index],
+    )
+}
+
+fn matrix_length_opcode() -> Result<KindedSlot, VMError> {
+    super::execute_bytecode_slot(
+        vec![
+            Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+            Instruction::new(OpCode::Length, None),
+        ],
+        vec![matrix_2x3_const()],
+    )
+}
+
+fn array_index(slot: &KindedSlot, index: i64) -> Result<KindedSlot, VMError> {
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.push_kinded_slot_preserving_miri(slot.clone())?;
+    vm.push_kinded(index as u64, NativeKind::Int64)?;
+    vm.op_get_prop(None)?;
+    vm.pop_kinded_slot_preserving_miri()
+}
+
+fn set_array_index_ref(slot: KindedSlot, writes: &[(i64, f64)]) -> Result<KindedSlot, VMError> {
+    let mut vm = VirtualMachine::new(VMConfig::default());
+    vm.push_kinded_slot_preserving_miri(slot)?;
+
+    let target = Arc::new(RefTarget::Local {
+        frame_index: u32::MAX,
+        slot_index: 0,
+        kind: NativeKind::Ptr(HeapKind::TypedArray),
+    });
+    let target_bits = Arc::into_raw(target) as u64;
+    vm.push_kinded(target_bits, NativeKind::Ptr(HeapKind::Reference))?;
+
+    for (index, value) in writes {
+        vm.push_kinded(*index as u64, NativeKind::Int64)?;
+        vm.push_kinded(value.to_bits(), NativeKind::Float64)?;
+        vm.op_set_index_ref(&Instruction::new(
+            OpCode::SetIndexRef,
+            Some(Operand::Local(1)),
+        ))?;
+    }
+
+    let (bits, kind) = vm.stack_read_kinded_raw(0);
+    clone_with_kind(bits, kind);
+    Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
+}
+
 #[test]
 fn test_new_matrix_2x2() {
     let instructions = vec![
@@ -102,32 +210,38 @@ fn test_new_matrix_2x2() {
 
 #[test]
 fn test_matrix_rows_property() {
-    todo!("phase-2c — GetProp on Matrix rows is not wired to the kinded Matrix carrier")
+    let result = matrix_property("rows").unwrap();
+    assert_i64(&result, 2);
 }
 
 #[test]
 fn test_matrix_cols_property() {
-    todo!("phase-2c — GetProp on Matrix cols is not wired to the kinded Matrix carrier")
+    let result = matrix_property("cols").unwrap();
+    assert_i64(&result, 3);
 }
 
 #[test]
 fn test_matrix_length_property() {
-    todo!("phase-2c — GetProp on Matrix length is not wired to the kinded Matrix carrier")
+    let result = matrix_property("length").unwrap();
+    assert_i64(&result, 2);
 }
 
 #[test]
 fn test_matrix_index_access() {
-    todo!("phase-2c — Matrix index access requires MatrixSlice/vector carrier restoration")
+    let result = matrix_index(int_const(1)).unwrap();
+    assert_f64_array(&result, &[4.0, 5.0, 6.0]);
 }
 
 #[test]
 fn test_matrix_negative_index() {
-    todo!("phase-2c — Matrix negative index access requires MatrixSlice/vector carrier restoration")
+    let result = matrix_index(int_const(-1));
+    assert!(matches!(result, Err(VMError::IndexOutOfBounds { .. })));
 }
 
 #[test]
 fn test_matrix_length_opcode() {
-    todo!("phase-2c — Length on Matrix is not wired to the kinded Matrix carrier")
+    let result = matrix_length_opcode().unwrap();
+    assert_i64(&result, 2);
 }
 
 #[test]
@@ -138,7 +252,8 @@ fn test_matrix_transpose() {
 
 #[test]
 fn test_matrix_shape() {
-    todo!("phase-2c — Matrix.shape returns an int vector; typed vector carrier is still surfaced")
+    let result = call_matrix_method(matrix_2x3_const(), "shape", vec![]).unwrap();
+    assert_i64_array(&result, &[2, 3]);
 }
 
 #[test]
@@ -154,22 +269,26 @@ fn test_matrix_reshape() {
 
 #[test]
 fn test_matrix_row() {
-    todo!("phase-2c — Matrix.row returns a vector carrier that is still surfaced")
+    let result = call_matrix_method(matrix_2x3_const(), "row", vec![Constant::Int(1)]).unwrap();
+    assert_f64_array(&result, &[4.0, 5.0, 6.0]);
 }
 
 #[test]
 fn test_matrix_col() {
-    todo!("phase-2c — Matrix.col returns a vector carrier that is still surfaced")
+    let result = call_matrix_method(matrix_2x3_const(), "col", vec![Constant::Int(2)]).unwrap();
+    assert_f64_array(&result, &[3.0, 6.0]);
 }
 
 #[test]
 fn test_matrix_diag() {
-    todo!("phase-2c — Matrix.diag returns a vector carrier that is still surfaced")
+    let result = call_matrix_method(matrix_2x3_const(), "diag", vec![]).unwrap();
+    assert_f64_array(&result, &[1.0, 5.0]);
 }
 
 #[test]
 fn test_matrix_flatten() {
-    todo!("phase-2c — Matrix.flatten returns a vector carrier that is still surfaced")
+    let result = call_matrix_method(matrix_2x3_const(), "flatten", vec![]).unwrap();
+    assert_f64_array(&result, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 }
 
 #[test]
@@ -198,12 +317,14 @@ fn test_matrix_mean() {
 
 #[test]
 fn test_matrix_row_sum() {
-    todo!("phase-2c — Matrix.rowSum returns a vector carrier that is still surfaced")
+    let result = call_matrix_method(matrix_2x3_const(), "rowSum", vec![]).unwrap();
+    assert_f64_array(&result, &[6.0, 15.0]);
 }
 
 #[test]
 fn test_matrix_col_sum() {
-    todo!("phase-2c — Matrix.colSum returns a vector carrier that is still surfaced")
+    let result = call_matrix_method(matrix_2x3_const(), "colSum", vec![]).unwrap();
+    assert_f64_array(&result, &[5.0, 7.0, 9.0]);
 }
 
 #[test]
@@ -233,12 +354,14 @@ fn test_matrix_inverse() {
 
 #[test]
 fn test_matrix_row_negative_index() {
-    todo!("phase-2c — Matrix.row vector-return path is still surfaced")
+    let result = call_matrix_method(matrix_2x3_const(), "row", vec![Constant::Int(-1)]);
+    assert!(result.is_err());
 }
 
 #[test]
 fn test_matrix_col_negative_index() {
-    todo!("phase-2c — Matrix.col vector-return path is still surfaced")
+    let result = call_matrix_method(matrix_2x3_const(), "col", vec![Constant::Int(-1)]);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -272,45 +395,65 @@ fn test_matrix_identity_inverse() {
 
 #[test]
 fn test_matrix_row_ref_deref_load() {
-    todo!("phase-2c — Matrix row references depend on MatrixSlice/vector carrier restoration")
+    let row = matrix_index(int_const(0)).unwrap();
+    let value = array_index(&row, 1).unwrap();
+    assert_f64(&value, 2.0);
 }
 
 #[test]
 fn test_matrix_row_ref_set_index_ref() {
-    todo!("phase-2c — Matrix row references depend on MatrixSlice/vector carrier restoration")
+    let row = matrix_index(int_const(0)).unwrap();
+    let result = set_array_index_ref(row, &[(1, 20.0)]).unwrap();
+    assert_f64_array(&result, &[1.0, 20.0, 3.0]);
 }
 
 #[test]
 fn test_matrix_row_ref_multiple_writes() {
-    todo!("phase-2c — Matrix row references depend on MatrixSlice/vector carrier restoration")
+    let row = matrix_index(int_const(1)).unwrap();
+    let result = set_array_index_ref(row, &[(0, 40.0), (2, 60.0)]).unwrap();
+    assert_f64_array(&result, &[40.0, 5.0, 60.0]);
 }
 
 #[test]
 fn test_matrix_row_ref_cow_semantics() {
-    todo!("phase-2c — Matrix row references depend on MatrixSlice/vector carrier restoration")
+    let row = matrix_index(int_const(0)).unwrap();
+    let result = set_array_index_ref(row, &[(1, 20.0)]).unwrap();
+    assert_f64_array(&result, &[1.0, 20.0, 3.0]);
+
+    let original = matrix_index(int_const(0)).unwrap();
+    assert_f64_array(&original, &[1.0, 2.0, 3.0]);
 }
 
 #[test]
 fn test_matrix_row_ref_negative_col_index() {
-    todo!("phase-2c — Matrix row references depend on MatrixSlice/vector carrier restoration")
+    let row = matrix_index(int_const(0)).unwrap();
+    let result = set_array_index_ref(row, &[(-1, 20.0)]);
+    assert!(matches!(result, Err(VMError::IndexOutOfBounds { .. })));
 }
 
 #[test]
 fn test_matrix_row_ref_col_oob_error() {
-    todo!("phase-2c — Matrix row references depend on MatrixSlice/vector carrier restoration")
+    let row = matrix_index(int_const(0)).unwrap();
+    let result = set_array_index_ref(row, &[(3, 20.0)]);
+    assert!(matches!(result, Err(VMError::IndexOutOfBounds { .. })));
 }
 
 #[test]
 fn test_matrix_row_ref_row_oob_error() {
-    todo!("phase-2c — Matrix row references depend on MatrixSlice/vector carrier restoration")
+    let result = matrix_index(int_const(2));
+    assert!(matches!(result, Err(VMError::IndexOutOfBounds { .. })));
 }
 
 #[test]
 fn test_matrix_row_ref_read_after_write() {
-    todo!("phase-2c — Matrix row references depend on MatrixSlice/vector carrier restoration")
+    let row = matrix_index(int_const(0)).unwrap();
+    let result = set_array_index_ref(row, &[(1, 20.0)]).unwrap();
+    let value = array_index(&result, 1).unwrap();
+    assert_f64(&value, 20.0);
 }
 
 #[test]
 fn test_matrix_row_ref_int_index() {
-    todo!("phase-2c — Matrix row references depend on MatrixSlice/vector carrier restoration")
+    let row = matrix_index(Constant::Int(1)).unwrap();
+    assert_f64_array(&row, &[4.0, 5.0, 6.0]);
 }
