@@ -497,7 +497,6 @@ pub static SET_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     // Read-only — MethodFnV2
     "has" => crate::executor::objects::set_methods::v2_has,
     "includes" => crate::executor::objects::set_methods::v2_has,
-    "size" => crate::executor::objects::set_methods::v2_size,
     "len" => crate::executor::objects::set_methods::v2_size,
     "length" => crate::executor::objects::set_methods::v2_size,
     "isEmpty" => crate::executor::objects::set_methods::v2_is_empty,
