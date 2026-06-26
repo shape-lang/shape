@@ -10,7 +10,8 @@ use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
 use crate::{VMConfig, VMError};
 use shape_ast::parser::parse_program;
-use shape_value::KindedSlot;
+use shape_value::content::{ChartSpec, ChartType, ContentNode};
+use shape_value::{HeapKind, KindedSlot, NativeKind};
 
 /// Compile and execute Shape source code, returning the final expression value.
 fn compile_and_execute(source: &str) -> Result<KindedSlot, VMError> {
@@ -29,6 +30,48 @@ fn compile_and_execute(source: &str) -> Result<KindedSlot, VMError> {
 fn assert_int_result(result: &KindedSlot, expected: i64, context: &str) {
     assert_eq!(result.kind(), shape_value::NativeKind::Int64, "{context}");
     assert_eq!(result.as_i64(), Some(expected), "{context}");
+}
+
+fn assert_numeric_result(result: &KindedSlot, expected: f64, context: &str) {
+    let actual = result
+        .as_f64()
+        .or_else(|| result.as_i64().map(|v| v as f64))
+        .expect(context);
+    assert_eq!(actual, expected, "{context}");
+}
+
+fn content_result<'a>(result: &'a KindedSlot, context: &str) -> &'a ContentNode {
+    assert_eq!(
+        result.kind(),
+        NativeKind::Ptr(HeapKind::Content),
+        "{context}"
+    );
+    let bits = result.raw();
+    assert_ne!(bits, 0, "{context}");
+    // SAFETY: Ptr(Content) slots are Arc::into_raw(Arc<ContentNode>) carriers.
+    unsafe { &*(bits as *const ContentNode) }
+}
+
+fn chart_result<'a>(result: &'a KindedSlot, context: &str) -> &'a ChartSpec {
+    match content_result(result, context) {
+        ContentNode::Chart(spec) => spec,
+        other => panic!("{context}: expected chart content, got {other:?}"),
+    }
+}
+
+fn assert_channel(spec: &ChartSpec, name: &str, label: &str, values: &[f64]) {
+    let matches: Vec<_> = spec
+        .channels_by_name(name)
+        .into_iter()
+        .filter(|channel| channel.label == label)
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one {name} channel labeled {label}, got {:?}",
+        spec.channels
+    );
+    assert_eq!(matches[0].values, values);
 }
 
 /// Assert that source code compiles successfully (may not need to run).
@@ -110,8 +153,8 @@ fn test_method_table_is_self_returning() {
 
 #[test]
 fn test_method_table_takes_closure_with_receiver_param() {
-    use shape_runtime::type_system::BuiltinTypes;
     use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
+    use shape_runtime::type_system::BuiltinTypes;
     let mut table = MethodTable::new();
     table.register_user_generic_method(
         "Vec",
@@ -202,8 +245,8 @@ fn test_resolve_option_map() {
 #[test]
 fn test_resolve_table_map_returns_table_u() {
     use shape_ast::ast::TypeAnnotation;
-    use shape_runtime::type_system::Type;
     use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
+    use shape_runtime::type_system::Type;
 
     let mut table = MethodTable::new();
     table.register_user_generic_method(
@@ -289,16 +332,44 @@ fn test_queryable_impl_for_custom_type() {
 
 #[test]
 fn test_extend_array_custom_method() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
-    )
+    let source = r#"
+        extend Vec {
+            method item_count() -> int {
+                self.len()
+            }
+        }
+
+        [4, 8, 15].item_count()
+    "#;
+    let result = compile_and_execute(source).unwrap();
+    assert_int_result(
+        &result,
+        3,
+        "extend Vec custom method should dispatch with the typed array receiver",
+    );
 }
 
 #[test]
 fn test_extend_number_method_chaining() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
-    )
+    let source = r#"
+        extend Number {
+            method add(n: int) -> number {
+                self + n
+            }
+
+            method double() -> number {
+                self * 2
+            }
+        }
+
+        5.add(3).double()
+    "#;
+    let result = compile_and_execute(source).unwrap();
+    assert_numeric_result(
+        &result,
+        16.0,
+        "extend Number methods should remain chainable after returning number",
+    );
 }
 
 // =============================================================================
@@ -394,16 +465,46 @@ fn test_bug1_type_annotated_value_not_wrapped() {
 
 #[test]
 fn test_content_chart_from_table_value() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
-    )
+    let source = r#"
+type SalesRecord { month: int, sales: int }
+let data = [
+    SalesRecord { month: 1, sales: 42 },
+    SalesRecord { month: 2, sales: 58 },
+    SalesRecord { month: 3, sales: 65 }
+]
+f"{data: chart(bar), x(month), y(sales)}"
+"#;
+    let result = compile_and_execute(source).unwrap();
+    let spec = chart_result(
+        &result,
+        "chart-formatted typed-record arrays should return chart content",
+    );
+    assert_eq!(spec.chart_type, ChartType::Bar);
+    assert_eq!(spec.x_label.as_deref(), Some("month"));
+    assert_channel(spec, "x", "month", &[1.0, 2.0, 3.0]);
+    assert_channel(spec, "y", "sales", &[42.0, 58.0, 65.0]);
 }
 
 #[test]
 fn test_content_chart_from_table_multi_y() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
-    )
+    let source = r#"
+type FinRecord { x: int, revenue: int, cost: int }
+let data = [
+    FinRecord { x: 1, revenue: 100, cost: 60 },
+    FinRecord { x: 2, revenue: 120, cost: 70 }
+]
+f"{data: chart(line), x(x), y(revenue, cost)}"
+"#;
+    let result = compile_and_execute(source).unwrap();
+    let spec = chart_result(
+        &result,
+        "chart-formatted typed-record arrays should support multiple y channels",
+    );
+    assert_eq!(spec.chart_type, ChartType::Line);
+    assert_eq!(spec.x_label.as_deref(), Some("x"));
+    assert_channel(spec, "x", "x", &[1.0, 2.0]);
+    assert_channel(spec, "y", "revenue", &[100.0, 120.0]);
+    assert_channel(spec, "y", "cost", &[60.0, 70.0]);
 }
 
 // ===== Table Row Literal Tests =====
@@ -478,9 +579,29 @@ let t = [1, 2], [3, 4]
 
 #[test]
 fn test_table_row_literal_chart() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — KindedSlot heap accessors pending)"
-    )
+    let source = r#"
+type MonthlySales { month: int, revenue: number, profit: number }
+
+let data: Table<MonthlySales> =
+    [1, 42.0, 18.0],
+    [2, 58.0, 25.0],
+    [3, 65.0, 31.0],
+    [4, 51.0, 22.0],
+    [5, 73.0, 35.0],
+    [6, 89.0, 42.0]
+
+f"{data: chart(bar), x(month), y(revenue, profit)}"
+"#;
+    let result = compile_and_execute(source).expect("should compile and run");
+    let spec = chart_result(
+        &result,
+        "chart-formatted Table<T> row literals should return chart content",
+    );
+    assert_eq!(spec.chart_type, ChartType::Bar);
+    assert_eq!(spec.x_label.as_deref(), Some("month"));
+    assert_channel(spec, "x", "month", &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_channel(spec, "y", "revenue", &[42.0, 58.0, 65.0, 51.0, 73.0, 89.0]);
+    assert_channel(spec, "y", "profit", &[18.0, 25.0, 31.0, 22.0, 35.0, 42.0]);
 }
 
 #[test]

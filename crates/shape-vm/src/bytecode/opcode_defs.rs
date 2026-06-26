@@ -2466,6 +2466,12 @@ pub enum BuiltinFunction {
     /// `(r<<16)|(g<<8)|b`. `flags`: bitmask (bold=1, italic=2, underline=4,
     /// dim=8). Pushes `Ptr(HeapKind::Content)`.
     FStringContentStyledText,
+    /// R8 W6 host residuals: build a `ContentNode::Chart` from a typed
+    /// table/typed-object-array value plus compile-time parsed chart spec.
+    /// Pops `[value, chart_type, x_column, y_column...]`; validates all
+    /// column names against the carrier schema/table before extracting
+    /// numeric channels. Pushes `Ptr(HeapKind::Content)`.
+    FStringContentChart,
     /// R8 W4 W18.4: combine N stack content values into a
     /// `ContentNode::Fragment`. Pops N `Ptr(HeapKind::Content)` slots,
     /// pushes the fragment. The arg-count slot encodes N per the standard
@@ -2809,6 +2815,7 @@ impl BuiltinFunction {
             // R8 W4 W18.4: f-string content-lowering builtins (3)
             BuiltinFunction::FStringContentText,
             BuiltinFunction::FStringContentStyledText,
+            BuiltinFunction::FStringContentChart,
             BuiltinFunction::FStringContentFragment,
             // Optimization
             BuiltinFunction::IntrinsicMinimize,

@@ -1167,6 +1167,16 @@ impl VirtualMachine {
                     let result = KindedSlot::from_content(std::sync::Arc::new(node));
                     self.push_kinded_slot(result)?;
                 }
+                BuiltinFunction::FStringContentChart => {
+                    // R8 W6 host residuals: `{value: chart(...), x(...),
+                    // y(...)}` lowers here with the original typed value
+                    // still intact. The helper validates the carrier as a
+                    // schema-backed table or typed-object array, then builds
+                    // chart channels from numeric typed fields.
+                    let args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let result = build_fstring_content_chart(self, &args)?;
+                    self.push_kinded_slot(result)?;
+                }
                 BuiltinFunction::FStringContentFragment => {
                     // R8 W4 W18.4: combine N content nodes into a Fragment.
                     // Per ADR-006 §2.3 v2-raw-heap: `Ptr(HeapKind::Content)`
@@ -1688,7 +1698,7 @@ impl VirtualMachine {
 /// contents — each element is copied out of the array's interned UTF-8.
 pub(in crate::executor) fn read_string_array(slot: &KindedSlot) -> Option<Vec<String>> {
     use crate::executor::v2_handlers::v2_array_detect::{
-        V2ElemType, as_v2_typed_array, read_element,
+        as_v2_typed_array, read_element, V2ElemType,
     };
     use shape_value::{HeapKind, NativeKind};
     if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
@@ -1773,6 +1783,372 @@ pub fn parse_chart_type(s: &str) -> Result<shape_value::content::ChartType, VMEr
              heatmap, bubble (e.g. ChartType.line)",
             other
         ))),
+    }
+}
+
+struct ChartProjection {
+    x: Option<(String, Vec<f64>)>,
+    y: Vec<(String, Vec<f64>)>,
+}
+
+fn build_fstring_content_chart(
+    vm: &VirtualMachine,
+    args: &[KindedSlot],
+) -> Result<KindedSlot, VMError> {
+    if args.len() < 4 {
+        return Err(VMError::RuntimeError(format!(
+            "FStringContentChart requires value, chart type, x column, and \
+             at least one y column; got {} arguments",
+            args.len()
+        )));
+    }
+    let chart_type_str = args[1].as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "FStringContentChart chart type must be a string, got kind {:?}",
+            args[1].kind
+        ))
+    })?;
+    let chart_type = parse_chart_type(chart_type_str)?;
+    let x_column_raw = args[2].as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "FStringContentChart x column must be a string, got kind {:?}",
+            args[2].kind
+        ))
+    })?;
+    let x_column = if x_column_raw.is_empty() {
+        None
+    } else {
+        Some(x_column_raw)
+    };
+    let mut y_columns = Vec::with_capacity(args.len().saturating_sub(3));
+    for arg in &args[3..] {
+        let name = arg.as_str().ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "FStringContentChart y column must be a string, got kind {:?}",
+                arg.kind
+            ))
+        })?;
+        if name.is_empty() {
+            return Err(VMError::RuntimeError(
+                "FStringContentChart y column cannot be empty".to_string(),
+            ));
+        }
+        y_columns.push(name.to_string());
+    }
+
+    let projection = project_chart_columns(vm, &args[0], x_column, &y_columns)?;
+    let mut channels = Vec::new();
+    if let Some((label, values)) = projection.x {
+        channels.push(shape_value::content::ChartChannel {
+            name: "x".to_string(),
+            label,
+            values,
+            color: None,
+        });
+    }
+    for (label, values) in projection.y {
+        channels.push(shape_value::content::ChartChannel {
+            name: "y".to_string(),
+            label,
+            values,
+            color: None,
+        });
+    }
+
+    let spec = shape_value::content::ChartSpec {
+        chart_type,
+        channels,
+        x_categories: None,
+        title: None,
+        x_label: x_column.map(str::to_string),
+        y_label: if y_columns.len() == 1 {
+            Some(y_columns[0].clone())
+        } else {
+            None
+        },
+        width: None,
+        height: None,
+        echarts_options: None,
+        interactive: true,
+    };
+    Ok(KindedSlot::from_content(std::sync::Arc::new(
+        shape_value::content::ContentNode::Chart(spec),
+    )))
+}
+
+fn project_chart_columns(
+    vm: &VirtualMachine,
+    value: &KindedSlot,
+    x_column: Option<&str>,
+    y_columns: &[String],
+) -> Result<ChartProjection, VMError> {
+    use shape_value::{HeapKind, NativeKind};
+    match value.kind {
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            project_typed_object_array_chart_columns(vm, value, x_column, y_columns)
+        }
+        NativeKind::Ptr(HeapKind::TableView) => {
+            project_table_view_chart_columns(vm, value, x_column, y_columns)
+        }
+        other => Err(VMError::RuntimeError(format!(
+            "FStringContentChart: expected typed object array or Table<T> \
+             value, got kind {:?}",
+            other
+        ))),
+    }
+}
+
+fn project_typed_object_array_chart_columns(
+    vm: &VirtualMachine,
+    value: &KindedSlot,
+    x_column: Option<&str>,
+    y_columns: &[String],
+) -> Result<ChartProjection, VMError> {
+    use crate::executor::v2_handlers::v2_array_detect::{
+        as_v2_typed_array, read_element, V2ElemType,
+    };
+    let view = as_v2_typed_array(value.raw(), value.kind).ok_or_else(|| {
+        VMError::RuntimeError(
+            "FStringContentChart: array value has invalid typed-array header".to_string(),
+        )
+    })?;
+    if view.elem_type != V2ElemType::TypedObject {
+        return Err(VMError::RuntimeError(format!(
+            "FStringContentChart: chart array elements must be typed objects, \
+             got {:?}",
+            view.elem_type
+        )));
+    }
+    if view.len == 0 {
+        return Err(VMError::RuntimeError(
+            "FStringContentChart: empty typed-object array has no schema-bearing \
+             row to project"
+                .to_string(),
+        ));
+    }
+
+    let mut x_values = x_column.map(|_| Vec::with_capacity(view.len as usize));
+    let mut y_values: Vec<Vec<f64>> = y_columns
+        .iter()
+        .map(|_| Vec::with_capacity(view.len as usize))
+        .collect();
+    for row_idx in 0..view.len {
+        let (bits, kind) = read_element(&view, row_idx).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "FStringContentChart: failed to read typed-object row {}",
+                row_idx
+            ))
+        })?;
+        // Ownership: the elem_type guard above guarantees `read_element`
+        // uses its `V2ElemType::TypedObject` arm, which calls
+        // `copy_typed_object_for_bind` and returns a fresh `_new`-allocated
+        // TypedObjectStorage share. Wrapping that pair in KindedSlot is
+        // therefore ownership-correct; `drop(row_slot)` retires the copied
+        // row, not a borrowed array element.
+        let row_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let row = row_slot.as_typed_object_storage().ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "FStringContentChart: row {} is not a typed object (kind {:?})",
+                row_idx, kind
+            ))
+        })?;
+        if let (Some(name), Some(values)) = (x_column, x_values.as_mut()) {
+            values.push(typed_object_numeric_field(vm, row, name)?);
+        }
+        for (col_idx, name) in y_columns.iter().enumerate() {
+            y_values[col_idx].push(typed_object_numeric_field(vm, row, name)?);
+        }
+        drop(row_slot);
+    }
+
+    Ok(ChartProjection {
+        x: x_column.map(|name| (name.to_string(), x_values.unwrap_or_default())),
+        y: y_columns.iter().cloned().zip(y_values).collect::<Vec<_>>(),
+    })
+}
+
+fn typed_object_numeric_field(
+    vm: &VirtualMachine,
+    row: &shape_value::TypedObjectStorage,
+    field_name: &str,
+) -> Result<f64, VMError> {
+    let schema = vm
+        .program
+        .type_schema_registry
+        .get_by_id(row.schema_id as u32)
+        .ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "FStringContentChart: unknown typed-object schema ID {}",
+                row.schema_id
+            ))
+        })?;
+    let field = schema.get_field(field_name).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "FStringContentChart: schema '{}' has no field '{}'",
+            schema.name, field_name
+        ))
+    })?;
+    ensure_chart_numeric_field_type(&schema.name, field_name, &field.field_type)?;
+    let slot = row
+        .clone_field_kinded(field.index as usize)
+        .ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "FStringContentChart: failed to read field '{}' from schema '{}'",
+                field_name, schema.name
+            ))
+        })?;
+    let value = chart_slot_to_f64(&slot).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "FStringContentChart: field '{}.{}' must be numeric, got kind {:?}",
+            schema.name, field_name, slot.kind
+        ))
+    })?;
+    drop(slot);
+    Ok(value)
+}
+
+fn project_table_view_chart_columns(
+    vm: &VirtualMachine,
+    value: &KindedSlot,
+    x_column: Option<&str>,
+    y_columns: &[String],
+) -> Result<ChartProjection, VMError> {
+    let (schema_id, table) = table_view_data_table(value)?;
+    if table.schema_id() != Some(schema_id as u32) {
+        return Err(VMError::RuntimeError(format!(
+            "FStringContentChart: TableView schema ID {} does not match \
+             DataTable schema ID {:?}",
+            schema_id,
+            table.schema_id()
+        )));
+    }
+    let schema = vm
+        .program
+        .type_schema_registry
+        .get_by_id(schema_id as u32)
+        .ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "FStringContentChart: unknown table schema ID {}",
+                schema_id
+            ))
+        })?;
+    let x = x_column
+        .map(|name| {
+            table_numeric_column(schema, table, name).map(|values| (name.to_string(), values))
+        })
+        .transpose()?;
+    let mut y = Vec::with_capacity(y_columns.len());
+    for name in y_columns {
+        y.push((name.clone(), table_numeric_column(schema, table, name)?));
+    }
+    Ok(ChartProjection { x, y })
+}
+
+fn table_view_data_table<'a>(
+    value: &'a KindedSlot,
+) -> Result<(u64, &'a shape_value::DataTable), VMError> {
+    use shape_value::{HeapKind, NativeKind, TableViewData};
+    if value.kind != NativeKind::Ptr(HeapKind::TableView) {
+        return Err(VMError::RuntimeError(format!(
+            "FStringContentChart: expected TableView carrier, got {:?}",
+            value.kind
+        )));
+    }
+    let bits = value.raw();
+    if bits == 0 {
+        return Err(VMError::RuntimeError(
+            "FStringContentChart: null TableView carrier".to_string(),
+        ));
+    }
+    // SAFETY: Ptr(TableView) slots carry Arc::into_raw(Arc<TableViewData>).
+    let table_view: &TableViewData = unsafe { &*(bits as *const TableViewData) };
+    match table_view {
+        TableViewData::TypedTable { schema_id, table } => Ok((*schema_id, table.as_ref())),
+        other => Err(VMError::RuntimeError(format!(
+            "FStringContentChart: chart projection expects a TypedTable \
+             carrier, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn table_numeric_column(
+    schema: &shape_runtime::type_schema::TypeSchema,
+    table: &shape_value::DataTable,
+    name: &str,
+) -> Result<Vec<f64>, VMError> {
+    let field = schema.get_field(name).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "FStringContentChart: schema '{}' has no field '{}'",
+            schema.name, name
+        ))
+    })?;
+    ensure_chart_numeric_field_type(&schema.name, name, &field.field_type)?;
+    let column = table.column_by_name(name).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "FStringContentChart: table has no column '{}'",
+            name
+        ))
+    })?;
+    if let Some(values) = column.as_any().downcast_ref::<arrow_array::Float64Array>() {
+        return Ok((0..values.len()).map(|idx| values.value(idx)).collect());
+    }
+    if let Some(values) = column.as_any().downcast_ref::<arrow_array::Int64Array>() {
+        return Ok((0..values.len())
+            .map(|idx| values.value(idx) as f64)
+            .collect());
+    }
+    Err(VMError::RuntimeError(format!(
+        "FStringContentChart: column '{}' must be numeric, got Arrow type {:?}",
+        name,
+        column.data_type()
+    )))
+}
+
+fn ensure_chart_numeric_field_type(
+    type_name: &str,
+    field_name: &str,
+    field_type: &shape_runtime::type_schema::FieldType,
+) -> Result<(), VMError> {
+    use shape_runtime::type_schema::FieldType;
+    if matches!(
+        field_type,
+        FieldType::F64
+            | FieldType::I64
+            | FieldType::Decimal
+            | FieldType::I8
+            | FieldType::U8
+            | FieldType::I16
+            | FieldType::U16
+            | FieldType::I32
+            | FieldType::U32
+            | FieldType::U64
+    ) {
+        return Ok(());
+    }
+    Err(VMError::RuntimeError(format!(
+        "FStringContentChart: field '{}.{}' must be numeric, got schema \
+         field type {}",
+        type_name, field_name, field_type
+    )))
+}
+
+fn chart_slot_to_f64(slot: &KindedSlot) -> Option<f64> {
+    use shape_value::NativeKind;
+    match slot.kind {
+        NativeKind::Float64 => Some(f64::from_bits(slot.raw())),
+        NativeKind::Float32 => Some(f32::from_bits(slot.raw() as u32) as f64),
+        NativeKind::Int64 => Some(slot.raw() as i64 as f64),
+        NativeKind::Int32 => Some(slot.raw() as u32 as i32 as f64),
+        NativeKind::Int16 => Some(slot.raw() as u16 as i16 as f64),
+        NativeKind::Int8 => Some(slot.raw() as u8 as i8 as f64),
+        NativeKind::UInt64 => Some(slot.raw() as f64),
+        NativeKind::UInt32 => Some(slot.raw() as u32 as f64),
+        NativeKind::UInt16 => Some(slot.raw() as u16 as f64),
+        NativeKind::UInt8 => Some(slot.raw() as u8 as f64),
+        NativeKind::IntSize => Some(slot.raw() as isize as f64),
+        NativeKind::UIntSize => Some(slot.raw() as usize as f64),
+        _ => None,
     }
 }
 
