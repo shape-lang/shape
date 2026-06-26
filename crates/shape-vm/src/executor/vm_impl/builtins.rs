@@ -2115,7 +2115,6 @@ fn ensure_chart_numeric_field_type(
         field_type,
         FieldType::F64
             | FieldType::I64
-            | FieldType::Decimal
             | FieldType::I8
             | FieldType::U8
             | FieldType::I16

@@ -507,6 +507,46 @@ f"{data: chart(line), x(x), y(revenue, cost)}"
     assert_channel(spec, "y", "cost", &[60.0, 70.0]);
 }
 
+#[test]
+fn test_content_chart_rejects_decimal_field_projection() {
+    let typed_object_source = r#"
+type Quote { day: int, price: decimal }
+let data = [
+    Quote { day: 1, price: 1.5D },
+    Quote { day: 2, price: 2.5D }
+]
+f"{data: chart(line), x(day), y(price)}"
+"#;
+    let err = compile_and_execute(typed_object_source)
+        .expect_err("decimal typed-object chart projection must reject at schema validation");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Quote.price") && msg.contains("field type decimal"),
+        "decimal typed-object rejection should cite schema field type, got: {msg}"
+    );
+    assert!(
+        !msg.contains("got kind") && !msg.contains("Arrow type"),
+        "decimal typed-object rejection should happen before carrier projection, got: {msg}"
+    );
+
+    let table_source = r#"
+type Quote { day: int, price: decimal }
+let data: Table<Quote> = [1, 10], [2, 20]
+f"{data: chart(line), x(day), y(price)}"
+"#;
+    let err = compile_and_execute(table_source)
+        .expect_err("decimal Table<T> chart projection must reject at schema validation");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Quote.price") && msg.contains("field type decimal"),
+        "decimal table rejection should cite schema field type, got: {msg}"
+    );
+    assert!(
+        !msg.contains("got kind") && !msg.contains("Arrow type"),
+        "decimal table rejection should happen before carrier projection, got: {msg}"
+    );
+}
+
 // ===== Table Row Literal Tests =====
 
 #[test]
