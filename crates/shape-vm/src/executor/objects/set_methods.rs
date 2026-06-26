@@ -181,14 +181,14 @@ pub fn v2_has(
     Ok(KindedSlot::from_bool(set.contains(key)))
 }
 
-/// Set.size() -> int
+/// Set.len() / Set.length() -> int
 pub fn v2_size(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 1 {
-        return Err(type_error("Set.size() takes no arguments"));
+        return Err(type_error("Set.len()/length() takes no arguments"));
     }
     let set = as_hashset(&args[0])?;
     Ok(KindedSlot::from_int(set.len() as i64))

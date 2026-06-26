@@ -801,7 +801,8 @@ impl MethodTable {
         // ---- Set<T> (receiver param 0 = T) -----------------------------
         // STRICT-FLIP (v0.3.3, SMOKE-s4): mirror the PHF `SET_METHODS`
         // (shape-vm method_registry.rs:492) so `.add` / `.len` / etc. resolve
-        // in the strict checker. The ctor is registered in
+        // in the strict checker. `.size` is intentionally absent per the Set
+        // naming policy: use `.len` / `.length`. The ctor is registered in
         // `environment/mod.rs::define_builtin_functions`. `add` / `delete` are
         // `&mut self` mutators at runtime; for the checker they return Self
         // (the s4 fixture discards the result either way).
@@ -810,7 +811,6 @@ impl MethodTable {
             ("delete", 0, vec![E::ReceiverParam(0)], E::SelfType),
             ("has", 0, vec![E::ReceiverParam(0)], boolean()),
             ("includes", 0, vec![E::ReceiverParam(0)], boolean()),
-            ("size", 0, vec![], int()),
             ("len", 0, vec![], int()),
             ("length", 0, vec![], int()),
             ("isEmpty", 0, vec![], boolean()),
@@ -1485,6 +1485,30 @@ mod tests {
         let array_type = BuiltinTypes::array(BuiltinTypes::number());
         let sig = table.lookup(&array_type, "len");
         assert!(sig.is_some());
+    }
+
+    #[test]
+    fn set_size_name_is_not_registered_in_strict_table() {
+        let table = MethodTable::new();
+        let set_type = Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Set".into()))),
+            args: vec![BuiltinTypes::string()],
+        };
+        let mut tvgen = crate::type_system::TypeVarGen::new();
+        let string_type = BuiltinTypes::string();
+
+        assert!(table
+            .resolve_method_call(&set_type, "len", &[], &mut tvgen)
+            .is_some());
+        assert!(table
+            .resolve_method_call(&set_type, "length", &[], &mut tvgen)
+            .is_some());
+        assert!(table
+            .resolve_method_call(&set_type, "includes", &[string_type], &mut tvgen)
+            .is_some());
+        assert!(table
+            .resolve_method_call(&set_type, "size", &[], &mut tvgen)
+            .is_none());
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! return a (possibly Arc-cloned) new receiver, the compiler emits a
 //! post-`CallMethod` `Dup; StoreLocal` writeback so the binding slot
 //! receives the new Arc identity. `let mut s = HashSet(); s.add("a");
-//! s.add("b"); s.size()` returns 2 (pre-ruling: 0).
+//! s.add("b"); s.len()` returns 2 (pre-ruling: 0).
 //!
 //! Coverage:
 //! - HashSet.add / .delete
@@ -23,13 +23,13 @@ use shape_value::NativeKind;
 // ─── HashSet ─────────────────────────────────────────────────────────────
 
 #[test]
-fn writeback_hashset_add_size() {
+fn writeback_hashset_add_len() {
     let result = eval(
         r#"
         let mut s = Set()
         s.add("a")
         s.add("b")
-        s.size()
+        s.len()
         "#,
     );
     assert_eq!(result.as_i64(), Some(2));
@@ -42,7 +42,7 @@ fn writeback_hashset_add_duplicate_is_idempotent() {
         let mut s = Set()
         s.add("a")
         s.add("a")
-        s.size()
+        s.len()
         "#,
     );
     assert_eq!(result.as_i64(), Some(1));
@@ -56,7 +56,7 @@ fn writeback_hashset_delete() {
         s.add("a")
         s.add("b")
         s.delete("a")
-        s.size()
+        s.len()
         "#,
     );
     assert_eq!(result.as_i64(), Some(1));
@@ -455,7 +455,7 @@ fn writeback_emits_dup_storelocal_on_mut_method() {
         r#"
         let mut s = Set()
         s.add("a")
-        s.size()
+        s.len()
         "#,
     );
     // Look for the `Dup; Store{Local,ModuleBinding}` sequence in the
