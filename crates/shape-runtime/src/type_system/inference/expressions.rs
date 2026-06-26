@@ -6,7 +6,7 @@ use super::{CheckMode, TypeInferenceEngine};
 use crate::type_system::checking::MethodTable;
 use crate::type_system::exhaustiveness;
 use crate::type_system::*;
-use shape_ast::ast::{Expr, Literal, Span, TypeAnnotation};
+use shape_ast::ast::{BinaryOp, Expr, Literal, Span, TypeAnnotation};
 use shape_ast::interpolation::{InterpolationPart, parse_interpolation_with_mode};
 
 impl TypeInferenceEngine {
@@ -374,10 +374,16 @@ impl TypeInferenceEngine {
                 // uniformly at the BinaryOp seam — pure literal deferral, no
                 // int-VALUE->number widening (delegates the literal-shape gate
                 // to `adopt_int_literal_in_context`, which rejects every
-                // non-literal operand).
-                else if let Some(adopted) = Self::adopt_int_literal_into_var(left, &right_type) {
+                // non-literal operand). The overloaded `+` arm is excluded:
+                // `c + 1` is a numeric body constraint, not the fully-unknown
+                // `c + d` string/numeric ambiguity that the Add deferral handles.
+                else if !matches!(op, BinaryOp::Add)
+                    && let Some(adopted) = Self::adopt_int_literal_into_var(left, &right_type)
+                {
                     left_type = adopted;
-                } else if let Some(adopted) = Self::adopt_int_literal_into_var(right, &left_type) {
+                } else if !matches!(op, BinaryOp::Add)
+                    && let Some(adopted) = Self::adopt_int_literal_into_var(right, &left_type)
+                {
                     right_type = adopted;
                 }
 
@@ -2296,6 +2302,18 @@ impl TypeInferenceEngine {
                 self.mark_current_scope_fallible();
 
                 if let Some(unwrapped) = self.try_unwrap_inner_type(&inner_type) {
+                    // A standalone `Ok(1)?` has no enclosing function return
+                    // carrier to pin its deferred constructor payload. Report
+                    // the literal's natural `int` without binding the var; inside
+                    // a callable body the var must stay live for later carrier
+                    // constraints such as `Result<number>`.
+                    if self.return_scopes.is_empty() && self.implicit_return_scopes.is_empty() {
+                        if let Type::Variable(var) = &unwrapped {
+                            if self.deferred_constructor_literal_payload_vars.contains(var) {
+                                return Ok(BuiltinTypes::integer());
+                            }
+                        }
+                    }
                     return Ok(unwrapped);
                 }
 
