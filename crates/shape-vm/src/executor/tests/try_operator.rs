@@ -35,7 +35,6 @@ fn compile_source(source: &str) -> Result<BytecodeProgram, VMError> {
 // Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
 
 #[test]
-#[ignore = "phase-2c host-tier eval/marshal API rebuild"]
 fn test_try_unwrap_ok_extracts_inner_value() {
     todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
@@ -72,13 +71,11 @@ match parse("12") {
 }
 
 #[test]
-#[ignore = "phase-2c host-tier eval/marshal API rebuild"]
 fn test_try_unwrap_err_raises_uncaught_exception_at_top_level() {
     todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
-#[ignore = "phase-2c host-tier eval/marshal API rebuild"]
 fn test_try_unwrap_none_raises_uncaught_exception_at_top_level() {
     todo!(
         "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted execute_bytecode_with_vm helper)"
@@ -86,13 +83,11 @@ fn test_try_unwrap_none_raises_uncaught_exception_at_top_level() {
 }
 
 #[test]
-#[ignore = "phase-2c host-tier eval/marshal API rebuild"]
 fn test_try_unwrap_passes_through_plain_non_none_values() {
     todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
-#[ignore = "phase-2c host-tier eval/marshal API rebuild"]
 fn test_try_unwrap_unwraps_explicit_some() {
     todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
@@ -243,31 +238,26 @@ fn test_infallible_type_assertion_compiles_to_into_dispatch_metadata() {
 }
 
 #[test]
-#[ignore = "phase-2c host-tier eval/marshal API rebuild"]
 fn test_error_context_lifts_ok_into_result_ok() {
     todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
-#[ignore = "phase-2c host-tier eval/marshal API rebuild"]
 fn test_error_context_wraps_err_with_context_and_cause() {
     todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
-#[ignore = "phase-2c host-tier eval/marshal API rebuild"]
 fn test_error_context_wraps_none_with_synthetic_cause() {
     todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
-#[ignore = "phase-2c host-tier eval/marshal API rebuild"]
 fn test_error_context_then_try_short_circuits_with_err() {
     todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
 
 #[test]
-#[ignore = "phase-2c host-tier eval/marshal API rebuild"]
 fn test_error_context_inline_try_syntax_without_parentheses() {
     todo!(
         "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted execute_source_with_vm helper)"
@@ -289,7 +279,6 @@ fn test_error_context_inline_try_syntax_without_parentheses() {
 // Phase-2c surface (helper deleted): see playbook §7 REVISED part 4 + ADR-006 §2.7.4.
 
 #[test]
-#[ignore = "phase-2c host-tier eval/marshal API rebuild"]
 fn test_uncaught_any_error_formats_chain_and_trace() {
     todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
@@ -594,7 +583,6 @@ let y = x as int
 }
 
 #[test]
-#[ignore = "phase-2c host-tier eval/marshal API rebuild"]
 fn test_uncaught_non_any_error_uses_value_formatting() {
     todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild)")
 }
