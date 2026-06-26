@@ -19,34 +19,77 @@
 //! sub-clusters (W17-array-typed-receiver, W17-typed-carrier-monomorphization).
 //! Those are unblocked once their respective sub-clusters land.
 
-use super::test_utils::{eval, eval_typed_i64};
+use super::test_utils::{eval, eval_result, eval_typed_i64};
+use crate::executor::v2_handlers::v2_array_detect::{
+    V2ElemType, V2TypedArrayView, as_v2_typed_array, read_element,
+};
+use shape_value::{HeapKind, KindedSlot, NativeKind};
+
+fn typed_array_view(slot: &KindedSlot) -> V2TypedArrayView {
+    assert_eq!(slot.kind, NativeKind::Ptr(HeapKind::TypedArray));
+    as_v2_typed_array(slot.slot.raw(), slot.kind).expect("expected v2 typed-array carrier")
+}
+
+fn assert_i64_array(source: &str, expected: &[i64]) {
+    let result = eval(source);
+    let view = typed_array_view(&result);
+    assert_eq!(view.elem_type, V2ElemType::I64);
+    assert_eq!(view.len as usize, expected.len());
+    for (i, value) in expected.iter().enumerate() {
+        let (bits, kind) = read_element(&view, i as u32).expect("element");
+        assert_eq!(kind, NativeKind::Int64);
+        assert_eq!(bits as i64, *value);
+    }
+}
+
+fn assert_f64_array(source: &str, expected: &[f64]) {
+    let result = eval(source);
+    let view = typed_array_view(&result);
+    assert_eq!(view.elem_type, V2ElemType::F64);
+    assert_eq!(view.len as usize, expected.len());
+    for (i, value) in expected.iter().enumerate() {
+        let (bits, kind) = read_element(&view, i as u32).expect("element");
+        assert_eq!(kind, NativeKind::Float64);
+        assert_eq!(f64::from_bits(bits), *value);
+    }
+}
+
+fn assert_bool_array(source: &str, expected: &[bool]) {
+    let result = eval(source);
+    let view = typed_array_view(&result);
+    assert_eq!(view.elem_type, V2ElemType::Bool);
+    assert_eq!(view.len as usize, expected.len());
+    for (i, value) in expected.iter().enumerate() {
+        let (bits, kind) = read_element(&view, i as u32).expect("element");
+        assert_eq!(kind, NativeKind::Bool);
+        assert_eq!(bits != 0, *value);
+    }
+}
 
 #[test]
 fn test_new_typed_array_ints() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    assert_i64_array("[1, 2, 3]", &[1, 2, 3]);
 }
 
 #[test]
 fn test_new_typed_array_floats() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    assert_f64_array("[1.5, 2.5, 3.5]", &[1.5, 2.5, 3.5]);
 }
 
 #[test]
 fn test_new_typed_array_bools() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    assert_bool_array("[true, false, true]", &[true, false, true]);
 }
 
 #[test]
-fn test_new_typed_array_mixed_falls_back() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+fn test_new_typed_array_mixed_is_clean_compile_error() {
+    let err = eval_result("[1, \"hello\"]").expect_err("mixed arrays must not compile");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Could not solve type constraints")
+            && msg.contains("int is not compatible with string"),
+        "mixed array error must cite incompatible element types; got: {msg}"
+    );
 }
 
 #[test]
@@ -91,44 +134,34 @@ fn test_float_array_len() {
 
 #[test]
 fn test_float_array_dot_product() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    let result = eval("[1.0, 2.0, 3.0].dot([4.0, 5.0, 6.0])");
+    assert_eq!(result.as_f64(), Some(32.0));
 }
 
 #[test]
 fn test_float_array_norm() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    let result = eval("[3.0, 4.0].norm()");
+    assert_eq!(result.as_f64(), Some(5.0));
 }
 
 #[test]
 fn test_float_array_cumsum() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    assert_f64_array("[1.0, 2.0, 3.0, 4.0].cumsum()", &[1.0, 3.0, 6.0, 10.0]);
 }
 
 #[test]
 fn test_float_array_diff() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    assert_f64_array("[1.0, 3.0, 6.0, 10.0].diff()", &[2.0, 3.0, 4.0]);
 }
 
 #[test]
 fn test_float_array_abs() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    assert_f64_array("[-1.0, 2.0, -3.0].abs()", &[1.0, 2.0, 3.0]);
 }
 
 #[test]
 fn test_float_array_to_array() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    assert_f64_array("[1.0, 2.0, 3.0].toArray()", &[1.0, 2.0, 3.0]);
 }
 
 #[test]
@@ -178,79 +211,76 @@ fn test_int_array_len() {
 
 #[test]
 fn test_int_array_abs() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    assert_i64_array("[-1, 2, -3].abs()", &[1, 2, 3]);
 }
 
 #[test]
 fn test_int_array_to_array() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    assert_i64_array("[1, 2, 3].toArray()", &[1, 2, 3]);
 }
 
 #[test]
 fn test_bool_array_count() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    let result = eval("[true, false, true, true].count()");
+    assert_eq!(result.as_i64(), Some(3));
 }
 
 #[test]
 fn test_bool_array_any() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    let result = eval("[false, false, true].any()");
+    assert_eq!(result.as_bool(), Some(true));
 }
 
 #[test]
 fn test_bool_array_any_all_false() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    let result = eval("[false, false, false].any()");
+    assert_eq!(result.as_bool(), Some(false));
 }
 
 #[test]
 fn test_bool_array_all() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    let result = eval("[true, true, true].all()");
+    assert_eq!(result.as_bool(), Some(true));
 }
 
 #[test]
 fn test_bool_array_all_with_false() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    let result = eval("[true, false, true].all()");
+    assert_eq!(result.as_bool(), Some(false));
 }
 
 #[test]
 fn test_bool_array_len() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    assert_eq!(eval_typed_i64("[true, false, true].len()"), 3);
 }
 
 #[test]
 fn test_bool_array_to_array() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    assert_bool_array("[true, false, true].toArray()", &[true, false, true]);
 }
 
 #[test]
 fn test_float_array_unknown_method_errors() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    let err = eval_result("[1.0, 2.0].notAMethod()").expect_err("unknown method must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("notAMethod")
+            && (msg.contains("Method 'notAMethod' not found")
+                || msg.contains("cannot have fields")),
+        "unknown method error should remain a clean compile error; got: {msg}"
+    );
 }
 
 #[test]
 fn test_int_array_unknown_method_errors() {
-    todo!(
-        "phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted ValueWord/Constant::Value(ValueWord) carrier)"
-    )
+    let err = eval_result("[1, 2].notAMethod()").expect_err("unknown method must fail");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("notAMethod")
+            && (msg.contains("Method 'notAMethod' not found")
+                || msg.contains("cannot have fields")),
+        "unknown method error should remain a clean compile error; got: {msg}"
+    );
 }
 
 // =========================================================================

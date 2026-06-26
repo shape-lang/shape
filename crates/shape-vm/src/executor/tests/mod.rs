@@ -404,17 +404,20 @@ fn test_arrays() {
 fn test_array_indexing() {
     // Test: [10, 20, 30][1] = 20
     //
-    // Index uses `Constant::Int(1)` not `Number(1.0)`. After Wave-E+5,
-    // PushConst for Number constants pushes raw native f64 bits; the
-    // array indexer's untagged-bits path interprets those as i64 (per
-    // op_get_prop's `Some(raw as i64)` branch), so f64 1.0 = bits
-    // 0x3FF0000000000000 ≈ 4.6e18 — way out of bounds, returns None.
-    // Int constants push native i64 directly, matching the indexer.
+    // The legacy `NewArray` opcode has no element-kind proof, so this
+    // hand-built bytecode uses the typed producer opcodes and then exercises
+    // the generic `GetProp` index path against the v2 typed-array carrier.
     let instructions = vec![
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::new(OpCode::NewArray, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(3))), // Push index 1
         Instruction::simple(OpCode::GetProp),
     ];

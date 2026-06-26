@@ -1,133 +1,130 @@
-//! Method handlers for typed arrays (`Arc<TypedArrayData>` receivers — Vec<int>,
-//! Vec<number>, Vec<bool>, …).
+//! Method handlers for v2 typed arrays (`TypedArray<T>` receivers — Vec<int>,
+//! Vec<number>, Vec<bool>, ...).
 //!
-//! ## V3-S5 ckpt-3 consumer-cascade tier 2 surface (2026-05-15)
+//! The old `TypedArrayData` heap carrier was deleted during strict-typing
+//! migration. These handlers consume the stamped v2-raw `TypedArray<T>`
+//! carrier through `v2_array_detect`, preserving the compile-time element kind
+//! instead of reconstructing a legacy `ValueWord`/`Constant::Value` carrier.
 //!
-//! Per V3-S5 ckpt-1 close (commit `aac8495e`, 2026-05-15), the
-//! `TypedArrayData` enum + impl blocks + `Display for TypedArrayData` +
-//! `typed_array_structural_eq` fn were DELETED at
-//! `crates/shape-value/src/heap_value.rs` per W12-typed-array-data-deletion
-//! audit §3.5 + ADR-006 §2.7.24 Q25.A SUPERSEDED. This file's previous
-//! consumer-shape (`Arc<TypedArrayData>` receiver recovery via
-//! `borrow_typed_array` + per-variant element-shape dispatch through
-//! `TypedArrayData::I64 / F64 / Bool / I8 / I16 / I32 / U8 / U16 / U32 / U64 /
-//! F32 / String / Decimal / BigInt / Char / TypedObject` arms in
-//! aggregation/transform/closure-callback bodies) cascade-breaks here as
-//! the deletion's consumer cascade tier 2.
-//!
-//! Public method-registry entry-point bodies (`v2_len / v2_float_sum /
-//! v2_float_avg / v2_float_min / v2_float_max / v2_float_variance /
-//! v2_float_std / v2_float_dot / v2_float_norm / v2_int_sum / v2_int_avg /
-//! v2_int_min / v2_int_max / v2_bool_count / v2_bool_any / v2_bool_all /
-//! handle_float_normalize / handle_float_cumsum / handle_float_diff /
-//! handle_float_abs / handle_float_sqrt / handle_float_ln / handle_float_exp /
-//! handle_float_map / handle_float_filter / handle_float_for_each /
-//! handle_float_reduce / handle_float_find / handle_float_some /
-//! handle_float_every / handle_float_to_array / handle_int_abs /
-//! handle_int_map / handle_int_filter / handle_int_for_each /
-//! handle_int_reduce / handle_int_find / handle_int_some / handle_int_every /
-//! handle_int_to_array / handle_bool_to_array`) are replaced with
-//! structured surface-and-stop returning `VMError::NotImplemented`. Local
-//! helpers that took `&TypedArrayData` or `&AlignedTypedBuffer` / `&TypedBuffer<i64>`
-//! (`borrow_typed_array / float_array_result / int_array_result /
-//! float_buf_sum / float_buf_min / float_buf_max / float_buf_variance /
-//! float_buf_dot / float_buf_norm / int_buf_sum / int_buf_min / int_buf_max /
-//! borrow_f64_slice / unary_float_transform / float_higher_order_variant_surface /
-//! snapshot_f64_elements / snapshot_i64_elements / int_higher_order_variant_surface /
-//! to_array_surface / none_sentinel`) are DELETED — every one took
-//! `&TypedArrayData` / produced `Arc<TypedArrayData>` (via
-//! `float_array_result`/`int_array_result`); with the type gone they cannot
-//! exist.
-//!
-//! ## Cascade migration target (post-ckpt-6 STRICT close)
-//!
-//! Per W12-typed-array-data-deletion audit §A.3 + §2.1 scalar recipe +
-//! §2.2 heap-element variants, every previous `TypedArrayData::X(buf)`
-//! match arm in this file's aggregation/transform bodies migrates to the
-//! v2-raw `TypedArray<T>` flat-struct carrier with per-T `as_slice()`
-//! access. Closure-callback dispatch (`handle_float_map/filter/reduce/find/
-//! some/every`, `handle_int_*` siblings) re-instates via
-//! `vm.call_value_immediate_nb` once the receiver-shape migration lands
-//! (the closure-callback ABI itself stays — ADR-006 §2.7.11 / Q12 is
-//! unaffected by the TypedArrayData deletion).
-//!
-//! Bodies REFUSED ON SIGHT under Refusal #1 (resurrection under rename
-//! per ckpt-1 close-marker at `heap_value.rs:3956`).
+//! Typed-specialized names live here. Names that are semantically identical
+//! for all element kinds still fall through to `ARRAY_METHODS`.
 
 use crate::executor::VirtualMachine;
+use crate::executor::v2_handlers::v2_array_detect::{
+    V2ElemType, V2TypedArrayView, all_elements, any_elements, as_v2_typed_array, clone_array,
+    count_true_elements, diff_f64, dot_elements, max_elements, min_elements, norm_elements,
+    std_elements, sum_elements, variance_elements,
+};
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
-use shape_value::{KindedSlot, NativeKind, VMError};
+use shape_value::v2::typed_array::{ELEM_TYPE_F64, ELEM_TYPE_I64, TypedArray};
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 
-// ═══════════════════════════════════════════════════════════════════════════
-// V3-S5 ckpt-3 surface-and-stop builder
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Common surface-and-stop body for every public handler in this file.
-///
-/// Returns a structured `VMError::NotImplemented` citing the V3-S5 ckpt-3
-/// cascade-broken state: the previous per-`TypedArrayData::X` variant
-/// dispatch path is gone (ckpt-1 deleted the enum); the v2-raw
-/// `TypedArray<T>` flat-struct consumer cascade lands across ckpt-3 / 4 /
-/// 5 / 6 per W12-typed-array-data-deletion audit §A.3 per-variant
-/// migration disposition. Closure-callback handlers preserve their
-/// `Ptr(HeapKind::Closure)` arity validation pre-surface so the
-/// closure-arg-shape contract gets a structured early-error rather than
-/// getting swallowed by the surface.
-#[cold]
-#[inline(never)]
-fn ckpt3_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
-    let receiver_kind = if args.is_empty() {
-        "<no args>".to_string()
-    } else {
-        format!("{:?}", args[0].kind)
-    };
-    VMError::NotImplemented(format!(
-        "{op}: SURFACE — V3-S5 ckpt-3 consumer-cascade tier 2 surface. \
-         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
-         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
-         SUPERSEDED. The previous `Arc<TypedArrayData>` receiver-recovery \
-         + per-variant aggregation/transform/closure-callback dispatch \
-         path (~51 references across 40 public entry points in this file) \
-         cascade-broke at the enum deletion site \
-         (`crates/shape-value/src/heap_value.rs:3944`). Post-deletion \
-         target is the v2-raw `TypedArray<T>` flat-struct carrier per \
-         audit §1.2 + §A.3 + §3.1 scalar recipe + §2.2 heap-element \
-         variants; per-T monomorphization landing across ckpt-3 \
-         (array_ops/this file/iterator_methods/array_sort/concat/\
-         property_access/array_query) + ckpt-4 (TypedBuffer<T> / \
-         HeapValue::TypedArray arm / HeapKind::TypedArray ordinal) + \
-         ckpt-5 (wire/json/marshal + 4-table lockstep) + ckpt-6 (JIT \
-         FFI). Closure-callback ABI (ADR-006 §2.7.11 / Q12 \
-         `vm.call_value_immediate_nb`) is unaffected and re-instates \
-         once receiver-shape migration lands. Receiver kind: {kind}. \
-         UNREACHABLE until ckpt-6 STRICT close. REFUSED ON SIGHT: \
-         TypedArrayData resurrection under any rename (Refusal #1, W12 \
-         audit §7).",
-        op = op,
-        kind = receiver_kind,
-    ))
+#[inline]
+fn extract_view(op: &str, args: &[KindedSlot]) -> Result<V2TypedArrayView, VMError> {
+    let receiver = args
+        .first()
+        .ok_or_else(|| VMError::RuntimeError(format!("{op}: missing receiver")))?;
+    if receiver.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err(VMError::RuntimeError(format!(
+            "{op}: expected v2 TypedArray receiver, got kind {:?}",
+            receiver.kind
+        )));
+    }
+    as_v2_typed_array(receiver.slot.raw(), receiver.kind).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "{op}: receiver bits failed v2 TypedArray detection"
+        ))
+    })
 }
 
-/// Closure-arg validation for higher-order handlers. Returns `Some(err)`
-/// when the closure slot has the wrong shape so the surface body returns
-/// the structured shape-error rather than the generic ckpt-3 surface.
 #[inline]
-fn validate_closure_arg(op: &str, args: &[KindedSlot]) -> Option<VMError> {
-    if args.len() >= 2 && args[1].kind != NativeKind::Ptr(HeapKind::Closure) {
-        Some(VMError::RuntimeError(format!(
-            "{}: second argument must be a closure, got kind {:?}",
-            op, args[1].kind
-        )))
+fn require_arity(op: &str, args: &[KindedSlot], expected_call_args: usize) -> Result<(), VMError> {
+    let actual = args.len().saturating_sub(1);
+    if actual == expected_call_args {
+        Ok(())
     } else {
-        None
+        Err(VMError::RuntimeError(format!(
+            "{op}: expected {expected_call_args} argument(s), got {actual}"
+        )))
     }
 }
 
+#[inline]
+fn pair_to_slot((bits, kind): (u64, NativeKind)) -> KindedSlot {
+    KindedSlot::new(ValueSlot::from_raw(bits), kind)
+}
+
+#[inline]
+fn typed_array_slot(ptr: *mut u8) -> KindedSlot {
+    KindedSlot::new(
+        ValueSlot::from_raw(ptr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    )
+}
+
+fn numeric_pair(
+    op: &str,
+    args: &[KindedSlot],
+    f: fn(&V2TypedArrayView) -> Option<(u64, NativeKind)>,
+) -> Result<KindedSlot, VMError> {
+    require_arity(op, args, 0)?;
+    let view = extract_view(op, args)?;
+    f(&view).map(pair_to_slot).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "{op}: not defined for element kind {:?}",
+            view.elem_type
+        ))
+    })
+}
+
+fn f64_result_array(
+    op: &str,
+    args: &[KindedSlot],
+    transform: impl Fn(&V2TypedArrayView, *mut f64) -> Result<u32, VMError>,
+) -> Result<KindedSlot, VMError> {
+    require_arity(op, args, 0)?;
+    let view = extract_view(op, args)?;
+    if view.elem_type != V2ElemType::F64 {
+        return Err(VMError::RuntimeError(format!(
+            "{op}: expected Vec<number>, got element kind {:?}",
+            view.elem_type
+        )));
+    }
+    let out = TypedArray::<f64>::with_capacity(view.len);
+    let out_len = unsafe {
+        let dst = (*out).data;
+        transform(&view, dst)?
+    };
+    unsafe {
+        (*out).len = out_len;
+        crate::executor::v2_handlers::v2_array_detect::stamp_elem_type(
+            out as *mut u8,
+            ELEM_TYPE_F64,
+        );
+    }
+    Ok(typed_array_slot(out as *mut u8))
+}
+
+fn f64_map_array(
+    op: &str,
+    args: &[KindedSlot],
+    f: impl Fn(f64) -> f64,
+) -> Result<KindedSlot, VMError> {
+    f64_result_array(op, args, |view, dst| {
+        let src = view.ptr as *const TypedArray<f64>;
+        for i in 0..view.len {
+            let value = unsafe { TypedArray::<f64>::get_unchecked(src, i) };
+            unsafe {
+                *dst.add(i as usize) = f(value);
+            }
+        }
+        Ok(view.len)
+    })
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
-// MethodFnV2 handlers — surface-and-stop stubs
-// Signatures preserved for method_registry.rs PHF integrity
-// (method_registry.rs:682-734).
+// MethodFnV2 handlers
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// `arr.len() / arr.length()` — element count.
@@ -136,7 +133,9 @@ pub fn v2_len(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("len", args))
+    require_arity("Vec.len", args, 0)?;
+    let view = extract_view("Vec.len", args)?;
+    Ok(KindedSlot::from_int(view.len as i64))
 }
 
 /// `Vec<number>.sum()` — float aggregation.
@@ -145,7 +144,7 @@ pub fn v2_float_sum(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.sum", args))
+    numeric_pair("Vec<number>.sum", args, sum_elements)
 }
 
 /// `Vec<int>.sum()` — int aggregation.
@@ -155,7 +154,7 @@ pub fn v2_int_sum(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<int>.sum", args))
+    numeric_pair("Vec<int>.sum", args, sum_elements)
 }
 
 /// `Vec<number>.avg() / Vec<number>.mean()`.
@@ -164,7 +163,11 @@ pub fn v2_float_avg(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.avg", args))
+    numeric_pair(
+        "Vec<number>.avg",
+        args,
+        crate::executor::v2_handlers::v2_array_detect::avg_elements,
+    )
 }
 
 /// `Vec<int>.avg() / Vec<int>.mean()`.
@@ -174,7 +177,11 @@ pub fn v2_int_avg(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<int>.avg", args))
+    numeric_pair(
+        "Vec<int>.avg",
+        args,
+        crate::executor::v2_handlers::v2_array_detect::avg_elements,
+    )
 }
 
 /// `Vec<number>.min()`.
@@ -183,7 +190,7 @@ pub fn v2_float_min(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.min", args))
+    numeric_pair("Vec<number>.min", args, min_elements)
 }
 
 /// `Vec<int>.min()`.
@@ -193,7 +200,7 @@ pub fn v2_int_min(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<int>.min", args))
+    numeric_pair("Vec<int>.min", args, min_elements)
 }
 
 /// `Vec<number>.max()`.
@@ -202,7 +209,7 @@ pub fn v2_float_max(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.max", args))
+    numeric_pair("Vec<number>.max", args, max_elements)
 }
 
 /// `Vec<int>.max()`.
@@ -212,7 +219,7 @@ pub fn v2_int_max(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<int>.max", args))
+    numeric_pair("Vec<int>.max", args, max_elements)
 }
 
 /// `Vec<number>.variance()`.
@@ -221,7 +228,7 @@ pub fn v2_float_variance(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.variance", args))
+    numeric_pair("Vec<number>.variance", args, variance_elements)
 }
 
 /// `Vec<number>.std()`.
@@ -230,7 +237,7 @@ pub fn v2_float_std(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.std", args))
+    numeric_pair("Vec<number>.std", args, std_elements)
 }
 
 /// `Vec<number>.dot(other)`.
@@ -239,7 +246,18 @@ pub fn v2_float_dot(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.dot", args))
+    require_arity("Vec<number>.dot", args, 1)?;
+    let lhs = extract_view("Vec<number>.dot", args)?;
+    let rhs = extract_view("Vec<number>.dot argument", &args[1..])?;
+    if lhs.len != rhs.len {
+        return Err(VMError::RuntimeError(format!(
+            "Vec<number>.dot: length mismatch {} vs {}",
+            lhs.len, rhs.len
+        )));
+    }
+    dot_elements(&lhs, &rhs).map(pair_to_slot).ok_or_else(|| {
+        VMError::RuntimeError("Vec<number>.dot: expected two Vec<number> receivers".into())
+    })
 }
 
 /// `Vec<number>.norm()`.
@@ -248,38 +266,56 @@ pub fn v2_float_norm(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.norm", args))
+    numeric_pair("Vec<number>.norm", args, norm_elements)
 }
 
 /// `Vec<bool>.count()`.
 pub fn v2_bool_count(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<bool>.count", args))
+    if args.len() > 1 {
+        return crate::executor::objects::array_aggregation::handle_count_v2(vm, args, ctx);
+    }
+    let view = extract_view("Vec<bool>.count", args)?;
+    count_true_elements(&view)
+        .map(pair_to_slot)
+        .ok_or_else(|| VMError::RuntimeError("Vec<bool>.count: expected Vec<bool> receiver".into()))
 }
 
 /// `Vec<bool>.any()`.
 pub fn v2_bool_any(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<bool>.any", args))
+    if args.len() > 1 {
+        return crate::executor::objects::array_query::handle_any_v2(vm, args, ctx);
+    }
+    let view = extract_view("Vec<bool>.any", args)?;
+    any_elements(&view)
+        .map(pair_to_slot)
+        .ok_or_else(|| VMError::RuntimeError("Vec<bool>.any: expected Vec<bool> receiver".into()))
 }
 
 /// `Vec<bool>.all()`.
 pub fn v2_bool_all(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<bool>.all", args))
+    if args.len() > 1 {
+        return crate::executor::objects::array_query::handle_all_v2(vm, args, ctx);
+    }
+    let view = extract_view("Vec<bool>.all", args)?;
+    all_elements(&view)
+        .map(pair_to_slot)
+        .ok_or_else(|| VMError::RuntimeError("Vec<bool>.all: expected Vec<bool> receiver".into()))
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Float unary transforms — surface-and-stop stubs
+// Float unary transforms
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// `Vec<number>.normalize()`.
@@ -288,7 +324,19 @@ pub(crate) fn handle_float_normalize(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.normalize", args))
+    let norm = {
+        require_arity("Vec<number>.normalize", args, 0)?;
+        let view = extract_view("Vec<number>.normalize", args)?;
+        let (bits, kind) = norm_elements(&view).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Vec<number>.normalize: expected Vec<number>, got {:?}",
+                view.elem_type
+            ))
+        })?;
+        debug_assert_eq!(kind, NativeKind::Float64);
+        f64::from_bits(bits)
+    };
+    f64_map_array("Vec<number>.normalize", args, |x| x / norm)
 }
 
 /// `Vec<number>.cumsum()`.
@@ -297,7 +345,17 @@ pub(crate) fn handle_float_cumsum(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.cumsum", args))
+    f64_result_array("Vec<number>.cumsum", args, |view, dst| {
+        let src = view.ptr as *const TypedArray<f64>;
+        let mut acc = 0.0_f64;
+        for i in 0..view.len {
+            acc += unsafe { TypedArray::<f64>::get_unchecked(src, i) };
+            unsafe {
+                *dst.add(i as usize) = acc;
+            }
+        }
+        Ok(view.len)
+    })
 }
 
 /// `Vec<number>.diff()`.
@@ -306,7 +364,11 @@ pub(crate) fn handle_float_diff(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.diff", args))
+    require_arity("Vec<number>.diff", args, 0)?;
+    let view = extract_view("Vec<number>.diff", args)?;
+    diff_f64(&view).map(typed_array_slot).ok_or_else(|| {
+        VMError::RuntimeError("Vec<number>.diff: expected Vec<number> receiver".into())
+    })
 }
 
 /// `Vec<number>.abs()`.
@@ -315,7 +377,7 @@ pub(crate) fn handle_float_abs(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.abs", args))
+    f64_map_array("Vec<number>.abs", args, f64::abs)
 }
 
 /// `Vec<number>.sqrt()`.
@@ -324,7 +386,7 @@ pub(crate) fn handle_float_sqrt(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.sqrt", args))
+    f64_map_array("Vec<number>.sqrt", args, f64::sqrt)
 }
 
 /// `Vec<number>.ln()`.
@@ -333,7 +395,7 @@ pub(crate) fn handle_float_ln(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.ln", args))
+    f64_map_array("Vec<number>.ln", args, f64::ln)
 }
 
 /// `Vec<number>.exp()`.
@@ -342,92 +404,74 @@ pub(crate) fn handle_float_exp(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.exp", args))
+    f64_map_array("Vec<number>.exp", args, f64::exp)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Float higher-order — surface-and-stop stubs
+// Float higher-order
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// `Vec<number>.map(|x| ...)`.
 pub(crate) fn handle_float_map(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("Vec<number>.map", args) {
-        return Err(err);
-    }
-    Err(ckpt3_surface("Vec<number>.map", args))
+    crate::executor::objects::array_transform::handle_map_v2(vm, args, ctx)
 }
 
 /// `Vec<number>.filter(|x| ...)`.
 pub(crate) fn handle_float_filter(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("Vec<number>.filter", args) {
-        return Err(err);
-    }
-    Err(ckpt3_surface("Vec<number>.filter", args))
+    crate::executor::objects::array_transform::handle_filter_v2(vm, args, ctx)
 }
 
 /// `Vec<number>.forEach(|x| ...)`.
 pub(crate) fn handle_float_for_each(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("Vec<number>.forEach", args) {
-        return Err(err);
-    }
-    Err(ckpt3_surface("Vec<number>.forEach", args))
+    crate::executor::objects::array_query::handle_for_each_v2(vm, args, ctx)
 }
 
 /// `Vec<number>.reduce(|acc, x| ...) / .fold(init, |acc, x| ...)`.
 pub(crate) fn handle_float_reduce(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.reduce", args))
+    crate::executor::objects::array_aggregation::handle_reduce_v2(vm, args, ctx)
 }
 
 /// `Vec<number>.find(|x| ...)`.
 pub(crate) fn handle_float_find(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("Vec<number>.find", args) {
-        return Err(err);
-    }
-    Err(ckpt3_surface("Vec<number>.find", args))
+    crate::executor::objects::array_query::handle_find_v2(vm, args, ctx)
 }
 
 /// `Vec<number>.some(|x| ...)`.
 pub(crate) fn handle_float_some(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("Vec<number>.some", args) {
-        return Err(err);
-    }
-    Err(ckpt3_surface("Vec<number>.some", args))
+    crate::executor::objects::array_query::handle_some_v2(vm, args, ctx)
 }
 
 /// `Vec<number>.every(|x| ...)`.
 pub(crate) fn handle_float_every(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("Vec<number>.every", args) {
-        return Err(err);
-    }
-    Err(ckpt3_surface("Vec<number>.every", args))
+    crate::executor::objects::array_query::handle_every_v2(vm, args, ctx)
 }
 
 /// `Vec<number>.toArray()`.
@@ -436,11 +480,13 @@ pub(crate) fn handle_float_to_array(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<number>.toArray", args))
+    require_arity("Vec<number>.toArray", args, 0)?;
+    let view = extract_view("Vec<number>.toArray", args)?;
+    Ok(typed_array_slot(clone_array(&view)))
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Int handlers — surface-and-stop stubs
+// Int handlers
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// `Vec<int>.abs()`.
@@ -450,95 +496,102 @@ pub(crate) fn handle_int_abs(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<int>.abs", args))
+    require_arity("Vec<int>.abs", args, 0)?;
+    let view = extract_view("Vec<int>.abs", args)?;
+    if view.elem_type != V2ElemType::I64 {
+        return Err(VMError::RuntimeError(format!(
+            "Vec<int>.abs: expected Vec<int>, got element kind {:?}",
+            view.elem_type
+        )));
+    }
+    let out = TypedArray::<i64>::with_capacity(view.len);
+    unsafe {
+        let src = view.ptr as *const TypedArray<i64>;
+        let dst = (*out).data;
+        for i in 0..view.len {
+            let value = TypedArray::<i64>::get_unchecked(src, i);
+            let abs = value.checked_abs().ok_or_else(|| {
+                VMError::RuntimeError("Vec<int>.abs: i64::MIN cannot be represented".into())
+            })?;
+            *dst.add(i as usize) = abs;
+        }
+        (*out).len = view.len;
+        crate::executor::v2_handlers::v2_array_detect::stamp_elem_type(
+            out as *mut u8,
+            ELEM_TYPE_I64,
+        );
+    }
+    Ok(typed_array_slot(out as *mut u8))
 }
 
 /// `Vec<int>.map(|x| ...)`.
 #[allow(dead_code)]
 pub(crate) fn handle_int_map(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("Vec<int>.map", args) {
-        return Err(err);
-    }
-    Err(ckpt3_surface("Vec<int>.map", args))
+    crate::executor::objects::array_transform::handle_map_v2(vm, args, ctx)
 }
 
 /// `Vec<int>.filter(|x| ...)`.
 #[allow(dead_code)]
 pub(crate) fn handle_int_filter(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("Vec<int>.filter", args) {
-        return Err(err);
-    }
-    Err(ckpt3_surface("Vec<int>.filter", args))
+    crate::executor::objects::array_transform::handle_filter_v2(vm, args, ctx)
 }
 
 /// `Vec<int>.forEach(|x| ...)`.
 #[allow(dead_code)]
 pub(crate) fn handle_int_for_each(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("Vec<int>.forEach", args) {
-        return Err(err);
-    }
-    Err(ckpt3_surface("Vec<int>.forEach", args))
+    crate::executor::objects::array_query::handle_for_each_v2(vm, args, ctx)
 }
 
 /// `Vec<int>.reduce(|acc, x| ...) / .fold(init, |acc, x| ...)`.
 #[allow(dead_code)]
 pub(crate) fn handle_int_reduce(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<int>.reduce", args))
+    crate::executor::objects::array_aggregation::handle_reduce_v2(vm, args, ctx)
 }
 
 /// `Vec<int>.find(|x| ...)`.
 #[allow(dead_code)]
 pub(crate) fn handle_int_find(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("Vec<int>.find", args) {
-        return Err(err);
-    }
-    Err(ckpt3_surface("Vec<int>.find", args))
+    crate::executor::objects::array_query::handle_find_v2(vm, args, ctx)
 }
 
 /// `Vec<int>.some(|x| ...)`.
 #[allow(dead_code)]
 pub(crate) fn handle_int_some(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("Vec<int>.some", args) {
-        return Err(err);
-    }
-    Err(ckpt3_surface("Vec<int>.some", args))
+    crate::executor::objects::array_query::handle_some_v2(vm, args, ctx)
 }
 
 /// `Vec<int>.every(|x| ...)`.
 #[allow(dead_code)]
 pub(crate) fn handle_int_every(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if let Some(err) = validate_closure_arg("Vec<int>.every", args) {
-        return Err(err);
-    }
-    Err(ckpt3_surface("Vec<int>.every", args))
+    crate::executor::objects::array_query::handle_every_v2(vm, args, ctx)
 }
 
 /// `Vec<int>.toArray()`.
@@ -548,7 +601,9 @@ pub(crate) fn handle_int_to_array(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<int>.toArray", args))
+    require_arity("Vec<int>.toArray", args, 0)?;
+    let view = extract_view("Vec<int>.toArray", args)?;
+    Ok(typed_array_slot(clone_array(&view)))
 }
 
 /// `Vec<bool>.toArray()`.
@@ -557,5 +612,7 @@ pub(crate) fn handle_bool_to_array(
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    Err(ckpt3_surface("Vec<bool>.toArray", args))
+    require_arity("Vec<bool>.toArray", args, 0)?;
+    let view = extract_view("Vec<bool>.toArray", args)?;
+    Ok(typed_array_slot(clone_array(&view)))
 }

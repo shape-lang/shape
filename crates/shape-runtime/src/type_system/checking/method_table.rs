@@ -339,6 +339,7 @@ impl MethodTable {
             ("pop", 0, vec![], E::ReceiverParam(0)),
             ("reverse", 0, vec![], E::SelfType),
             ("clone", 0, vec![], E::SelfType),
+            ("toArray", 0, vec![], E::SelfType),
             (
                 "filter",
                 0,
@@ -1311,7 +1312,12 @@ impl MethodTable {
                 if name == "Result" && params.len() == 1 {
                     params.push(Type::Concrete(TypeAnnotation::Reference("AnyError".into())));
                 }
-                (Some(name.to_string()), params)
+                let canonical = if name == "Array" {
+                    "Vec".to_string()
+                } else {
+                    name.to_string()
+                };
+                (Some(canonical), params)
             }
             _ => (None, vec![]),
         }

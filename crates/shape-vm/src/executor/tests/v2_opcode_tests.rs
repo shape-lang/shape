@@ -40,36 +40,140 @@ fn assert_bool(slot: &KindedSlot, expected: bool) {
     assert_eq!(slot.as_bool(), Some(expected));
 }
 
-// ===== Typed Array: primitive layer remains a real Phase-2c runtime surface =====
+// ===== Typed Array: v2-raw `TypedArray<T>` carrier =====
 
 #[test]
 fn test_v2_typed_array_f64_create_push_get() {
-    todo!("phase-2c — v2_typed_array primitive layer deleted; not a host-tier kinded API failure")
+    let instructions = vec![
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(4))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
+        Instruction::simple(OpCode::TypedArrayGetF64),
+    ];
+    let constants = vec![
+        Constant::Number(1.5),
+        Constant::Number(2.5),
+        Constant::Number(3.5),
+        Constant::Int(1),
+    ];
+    let result = run_with_locals(instructions, constants, 1).unwrap();
+    assert_f64(&result, 2.5);
 }
 
 #[test]
 fn test_v2_typed_array_f64_set() {
-    todo!("phase-2c — v2_typed_array primitive layer deleted; not a host-tier kinded API failure")
+    let instructions = vec![
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(2))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
+        Instruction::simple(OpCode::TypedArraySetF64),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
+        Instruction::simple(OpCode::TypedArrayGetF64),
+    ];
+    let constants = vec![
+        Constant::Number(1.0),
+        Constant::Number(2.0),
+        Constant::Number(99.0),
+        Constant::Int(0),
+    ];
+    let result = run_with_locals(instructions, constants, 1).unwrap();
+    assert_f64(&result, 99.0);
 }
 
 #[test]
 fn test_v2_typed_array_f64_len() {
-    todo!("phase-2c — v2_typed_array primitive layer deleted; not a host-tier kinded API failure")
+    let instructions = vec![
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(4))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::simple(OpCode::TypedArrayLen),
+    ];
+    let result = run_with_locals(instructions, vec![Constant::Number(1.0)], 1).unwrap();
+    assert_i64(&result, 3);
 }
 
 #[test]
 fn test_v2_typed_array_i64_create_push_get() {
-    todo!("phase-2c — v2_typed_array primitive layer deleted; not a host-tier kinded API failure")
+    let instructions = vec![
+        Instruction::new(OpCode::NewTypedArrayI64, Some(Operand::Count(4))),
+        Instruction::new(OpCode::StoreLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushI64),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::TypedArrayPushI64),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
+        Instruction::simple(OpCode::TypedArrayPushI64),
+        Instruction::new(OpCode::LoadLocal, Some(Operand::Local(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
+        Instruction::simple(OpCode::TypedArrayGetI64),
+    ];
+    let constants = vec![
+        Constant::Int(10),
+        Constant::Int(20),
+        Constant::Int(30),
+        Constant::Int(2),
+    ];
+    let result = run_with_locals(instructions, constants, 1).unwrap();
+    assert_i64(&result, 30);
 }
 
 #[test]
 fn test_v2_typed_array_f64_out_of_bounds() {
-    todo!("phase-2c — v2_typed_array primitive layer deleted; not a host-tier kinded API failure")
+    let instructions = vec![
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayGetF64),
+    ];
+    let err = run(instructions, vec![Constant::Int(0)]).unwrap_err();
+    match err {
+        VMError::IndexOutOfBounds { index, length } => {
+            assert_eq!(index, 0);
+            assert_eq!(length, 0);
+        }
+        other => panic!("expected IndexOutOfBounds, got: {:?}", other),
+    }
 }
 
 #[test]
 fn test_v2_typed_array_i64_out_of_bounds() {
-    todo!("phase-2c — v2_typed_array primitive layer deleted; not a host-tier kinded API failure")
+    let instructions = vec![
+        Instruction::new(OpCode::NewTypedArrayI64, Some(Operand::Count(0))),
+        Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayGetI64),
+    ];
+    let err = run(instructions, vec![Constant::Int(5)]).unwrap_err();
+    assert!(matches!(err, VMError::IndexOutOfBounds { .. }));
 }
 
 // ===== Typed Field: load/store =====
