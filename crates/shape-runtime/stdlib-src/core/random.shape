@@ -8,7 +8,7 @@
 ///
 /// @example
 /// let r = random();  // 0.734521...
-pub fn random() {
+pub fn random() -> number {
     __intrinsic_random()
 }
 
@@ -20,7 +20,7 @@ pub fn random() {
 ///
 /// @example
 /// let dice = random_int(1, 6);  // 1, 2, 3, 4, 5, or 6
-pub fn random_int(lo, hi) {
+pub fn random_int(lo: number, hi: number) -> number {
     __intrinsic_random_int(lo, hi)
 }
 
@@ -33,7 +33,7 @@ pub fn random_int(lo, hi) {
 /// let r1 = random();
 /// random_seed(42);
 /// let r2 = random();  // r1 == r2
-pub fn random_seed(seed) {
+pub fn random_seed(seed: number) -> void {
     __intrinsic_random_seed(seed)
 }
 
@@ -45,7 +45,7 @@ pub fn random_seed(seed) {
 ///
 /// @example
 /// let price_shock = random_normal(0, 0.02);  // 2% volatility
-pub fn random_normal(mean, std) {
+pub fn random_normal(mean: number, std: number) -> number {
     __intrinsic_random_normal(mean, std)
 }
 
@@ -56,6 +56,6 @@ pub fn random_normal(mean, std) {
 ///
 /// @example
 /// let samples = random_array(1000);
-pub fn random_array(n) {
+pub fn random_array(n: int) -> Array<number> {
     __intrinsic_random_array(n)
 }

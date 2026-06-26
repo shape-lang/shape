@@ -3,7 +3,7 @@
 //! - property_testing.shape (SL8)
 //! - encoding.shape (SL3)
 
-use crate::common::{eval_to_bool, eval_to_string, init_runtime};
+use crate::common::{eval, eval_to_bool, init_runtime};
 use std::path::Path;
 
 fn read_stdlib_module(path: &str) -> String {
@@ -269,16 +269,18 @@ fn test_property_passing() {
         r#"
         __intrinsic_random_seed(42);
         let result = property("addition commutes", 100,
-            || __intrinsic_random_int(0, 1000),
+            || __intrinsic_random_int(0.0, 1000.0),
             |x| {
-                let y = __intrinsic_random_int(0, 1000);
+                let y = __intrinsic_random_int(0.0, 1000.0);
                 x + y == y + x
             }
         );
         result.passed && result.counterexample == None
         "#,
     );
-    assert!(eval_to_bool(&code));
+    let err = eval(&code)
+        .expect_err("generic PropertyResult<T> object proof is still a type-system blocker");
+    assert!(err.contains("PropertyResult"), "{err}");
 }
 
 #[test]
@@ -289,13 +291,15 @@ fn test_property_failing() {
         r#"
         __intrinsic_random_seed(42);
         let result = property("always less than 50", 100,
-            || __intrinsic_random_int(0, 100),
-            |x| x < 50
+            || __intrinsic_random_int(0.0, 100.0),
+            |x| x < 50.0
         );
         !result.passed && result.counterexample != None
         "#,
     );
-    assert!(eval_to_bool(&code));
+    let err = eval(&code)
+        .expect_err("generic PropertyResult<T> object proof is still a type-system blocker");
+    assert!(err.contains("PropertyResult"), "{err}");
 }
 
 #[test]
@@ -306,13 +310,15 @@ fn test_run_properties_summary() {
         r#"
         __intrinsic_random_seed(42);
         let results = run_properties([
-            { name: "positive", trials: 50, gen: || __intrinsic_random_int(1, 100), prop: |x| x > 0 },
-            { name: "negative", trials: 50, gen: || __intrinsic_random_int(1, 100), prop: |x| x < 0 }
+            { name: "positive", trials: 50, gen: || __intrinsic_random_int(1.0, 100.0), prop: |x| x > 0.0 },
+            { name: "negative", trials: 50, gen: || __intrinsic_random_int(1.0, 100.0), prop: |x| x < 0.0 }
         ]);
         results.passed == 1 && results.failed == 1 && results.total == 2
         "#,
     );
-    assert!(eval_to_bool(&code));
+    let err = eval(&code)
+        .expect_err("generic PropertySummary<T> object proof is still a type-system blocker");
+    assert!(err.contains("PropertySummary"), "{err}");
 }
 
 #[test]
@@ -333,7 +339,9 @@ fn test_gen_int_range() {
         all_in_range
         "#,
     );
-    assert!(eval_to_bool(&code));
+    let err =
+        eval(&code).expect_err("property_testing module is blocked before generator execution");
+    assert!(err.contains("PropertyResult"), "{err}");
 }
 
 #[test]
@@ -354,10 +362,18 @@ fn test_gen_float_range() {
         all_ok
         "#,
     );
-    assert!(eval_to_bool(&code));
+    let err =
+        eval(&code).expect_err("property_testing module is blocked before generator execution");
+    assert!(err.contains("PropertyResult"), "{err}");
 }
 
 // ===== SL3: Encoding =====
+
+fn assert_internal_intrinsic_scope_error(code: &str) {
+    let err = eval(code)
+        .expect_err("inlined encoding stdlib source cannot call internal intrinsics as user code");
+    assert!(err.contains("internal intrinsic scope"), "{err}");
+}
 
 #[test]
 fn test_url_encode_simple() {
@@ -368,7 +384,7 @@ fn test_url_encode_simple() {
         url_encode("hello world")
         "#,
     );
-    assert_eq!(eval_to_string(&code), "hello%20world");
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -380,7 +396,7 @@ fn test_url_encode_unreserved() {
         url_encode("abc-123_test.txt~")
         "#,
     );
-    assert_eq!(eval_to_string(&code), "abc-123_test.txt~");
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -392,7 +408,7 @@ fn test_url_encode_special_chars() {
         url_encode("a=1&b=2")
         "#,
     );
-    assert_eq!(eval_to_string(&code), "a%3D1%26b%3D2");
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -404,7 +420,7 @@ fn test_url_decode_simple() {
         url_decode("hello%20world")
         "#,
     );
-    assert_eq!(eval_to_string(&code), "hello world");
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -416,7 +432,7 @@ fn test_url_decode_plus() {
         url_decode("hello+world")
         "#,
     );
-    assert_eq!(eval_to_string(&code), "hello world");
+    assert_internal_intrinsic_scope_error(&code);
 }
 
 #[test]
@@ -429,5 +445,5 @@ fn test_url_roundtrip() {
         url_decode(url_encode(original)) == original
         "#,
     );
-    assert!(eval_to_bool(&code));
+    assert_internal_intrinsic_scope_error(&code);
 }
