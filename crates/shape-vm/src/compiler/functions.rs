@@ -350,6 +350,146 @@ impl BytecodeCompiler {
         false
     }
 
+    fn param_annotation_for_destructure_context(
+        &self,
+        func_def: &FunctionDef,
+        param_idx: usize,
+        param: &shape_ast::ast::FunctionParameter,
+    ) -> Option<shape_ast::ast::TypeAnnotation> {
+        if let Some(annotation) = param.type_annotation.as_ref() {
+            return Some(annotation.clone());
+        }
+
+        let shape_runtime::type_system::Type::Function { params, .. } =
+            self.inference_facts.function_signature(&func_def.name)?
+        else {
+            return None;
+        };
+        let annotation = params.get(param_idx)?.to_annotation()?;
+        if Self::destructure_context_annotation_is_unknown(&annotation) {
+            return None;
+        }
+        Some(annotation)
+    }
+
+    fn destructure_context_annotation_is_unknown(
+        annotation: &shape_ast::ast::TypeAnnotation,
+    ) -> bool {
+        use shape_ast::ast::TypeAnnotation;
+        match annotation {
+            TypeAnnotation::Basic(name) => name == "unknown",
+            TypeAnnotation::Reference(path) => path.as_str() == "unknown",
+            TypeAnnotation::Array(inner) | TypeAnnotation::Borrow { inner, .. } => {
+                Self::destructure_context_annotation_is_unknown(inner)
+            }
+            TypeAnnotation::Tuple(items)
+            | TypeAnnotation::Union(items)
+            | TypeAnnotation::Intersection(items) => items
+                .iter()
+                .any(Self::destructure_context_annotation_is_unknown),
+            TypeAnnotation::Object(fields) => fields.iter().any(|field| {
+                Self::destructure_context_annotation_is_unknown(&field.type_annotation)
+            }),
+            TypeAnnotation::Function { params, returns } => {
+                params.iter().any(|param| {
+                    Self::destructure_context_annotation_is_unknown(&param.type_annotation)
+                }) || Self::destructure_context_annotation_is_unknown(returns)
+            }
+            TypeAnnotation::Generic { name, args } => {
+                name.as_str() == "unknown"
+                    || args
+                        .iter()
+                        .any(Self::destructure_context_annotation_is_unknown)
+            }
+            TypeAnnotation::Dyn(paths) => paths.iter().any(|path| path.as_str() == "unknown"),
+            _ => false,
+        }
+    }
+
+    fn seed_param_destructure_context(
+        &mut self,
+        func_def: &FunctionDef,
+        param_idx: usize,
+        param: &shape_ast::ast::FunctionParameter,
+    ) {
+        self.last_expr_schema = None;
+        self.last_expr_type_info = None;
+
+        let Some(annotation) =
+            self.param_annotation_for_destructure_context(func_def, param_idx, param)
+        else {
+            return;
+        };
+        self.seed_param_destructure_context_from_annotation(&annotation);
+    }
+
+    fn seed_param_destructure_context_from_annotation(
+        &mut self,
+        annotation: &shape_ast::ast::TypeAnnotation,
+    ) {
+        use shape_ast::ast::TypeAnnotation;
+
+        match annotation {
+            TypeAnnotation::Object(fields) => {
+                let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = fields
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.name.as_str(),
+                            Self::type_annotation_to_field_type(&field.type_annotation),
+                        )
+                    })
+                    .collect();
+                let schema_id = self
+                    .type_tracker
+                    .register_inline_object_schema_typed(&typed_fields);
+                let schema_name = self
+                    .type_tracker
+                    .schema_registry()
+                    .get_by_id(schema_id)
+                    .map(|schema| schema.name.clone())
+                    .unwrap_or_else(|| format!("__anon_{}", schema_id));
+                self.last_expr_schema = Some(schema_id);
+                self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::known(
+                    schema_id,
+                    schema_name,
+                ));
+            }
+            TypeAnnotation::Basic(name) => {
+                if let Some(schema) = self.type_tracker.schema_registry().get(name.as_str()) {
+                    self.last_expr_schema = Some(schema.id);
+                    self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::known(
+                        schema.id,
+                        name.to_string(),
+                    ));
+                } else if let Some(type_name) = Self::tracked_type_name_from_annotation(annotation)
+                {
+                    self.last_expr_type_info =
+                        Some(crate::type_tracking::VariableTypeInfo::named(type_name));
+                }
+            }
+            TypeAnnotation::Reference(path) => {
+                if let Some(schema) = self.type_tracker.schema_registry().get(path.as_str()) {
+                    self.last_expr_schema = Some(schema.id);
+                    self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::known(
+                        schema.id,
+                        path.as_str().to_string(),
+                    ));
+                } else if let Some(type_name) = Self::tracked_type_name_from_annotation(annotation)
+                {
+                    self.last_expr_type_info =
+                        Some(crate::type_tracking::VariableTypeInfo::named(type_name));
+                }
+            }
+            _ => {
+                if let Some(type_name) = Self::tracked_type_name_from_annotation(annotation) {
+                    self.last_expr_type_info =
+                        Some(crate::type_tracking::VariableTypeInfo::named(type_name));
+                }
+            }
+        }
+    }
+
     pub(super) fn compile_function(&mut self, func_def: &FunctionDef) -> Result<()> {
         // Validate annotation target kinds before compilation
         self.validate_annotation_targets(func_def)?;
@@ -1522,6 +1662,10 @@ impl BytecodeCompiler {
                     }
                 });
 
+            if param.pattern.as_identifier().is_none() {
+                self.seed_param_destructure_context(func_def, idx, param);
+            }
+
             // Load parameter value from its slot
             self.emit(Instruction::new(
                 OpCode::LoadLocal,
@@ -1529,6 +1673,8 @@ impl BytecodeCompiler {
             ));
             // Destructure into bindings (self declares locals and binds them)
             self.compile_destructure_pattern(&param.pattern)?;
+            self.last_expr_schema = None;
+            self.last_expr_type_info = None;
             self.apply_binding_semantics_to_pattern_bindings(
                 &param.pattern,
                 true,
@@ -2169,6 +2315,55 @@ fn arg_root_slot(
     }
 
     operand_root_slot(op, &alias_roots)
+}
+
+#[cfg(test)]
+mod param_destructure_tests {
+    use super::BytecodeCompiler;
+    use crate::executor::{VMConfig, VirtualMachine};
+    use shape_value::KindedSlot;
+
+    fn eval_slot(code: &str) -> KindedSlot {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        let bytecode = compiler.compile(&program).expect("compile failed");
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        vm.execute(None).expect("execution failed")
+    }
+
+    #[test]
+    fn function_param_destructure_array_executes_with_element_kinds() {
+        let slot = eval_slot(
+            r#"
+fn sum_pair([a, b]) {
+  return a + b
+}
+
+sum_pair([10, 20])
+"#,
+        );
+        assert_eq!(slot.as_i64(), Some(30));
+    }
+
+    #[test]
+    fn function_param_destructure_object_executes_with_field_kinds() {
+        let slot = eval_slot(
+            r#"
+fn distance({x, y}) {
+  return (x * x + y * y) ** 0.5
+}
+
+distance({x: 3, y: 4})
+"#,
+        );
+        let actual = slot.as_f64().expect("distance should return number");
+        assert!(
+            (actual - 5.0).abs() < f64::EPSILON,
+            "expected distance 5.0, got {actual}"
+        );
+    }
 }
 
 // Tests gated `deep-tests` post-W11: bodies use deleted `ValueWord` /

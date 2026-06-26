@@ -3001,6 +3001,19 @@ fn u40_find_binding_span(
             Item::VariableDecl(decl, _) => decl_span(decl, name, &mut out),
             Item::Statement(stmt, _) => walk_stmt(stmt, name, &mut out),
             Item::Function(func, _) => {
+                for param in &func.params {
+                    out = param
+                        .pattern
+                        .get_bindings()
+                        .into_iter()
+                        .find_map(|(binding, span)| (binding == name).then_some(span));
+                    if out.is_some() {
+                        break;
+                    }
+                }
+                if out.is_some() {
+                    break;
+                }
                 for stmt in &func.body {
                     walk_stmt(stmt, name, &mut out);
                     if out.is_some() {
@@ -3048,6 +3061,18 @@ fn u40_is_array_of_int(ty: &Type) -> bool {
                 Type::Concrete(TypeAnnotation::Reference(name)) if name.as_str() == "Array"
             ) && u40_is_int(&args[0])
         }
+        _ => false,
+    }
+}
+
+fn u40_object_has_int_fields(ty: &Type, field_names: &[&str]) -> bool {
+    match ty {
+        Type::Concrete(TypeAnnotation::Object(fields)) => field_names.iter().all(|name| {
+            fields
+                .iter()
+                .find(|field| field.name == *name)
+                .is_some_and(|field| u40_is_int(&Type::Concrete(field.type_annotation.clone())))
+        }),
         _ => false,
     }
 }
@@ -3101,6 +3126,104 @@ fn u40_is_array_of_function_returning_int(ty: &Type) -> bool {
         }
         _ => false,
     }
+}
+
+#[test]
+fn inference_facts_exposes_function_array_param_destructure_binding_types() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn sum_pair([a, b]) {
+  return a + b
+}
+
+let out = sum_pair([10, 20])
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let a_span = u40_find_binding_span(&program, "a").expect("a param binding span");
+    let b_span = u40_find_binding_span(&program, "b").expect("b param binding span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "function array param destructure should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.binding_type(a_span).is_some_and(u40_is_int),
+        "a should bind to int, got {:?}",
+        facts.binding_type(a_span)
+    );
+    assert!(
+        facts.binding_type(b_span).is_some_and(u40_is_int),
+        "b should bind to int, got {:?}",
+        facts.binding_type(b_span)
+    );
+    let Type::Function { params, returns } = facts
+        .function_signature("sum_pair")
+        .expect("sum_pair signature fact")
+    else {
+        panic!("sum_pair should have a function signature")
+    };
+    assert!(
+        params.first().is_some_and(u40_is_array_of_int),
+        "sum_pair parameter should resolve to Array<int>, got {:?}",
+        params.first()
+    );
+    assert!(
+        u40_is_int(returns),
+        "sum_pair return should resolve to int, got {:?}",
+        returns
+    );
+}
+
+#[test]
+fn inference_facts_exposes_function_object_param_destructure_binding_types() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn distance({x, y}) {
+  return (x * x + y * y) ** 0.5
+}
+
+let out = distance({x: 3, y: 4})
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let x_span = u40_find_binding_span(&program, "x").expect("x param binding span");
+    let y_span = u40_find_binding_span(&program, "y").expect("y param binding span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "function object param destructure should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.binding_type(x_span).is_some_and(u40_is_int),
+        "x should bind to int, got {:?}",
+        facts.binding_type(x_span)
+    );
+    assert!(
+        facts.binding_type(y_span).is_some_and(u40_is_int),
+        "y should bind to int, got {:?}",
+        facts.binding_type(y_span)
+    );
+    let Type::Function { params, returns } = facts
+        .function_signature("distance")
+        .expect("distance signature fact")
+    else {
+        panic!("distance should have a function signature")
+    };
+    assert!(
+        params
+            .first()
+            .is_some_and(|param| u40_object_has_int_fields(param, &["x", "y"])),
+        "distance parameter should resolve to an object with int x/y fields, got {:?}",
+        params.first()
+    );
+    let _ = returns;
 }
 
 #[test]

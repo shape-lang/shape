@@ -635,6 +635,13 @@ impl TypeInferenceEngine {
             let param_type = if let Some(ann) = &param.type_annotation {
                 param_source_vars.push(None);
                 self.resolve_type_annotation(ann)
+            } else if param.simple_name().is_none() {
+                let var = self.fresh_var();
+                unannotated_param_vars.push(var.clone());
+                param_source_vars.push(Some(var.clone()));
+                let param_type = Type::Variable(var);
+                self.bind_function_param_pattern(&param.pattern, &param_type);
+                param_type
             } else {
                 let var = self.fresh_var();
                 unannotated_param_vars.push(var.clone());
@@ -643,10 +650,10 @@ impl TypeInferenceEngine {
             };
 
             param_types.push(param_type.clone());
-            // Define all identifiers from the pattern
-            for name in param.get_identifiers() {
-                self.env.define(&name, TypeScheme::mono(param_type.clone()));
+            if param.type_annotation.is_some() || param.simple_name().is_some() {
+                self.bind_function_param_pattern(&param.pattern, &param_type);
             }
+            self.record_binding_facts_for_param_pattern(&param.pattern);
         }
         self.callable_param_source_vars
             .insert(func.name.clone(), param_source_vars);
@@ -887,6 +894,146 @@ impl TypeInferenceEngine {
         }
 
         Ok(function_type)
+    }
+
+    fn bind_function_param_pattern(&mut self, pattern: &DestructurePattern, scrutinee: &Type) {
+        match pattern {
+            DestructurePattern::Identifier(name, _) => {
+                self.env.define(name, TypeScheme::mono(scrutinee.clone()));
+            }
+            DestructurePattern::Array(patterns) => {
+                let elem_ty = Self::decl_array_element_type(scrutinee).unwrap_or_else(|| {
+                    let elem = self.fresh_type_var();
+                    if let Type::Variable(elem_var) = &elem {
+                        self.param_destructure_array_element_links
+                            .push((scrutinee.clone(), elem_var.clone()));
+                    }
+                    self.constraints
+                        .push((scrutinee.clone(), BuiltinTypes::array(elem.clone())));
+                    elem
+                });
+                for pattern in patterns {
+                    match pattern {
+                        DestructurePattern::Rest(inner) => {
+                            self.bind_function_param_pattern(
+                                inner,
+                                &BuiltinTypes::array(elem_ty.clone()),
+                            );
+                        }
+                        _ => self.bind_function_param_pattern(pattern, &elem_ty),
+                    }
+                }
+            }
+            DestructurePattern::Object(fields) => {
+                for field in fields {
+                    if let DestructurePattern::Rest(inner) = &field.pattern {
+                        let rest_ty = Type::Concrete(TypeAnnotation::Object(Vec::new()));
+                        self.bind_function_param_pattern(inner, &rest_ty);
+                        continue;
+                    }
+                    let field_ty = self
+                        .destructure_object_field_type(scrutinee, &field.key)
+                        .unwrap_or_else(|| {
+                            let result_ty = self.fresh_type_var();
+                            if let Type::Variable(result_var) = &result_ty {
+                                self.param_destructure_field_links.push((
+                                    scrutinee.clone(),
+                                    field.key.clone(),
+                                    result_var.clone(),
+                                ));
+                            }
+                            let bound_var = self.fresh_var();
+                            self.constraints.push((
+                                scrutinee.clone(),
+                                Type::Constrained {
+                                    var: bound_var,
+                                    constraint: Box::new(TypeConstraint::HasField(
+                                        field.key.clone(),
+                                        Box::new(result_ty.clone()),
+                                    )),
+                                },
+                            ));
+                            result_ty
+                        });
+                    self.bind_function_param_pattern(&field.pattern, &field_ty);
+                }
+            }
+            DestructurePattern::Rest(inner) => {
+                self.bind_function_param_pattern(inner, scrutinee);
+            }
+            DestructurePattern::Decomposition(bindings) => {
+                for binding in bindings {
+                    let binding_type = self.resolve_type_annotation(&binding.type_annotation);
+                    self.env
+                        .define(&binding.name, TypeScheme::mono(binding_type));
+                }
+            }
+        }
+    }
+
+    fn destructure_object_field_type(&self, scrutinee: &Type, key: &str) -> Option<Type> {
+        let resolved = self.solver.unifier().apply_substitutions(scrutinee);
+        if let Type::Concrete(TypeAnnotation::Object(fields)) = &resolved {
+            if let Some(field) = fields.iter().find(|field| field.name == key) {
+                return Some(Self::type_from_annotation_preserving_tyvars(
+                    &field.type_annotation,
+                ));
+            }
+        }
+
+        let struct_name = self
+            .struct_name_of_type(&resolved)
+            .or_else(|| self.struct_name_of_type(scrutinee))?;
+        self.struct_field_annotation(&struct_name, key)
+            .map(|ann| self.resolve_type_annotation(&ann))
+    }
+
+    fn type_from_annotation_preserving_tyvars(ann: &TypeAnnotation) -> Type {
+        if let Some(var) = annotation_as_tyvar(ann) {
+            return Type::Variable(var);
+        }
+        match ann {
+            TypeAnnotation::Array(inner) => {
+                BuiltinTypes::array(Self::type_from_annotation_preserving_tyvars(inner))
+            }
+            TypeAnnotation::Generic { name, args } => Type::Generic {
+                base: Box::new(Type::Concrete(TypeAnnotation::Reference(name.clone()))),
+                args: args
+                    .iter()
+                    .map(Self::type_from_annotation_preserving_tyvars)
+                    .collect(),
+            },
+            TypeAnnotation::Function { params, returns } => Type::Function {
+                params: params
+                    .iter()
+                    .map(|param| {
+                        Self::type_from_annotation_preserving_tyvars(&param.type_annotation)
+                    })
+                    .collect(),
+                returns: Box::new(Self::type_from_annotation_preserving_tyvars(returns)),
+            },
+            other => Type::Concrete(other.clone()),
+        }
+    }
+
+    fn record_binding_facts_for_param_pattern(&mut self, pattern: &DestructurePattern) {
+        for (name, binder_span) in pattern.get_bindings() {
+            if binder_span.is_dummy() {
+                continue;
+            }
+            let Some(scheme) = self.env.lookup(&name) else {
+                continue;
+            };
+            self.binding_fact_table.insert(
+                binder_span,
+                BindingFact {
+                    name,
+                    binder_span,
+                    initializer_span: None,
+                    ty: scheme.ty.clone(),
+                },
+            );
+        }
     }
 
     /// Resolve a type annotation, converting type parameter references to type variables
@@ -2104,8 +2251,7 @@ impl TypeInferenceEngine {
                             self.bind_decl_pattern(inner, BuiltinTypes::array(elem.clone()));
                         }
                         _ => {
-                            let fallback =
-                                elem_ty.clone().unwrap_or_else(|| self.fresh_type_var());
+                            let fallback = elem_ty.clone().unwrap_or_else(|| self.fresh_type_var());
                             self.bind_decl_pattern(pattern, fallback);
                         }
                     }
