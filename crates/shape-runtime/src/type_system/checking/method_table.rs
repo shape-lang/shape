@@ -810,6 +810,7 @@ impl MethodTable {
             ("delete", 0, vec![E::ReceiverParam(0)], E::SelfType),
             ("has", 0, vec![E::ReceiverParam(0)], boolean()),
             ("includes", 0, vec![E::ReceiverParam(0)], boolean()),
+            ("size", 0, vec![], int()),
             ("len", 0, vec![], int()),
             ("length", 0, vec![], int()),
             ("isEmpty", 0, vec![], boolean()),
@@ -882,6 +883,53 @@ impl MethodTable {
             self.register_user_generic_method("PriorityQueue", name, mtp, params, ret, vec![]);
         }
 
+        // ---- Mutex<T> / Atomic ----------------------------------------
+        //
+        // These are interior-mutability carriers, not COW collection
+        // writeback participants. Seed their exact PHF method signatures so
+        // strict checking accepts `let m = Mutex(0); m.set(1)` without
+        // treating `set`/`store` as a binding reassignment.
+        let mutex_methods: Vec<(&str, usize, Vec<E>, E)> = vec![
+            ("lock", 0, vec![], E::SelfType),
+            ("try_lock", 0, vec![], boolean()),
+            ("set", 0, vec![E::ReceiverParam(0)], E::SelfType),
+            ("get", 0, vec![], E::ReceiverParam(0)),
+        ];
+        for (name, mtp, params, ret) in mutex_methods {
+            self.register_user_generic_method("Mutex", name, mtp, params, ret, vec![]);
+        }
+
+        let atomic_ty = || Type::Concrete(TypeAnnotation::Reference("Atomic".into()));
+        self.register_method("Atomic", "load", vec![], BuiltinTypes::integer(), false);
+        self.register_method(
+            "Atomic",
+            "store",
+            vec![BuiltinTypes::integer()],
+            atomic_ty(),
+            false,
+        );
+        self.register_method(
+            "Atomic",
+            "fetch_add",
+            vec![BuiltinTypes::integer()],
+            BuiltinTypes::integer(),
+            false,
+        );
+        self.register_method(
+            "Atomic",
+            "fetch_sub",
+            vec![BuiltinTypes::integer()],
+            BuiltinTypes::integer(),
+            false,
+        );
+        self.register_method(
+            "Atomic",
+            "compare_exchange",
+            vec![BuiltinTypes::integer(), BuiltinTypes::integer()],
+            BuiltinTypes::integer(),
+            false,
+        );
+
         // ---- Range<T> (receiver param 0 = T) ---------------------------
         // Wave-1b SEAM A: `(0..10).iter()` -> Iterator<int>. A range is
         // `Range<int>` (expressions.rs:1423); `extract_receiver_info` keys it
@@ -908,17 +956,12 @@ impl MethodTable {
         // Runtime bodies are SEAM B.
         self.register_iterator_methods("Iterator");
 
-        // FOLLOW-UP (concurrency-method seeds): `Mutex`/`Atomic`/`Lazy`/
-        // `Channel` ctors ARE registered in `environment/mod.rs` (clears the
-        // undefined-function FP class), but their PHF method sets
-        // (`MUTEX_METHODS`/`ATOMIC_METHODS`/`LAZY_METHODS`/`CHANNEL_METHODS`,
-        // method_registry.rs:820-850) are NOT seeded here. Their signatures
-        // are non-trivial to express precisely (e.g. `mutex.lock()` /
-        // `lazy.get()` return the wrapped `T`; `channel.recv()` blocks and
-        // returns `Option<T>`; `atomic.compare_exchange` is multi-arg over
-        // int). Per the SMOKE-s4-s5 spec ("if a sibling is complex/ambiguous,
-        // register its ctor + flag its methods as a follow-up rather than
-        // guess"), these are deliberately left for a precise follow-up.
+        // FOLLOW-UP (remaining concurrency-method seeds): `Lazy` / `Channel`
+        // ctors ARE registered in `environment/mod.rs`, but their full PHF
+        // method sets (`LAZY_METHODS` / `CHANNEL_METHODS`, method_registry.rs)
+        // remain unseeded here. Their signatures cross scheduler / closure /
+        // Option-carrier boundaries (`lazy.get()`, `channel.recv()`), so they
+        // stay out of this focused Mutex/Atomic metadata fix.
     }
 
     /// Wave-1b SEAM A (user ruling 2026-06-15): seed the Iterator-trait
