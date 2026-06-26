@@ -4,23 +4,79 @@
 /// Axis-Aligned Bounding Box (AABB) collision detection with spatial hashing
 /// for efficient broad-phase collision queries.
 
+pub type Aabb {
+    min_x: number,
+    min_y: number,
+    max_x: number,
+    max_y: number
+}
+
+type Vec2 {
+    x: number,
+    y: number
+}
+
+type AabbSize {
+    width: number,
+    height: number
+}
+
+type CollisionPair {
+    i: int,
+    j: int
+}
+
+type SweepEntry {
+    idx: int,
+    min_x: number
+}
+
+type CollisionBody {
+    aabb: Aabb,
+    vx: number,
+    vy: number,
+    mass: number
+}
+
+type BodyVelocity {
+    vx: number,
+    vy: number
+}
+
+type ElasticResponse {
+    a: BodyVelocity,
+    b: BodyVelocity
+}
+
+function set_sweep_entry(entries: Array<SweepEntry>, idx: int, value: SweepEntry) -> Array<SweepEntry> {
+    let mut out: Array<SweepEntry> = [];
+    for i in range(0, entries.len()) {
+        if i == idx {
+            out.push(value);
+        } else {
+            out.push(entries[i]);
+        }
+    }
+    out
+}
+
 /// Create an AABB from min/max corners
 ///
 /// @param min_x - minimum x coordinate
 /// @param min_y - minimum y coordinate
 /// @param max_x - maximum x coordinate
 /// @param max_y - maximum y coordinate
-pub fn aabb(min_x, min_y, max_x, max_y) {
+pub fn aabb(min_x: number, min_y: number, max_x: number, max_y: number) -> Aabb {
     { min_x: min_x, min_y: min_y, max_x: max_x, max_y: max_y }
 }
 
 /// Create an AABB centered at (cx, cy) with half-extents (hw, hh)
-pub fn aabb_centered(cx, cy, hw, hh) {
+pub fn aabb_centered(cx: number, cy: number, hw: number, hh: number) -> Aabb {
     { min_x: cx - hw, min_y: cy - hh, max_x: cx + hw, max_y: cy + hh }
 }
 
 /// Create an AABB from a position and size
-pub fn aabb_from_pos(x, y, w, h) {
+pub fn aabb_from_pos(x: number, y: number, w: number, h: number) -> Aabb {
     { min_x: x, min_y: y, max_x: x + w, max_y: y + h }
 }
 
@@ -29,15 +85,15 @@ pub fn aabb_from_pos(x, y, w, h) {
 /// @param a - first AABB
 /// @param b - second AABB
 /// @returns true if the AABBs overlap
-pub fn aabb_overlaps(a, b) {
+pub fn aabb_overlaps(a: Aabb, b: Aabb) -> bool {
     a.min_x <= b.max_x && a.max_x >= b.min_x &&
     a.min_y <= b.max_y && a.max_y >= b.min_y
 }
 
 /// Compute the overlap area between two AABBs (0 if no overlap)
-pub fn aabb_overlap_area(a, b) {
-    let ox = min(a.max_x, b.max_x) - max(a.min_x, b.min_x);
-    let oy = min(a.max_y, b.max_y) - max(a.min_y, b.min_y);
+pub fn aabb_overlap_area(a: Aabb, b: Aabb) -> number {
+    let ox: number = min(a.max_x, b.max_x) - max(a.min_x, b.min_x);
+    let oy: number = min(a.max_y, b.max_y) - max(a.min_y, b.min_y);
     if ox > 0.0 && oy > 0.0 {
         ox * oy
     } else {
@@ -46,19 +102,19 @@ pub fn aabb_overlap_area(a, b) {
 }
 
 /// Test if AABB a fully contains AABB b
-pub fn aabb_contains(a, b) {
+pub fn aabb_contains(a: Aabb, b: Aabb) -> bool {
     a.min_x <= b.min_x && a.max_x >= b.max_x &&
     a.min_y <= b.min_y && a.max_y >= b.max_y
 }
 
 /// Test if point (px, py) is inside an AABB
-pub fn aabb_contains_point(box, px, py) {
+pub fn aabb_contains_point(box: Aabb, px: number, py: number) -> bool {
     px >= box.min_x && px <= box.max_x &&
     py >= box.min_y && py <= box.max_y
 }
 
 /// Compute the union (smallest enclosing AABB) of two AABBs
-pub fn aabb_union(a, b) {
+pub fn aabb_union(a: Aabb, b: Aabb) -> Aabb {
     {
         min_x: min(a.min_x, b.min_x),
         min_y: min(a.min_y, b.min_y),
@@ -68,21 +124,22 @@ pub fn aabb_union(a, b) {
 }
 
 /// Compute the intersection AABB of two AABBs (None if no overlap)
-pub fn aabb_intersection(a, b) {
-    let ix_min = max(a.min_x, b.min_x);
-    let iy_min = max(a.min_y, b.min_y);
-    let ix_max = min(a.max_x, b.max_x);
-    let iy_max = min(a.max_y, b.max_y);
+pub fn aabb_intersection(a: Aabb, b: Aabb) -> Aabb? {
+    let ix_min: number = max(a.min_x, b.min_x);
+    let iy_min: number = max(a.min_y, b.min_y);
+    let ix_max: number = min(a.max_x, b.max_x);
+    let iy_max: number = min(a.max_y, b.max_y);
 
     if ix_min <= ix_max && iy_min <= iy_max {
-        { min_x: ix_min, min_y: iy_min, max_x: ix_max, max_y: iy_max }
+        let intersection: Aabb = { min_x: ix_min, min_y: iy_min, max_x: ix_max, max_y: iy_max };
+        Some(intersection)
     } else {
         None
     }
 }
 
 /// Expand an AABB by a margin on all sides
-pub fn aabb_expand(box, margin) {
+pub fn aabb_expand(box: Aabb, margin: number) -> Aabb {
     {
         min_x: box.min_x - margin,
         min_y: box.min_y - margin,
@@ -92,7 +149,7 @@ pub fn aabb_expand(box, margin) {
 }
 
 /// Get the center of an AABB
-pub fn aabb_center(box) {
+pub fn aabb_center(box: Aabb) -> Vec2 {
     {
         x: (box.min_x + box.max_x) / 2.0,
         y: (box.min_y + box.max_y) / 2.0
@@ -100,7 +157,7 @@ pub fn aabb_center(box) {
 }
 
 /// Get the width and height of an AABB
-pub fn aabb_size(box) {
+pub fn aabb_size(box: Aabb) -> AabbSize {
     {
         width: box.max_x - box.min_x,
         height: box.max_y - box.min_y
@@ -115,35 +172,37 @@ pub fn aabb_size(box) {
 /// @param a - first AABB
 /// @param b - second AABB
 /// @returns { x, y } separation vector (move a by this to separate), or None
-pub fn aabb_separation(a, b) {
+pub fn aabb_separation(a: Aabb, b: Aabb) -> Vec2? {
     if !aabb_overlaps(a, b) {
         return None;
     }
 
     // Compute overlap extents on each axis
-    let overlap_x = min(a.max_x, b.max_x) - max(a.min_x, b.min_x);
-    let overlap_y = min(a.max_y, b.max_y) - max(a.min_y, b.min_y);
+    let overlap_x: number = min(a.max_x, b.max_x) - max(a.min_x, b.min_x);
+    let overlap_y: number = min(a.max_y, b.max_y) - max(a.min_y, b.min_y);
 
     // Direction: push a away from b (from b's center toward a's center)
-    let ca_x = (a.min_x + a.max_x) / 2.0;
-    let cb_x = (b.min_x + b.max_x) / 2.0;
-    let ca_y = (a.min_y + a.max_y) / 2.0;
-    let cb_y = (b.min_y + b.max_y) / 2.0;
+    let ca_x: number = (a.min_x + a.max_x) / 2.0;
+    let cb_x: number = (b.min_x + b.max_x) / 2.0;
+    let ca_y: number = (a.min_y + a.max_y) / 2.0;
+    let cb_y: number = (b.min_y + b.max_y) / 2.0;
 
     if overlap_x <= overlap_y {
         // Separate along x (minimum penetration axis)
-        let mut dir = 1.0;
+        let mut dir: number = 1.0;
         if ca_x < cb_x {
             dir = -1.0;
         }
-        { x: dir * overlap_x, y: 0.0 }
+        let sep: Vec2 = { x: dir * overlap_x, y: 0.0 };
+        Some(sep)
     } else {
         // Separate along y
-        let mut dir = 1.0;
+        let mut dir: number = 1.0;
         if ca_y < cb_y {
             dir = -1.0;
         }
-        { x: 0.0, y: dir * overlap_y }
+        let sep: Vec2 = { x: 0.0, y: dir * overlap_y };
+        Some(sep)
     }
 }
 
@@ -153,16 +212,17 @@ pub fn aabb_separation(a, b) {
 ///
 /// @param boxes - array of AABB objects
 /// @returns array of { i, j } index pairs where boxes[i] overlaps boxes[j]
-pub fn find_collisions_brute(boxes) {
-    let mut pairs = [];
-    let n = boxes.len();
+pub fn find_collisions_brute(boxes: Array<Aabb>) -> Array<CollisionPair> {
+    let mut pairs: Array<CollisionPair> = [];
+    let n: int = boxes.len();
 
     for i in range(0, n) {
-        let box_i = boxes[i];
+        let box_i: Aabb = boxes[i];
         for j in range(i + 1, n) {
-            let box_j = boxes[j];
+            let box_j: Aabb = boxes[j];
             if aabb_overlaps(box_i, box_j) {
-                pairs.push({ i: i, j: j });
+                let pair: CollisionPair = { i: i, j: j };
+                pairs.push(pair);
             }
         }
     }
@@ -177,65 +237,67 @@ pub fn find_collisions_brute(boxes) {
 ///
 /// @param boxes - array of AABB objects
 /// @returns array of { i, j } index pairs of overlapping boxes
-pub fn find_collisions_sweep(boxes) {
-    let n = boxes.len();
+pub fn find_collisions_sweep(boxes: Array<Aabb>) -> Array<CollisionPair> {
+    let n: int = boxes.len();
 
     // Build index array sorted by min_x
-    let mut indices = [];
+    let mut indices: Array<SweepEntry> = [];
     for i in range(0, n) {
-        let b = boxes[i];
-        indices.push({ idx: i, min_x: b.min_x });
+        let b: Aabb = boxes[i];
+        let entry: SweepEntry = { idx: i, min_x: b.min_x };
+        indices.push(entry);
     }
 
     // Simple insertion sort by min_x (sufficient for typical counts)
     for i in range(1, n) {
-        let key = indices[i];
-        let mut j = i - 1;
-        let mut cont = j >= 0;
+        let key: SweepEntry = indices[i];
+        let mut j: int = i - 1;
+        let mut cont: bool = j >= 0;
         if cont {
-            let ej = indices[j];
+            let ej: SweepEntry = indices[j];
             cont = ej.min_x > key.min_x;
         }
         while cont {
-            let ej = indices[j];
-            indices[j + 1] = ej;
+            let ej: SweepEntry = indices[j];
+            indices = set_sweep_entry(indices, j + 1, ej);
             j = j - 1;
             cont = j >= 0;
             if cont {
-                let ej2 = indices[j];
+                let ej2: SweepEntry = indices[j];
                 cont = ej2.min_x > key.min_x;
             }
         }
-        indices[j + 1] = key;
+        indices = set_sweep_entry(indices, j + 1, key);
     }
 
-    let mut pairs = [];
+    let mut pairs: Array<CollisionPair> = [];
 
     for i in range(0, n) {
-        let entry_i = indices[i];
-        let ai = entry_i.idx;
-        let a = boxes[ai];
+        let entry_i: SweepEntry = indices[i];
+        let ai: int = entry_i.idx;
+        let a: Aabb = boxes[ai];
+        let mut active: bool = true;
 
         for j in range(i + 1, n) {
-            let entry_j = indices[j];
-            let bi = entry_j.idx;
-            let b = boxes[bi];
+            if active {
+                let entry_j: SweepEntry = indices[j];
+                let bi: int = entry_j.idx;
+                let b: Aabb = boxes[bi];
 
-            // If b starts after a ends on x-axis, no more overlaps with a
-            if b.min_x > a.max_x {
-                break;
-            }
-
-            // Check full AABB overlap (x already overlaps, just check y)
-            if a.min_y <= b.max_y && a.max_y >= b.min_y {
-                let mut lo = ai;
-                let mut hi = bi;
-                if lo > hi {
-                    let tmp = lo;
-                    lo = hi;
-                    hi = tmp;
+                // If b starts after a ends on x-axis, no more overlaps with a.
+                if b.min_x > a.max_x {
+                    active = false;
+                } else if a.min_y <= b.max_y && a.max_y >= b.min_y {
+                    let mut lo: int = ai;
+                    let mut hi: int = bi;
+                    if lo > hi {
+                        let tmp: int = lo;
+                        lo = hi;
+                        hi = tmp;
+                    }
+                    let pair: CollisionPair = { i: lo, j: hi };
+                    pairs.push(pair);
                 }
-                pairs.push({ i: lo, j: hi });
             }
         }
     }
@@ -253,44 +315,48 @@ pub fn find_collisions_sweep(boxes) {
 /// @param body_a - { aabb, vx, vy, mass }
 /// @param body_b - { aabb, vx, vy, mass }
 /// @returns { a: { vx, vy }, b: { vx, vy } } post-collision velocities
-pub fn elastic_response(body_a, body_b) {
+pub fn elastic_response(body_a: CollisionBody, body_b: CollisionBody) -> ElasticResponse {
     // Bind fields to locals to avoid borrow issues with nested field access
-    let aabb_a = body_a.aabb;
-    let aabb_b = body_b.aabb;
-    let vx_a = body_a.vx;
-    let vy_a = body_a.vy;
-    let vx_b = body_b.vx;
-    let vy_b = body_b.vy;
-    let ma = body_a.mass;
-    let mb = body_b.mass;
+    let aabb_a: Aabb = body_a.aabb;
+    let aabb_b: Aabb = body_b.aabb;
+    let vx_a: number = body_a.vx;
+    let vy_a: number = body_a.vy;
+    let vx_b: number = body_b.vx;
+    let vy_b: number = body_b.vy;
+    let ma: number = body_a.mass;
+    let mb: number = body_b.mass;
 
-    let sep = aabb_separation(aabb_a, aabb_b);
-    if sep == None {
+    if !aabb_overlaps(aabb_a, aabb_b) {
         return { a: { vx: vx_a, vy: vy_a }, b: { vx: vx_b, vy: vy_b } };
     }
 
+    let sep: Vec2 = match aabb_separation(aabb_a, aabb_b) {
+        Some(v) => v,
+        None => { x: 0.0, y: 0.0 },
+    };
+
     // Normalize separation vector
-    let len_sep = sqrt(sep.x * sep.x + sep.y * sep.y);
+    let len_sep: number = sqrt(sep.x * sep.x + sep.y * sep.y);
     if len_sep < 0.000001 {
         return { a: { vx: vx_a, vy: vy_a }, b: { vx: vx_b, vy: vy_b } };
     }
-    let nx = sep.x / len_sep;
-    let ny = sep.y / len_sep;
+    let nx: number = sep.x / len_sep;
+    let ny: number = sep.y / len_sep;
 
     // Relative velocity along normal
-    let dvx = vx_a - vx_b;
-    let dvy = vy_a - vy_b;
-    let dvn = dvx * nx + dvy * ny;
+    let dvx: number = vx_a - vx_b;
+    let dvy: number = vy_a - vy_b;
+    let dvn: number = dvx * nx + dvy * ny;
 
     // Don't resolve if separating
     if dvn > 0.0 {
         return { a: { vx: vx_a, vy: vy_a }, b: { vx: vx_b, vy: vy_b } };
     }
 
-    let inv_total = 2.0 / (ma + mb);
+    let inv_total: number = 2.0 / (ma + mb);
 
-    let impulse_a = mb * inv_total * dvn;
-    let impulse_b = ma * inv_total * dvn;
+    let impulse_a: number = mb * inv_total * dvn;
+    let impulse_b: number = ma * inv_total * dvn;
 
     return {
         a: { vx: vx_a - impulse_a * nx, vy: vy_a - impulse_a * ny },

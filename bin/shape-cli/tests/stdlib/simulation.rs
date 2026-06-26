@@ -39,6 +39,18 @@ fn with_modules(module_paths: &[&str], code: &str) -> String {
     merged
 }
 
+fn with_prelude_and_modules(prelude: &str, module_paths: &[&str], code: &str) -> String {
+    let mut merged = String::new();
+    merged.push_str(prelude);
+    merged.push('\n');
+    for path in module_paths {
+        merged.push_str(&strip_import_lines(&read_stdlib_module(path)));
+        merged.push('\n');
+    }
+    merged.push_str(code);
+    merged
+}
+
 fn assert_internal_intrinsic_scope_error(code: &str) {
     let err =
         eval(code).expect_err("inlined stdlib source cannot call internal intrinsics as user code");
@@ -111,10 +123,7 @@ fn test_ode_integrators() {
          let r = rk4(|t, y| -y, 1.0, 0.0, 1.0, 0.1);\n\
          (e.len() >= 0) && (r.len() >= 0)",
     );
-    let err = eval(&code).expect_err(
-        "ODE scalar integrators are blocked by the range executor surface in this checkout",
-    );
-    assert!(err.contains("range: SURFACE"), "{err}");
+    assert!(eval_to_bool(&code));
 }
 
 #[test]
@@ -155,12 +164,23 @@ fn test_harmonic_oscillator_rk4_system() {
 fn test_physics_projectile_range() {
     init_runtime();
 
-    let code = with_modules(
-        &[
-            "physics/types.shape",
-            "physics/mechanics.shape",
-            "physics/simulation.shape",
-        ],
+    let physics_state_types = r#"
+        type ProjectileState {
+            x: number,
+            y: number,
+            vx: number,
+            vy: number,
+            t: number
+        }
+
+        type OscillatorState {
+            x: number,
+            v: number
+        }
+    "#;
+    let code = with_prelude_and_modules(
+        physics_state_types,
+        &["physics/mechanics.shape", "physics/simulation.shape"],
         "let vx = 7.0710678118654755;\n\
          let vy = 7.0710678118654755;\n\
          let res = simulate_projectile({ x: 0.0, y: 0.0, vx: vx, vy: vy, t: 0.0 }, 5.0, 0.01, 9.81);\n\
@@ -462,7 +482,10 @@ fn test_aabb_separation() {
         let b = aabb(2.0, 0.0, 5.0, 3.0);
         let sep = aabb_separation(a, b);
         // Minimum separation is 1.0 in x-direction
-        sep != None && abs(abs(sep.x) - 1.0) < 0.001
+        match sep {
+            Some(s) => abs(abs(s.x) - 1.0) < 0.001,
+            None => false,
+        }
         "#,
     );
     assert!(eval_to_bool(&code));

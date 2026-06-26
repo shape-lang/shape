@@ -3,18 +3,38 @@
 ///
 /// Basic step functions for common mechanics systems.
 
-function vec_add(a, b) {
-    let mut out = [];
+from std::physics::types use { OscillatorState, ProjectileState }
+
+pub type NBodyParticle {
+    position: Array<number>,
+    velocity: Array<number>,
+    mass: number
+}
+
+function vec_add(a: Array<number>, b: Array<number>) -> Array<number> {
+    let mut out: Array<number> = [];
     for i in range(0, a.len()) {
         out.push(a[i] + b[i]);
     }
     out
 }
 
-function vec_scale(a, s) {
-    let mut out = [];
+function vec_scale(a: Array<number>, s: number) -> Array<number> {
+    let mut out: Array<number> = [];
     for i in range(0, a.len()) {
         out.push(a[i] * s);
+    }
+    out
+}
+
+function vec_set_number(a: Array<number>, idx: int, value: number) -> Array<number> {
+    let mut out: Array<number> = [];
+    for i in range(0, a.len()) {
+        if i == idx {
+            out.push(value);
+        } else {
+            out.push(a[i]);
+        }
     }
     out
 }
@@ -24,10 +44,10 @@ function vec_scale(a, s) {
 /// @param state - ProjectileState
 /// @param dt - time step
 /// @param g - gravity (positive, downward)
-pub fn projectile_step(state, dt, g = 9.81) {
-    let new_x = state.x + state.vx * dt;
-    let new_y = state.y + state.vy * dt - 0.5 * g * dt * dt;
-    let new_vy = state.vy - g * dt;
+pub fn projectile_step(state: ProjectileState, dt: number, g: number = 9.81) -> ProjectileState {
+    let new_x: number = state.x + state.vx * dt;
+    let new_y: number = state.y + state.vy * dt - 0.5 * g * dt * dt;
+    let new_vy: number = state.vy - g * dt;
 
     {
         x: new_x,
@@ -45,10 +65,10 @@ pub fn projectile_step(state, dt, g = 9.81) {
 /// @param m - mass
 /// @param dt - time step
 /// @param damping - damping coefficient
-pub fn spring_mass_step(state, k, m, dt, damping = 0.0) {
-    let a = -(k / m) * state.x - (damping / m) * state.v;
-    let v_next = state.v + a * dt;
-    let x_next = state.x + v_next * dt;
+pub fn spring_mass_step(state: OscillatorState, k: number, m: number, dt: number, damping: number = 0.0) -> OscillatorState {
+    let a: number = -(k / m) * state.x - (damping / m) * state.v;
+    let v_next: number = state.v + a * dt;
+    let x_next: number = state.x + v_next * dt;
 
     {
         x: x_next,
@@ -58,48 +78,63 @@ pub fn spring_mass_step(state, k, m, dt, damping = 0.0) {
 
 /// Single step for n-body gravitational system
 ///
-/// @param particles - array of Particle
+/// @param particles - array of NBodyParticle
 /// @param dt - time step
 /// @param G - gravitational constant
-pub fn n_body_step(particles, dt, G = 1.0) {
-    let n = particles.len();
-    let mut acc = [];
+pub fn n_body_step(particles: Array<NBodyParticle>, dt: number, G: number = 1.0) -> Array<NBodyParticle> {
+    let n: int = particles.len();
+    let mut acc_x: Array<number> = [];
+    let mut acc_y: Array<number> = [];
+    let mut acc_z: Array<number> = [];
 
     for i in range(0, n) {
-        acc.push([0.0, 0.0, 0.0]);
+        acc_x.push(0.0);
+        acc_y.push(0.0);
+        acc_z.push(0.0);
     }
 
     // Compute pairwise accelerations
     for i in range(0, n) {
         for j in range(i + 1, n) {
-            let pi = particles[i];
-            let pj = particles[j];
-            let dx = pj.position[0] - pi.position[0];
-            let dy = pj.position[1] - pi.position[1];
-            let dz = pj.position[2] - pi.position[2];
-            let dist2 = dx * dx + dy * dy + dz * dz + 0.000000001;
-            let dist = sqrt(dist2);
-            let inv = G / (dist2 * dist);
+            let pi: NBodyParticle = particles[i];
+            let pj: NBodyParticle = particles[j];
+            let dx: number = pj.position[0] - pi.position[0];
+            let dy: number = pj.position[1] - pi.position[1];
+            let dz: number = pj.position[2] - pi.position[2];
+            let dist2: number = dx * dx + dy * dy + dz * dz + 0.000000001;
+            let dist: number = sqrt(dist2);
+            let inv: number = G / (dist2 * dist);
 
-            let ax = inv * pj.mass * dx;
-            let ay = inv * pj.mass * dy;
-            let az = inv * pj.mass * dz;
+            let ax: number = inv * pj.mass * dx;
+            let ay: number = inv * pj.mass * dy;
+            let az: number = inv * pj.mass * dz;
 
-            acc[i] = vec_add(acc[i], [ax, ay, az]);
-            acc[j] = vec_add(acc[j], [-inv * pi.mass * dx, -inv * pi.mass * dy, -inv * pi.mass * dz]);
+            acc_x = vec_set_number(acc_x, i, acc_x[i] + ax);
+            acc_y = vec_set_number(acc_y, i, acc_y[i] + ay);
+            acc_z = vec_set_number(acc_z, i, acc_z[i] + az);
+            acc_x = vec_set_number(acc_x, j, acc_x[j] - inv * pi.mass * dx);
+            acc_y = vec_set_number(acc_y, j, acc_y[j] - inv * pi.mass * dy);
+            acc_z = vec_set_number(acc_z, j, acc_z[j] - inv * pi.mass * dz);
         }
     }
 
-    let mut updated = [];
+    let mut updated: Array<NBodyParticle> = [];
     for i in range(0, n) {
-        let p = particles[i];
-        let v_next = vec_add(p.velocity, vec_scale(acc[i], dt));
-        let pos_next = vec_add(p.position, vec_scale(v_next, dt));
-        updated.push({
+        let p: NBodyParticle = particles[i];
+        let vx_next: number = p.velocity[0] + acc_x[i] * dt;
+        let vy_next: number = p.velocity[1] + acc_y[i] * dt;
+        let vz_next: number = p.velocity[2] + acc_z[i] * dt;
+        let x_next: number = p.position[0] + vx_next * dt;
+        let y_next: number = p.position[1] + vy_next * dt;
+        let z_next: number = p.position[2] + vz_next * dt;
+        let v_next: Array<number> = [vx_next, vy_next, vz_next];
+        let pos_next: Array<number> = [x_next, y_next, z_next];
+        let particle: NBodyParticle = {
             position: pos_next,
             velocity: v_next,
             mass: p.mass
-        });
+        };
+        updated.push(particle);
     }
 
     updated
