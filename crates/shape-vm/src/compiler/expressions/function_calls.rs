@@ -2296,9 +2296,22 @@ impl BytecodeCompiler {
 
         let hints = if is_reduce {
             // reduce(f, init): the callback `f` is positional arg 0 with
-            // two user params `(acc, x)`, both elem-type for homogeneous
-            // folds; `init` is positional arg 1.
-            vec![Some(elem_ann.clone()), Some(elem_ann)]
+            // two user params `(acc, x)`. The accumulator type is proven by
+            // the seed expression (`init`, positional arg 1), while the item
+            // type is proven by the receiver element type. Do not fall back to
+            // the element type for `acc`: a fold like
+            // `Array<string>.reduce(|n, s| n + s.length, 0)` is valid only if
+            // the seed proves `n: int`, not because strings can be decoded at
+            // runtime.
+            let acc_ann = args.get(1).and_then(|init| {
+                crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                    self, init,
+                )
+                .and_then(|ct| {
+                    crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
+                })
+            });
+            vec![acc_ann, Some(elem_ann)]
         } else if is_sort {
             // sort(cmp): the callback `cmp` is positional arg 0 with two
             // user params `(a, b)`, both elem-type for a homogeneous

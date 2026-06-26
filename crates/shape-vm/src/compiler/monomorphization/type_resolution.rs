@@ -1839,7 +1839,10 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
         // proof — same chain as the let-binding site at statements.rs:4931.
         // No tag-bit decode, no runtime probe, no fabricated default.
         Expr::MethodCall {
-            receiver, method, ..
+            receiver,
+            method,
+            args,
+            ..
         } => {
             // The `DateTime` namespace constructors all yield a `DateTime`
             // value (datetime book chapter). Recording `ConcreteType::DateTime`
@@ -1914,6 +1917,35 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
             // path). When present, that IS the proof — use it verbatim.
             if let Some(ct) = specialized_call_return_concrete_type(compiler, expr) {
                 return Some(ct);
+            }
+            // W7 reduce-pipeline inference: `map`'s registered return is
+            // `Array<MethodParam(0)>`, so the generic-signature projection below
+            // intentionally refuses to invent `U`. When the map callback is an
+            // inline closure and the receiver is already proven `Array<T>`, the
+            // closure body statically proves `U`. Thread that proof into the
+            // chained receiver so a following `.reduce(|acc, x| ..., init)` can
+            // seed `x` from the mapped element type. No fallback: if the
+            // receiver, callback, argument, or closure return is unproven, this
+            // arm yields `None` and the existing strict surface remains.
+            if method == "map"
+                && args.len() == 1
+                && let Expr::FunctionExpr {
+                    params,
+                    body,
+                    return_type,
+                    ..
+                } = &args[0]
+                && let Some(ConcreteType::Array(elem_ct)) =
+                    concrete_type_for_expr(compiler, receiver)
+            {
+                let ret_ct = closure_literal_return_concrete_type(
+                    compiler,
+                    params,
+                    body,
+                    return_type.as_ref(),
+                    &[elem_ct.as_ref().clone()],
+                )?;
+                return Some(ConcreteType::Array(Box::new(ret_ct)));
             }
             // R3-elemerasure (strict-flip): builtin (PHF) array methods are NOT
             // monomorphized stdlib functions, so the chain above finds nothing
@@ -2134,6 +2166,10 @@ fn function_call_return_concrete_type(
     name: &str,
     args: &[Expr],
 ) -> Option<ConcreteType> {
+    if let Some(ct) = closure_binding_call_return_concrete_type(compiler, name, args) {
+        return Some(ct);
+    }
+
     let func_def = compiler.function_defs.get(name)?;
     let Some(return_annotation) = func_def.return_type.as_ref() else {
         // strict-flip S1 (call-site HOF return propagation, 2026-06-22): the
@@ -2181,6 +2217,91 @@ fn function_call_return_concrete_type(
         .zip(resolution.type_args.iter().cloned())
         .collect();
     concrete_type_from_annotation(return_annotation, &bindings)
+}
+
+/// W7 closure-call array inference: resolve a direct call to a closure-bound
+/// local/module binding (`let f = |x| x * i; [f(10)]`) from the retained
+/// closure body and the call-site argument ConcreteTypes. This is the same
+/// static proof shape as [`unannotated_fn_return_concrete_type`], but for
+/// closure literals stored in slots rather than named `FunctionDef`s.
+///
+/// Every link must be proven at compile time:
+///   * the callee name must resolve to a retained closure body,
+///   * every call argument must have a `ConcreteType`,
+///   * every closure param must be a simple identifier, and any explicit param
+///     annotation must agree with the supplied argument type,
+///   * the closure body tail must resolve structurally under those param types.
+///
+/// Missing or conflicting proof returns `None`; callers keep the existing
+/// strict surface. No runtime inference, tag probing, or numeric fallback.
+fn closure_binding_call_return_concrete_type(
+    compiler: &BytecodeCompiler,
+    name: &str,
+    args: &[Expr],
+) -> Option<ConcreteType> {
+    let peek = if let Some(local_idx) = compiler.resolve_local(name) {
+        compiler.local_callable_closure_bodies.get(&local_idx)
+    } else if let Some(scoped) = compiler.resolve_scoped_module_binding_name(name) {
+        compiler
+            .module_bindings
+            .get(&scoped)
+            .and_then(|idx| compiler.module_binding_callable_closure_bodies.get(idx))
+    } else {
+        compiler
+            .module_bindings
+            .get(name)
+            .and_then(|idx| compiler.module_binding_callable_closure_bodies.get(idx))
+    }?;
+
+    let mut arg_cts = Vec::with_capacity(args.len());
+    for arg in args {
+        arg_cts.push(concrete_type_for_expr(compiler, arg)?);
+    }
+    closure_peek_return_concrete_type(compiler, peek, &arg_cts)
+}
+
+fn closure_peek_return_concrete_type(
+    compiler: &BytecodeCompiler,
+    peek: &crate::compiler::ClosureBodyPeek,
+    arg_cts: &[ConcreteType],
+) -> Option<ConcreteType> {
+    closure_literal_return_concrete_type(
+        compiler,
+        &peek.params,
+        &peek.body,
+        peek.return_type.as_ref(),
+        arg_cts,
+    )
+}
+
+fn closure_literal_return_concrete_type(
+    compiler: &BytecodeCompiler,
+    params: &[shape_ast::ast::FunctionParameter],
+    body: &[Statement],
+    return_type: Option<&TypeAnnotation>,
+    arg_cts: &[ConcreteType],
+) -> Option<ConcreteType> {
+    if let Some(ann) = return_type {
+        return concrete_type_from_annotation(ann, &HashMap::new());
+    }
+    if params.len() != arg_cts.len() {
+        return None;
+    }
+
+    let mut param_cts: HashMap<&str, ConcreteType> = HashMap::new();
+    for (param, ct) in params.iter().zip(arg_cts.iter()) {
+        let ident = param.pattern.as_identifier()?;
+        if let Some(ann) = param.type_annotation.as_ref() {
+            let declared = concrete_type_from_annotation(ann, &HashMap::new())?;
+            if declared != *ct {
+                return None;
+            }
+        }
+        param_cts.insert(ident, ct.clone());
+    }
+
+    let tail = body_tail_expr(body)?;
+    body_expr_concrete_type(compiler, &param_cts, tail)
 }
 
 /// strict-flip S1 (call-site HOF return propagation, 2026-06-22): resolve the
