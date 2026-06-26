@@ -36,10 +36,13 @@
 use std::sync::Arc;
 
 use crate::bytecode::{Instruction, OpCode, Operand};
+use crate::executor::v2_handlers::v2_array_detect::{
+    V2TypedArrayView, as_v2_typed_array, avg_elements, max_elements, min_elements, sum_elements,
+};
 use crate::executor::vm_impl::stack::drop_with_kind;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
-use shape_value::{KindedSlot, NativeKind, TableViewData, VMError};
+use shape_value::{KindedSlot, NativeKind, TableViewData, VMError, ValueSlot};
 
 use super::VirtualMachine;
 
@@ -52,41 +55,28 @@ fn type_error(msg: impl Into<String>) -> VMError {
     VMError::RuntimeError(msg.into())
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// V3-S5 ckpt-5 (2026-05-15): TypedArrayData helpers DELETED
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// `as_typed_array` / `typed_array_to_f64_vec` / `typed_array_len`
-// (TypedArrayData consumers) were deleted. The `Arc<TypedArrayData>`
-// payload + `HeapValue::TypedArray` outer arm + `HeapKind::TypedArray=8`
-// ordinal were retired at V3-S5 ckpt-1..ckpt-4 per W12-typed-array-data-
-// deletion-audit §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED. The
-// window-function aggregate handlers (`handle_window_sum_v2`,
-// `handle_window_avg_v2`, `handle_window_min_v2`, `handle_window_max_v2`,
-// `handle_window_count_v2`) that consumed those helpers surface-and-stop
-// at ckpt-5; rebuild lands at ckpt-6 STRICT close per the per-element-kind
-// v2-raw `TypedArray<T>` direct-access target.
-//
-// Refusal #1 binding.
+#[inline]
+fn extract_window_frame_view(
+    op: &'static str,
+    slot: &KindedSlot,
+) -> Result<V2TypedArrayView, VMError> {
+    if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err(type_error(format!(
+            "{op}: expected v2 TypedArray frame, got kind {:?}",
+            slot.kind
+        )));
+    }
+    as_v2_typed_array(slot.slot.raw(), slot.kind).ok_or_else(|| {
+        type_error(format!(
+            "{op}: frame bits failed v2 TypedArray detection (kind {:?})",
+            slot.kind
+        ))
+    })
+}
 
-/// Common surface-and-stop body for the TypedArrayData-dependent window
-/// aggregate handlers in this file. Returns a structured
-/// `VMError::NotImplemented` citing the V3-S5 ckpt-5 cascade state.
-#[cold]
-#[inline(never)]
-fn ckpt5_window_surface(op: &'static str) -> VMError {
-    VMError::NotImplemented(format!(
-        "{op}: SURFACE — V3-S5 ckpt-5 consumer-cascade tier 3 surface. \
-         `Arc<TypedArrayData>` carrier + per-arm dispatch helpers \
-         (`as_typed_array` / `typed_array_to_f64_vec` / `typed_array_len`) \
-         DELETED across V3-S5 ckpt-1..ckpt-4 per W12-typed-array-data-\
-         deletion-audit §3.5 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED. \
-         Window-aggregate scalar arm preserved (Int64/Float64); array arm \
-         rebuild lands at ckpt-6 STRICT close per per-element-kind v2-raw \
-         `TypedArray<T>` direct-access target. REFUSED ON SIGHT: \
-         TypedArrayData resurrection under any rename (Refusal #1).",
-        op = op,
-    ))
+#[inline]
+fn pair_to_slot((bits, kind): (u64, NativeKind)) -> KindedSlot {
+    KindedSlot::new(ValueSlot::from_raw(bits), kind)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -176,9 +166,16 @@ pub(crate) fn handle_window_sum_v2(
         .ok_or_else(|| type_error("WindowSum requires at least 1 argument (value or array)"))?;
     match arg.kind {
         NativeKind::Int64 | NativeKind::Float64 => Ok(arg.clone()),
-        // V3-S5 ckpt-5: TypedArray arm surface; rebuild at ckpt-6 STRICT
-        // close per per-element-kind v2-raw `TypedArray<T>` direct access.
-        _ => Err(ckpt5_window_surface("WindowSum")),
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            let view = extract_window_frame_view("WindowSum", arg)?;
+            sum_elements(&view).map(pair_to_slot).ok_or_else(|| {
+                type_error(format!("WindowSum: not defined for {:?}", view.elem_type))
+            })
+        }
+        _ => Err(type_error(format!(
+            "WindowSum expected scalar number or v2 TypedArray frame, got {:?}",
+            arg.kind
+        ))),
     }
 }
 
@@ -201,8 +198,16 @@ pub(crate) fn handle_window_avg_v2(
             Ok(KindedSlot::from_number(i as f64))
         }
         NativeKind::Float64 => Ok(arg.clone()),
-        // V3-S5 ckpt-5: TypedArray arm surface; ckpt-6 rebuild target.
-        _ => Err(ckpt5_window_surface("WindowAvg")),
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            let view = extract_window_frame_view("WindowAvg", arg)?;
+            avg_elements(&view).map(pair_to_slot).ok_or_else(|| {
+                type_error(format!("WindowAvg: not defined for {:?}", view.elem_type))
+            })
+        }
+        _ => Err(type_error(format!(
+            "WindowAvg expected scalar number or v2 TypedArray frame, got {:?}",
+            arg.kind
+        ))),
     }
 }
 
@@ -229,14 +234,27 @@ pub(crate) fn handle_window_max_v2(
 }
 
 fn handle_window_min_max_inner(args: &[KindedSlot], pick_max: bool) -> Result<KindedSlot, VMError> {
-    let _ = pick_max;
     let arg = args
         .first()
         .ok_or_else(|| type_error("WindowMin/Max requires at least 1 argument (value or array)"))?;
     match arg.kind {
         NativeKind::Int64 | NativeKind::Float64 => Ok(arg.clone()),
-        // V3-S5 ckpt-5: TypedArray arm surface; ckpt-6 rebuild target.
-        _ => Err(ckpt5_window_surface("WindowMin/Max")),
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            let op = if pick_max { "WindowMax" } else { "WindowMin" };
+            let view = extract_window_frame_view(op, arg)?;
+            let reduced = if pick_max {
+                max_elements(&view)
+            } else {
+                min_elements(&view)
+            };
+            reduced
+                .map(pair_to_slot)
+                .ok_or_else(|| type_error(format!("{op}: not defined for {:?}", view.elem_type)))
+        }
+        _ => Err(type_error(format!(
+            "WindowMin/Max expected scalar number or v2 TypedArray frame, got {:?}",
+            arg.kind
+        ))),
     }
 }
 
@@ -261,8 +279,14 @@ pub(crate) fn handle_window_count_v2(
         // raw bits == 0 and Bool kind by convention; treat raw 0 as 0.
         NativeKind::Bool if arg.slot.raw() == 0 => Ok(KindedSlot::from_int(0)),
         NativeKind::Int64 | NativeKind::Float64 | NativeKind::Bool => Ok(KindedSlot::from_int(1)),
-        // V3-S5 ckpt-5: TypedArray arm surface; ckpt-6 rebuild target.
-        _ => Err(ckpt5_window_surface("WindowCount")),
+        NativeKind::Ptr(HeapKind::TypedArray) => {
+            let view = extract_window_frame_view("WindowCount", arg)?;
+            Ok(KindedSlot::from_int(view.len as i64))
+        }
+        _ => Err(type_error(format!(
+            "WindowCount expected scalar value or v2 TypedArray frame, got {:?}",
+            arg.kind
+        ))),
     }
 }
 

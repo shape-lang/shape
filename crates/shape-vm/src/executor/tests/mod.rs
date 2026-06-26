@@ -2137,11 +2137,17 @@ fn test_window_sum_builtin_executes() {
     // Test that WindowSum builtin can be dispatched through the executor.
     // We manually construct bytecodes that push an array and call WindowSum.
     let instructions = vec![
-        // Push array [1, 2, 3]
+        // Push v2 TypedArray<f64> [1, 2, 3]
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))), // 1.0
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))), // 2.0
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))), // 3.0
-        Instruction::new(OpCode::NewArray, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
         // Push window spec (empty string = no partitioning)
         Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
         // Push arg count (2: array + spec)
@@ -2157,7 +2163,7 @@ fn test_window_sum_builtin_executes() {
         Constant::Number(2.0),
         Constant::Number(3.0),
         Constant::String("".to_string()),
-        Constant::Number(2.0), // arg count
+        Constant::Int(2), // arg count
     ];
 
     let result = execute_bytecode(instructions, constants);
@@ -2172,10 +2178,16 @@ fn test_window_sum_builtin_executes() {
 #[test]
 fn test_window_avg_builtin_executes() {
     let instructions = vec![
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::new(OpCode::NewArray, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(4))),
         Instruction::new(
@@ -2188,7 +2200,7 @@ fn test_window_avg_builtin_executes() {
         Constant::Number(20.0),
         Constant::Number(30.0),
         Constant::String("".to_string()),
-        Constant::Number(2.0),
+        Constant::Int(2),
     ];
 
     let result = execute_bytecode(instructions, constants);
@@ -2207,9 +2219,13 @@ fn test_window_avg_builtin_executes() {
 #[test]
 fn test_window_count_builtin_executes() {
     let instructions = vec![
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(2))),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
-        Instruction::new(OpCode::NewArray, Some(Operand::Count(2))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
         Instruction::new(
@@ -2221,7 +2237,7 @@ fn test_window_count_builtin_executes() {
         Constant::Number(5.0),
         Constant::Number(10.0),
         Constant::String("".to_string()),
-        Constant::Number(2.0),
+        Constant::Int(2),
     ];
 
     let result = execute_bytecode(instructions, constants);
@@ -2230,19 +2246,24 @@ fn test_window_count_builtin_executes() {
         "WindowCount should execute: {:?}",
         result.err()
     );
-    let _result_val = result.unwrap();
-    let n = f64::from_bits(_result_val);
-    assert_eq!(n, 2.0, "count([5,10]) = 2");
+    let n = result.unwrap() as i64;
+    assert_eq!(n, 2, "count([5,10]) = 2");
 }
 
 #[test]
 fn test_window_min_max_builtin_executes() {
     // Test WindowMin
     let instructions = vec![
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::new(OpCode::NewArray, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(4))),
         Instruction::new(
@@ -2255,7 +2276,7 @@ fn test_window_min_max_builtin_executes() {
         Constant::Number(3.0),
         Constant::Number(9.0),
         Constant::String("".to_string()),
-        Constant::Number(2.0),
+        Constant::Int(2),
     ];
 
     let result = execute_bytecode(instructions, constants);
@@ -2268,10 +2289,16 @@ fn test_window_min_max_builtin_executes() {
 
     // Test WindowMax
     let instructions2 = vec![
+        Instruction::new(OpCode::NewTypedArrayF64, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(0))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(1))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
+        Instruction::simple(OpCode::Dup),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(2))),
-        Instruction::new(OpCode::NewArray, Some(Operand::Count(3))),
+        Instruction::simple(OpCode::TypedArrayPushF64),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(3))),
         Instruction::new(OpCode::PushConst, Some(Operand::Const(4))),
         Instruction::new(
@@ -2284,7 +2311,7 @@ fn test_window_min_max_builtin_executes() {
         Constant::Number(3.0),
         Constant::Number(9.0),
         Constant::String("".to_string()),
-        Constant::Number(2.0),
+        Constant::Int(2),
     ];
 
     let result2 = execute_bytecode(instructions2, constants2);
@@ -2311,7 +2338,7 @@ fn test_window_row_number_builtin_executes() {
     let constants = vec![
         Constant::Number(42.0),
         Constant::String("".to_string()),
-        Constant::Number(2.0),
+        Constant::Int(2),
     ];
 
     let result = execute_bytecode(instructions, constants);
@@ -2341,7 +2368,7 @@ fn test_window_lag_lead_builtin_executes() {
         Constant::Number(1.0),
         Constant::Number(0.0),
         Constant::String("".to_string()),
-        Constant::Number(4.0),
+        Constant::Int(4),
     ];
 
     let result = execute_bytecode(instructions, constants);
