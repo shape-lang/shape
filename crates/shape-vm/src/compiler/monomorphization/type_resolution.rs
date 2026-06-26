@@ -121,6 +121,7 @@
 
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::compiler::{BindingConcreteFact, BindingConcreteFactSource};
+use shape_ast::Spanned;
 use shape_ast::ast::{Expr, Span, Statement, TypeAnnotation};
 use shape_runtime::type_system::Type;
 use shape_value::v2::ConcreteType;
@@ -849,6 +850,76 @@ pub fn resolve_call_site_type_args(
     Some(TypeArgResolution::new(fn_name, type_args))
 }
 
+/// Resolve type-parameter bindings using the canonical inference facts for
+/// argument expressions when the concrete-type projection would erase useful
+/// structure. This is still a compile-time path: function-valued arguments are
+/// read from `Type::Function { params, returns }` facts, never from runtime
+/// tags or fallback conversion.
+pub fn resolve_call_site_type_args_from_exprs(
+    compiler: &BytecodeCompiler,
+    fn_name: &str,
+    args: &[Expr],
+    arg_types: &[Option<ConcreteType>],
+    generic_params: &[String],
+) -> Option<TypeArgResolution> {
+    if generic_params.is_empty() {
+        return Some(TypeArgResolution::new(fn_name, Vec::new()));
+    }
+
+    let func_def = compiler.function_defs.get(fn_name)?;
+    let mut bindings: HashMap<String, ConcreteType> = HashMap::new();
+    let generics: Vec<&str> = generic_params.iter().map(|s| s.as_str()).collect();
+
+    for (param_idx, param) in func_def.params.iter().enumerate() {
+        let Some(param_annotation) = param.type_annotation.as_ref() else {
+            continue;
+        };
+
+        let param_mentions_generic = annotation_mentions_any(param_annotation, &generics);
+        if param_mentions_generic {
+            if let Some(arg_expr) = args.get(param_idx) {
+                if let Some(arg_ty) = inference_type_for_arg_expr(compiler, arg_expr) {
+                    if !unify_annotation_with_inference_type(
+                        param_annotation,
+                        &arg_ty,
+                        compiler,
+                        &generics,
+                        &mut bindings,
+                    ) {
+                        return None;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        let Some(arg_slot) = arg_types.get(param_idx) else {
+            continue;
+        };
+        let Some(arg_ct) = arg_slot.as_ref() else {
+            let has_unbound_mention = generics.iter().any(|g| {
+                annotation_mentions_any(param_annotation, &[g]) && !bindings.contains_key(*g)
+            });
+            if has_unbound_mention {
+                return None;
+            }
+            continue;
+        };
+
+        if !unify_annotation_with_concrete(param_annotation, arg_ct, &generics, &mut bindings) {
+            return None;
+        }
+    }
+
+    let mut type_args: Vec<ConcreteType> = Vec::with_capacity(generic_params.len());
+    for name in generic_params {
+        let binding = bindings.get(name)?.clone();
+        type_args.push(binding);
+    }
+
+    Some(TypeArgResolution::new(fn_name, type_args))
+}
+
 /// Phase C — resolve type args AND per-closure-arg specialization info.
 ///
 /// Like [`resolve_call_site_type_args`], but additionally inspects each
@@ -1417,6 +1488,269 @@ fn annotation_mentions_any(annotation: &TypeAnnotation, generics: &[&str]) -> bo
         | TypeAnnotation::Null
         | TypeAnnotation::Undefined
         | TypeAnnotation::Dyn(_) => false,
+    }
+}
+
+fn inference_type_for_arg_expr(compiler: &BytecodeCompiler, arg: &Expr) -> Option<Type> {
+    let span = arg.span();
+    compiler
+        .resolved_expr_types
+        .get(&span)
+        .cloned()
+        .or_else(|| compiler.inference_facts.expression_type(span).cloned())
+        .or_else(|| match arg {
+            Expr::Identifier(name, _) => binding_fact_type_for_identifier(compiler, name),
+            _ => None,
+        })
+}
+
+fn binding_fact_type_for_identifier(compiler: &BytecodeCompiler, name: &str) -> Option<Type> {
+    if let Some(local_idx) = compiler_resolve_local(compiler, name) {
+        if let Some(ty) = compiler
+            .local_binding_spans
+            .get(&local_idx)
+            .copied()
+            .and_then(|span| compiler.inference_facts.binding_type(span))
+            .cloned()
+        {
+            return Some(ty);
+        }
+    }
+
+    if let Some(binding_idx) = compiler_resolve_module_binding(compiler, name) {
+        if let Some(ty) = compiler
+            .module_binding_spans
+            .get(&binding_idx)
+            .copied()
+            .and_then(|span| compiler.inference_facts.binding_type(span))
+            .cloned()
+        {
+            return Some(ty);
+        }
+    }
+
+    compiler
+        .inference_facts
+        .top_level_type(name)
+        .cloned()
+        .or_else(|| {
+            compiler
+                .inference_facts
+                .bindings_named(name)
+                .next()
+                .map(|fact| fact.ty.clone())
+        })
+}
+
+fn unify_annotation_with_inference_type(
+    annotation: &TypeAnnotation,
+    actual: &Type,
+    compiler: &BytecodeCompiler,
+    generics: &[&str],
+    bindings: &mut HashMap<String, ConcreteType>,
+) -> bool {
+    let actual = actual.canonicalize();
+    match annotation {
+        TypeAnnotation::Basic(name) => {
+            if generics.iter().any(|g| *g == name.as_str()) {
+                let Some(ct) = concrete_type_from_inference_fact(compiler, &actual) else {
+                    return false;
+                };
+                return record_binding(name, ct, bindings);
+            }
+            true
+        }
+        TypeAnnotation::Reference(path) => {
+            let name = path.as_str();
+            if generics.iter().any(|g| *g == name) {
+                let Some(ct) = concrete_type_from_inference_fact(compiler, &actual) else {
+                    return false;
+                };
+                return record_binding(name, ct, bindings);
+            }
+            true
+        }
+        TypeAnnotation::Array(inner) => match actual {
+            Type::Concrete(TypeAnnotation::Array(actual_inner)) => {
+                unify_annotation_with_inference_type(
+                    inner,
+                    &Type::Concrete(*actual_inner),
+                    compiler,
+                    generics,
+                    bindings,
+                )
+            }
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if matches!(name.as_str(), "Array" | "Vec") && args.len() == 1 =>
+            {
+                unify_annotation_with_inference_type(
+                    inner,
+                    &Type::Concrete(args[0].clone()),
+                    compiler,
+                    generics,
+                    bindings,
+                )
+            }
+            Type::Generic { base, args } if args.len() == 1 => {
+                let base_name = match base.as_ref() {
+                    Type::Concrete(ann) => ann.as_type_name_str(),
+                    _ => None,
+                };
+                if matches!(base_name, Some("Array" | "Vec")) {
+                    unify_annotation_with_inference_type(
+                        inner, &args[0], compiler, generics, bindings,
+                    )
+                } else {
+                    !annotation_mentions_any(inner, generics)
+                }
+            }
+            _ => !annotation_mentions_any(inner, generics),
+        },
+        TypeAnnotation::Generic { name, args } => {
+            let expected_name = name.as_str();
+            match actual {
+                Type::Concrete(TypeAnnotation::Generic {
+                    name: actual_name,
+                    args: actual_args,
+                }) if actual_name.as_str() == expected_name && actual_args.len() == args.len() => {
+                    args.iter()
+                        .zip(actual_args.iter())
+                        .all(|(expected, actual)| {
+                            unify_annotation_with_inference_type(
+                                expected,
+                                &Type::Concrete(actual.clone()),
+                                compiler,
+                                generics,
+                                bindings,
+                            )
+                        })
+                }
+                Type::Generic {
+                    base,
+                    args: actual_args,
+                } if actual_args.len() == args.len() => {
+                    let actual_name = match base.as_ref() {
+                        Type::Concrete(ann) => ann.as_type_name_str(),
+                        _ => None,
+                    };
+                    if actual_name == Some(expected_name) {
+                        args.iter()
+                            .zip(actual_args.iter())
+                            .all(|(expected, actual)| {
+                                unify_annotation_with_inference_type(
+                                    expected, actual, compiler, generics, bindings,
+                                )
+                            })
+                    } else {
+                        !args.iter().any(|a| annotation_mentions_any(a, generics))
+                    }
+                }
+                _ => {
+                    if let Some(ct) = concrete_type_from_inference_fact(compiler, &actual) {
+                        unify_annotation_with_concrete(annotation, &ct, generics, bindings)
+                    } else {
+                        !args.iter().any(|a| annotation_mentions_any(a, generics))
+                    }
+                }
+            }
+        }
+        TypeAnnotation::Function { params, returns } => match actual {
+            Type::Function {
+                params: actual_params,
+                returns: actual_returns,
+            } if actual_params.len() == params.len() => {
+                params
+                    .iter()
+                    .zip(actual_params.iter())
+                    .all(|(expected, actual)| {
+                        unify_annotation_with_inference_type(
+                            &expected.type_annotation,
+                            actual,
+                            compiler,
+                            generics,
+                            bindings,
+                        )
+                    })
+                    && unify_annotation_with_inference_type(
+                        returns,
+                        &actual_returns,
+                        compiler,
+                        generics,
+                        bindings,
+                    )
+            }
+            Type::Concrete(TypeAnnotation::Function {
+                params: actual_params,
+                returns: actual_returns,
+            }) if actual_params.len() == params.len() => {
+                params
+                    .iter()
+                    .zip(actual_params.iter())
+                    .all(|(expected, actual)| {
+                        unify_annotation_with_inference_type(
+                            &expected.type_annotation,
+                            &Type::Concrete(actual.type_annotation.clone()),
+                            compiler,
+                            generics,
+                            bindings,
+                        )
+                    })
+                    && unify_annotation_with_inference_type(
+                        returns,
+                        &Type::Concrete(*actual_returns),
+                        compiler,
+                        generics,
+                        bindings,
+                    )
+            }
+            _ => {
+                let mentions = params
+                    .iter()
+                    .any(|p| annotation_mentions_any(&p.type_annotation, generics))
+                    || annotation_mentions_any(returns, generics);
+                !mentions
+            }
+        },
+        TypeAnnotation::Tuple(items) => match actual {
+            Type::Concrete(TypeAnnotation::Tuple(actual_items))
+                if actual_items.len() == items.len() =>
+            {
+                items
+                    .iter()
+                    .zip(actual_items.iter())
+                    .all(|(expected, actual)| {
+                        unify_annotation_with_inference_type(
+                            expected,
+                            &Type::Concrete(actual.clone()),
+                            compiler,
+                            generics,
+                            bindings,
+                        )
+                    })
+            }
+            Type::Generic { .. }
+            | Type::Concrete(_)
+            | Type::Variable(_)
+            | Type::Constrained { .. }
+            | Type::Function { .. } => {
+                if let Some(ct) = concrete_type_from_inference_fact(compiler, &actual) {
+                    unify_annotation_with_concrete(annotation, &ct, generics, bindings)
+                } else {
+                    !items.iter().any(|t| annotation_mentions_any(t, generics))
+                }
+            }
+        },
+        TypeAnnotation::Borrow { inner, .. } => {
+            unify_annotation_with_inference_type(inner, &actual, compiler, generics, bindings)
+        }
+        TypeAnnotation::Object(_)
+        | TypeAnnotation::Union(_)
+        | TypeAnnotation::Intersection(_)
+        | TypeAnnotation::Void
+        | TypeAnnotation::Never
+        | TypeAnnotation::Null
+        | TypeAnnotation::Undefined
+        | TypeAnnotation::Dyn(_) => true,
     }
 }
 
@@ -3209,8 +3543,8 @@ mod tests {
     use crate::compiler::BytecodeCompiler;
     use shape_ast::ast::type_path::TypePath;
     use shape_ast::ast::{
-        DestructurePattern, FunctionDef, FunctionParam, FunctionParameter, Span, TypeAnnotation,
-        TypeParam,
+        DestructurePattern, Expr, FunctionDef, FunctionParam, FunctionParameter, Literal, Span,
+        TypeAnnotation, TypeParam,
     };
 
     // ---- Helper builders ------------------------------------------------
@@ -3223,6 +3557,13 @@ mod tests {
         TypeAnnotation::Generic {
             name: TypePath::simple("Array"),
             args: vec![inner],
+        }
+    }
+
+    fn ann_generic(name: &str, args: Vec<TypeAnnotation>) -> TypeAnnotation {
+        TypeAnnotation::Generic {
+            name: TypePath::simple(name),
+            args,
         }
     }
 
@@ -3363,6 +3704,13 @@ mod tests {
             },
         );
         install_inference_facts(compiler, HashMap::new(), binding_facts);
+    }
+
+    fn function_fact(params: Vec<Type>, returns: Type) -> Type {
+        Type::Function {
+            params,
+            returns: Box::new(returns),
+        }
     }
 
     #[test]
@@ -3744,6 +4092,125 @@ mod tests {
         assert_eq!(resolution.fn_name, "filter");
         assert_eq!(resolution.type_args, vec![ConcreteType::F64]);
         assert_eq!(resolution.mono_key, "filter::f64");
+    }
+
+    #[test]
+    fn property_t_resolves_from_typed_function_value_facts() {
+        let def = fn_def(
+            "property",
+            vec![type_param("T")],
+            vec![
+                func_param("name", ann_basic("string")),
+                func_param("n_trials", ann_basic("int")),
+                func_param("gen_fn", ann_fn(vec![], ann_basic("T"))),
+                func_param("prop_fn", ann_fn(vec![ann_basic("T")], ann_basic("bool"))),
+            ],
+            Some(ann_generic("PropertyResult", vec![ann_basic("T")])),
+        );
+        let mut compiler = make_compiler_with_fn("property", def);
+
+        let gen_span = Span::new(10, 13);
+        let prop_span = Span::new(20, 24);
+        compiler.locals = vec![HashMap::new()];
+        compiler.locals[0].insert("gen".to_string(), 0);
+        compiler.locals[0].insert("prop".to_string(), 1);
+        compiler.local_binding_spans.insert(0, gen_span);
+        compiler.local_binding_spans.insert(1, prop_span);
+
+        let mut binding_facts = HashMap::new();
+        binding_facts.insert(
+            gen_span,
+            shape_runtime::type_system::BindingFact {
+                name: "gen".to_string(),
+                binder_span: gen_span,
+                initializer_span: None,
+                ty: function_fact(vec![], fact_basic("number")),
+            },
+        );
+        binding_facts.insert(
+            prop_span,
+            shape_runtime::type_system::BindingFact {
+                name: "prop".to_string(),
+                binder_span: prop_span,
+                initializer_span: None,
+                ty: function_fact(vec![fact_basic("number")], fact_basic("bool")),
+            },
+        );
+        install_inference_facts(&mut compiler, HashMap::new(), binding_facts);
+
+        let args = vec![
+            Expr::Literal(
+                Literal::String("addition commutes".to_string()),
+                Span::new(1, 2),
+            ),
+            Expr::Literal(Literal::Int(100), Span::new(3, 4)),
+            Expr::Identifier("gen".to_string(), gen_span),
+            Expr::Identifier("prop".to_string(), prop_span),
+        ];
+        let arg_types = vec![
+            Some(ConcreteType::String),
+            Some(ConcreteType::I64),
+            Some(ConcreteType::Function(
+                shape_value::v2::concrete_type::FunctionTypeId(0),
+            )),
+            Some(ConcreteType::Function(
+                shape_value::v2::concrete_type::FunctionTypeId(0),
+            )),
+        ];
+
+        let resolution = resolve_call_site_type_args_from_exprs(
+            &compiler,
+            "property",
+            &args,
+            &arg_types,
+            &["T".to_string()],
+        )
+        .expect("T should resolve through the typed function-value facts");
+
+        assert_eq!(resolution.type_args, vec![ConcreteType::F64]);
+        assert_eq!(resolution.mono_key, "property::f64");
+    }
+
+    #[test]
+    fn run_properties_t_resolves_from_generic_struct_array_fact() {
+        let def = fn_def(
+            "run_properties",
+            vec![type_param("T")],
+            vec![func_param(
+                "tests",
+                ann_array(ann_generic("PropertySpec", vec![ann_basic("T")])),
+            )],
+            Some(ann_generic("PropertySummary", vec![ann_basic("T")])),
+        );
+        let mut compiler = make_compiler_with_fn("run_properties", def);
+
+        let tests_span = Span::new(30, 35);
+        compiler.locals = vec![HashMap::new()];
+        compiler.locals[0].insert("tests".to_string(), 0);
+        compiler.local_binding_spans.insert(0, tests_span);
+        install_binding_fact(
+            &mut compiler,
+            "tests",
+            tests_span,
+            fact_generic(
+                "Array",
+                vec![fact_generic("PropertySpec", vec![fact_basic("number")])],
+            ),
+        );
+
+        let args = vec![Expr::Identifier("tests".to_string(), tests_span)];
+        let arg_types = vec![None];
+        let resolution = resolve_call_site_type_args_from_exprs(
+            &compiler,
+            "run_properties",
+            &args,
+            &arg_types,
+            &["T".to_string()],
+        )
+        .expect("T should resolve through Array<PropertySpec<T>> inference facts");
+
+        assert_eq!(resolution.type_args, vec![ConcreteType::F64]);
+        assert_eq!(resolution.mono_key, "run_properties::f64");
     }
 
     /// `identity<T>(x: T) -> T` called with `x: bool` resolves T=Bool.

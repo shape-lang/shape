@@ -150,6 +150,162 @@ let a = Some(1)
     }
 }
 
+#[test]
+fn test_none_initializer_checks_against_generic_option_annotation() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+type Box<T> {
+    value: T?
+}
+
+fn make<T>(input: T) -> Box<T> {
+    var x: T? = None
+    x = Some(input)
+    Box {
+        value: x
+    }
+}
+
+let b = make(1)
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let types = engine
+        .infer_program(&program)
+        .expect("inference should accept contextual None for T?");
+
+    let b_type = types.get("b").expect("b should be inferred").canonicalize();
+    match b_type {
+        Type::Generic { base, args } => {
+            assert!(
+                matches!(
+                    base.as_ref(),
+                    Type::Concrete(TypeAnnotation::Reference(name)) if name == "Box"
+                ),
+                "expected Box<T> base, got {:?}",
+                base
+            );
+            assert_eq!(args.len(), 1, "Box must have one type argument");
+            assert_eq!(
+                args[0],
+                Type::Concrete(TypeAnnotation::Basic("int".to_string()))
+            );
+        }
+        other => panic!("expected Box<int> for b, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_generic_struct_infers_type_param_from_canonical_array_field() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+type PropertyResult<T> {
+    passed: bool,
+    counterexample: T?
+}
+
+type PropertySummary<T> {
+    results: Array<PropertyResult<T>>
+}
+
+fn summarize<T>(results: Array<PropertyResult<T>>) -> PropertySummary<T> {
+    PropertySummary {
+        results: results
+    }
+}
+
+let item = PropertyResult { passed: true, counterexample: Some(1) }
+let summary = summarize([item])
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let types = engine
+        .infer_program(&program)
+        .expect("inference should bind T through Array<PropertyResult<T>>");
+
+    let summary_type = types
+        .get("summary")
+        .expect("summary should be inferred")
+        .canonicalize();
+    match summary_type {
+        Type::Generic { base, args } => {
+            assert!(
+                matches!(
+                    base.as_ref(),
+                    Type::Concrete(TypeAnnotation::Reference(name)) if name == "PropertySummary"
+                ),
+                "expected PropertySummary<T> base, got {:?}",
+                base
+            );
+            assert_eq!(args.len(), 1, "PropertySummary must have one type argument");
+            assert_eq!(
+                args[0],
+                Type::Concrete(TypeAnnotation::Basic("int".to_string()))
+            );
+        }
+        other => panic!("expected PropertySummary<int> for summary, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_generic_struct_infers_type_param_from_function_fields() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+type PropertySpec<T> {
+    name: string,
+    trials: int,
+    gen: () => T,
+    prop: (T) => bool
+}
+
+let gen: () => number = || 1.0
+let prop: (number) => bool = |x| x > 0.0
+let spec = PropertySpec {
+    name: "positive",
+    trials: 1,
+    gen: gen,
+    prop: prop
+}
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let types = engine
+        .infer_program(&program)
+        .expect("inference should bind T through function-typed fields");
+
+    let spec_type = types
+        .get("spec")
+        .expect("spec should be inferred")
+        .canonicalize();
+    match spec_type {
+        Type::Generic { base, args } => {
+            assert!(
+                matches!(
+                    base.as_ref(),
+                    Type::Concrete(TypeAnnotation::Reference(name)) if name == "PropertySpec"
+                ),
+                "expected PropertySpec<T> base, got {:?}",
+                base
+            );
+            assert_eq!(args.len(), 1, "PropertySpec must have one type argument");
+            assert_eq!(
+                args[0],
+                Type::Concrete(TypeAnnotation::Basic("number".to_string()))
+            );
+        }
+        other => panic!("expected PropertySpec<number> for spec, got {:?}", other),
+    }
+}
+
 // ─── SC1: Color / Border / ChartType namespace constructors ───────────
 
 #[test]
@@ -2238,7 +2394,7 @@ let r = area(aabb(1, 5))
 /// a crash and not a fabricated type. Guards the marker round-trip.
 #[test]
 fn test_ws9c_unresolved_factory_field_marker_round_trips() {
-    use crate::type_system::{annotation_as_tyvar, tyvar_to_annotation, TypeVar};
+    use crate::type_system::{TypeVar, annotation_as_tyvar, tyvar_to_annotation};
 
     let var = TypeVar::new("T42".to_string());
     let ann = tyvar_to_annotation(&var);

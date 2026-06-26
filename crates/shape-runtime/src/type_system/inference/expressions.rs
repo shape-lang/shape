@@ -3042,6 +3042,23 @@ impl TypeInferenceEngine {
                         type_params,
                         bindings,
                     );
+                    return;
+                }
+
+                let actual = actual.canonicalize();
+                if let Type::Generic { base, args } = actual {
+                    let base_name = match base.as_ref() {
+                        Type::Concrete(ann) => ann.as_type_name_str(),
+                        _ => None,
+                    };
+                    if matches!(base_name, Some("Array" | "Vec")) && args.len() == 1 {
+                        self.bind_type_params_from_annotation(
+                            inner,
+                            &args[0],
+                            type_params,
+                            bindings,
+                        );
+                    }
                 }
             }
             TypeAnnotation::Generic { name, args } => {
@@ -3064,6 +3081,70 @@ impl TypeInferenceEngine {
                             );
                         }
                     }
+                }
+                if let Type::Concrete(TypeAnnotation::Generic {
+                    name: actual_name,
+                    args: actual_args,
+                }) = actual
+                {
+                    if actual_name == name {
+                        for (expected_arg, actual_arg) in args.iter().zip(actual_args.iter()) {
+                            self.bind_type_params_from_annotation(
+                                expected_arg,
+                                &Type::Concrete(actual_arg.clone()),
+                                type_params,
+                                bindings,
+                            );
+                        }
+                    }
+                }
+            }
+            TypeAnnotation::Function { params, returns } => {
+                let actual = actual.canonicalize();
+                match actual {
+                    Type::Function {
+                        params: actual_params,
+                        returns: actual_returns,
+                    } if actual_params.len() == params.len() => {
+                        for (expected_param, actual_param) in
+                            params.iter().zip(actual_params.iter())
+                        {
+                            self.bind_type_params_from_annotation(
+                                &expected_param.type_annotation,
+                                actual_param,
+                                type_params,
+                                bindings,
+                            );
+                        }
+                        self.bind_type_params_from_annotation(
+                            returns,
+                            actual_returns.as_ref(),
+                            type_params,
+                            bindings,
+                        );
+                    }
+                    Type::Concrete(TypeAnnotation::Function {
+                        params: actual_params,
+                        returns: actual_returns,
+                    }) if actual_params.len() == params.len() => {
+                        for (expected_param, actual_param) in
+                            params.iter().zip(actual_params.iter())
+                        {
+                            self.bind_type_params_from_annotation(
+                                &expected_param.type_annotation,
+                                &Type::Concrete(actual_param.type_annotation.clone()),
+                                type_params,
+                                bindings,
+                            );
+                        }
+                        self.bind_type_params_from_annotation(
+                            returns,
+                            &Type::Concrete(*actual_returns),
+                            type_params,
+                            bindings,
+                        );
+                    }
+                    _ => {}
                 }
             }
             _ => {}
@@ -3202,9 +3283,7 @@ impl TypeInferenceEngine {
                 {
                     // Refutable unit-variant pattern — binds nothing.
                 } else {
-                    let var_type = scrutinee
-                        .cloned()
-                        .unwrap_or_else(|| self.fresh_type_var());
+                    let var_type = scrutinee.cloned().unwrap_or_else(|| self.fresh_type_var());
                     self.env.define(name, TypeScheme::mono(var_type));
                 }
             }
@@ -3831,7 +3910,9 @@ mod tests {
             name: "Option".into(),
             args: vec![TypeAnnotation::Basic("string".to_string())],
         });
-        engine.env.define("value", TypeScheme::mono(optional_string));
+        engine
+            .env
+            .define("value", TypeScheme::mono(optional_string));
 
         let expr =
             shape_ast::parser::parse_expression_str("value as int").expect("expression parses");
