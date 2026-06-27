@@ -367,11 +367,25 @@ impl VirtualMachine {
                 }
 
                 // ── Wave 5c: type-introspection + conversion + native-interop ──
+                BuiltinFunction::IsArray | BuiltinFunction::IsObject => {
+                    let args = self.pop_builtin_args()?;
+                    let value = args.first().ok_or_else(|| {
+                        VMError::RuntimeError(format!("{:?} expects 1 argument", builtin))
+                    })?;
+                    let result = match builtin {
+                        BuiltinFunction::IsArray => {
+                            matches!(value.kind, NativeKind::Ptr(HeapKind::TypedArray))
+                        }
+                        BuiltinFunction::IsObject => {
+                            matches!(value.kind, NativeKind::Ptr(HeapKind::TypedObject))
+                        }
+                        _ => unreachable!("outer match restricts builtin"),
+                    };
+                    self.push_kinded_slot(KindedSlot::from_bool(result))?;
+                }
                 BuiltinFunction::IsNumber
                 | BuiltinFunction::IsString
                 | BuiltinFunction::IsBool
-                | BuiltinFunction::IsArray
-                | BuiltinFunction::IsObject
                 | BuiltinFunction::IsDataRow => {
                     // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5c —
                     // is_* type-check body migration deferred. Drain args
@@ -1732,7 +1746,7 @@ fn random_int_arg(
 }
 
 fn random_array_number_slot(values: Vec<f64>) -> KindedSlot {
-    use shape_value::v2::typed_array::{ELEM_TYPE_F64, TypedArray, stamp_elem_type};
+    use shape_value::v2::typed_array::{stamp_elem_type, TypedArray, ELEM_TYPE_F64};
 
     let ptr = TypedArray::<f64>::from_slice(&values);
     unsafe {
@@ -1841,7 +1855,7 @@ fn vm_random_intrinsic_slot(
 /// contents — each element is copied out of the array's interned UTF-8.
 pub(in crate::executor) fn read_string_array(slot: &KindedSlot) -> Option<Vec<String>> {
     use crate::executor::v2_handlers::v2_array_detect::{
-        V2ElemType, as_v2_typed_array, read_element,
+        as_v2_typed_array, read_element, V2ElemType,
     };
     use shape_value::{HeapKind, NativeKind};
     if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
@@ -2048,7 +2062,7 @@ fn project_typed_object_array_chart_columns(
     y_columns: &[String],
 ) -> Result<ChartProjection, VMError> {
     use crate::executor::v2_handlers::v2_array_detect::{
-        V2ElemType, as_v2_typed_array, read_element,
+        as_v2_typed_array, read_element, V2ElemType,
     };
     let view = as_v2_typed_array(value.raw(), value.kind).ok_or_else(|| {
         VMError::RuntimeError(
