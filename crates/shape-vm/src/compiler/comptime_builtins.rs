@@ -553,25 +553,22 @@ pub(crate) fn create_comptime_builtins_module(
         },
     );
 
-    // Internal comptime directive: set a parameter default value.
-    // __emit_set_param_value(param_name: string, value: any)
-    register_typed_function(
+    // Internal comptime directive: set an integer parameter default value.
+    // __emit_set_param_value(param_name: string, value: int)
+    //
+    // This intentionally uses the fixed-arity typed marshal path: the
+    // variadic `register_typed_function` helper currently stamps every
+    // incoming argument as Bool, so a string param name cannot be recovered
+    // there without a dynamic fallback.
+    register_typed_fn_2::<_, Arc<String>, i64>(
         &mut module,
         "__emit_set_param_value",
         "Internal: set a parameter default value by name",
-        vec![],
+        [("param_name", "string"), ("value", "int")],
         ConcreteType::Unit,
-        |nb_args, _ctx| {
-            let param_name = nb_args
-                .first()
-                .and_then(|nb| nb.as_str())
-                .ok_or_else(|| {
-                    "__emit_set_param_value expects param name as first string arg".to_string()
-                })?
-                .to_string();
-            let value = nb_args.get(1).cloned().ok_or_else(|| {
-                "__emit_set_param_value expects a value as second arg".to_string()
-            })?;
+        |param_name, value, _ctx| {
+            let value = KindedSlot::from_int(value);
+            let param_name = param_name.as_str().to_string();
             push_comptime_directive(ComptimeDirective::SetParamValue { param_name, value })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },

@@ -1150,7 +1150,16 @@ impl BytecodeCompiler {
             }
         }
 
-        // Source 2: AST literal type
+        // Source 2: schema-backed field access type. Generated annotation
+        // methods are compiled immediately after `extend target`, and the
+        // shared inference span table may not carry `self.id` / `other.id`
+        // field results yet. The receiver's tracker schema plus field schema
+        // is the static proof; untracked receivers fall through.
+        if let Some(eq_type) = self.property_access_field_eq_type(expr) {
+            return Some(eq_type);
+        }
+
+        // Source 3: AST literal type
         match expr {
             Expr::Literal(Literal::Int(_) | Literal::UInt(_) | Literal::TypedInt(..), _) => {
                 Some(EqOperandType::Int)
@@ -1161,6 +1170,39 @@ impl BytecodeCompiler {
             // WS-8 (2026-05-22): bool literal type for the AST-fallback
             // source (handles `x == true` where `x` is untyped).
             Expr::Literal(Literal::Bool(_), _) => Some(EqOperandType::Bool),
+            _ => None,
+        }
+    }
+
+    fn property_access_field_eq_type(&mut self, expr: &Expr) -> Option<EqOperandType> {
+        use shape_runtime::type_schema::FieldType;
+        let Expr::PropertyAccess {
+            object, property, ..
+        } = expr
+        else {
+            return None;
+        };
+        let schema_id = self.tracker_schema_id_for_expr(object)?;
+        let field_type = self
+            .type_tracker
+            .schema_registry()
+            .get_by_id(schema_id)
+            .and_then(|schema| schema.get_field(property))
+            .map(|field| field.field_type.clone())?;
+        match field_type {
+            FieldType::I64
+            | FieldType::Timestamp
+            | FieldType::I8
+            | FieldType::U8
+            | FieldType::I16
+            | FieldType::U16
+            | FieldType::I32
+            | FieldType::U32
+            | FieldType::U64 => Some(EqOperandType::Int),
+            FieldType::F64 => Some(EqOperandType::Number),
+            FieldType::Decimal => Some(EqOperandType::Decimal),
+            FieldType::String => Some(EqOperandType::String),
+            FieldType::Bool => Some(EqOperandType::Bool),
             _ => None,
         }
     }
