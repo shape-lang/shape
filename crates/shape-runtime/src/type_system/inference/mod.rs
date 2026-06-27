@@ -2182,7 +2182,6 @@ impl TypeInferenceEngine {
         // CONFLICTING observed pair still produces the genuine union mismatch.
         self.apply_callsite_unions(&mut types);
         errors.extend(self.propagate_param_destructure_field_links());
-        self.rewalk_resolved_function_bodies(program, &mut types);
 
         // HOF return-type soundness re-check (the sg2 root, int/number guard).
         //
