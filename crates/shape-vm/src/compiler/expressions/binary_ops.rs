@@ -1248,6 +1248,14 @@ impl BytecodeCompiler {
             }
         }
 
+        if let Some(enum_name) = self.equality_enum_constructor_type_name(expr) {
+            return Some(enum_name);
+        }
+
+        if let Some(enum_name) = self.equality_property_enum_type_name(expr) {
+            return Some(enum_name);
+        }
+
         let ty = self.infer_expr_type(expr).ok()?;
         let display = type_display_name(&ty);
         let resolved = self.resolve_type_name(&display);
@@ -1255,6 +1263,69 @@ impl BytecodeCompiler {
             .schema_registry()
             .get(resolved.as_str())
             .and_then(|schema| schema.get_enum_info().map(|_| resolved))
+    }
+
+    fn equality_enum_schema_name_if_known(&self, enum_name: &str) -> Option<String> {
+        let resolved = self.resolve_type_name(enum_name);
+        self.type_tracker
+            .schema_registry()
+            .get(resolved.as_str())
+            .and_then(|schema| schema.get_enum_info().map(|_| resolved))
+    }
+
+    fn equality_enum_constructor_type_name(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::EnumConstructor {
+                enum_name, variant, ..
+            } => {
+                let resolved = self.equality_enum_schema_name_if_known(enum_name.as_str())?;
+                let schema = self.type_tracker.schema_registry().get(resolved.as_str())?;
+                schema
+                    .get_enum_info()
+                    .and_then(|info| info.variant_by_name(variant).map(|_| resolved))
+            }
+            Expr::QualifiedFunctionCall {
+                namespace,
+                function,
+                args,
+                named_args,
+                ..
+            } if args.is_empty() && named_args.is_empty() => {
+                let resolved = self.equality_enum_schema_name_if_known(namespace)?;
+                let schema = self.type_tracker.schema_registry().get(resolved.as_str())?;
+                schema
+                    .get_enum_info()
+                    .and_then(|info| info.variant_by_name(function).map(|_| resolved))
+            }
+            _ => None,
+        }
+    }
+
+    fn equality_property_enum_type_name(&mut self, expr: &Expr) -> Option<String> {
+        let Expr::PropertyAccess {
+            object,
+            property,
+            optional,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        if *optional {
+            return None;
+        }
+
+        let schema_id = self.tracker_schema_id_for_expr(object)?;
+        let field_type = self
+            .type_tracker
+            .schema_registry()
+            .get_by_id(schema_id)
+            .and_then(|schema| schema.get_field(property))
+            .map(|field| field.field_type.clone())?;
+        let FieldType::Object(enum_name) = field_type else {
+            return None;
+        };
+        self.equality_enum_schema_name_if_known(&enum_name)
     }
 
     fn emit_enum_variant_field(&mut self, expr: &Expr, schema_id: u16) -> Result<()> {
@@ -3654,7 +3725,7 @@ mod s4_type_erasure_dispatch_tests {
     //! - functions: a free-function call with named arguments is a clean
     //!   compile error (was silent-discard → wrong result).
     use crate::compiler::BytecodeCompiler;
-    use crate::test_utils::{eval_typed_bool, eval_typed_i64};
+    use crate::test_utils::eval_typed_i64;
     use shape_ast::parser::parse_program;
 
     #[test]
@@ -4282,5 +4353,56 @@ mod u4_4_regression_probe {
         let program = shape_ast::parser::parse_program(code).expect("parse");
         let r = BytecodeCompiler::new().compile(&program);
         assert!(r.is_ok(), "compile failed: {:?}", r.err());
+    }
+}
+
+#[cfg(test)]
+mod w28_enum_field_equality_static_proof_tests {
+    use crate::test_utils::compile_with_prelude;
+
+    #[test]
+    fn specialized_extend_method_compares_enum_field_to_unit_variant() {
+        let src = r#"
+            enum Status {
+                Active,
+                Inactive,
+                Pending
+            }
+
+            type User {
+                name: string,
+                age: int,
+                status: Status
+            }
+
+            extend User {
+                method is_active() {
+                    self.status == Status::Active
+                }
+            }
+
+            fn make_user(name, age, active) {
+                User {
+                    name: name,
+                    age: age,
+                    status: if active { Status::Active } else { Status::Inactive }
+                }
+            }
+
+            fn count_active(users) {
+                users.filter(|u| u.is_active()).length
+            }
+
+            let users = [
+                make_user("a", 20, true),
+                make_user("b", 30, false)
+            ]
+            print(count_active(users))
+        "#;
+
+        assert!(
+            compile_with_prelude(src).is_ok(),
+            "specialized extend method enum-field equality should compile"
+        );
     }
 }

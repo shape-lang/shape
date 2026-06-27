@@ -25,6 +25,22 @@ fn type_annotation_from_concrete_type(ct: &ConcreteType) -> Option<shape_ast::as
     crate::compiler::expressions::closures::concrete_type_to_type_annotation(ct)
 }
 
+#[cfg(test)]
+mod w28_hof_reduce_static_proof_tests {
+    use crate::test_utils::eval_typed_i64;
+
+    #[test]
+    fn flatmap_result_threads_element_type_to_reduce() {
+        let src = r#"
+            let nested = [[1, 2], [3, 4], [5]]
+            let flat = nested.flatMap(|arr| arr)
+            flat.reduce(|acc, x| acc + x, 0)
+        "#;
+
+        assert_eq!(eval_typed_i64(src), 15);
+    }
+}
+
 fn concrete_type_cache_key(ct: &ConcreteType) -> String {
     type_annotation_from_concrete_type(ct)
         .map(|ann| {
@@ -145,6 +161,111 @@ fn slot_kind_to_type_annotation(
         // which is identical to the pre-fix behaviour.
         _ => return None,
     })
+}
+
+fn array_element_annotation_from_inferred_type(
+    compiler: &BytecodeCompiler,
+    ty: &Type,
+) -> Option<shape_ast::ast::TypeAnnotation> {
+    use shape_ast::ast::TypeAnnotation;
+
+    let ann = ty.to_annotation()?;
+    let elem_ann = match ann {
+        TypeAnnotation::Array(inner) => *inner,
+        TypeAnnotation::Generic { name, mut args }
+            if (name.as_str() == "Array" || name.as_str() == "Vec") && args.len() == 1 =>
+        {
+            args.remove(0)
+        }
+        _ => return None,
+    };
+
+    crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+        compiler, &elem_ann,
+    )?;
+    Some(elem_ann)
+}
+
+fn type_annotation_from_tracker_name(type_name: &str) -> Option<shape_ast::ast::TypeAnnotation> {
+    use shape_ast::ast::{TypeAnnotation, TypePath};
+
+    let type_name = type_name.trim();
+    if type_name.is_empty() || type_name == "unknown" {
+        return None;
+    }
+
+    if let Some(inner) = type_name
+        .strip_prefix("Vec<")
+        .and_then(|s| s.strip_suffix('>'))
+        .or_else(|| {
+            type_name
+                .strip_prefix("Array<")
+                .and_then(|s| s.strip_suffix('>'))
+        })
+    {
+        let inner_ann = type_annotation_from_tracker_name(inner)?;
+        return Some(TypeAnnotation::Generic {
+            name: TypePath::simple("Vec"),
+            args: vec![inner_ann],
+        });
+    }
+
+    if let Some(inner) = type_name.strip_suffix("[]") {
+        let inner_ann = type_annotation_from_tracker_name(inner)?;
+        return Some(TypeAnnotation::Array(Box::new(inner_ann)));
+    }
+
+    if matches!(
+        type_name,
+        "int"
+            | "i64"
+            | "i32"
+            | "i16"
+            | "i8"
+            | "u64"
+            | "u32"
+            | "u16"
+            | "u8"
+            | "number"
+            | "f64"
+            | "float"
+            | "bool"
+            | "string"
+            | "decimal"
+            | "bigint"
+            | "DateTime"
+    ) {
+        Some(TypeAnnotation::Basic(type_name.to_string()))
+    } else {
+        Some(TypeAnnotation::Reference(TypePath::simple(type_name)))
+    }
+}
+
+fn array_element_annotation_from_tracker_name(
+    compiler: &BytecodeCompiler,
+    type_name: &str,
+) -> Option<shape_ast::ast::TypeAnnotation> {
+    use shape_ast::ast::TypeAnnotation;
+
+    let ann = type_annotation_from_tracker_name(type_name)?;
+    let elem_ann = match ann {
+        TypeAnnotation::Array(inner) => *inner,
+        TypeAnnotation::Generic { name, mut args }
+            if (name.as_str() == "Array" || name.as_str() == "Vec") && args.len() == 1 =>
+        {
+            args.remove(0)
+        }
+        _ => return None,
+    };
+
+    crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+        compiler, &elem_ann,
+    )?;
+    Some(elem_ann)
+}
+
+fn tracker_type_info_from_concrete_type(ct: &ConcreteType) -> Option<VariableTypeInfo> {
+    crate::compiler::patterns::binding::concrete_type_tracker_name(ct).map(VariableTypeInfo::named)
 }
 
 /// Array methods whose Rust PHF handlers are the canonical strict-carrier
@@ -345,6 +466,333 @@ pub(crate) fn eval_const_expr_to_nanboxed(expr: &Expr) -> Option<ConstFoldValue>
 }
 
 impl BytecodeCompiler {
+    fn field_type_to_static_hof_concrete_type(
+        &self,
+        ft: &shape_runtime::type_schema::FieldType,
+    ) -> Option<ConcreteType> {
+        use shape_runtime::type_schema::FieldType;
+        use shape_value::v2::concrete_type::{EnumLayoutId, StructLayoutId};
+
+        Some(match ft {
+            FieldType::I64 | FieldType::Timestamp => ConcreteType::I64,
+            FieldType::F64 => ConcreteType::F64,
+            FieldType::Bool => ConcreteType::Bool,
+            FieldType::String => ConcreteType::String,
+            FieldType::Decimal => ConcreteType::Decimal,
+            FieldType::I8 => ConcreteType::I8,
+            FieldType::I16 => ConcreteType::I16,
+            FieldType::I32 => ConcreteType::I32,
+            FieldType::U8 => ConcreteType::U8,
+            FieldType::U16 => ConcreteType::U16,
+            FieldType::U32 => ConcreteType::U32,
+            FieldType::U64 => ConcreteType::U64,
+            FieldType::Array(inner) => ConcreteType::Array(Box::new(
+                self.field_type_to_static_hof_concrete_type(inner)?,
+            )),
+            FieldType::Object(name) => {
+                let resolved = self.resolve_type_name(name);
+                if self
+                    .type_tracker
+                    .schema_registry()
+                    .get(resolved.as_str())
+                    .is_some_and(|schema| schema.get_enum_info().is_some())
+                {
+                    ConcreteType::named_enum(resolved, EnumLayoutId(0))
+                } else {
+                    ConcreteType::named_struct(resolved, StructLayoutId(0))
+                }
+            }
+            FieldType::Option(_)
+            | FieldType::HashMap { .. }
+            | FieldType::Set(_)
+            | FieldType::Any => return None,
+        })
+    }
+
+    fn static_hof_array_receiver_concrete_type(
+        &mut self,
+        receiver: &Expr,
+        receiver_ct: Option<&ConcreteType>,
+    ) -> Option<ConcreteType> {
+        if let Some(ct @ ConcreteType::Array(_)) = receiver_ct {
+            return Some(ct.clone());
+        }
+
+        if let Expr::Identifier(name, _) = receiver
+            && let Some(type_name) = self.tracker_type_name_for_identifier(name)
+            && let Some(ann) = type_annotation_from_tracker_name(&type_name)
+            && let Some(ct) =
+                crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                    self, &ann,
+                )
+            && matches!(ct, ConcreteType::Array(_))
+        {
+            return Some(ct);
+        }
+
+        if let Expr::MethodCall {
+            receiver: inner,
+            method,
+            args,
+            ..
+        } = receiver
+        {
+            let inner_ct = concrete_type_for_expr(self, inner);
+            if let Some(ct) =
+                self.static_array_hof_result_concrete_type(inner, inner_ct.as_ref(), method, args)
+                && matches!(ct, ConcreteType::Array(_))
+            {
+                return Some(ct);
+            }
+        }
+
+        let ann = self.infer_expr_type(receiver).ok()?.to_annotation()?;
+        let ct =
+            crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                self, &ann,
+            )?;
+        matches!(ct, ConcreteType::Array(_)).then_some(ct)
+    }
+
+    fn static_hof_terminal_expr(body: &[Statement]) -> Option<&Expr> {
+        body.iter().rev().find_map(|stmt| match stmt {
+            Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => Some(expr),
+            _ => None,
+        })
+    }
+
+    fn static_hof_expr_concrete_type(
+        &mut self,
+        param_types: &HashMap<String, ConcreteType>,
+        expr: &Expr,
+    ) -> Option<ConcreteType> {
+        if let Expr::Identifier(name, _) = expr
+            && let Some(ct) = param_types.get(name)
+        {
+            return Some(ct.clone());
+        }
+
+        if let Some(ct) = concrete_type_for_expr(self, expr) {
+            return Some(ct);
+        }
+
+        match expr {
+            Expr::PropertyAccess {
+                object, property, ..
+            } => {
+                let object_ct = self.static_hof_expr_concrete_type(param_types, object)?;
+                let type_name = match object_ct {
+                    ConcreteType::Struct(named) => named.name_str()?.to_string(),
+                    ConcreteType::Enum(named) => named.name_str()?.to_string(),
+                    ConcreteType::Array(_) if property == "length" => {
+                        return Some(ConcreteType::I64);
+                    }
+                    _ => return None,
+                };
+                let resolved = self.resolve_type_name(&type_name);
+                let field_type = self
+                    .type_tracker
+                    .schema_registry()
+                    .get(resolved.as_str())
+                    .and_then(|schema| schema.get_field(property))
+                    .map(|field| field.field_type.clone())?;
+                self.field_type_to_static_hof_concrete_type(&field_type)
+            }
+            Expr::IndexAccess { object, .. } => {
+                let object_ct = self.static_hof_expr_concrete_type(param_types, object)?;
+                match object_ct {
+                    ConcreteType::Array(elem) => Some(*elem),
+                    _ => None,
+                }
+            }
+            Expr::BinaryOp {
+                left, op, right, ..
+            } => {
+                use shape_ast::ast::BinaryOp;
+                match op {
+                    BinaryOp::Equal
+                    | BinaryOp::NotEqual
+                    | BinaryOp::Greater
+                    | BinaryOp::Less
+                    | BinaryOp::GreaterEq
+                    | BinaryOp::LessEq
+                    | BinaryOp::FuzzyEqual
+                    | BinaryOp::FuzzyGreater
+                    | BinaryOp::FuzzyLess
+                    | BinaryOp::And
+                    | BinaryOp::Or => Some(ConcreteType::Bool),
+                    BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+                    | BinaryOp::Pow
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::BitShl
+                    | BinaryOp::BitShr => {
+                        let left_ct = self.static_hof_expr_concrete_type(param_types, left)?;
+                        let right_ct = self.static_hof_expr_concrete_type(param_types, right)?;
+                        if left_ct == right_ct {
+                            Some(left_ct)
+                        } else if matches!(
+                            (&left_ct, &right_ct),
+                            (ConcreteType::F64, ConcreteType::I64)
+                                | (ConcreteType::I64, ConcreteType::F64)
+                        ) {
+                            Some(ConcreteType::F64)
+                        } else {
+                            None
+                        }
+                    }
+                    BinaryOp::NullCoalesce => self
+                        .static_hof_expr_concrete_type(param_types, left)
+                        .or_else(|| self.static_hof_expr_concrete_type(param_types, right)),
+                    BinaryOp::ErrorContext | BinaryOp::Pipe => None,
+                }
+            }
+            Expr::If(if_expr, _) => {
+                let then_ct =
+                    self.static_hof_expr_concrete_type(param_types, &if_expr.then_branch)?;
+                let else_ct = if_expr.else_branch.as_ref().and_then(|else_branch| {
+                    self.static_hof_expr_concrete_type(param_types, else_branch)
+                })?;
+                (then_ct == else_ct).then_some(then_ct)
+            }
+            Expr::Conditional {
+                then_expr,
+                else_expr: Some(else_expr),
+                ..
+            } => {
+                let then_ct = self.static_hof_expr_concrete_type(param_types, then_expr)?;
+                let else_ct = self.static_hof_expr_concrete_type(param_types, else_expr)?;
+                (then_ct == else_ct).then_some(then_ct)
+            }
+            Expr::Block(block, _) => block.items.iter().rev().find_map(|item| match item {
+                shape_ast::ast::BlockItem::Expression(expr) => {
+                    self.static_hof_expr_concrete_type(param_types, expr)
+                }
+                shape_ast::ast::BlockItem::Statement(Statement::Expression(expr, _))
+                | shape_ast::ast::BlockItem::Statement(Statement::Return(Some(expr), _)) => {
+                    self.static_hof_expr_concrete_type(param_types, expr)
+                }
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    fn static_hof_closure_return_concrete_type(
+        &mut self,
+        params: &[shape_ast::ast::FunctionParameter],
+        body: &[Statement],
+        explicit_return: Option<&shape_ast::ast::TypeAnnotation>,
+        arg_types: &[ConcreteType],
+    ) -> Option<ConcreteType> {
+        if let Some(ann) = explicit_return {
+            return crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                self, ann,
+            );
+        }
+
+        let mut param_types = HashMap::new();
+        for (param, ct) in params.iter().zip(arg_types.iter()) {
+            if let Some(name) = param.simple_name() {
+                param_types.insert(name.to_string(), ct.clone());
+            }
+        }
+
+        Self::static_hof_terminal_expr(body)
+            .and_then(|terminal| self.static_hof_expr_concrete_type(&param_types, terminal))
+            .or_else(|| {
+                let caller_arg_type_names: Vec<Option<String>> = arg_types
+                    .iter()
+                    .map(crate::compiler::patterns::binding::concrete_type_tracker_name)
+                    .collect();
+                let ty = crate::compiler::expressions::closures::infer_closure_body_return_type_with_caller_context(
+                    self,
+                    params,
+                    body,
+                    explicit_return,
+                    &[],
+                    &caller_arg_type_names,
+                )?;
+                let ann = ty.to_annotation()?;
+                crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                    self, &ann,
+                )
+            })
+    }
+
+    fn static_array_hof_result_concrete_type(
+        &mut self,
+        receiver: &Expr,
+        receiver_ct: Option<&ConcreteType>,
+        method: &str,
+        args: &[Expr],
+    ) -> Option<ConcreteType> {
+        let receiver_ct = self.static_hof_array_receiver_concrete_type(receiver, receiver_ct)?;
+        let ConcreteType::Array(elem) = receiver_ct else {
+            return None;
+        };
+        let elem_ct = (*elem).clone();
+
+        match method {
+            "filter" => Some(ConcreteType::Array(Box::new(elem_ct))),
+            "map" => {
+                let Expr::FunctionExpr {
+                    params,
+                    body,
+                    return_type,
+                    ..
+                } = args.first()?
+                else {
+                    return None;
+                };
+                let arg_types = if params.len() >= 2 {
+                    vec![elem_ct, ConcreteType::I64]
+                } else {
+                    vec![elem_ct]
+                };
+                let result_ct = self.static_hof_closure_return_concrete_type(
+                    params,
+                    body,
+                    return_type.as_ref(),
+                    &arg_types,
+                )?;
+                Some(ConcreteType::Array(Box::new(result_ct)))
+            }
+            "flatMap" => {
+                let Expr::FunctionExpr {
+                    params,
+                    body,
+                    return_type,
+                    ..
+                } = args.first()?
+                else {
+                    return None;
+                };
+                let result_ct = self.static_hof_closure_return_concrete_type(
+                    params,
+                    body,
+                    return_type.as_ref(),
+                    &[elem_ct],
+                )?;
+                match result_ct {
+                    ConcreteType::Array(inner) => Some(ConcreteType::Array(inner)),
+                    _ => None,
+                }
+            }
+            "reduce" => {
+                let init = args.get(1)?;
+                concrete_type_for_expr(self, init)
+                    .or_else(|| self.static_hof_expr_concrete_type(&HashMap::new(), init))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn hidden_native_module_binding_name(module_path: &str) -> String {
         format!("__imported_module__::{}", module_path)
     }
@@ -2541,6 +2989,57 @@ impl BytecodeCompiler {
             .or_else(|| {
                 let elem_ct = self.iter_element_concrete_type(receiver)?;
                 crate::compiler::expressions::closures::concrete_type_to_type_annotation(&elem_ct)
+            })
+            // W28 HOF reduce/static proof: `let flat = xs.flatMap(...)`
+            // records a tracker name (`Vec<T>`) even when no whole-binding
+            // `ConcreteType` fact exists yet. Parse that already-recorded
+            // compile-time fact to type the next reducer's item parameter.
+            .or_else(|| {
+                if let Expr::Identifier(name, _) = receiver {
+                    let type_name = self.tracker_type_name_for_identifier(name)?;
+                    array_element_annotation_from_tracker_name(self, &type_name)
+                } else {
+                    None
+                }
+            })
+            // Inline producer chain: `users.map(|u| u.age).reduce(...)`
+            // never passes through a `let`, so recover the receiver result
+            // directly from the static HOF shape.
+            .or_else(|| {
+                if let Expr::MethodCall {
+                    receiver: inner,
+                    method: recv_method,
+                    args: recv_args,
+                    ..
+                } = receiver
+                {
+                    let inner_ct = concrete_type_for_expr(self, inner);
+                    match self.static_array_hof_result_concrete_type(
+                        inner,
+                        inner_ct.as_ref(),
+                        recv_method,
+                        recv_args,
+                    )? {
+                        ConcreteType::Array(elem) => {
+                            crate::compiler::expressions::closures::concrete_type_to_type_annotation(
+                                &elem,
+                            )
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+            // W28 HOF reduce/static proof: a named receiver whose initializer is
+            // a type-changing HOF such as `flatMap` may already have an engine
+            // span-table/binding fact of `Array<T>` even when the local
+            // `ConcreteType` side-table has no entry. Consume that compile-time
+            // fact here so a following `.reduce(|acc, x| ..., init)` can type
+            // `x` from `T`; the accumulator still comes from `init` below.
+            .or_else(|| {
+                let ty = self.infer_expr_type(receiver).ok()?;
+                array_element_annotation_from_inferred_type(self, &ty)
             });
         let Some(elem_ann) = elem_ann_opt else {
             return Ok(());
@@ -2562,6 +3061,15 @@ impl BytecodeCompiler {
                 .and_then(|ct| {
                     crate::compiler::expressions::closures::concrete_type_to_type_annotation(&ct)
                 })
+                .or_else(|| {
+                    self.static_hof_expr_concrete_type(&HashMap::new(), init)
+                        .and_then(|ct| {
+                            crate::compiler::expressions::closures::concrete_type_to_type_annotation(
+                                &ct,
+                            )
+                        })
+                })
+                .or_else(|| crate::compiler::expressions::closures::infer_callsite_arg_type(init))
             });
             vec![acc_ann, Some(elem_ann)]
         } else if is_sort {
@@ -3794,6 +4302,12 @@ impl BytecodeCompiler {
         let native_array_element_kind = receiver_concrete_type
             .as_ref()
             .and_then(array_element_kind_from_concrete_type);
+        let static_array_hof_result_type = self.static_array_hof_result_concrete_type(
+            receiver,
+            receiver_concrete_type.as_ref(),
+            method,
+            args,
+        );
 
         // Resolve closure-row schema from the receiver contract.
         // `receiver` was compiled immediately above and may carry Table<T> metadata.
@@ -4435,6 +4949,18 @@ impl BytecodeCompiler {
 
         // Propagate known return type for standard method calls
         self.last_expr_schema = None;
+
+        if let Some(ct) = static_array_hof_result_type.as_ref()
+            && let Some(type_info) = tracker_type_info_from_concrete_type(ct)
+        {
+            self.last_expr_type_info = Some(type_info);
+            self.last_expr_schema = self
+                .last_expr_type_info
+                .as_ref()
+                .and_then(Self::value_schema_from_type_info);
+            self.clear_last_expr_reference_result();
+            return Ok(());
+        }
 
         if prefer_native_array_method {
             let method_expr = Expr::MethodCall {
