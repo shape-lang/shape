@@ -2236,7 +2236,7 @@ fn ws9b_property_access_on_unannotated_param_resolves_named_struct() {
 fn ws9b_named_function_object_param_left_as_variable_for_callsite_union() {
     use crate::type_system::{Type, TypeConstraint, TypeVar};
 
-    let mut engine = TypeInferenceEngine::new();
+    let engine = TypeInferenceEngine::new();
     let param_var = TypeVar::new("p".to_string());
     let field_var = TypeVar::new("f".to_string());
     let mut param_types = vec![Type::Variable(param_var.clone())];
