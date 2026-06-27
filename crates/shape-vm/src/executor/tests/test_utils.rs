@@ -11,6 +11,23 @@ use crate::executor::VirtualMachine;
 use crate::type_tracking::NativeKind;
 use shape_value::{KindedSlot, VMError};
 
+/// Assertion extension for tests migrated from the deleted `ValueWordExt`
+/// surface. It decodes only from the explicit `KindedSlot.kind` label.
+pub trait KindedSlotTestExt {
+    fn as_test_number(&self) -> Option<f64>;
+    fn as_test_int(&self) -> Option<i64>;
+}
+
+impl KindedSlotTestExt for KindedSlot {
+    fn as_test_number(&self) -> Option<f64> {
+        self.as_f64().or_else(|| self.as_i64().map(|i| i as f64))
+    }
+
+    fn as_test_int(&self) -> Option<i64> {
+        self.as_i64()
+    }
+}
+
 /// Compile + execute Shape source code, returning the **raw u64 bits**
 /// at the top of stack plus the program's declared top-level return
 /// kind (if any). Mirrors `crate::test_utils::eval_raw`.

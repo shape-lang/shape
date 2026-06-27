@@ -28,11 +28,11 @@
 
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_runtime::type_schema::{
+    EnumVariantKind, TypeSchema, TypeSchemaRegistry,
     builtin_schemas::{
         OPTION_PAYLOAD, OPTION_VARIANT, OPTION_VARIANT_NONE, OPTION_VARIANT_SOME, RESULT_PAYLOAD,
         RESULT_VARIANT, RESULT_VARIANT_ERR, RESULT_VARIANT_OK,
     },
-    EnumVariantKind, TypeSchema, TypeSchemaRegistry,
 };
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectStorage};
 use shape_value::{KindedSlot, NativeKind, ValueSlot};
@@ -1574,7 +1574,7 @@ mod tests {
     #[test]
     fn test_format_typed_array_via_ptr_carrier() {
         use crate::executor::v2_handlers::v2_array_detect::stamp_elem_type;
-        use shape_value::v2::typed_array::{TypedArray, ELEM_TYPE_I64};
+        use shape_value::v2::typed_array::{ELEM_TYPE_I64, TypedArray};
 
         let reg = create_test_registry();
         let formatter = ValueFormatter::new(&reg);

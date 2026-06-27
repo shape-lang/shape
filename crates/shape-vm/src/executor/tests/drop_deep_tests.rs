@@ -10,8 +10,7 @@
 //! 7. Async Drop (~10 tests)
 
 use crate::bytecode::OpCode;
-use crate::executor::tests::test_utils::{compile, eval};
-use shape_value::{ValueWord, ValueWordExt};
+use crate::executor::tests::test_utils::{KindedSlotTestExt, compile, eval};
 
 /// Count occurrences of a specific opcode in compiled bytecode.
 fn count_opcode(source: &str, opcode: OpCode) -> usize {
@@ -86,7 +85,7 @@ fn test_drop_basic_five_lets_all_dropped() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(15.0));
+    assert_eq!(result.as_test_number(), Some(15.0));
 }
 
 #[test]
@@ -100,7 +99,7 @@ fn test_drop_basic_let_in_function_body_correct_result() {
         f()
     "#,
     );
-    assert_eq!(result.as_number_coerce(), Some(42.0));
+    assert_eq!(result.as_test_number(), Some(42.0));
 }
 
 #[test]
@@ -124,7 +123,7 @@ fn test_drop_basic_let_in_nested_block_drops_at_block_exit() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(1.0));
+    assert_eq!(result.as_test_number(), Some(1.0));
 }
 
 #[test]
@@ -149,7 +148,7 @@ fn test_drop_basic_multiple_nested_blocks() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(1.0));
+    assert_eq!(result.as_test_number(), Some(1.0));
 }
 
 #[test]
@@ -167,7 +166,7 @@ fn test_drop_basic_let_binding_primitive_number() {
         "primitive number let binding should still emit DropCall"
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(99.0));
+    assert_eq!(result.as_test_number(), Some(99.0));
 }
 
 #[test]
@@ -230,7 +229,7 @@ fn test_drop_basic_let_no_init() {
         "uninitialized let should still emit DropCall"
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(1.0));
+    assert_eq!(result.as_test_number(), Some(1.0));
 }
 
 #[test]
@@ -245,7 +244,7 @@ fn test_drop_basic_mutable_let() {
     "#;
     assert!(has_opcode(src, OpCode::DropCall));
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(2.0));
+    assert_eq!(result.as_test_number(), Some(2.0));
 }
 
 #[test]
@@ -270,7 +269,7 @@ fn test_drop_basic_sequential_blocks() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(3.0));
+    assert_eq!(result.as_test_number(), Some(3.0));
 }
 
 #[test]
@@ -293,7 +292,7 @@ fn test_drop_basic_block_with_multiple_lets() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(0.0));
+    assert_eq!(result.as_test_number(), Some(0.0));
 }
 
 #[test]
@@ -308,7 +307,7 @@ fn test_drop_basic_function_params_not_tracked_separately() {
         f(10, 20)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(30.0));
+    assert_eq!(result.as_test_number(), Some(30.0));
 }
 
 #[test]
@@ -339,7 +338,7 @@ fn test_drop_basic_deeply_nested_blocks() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(1.0));
+    assert_eq!(result.as_test_number(), Some(1.0));
 }
 
 #[test]
@@ -355,7 +354,7 @@ fn test_drop_basic_empty_block_no_drops() {
     // The function itself may emit drops for its scope, but the empty block
     // should contribute no additional drops.
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(1.0));
+    assert_eq!(result.as_test_number(), Some(1.0));
 }
 
 #[test]
@@ -370,7 +369,7 @@ fn test_drop_basic_let_with_complex_init() {
     "#;
     assert!(has_opcode(src, OpCode::DropCall));
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(3.0));
+    assert_eq!(result.as_test_number(), Some(3.0));
 }
 
 #[test]
@@ -388,7 +387,7 @@ fn test_drop_basic_multiple_functions_independent() {
         f() + g()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(30.0));
+    assert_eq!(result.as_test_number(), Some(30.0));
 }
 
 #[test]
@@ -407,7 +406,7 @@ fn test_drop_basic_function_calling_function() {
         outer()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(15.0));
+    assert_eq!(result.as_test_number(), Some(15.0));
 }
 
 // ============================================================================
@@ -425,7 +424,7 @@ fn test_drop_early_return_single_local() {
     "#;
     assert!(has_opcode(src, OpCode::DropCall));
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(42.0));
+    assert_eq!(result.as_test_number(), Some(42.0));
 }
 
 #[test]
@@ -442,7 +441,7 @@ fn test_drop_early_return_from_if_block() {
     "#;
     assert!(has_opcode(src, OpCode::DropCall));
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result.as_test_number(), Some(10.0));
 }
 
 #[test]
@@ -459,7 +458,7 @@ fn test_drop_early_return_from_else_block() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result.as_test_number(), Some(10.0));
 }
 
 #[test]
@@ -482,7 +481,7 @@ fn test_drop_early_return_nested_scope_two_levels() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(3.0));
+    assert_eq!(result.as_test_number(), Some(3.0));
 }
 
 #[test]
@@ -507,7 +506,7 @@ fn test_drop_early_return_three_nested_scopes() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(6.0));
+    assert_eq!(result.as_test_number(), Some(6.0));
 }
 
 #[test]
@@ -524,7 +523,7 @@ fn test_drop_early_return_conditional_true_branch() {
         f(true)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(20.0));
+    assert_eq!(result.as_test_number(), Some(20.0));
 }
 
 #[test]
@@ -541,7 +540,7 @@ fn test_drop_early_return_conditional_false_branch() {
         f(false)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result.as_test_number(), Some(10.0));
 }
 
 #[test]
@@ -561,7 +560,7 @@ fn test_drop_break_from_loop() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(12.0));
+    assert_eq!(result.as_test_number(), Some(12.0));
 }
 
 #[test]
@@ -584,7 +583,7 @@ fn test_drop_break_from_nested_loop_inner() {
     "#;
     // Each outer iteration adds 10 (only first j=10 is added before break at j=20)
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(30.0));
+    assert_eq!(result.as_test_number(), Some(30.0));
 }
 
 #[test]
@@ -605,7 +604,7 @@ fn test_drop_continue_in_loop() {
     "#;
     // 1 + 2 + 4 + 5 = 12
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(12.0));
+    assert_eq!(result.as_test_number(), Some(12.0));
 }
 
 #[test]
@@ -646,7 +645,7 @@ fn test_drop_early_return_from_loop() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(102.0));
+    assert_eq!(result.as_test_number(), Some(102.0));
 }
 
 #[test]
@@ -667,7 +666,7 @@ fn test_drop_return_inside_nested_if() {
         f(10)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(6.0));
+    assert_eq!(result.as_test_number(), Some(6.0));
 }
 
 #[test]
@@ -689,7 +688,7 @@ fn test_drop_return_inside_nested_if_mid_path() {
         f(3)
     "#,
     );
-    assert_eq!(result.as_number_coerce(), Some(3.0));
+    assert_eq!(result.as_test_number(), Some(3.0));
 }
 
 #[test]
@@ -711,7 +710,7 @@ fn test_drop_return_inside_nested_if_outer() {
         f(-1)
     "#,
     );
-    assert_eq!(result.as_number_coerce(), Some(1.0));
+    assert_eq!(result.as_test_number(), Some(1.0));
 }
 
 #[test]
@@ -727,7 +726,7 @@ fn test_drop_multiple_returns_in_function() {
         f(2)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(12.0));
+    assert_eq!(result.as_test_number(), Some(12.0));
 }
 
 #[test]
@@ -742,7 +741,7 @@ fn test_drop_return_with_computation() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(30.0));
+    assert_eq!(result.as_test_number(), Some(30.0));
 }
 
 #[test]
@@ -759,7 +758,7 @@ fn test_drop_break_with_let_after_loop() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(99.0));
+    assert_eq!(result.as_test_number(), Some(99.0));
 }
 
 #[test]
@@ -780,7 +779,7 @@ fn test_drop_while_loop_break() {
     "#;
     // 0 + 1 + 2 + 3 + 4 = 10
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result.as_test_number(), Some(10.0));
 }
 
 #[test]
@@ -801,7 +800,7 @@ fn test_drop_while_loop_continue() {
     "#;
     // 1 + 2 + 4 + 5 = 12
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(12.0));
+    assert_eq!(result.as_test_number(), Some(12.0));
 }
 
 #[test]
@@ -830,7 +829,7 @@ fn test_drop_early_return_drops_all_active_scopes() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result.as_test_number(), Some(10.0));
 }
 
 #[test]
@@ -848,7 +847,7 @@ fn test_drop_break_only_drops_loop_scope() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(100.0));
+    assert_eq!(result.as_test_number(), Some(100.0));
 }
 
 #[test]
@@ -866,7 +865,7 @@ fn test_drop_continue_only_drops_current_iteration() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(3.0));
+    assert_eq!(result.as_test_number(), Some(3.0));
 }
 
 // ============================================================================
@@ -887,7 +886,7 @@ fn test_drop_loop_for_body_locals_dropped_per_iteration() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(120.0));
+    assert_eq!(result.as_test_number(), Some(120.0));
 }
 
 #[test]
@@ -906,7 +905,7 @@ fn test_drop_loop_while_body_locals_dropped_per_iteration() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(60.0));
+    assert_eq!(result.as_test_number(), Some(60.0));
 }
 
 #[test]
@@ -924,7 +923,7 @@ fn test_drop_loop_break_in_middle_drops_local() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(3.0));
+    assert_eq!(result.as_test_number(), Some(3.0));
 }
 
 #[test]
@@ -945,7 +944,7 @@ fn test_drop_loop_continue_drops_local() {
     "#;
     // 10 + 30 + 50 = 90
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(90.0));
+    assert_eq!(result.as_test_number(), Some(90.0));
 }
 
 #[test]
@@ -963,7 +962,7 @@ fn test_drop_loop_conditional_break() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(5.0));
+    assert_eq!(result.as_test_number(), Some(5.0));
 }
 
 #[test]
@@ -985,7 +984,7 @@ fn test_drop_loop_nested_loops_break_inner() {
     // i=1: j=10 -> 10, break at j=20
     // i=2: j=10 -> 20, break at j=20
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(30.0));
+    assert_eq!(result.as_test_number(), Some(30.0));
 }
 
 #[test]
@@ -1006,7 +1005,7 @@ fn test_drop_loop_nested_loops_continue_inner() {
     "#;
     // Each outer: 10 + 30 = 40. Two outer iterations = 80.
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(80.0));
+    assert_eq!(result.as_test_number(), Some(80.0));
 }
 
 #[test]
@@ -1022,7 +1021,7 @@ fn test_drop_loop_with_accumulator() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(15.0));
+    assert_eq!(result.as_test_number(), Some(15.0));
 }
 
 #[test]
@@ -1041,7 +1040,7 @@ fn test_drop_loop_with_early_return() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(103.0));
+    assert_eq!(result.as_test_number(), Some(103.0));
 }
 
 #[test]
@@ -1058,7 +1057,7 @@ fn test_drop_loop_for_empty_iterable() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(0.0));
+    assert_eq!(result.as_test_number(), Some(0.0));
 }
 
 #[test]
@@ -1075,7 +1074,7 @@ fn test_drop_loop_while_never_enters() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(0.0));
+    assert_eq!(result.as_test_number(), Some(0.0));
 }
 
 #[test]
@@ -1095,7 +1094,7 @@ fn test_drop_loop_many_iterations() {
     "#;
     // Sum 0..99 = 4950
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(4950.0));
+    assert_eq!(result.as_test_number(), Some(4950.0));
 }
 
 #[test]
@@ -1115,7 +1114,7 @@ fn test_drop_loop_nested_break_with_let_between() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(1.0));
+    assert_eq!(result.as_test_number(), Some(1.0));
 }
 
 #[test]
@@ -1132,7 +1131,7 @@ fn test_drop_loop_for_with_array_of_arrays() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(6.0));
+    assert_eq!(result.as_test_number(), Some(6.0));
 }
 
 #[test]
@@ -1150,7 +1149,7 @@ fn test_drop_loop_break_after_multiple_lets() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(42.0));
+    assert_eq!(result.as_test_number(), Some(42.0));
 }
 
 #[test]
@@ -1170,7 +1169,7 @@ fn test_drop_loop_continue_after_multiple_lets() {
     "#;
     // i=1: 1+2=3, i=2: skip, i=3: 3+6=9 => 12
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(12.0));
+    assert_eq!(result.as_test_number(), Some(12.0));
 }
 
 #[test]
@@ -1190,7 +1189,7 @@ fn test_drop_loop_while_with_block_body() {
     "#;
     // 5! = 120
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(120.0));
+    assert_eq!(result.as_test_number(), Some(120.0));
 }
 
 #[test]
@@ -1212,7 +1211,7 @@ fn test_drop_loop_triple_nested() {
     "#;
     // All combos of {1,2}^3: 1+2+2+4+2+4+4+8 = 27
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(27.0));
+    assert_eq!(result.as_test_number(), Some(27.0));
 }
 
 #[test]
@@ -1233,7 +1232,7 @@ fn test_drop_loop_return_from_nested_for() {
     "#;
     // i=2, j=20 => 40
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(40.0));
+    assert_eq!(result.as_test_number(), Some(40.0));
 }
 
 // ============================================================================
@@ -1255,7 +1254,7 @@ fn test_drop_scope_if_else_different_locals() {
         f(true)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result.as_test_number(), Some(10.0));
 }
 
 #[test]
@@ -1274,7 +1273,7 @@ fn test_drop_scope_if_else_false_branch() {
         f(false)
     "#,
     );
-    assert_eq!(result.as_number_coerce(), Some(20.0));
+    assert_eq!(result.as_test_number(), Some(20.0));
 }
 
 #[test]
@@ -1290,7 +1289,7 @@ fn test_drop_scope_if_without_else() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result.as_test_number(), Some(10.0));
 }
 
 #[test]
@@ -1306,7 +1305,7 @@ fn test_drop_scope_if_false_without_else() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result.as_test_number(), Some(10.0));
 }
 
 #[test]
@@ -1323,7 +1322,7 @@ fn test_drop_scope_block_expr_as_value() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(42.0));
+    assert_eq!(result.as_test_number(), Some(42.0));
 }
 
 #[test]
@@ -1346,7 +1345,7 @@ fn test_drop_scope_block_expr_temp_dropped() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(15.0));
+    assert_eq!(result.as_test_number(), Some(15.0));
 }
 
 #[test]
@@ -1370,7 +1369,7 @@ fn test_drop_scope_nested_blocks_ordering() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(4.0));
+    assert_eq!(result.as_test_number(), Some(4.0));
 }
 
 #[test]
@@ -1386,7 +1385,7 @@ fn test_drop_scope_conditional_let_only_drops_if_entered() {
         f(true)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(1.0));
+    assert_eq!(result.as_test_number(), Some(1.0));
 }
 
 #[test]
@@ -1413,7 +1412,7 @@ fn test_drop_scope_interleaved_blocks_and_lets() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(9.0));
+    assert_eq!(result.as_test_number(), Some(9.0));
 }
 
 #[test]
@@ -1430,7 +1429,7 @@ fn test_drop_scope_block_value_not_dropped_prematurely() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(102.0));
+    assert_eq!(result.as_test_number(), Some(102.0));
 }
 
 #[test]
@@ -1450,7 +1449,7 @@ fn test_drop_scope_multiple_block_exprs() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(30.0));
+    assert_eq!(result.as_test_number(), Some(30.0));
 }
 
 #[test]
@@ -1463,7 +1462,7 @@ fn test_drop_scope_if_else_as_expression() {
         f(true)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result.as_test_number(), Some(10.0));
 }
 
 #[test]
@@ -1477,7 +1476,7 @@ fn test_drop_scope_if_else_expr_false() {
         f(false)
     "#,
     );
-    assert_eq!(result.as_number_coerce(), Some(20.0));
+    assert_eq!(result.as_test_number(), Some(20.0));
 }
 
 #[test]
@@ -1496,7 +1495,7 @@ fn test_drop_scope_block_with_early_return_inside() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(3.0));
+    assert_eq!(result.as_test_number(), Some(3.0));
 }
 
 #[test]
@@ -1524,7 +1523,7 @@ fn test_drop_scope_many_variables_same_scope() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(55.0));
+    assert_eq!(result.as_test_number(), Some(55.0));
 }
 
 #[test]
@@ -1547,7 +1546,7 @@ fn test_drop_scope_variable_shadowing() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result.as_test_number(), Some(10.0));
 }
 
 #[test]
@@ -1566,7 +1565,7 @@ fn test_drop_scope_block_inside_if() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(1.0));
+    assert_eq!(result.as_test_number(), Some(1.0));
 }
 
 #[test]
@@ -1586,7 +1585,7 @@ fn test_drop_scope_function_call_in_block() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(43.0));
+    assert_eq!(result.as_test_number(), Some(43.0));
 }
 
 #[test]
@@ -1603,7 +1602,7 @@ fn test_drop_scope_mutable_in_block() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result.as_test_number(), Some(10.0));
 }
 
 #[test]
@@ -1622,7 +1621,7 @@ fn test_drop_scope_nested_block_exprs() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(11.0));
+    assert_eq!(result.as_test_number(), Some(11.0));
 }
 
 #[test]
@@ -1639,7 +1638,7 @@ fn test_drop_scope_let_after_block_with_drops() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(3.0));
+    assert_eq!(result.as_test_number(), Some(3.0));
 }
 
 #[test]
@@ -1658,7 +1657,7 @@ fn test_drop_scope_loop_inside_block() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(6.0));
+    assert_eq!(result.as_test_number(), Some(6.0));
 }
 
 #[test]
@@ -1682,7 +1681,7 @@ fn test_drop_scope_if_chain_with_lets() {
         f(3)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(30.0));
+    assert_eq!(result.as_test_number(), Some(30.0));
 }
 
 #[test]
@@ -1703,7 +1702,7 @@ fn test_drop_scope_complex_nesting() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(6.0));
+    assert_eq!(result.as_test_number(), Some(6.0));
 }
 
 // ============================================================================
@@ -1725,7 +1724,7 @@ fn test_drop_custom_type_without_drop_impl() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(3.0));
+    assert_eq!(result.as_test_number(), Some(3.0));
 }
 
 #[test]
@@ -1743,7 +1742,7 @@ fn test_drop_custom_type_multiple_instances() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(5.0));
+    assert_eq!(result.as_test_number(), Some(5.0));
 }
 
 #[test]
@@ -1753,9 +1752,9 @@ fn test_drop_custom_type_in_loop() {
             value: number
         }
         function f() {
-            let mut sum = 0
+            let mut sum = 0.0
             for i in [1, 2, 3] {
-                let w = Wrapper { value: i * 10 }
+                let w = Wrapper { value: i as number * 10.0 }
                 sum = sum + w.value
             }
             return sum
@@ -1763,7 +1762,7 @@ fn test_drop_custom_type_in_loop() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(60.0));
+    assert_eq!(result.as_test_number(), Some(60.0));
 }
 
 #[test]
@@ -1782,7 +1781,7 @@ fn test_drop_custom_type_in_block() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(42.0));
+    assert_eq!(result.as_test_number(), Some(42.0));
 }
 
 #[test]
@@ -1801,7 +1800,7 @@ fn test_drop_custom_type_early_return() {
         f(true)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(99.0));
+    assert_eq!(result.as_test_number(), Some(99.0));
 }
 
 #[test]
@@ -1814,7 +1813,7 @@ fn test_drop_array_of_numbers() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(5.0));
+    assert_eq!(result.as_test_number(), Some(5.0));
 }
 
 #[test]
@@ -1827,7 +1826,7 @@ fn test_drop_nested_arrays() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(3.0));
+    assert_eq!(result.as_test_number(), Some(3.0));
 }
 
 #[test]
@@ -1843,7 +1842,7 @@ fn test_drop_string_in_scope() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(11.0));
+    assert_eq!(result.as_test_number(), Some(11.0));
 }
 
 #[test]
@@ -1864,7 +1863,7 @@ fn test_drop_custom_type_nested_in_function_call() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result.as_test_number(), Some(10.0));
 }
 
 #[test]
@@ -1885,7 +1884,7 @@ fn test_drop_custom_type_conditional_branches() {
         f(true) + f(false)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(30.0));
+    assert_eq!(result.as_test_number(), Some(30.0));
 }
 
 #[test]
@@ -1901,7 +1900,7 @@ fn test_drop_multiple_types_same_scope() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(30.0));
+    assert_eq!(result.as_test_number(), Some(30.0));
 }
 
 #[test]
@@ -1924,7 +1923,7 @@ fn test_drop_custom_type_in_while_loop() {
     "#;
     // 0 + 10 + 20 = 30
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(30.0));
+    assert_eq!(result.as_test_number(), Some(30.0));
 }
 
 #[test]
@@ -1945,7 +1944,7 @@ fn test_drop_custom_type_returned_not_dropped() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(42.0));
+    assert_eq!(result.as_test_number(), Some(42.0));
 }
 
 #[test]
@@ -1956,17 +1955,17 @@ fn test_drop_mixed_types_complex() {
             val: number
         }
         function f() {
-            let n = 42
+            let n = 42.0
             let s = "hello"
             let a = [1, 2, 3]
             let r = Rec { name: "test", val: 99 }
-            return n + a.length() + r.val
+            return n + (a.length() as number) + r.val
         }
         f()
     "#;
     // 42 + 3 + 99 = 144
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(144.0));
+    assert_eq!(result.as_test_number(), Some(144.0));
 }
 
 #[test]
@@ -1986,7 +1985,7 @@ fn test_drop_custom_type_with_string_field() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(7.0));
+    assert_eq!(result.as_test_number(), Some(7.0));
 }
 
 // ============================================================================
@@ -2003,7 +2002,7 @@ fn test_drop_closure_basic_no_capture() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(7.0));
+    assert_eq!(result.as_test_number(), Some(7.0));
 }
 
 #[test]
@@ -2017,7 +2016,7 @@ fn test_drop_closure_captures_value() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(15.0));
+    assert_eq!(result.as_test_number(), Some(15.0));
 }
 
 #[test]
@@ -2035,7 +2034,7 @@ fn test_drop_closure_returned_from_function() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(15.0));
+    assert_eq!(result.as_test_number(), Some(15.0));
 }
 
 #[test]
@@ -2052,7 +2051,7 @@ fn test_drop_closure_in_loop() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(6.0));
+    assert_eq!(result.as_test_number(), Some(6.0));
 }
 
 #[test]
@@ -2069,7 +2068,7 @@ fn test_drop_closure_as_argument() {
         g()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(21.0));
+    assert_eq!(result.as_test_number(), Some(21.0));
 }
 
 #[test]
@@ -2083,7 +2082,7 @@ fn test_drop_higher_order_map() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(5.0));
+    assert_eq!(result.as_test_number(), Some(5.0));
 }
 
 #[test]
@@ -2097,7 +2096,7 @@ fn test_drop_higher_order_filter() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(3.0));
+    assert_eq!(result.as_test_number(), Some(3.0));
 }
 
 #[test]
@@ -2112,7 +2111,7 @@ fn test_drop_closure_multiple_captures() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(35.0));
+    assert_eq!(result.as_test_number(), Some(35.0));
 }
 
 #[test]
@@ -2129,7 +2128,7 @@ fn test_drop_closure_nested_closures() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result.as_test_number(), Some(10.0));
 }
 
 #[test]
@@ -2146,7 +2145,7 @@ fn test_drop_closure_with_block_body() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(11.0));
+    assert_eq!(result.as_test_number(), Some(11.0));
 }
 
 // ============================================================================
@@ -2599,7 +2598,7 @@ fn test_drop_edge_recursive_function() {
         factorial(5)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(120.0));
+    assert_eq!(result.as_test_number(), Some(120.0));
 }
 
 #[test]
@@ -2618,7 +2617,7 @@ fn test_drop_edge_mutual_recursion() {
         is_even(10)
     "#;
     let result = eval(src);
-    assert!(result.is_truthy());
+    assert_eq!(result.as_bool(), Some(true));
 }
 
 #[test]
@@ -2637,7 +2636,7 @@ fn test_drop_edge_function_returning_array() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(3.0));
+    assert_eq!(result.as_test_number(), Some(3.0));
 }
 
 #[test]
@@ -2654,7 +2653,7 @@ fn test_drop_edge_chained_function_calls() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(10.0));
+    assert_eq!(result.as_test_number(), Some(10.0));
 }
 
 #[test]
@@ -2673,7 +2672,7 @@ fn test_drop_edge_scope_after_loop_completion() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(12.0));
+    assert_eq!(result.as_test_number(), Some(12.0));
 }
 
 #[test]
@@ -2696,7 +2695,7 @@ fn test_drop_edge_multiple_loops_sequential() {
     "#;
     // 6 + 60 = 66
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(66.0));
+    assert_eq!(result.as_test_number(), Some(66.0));
 }
 
 #[test]
@@ -2716,7 +2715,7 @@ fn test_drop_edge_let_in_both_if_branches() {
         f(5) + f(-3)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(13.0));
+    assert_eq!(result.as_test_number(), Some(13.0));
 }
 
 #[test]
@@ -2736,7 +2735,7 @@ fn test_drop_edge_block_expr_with_function_call() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(42.0));
+    assert_eq!(result.as_test_number(), Some(42.0));
 }
 
 #[test]
@@ -2762,7 +2761,7 @@ fn test_drop_edge_deeply_nested_return() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(15.0));
+    assert_eq!(result.as_test_number(), Some(15.0));
 }
 
 #[test]
@@ -2790,7 +2789,7 @@ fn test_drop_edge_loop_with_nested_blocks_and_break() {
     // i=1: a=1, b=2, c=3. i=2: a=2, b=4, c=5. i=3: a=3, b=6, c=7. i=4: a=4, b=8, c=9>7 break
     // 3+5+7 = 15
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(15.0));
+    assert_eq!(result.as_test_number(), Some(15.0));
 }
 
 #[test]
@@ -2808,7 +2807,7 @@ fn test_drop_edge_while_true_with_break() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(5.0));
+    assert_eq!(result.as_test_number(), Some(5.0));
 }
 
 #[test]
@@ -2824,7 +2823,7 @@ fn test_drop_edge_fibonacci() {
         fib(10)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(55.0));
+    assert_eq!(result.as_test_number(), Some(55.0));
 }
 
 #[test]
@@ -2845,7 +2844,7 @@ fn test_drop_edge_iterative_fibonacci() {
         fib(10)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(55.0));
+    assert_eq!(result.as_test_number(), Some(55.0));
 }
 
 #[test]
@@ -2858,7 +2857,7 @@ fn test_drop_edge_empty_function() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(42.0));
+    assert_eq!(result.as_test_number(), Some(42.0));
 }
 
 #[test]
@@ -2870,7 +2869,7 @@ fn test_drop_edge_only_params_no_lets() {
         f(1, 2, 3)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(6.0));
+    assert_eq!(result.as_test_number(), Some(6.0));
 }
 
 // BUG: compile_expr_return (expression-form return, e.g. inside block expressions)
@@ -2896,7 +2895,7 @@ fn test_drop_bug_expr_return_should_emit_drops() {
         count
     );
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(100.0));
+    assert_eq!(result.as_test_number(), Some(100.0));
 }
 
 #[test]
@@ -2913,7 +2912,7 @@ fn test_drop_edge_return_value_computed_before_drops() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(60.0));
+    assert_eq!(result.as_test_number(), Some(60.0));
 }
 
 #[test]
@@ -2936,7 +2935,7 @@ fn test_drop_stress_many_scopes() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(55.0));
+    assert_eq!(result.as_test_number(), Some(55.0));
 }
 
 #[test]
@@ -2950,7 +2949,7 @@ fn test_drop_stress_deep_recursion() {
         sum_to(50)
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(1275.0));
+    assert_eq!(result.as_test_number(), Some(1275.0));
 }
 
 #[test]
@@ -2967,7 +2966,7 @@ fn test_drop_edge_assign_does_not_double_drop() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(3.0));
+    assert_eq!(result.as_test_number(), Some(3.0));
 }
 
 #[test]
@@ -2984,7 +2983,7 @@ fn test_drop_edge_for_expr_returns_value() {
         f()
     "#;
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(15.0));
+    assert_eq!(result.as_test_number(), Some(15.0));
 }
 
 #[test]
@@ -3013,5 +3012,5 @@ fn test_drop_edge_complex_mix() {
     // i=4: val=8, inner=108, sum=314
     // i=5: val=10, inner=110, sum=424
     let result = eval(src);
-    assert_eq!(result.as_number_coerce(), Some(424.0));
+    assert_eq!(result.as_test_number(), Some(424.0));
 }

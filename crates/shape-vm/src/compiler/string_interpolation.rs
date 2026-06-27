@@ -8,11 +8,11 @@ use crate::compiler::BytecodeCompiler;
 use shape_ast::ast::InterpolationMode;
 use shape_ast::content_style::{ChartTypeSpec, ColorSpec, ContentFormatSpec, NamedContentColor};
 use shape_ast::error::{Result, ShapeError};
-pub use shape_ast::interpolation::{has_interpolation, has_interpolation_with_mode};
 use shape_ast::interpolation::{
-    parse_interpolation_with_mode, FormatAlignment, FormatColor, InterpolationFormatSpec,
-    InterpolationPart,
+    FormatAlignment, FormatColor, InterpolationFormatSpec, InterpolationPart,
+    parse_interpolation_with_mode,
 };
+pub use shape_ast::interpolation::{has_interpolation, has_interpolation_with_mode};
 
 const FORMAT_SPEC_FIXED: i64 = 1;
 const FORMAT_SPEC_TABLE: i64 = 2;

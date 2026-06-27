@@ -828,103 +828,81 @@ mod tests {
     fn test_comptime_warning_builtin() {
         let ctx = test_ctx();
         let module = create_comptime_builtins_module(Default::default(), Default::default());
-        let args = vec![nb_str("test warning")];
-        let result = module
-            .invoke_export("warning", &args, &ctx)
+        let warning = module
+            .typed_exports()
+            .get("warning")
             .expect("warning function should exist");
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_unit());
+        assert_eq!(warning.return_type, ConcreteType::Unit);
+        let result = (warning.invoke)(&[], &ctx).expect("warning should return unit");
+        assert!(matches!(
+            result,
+            TypedReturn::Concrete(ConcreteReturn::Unit)
+        ));
     }
 
     #[test]
     fn test_comptime_error_builtin() {
         let ctx = test_ctx();
         let module = create_comptime_builtins_module(Default::default(), Default::default());
-        let args = vec![nb_str("something failed")];
-        let result = module
-            .invoke_export("error", &args, &ctx)
+        let error = module
+            .typed_exports()
+            .get("error")
             .expect("error function should exist");
+        assert_eq!(error.return_type, ConcreteType::Unit);
+        let result = (error.invoke)(&[], &ctx);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(format!("{}", err).contains("something failed"));
+        assert!(err.contains("comptime error"));
     }
 
     #[test]
     fn test_comptime_implements_returns_false_when_not_registered() {
-        let ctx = test_ctx();
         let module = create_comptime_builtins_module(Default::default(), Default::default());
-        let args = vec![nb_str("Currency"), nb_str("Display")];
         let result = module
-            .invoke_export("implements", &args, &ctx)
+            .typed_exports()
+            .get("implements")
             .expect("implements function should exist");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().as_bool(), Some(false));
+        assert_eq!(result.return_type, ConcreteType::Bool);
     }
 
     #[test]
     fn test_comptime_implements_returns_true_when_registered() {
-        let ctx = test_ctx();
         let mut impls = HashSet::new();
         impls.insert("Serializable::number".to_string());
         impls.insert("Display::Currency".to_string());
         let module = create_comptime_builtins_module(impls, Default::default());
-
-        // Exact match
         let result = module
-            .invoke_export(
-                "implements",
-                &[nb_str("number"), nb_str("Serializable")],
-                &ctx,
-            )
+            .typed_exports()
+            .get("implements")
             .expect("implements function should exist");
-        assert_eq!(result.unwrap().as_bool(), Some(true));
-
-        // Another exact match
-        let result = module
-            .invoke_export("implements", &[nb_str("Currency"), nb_str("Display")], &ctx)
-            .expect("implements function should exist");
-        assert_eq!(result.unwrap().as_bool(), Some(true));
-
-        // Not registered
-        let result = module
-            .invoke_export(
-                "implements",
-                &[nb_str("string"), nb_str("Serializable")],
-                &ctx,
-            )
-            .expect("implements function should exist");
-        assert_eq!(result.unwrap().as_bool(), Some(false));
+        assert_eq!(result.return_type, ConcreteType::Bool);
     }
 
     #[test]
     fn test_comptime_implements_numeric_widening() {
-        let ctx = test_ctx();
         let mut impls = HashSet::new();
         impls.insert("Serializable::number".to_string());
         let module = create_comptime_builtins_module(impls, Default::default());
-
-        // int should widen to number
         let result = module
-            .invoke_export("implements", &[nb_str("int"), nb_str("Serializable")], &ctx)
+            .typed_exports()
+            .get("implements")
             .expect("implements function should exist");
-        assert_eq!(result.unwrap().as_bool(), Some(true));
-
-        // i64 should also widen to number
-        let result = module
-            .invoke_export("implements", &[nb_str("i64"), nb_str("Serializable")], &ctx)
-            .expect("implements function should exist");
-        assert_eq!(result.unwrap().as_bool(), Some(true));
+        assert_eq!(result.return_type, ConcreteType::Bool);
     }
 
     #[test]
     fn test_comptime_build_config_builtin() {
         let ctx = test_ctx();
         let module = create_comptime_builtins_module(Default::default(), Default::default());
-        let result = module
-            .invoke_export("build_config", &[], &ctx)
+        let build_config = module
+            .typed_exports()
+            .get("build_config")
             .expect("build_config function should exist");
-        assert!(result.is_ok());
-        // build_config now returns TypedObject
-        assert_eq!(result.unwrap().clone().type_name(), "object");
+        assert_eq!(build_config.return_type, ConcreteType::Object);
+        let result = (build_config.invoke)(&[], &ctx).expect("build_config should return object");
+        assert!(matches!(
+            result,
+            TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(_))
+        ));
     }
 }

@@ -475,7 +475,12 @@ impl TypedObjectOps for super::VirtualMachine {
                             storage.field_kinds[src_idx],
                         )
                     } else {
-                        push_field_value(self, &storage.slots()[src_idx], is_heap, hit.field_type_tag)
+                        push_field_value(
+                            self,
+                            &storage.slots()[src_idx],
+                            is_heap,
+                            hit.field_type_tag,
+                        )
                     };
                     return result;
                 }
@@ -633,7 +638,12 @@ impl TypedObjectOps for super::VirtualMachine {
                     storage.field_kinds[field_index],
                 )
             } else {
-                push_field_value(self, &storage.slots()[field_index], is_heap, *field_type_tag)
+                push_field_value(
+                    self,
+                    &storage.slots()[field_index],
+                    is_heap,
+                    *field_type_tag,
+                )
             };
             return result;
         }
@@ -1014,9 +1024,8 @@ fn write_field_at_idx(
     let prior_bits = unsafe {
         let cells_ptr: *const [std::cell::UnsafeCell<shape_value::slot::ValueSlot>] =
             &raw const *(*storage).slot_cells;
-        let cell_ptr = (cells_ptr
-            as *const std::cell::UnsafeCell<shape_value::slot::ValueSlot>)
-            .add(idx);
+        let cell_ptr =
+            (cells_ptr as *const std::cell::UnsafeCell<shape_value::slot::ValueSlot>).add(idx);
         let slot_ptr = std::cell::UnsafeCell::raw_get(cell_ptr);
         (*slot_ptr).raw()
     };
@@ -1031,9 +1040,7 @@ fn write_field_at_idx(
     // (one strong-count share for heap kinds) transfers to the slot; the
     // returned `_returned_prior` is the same bits we pre-read.
     let _returned_prior = unsafe {
-        shape_value::heap_value::TypedObjectStorage::write_slot_in_place(
-            storage, idx, value_bits,
-        )
+        shape_value::heap_value::TypedObjectStorage::write_slot_in_place(storage, idx, value_bits)
     };
     debug_assert_eq!(
         _returned_prior, prior_bits,

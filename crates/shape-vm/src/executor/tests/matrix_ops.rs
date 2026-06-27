@@ -1,7 +1,7 @@
 //! Matrix integration tests for the post-strict-typing host/test boundary.
 
 use crate::bytecode::{Constant, Instruction, KindedConstant, OpCode, Operand};
-use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, V2ElemType};
+use crate::executor::v2_handlers::v2_array_detect::{V2ElemType, as_v2_typed_array};
 use crate::executor::vm_impl::stack::clone_with_kind;
 use crate::executor::{VMConfig, VirtualMachine};
 use crate::type_tracking::NativeKind;

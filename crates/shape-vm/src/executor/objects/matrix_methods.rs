@@ -112,7 +112,7 @@ pub(crate) fn matrix_slot(m: MatrixData) -> KindedSlot {
 
 /// Wrap a flat f64 buffer into the current v2 typed-array carrier.
 pub(crate) fn float_array_slot(data: AlignedVec<f64>) -> Result<KindedSlot, VMError> {
-    use crate::executor::v2_handlers::v2_array_detect::{stamp_elem_type, ELEM_TYPE_F64};
+    use crate::executor::v2_handlers::v2_array_detect::{ELEM_TYPE_F64, stamp_elem_type};
     let arr = TypedArray::<f64>::from_slice(data.as_slice());
     unsafe {
         stamp_elem_type(arr as *mut u8, ELEM_TYPE_F64);
@@ -125,7 +125,7 @@ pub(crate) fn float_array_slot(data: AlignedVec<f64>) -> Result<KindedSlot, VMEr
 
 /// Wrap an i64 vector into the current v2 typed-array carrier.
 fn int_array_slot(data: Vec<i64>) -> Result<KindedSlot, VMError> {
-    use crate::executor::v2_handlers::v2_array_detect::{stamp_elem_type, ELEM_TYPE_I64};
+    use crate::executor::v2_handlers::v2_array_detect::{ELEM_TYPE_I64, stamp_elem_type};
     let arr = TypedArray::<i64>::from_slice(&data);
     unsafe {
         stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);

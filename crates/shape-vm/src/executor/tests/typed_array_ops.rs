@@ -21,7 +21,7 @@
 
 use super::test_utils::{eval, eval_result, eval_typed_i64, eval_with_prelude};
 use crate::executor::v2_handlers::v2_array_detect::{
-    as_v2_typed_array, read_element, V2ElemType, V2TypedArrayView,
+    V2ElemType, V2TypedArrayView, as_v2_typed_array, read_element,
 };
 use shape_value::{HeapKind, KindedSlot, NativeKind};
 

@@ -195,8 +195,8 @@ fn test_method_table_is_self_returning() {
 
 #[test]
 fn test_method_table_takes_closure_with_receiver_param() {
-    use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
     use shape_runtime::type_system::BuiltinTypes;
+    use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
     let mut table = MethodTable::new();
     table.register_user_generic_method(
         "Vec",
@@ -287,8 +287,8 @@ fn test_resolve_option_map() {
 #[test]
 fn test_resolve_table_map_returns_table_u() {
     use shape_ast::ast::TypeAnnotation;
-    use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
     use shape_runtime::type_system::Type;
+    use shape_runtime::type_system::checking::{MethodTable, TypeParamExpr};
 
     let mut table = MethodTable::new();
     table.register_user_generic_method(

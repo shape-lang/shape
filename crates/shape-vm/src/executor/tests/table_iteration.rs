@@ -12,9 +12,9 @@ use super::*;
 use crate::bytecode::{BytecodeProgram, Constant, Instruction, KindedConstant, OpCode, Operand};
 use crate::executor::{VMConfig, VirtualMachine};
 use arrow_schema::{DataType, Field, Schema};
+use shape_value::NativeKind;
 use shape_value::datatable::{DataTable, DataTableBuilder};
 use shape_value::heap_value::{HeapKind, TableViewData};
-use shape_value::NativeKind;
 use std::sync::Arc;
 
 /// Build a sample DataTable with 3 rows: price=[10.0, 20.0, 30.0], name=["a","b","c"]

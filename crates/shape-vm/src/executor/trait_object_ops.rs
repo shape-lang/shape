@@ -37,13 +37,13 @@
 
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
-    executor::{result_option_carrier, VirtualMachine},
+    executor::{VirtualMachine, result_option_carrier},
 };
 use shape_runtime::type_schema::BuiltinSchemaIds;
 use shape_value::{
+    HeapKind, KindedSlot, NativeKind, VMError, ValueSlot,
     heap_value::{TraitObjectStorage, TypedObjectStorage},
     value::{VTable, VTableEntry, WrapTarget},
-    HeapKind, KindedSlot, NativeKind, VMError, ValueSlot,
 };
 use smallvec::SmallVec;
 use std::sync::Arc;

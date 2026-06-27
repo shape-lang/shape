@@ -25,7 +25,7 @@ fn project_concrete_return(
     use shape_value::heap_value::{HashMapData, HashMapKindedRef};
     use shape_value::v2::string_obj::StringObj;
     use shape_value::v2::typed_array::{
-        stamp_elem_type, TypedArray, ELEM_TYPE_F64, ELEM_TYPE_I64, ELEM_TYPE_STRING,
+        ELEM_TYPE_F64, ELEM_TYPE_I64, ELEM_TYPE_STRING, TypedArray, stamp_elem_type,
     };
     use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
     use std::sync::Arc;
@@ -994,11 +994,11 @@ mod stage_k1_tests {
 /// the `#[cfg(test)]` module so it can be a `super::` reference from the
 /// nested test module while still being compiled only under `cfg(test)`.
 #[cfg(test)]
-fn project_concrete_return_for_test_typed_object(
-) -> std::sync::Arc<shape_value::heap_value::HeapValue> {
+fn project_concrete_return_for_test_typed_object()
+-> std::sync::Arc<shape_value::heap_value::HeapValue> {
     use shape_runtime::type_schema::typed_object_from_pairs;
-    use shape_value::heap_value::HeapValue;
     use shape_value::KindedSlot;
+    use shape_value::heap_value::HeapValue;
     // Build a 1-field typed object via the shared builder, then recover its
     // raw TypedObject pointer into an Arc<HeapValue::TypedObject> carrier
     // (the ArrayHeapValue / HashMapStringHeapValue element shape).

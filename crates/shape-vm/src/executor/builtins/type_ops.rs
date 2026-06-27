@@ -28,9 +28,9 @@
 
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::bytecode::{Constant, Instruction, Operand};
-use crate::executor::result_option_carrier;
 use crate::executor::VirtualMachine;
 use crate::executor::printing::ValueFormatter;
+use crate::executor::result_option_carrier;
 use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_value::heap_value::HeapKind;
 use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
