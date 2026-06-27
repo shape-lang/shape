@@ -181,6 +181,135 @@ impl TypeInferenceEngine {
         )
     }
 
+    fn is_hashmap_generic_type(ty: &Type) -> bool {
+        match ty {
+            Type::Generic { base, args } if args.len() == 2 => {
+                matches!(
+                    base.as_ref(),
+                    Type::Concrete(TypeAnnotation::Reference(name)) if name.as_str() == "HashMap"
+                )
+            }
+            Type::Concrete(TypeAnnotation::Generic { name, args }) => {
+                name == "HashMap" && args.len() == 2
+            }
+            _ => false,
+        }
+    }
+
+    fn is_function_like_type(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Function { .. } | Type::Concrete(TypeAnnotation::Function { .. })
+        )
+    }
+
+    fn local_function_value_call_excluded(name: &str) -> bool {
+        matches!(
+            name,
+            // Builtin/special forms keep their dedicated inference paths in
+            // `infer_function_call`; this helper is only for function-valued
+            // local bindings that are already statically known functions.
+            "print"
+                | "range"
+                | "min"
+                | "max"
+                | "len"
+                | "fold"
+                | "HashMap"
+                | "Set"
+                | "Deque"
+                | "PriorityQueue"
+                | "Channel"
+                | "Mutex"
+                | "Atomic"
+                | "Lazy"
+                | "Some"
+                | "Ok"
+                | "Err"
+        )
+    }
+
+    fn function_shape_for_value_call(func_type: Type) -> Option<(Vec<Type>, Type)> {
+        match func_type {
+            Type::Function { params, returns } => Some((params, returns.as_ref().clone())),
+            Type::Concrete(TypeAnnotation::Function {
+                params: concrete_params,
+                returns: concrete_returns,
+            }) => {
+                let params = concrete_params
+                    .iter()
+                    .map(|param| match annotation_as_tyvar(&param.type_annotation) {
+                        Some(var) => Type::Variable(var),
+                        None => Type::Concrete(param.type_annotation.clone()),
+                    })
+                    .collect();
+                let returns = match annotation_as_tyvar(&concrete_returns) {
+                    Some(var) => Type::Variable(var),
+                    None => Type::Concrete(*concrete_returns),
+                };
+                Some((params, returns))
+            }
+            _ => None,
+        }
+    }
+
+    fn source_var_for_value_call_param(ty: &Type) -> Option<TypeVar> {
+        match ty {
+            Type::Variable(var) | Type::Constrained { var, .. } => Some(var.clone()),
+            _ => None,
+        }
+    }
+
+    fn infer_function_value_binding_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+    ) -> Option<TypeResult<Type>> {
+        if self.lookup_callable_origin_for_name(name).is_some()
+            || Self::local_function_value_call_excluded(name)
+        {
+            return None;
+        }
+
+        let scheme = self.env.lookup(name).cloned()?;
+        let func_type = scheme.instantiate(&mut self.type_var_gen);
+        let (params, returns) = Self::function_shape_for_value_call(func_type)?;
+        if !params
+            .iter()
+            .any(|param| Self::source_var_for_value_call_param(param).is_some())
+        {
+            return None;
+        }
+        if params.len() != args.len() {
+            return Some(Err(TypeError::ArityMismatch(params.len(), args.len())));
+        }
+
+        for (arg, param_ty) in args.iter().zip(params.iter()) {
+            let arg_ty = match self.infer_expr(arg) {
+                Ok(ty) => ty,
+                Err(err) => return Some(Err(err)),
+            };
+            let expected = Self::adopt_int_literal_in_context(arg, param_ty)
+                .or_else(|| {
+                    Self::source_var_for_value_call_param(param_ty)
+                        .and_then(|var| self.deferred_closure_numeric_param_body_hint.get(&var))
+                        .and_then(|hint| Self::adopt_int_literal_in_context(arg, hint))
+                })
+                .unwrap_or_else(|| arg_ty.clone());
+            self.constraints.push((expected.clone(), param_ty.clone()));
+
+            if let Some(param_var) = Self::source_var_for_value_call_param(param_ty) {
+                let resolved_expected = self.solver.unifier().apply_substitutions(&expected);
+                if !self.type_contains_unresolved_vars(&resolved_expected)
+                    && self.solver.unifier().lookup(&param_var).is_none()
+                {
+                    self.solver.unifier_mut().bind(param_var, resolved_expected);
+                }
+            }
+        }
+        Some(Ok(self.solver.unifier().apply_substitutions(&returns)))
+    }
+
     /// Whether an expression DIVERGES — i.e. control flow never falls through
     /// past it, so it produces no value of any ordinary type. A diverging
     /// branch is the NEVER/bottom type and must be EXCLUDED from if/else and
@@ -413,7 +542,14 @@ impl TypeInferenceEngine {
             Expr::Identifier(name, span) => {
                 let scheme_clone = self.env.lookup(name).cloned();
                 scheme_clone
-                    .map(|scheme| scheme.instantiate(&mut self.type_var_gen))
+                    .map(|scheme| {
+                        let instantiated = scheme.instantiate(&mut self.type_var_gen);
+                        if Self::is_hashmap_generic_type(&instantiated) {
+                            self.solver.unifier().apply_substitutions(&instantiated)
+                        } else {
+                            instantiated
+                        }
+                    })
                     .or_else(|| {
                         // Fall back to a type reference for known struct type names.
                         // This enables static-path expressions like `Currency.symbol`
@@ -623,7 +759,13 @@ impl TypeInferenceEngine {
 
             Expr::FunctionCall {
                 name, args, span, ..
-            } => self.infer_function_call(name, args, *span),
+            } => {
+                if let Some(result) = self.infer_function_value_binding_call(name, args) {
+                    result
+                } else {
+                    self.infer_function_call(name, args, *span)
+                }
+            }
 
             Expr::QualifiedFunctionCall {
                 namespace,
@@ -1157,6 +1299,27 @@ impl TypeInferenceEngine {
                     }
                 }
 
+                // `split` is a built-in string method with a fixed static
+                // signature: `string.split(string) -> Array<string>`. When the
+                // receiver is an unannotated parameter, generic method lookup
+                // cannot extract the receiver name yet and the fallback
+                // `HasMethod` constraint validates too late to prove the loop
+                // element type of `for word in text.split(" ")`. Stamp the
+                // same method-table signature here: the receiver and separator
+                // are constrained to `string`, and the result carries
+                // `Array<string>` into downstream HashMap key binding.
+                if method == "split"
+                    && args.len() == 1
+                    && matches!(&receiver_type, Type::Variable(_) | Type::Constrained { .. })
+                {
+                    let separator_type = self.infer_expr(&args[0])?;
+                    self.constraints
+                        .push((receiver_type.clone(), BuiltinTypes::string()));
+                    self.constraints
+                        .push((separator_type, BuiltinTypes::string()));
+                    return Ok(BuiltinTypes::array(BuiltinTypes::string()));
+                }
+
                 // Look up expected parameter types BEFORE inferring arguments
                 // so closures get their param types from the method signature.
                 let (type_name, receiver_params) =
@@ -1284,7 +1447,13 @@ impl TypeInferenceEngine {
                         if let Some(arg_ty) = arg_types.get(i) {
                             self.constraints.push((arg_ty.clone(), expected_ty.clone()));
                             let resolved_arg = self.solver.unifier().apply_substitutions(arg_ty);
-                            if !self.type_contains_unresolved_vars(&resolved_arg)
+                            let can_bind_callable_hashmap_value =
+                                matches!(type_name.as_deref(), Some("HashMap"))
+                                    && method == "set"
+                                    && i == 1
+                                    && Self::is_function_like_type(&resolved_arg);
+                            if (!self.type_contains_unresolved_vars(&resolved_arg)
+                                || can_bind_callable_hashmap_value)
                                 && self.solver.unifier().lookup(var).is_none()
                             {
                                 self.solver.unifier_mut().bind(var.clone(), resolved_arg);
@@ -1432,7 +1601,8 @@ impl TypeInferenceEngine {
                             &receiver_params,
                             &method_vars,
                         );
-                        return Ok(self.solver.unifier().apply_substitutions(&result_type));
+                        let result_type = self.solver.unifier().apply_substitutions(&result_type);
+                        return Ok(result_type);
                     }
                 }
 
@@ -1505,7 +1675,8 @@ impl TypeInferenceEngine {
                     // for `HashMap().set("a", 1)`) are reflected in the result
                     // type. Without this the result stays `HashMap<K, V>` and the
                     // let-gen function-return gate rejects it as unresolved.
-                    return Ok(self.solver.unifier().apply_substitutions(&result_type));
+                    let result_type = self.solver.unifier().apply_substitutions(&result_type);
+                    return Ok(result_type);
                 }
 
                 // REAL-MOVE keep-both (v0.3.3, user 2026-06-21): `clone p`

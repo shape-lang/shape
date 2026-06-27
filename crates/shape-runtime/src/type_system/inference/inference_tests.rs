@@ -3246,6 +3246,59 @@ fn u40_is_hashmap_string_int(ty: &Type) -> bool {
     }
 }
 
+fn u40_is_function_int_int_to_int(ty: &Type) -> bool {
+    match ty.canonicalize() {
+        Type::Function { params, returns } if params.len() == 2 => {
+            u40_is_int(&params[0]) && u40_is_int(&params[1]) && u40_is_int(&returns)
+        }
+        Type::Concrete(TypeAnnotation::Function { params, returns }) if params.len() == 2 => {
+            let p0 = Type::Concrete(params[0].type_annotation.clone());
+            let p1 = Type::Concrete(params[1].type_annotation.clone());
+            let ret = Type::Concrete(*returns);
+            u40_is_int(&p0) && u40_is_int(&p1) && u40_is_int(&ret)
+        }
+        _ => false,
+    }
+}
+
+fn u40_is_option_of(ty: &Type, inner: fn(&Type) -> bool) -> bool {
+    match ty.canonicalize() {
+        Type::Generic { base, args } if args.len() == 1 => {
+            matches!(
+                base.as_ref(),
+                Type::Concrete(TypeAnnotation::Reference(n)) if n.as_str() == "Option"
+            ) && inner(&args[0])
+        }
+        Type::Concrete(TypeAnnotation::Generic { name, args })
+            if name == "Option" && args.len() == 1 =>
+        {
+            inner(&Type::Concrete(args[0].clone()))
+        }
+        _ => false,
+    }
+}
+
+fn u40_is_option_int(ty: &Type) -> bool {
+    u40_is_option_of(ty, u40_is_int)
+}
+
+fn u40_is_option_function_int_int_to_int(ty: &Type) -> bool {
+    u40_is_option_of(ty, u40_is_function_int_int_to_int)
+}
+
+fn u40_is_hashmap_string_int_function(ty: &Type) -> bool {
+    match ty {
+        Type::Generic { base, args } if args.len() == 2 => {
+            matches!(
+                base.as_ref(),
+                Type::Concrete(TypeAnnotation::Reference(n)) if n.as_str() == "HashMap"
+            ) && u40_is_string(&args[0])
+                && u40_is_function_int_int_to_int(&args[1])
+        }
+        _ => false,
+    }
+}
+
 fn u40_match_binding_fact(code: &str, name: &str) -> BindingFact {
     use shape_ast::parser::parse_program;
 
@@ -3704,6 +3757,167 @@ fn build_map() {
         u40_is_int(&module_fact.ty),
         "module_count should finalize to int, got {:?}",
         module_fact.ty
+    );
+}
+
+#[test]
+fn hashmap_set_chain_preserves_kv_and_get_returns_option_proof() {
+    let (_engine, types, errors) = u40_infer(
+        r#"
+let counts = HashMap()
+  .set("a", 1)
+  .set("b", 2)
+let a_count = counts.get("a")
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "HashMap set/get proof should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        types.get("counts").is_some_and(u40_is_hashmap_string_int),
+        "counts should infer as HashMap<string, int>, got {:?}",
+        types.get("counts")
+    );
+    assert!(
+        types.get("a_count").is_some_and(u40_is_option_int),
+        "HashMap.get should preserve Option<int>, got {:?}",
+        types.get("a_count")
+    );
+}
+
+#[test]
+fn hashmap_word_counter_match_get_payload_static_kv_proof() {
+    let (_engine, types, errors) = u40_infer(
+        r#"
+fn count_words(text) {
+  let words = text.split(" ")
+  let mut counts = HashMap()
+  for word in words {
+    match counts.get(word) {
+      Some(existing) => { counts = counts.set(word, existing + 1) }
+      None => { counts = counts.set(word, 1) }
+    }
+  }
+  counts
+}
+let wc = count_words("the cat the")
+let the_count = wc.get("the")
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "match-based word-counter HashMap proof should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        types.get("wc").is_some_and(u40_is_hashmap_string_int),
+        "wc should infer as HashMap<string, int>, got {:?}",
+        types.get("wc")
+    );
+    assert!(
+        types.get("the_count").is_some_and(u40_is_option_int),
+        "HashMap.get after split loop should preserve Option<int>, got {:?}",
+        types.get("the_count")
+    );
+}
+
+#[test]
+fn hashmap_callable_values_match_get_payload_value_call_proof() {
+    let (_engine, types, errors) = u40_infer(
+        r#"
+let ops = HashMap()
+  .set("add", |a: int, b: int| { a + b })
+  .set("mul", |a: int, b: int| { a * b })
+let add_fn = ops.get("add")
+let total = match ops.get("add") {
+  Some(f) => f(3, 4)
+  None => 0
+}
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "callable-valued HashMap match proof should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        types
+            .get("ops")
+            .is_some_and(u40_is_hashmap_string_int_function),
+        "ops should infer as HashMap<string, (int, int) -> int>, got {:?}",
+        types.get("ops")
+    );
+    assert!(
+        types
+            .get("add_fn")
+            .is_some_and(u40_is_option_function_int_int_to_int),
+        "HashMap.get should preserve Option<(int, int) -> int>, got {:?}",
+        types.get("add_fn")
+    );
+    assert!(
+        types.get("total").is_some_and(u40_is_int),
+        "calling matched HashMap function payload should infer int, got {:?}",
+        types.get("total")
+    );
+}
+
+#[test]
+fn hashmap_get_option_function_is_not_directly_callable() {
+    let (_engine, _types, errors) = u40_infer(
+        r#"
+let ops = HashMap()
+  .set("add", |a: int, b: int| { a + b })
+let add_fn = ops.get("add")
+let total = add_fn(3, 4)
+"#,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|err| format!("{err:?}").contains("'add_fn' is not callable")),
+        "HashMap.get should preserve Option<Function> and reject direct calls, got {:?}",
+        errors
+    );
+}
+
+#[test]
+fn hashmap_explicit_annotation_loop_aggregation_static_kv_proof() {
+    let (_engine, types, errors) = u40_infer(
+        r#"
+type ScoreEntry { name: string, score: int }
+let mut scores: HashMap<string, int> = HashMap()
+let entries = [
+  ScoreEntry { name: "Alice", score: 90 },
+  ScoreEntry { name: "Bob", score: 85 },
+  ScoreEntry { name: "Alice", score: 95 },
+]
+for entry in entries {
+  let name = entry.name
+  let score = entry.score
+  match scores.get(name) {
+    Some(prev) => { let p: int = prev; scores = scores.set(name, p + score) }
+    None => { scores = scores.set(name, score) }
+  }
+}
+let alice = scores.get("Alice")
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "annotated HashMap loop aggregation should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        types.get("scores").is_some_and(u40_is_hashmap_string_int),
+        "scores should remain HashMap<string, int>, got {:?}",
+        types.get("scores")
+    );
+    assert!(
+        types.get("alice").is_some_and(u40_is_option_int),
+        "scores.get should preserve Option<int> after loop aggregation, got {:?}",
+        types.get("alice")
     );
 }
 
