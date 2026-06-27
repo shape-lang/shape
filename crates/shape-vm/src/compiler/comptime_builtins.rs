@@ -13,6 +13,7 @@
 //!   `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md`)
 
 use shape_ast::ast::TypeAnnotation;
+use shape_runtime::marshal::{register_typed_fn_1, register_typed_fn_2};
 use shape_runtime::module_exports::ModuleExports;
 use shape_runtime::type_schema::typed_object_from_pairs;
 use shape_runtime::type_system::BuiltinTypes;
@@ -506,19 +507,16 @@ pub(crate) fn create_comptime_builtins_module(
     );
 
     // Internal comptime directive: emit an extend statement payload (JSON AST).
-    register_typed_function(
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "__emit_extend",
         "Internal: emit extend directive payload",
-        vec![],
+        "payload",
+        "string",
         ConcreteType::Unit,
-        |nb_args, _ctx| {
-            let json = nb_args
-                .first()
-                .and_then(|nb| nb.as_str())
-                .ok_or_else(|| "__emit_extend expects a JSON string payload".to_string())?;
-            let extend: shape_ast::ast::ExtendStatement =
-                serde_json::from_str(json).map_err(|e| format!("invalid extend payload: {}", e))?;
+        |json, _ctx| {
+            let extend: shape_ast::ast::ExtendStatement = serde_json::from_str(json.as_str())
+                .map_err(|e| format!("invalid extend payload: {}", e))?;
             push_comptime_directive(ComptimeDirective::Extend(extend))?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
@@ -539,26 +537,16 @@ pub(crate) fn create_comptime_builtins_module(
 
     // Internal comptime directive: set a parameter type by parameter name.
     // __emit_set_param_type(param_name: string, type_payload: string)
-    register_typed_function(
+    register_typed_fn_2::<_, Arc<String>, Arc<String>>(
         &mut module,
         "__emit_set_param_type",
         "Internal: set a parameter type by name",
-        vec![],
+        [("param_name", "string"), ("type_payload", "string")],
         ConcreteType::Unit,
-        |nb_args, _ctx| {
-            let param_name = nb_args
-                .first()
-                .and_then(|nb| nb.as_str())
-                .ok_or_else(|| {
-                    "__emit_set_param_type expects param name as first string arg".to_string()
-                })?
-                .to_string();
-            let payload = nb_args.get(1).and_then(|nb| nb.as_str()).ok_or_else(|| {
-                "__emit_set_param_type expects type annotation as second string arg".to_string()
-            })?;
-            let type_annotation = parse_type_annotation_payload(payload)?;
+        |param_name, payload, _ctx| {
+            let type_annotation = parse_type_annotation_payload(payload.as_str())?;
             push_comptime_directive(ComptimeDirective::SetParamType {
-                param_name,
+                param_name: param_name.as_str().to_string(),
                 type_annotation,
             })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
@@ -591,17 +579,15 @@ pub(crate) fn create_comptime_builtins_module(
 
     // Internal comptime directive: set function return type.
     // __emit_set_return_type(type_payload: string)
-    register_typed_function(
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "__emit_set_return_type",
         "Internal: set the function return type",
-        vec![],
+        "type_payload",
+        "string",
         ConcreteType::Unit,
-        |nb_args, _ctx| {
-            let payload = nb_args.first().and_then(|nb| nb.as_str()).ok_or_else(|| {
-                "__emit_set_return_type expects a type annotation string".to_string()
-            })?;
-            let type_annotation = parse_type_annotation_payload(payload)?;
+        |payload, _ctx| {
+            let type_annotation = parse_type_annotation_payload(payload.as_str())?;
             push_comptime_directive(ComptimeDirective::SetReturnType { type_annotation })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
@@ -609,17 +595,15 @@ pub(crate) fn create_comptime_builtins_module(
 
     // Internal comptime directive: replace function body from serialized AST payload.
     // __emit_replace_body(body_payload: string)
-    register_typed_function(
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "__emit_replace_body",
         "Internal: replace function body from AST payload",
-        vec![],
+        "body_payload",
+        "string",
         ConcreteType::Unit,
-        |nb_args, _ctx| {
-            let payload = nb_args.first().and_then(|nb| nb.as_str()).ok_or_else(|| {
-                "__emit_replace_body expects a function body source string".to_string()
-            })?;
-            let body = parse_function_body_payload(payload)?;
+        |payload, _ctx| {
+            let body = parse_function_body_payload(payload.as_str())?;
             push_comptime_directive(ComptimeDirective::ReplaceBody { body })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
@@ -627,17 +611,15 @@ pub(crate) fn create_comptime_builtins_module(
 
     // Internal comptime directive: replace module items from source payload.
     // __emit_replace_module(module_payload: string)
-    register_typed_function(
+    register_typed_fn_1::<_, Arc<String>>(
         &mut module,
         "__emit_replace_module",
         "Internal: replace module items from source payload",
-        vec![],
+        "module_payload",
+        "string",
         ConcreteType::Unit,
-        |nb_args, _ctx| {
-            let payload = nb_args.first().and_then(|nb| nb.as_str()).ok_or_else(|| {
-                "__emit_replace_module expects a module body source string".to_string()
-            })?;
-            let items = parse_module_items_payload(payload)?;
+        |payload, _ctx| {
+            let items = parse_module_items_payload(payload.as_str())?;
             push_comptime_directive(ComptimeDirective::ReplaceModule { items })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
