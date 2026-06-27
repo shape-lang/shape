@@ -996,9 +996,51 @@ impl TypeInferenceEngine {
         program: &shape_ast::ast::Program,
         types: &mut HashMap<String, Type>,
     ) {
+        self.publish_rewalk_function_schemes(program, types);
         for item in &program.items {
             self.rewalk_resolved_function_bodies_for_item(item, types);
         }
+    }
+
+    fn publish_rewalk_function_schemes(
+        &mut self,
+        program: &shape_ast::ast::Program,
+        types: &HashMap<String, Type>,
+    ) {
+        for item in &program.items {
+            match item {
+                Item::Function(func, _) => self.publish_rewalk_function_scheme(func, types),
+                Item::Export(export, _) => {
+                    if let shape_ast::ast::ExportItem::Function(func) = &export.item {
+                        self.publish_rewalk_function_scheme(func, types);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn publish_rewalk_function_scheme(
+        &mut self,
+        func: &FunctionDef,
+        types: &HashMap<String, Type>,
+    ) {
+        let Some(ty) = types.get(&func.name).cloned() else {
+            return;
+        };
+        let Type::Function { params, .. } = &ty else {
+            return;
+        };
+
+        if params
+            .iter()
+            .any(|param| self.type_contains_unresolved_vars(param))
+        {
+            return;
+        }
+
+        let scheme = self.make_function_scheme(func, ty);
+        self.env.define(&func.name, scheme);
     }
 
     fn rewalk_resolved_function_bodies_for_item(
@@ -1082,10 +1124,10 @@ impl TypeInferenceEngine {
             returns
         };
 
-        types.insert(
-            func.name.clone(),
-            BuiltinTypes::function(resolved_params, new_return),
-        );
+        let new_type = BuiltinTypes::function(resolved_params, new_return);
+        let scheme = self.make_function_scheme(func, new_type.clone());
+        self.env.define(&func.name, scheme);
+        types.insert(func.name.clone(), new_type);
     }
 
     fn bind_function_param_pattern(&mut self, pattern: &DestructurePattern, scrutinee: &Type) {

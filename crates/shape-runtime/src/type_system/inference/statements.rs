@@ -551,13 +551,12 @@ impl TypeInferenceEngine {
         let explicit_returns = self.pop_return_scope();
         let implicit_returns = self.pop_implicit_return_scope();
         let body_type = body_result?;
+        let implicit_candidates: Vec<Type> = implicit_returns
+            .into_iter()
+            .filter(|ty| !self.is_void_type(ty))
+            .collect();
 
         if explicit_returns.is_empty() {
-            let implicit_candidates: Vec<Type> = implicit_returns
-                .into_iter()
-                .filter(|ty| !self.is_void_type(ty))
-                .collect();
-
             if implicit_candidates.is_empty() {
                 Ok(body_type)
             } else {
@@ -567,32 +566,40 @@ impl TypeInferenceEngine {
                     self.combine_return_types(&implicit_candidates)
                 }
             }
-        } else if self.all_types_equal(&explicit_returns) {
-            Ok(explicit_returns[0].clone())
-        } else if let Some(base_var) = explicit_returns.iter().find_map(|ty| match ty {
-            Type::Variable(var) => Some(var.clone()),
-            _ => None,
-        }) {
-            // Preserve precision for mixed returns like:
-            //   return c        // c: type variable resolved from call-sites
-            //   return "hi"     // concrete
-            // by materializing the union after call-site widening.
-            let additional_members = explicit_returns
-                .iter()
-                .filter(|ty| !matches!(ty, Type::Variable(var) if *var == base_var))
-                .cloned()
-                .collect::<Vec<_>>();
-            if additional_members.is_empty() {
-                Ok(Type::Variable(base_var))
-            } else {
-                self.record_pending_return_union(base_var.clone(), additional_members);
-                Ok(Type::Variable(base_var))
-            }
         } else {
-            if allow_unresolved_generic_args {
-                self.combine_return_types_allow_unresolved(&explicit_returns)
+            // A body may return through both explicit statements and a fallthrough
+            // tail expression, e.g. `if bad { return Err(e) }; Ok(value)`.
+            // Both paths are callable returns and must share one carrier.
+            let mut return_candidates = explicit_returns;
+            return_candidates.extend(implicit_candidates);
+
+            if self.all_types_equal(&return_candidates) {
+                Ok(return_candidates[0].clone())
+            } else if let Some(base_var) = return_candidates.iter().find_map(|ty| match ty {
+                Type::Variable(var) => Some(var.clone()),
+                _ => None,
+            }) {
+                // Preserve precision for mixed returns like:
+                //   return c        // c: type variable resolved from call-sites
+                //   return "hi"     // concrete
+                // by materializing the union after call-site widening.
+                let additional_members = return_candidates
+                    .iter()
+                    .filter(|ty| !matches!(ty, Type::Variable(var) if *var == base_var))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if additional_members.is_empty() {
+                    Ok(Type::Variable(base_var))
+                } else {
+                    self.record_pending_return_union(base_var.clone(), additional_members);
+                    Ok(Type::Variable(base_var))
+                }
             } else {
-                self.combine_return_types(&explicit_returns)
+                if allow_unresolved_generic_args {
+                    self.combine_return_types_allow_unresolved(&return_candidates)
+                } else {
+                    self.combine_return_types(&return_candidates)
+                }
             }
         }
     }

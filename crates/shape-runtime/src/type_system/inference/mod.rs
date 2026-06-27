@@ -1774,6 +1774,13 @@ impl TypeInferenceEngine {
         }
     }
 
+    fn is_any_error_type(ty: &Type) -> bool {
+        matches!(
+            ty.canonicalize(),
+            Type::Concrete(ann) if ann.as_type_name_str() == Some("AnyError")
+        )
+    }
+
     fn merge_homogeneous_generic_types(
         &mut self,
         types: &[Type],
@@ -1803,7 +1810,15 @@ impl TypeInferenceEngine {
         }
 
         let mut merged_args = Vec::with_capacity(arity);
-        for arg_candidates in all_args {
+        let result_error_arg = |idx: usize, base: &Type| {
+            idx == 1
+                && matches!(
+                    base,
+                    Type::Concrete(ann) if ann.as_type_name_str() == Some("Result")
+                )
+        };
+
+        for (arg_idx, arg_candidates) in all_args.into_iter().enumerate() {
             let mut concrete_candidates = Vec::new();
             let mut unresolved_candidates = Vec::new();
             for arg in arg_candidates {
@@ -1827,6 +1842,17 @@ impl TypeInferenceEngine {
                     .any(|existing| self.types_equal(existing, &arg))
                 {
                     concrete_candidates.push(arg);
+                }
+            }
+
+            if result_error_arg(arg_idx, &base) && concrete_candidates.len() > 1 {
+                let non_any_error_candidates = concrete_candidates
+                    .iter()
+                    .filter(|ty| !Self::is_any_error_type(ty))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !non_any_error_candidates.is_empty() {
+                    concrete_candidates = non_any_error_candidates;
                 }
             }
 

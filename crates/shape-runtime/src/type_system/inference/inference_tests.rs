@@ -3017,6 +3017,15 @@ where
             }
             Expr::Return(Some(v), _) => walk_expr(v, pred, out),
             Expr::Reference { expr, .. } => walk_expr(expr, pred, out),
+            Expr::Match(match_expr, _) => {
+                walk_expr(&match_expr.scrutinee, pred, out);
+                for arm in &match_expr.arms {
+                    if let Some(guard) = &arm.guard {
+                        walk_expr(guard, pred, out);
+                    }
+                    walk_expr(&arm.body, pred, out);
+                }
+            }
             _ => {}
         }
     }
@@ -3972,6 +3981,89 @@ let out = match res {
         facts.binding_type(e_span).is_some_and(u40_is_string),
         "Err(e) should bind e as string, got {:?}",
         facts.binding_type(e_span)
+    );
+}
+
+#[test]
+fn w28_result_match_payload_tracks_callsite_proven_callee_return() {
+    use shape_ast::ast::Expr;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn safe_divide(a, b) {
+  if b == 0 { return Err("division by zero") }
+  Ok(a / b)
+}
+fn process_division(a, b) {
+  match safe_divide(a, b) {
+    Ok(v) => {
+      if v > 10 { "large: " + v } else { "small: " + v }
+    },
+    Err(e) => "error: " + e
+  }
+}
+let out = process_division(100, 5)
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let v_span = u40_find_binding_span(&program, "v").expect("v binding span");
+    let e_span = u40_find_binding_span(&program, "e").expect("e binding span");
+    let out_span = u40_find_binding_span(&program, "out").expect("out binding span");
+    let scrutinee_span = u40_find_expr_span(
+        &program,
+        &|expr| matches!(expr, Expr::FunctionCall { name, .. } if name == "safe_divide"),
+    )
+    .expect("safe_divide call span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "callsite-proven Result match should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.binding_type(v_span).is_some_and(u40_is_int),
+        "Ok(v) should bind v as int after callee return proof, got {:?}",
+        facts.binding_type(v_span)
+    );
+    assert!(
+        facts.binding_type(e_span).is_some_and(u40_is_string),
+        "Err(e) should bind e as string after callee return proof, got {:?}",
+        facts.binding_type(e_span)
+    );
+    let scrutinee_ty = facts
+        .expression_type(scrutinee_span)
+        .expect("safe_divide scrutinee call type");
+    match scrutinee_ty.canonicalize() {
+        Type::Generic { base, args } if args.len() >= 2 => {
+            assert!(
+                matches!(
+                    base.as_ref(),
+                    Type::Concrete(TypeAnnotation::Reference(name)) if name == "Result"
+                ),
+                "safe_divide scrutinee should be Result<_, _>, got {:?}",
+                scrutinee_ty
+            );
+            assert!(
+                u40_is_int(&args[0]),
+                "safe_divide Ok payload should be int, got {:?}",
+                args[0]
+            );
+            assert!(
+                u40_is_string(&args[1]),
+                "safe_divide Err payload should be string, got {:?}",
+                args[1]
+            );
+        }
+        other => panic!(
+            "safe_divide scrutinee should finalize as Result<int,string>, got {:?}",
+            other
+        ),
+    }
+    assert!(
+        facts.binding_type(out_span).is_some_and(u40_is_string),
+        "process_division call should resolve to string, got {:?}",
+        facts.binding_type(out_span)
     );
 }
 
