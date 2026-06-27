@@ -1251,6 +1251,7 @@ impl TypeInferenceEngine {
         }
 
         let inferred_result_type = Self::apply_substitutions_to_type(&returns, &substitutions);
+        self.record_function_callsite_return(name, inferred_result_type.clone());
 
         // Numeric-conversion §4 literal adoption (call-argument context): a bare
         // integer literal argument adopts the corresponding parameter's concrete
