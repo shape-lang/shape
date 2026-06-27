@@ -21,6 +21,21 @@ use std::collections::HashMap;
 
 use super::super::{BuiltinNameResolution, BytecodeCompiler, ModuleBuiltinFunction};
 
+fn type_annotation_from_concrete_type(ct: &ConcreteType) -> Option<shape_ast::ast::TypeAnnotation> {
+    crate::compiler::expressions::closures::concrete_type_to_type_annotation(ct)
+}
+
+fn concrete_type_cache_key(ct: &ConcreteType) -> String {
+    type_annotation_from_concrete_type(ct)
+        .map(|ann| {
+            ann.to_type_string()
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                .collect::<String>()
+        })
+        .unwrap_or_else(|| format!("{:?}", ct).replace(|ch: char| !ch.is_ascii_alphanumeric(), "_"))
+}
+
 /// Strict-typing-sweep (Cluster 3): map a `NativeKind` (the type-tracker's
 /// per-slot storage hint) to an AST `TypeAnnotation`. Used by HOF dispatch
 /// to type closure user params from a bare `[1, 2, 3]`-literal receiver
@@ -3897,7 +3912,15 @@ impl BytecodeCompiler {
             // compiled body) or for generic functions where the probe
             // succeeded (so monomorphization here will hit the cache).
             let call_func_idx = self
-                .try_monomorphize_method_call(&func_name, receiver, args, call_site_span)
+                .try_specialize_concrete_user_method_call(
+                    &func_name,
+                    receiver,
+                    args,
+                    call_site_span,
+                )?
+                .or_else(|| {
+                    self.try_monomorphize_method_call(&func_name, receiver, args, call_site_span)
+                })
                 .unwrap_or(func_idx);
 
             let arg_count = self.program.add_constant(Constant::Int(call_arity as i64));
@@ -3918,6 +3941,10 @@ impl BytecodeCompiler {
                 blob.record_call(&call_func_name);
             }
             self.last_expr_schema = None;
+            if self.stamp_last_expr_from_function_return_annotation(&call_func_name) {
+                self.clear_last_expr_reference_result();
+                return Ok(());
+            }
             // Propagate return type for UFCS method calls.
             // U4-4: the extend-method receiver-numeric-type propagation (which
             // wrote the deleted `last_expr_numeric_type` register for chaining)
@@ -4036,7 +4063,20 @@ impl BytecodeCompiler {
                 // for non-generic functions or generic functions where the
                 // probe succeeded (cache hit).
                 let call_func_idx = self
-                    .try_monomorphize_method_call(&func_name, receiver, args, call_site_span)
+                    .try_specialize_concrete_user_method_call(
+                        &func_name,
+                        receiver,
+                        args,
+                        call_site_span,
+                    )?
+                    .or_else(|| {
+                        self.try_monomorphize_method_call(
+                            &func_name,
+                            receiver,
+                            args,
+                            call_site_span,
+                        )
+                    })
                     .unwrap_or(func_idx);
 
                 let arg_count = self.program.add_constant(Constant::Int(call_arity as i64));
@@ -4056,6 +4096,10 @@ impl BytecodeCompiler {
                     blob.record_call(&call_func_name);
                 }
                 self.last_expr_schema = None;
+                if self.stamp_last_expr_from_function_return_annotation(&call_func_name) {
+                    self.clear_last_expr_reference_result();
+                    return Ok(());
+                }
                 if self.is_type_preserving_table_method(method) {
                     self.last_expr_type_info = receiver_type_info;
                 } else {
@@ -4893,6 +4937,154 @@ impl BytecodeCompiler {
     /// and the monomorphization cache. When the receiver has a concretely known
     /// type (e.g. `Array<int>`), the function's type parameters are resolved
     /// and a specialized version is compiled/cached.
+    fn try_specialize_concrete_user_method_call(
+        &mut self,
+        func_name: &str,
+        receiver: &Expr,
+        args: &[Expr],
+        call_site_span: Span,
+    ) -> Result<Option<usize>> {
+        if !(func_name.contains('.') || func_name.contains("::")) {
+            return Ok(None);
+        }
+
+        let Some(original_def) = self.function_defs.get(func_name).cloned() else {
+            return Ok(None);
+        };
+        if original_def
+            .type_params
+            .as_ref()
+            .is_some_and(|tps| !tps.is_empty())
+        {
+            return Ok(None);
+        }
+        if original_def.params.len() != args.len() + 1 {
+            return Ok(None);
+        }
+
+        let Some(receiver_ct) = concrete_type_for_expr(self, receiver) else {
+            return Ok(None);
+        };
+        let mut call_arg_cts = Vec::with_capacity(args.len() + 1);
+        call_arg_cts.push(receiver_ct);
+        for arg in args {
+            let Some(ct) = concrete_type_for_expr(self, arg) else {
+                return Ok(None);
+            };
+            call_arg_cts.push(ct);
+        }
+
+        let mut specialized_def = original_def.clone();
+        let mut changed = false;
+        for (param, ct) in specialized_def.params.iter_mut().zip(call_arg_cts.iter()) {
+            if param.type_annotation.is_none() {
+                let Some(ann) = type_annotation_from_concrete_type(ct) else {
+                    return Ok(None);
+                };
+                param.type_annotation = Some(ann);
+                changed = true;
+            }
+        }
+
+        let return_ct = if specialized_def.return_type.is_none() {
+            self.concrete_user_method_body_return_type(&specialized_def, &call_arg_cts)
+        } else {
+            None
+        };
+        if let Some(ct) = return_ct.as_ref() {
+            if let Some(ann) = type_annotation_from_concrete_type(ct) {
+                specialized_def.return_type = Some(ann);
+                changed = true;
+            }
+        }
+
+        if !changed {
+            return Ok(None);
+        }
+
+        let mut name_parts = vec![format!(
+            "__w24_method_{}_{}_{}",
+            func_name
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                .collect::<String>(),
+            call_site_span.start,
+            call_site_span.end
+        )];
+        name_parts.extend(call_arg_cts.iter().map(concrete_type_cache_key));
+        specialized_def.name = name_parts.join("_");
+        specialized_def.type_params = Some(Vec::new());
+
+        if let Some(idx) = self.find_function(&specialized_def.name) {
+            return Ok(Some(idx));
+        }
+
+        self.register_function(&specialized_def)?;
+        let Some(specialized_idx) = self.find_function(&specialized_def.name) else {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "failed to register method call specialization '{}'",
+                    specialized_def.name
+                ),
+                location: Some(self.span_to_source_location(call_site_span)),
+            });
+        };
+
+        let saved_closure_function_ids = std::mem::take(&mut self.closure_function_ids);
+        let saved_local_concrete_facts =
+            std::mem::take(&mut self.current_function_local_concrete_facts);
+        let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
+        let compile_result = self.compile_function(&specialized_def);
+        self.closure_function_ids = saved_closure_function_ids;
+        self.current_function_local_concrete_facts = saved_local_concrete_facts;
+        self.local_binding_spans = saved_local_binding_spans;
+        compile_result?;
+
+        if return_ct.is_some() {
+            self.program
+                .monomorphized_method_call_sites
+                .insert((call_site_span, self.current_function), specialized_idx);
+        }
+
+        Ok(Some(specialized_idx))
+    }
+
+    fn concrete_user_method_body_return_type(
+        &self,
+        func_def: &shape_ast::ast::FunctionDef,
+        call_arg_cts: &[ConcreteType],
+    ) -> Option<ConcreteType> {
+        let body_expr = match func_def.body.as_slice() {
+            [Statement::Expression(expr, _)] => expr,
+            [Statement::Return(Some(expr), _)] => expr,
+            _ => return None,
+        };
+
+        match body_expr {
+            Expr::Identifier(name, _) if name == "self" => call_arg_cts.first().cloned(),
+            _ => concrete_type_for_expr(self, body_expr),
+        }
+    }
+
+    fn stamp_last_expr_from_function_return_annotation(&mut self, func_name: &str) -> bool {
+        let Some(return_type) = self
+            .function_defs
+            .get(func_name)
+            .and_then(|def| def.return_type.clone())
+        else {
+            return false;
+        };
+        let Some(type_info) = self.type_info_from_annotation(&return_type) else {
+            return false;
+        };
+        self.last_expr_type_info = Some(type_info);
+        self.last_expr_schema = self
+            .last_expr_type_info
+            .as_ref()
+            .and_then(Self::value_schema_from_type_info);
+        true
+    }
+
     fn try_monomorphize_method_call(
         &mut self,
         func_name: &str,
