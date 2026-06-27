@@ -50,6 +50,7 @@ use rust_decimal::prelude::ToPrimitive;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
 use shape_value::{KindedSlot, NativeKind, VMError};
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 // ── Receiver / argument helpers ─────────────────────────────────────────────
@@ -448,6 +449,43 @@ pub fn number_clamp_v2(
     }
 }
 
+pub fn number_cmp_v2(
+    _vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    _ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "number.cmp: missing comparison argument".to_string(),
+        ));
+    }
+
+    let ordering = match (args[0].kind, args[1].kind) {
+        (NativeKind::Int64, NativeKind::Int64) => {
+            let lhs = args[0].as_i64().ok_or_else(|| {
+                VMError::RuntimeError("number.cmp: int receiver decode".to_string())
+            })?;
+            let rhs = args[1]
+                .as_i64()
+                .ok_or_else(|| VMError::RuntimeError("number.cmp: int arg decode".to_string()))?;
+            lhs.cmp(&rhs)
+        }
+        _ => {
+            let lhs = recv_number_as_f64(args, "cmp")?;
+            let rhs = arg_number_as_f64(args, 1, "cmp")?;
+            lhs.partial_cmp(&rhs)
+                .ok_or_else(|| VMError::RuntimeError("number.cmp: NaN is unordered".to_string()))?
+        }
+    };
+
+    let result = match ordering {
+        Ordering::Less => -1,
+        Ordering::Equal => 0,
+        Ordering::Greater => 1,
+    };
+    Ok(KindedSlot::from_int(result))
+}
+
 // ---------------------------------------------------------------------------
 // bool methods
 // ---------------------------------------------------------------------------
@@ -736,6 +774,67 @@ mod tests {
         ];
         let r = number_clamp_v2(&mut v, &args, None).unwrap();
         assert_eq!(r.as_f64(), Some(10.0));
+    }
+
+    #[test]
+    fn cmp_int_returns_ordering_code() {
+        let mut v = vm();
+        let less = number_cmp_v2(
+            &mut v,
+            &[KindedSlot::from_int(3), KindedSlot::from_int(9)],
+            None,
+        )
+        .unwrap();
+        assert_eq!(less.kind, NativeKind::Int64);
+        assert_eq!(less.as_i64(), Some(-1));
+
+        let equal = number_cmp_v2(
+            &mut v,
+            &[KindedSlot::from_int(9), KindedSlot::from_int(9)],
+            None,
+        )
+        .unwrap();
+        assert_eq!(equal.as_i64(), Some(0));
+
+        let greater = number_cmp_v2(
+            &mut v,
+            &[KindedSlot::from_int(9), KindedSlot::from_int(3)],
+            None,
+        )
+        .unwrap();
+        assert_eq!(greater.as_i64(), Some(1));
+    }
+
+    #[test]
+    fn cmp_mixed_numeric_returns_ordering_code() {
+        let mut v = vm();
+        let r = number_cmp_v2(
+            &mut v,
+            &[KindedSlot::from_int(3), KindedSlot::from_number(3.5)],
+            None,
+        )
+        .unwrap();
+        assert_eq!(r.as_i64(), Some(-1));
+    }
+
+    #[test]
+    fn cmp_nan_is_unordered_error() {
+        let mut v = vm();
+        let err = number_cmp_v2(
+            &mut v,
+            &[
+                KindedSlot::from_number(f64::NAN),
+                KindedSlot::from_number(1.0),
+            ],
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, VMError::RuntimeError(_)));
+    }
+
+    #[test]
+    fn number_registry_exposes_cmp() {
+        assert!(crate::executor::objects::method_registry::NUMBER_METHODS.contains_key("cmp"));
     }
 
     #[test]

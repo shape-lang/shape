@@ -886,6 +886,7 @@ pub static NUMBER_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "toString" => crate::executor::objects::number_methods::number_to_string_v2,
     "to_string" => crate::executor::objects::number_methods::number_to_string_v2,
     "clamp" => crate::executor::objects::number_methods::number_clamp_v2,
+    "cmp" => crate::executor::objects::number_methods::number_cmp_v2,
 };
 
 /// PHF registry for String methods (v2 native handlers)
