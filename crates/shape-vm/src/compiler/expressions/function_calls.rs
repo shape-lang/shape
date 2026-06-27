@@ -36,6 +36,88 @@ fn concrete_type_cache_key(ct: &ConcreteType) -> String {
         .unwrap_or_else(|| format!("{:?}", ct).replace(|ch: char| !ch.is_ascii_alphanumeric(), "_"))
 }
 
+#[cfg(test)]
+mod w27_implicit_generic_tests {
+    use crate::bytecode::OpCode;
+    use crate::test_utils::compile_with_prelude;
+
+    #[test]
+    fn complex_math_library_calls_concrete_implicit_specializations() {
+        let source = r#"
+            fn abs(x) { if x < 0 { 0 - x } else { x } }
+            fn max(a, b) { if a > b { a } else { b } }
+            fn min(a, b) { if a < b { a } else { b } }
+            fn clamp(x, lo, hi) { max(lo, min(x, hi)) }
+
+            print(abs(-7))
+            print(max(3, 9))
+            print(min(3, 9))
+            print(clamp(15, 0, 10))
+            print(clamp(-5, 0, 10))
+            print(clamp(5, 0, 10))
+        "#;
+
+        let bytecode = compile_with_prelude(source).expect("compile should succeed");
+        let ca = bytecode
+            .content_addressed
+            .as_ref()
+            .expect("graph/prelude compile should produce content-addressed blobs");
+
+        let blob_named = |needle: &str| {
+            ca.function_store
+                .values()
+                .find(|blob| blob.name.contains(needle))
+                .unwrap_or_else(|| {
+                    let mut names: Vec<_> = ca
+                        .function_store
+                        .values()
+                        .map(|blob| blob.name.as_str())
+                        .collect();
+                    names.sort();
+                    panic!("missing blob containing {needle}; blobs: {names:?}")
+                })
+        };
+
+        let max_blob = blob_named("__w27_implicit_max");
+        assert!(
+            max_blob
+                .instructions
+                .iter()
+                .any(|instruction| instruction.opcode == OpCode::GtInt),
+            "max specialization should use a real typed comparison, got {:?}",
+            max_blob.instructions
+        );
+
+        let min_blob = blob_named("__w27_implicit_min");
+        assert!(
+            min_blob
+                .instructions
+                .iter()
+                .any(|instruction| instruction.opcode == OpCode::LtInt),
+            "min specialization should use a real typed comparison, got {:?}",
+            min_blob.instructions
+        );
+
+        let clamp_blob = ca
+            .function_store
+            .values()
+            .find(|blob| blob.name == "clamp")
+            .expect("missing source clamp blob");
+        assert!(
+            clamp_blob
+                .callee_names
+                .iter()
+                .any(|name| name.contains("__w27_implicit_max"))
+                && clamp_blob
+                    .callee_names
+                    .iter()
+                    .any(|name| name.contains("__w27_implicit_min")),
+            "clamp specialization should call concrete max/min specializations, got {:?}",
+            clamp_blob.callee_names
+        );
+    }
+}
+
 /// Strict-typing-sweep (Cluster 3): map a `NativeKind` (the type-tracker's
 /// per-slot storage hint) to an AST `TypeAnnotation`. Used by HOF dispatch
 /// to type closure user params from a bare `[1, 2, 3]`-literal receiver
@@ -1542,6 +1624,11 @@ impl BytecodeCompiler {
             {
                 call_func_idx = specialized_idx;
                 call_name = self.program.functions[call_func_idx].name.clone();
+            } else if let Some(specialized_idx) =
+                self.try_specialize_implicit_generic_free_function_call(&call_name, args, span)?
+            {
+                call_func_idx = specialized_idx;
+                call_name = self.program.functions[call_func_idx].name.clone();
             } else if self
                 .function_defs
                 .get(&call_name)
@@ -1562,6 +1649,19 @@ impl BytecodeCompiler {
                 return Err(ShapeError::SemanticError {
                     message: format!(
                         "cannot infer type argument(s) for generic function '{}' from the call-site arguments — annotate the arguments or call with values whose types are statically known",
+                        call_name
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            } else if !self.deferring_uninstantiated_template_body
+                && self.function_defs.get(&call_name).is_some_and(|def| {
+                    self.is_uninstantiated_implicit_generic(def)
+                        && self.implicit_generic_body_requires_concrete_emission(def)
+                })
+            {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "cannot infer concrete parameter type(s) for implicit-generic function '{}' from this call site",
                         call_name
                     ),
                     location: Some(self.span_to_source_location(span)),
@@ -5000,6 +5100,706 @@ impl BytecodeCompiler {
                 Ok(Some(specialized_idx as usize))
             }
             Err(_) => Ok(None),
+        }
+    }
+
+    fn try_specialize_implicit_generic_free_function_call(
+        &mut self,
+        func_name: &str,
+        args: &[Expr],
+        call_site_span: Span,
+    ) -> Result<Option<usize>> {
+        let Some(original_def) = self.function_defs.get(func_name).cloned() else {
+            return Ok(None);
+        };
+        if original_def
+            .type_params
+            .as_ref()
+            .is_some_and(|tps| !tps.is_empty())
+            || !self.is_uninstantiated_implicit_generic(&original_def)
+            || original_def.params.len() != args.len()
+        {
+            return Ok(None);
+        }
+
+        let mut arg_cts = Vec::with_capacity(args.len());
+        for arg in args {
+            let Some(ct) = self.concrete_type_for_implicit_specialization_arg(arg)? else {
+                return Ok(None);
+            };
+            arg_cts.push(ct);
+        }
+
+        let mut specialized_def = original_def.clone();
+        let mut changed = false;
+        for (param, ct) in specialized_def.params.iter_mut().zip(arg_cts.iter()) {
+            if param.type_annotation.is_some()
+                || param.is_reference
+                || param.is_mut_reference
+                || param.is_const
+                || param.simple_name().is_none()
+            {
+                continue;
+            }
+            let Some(ann) = type_annotation_from_concrete_type(ct) else {
+                return Ok(None);
+            };
+            param.type_annotation = Some(ann);
+            changed = true;
+        }
+
+        if let Some(return_ct) =
+            self.implicit_specialization_return_concrete_type(&original_def, &arg_cts, 0)
+            && specialized_def.return_type.is_none()
+            && let Some(ann) = type_annotation_from_concrete_type(&return_ct)
+        {
+            specialized_def.return_type = Some(ann);
+            changed = true;
+        }
+
+        if !changed {
+            return Ok(None);
+        }
+
+        let mut name_parts = vec![format!(
+            "__w27_implicit_{}",
+            func_name
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                .collect::<String>()
+        )];
+        name_parts.extend(arg_cts.iter().map(concrete_type_cache_key));
+        specialized_def.name = name_parts.join("_");
+        specialized_def.type_params = Some(Vec::new());
+
+        if let Some(idx) = self.find_function(&specialized_def.name) {
+            return Ok(Some(idx));
+        }
+
+        self.register_function(&specialized_def)?;
+        let Some(specialized_idx) = self.find_function(&specialized_def.name) else {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "failed to register implicit-generic specialization '{}'",
+                    specialized_def.name
+                ),
+                location: Some(self.span_to_source_location(call_site_span)),
+            });
+        };
+
+        let saved_closure_function_ids = std::mem::take(&mut self.closure_function_ids);
+        let saved_local_concrete_facts =
+            std::mem::take(&mut self.current_function_local_concrete_facts);
+        let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
+        let compile_result = self.compile_function(&specialized_def);
+        self.closure_function_ids = saved_closure_function_ids;
+        self.current_function_local_concrete_facts = saved_local_concrete_facts;
+        self.local_binding_spans = saved_local_binding_spans;
+        compile_result?;
+
+        Ok(Some(specialized_idx))
+    }
+
+    fn implicit_generic_body_requires_concrete_emission(
+        &self,
+        func_def: &shape_ast::ast::FunctionDef,
+    ) -> bool {
+        let mut visiting = BTreeSet::new();
+        self.implicit_generic_body_requires_concrete_emission_by_name(&func_def.name, &mut visiting)
+    }
+
+    fn implicit_generic_body_requires_concrete_emission_by_name(
+        &self,
+        func_name: &str,
+        visiting: &mut BTreeSet<String>,
+    ) -> bool {
+        if !visiting.insert(func_name.to_string()) {
+            return false;
+        }
+        let Some(func_def) = self.function_defs.get(func_name) else {
+            return false;
+        };
+        let param_names: BTreeSet<String> = func_def
+            .params
+            .iter()
+            .filter_map(|param| param.pattern.as_identifier().map(str::to_string))
+            .collect();
+        func_def.body.iter().any(|stmt| {
+            self.implicit_generic_stmt_requires_concrete_emission(stmt, &param_names, visiting)
+        })
+    }
+
+    fn implicit_generic_stmt_requires_concrete_emission(
+        &self,
+        stmt: &Statement,
+        param_names: &BTreeSet<String>,
+        visiting: &mut BTreeSet<String>,
+    ) -> bool {
+        match stmt {
+            Statement::Return(Some(expr), _)
+            | Statement::Expression(expr, _)
+            | Statement::SetParamValue {
+                expression: expr, ..
+            }
+            | Statement::SetReturnExpr {
+                expression: expr, ..
+            }
+            | Statement::ReplaceBodyExpr {
+                expression: expr, ..
+            }
+            | Statement::ReplaceModuleExpr {
+                expression: expr, ..
+            } => self.implicit_generic_expr_requires_concrete_emission(expr, param_names, visiting),
+            Statement::VariableDecl(decl, _) => decl.value.as_ref().is_some_and(|expr| {
+                self.implicit_generic_expr_requires_concrete_emission(expr, param_names, visiting)
+            }),
+            Statement::Assignment(assign, _) => self
+                .implicit_generic_expr_requires_concrete_emission(
+                    &assign.value,
+                    param_names,
+                    visiting,
+                ),
+            Statement::If(if_stmt, _) => {
+                self.implicit_generic_expr_requires_concrete_emission(
+                    &if_stmt.condition,
+                    param_names,
+                    visiting,
+                ) || if_stmt.then_body.iter().any(|stmt| {
+                    self.implicit_generic_stmt_requires_concrete_emission(
+                        stmt,
+                        param_names,
+                        visiting,
+                    )
+                }) || if_stmt.else_body.as_ref().is_some_and(|else_body| {
+                    else_body.iter().any(|stmt| {
+                        self.implicit_generic_stmt_requires_concrete_emission(
+                            stmt,
+                            param_names,
+                            visiting,
+                        )
+                    })
+                })
+            }
+            Statement::While(while_loop, _) => {
+                self.implicit_generic_expr_requires_concrete_emission(
+                    &while_loop.condition,
+                    param_names,
+                    visiting,
+                ) || while_loop.body.iter().any(|stmt| {
+                    self.implicit_generic_stmt_requires_concrete_emission(
+                        stmt,
+                        param_names,
+                        visiting,
+                    )
+                })
+            }
+            Statement::For(for_loop, _) => {
+                let init_requires = match &for_loop.init {
+                    shape_ast::ast::ForInit::ForIn { iter, .. } => self
+                        .implicit_generic_expr_requires_concrete_emission(
+                            iter,
+                            param_names,
+                            visiting,
+                        ),
+                    shape_ast::ast::ForInit::ForC {
+                        init,
+                        condition,
+                        update,
+                    } => {
+                        self.implicit_generic_stmt_requires_concrete_emission(
+                            init,
+                            param_names,
+                            visiting,
+                        ) || self.implicit_generic_expr_requires_concrete_emission(
+                            condition,
+                            param_names,
+                            visiting,
+                        ) || self.implicit_generic_expr_requires_concrete_emission(
+                            update,
+                            param_names,
+                            visiting,
+                        )
+                    }
+                };
+                init_requires
+                    || for_loop.body.iter().any(|stmt| {
+                        self.implicit_generic_stmt_requires_concrete_emission(
+                            stmt,
+                            param_names,
+                            visiting,
+                        )
+                    })
+            }
+            Statement::ReplaceBody { body, .. } => body.iter().any(|stmt| {
+                self.implicit_generic_stmt_requires_concrete_emission(stmt, param_names, visiting)
+            }),
+            _ => false,
+        }
+    }
+
+    fn implicit_generic_expr_requires_concrete_emission(
+        &self,
+        expr: &Expr,
+        param_names: &BTreeSet<String>,
+        visiting: &mut BTreeSet<String>,
+    ) -> bool {
+        match expr {
+            Expr::BinaryOp { left, right, .. } => {
+                Self::expr_mentions_any_name(left, param_names)
+                    || Self::expr_mentions_any_name(right, param_names)
+            }
+            Expr::FunctionCall { name, args, .. } => {
+                let args_require = args.iter().any(|arg| {
+                    self.implicit_generic_expr_requires_concrete_emission(
+                        arg,
+                        param_names,
+                        visiting,
+                    )
+                });
+                if args_require {
+                    return true;
+                }
+                self.function_defs.get(name).is_some_and(|def| {
+                    self.is_uninstantiated_implicit_generic(def)
+                        && self.implicit_generic_body_requires_concrete_emission_by_name(
+                            name, visiting,
+                        )
+                })
+            }
+            Expr::QualifiedFunctionCall { args, .. } => args.iter().any(|arg| {
+                self.implicit_generic_expr_requires_concrete_emission(arg, param_names, visiting)
+            }),
+            Expr::MethodCall { receiver, args, .. } => {
+                self.implicit_generic_expr_requires_concrete_emission(
+                    receiver,
+                    param_names,
+                    visiting,
+                ) || args.iter().any(|arg| {
+                    self.implicit_generic_expr_requires_concrete_emission(
+                        arg,
+                        param_names,
+                        visiting,
+                    )
+                })
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                self.implicit_generic_expr_requires_concrete_emission(
+                    condition,
+                    param_names,
+                    visiting,
+                ) || self.implicit_generic_expr_requires_concrete_emission(
+                    then_expr,
+                    param_names,
+                    visiting,
+                ) || else_expr.as_ref().is_some_and(|expr| {
+                    self.implicit_generic_expr_requires_concrete_emission(
+                        expr,
+                        param_names,
+                        visiting,
+                    )
+                })
+            }
+            Expr::If(if_expr, _) => {
+                self.implicit_generic_expr_requires_concrete_emission(
+                    &if_expr.condition,
+                    param_names,
+                    visiting,
+                ) || self.implicit_generic_expr_requires_concrete_emission(
+                    &if_expr.then_branch,
+                    param_names,
+                    visiting,
+                ) || if_expr.else_branch.as_ref().is_some_and(|expr| {
+                    self.implicit_generic_expr_requires_concrete_emission(
+                        expr,
+                        param_names,
+                        visiting,
+                    )
+                })
+            }
+            Expr::Block(block, _) => block.items.iter().any(|item| match item {
+                shape_ast::ast::BlockItem::VariableDecl(decl) => {
+                    decl.value.as_ref().is_some_and(|expr| {
+                        self.implicit_generic_expr_requires_concrete_emission(
+                            expr,
+                            param_names,
+                            visiting,
+                        )
+                    })
+                }
+                shape_ast::ast::BlockItem::Assignment(assign) => self
+                    .implicit_generic_expr_requires_concrete_emission(
+                        &assign.value,
+                        param_names,
+                        visiting,
+                    ),
+                shape_ast::ast::BlockItem::Statement(stmt) => self
+                    .implicit_generic_stmt_requires_concrete_emission(stmt, param_names, visiting),
+                shape_ast::ast::BlockItem::Expression(expr) => self
+                    .implicit_generic_expr_requires_concrete_emission(expr, param_names, visiting),
+            }),
+            Expr::Array(elements, _) => elements.iter().any(|expr| {
+                self.implicit_generic_expr_requires_concrete_emission(expr, param_names, visiting)
+            }),
+            Expr::Object(entries, _) => entries.iter().any(|entry| match entry {
+                shape_ast::ast::ObjectEntry::Field { value, .. }
+                | shape_ast::ast::ObjectEntry::Spread(value) => self
+                    .implicit_generic_expr_requires_concrete_emission(value, param_names, visiting),
+            }),
+            Expr::UnaryOp { operand, .. }
+            | Expr::TryOperator(operand, _)
+            | Expr::Await(operand, _)
+            | Expr::AsyncScope(operand, _)
+            | Expr::Spread(operand, _) => self.implicit_generic_expr_requires_concrete_emission(
+                operand,
+                param_names,
+                visiting,
+            ),
+            Expr::Return(Some(expr), _) | Expr::Break(Some(expr), _) => {
+                self.implicit_generic_expr_requires_concrete_emission(expr, param_names, visiting)
+            }
+            Expr::Let(let_expr, _) => {
+                let_expr.value.as_ref().is_some_and(|expr| {
+                    self.implicit_generic_expr_requires_concrete_emission(
+                        expr,
+                        param_names,
+                        visiting,
+                    )
+                }) || self.implicit_generic_expr_requires_concrete_emission(
+                    &let_expr.body,
+                    param_names,
+                    visiting,
+                )
+            }
+            Expr::Assign(assign_expr, _) => self.implicit_generic_expr_requires_concrete_emission(
+                &assign_expr.value,
+                param_names,
+                visiting,
+            ),
+            Expr::FunctionExpr { .. } => false,
+            _ => false,
+        }
+    }
+
+    fn expr_mentions_any_name(expr: &Expr, names: &BTreeSet<String>) -> bool {
+        match expr {
+            Expr::Identifier(name, _) => names.contains(name),
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                Self::expr_mentions_any_name(left, names)
+                    || Self::expr_mentions_any_name(right, names)
+            }
+            Expr::UnaryOp { operand, .. }
+            | Expr::TryOperator(operand, _)
+            | Expr::Await(operand, _)
+            | Expr::AsyncScope(operand, _)
+            | Expr::Spread(operand, _) => Self::expr_mentions_any_name(operand, names),
+            Expr::FunctionCall { args, .. } | Expr::QualifiedFunctionCall { args, .. } => args
+                .iter()
+                .any(|arg| Self::expr_mentions_any_name(arg, names)),
+            Expr::MethodCall { receiver, args, .. } => {
+                Self::expr_mentions_any_name(receiver, names)
+                    || args
+                        .iter()
+                        .any(|arg| Self::expr_mentions_any_name(arg, names))
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                Self::expr_mentions_any_name(condition, names)
+                    || Self::expr_mentions_any_name(then_expr, names)
+                    || else_expr
+                        .as_ref()
+                        .is_some_and(|expr| Self::expr_mentions_any_name(expr, names))
+            }
+            Expr::If(if_expr, _) => {
+                Self::expr_mentions_any_name(&if_expr.condition, names)
+                    || Self::expr_mentions_any_name(&if_expr.then_branch, names)
+                    || if_expr
+                        .else_branch
+                        .as_ref()
+                        .is_some_and(|expr| Self::expr_mentions_any_name(expr, names))
+            }
+            Expr::Block(block, _) => block.items.iter().any(|item| match item {
+                shape_ast::ast::BlockItem::VariableDecl(decl) => decl
+                    .value
+                    .as_ref()
+                    .is_some_and(|expr| Self::expr_mentions_any_name(expr, names)),
+                shape_ast::ast::BlockItem::Assignment(assign) => {
+                    Self::expr_mentions_any_name(&assign.value, names)
+                }
+                shape_ast::ast::BlockItem::Statement(stmt) => {
+                    Self::stmt_mentions_any_name(stmt, names)
+                }
+                shape_ast::ast::BlockItem::Expression(expr) => {
+                    Self::expr_mentions_any_name(expr, names)
+                }
+            }),
+            Expr::Return(Some(expr), _) | Expr::Break(Some(expr), _) => {
+                Self::expr_mentions_any_name(expr, names)
+            }
+            Expr::Array(elements, _) => elements
+                .iter()
+                .any(|expr| Self::expr_mentions_any_name(expr, names)),
+            Expr::Object(entries, _) => entries.iter().any(|entry| match entry {
+                shape_ast::ast::ObjectEntry::Field { value, .. }
+                | shape_ast::ast::ObjectEntry::Spread(value) => {
+                    Self::expr_mentions_any_name(value, names)
+                }
+            }),
+            Expr::Let(let_expr, _) => {
+                let_expr
+                    .value
+                    .as_ref()
+                    .is_some_and(|expr| Self::expr_mentions_any_name(expr, names))
+                    || Self::expr_mentions_any_name(&let_expr.body, names)
+            }
+            Expr::Assign(assign_expr, _) => Self::expr_mentions_any_name(&assign_expr.value, names),
+            _ => false,
+        }
+    }
+
+    fn stmt_mentions_any_name(stmt: &Statement, names: &BTreeSet<String>) -> bool {
+        match stmt {
+            Statement::Return(Some(expr), _) | Statement::Expression(expr, _) => {
+                Self::expr_mentions_any_name(expr, names)
+            }
+            Statement::VariableDecl(decl, _) => decl
+                .value
+                .as_ref()
+                .is_some_and(|expr| Self::expr_mentions_any_name(expr, names)),
+            Statement::Assignment(assign, _) => Self::expr_mentions_any_name(&assign.value, names),
+            Statement::If(if_stmt, _) => {
+                Self::expr_mentions_any_name(&if_stmt.condition, names)
+                    || if_stmt
+                        .then_body
+                        .iter()
+                        .any(|stmt| Self::stmt_mentions_any_name(stmt, names))
+                    || if_stmt.else_body.as_ref().is_some_and(|else_body| {
+                        else_body
+                            .iter()
+                            .any(|stmt| Self::stmt_mentions_any_name(stmt, names))
+                    })
+            }
+            Statement::While(while_loop, _) => {
+                Self::expr_mentions_any_name(&while_loop.condition, names)
+                    || while_loop
+                        .body
+                        .iter()
+                        .any(|stmt| Self::stmt_mentions_any_name(stmt, names))
+            }
+            Statement::For(for_loop, _) => {
+                let init_mentions = match &for_loop.init {
+                    shape_ast::ast::ForInit::ForIn { iter, .. } => {
+                        Self::expr_mentions_any_name(iter, names)
+                    }
+                    shape_ast::ast::ForInit::ForC {
+                        init,
+                        condition,
+                        update,
+                    } => {
+                        Self::stmt_mentions_any_name(init, names)
+                            || Self::expr_mentions_any_name(condition, names)
+                            || Self::expr_mentions_any_name(update, names)
+                    }
+                };
+                init_mentions
+                    || for_loop
+                        .body
+                        .iter()
+                        .any(|stmt| Self::stmt_mentions_any_name(stmt, names))
+            }
+            _ => false,
+        }
+    }
+
+    fn concrete_type_for_implicit_specialization_arg(
+        &mut self,
+        expr: &Expr,
+    ) -> Result<Option<ConcreteType>> {
+        if let Some(ct) = concrete_type_for_expr(self, expr) {
+            return Ok(Some(ct));
+        }
+        let Expr::FunctionCall { name, args, .. } = expr else {
+            return Ok(None);
+        };
+        let Some(func_def) = self.function_defs.get(name).cloned() else {
+            return Ok(None);
+        };
+        if !self.is_uninstantiated_implicit_generic(&func_def) {
+            return Ok(None);
+        }
+        let mut arg_cts = Vec::with_capacity(args.len());
+        for arg in args {
+            let Some(ct) = self.concrete_type_for_implicit_specialization_arg(arg)? else {
+                return Ok(None);
+            };
+            arg_cts.push(ct);
+        }
+        Ok(self.implicit_specialization_return_concrete_type(&func_def, &arg_cts, 0))
+    }
+
+    fn implicit_specialization_return_concrete_type(
+        &self,
+        func_def: &shape_ast::ast::FunctionDef,
+        arg_cts: &[ConcreteType],
+        depth: usize,
+    ) -> Option<ConcreteType> {
+        if depth > 8 || func_def.params.len() != arg_cts.len() {
+            return None;
+        }
+        if let Some(return_type) = func_def.return_type.as_ref() {
+            return crate::compiler::v2_map_emission::concrete_type_from_annotation(return_type);
+        }
+
+        let mut param_cts: HashMap<&str, ConcreteType> = HashMap::new();
+        for (param, ct) in func_def.params.iter().zip(arg_cts.iter()) {
+            let name = param.pattern.as_identifier()?;
+            if let Some(annotation) = param.type_annotation.as_ref() {
+                let declared =
+                    crate::compiler::v2_map_emission::concrete_type_from_annotation(annotation)?;
+                if declared != *ct {
+                    return None;
+                }
+            }
+            param_cts.insert(name, ct.clone());
+        }
+
+        self.implicit_specialization_stmt_tail_type(&func_def.body, &param_cts, depth)
+    }
+
+    fn implicit_specialization_stmt_tail_type(
+        &self,
+        body: &[Statement],
+        param_cts: &HashMap<&str, ConcreteType>,
+        depth: usize,
+    ) -> Option<ConcreteType> {
+        match body.last()? {
+            Statement::Return(Some(expr), _) | Statement::Expression(expr, _) => {
+                self.implicit_specialization_expr_type(expr, param_cts, depth)
+            }
+            Statement::If(if_stmt, _) => {
+                let then_ct = self.implicit_specialization_stmt_tail_type(
+                    &if_stmt.then_body,
+                    param_cts,
+                    depth,
+                )?;
+                let else_body = if_stmt.else_body.as_ref()?;
+                let else_ct =
+                    self.implicit_specialization_stmt_tail_type(else_body, param_cts, depth)?;
+                if then_ct == else_ct {
+                    Some(then_ct)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn implicit_specialization_expr_type(
+        &self,
+        expr: &Expr,
+        param_cts: &HashMap<&str, ConcreteType>,
+        depth: usize,
+    ) -> Option<ConcreteType> {
+        match expr {
+            Expr::Identifier(name, _) => param_cts.get(name.as_str()).cloned(),
+            Expr::Literal(_, _) => concrete_type_for_expr(self, expr),
+            Expr::If(if_expr, _) => {
+                let then_ct =
+                    self.implicit_specialization_expr_type(&if_expr.then_branch, param_cts, depth)?;
+                let else_ct = if_expr.else_branch.as_ref().and_then(|else_expr| {
+                    self.implicit_specialization_expr_type(else_expr, param_cts, depth)
+                })?;
+                if then_ct == else_ct {
+                    Some(then_ct)
+                } else {
+                    None
+                }
+            }
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                let then_ct =
+                    self.implicit_specialization_expr_type(then_expr, param_cts, depth)?;
+                let else_ct = else_expr.as_ref().and_then(|else_expr| {
+                    self.implicit_specialization_expr_type(else_expr, param_cts, depth)
+                })?;
+                if then_ct == else_ct {
+                    Some(then_ct)
+                } else {
+                    None
+                }
+            }
+            Expr::Block(block, _) => match block.items.last()? {
+                shape_ast::ast::BlockItem::Expression(expr) => {
+                    self.implicit_specialization_expr_type(expr, param_cts, depth)
+                }
+                shape_ast::ast::BlockItem::Statement(stmt) => self
+                    .implicit_specialization_stmt_tail_type(
+                        std::slice::from_ref(stmt),
+                        param_cts,
+                        depth,
+                    ),
+                shape_ast::ast::BlockItem::VariableDecl(decl) => {
+                    decl.value.as_ref().and_then(|expr| {
+                        self.implicit_specialization_expr_type(expr, param_cts, depth)
+                    })
+                }
+                shape_ast::ast::BlockItem::Assignment(assign) => {
+                    self.implicit_specialization_expr_type(&assign.value, param_cts, depth)
+                }
+            },
+            Expr::Return(Some(expr), _) => {
+                self.implicit_specialization_expr_type(expr, param_cts, depth)
+            }
+            Expr::FunctionCall { name, args, .. } => {
+                let func_def = self.function_defs.get(name)?;
+                let mut arg_cts = Vec::with_capacity(args.len());
+                for arg in args {
+                    arg_cts.push(
+                        self.implicit_specialization_expr_type(arg, param_cts, depth)
+                            .or_else(|| concrete_type_for_expr(self, arg))?,
+                    );
+                }
+                self.implicit_specialization_return_concrete_type(func_def, &arg_cts, depth + 1)
+            }
+            Expr::BinaryOp {
+                left, op, right, ..
+            } => {
+                use shape_ast::ast::BinaryOp;
+                match op {
+                    BinaryOp::Greater
+                    | BinaryOp::Less
+                    | BinaryOp::GreaterEq
+                    | BinaryOp::LessEq
+                    | BinaryOp::Equal
+                    | BinaryOp::NotEqual
+                    | BinaryOp::And
+                    | BinaryOp::Or => Some(ConcreteType::Bool),
+                    _ => {
+                        let left_ct =
+                            self.implicit_specialization_expr_type(left, param_cts, depth)?;
+                        let right_ct =
+                            self.implicit_specialization_expr_type(right, param_cts, depth)?;
+                        if left_ct == right_ct {
+                            Some(left_ct)
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+            _ => concrete_type_for_expr(self, expr),
         }
     }
 
