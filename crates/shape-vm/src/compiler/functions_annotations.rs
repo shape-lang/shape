@@ -21,6 +21,103 @@ impl BytecodeCompiler {
         ));
     }
 
+    fn annotation_type_is_unknown(annotation: &TypeAnnotation) -> bool {
+        match annotation {
+            TypeAnnotation::Basic(name) => name == "unknown",
+            TypeAnnotation::Reference(path) => path.as_str() == "unknown",
+            TypeAnnotation::Array(inner) | TypeAnnotation::Borrow { inner, .. } => {
+                Self::annotation_type_is_unknown(inner)
+            }
+            TypeAnnotation::Tuple(items)
+            | TypeAnnotation::Union(items)
+            | TypeAnnotation::Intersection(items) => {
+                items.iter().any(Self::annotation_type_is_unknown)
+            }
+            TypeAnnotation::Object(fields) => fields
+                .iter()
+                .any(|field| Self::annotation_type_is_unknown(&field.type_annotation)),
+            TypeAnnotation::Function { params, returns } => {
+                params
+                    .iter()
+                    .any(|param| Self::annotation_type_is_unknown(&param.type_annotation))
+                    || Self::annotation_type_is_unknown(returns)
+            }
+            TypeAnnotation::Generic { name, args } => {
+                name.as_str() == "unknown" || args.iter().any(Self::annotation_type_is_unknown)
+            }
+            TypeAnnotation::Dyn(paths) => paths.iter().any(|path| path.as_str() == "unknown"),
+            _ => false,
+        }
+    }
+
+    fn annotation_param_type_annotation(
+        &self,
+        func_def: &FunctionDef,
+        param_idx: usize,
+        param: &shape_ast::ast::FunctionParameter,
+    ) -> Option<TypeAnnotation> {
+        if let Some(annotation) = param.type_annotation.as_ref() {
+            return (!Self::annotation_type_is_unknown(annotation)).then(|| annotation.clone());
+        }
+
+        let shape_runtime::type_system::Type::Function { params, .. } =
+            self.inference_facts.function_signature(&func_def.name)?
+        else {
+            return None;
+        };
+        let annotation = params.get(param_idx)?.to_annotation()?;
+        (!Self::annotation_type_is_unknown(&annotation)).then_some(annotation)
+    }
+
+    fn annotation_arg_array_element_annotation(
+        &self,
+        func_def: &FunctionDef,
+    ) -> Result<TypeAnnotation> {
+        if func_def.params.is_empty() {
+            return Ok(TypeAnnotation::Basic("int".to_string()));
+        }
+
+        let mut resolved: Option<TypeAnnotation> = None;
+        for (idx, param) in func_def.params.iter().enumerate() {
+            let annotation = self
+                .annotation_param_type_annotation(func_def, idx, param)
+                .ok_or_else(|| ShapeError::SemanticError {
+                    message: format!(
+                        "cannot build annotation args for function '{}': parameter #{} has no \
+                         statically proven typed-array element carrier. Add a concrete parameter \
+                         annotation or avoid runtime before/after annotations for this function.",
+                        func_def.name,
+                        idx + 1
+                    ),
+                    location: Some(self.span_to_source_location(param.span())),
+                })?;
+
+            match resolved.as_ref() {
+                Some(prev) if prev != &annotation => {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "cannot build annotation args for function '{}': parameters have \
+                             heterogeneous element types. Runtime annotation args require a \
+                             single statically proven element type.",
+                            func_def.name
+                        ),
+                        location: Some(self.span_to_source_location(param.span())),
+                    });
+                }
+                Some(_) => {}
+                None => resolved = Some(annotation),
+            }
+        }
+
+        resolved.ok_or_else(|| ShapeError::RuntimeError {
+            message: format!(
+                "Internal error: annotation arg element type for '{}' was not resolved",
+                func_def.name
+            ),
+            location: None,
+        })
+    }
+
     fn annotation_arg_array_kind(
         &self,
         func_def: &FunctionDef,
@@ -51,7 +148,7 @@ impl BytecodeCompiler {
                     other => should_use_typed_array_from_slot_kind(other),
                 })
                 .or_else(|| {
-                    let ann = param.type_annotation.as_ref()?;
+                    let ann = self.annotation_param_type_annotation(func_def, idx, param)?;
                     let array_ann = TypeAnnotation::Array(Box::new(ann.clone()));
                     self.resolve_typed_array_kind_from_annotation(&array_ann)
                 })
@@ -1674,6 +1771,248 @@ impl BytecodeCompiler {
         self.compile_annotation_wrapper(func_def, func_idx, impl_idx, &compiled_ann, &ann_arg_exprs)
     }
 
+    fn annotation_ctx_type_annotation() -> TypeAnnotation {
+        TypeAnnotation::Object(vec![
+            shape_ast::ast::ObjectTypeField {
+                name: "state".to_string(),
+                optional: false,
+                type_annotation: TypeAnnotation::Basic("unknown".to_string()),
+                annotations: vec![],
+            },
+            shape_ast::ast::ObjectTypeField {
+                name: "event_log".to_string(),
+                optional: false,
+                type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                    "unknown".to_string(),
+                ))),
+                annotations: vec![],
+            },
+        ])
+    }
+
+    fn annotation_result_type_annotation(&self, func_def: &FunctionDef) -> TypeAnnotation {
+        if let Some(annotation) = func_def.return_type.as_ref() {
+            if !Self::annotation_type_is_unknown(annotation) {
+                return annotation.clone();
+            }
+        }
+
+        if let Some(shape_runtime::type_system::Type::Function { returns, .. }) =
+            self.inference_facts.function_signature(&func_def.name)
+            && let Some(annotation) = returns.to_annotation()
+            && !Self::annotation_type_is_unknown(&annotation)
+        {
+            return annotation;
+        }
+
+        TypeAnnotation::Void
+    }
+
+    fn annotation_literal_type_annotation(literal: &Literal) -> Option<TypeAnnotation> {
+        let name = match literal {
+            Literal::Int(_) => "int",
+            Literal::UInt(_) => "u64",
+            Literal::TypedInt(_, width) => match width {
+                shape_ast::IntWidth::I8 => "i8",
+                shape_ast::IntWidth::U8 => "u8",
+                shape_ast::IntWidth::I16 => "i16",
+                shape_ast::IntWidth::U16 => "u16",
+                shape_ast::IntWidth::I32 => "i32",
+                shape_ast::IntWidth::U32 => "u32",
+                shape_ast::IntWidth::U64 => "u64",
+            },
+            Literal::Number(_) => "number",
+            Literal::Decimal(_) => "decimal",
+            Literal::String(_) | Literal::FormattedString { .. } => "string",
+            Literal::Char(_) => "char",
+            Literal::Bool(_) => "bool",
+            Literal::None => "null",
+            Literal::Unit => "void",
+            Literal::Timeframe(_) => "timeframe",
+        };
+        Some(TypeAnnotation::Basic(name.to_string()))
+    }
+
+    fn annotation_expr_type_annotation(&mut self, expr: &Expr) -> Option<TypeAnnotation> {
+        if let Expr::Literal(literal, _) = expr {
+            return Self::annotation_literal_type_annotation(literal);
+        }
+
+        if let Ok(inferred) = self.infer_expr_type(expr)
+            && let Some(annotation) = inferred.to_annotation()
+            && !Self::annotation_type_is_unknown(&annotation)
+        {
+            return Some(annotation);
+        }
+
+        let concrete =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, expr)?;
+        let annotation =
+            crate::compiler::expressions::closures::concrete_type_to_type_annotation(&concrete)?;
+        (!Self::annotation_type_is_unknown(&annotation)).then_some(annotation)
+    }
+
+    fn simple_annotation_parameter(
+        name: String,
+        type_annotation: Option<TypeAnnotation>,
+    ) -> shape_ast::ast::FunctionParameter {
+        shape_ast::ast::FunctionParameter {
+            pattern: DestructurePattern::Identifier(name, Span::DUMMY),
+            is_const: false,
+            is_reference: false,
+            is_mut_reference: false,
+            is_out: false,
+            type_annotation,
+            default_value: None,
+        }
+    }
+
+    fn specialized_annotation_handler_name(
+        annotation_name: &str,
+        wrapper_func_idx: usize,
+        handler_type: shape_ast::ast::AnnotationHandlerType,
+    ) -> String {
+        let sanitized: String = annotation_name
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let suffix = match handler_type {
+            shape_ast::ast::AnnotationHandlerType::Before => "before",
+            shape_ast::ast::AnnotationHandlerType::After => "after",
+            _ => "handler",
+        };
+        format!(
+            "__ann_{}_{}_wrapper_{}",
+            sanitized, suffix, wrapper_func_idx
+        )
+    }
+
+    fn compile_specialized_annotation_handler(
+        &mut self,
+        func_def: &FunctionDef,
+        wrapper_func_idx: usize,
+        compiled_ann: &crate::bytecode::CompiledAnnotation,
+        handler: &shape_ast::ast::AnnotationHandler,
+        ann_arg_exprs: &[shape_ast::ast::Expr],
+    ) -> Result<u16> {
+        let mut params = vec![Self::simple_annotation_parameter(
+            "self".to_string(),
+            Some(TypeAnnotation::Basic("number".to_string())),
+        )];
+
+        let ann_param_count = compiled_ann.param_defs.len().max(ann_arg_exprs.len());
+        for idx in 0..ann_param_count {
+            let mut param = compiled_ann
+                .param_defs
+                .get(idx)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let name = compiled_ann
+                        .param_names
+                        .get(idx)
+                        .cloned()
+                        .unwrap_or_else(|| format!("__ann_arg_{}", idx));
+                    Self::simple_annotation_parameter(name, None)
+                });
+            if param.type_annotation.is_none()
+                && let Some(expr) = ann_arg_exprs.get(idx)
+            {
+                param.type_annotation = self.annotation_expr_type_annotation(expr);
+            }
+            params.push(param);
+        }
+
+        let args_annotation = TypeAnnotation::Array(Box::new(
+            self.annotation_arg_array_element_annotation(func_def)?,
+        ));
+        let result_annotation = self.annotation_result_type_annotation(func_def);
+        let ctx_annotation = Self::annotation_ctx_type_annotation();
+
+        for handler_param in &handler.params {
+            let type_annotation = match handler_param.name.as_str() {
+                "args" => Some(args_annotation.clone()),
+                "result" => Some(result_annotation.clone()),
+                "ctx" => Some(ctx_annotation.clone()),
+                _ => None,
+            };
+            params.push(Self::simple_annotation_parameter(
+                handler_param.name.clone(),
+                type_annotation,
+            ));
+        }
+
+        let func_name = Self::specialized_annotation_handler_name(
+            &compiled_ann.name,
+            wrapper_func_idx,
+            handler.handler_type.clone(),
+        );
+        let func_def = FunctionDef {
+            name: func_name.clone(),
+            name_span: Span::DUMMY,
+            declaring_module_path: None,
+            doc_comment: None,
+            params,
+            return_type: handler.return_type.clone(),
+            body: vec![Statement::Return(Some(handler.body.clone()), Span::DUMMY)],
+            type_params: Some(Vec::new()),
+            annotations: Vec::new(),
+            where_clause: None,
+            is_async: false,
+            is_comptime: false,
+        };
+
+        self.register_function(&func_def)?;
+        let func_idx = self
+            .find_function(&func_name)
+            .ok_or_else(|| ShapeError::RuntimeError {
+                message: format!(
+                    "Internal error: specialized annotation handler '{}' was not registered",
+                    func_name
+                ),
+                location: None,
+            })?;
+        self.compile_function(&func_def)?;
+        Ok(func_idx as u16)
+    }
+
+    fn specialize_annotation_runtime_handlers(
+        &mut self,
+        func_def: &FunctionDef,
+        wrapper_func_idx: usize,
+        compiled_ann: &crate::bytecode::CompiledAnnotation,
+        ann_arg_exprs: &[shape_ast::ast::Expr],
+    ) -> Result<crate::bytecode::CompiledAnnotation> {
+        let mut specialized = compiled_ann.clone();
+
+        if let Some(handler) = compiled_ann.before_handler_template.clone() {
+            specialized.before_handler = Some(self.compile_specialized_annotation_handler(
+                func_def,
+                wrapper_func_idx,
+                compiled_ann,
+                &handler,
+                ann_arg_exprs,
+            )?);
+        }
+
+        if let Some(handler) = compiled_ann.after_handler_template.clone() {
+            specialized.after_handler = Some(self.compile_specialized_annotation_handler(
+                func_def,
+                wrapper_func_idx,
+                compiled_ann,
+                &handler,
+                ann_arg_exprs,
+            )?);
+        }
+
+        Ok(specialized)
+    }
+
     /// Core annotation wrapper compilation.
     ///
     /// Emits bytecode for a wrapper function at `wrapper_func_idx` that:
@@ -1690,6 +2029,14 @@ impl BytecodeCompiler {
         compiled_ann: &crate::bytecode::CompiledAnnotation,
         ann_arg_exprs: &[shape_ast::ast::Expr],
     ) -> Result<()> {
+        let runtime_ann = self.specialize_annotation_runtime_handlers(
+            func_def,
+            wrapper_func_idx,
+            compiled_ann,
+            ann_arg_exprs,
+        )?;
+        let compiled_ann = &runtime_ann;
+
         let jump_over = if self.current_function.is_none() {
             Some(self.emit_jump(OpCode::Jump, 0))
         } else {

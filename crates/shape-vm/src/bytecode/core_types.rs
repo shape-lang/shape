@@ -1117,6 +1117,11 @@ pub struct Function {
 pub struct CompiledAnnotation {
     pub name: String,
     pub param_names: Vec<String>,
+    /// Original annotation parameter definitions. Runtime handlers are
+    /// specialized at each function target, so the wrapper compiler needs the
+    /// declaration shape, not only the flattened names.
+    #[serde(skip, default)]
+    pub param_defs: Vec<shape_ast::ast::FunctionParameter>,
     /// Function ID for `before(args, ctx)` handler (if defined)
     pub before_handler: Option<u16>,
     /// Function ID for `after(args, result, ctx)` handler (if defined)
@@ -1131,6 +1136,14 @@ pub struct CompiledAnnotation {
     /// AST for `comptime post(target, ctx) { ... }` (executed after function inference/compilation)
     #[serde(skip, default)]
     pub comptime_post_handler: Option<shape_ast::ast::AnnotationHandler>,
+    /// Runtime `before` handler template. This is compiled per annotated
+    /// target after the target's parameter/result types are statically known.
+    #[serde(skip, default)]
+    pub before_handler_template: Option<shape_ast::ast::AnnotationHandler>,
+    /// Runtime `after` handler template. This is compiled per annotated
+    /// target after the target's parameter/result types are statically known.
+    #[serde(skip, default)]
+    pub after_handler_template: Option<shape_ast::ast::AnnotationHandler>,
     /// Allowed target kinds for this annotation.
     /// Inferred from handler types: before/after → Function only;
     /// metadata/comptime only → any target.

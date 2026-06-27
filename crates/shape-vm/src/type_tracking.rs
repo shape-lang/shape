@@ -1158,10 +1158,8 @@ impl TypeTracker {
             .iter()
             .map(|(name, ft)| (name.to_string(), ft.clone()))
             .collect();
-        let schema = TypeSchema::new(&type_name, field_defs);
-        let schema_id = schema.id;
-        self.schema_registry.register(schema);
-        schema_id
+        self.schema_registry
+            .register_type_scoped(type_name, field_defs)
     }
 
     /// Register a named struct schema (e.g. `Point { x, y }`)

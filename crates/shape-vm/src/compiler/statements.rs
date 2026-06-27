@@ -2127,15 +2127,6 @@ impl BytecodeCompiler {
         }
 
         let schema_name = format!("__mod_{}", module_path);
-        if self
-            .type_tracker
-            .schema_registry()
-            .get(&schema_name)
-            .is_some()
-        {
-            return;
-        }
-
         let mut export_names: Vec<String> = module
             .export_names_available(self.comptime_mode)
             .into_iter()
@@ -2177,7 +2168,7 @@ impl BytecodeCompiler {
         // surfacing as "module 'X' has no export 'Y'" at compile time.
         self.type_tracker
             .schema_registry_mut()
-            .register_type_scoped(schema_name, fields);
+            .upsert_type_scoped_union_fields(schema_name, fields);
     }
 
     /// Register an enum definition in the TypeSchemaRegistry
@@ -2971,12 +2962,15 @@ impl BytecodeCompiler {
                 .iter()
                 .flat_map(|p| p.get_identifiers())
                 .collect(),
+            param_defs: ann_def.params.clone(),
             before_handler: None,
             after_handler: None,
             on_define_handler: None,
             metadata_handler: None,
             comptime_pre_handler: None,
             comptime_post_handler: None,
+            before_handler_template: None,
+            after_handler_template: None,
             allowed_targets: Vec::new(),
         };
 
@@ -3014,6 +3008,48 @@ impl BytecodeCompiler {
             };
 
             let func_name = format!("{}___{}", ann_def.name, handler_type_str);
+
+            if matches!(
+                handler.handler_type,
+                AnnotationHandlerType::Before | AnnotationHandlerType::After
+            ) {
+                let placeholder = FunctionDef {
+                    name: func_name.clone(),
+                    name_span: Span::DUMMY,
+                    declaring_module_path: None,
+                    doc_comment: None,
+                    params: Vec::new(),
+                    return_type: handler.return_type.clone(),
+                    body: Vec::new(),
+                    type_params: Some(Vec::new()),
+                    annotations: Vec::new(),
+                    is_async: false,
+                    is_comptime: false,
+                    where_clause: None,
+                };
+                self.register_function(&placeholder)?;
+                let func_id = self.find_function(&func_name).ok_or_else(|| {
+                    ShapeError::RuntimeError {
+                        message: format!(
+                            "Internal error: annotation handler function '{}' was not registered",
+                            func_name
+                        ),
+                        location: None,
+                    }
+                })? as u16;
+                match handler.handler_type {
+                    AnnotationHandlerType::Before => {
+                        compiled.before_handler = Some(func_id);
+                        compiled.before_handler_template = Some(handler.clone());
+                    }
+                    AnnotationHandlerType::After => {
+                        compiled.after_handler = Some(func_id);
+                        compiled.after_handler_template = Some(handler.clone());
+                    }
+                    _ => unreachable!(),
+                }
+                continue;
+            }
 
             // Build function params: self + annotation_params + handler_params
             let mut params = vec![FunctionParameter {
