@@ -299,7 +299,6 @@ fn edge_immediately_invoked_lambda_pipe_multiply() {
     .expect_number(42.0);
 }
 
-// BUG: Chained closure calls fail -- see hof_adder_chained_call
 #[test]
 fn edge_closure_three_deep() {
     ShapeTest::new(
@@ -314,11 +313,7 @@ fn edge_closure_three_deep() {
         f2(3)
     "#,
     )
-    // W20 strict-flip: reject before closure materialization. The innermost
-    // numeric op has no compile-time proof for `c`, so the compiler surfaces a
-    // parameter-annotation diagnostic instead of reaching the old runtime
-    // scalar-into-heap-carrier guard.
-    .expect_run_err_contains("cannot infer the numeric type of closure parameter `c`");
+    .expect_number(6.0);
 }
 
 // Memory-safety regression pin (closures_hof transitive-capture SIGSEGV fix,

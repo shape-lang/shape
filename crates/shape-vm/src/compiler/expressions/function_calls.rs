@@ -5916,9 +5916,9 @@ mod wave1a_partb_fn_typed_param_tests {
                 let result = f(val)
                 if result < 0 { Err("negative result") } else { Ok(result) }
             }
-            match try_apply(|x| x * 2 - 100, 30) {
-                Ok(v) => "ok: " + v,
-                Err(e) => "err: " + e
+            match try_apply(|x| x * 2 - 100, 80) {
+                Ok(v) => v + 1,
+                Err(e) => 0
             }
             "#,
         )
@@ -5929,23 +5929,23 @@ mod wave1a_partb_fn_typed_param_tests {
     fn unannotated_result_payload_flows_through_named_calls() {
         try_compile(
             r#"
-            fn safe_divide(a, b) {
-                if b == 0 { return Err("division by zero") }
-                Ok(a / b)
+            fn safe_adjust(a, b) {
+                if b == 0 { return Err("zero") }
+                Ok(a + b)
             }
-            fn process_division(a, b) {
-                match safe_divide(a, b) {
+            fn process_adjust(a, b) {
+                match safe_adjust(a, b) {
                     Ok(v) => {
                         if v > 10 {
-                            "large: " + v
+                            v - 1
                         } else {
-                            "small: " + v
+                            v + 1
                         }
                     },
-                    Err(e) => "error: " + e
+                    Err(e) => 0
                 }
             }
-            process_division(100, 5)
+            process_adjust(6, 5)
             "#,
         )
         .expect("unannotated named Result payloads must remain statically typed through match");

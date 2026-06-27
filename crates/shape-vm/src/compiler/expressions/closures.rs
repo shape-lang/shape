@@ -3953,7 +3953,7 @@ impl BytecodeCompiler {
                 Expr::BinaryOp { left, right, .. } => {
                     let pair_match = if let Expr::Identifier(n, _) = left.as_ref() {
                         if n == name {
-                            outer_ident_type_ann(compiler, right)
+                            static_expr_type_ann(compiler, right, name)
                         } else {
                             None
                         }
@@ -3965,7 +3965,7 @@ impl BytecodeCompiler {
                     }
                     let pair_match = if let Expr::Identifier(n, _) = right.as_ref() {
                         if n == name {
-                            outer_ident_type_ann(compiler, left)
+                            static_expr_type_ann(compiler, left, name)
                         } else {
                             None
                         }
@@ -4019,12 +4019,21 @@ impl BytecodeCompiler {
             }
         }
         /// Resolve an arbitrary expression to a `TypeAnnotation` when it's
-        /// an identifier whose outer-scope type is statically known.
-        /// Conservatively only handles `Expr::Identifier`.
-        fn outer_ident_type_ann(
+        /// statically known and does not mention the parameter being inferred.
+        /// This keeps inference bidirectional but static: `base + offset + x`
+        /// can seed `x` from the proven type of `base + offset`, while
+        /// self-dependent shapes like `x + (x + n)` stay unproven.
+        fn static_expr_type_ann(
             compiler: &BytecodeCompiler,
             expr: &Expr,
+            param_name: &str,
         ) -> Option<TypeAnnotation> {
+            if expr_mentions_name(expr, param_name) {
+                return None;
+            }
+            if let Some(ct) = concrete_type_for_expr(compiler, expr) {
+                return concrete_type_to_type_annotation(&ct);
+            }
             let other_name = match expr {
                 Expr::Identifier(n, _) => n,
                 _ => return None,
@@ -4047,6 +4056,140 @@ impl BytecodeCompiler {
                     .and_then(|info| info.storage_hint)
             }?;
             storage_hint_to_type_annotation(hint)
+        }
+
+        fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
+            match expr {
+                Expr::Identifier(n, _) => n == name,
+                Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                    expr_mentions_name(left, name) || expr_mentions_name(right, name)
+                }
+                Expr::UnaryOp { operand, .. } | Expr::Reference { expr: operand, .. } => {
+                    expr_mentions_name(operand, name)
+                }
+                Expr::FunctionCall { args, .. } | Expr::QualifiedFunctionCall { args, .. } => {
+                    args.iter().any(|a| expr_mentions_name(a, name))
+                }
+                Expr::MethodCall { receiver, args, .. } => {
+                    expr_mentions_name(receiver, name)
+                        || args.iter().any(|a| expr_mentions_name(a, name))
+                }
+                Expr::Array(elements, _) => elements.iter().any(|e| expr_mentions_name(e, name)),
+                Expr::IndexAccess { object, index, .. } => {
+                    expr_mentions_name(object, name) || expr_mentions_name(index, name)
+                }
+                Expr::PropertyAccess { object, .. } => expr_mentions_name(object, name),
+                Expr::Conditional {
+                    condition,
+                    then_expr,
+                    else_expr,
+                    ..
+                } => {
+                    expr_mentions_name(condition, name)
+                        || expr_mentions_name(then_expr, name)
+                        || else_expr
+                            .as_ref()
+                            .is_some_and(|expr| expr_mentions_name(expr, name))
+                }
+                Expr::Return(Some(expr), _) | Expr::Await(expr, _) => {
+                    expr_mentions_name(expr, name)
+                }
+                Expr::Block(block, _) => block.items.iter().any(|item| match item {
+                    shape_ast::ast::BlockItem::VariableDecl(decl) => decl
+                        .value
+                        .as_ref()
+                        .is_some_and(|expr| expr_mentions_name(expr, name)),
+                    shape_ast::ast::BlockItem::Assignment(assign) => {
+                        expr_mentions_name(&assign.value, name)
+                    }
+                    shape_ast::ast::BlockItem::Statement(stmt) => stmt_mentions_name(stmt, name),
+                    shape_ast::ast::BlockItem::Expression(expr) => expr_mentions_name(expr, name),
+                }),
+                Expr::Assign(assign, _) => {
+                    expr_mentions_name(&assign.target, name)
+                        || expr_mentions_name(&assign.value, name)
+                }
+                Expr::If(if_expr, _) => {
+                    expr_mentions_name(&if_expr.condition, name)
+                        || expr_mentions_name(&if_expr.then_branch, name)
+                        || if_expr
+                            .else_branch
+                            .as_ref()
+                            .is_some_and(|expr| expr_mentions_name(expr, name))
+                }
+                Expr::While(while_expr, _) => {
+                    expr_mentions_name(&while_expr.condition, name)
+                        || expr_mentions_name(&while_expr.body, name)
+                }
+                Expr::For(for_expr, _) => {
+                    expr_mentions_name(&for_expr.iterable, name)
+                        || expr_mentions_name(&for_expr.body, name)
+                }
+                Expr::Loop(loop_expr, _) => expr_mentions_name(&loop_expr.body, name),
+                Expr::Match(match_expr, _) => {
+                    expr_mentions_name(&match_expr.scrutinee, name)
+                        || match_expr.arms.iter().any(|arm| {
+                            arm.guard
+                                .as_ref()
+                                .is_some_and(|guard| expr_mentions_name(guard, name))
+                                || expr_mentions_name(&arm.body, name)
+                        })
+                }
+                _ => false,
+            }
+        }
+
+        fn stmt_mentions_name(stmt: &Statement, name: &str) -> bool {
+            match stmt {
+                Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+                    expr_mentions_name(expr, name)
+                }
+                Statement::VariableDecl(decl, _) => decl
+                    .value
+                    .as_ref()
+                    .is_some_and(|expr| expr_mentions_name(expr, name)),
+                Statement::Assignment(assign, _) => expr_mentions_name(&assign.value, name),
+                Statement::If(if_stmt, _) => {
+                    expr_mentions_name(&if_stmt.condition, name)
+                        || if_stmt
+                            .then_body
+                            .iter()
+                            .any(|stmt| stmt_mentions_name(stmt, name))
+                        || if_stmt.else_body.as_ref().is_some_and(|body| {
+                            body.iter().any(|stmt| stmt_mentions_name(stmt, name))
+                        })
+                }
+                Statement::While(while_stmt, _) => {
+                    expr_mentions_name(&while_stmt.condition, name)
+                        || while_stmt
+                            .body
+                            .iter()
+                            .any(|stmt| stmt_mentions_name(stmt, name))
+                }
+                Statement::For(for_stmt, _) => {
+                    for_init_mentions_name(&for_stmt.init, name)
+                        || for_stmt
+                            .body
+                            .iter()
+                            .any(|stmt| stmt_mentions_name(stmt, name))
+                }
+                _ => false,
+            }
+        }
+
+        fn for_init_mentions_name(init: &shape_ast::ast::ForInit, name: &str) -> bool {
+            match init {
+                shape_ast::ast::ForInit::ForIn { iter, .. } => expr_mentions_name(iter, name),
+                shape_ast::ast::ForInit::ForC {
+                    init,
+                    condition,
+                    update,
+                } => {
+                    stmt_mentions_name(init, name)
+                        || expr_mentions_name(condition, name)
+                        || expr_mentions_name(update, name)
+                }
+            }
         }
 
         fn storage_hint_to_type_annotation(

@@ -274,38 +274,6 @@ fn string_plus_nonstring_error(
     }
 }
 
-fn string_scalar_concat_opcode_for_type_name(type_name: &str) -> Option<OpCode> {
-    if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(type_name) {
-        return Some(OpCode::StringConcatInt);
-    }
-    match type_name {
-        "number" | "f64" => Some(OpCode::StringConcatNumber),
-        "bool" => Some(OpCode::StringConcatBool),
-        _ => None,
-    }
-}
-
-fn string_scalar_concat_opcode_for_native_kind(
-    kind: crate::type_tracking::NativeKind,
-) -> Option<OpCode> {
-    use crate::type_tracking::NativeKind;
-    match kind {
-        NativeKind::Int8
-        | NativeKind::Int16
-        | NativeKind::Int32
-        | NativeKind::Int64
-        | NativeKind::IntSize
-        | NativeKind::UInt8
-        | NativeKind::UInt16
-        | NativeKind::UInt32
-        | NativeKind::UInt64
-        | NativeKind::UIntSize => Some(OpCode::StringConcatInt),
-        NativeKind::Float64 | NativeKind::NullableFloat64 => Some(OpCode::StringConcatNumber),
-        NativeKind::Bool => Some(OpCode::StringConcatBool),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NumericEmitResult {
     EmittedTyped,
@@ -1902,17 +1870,11 @@ impl BytecodeCompiler {
                         return Ok(());
                     }
 
-                    // Static string + scalar concat. This is selected only
-                    // when the left operand is proven string-like and the right
-                    // operand's scalar kind is proven at compile time. Unknown
-                    // or unsupported mixed cases still reject below; no generic
-                    // stringify or runtime tag probe is used.
-                    //
-                    // Resolve string-ness via the same multi-source order the
-                    // surrounding arithmetic branch uses: `infer_expr_type`
-                    // display name, then the `storage_hint_for_expr`
-                    // `NativeKind::String` hint (set by `let x: string = ...`
-                    // annotations and by literals).
+                    // Strict no-coercion ruling (user 2026-06-14): resolve
+                    // string-ness via the same multi-source order the
+                    // surrounding arithmetic branch uses, but do not lower
+                    // mixed string + scalar `+` to the old auto-stringify
+                    // opcodes. Exactly-one-string rejects below.
                     let lhs_is_string = is_strish(&lhs_name)
                         || matches!(
                             self.storage_hint_for_expr(left),
@@ -1923,23 +1885,6 @@ impl BytecodeCompiler {
                             self.storage_hint_for_expr(right),
                             Some(crate::type_tracking::NativeKind::String)
                         );
-                    if lhs_is_string && !rhs_is_string {
-                        let scalar_opcode = rhs_name
-                            .as_deref()
-                            .and_then(string_scalar_concat_opcode_for_type_name)
-                            .or_else(|| {
-                                self.storage_hint_for_expr(right)
-                                    .and_then(string_scalar_concat_opcode_for_native_kind)
-                            });
-                        if let Some(opcode) = scalar_opcode {
-                            self.emit(Instruction::simple(opcode));
-                            self.last_expr_schema = None;
-                            self.last_expr_type_info = Some(
-                                crate::type_tracking::VariableTypeInfo::named("string".to_string()),
-                            );
-                            return Ok(());
-                        }
-                    }
                     // Exactly one side is a string. The other operand's type is
                     // resolved (numeric/bool/heap) — there is no valid `+` here.
                     if lhs_is_string != rhs_is_string {
@@ -4294,6 +4239,31 @@ mod u4_4_numeric_opcode_golden {
             "fn add(a: number, b: number) -> number { a + b }\nadd(2.0, 3.0)\n",
         ),
     ];
+}
+
+#[cfg(test)]
+mod strict_string_concat_tests {
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::parser::parse_program;
+
+    #[test]
+    fn string_plus_scalar_rejects_without_implicit_stringify() {
+        for code in [
+            "let v: int = 1\n\"ok: \" + v\n",
+            "let v: number = 1.5\n\"ok: \" + v\n",
+            "let v: bool = true\n\"ok: \" + v\n",
+        ] {
+            let program = parse_program(code).expect("parse");
+            let err = BytecodeCompiler::new()
+                .compile(&program)
+                .expect_err("string + scalar must remain a compile error");
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains("Strict typing does not implicitly convert"),
+                "unexpected diagnostic for `{code}`: {msg}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
