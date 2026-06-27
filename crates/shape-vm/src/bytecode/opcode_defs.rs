@@ -843,6 +843,28 @@ define_opcodes! {
     /// pushes nothing. Releases prior element, transfers new value's refcount share.
     TypedArraySetTraitObject = 0x1C0, Object, pops: 3, pushes: 0;
 
+    // ── W22 callable-array element carrier (2026-06-27) ──
+    //
+    // Compile-time-proven `Array<Function<...>>` literals use a dedicated
+    // `TypedArray<CallableArrayElem>` descriptor carrier. Closure elements own
+    // `Arc<HeapValue>` shares; named/module functions are inline ids. The
+    // descriptor records the exact callable NativeKind shape per element, so
+    // element reads can call through existing `CallValue` dispatch without
+    // runtime probing and without pretending closures have a HeapHeader.
+
+    /// Create a new TypedArray<CallableArrayElem> with given capacity.
+    /// Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayCallable = 0x1C4, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<CallableArrayElem>: pops (arr_ptr, index),
+    /// pushes the stored callable bits with the stored callable kind.
+    TypedArrayGetCallable = 0x1C5, Object, pops: 2, pushes: 1;
+    /// Push callable element to TypedArray<CallableArrayElem>: pops (arr_ptr, value),
+    /// pushes nothing. Caller transfers any closure share to the array.
+    TypedArrayPushCallable = 0x1C6, Object, pops: 2, pushes: 0;
+    /// Set callable element in TypedArray<CallableArrayElem>: pops (arr_ptr, index, value),
+    /// pushes nothing. Releases prior closure share, transfers the new share.
+    TypedArraySetCallable = 0x1C7, Object, pops: 3, pushes: 0;
+
     // U3 (SB-9 deletion): the v2 `TypedMap<K,V>` opcode family (0xCD-0xFB
     // ranges) was deleted along with the dual-HashMap-carrier split-brain.
     // ALL HashMap operations now use the single honest `HashMapData` carrier
@@ -2087,6 +2109,11 @@ impl OpCode {
             | OpCode::TypedArrayGetTraitObject
             | OpCode::TypedArrayPushTraitObject
             | OpCode::TypedArraySetTraitObject
+            // W22 callable-array element carrier.
+            | OpCode::NewTypedArrayCallable
+            | OpCode::TypedArrayGetCallable
+            | OpCode::TypedArrayPushCallable
+            | OpCode::TypedArraySetCallable
             // Local-slot-based typed array element access
             | OpCode::GetElemI64
             | OpCode::GetElemF64

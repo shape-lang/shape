@@ -82,15 +82,15 @@ use shape_value::v2::decimal_obj::DecimalObj;
 use shape_value::v2::heap_element::HeapElement;
 use shape_value::v2::refcount::v2_retain;
 use shape_value::v2::string_obj::StringObj;
-use shape_value::v2::typed_array::{TypedArray, TypedArrayElem};
+use shape_value::v2::typed_array::{CallableArrayElem, TypedArray, TypedArrayElem};
 use shape_value::{HeapKind, NativeKind, VMError};
 
 use super::super::VirtualMachine;
 use super::v2_array_detect::{
-    ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I8,
-    ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT,
-    ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32,
-    stamp_elem_type,
+    ELEM_TYPE_BOOL, ELEM_TYPE_CALLABLE, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32,
+    ELEM_TYPE_F64, ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING,
+    ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8,
+    ELEM_TYPE_U16, ELEM_TYPE_U32, stamp_elem_type,
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -610,6 +610,101 @@ macro_rules! define_exec_v2_typed_array {
                         };
                         let ptr = DecimalObj::new(d);
                         self.push_kinded(ptr as usize as u64, NativeKind::DecimalV2)?;
+                        Ok(())
+                    }
+
+                    // ── W22 callable-array element carrier ────────────
+                    //
+                    // `Array<Function<...>>` uses `TypedArray<CallableArrayElem>`.
+                    // Elements are descriptors carrying the exact callable shape:
+                    // closure pointers own one `Arc<HeapValue>` share, while named
+                    // function ids and module-function ids are inline. These arms
+                    // intentionally do not use the heap-row macro because closure
+                    // shares are not `HeapHeader` elements.
+                    OpCode::NewTypedArrayCallable => {
+                        let cap = match instruction.operand {
+                            Some(Operand::Count(n)) => n as u32,
+                            _ => 0,
+                        };
+                        let ptr = TypedArray::<CallableArrayElem>::with_capacity(cap);
+                        unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_CALLABLE) };
+                        self.push_kinded(
+                            ptr as usize as u64,
+                            NativeKind::Ptr(HeapKind::TypedArray),
+                        )?;
+                        Ok(())
+                    }
+                    OpCode::TypedArrayGetCallable => {
+                        let (idx_bits, _idx_kind) = self.pop_kinded()?;
+                        let index = idx_bits as i64 as u32;
+                        let (arr_bits, arr_kind) = self.pop_kinded()?;
+                        let arr = arr_bits as usize as *const TypedArray<CallableArrayElem>;
+                        let len = unsafe { TypedArray::len(arr) };
+                        let elem = unsafe {
+                            TypedArray::<CallableArrayElem>::get(arr, index).ok_or(
+                                VMError::IndexOutOfBounds {
+                                    index: index as i32,
+                                    length: len as usize,
+                                },
+                            )?
+                        };
+                        unsafe { elem.retain() };
+                        drop_with_kind(arr_bits, arr_kind);
+                        self.push_kinded(elem.bits, elem.native_kind())?;
+                        Ok(())
+                    }
+                    OpCode::TypedArrayPushCallable => {
+                        let (val_bits, val_kind) = self.pop_kinded()?;
+                        let (arr_bits, arr_kind) = self.pop_kinded()?;
+                        let elem = match CallableArrayElem::from_native_kind(val_bits, val_kind) {
+                            Some(elem) => elem,
+                            None => {
+                                drop_with_kind(val_bits, val_kind);
+                                drop_with_kind(arr_bits, arr_kind);
+                                return Err(VMError::RuntimeError(format!(
+                                    "TypedArrayPushCallable: expected callable value, got {:?}",
+                                    val_kind
+                                )));
+                            }
+                        };
+                        let arr = arr_bits as usize as *mut TypedArray<CallableArrayElem>;
+                        // Caller transfers any closure share to the array.
+                        unsafe { TypedArray::push(arr, elem) };
+                        drop_with_kind(arr_bits, arr_kind);
+                        Ok(())
+                    }
+                    OpCode::TypedArraySetCallable => {
+                        let (val_bits, val_kind) = self.pop_kinded()?;
+                        let (idx_bits, _idx_kind) = self.pop_kinded()?;
+                        let index = idx_bits as i64 as u32;
+                        let (arr_bits, arr_kind) = self.pop_kinded()?;
+                        let elem = match CallableArrayElem::from_native_kind(val_bits, val_kind) {
+                            Some(elem) => elem,
+                            None => {
+                                drop_with_kind(val_bits, val_kind);
+                                drop_with_kind(arr_bits, arr_kind);
+                                return Err(VMError::RuntimeError(format!(
+                                    "TypedArraySetCallable: expected callable value, got {:?}",
+                                    val_kind
+                                )));
+                            }
+                        };
+                        let arr = arr_bits as usize as *mut TypedArray<CallableArrayElem>;
+                        let len = unsafe { TypedArray::len(arr) };
+                        if index >= len {
+                            unsafe { elem.release() };
+                            drop_with_kind(arr_bits, arr_kind);
+                            return Err(VMError::IndexOutOfBounds {
+                                index: index as i32,
+                                length: len as usize,
+                            });
+                        }
+                        unsafe {
+                            let old = TypedArray::<CallableArrayElem>::get_unchecked(arr, index);
+                            old.release();
+                            TypedArray::set(arr, index, elem);
+                        }
+                        drop_with_kind(arr_bits, arr_kind);
                         Ok(())
                     }
 

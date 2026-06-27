@@ -120,6 +120,12 @@ pub enum TypedArrayKind {
     /// the element is an `Expr::Array` literal (structurally an inner typed
     /// array) per ADR-006 §2.7.5.
     TypedArray,
+    /// `TypedArray<CallableArrayElem>` — backing for compile-time-proven
+    /// `Array<Function<...>>`. The element descriptor stores the exact callable
+    /// carrier shape (`Ptr(Closure)`, `UInt64` function id, or
+    /// `Ptr(ModuleFn)`) so reads can call through existing `CallValue`
+    /// dispatch without probing runtime bits.
+    Callable,
 }
 
 impl TypedArrayKind {
@@ -147,6 +153,7 @@ impl TypedArrayKind {
             TypedArrayKind::TraitObject => OpCode::NewTypedArrayTraitObject,
             // Construction strict-typing close (2026-06-05) — nested array.
             TypedArrayKind::TypedArray => OpCode::NewTypedArrayNested,
+            TypedArrayKind::Callable => OpCode::NewTypedArrayCallable,
         }
     }
 
@@ -174,6 +181,7 @@ impl TypedArrayKind {
             TypedArrayKind::TraitObject => OpCode::TypedArrayGetTraitObject,
             // Construction strict-typing close (2026-06-05) — nested array.
             TypedArrayKind::TypedArray => OpCode::TypedArrayGetNested,
+            TypedArrayKind::Callable => OpCode::TypedArrayGetCallable,
         }
     }
 
@@ -201,6 +209,7 @@ impl TypedArrayKind {
             TypedArrayKind::TraitObject => OpCode::TypedArrayPushTraitObject,
             // Construction strict-typing close (2026-06-05) — nested array.
             TypedArrayKind::TypedArray => OpCode::TypedArrayPushNested,
+            TypedArrayKind::Callable => OpCode::TypedArrayPushCallable,
         }
     }
 
@@ -228,6 +237,7 @@ impl TypedArrayKind {
             TypedArrayKind::TraitObject => OpCode::TypedArraySetTraitObject,
             // Construction strict-typing close (2026-06-05) — nested array.
             TypedArrayKind::TypedArray => OpCode::TypedArraySetNested,
+            TypedArrayKind::Callable => OpCode::TypedArraySetCallable,
         }
     }
 }
@@ -304,6 +314,7 @@ pub fn should_use_typed_array(elem_type: &ConcreteType) -> Option<TypedArrayKind
         // is `ConcreteType::Enum`; the enum-vs-struct distinction is irrelevant
         // to the runtime carrier.
         ConcreteType::Enum(_) => Some(TypedArrayKind::TypedObject),
+        ConcreteType::Closure(_) | ConcreteType::Function(_) => Some(TypedArrayKind::Callable),
         _ => None,
     }
 }
@@ -375,6 +386,9 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
         TypedArrayKind::TypedArray => ConcreteType::Array(Box::new(ConcreteType::Array(Box::new(
             ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0)),
         )))),
+        TypedArrayKind::Callable => {
+            ConcreteType::Function(shape_value::v2::concrete_type::FunctionTypeId(0))
+        }
     }
 }
 
@@ -454,6 +468,7 @@ pub fn should_use_typed_array_from_slot_kind(
         // statically proven at the producer site, never decoded from runtime
         // bits.
         NativeKind::Ptr(shape_value::HeapKind::TypedObject) => Some(TypedArrayKind::TypedObject),
+        NativeKind::Ptr(shape_value::HeapKind::Closure) => Some(TypedArrayKind::Callable),
         _ => None,
     }
 }
@@ -486,6 +501,7 @@ pub fn vec_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'static str 
         // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
         TypedArrayKind::TraitObject => "Vec<dyn>",
         TypedArrayKind::TypedArray => "Vec<array>",
+        TypedArrayKind::Callable => "Vec<function>",
     }
 }
 
@@ -513,6 +529,7 @@ pub fn vec_element_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'sta
         // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
         TypedArrayKind::TraitObject => "dyn",
         TypedArrayKind::TypedArray => "array",
+        TypedArrayKind::Callable => "function",
     }
 }
 
@@ -694,6 +711,43 @@ impl super::BytecodeCompiler {
         acc
     }
 
+    /// Structural producer-side proof for function-value array literals.
+    ///
+    /// Bare closure literals do not always have a resolved `ConcreteType` before
+    /// their expression body is compiled, while named function identifiers can
+    /// resolve either through inference facts or the function registry. This
+    /// helper accepts only all-callable element lists and never inspects runtime
+    /// values.
+    pub(crate) fn array_elements_all_callable(&self, elements: &[shape_ast::ast::Expr]) -> bool {
+        use shape_ast::ast::Expr;
+        if elements.is_empty() {
+            return false;
+        }
+        elements.iter().all(|elem| match elem {
+            Expr::FunctionExpr { .. } => true,
+            Expr::Identifier(name, _) => {
+                self.function_defs.contains_key(name)
+                    || self.foreign_function_defs.contains_key(name)
+                    || matches!(
+                        super::monomorphization::type_resolution::concrete_type_for_expr(
+                            self, elem
+                        ),
+                        Some(
+                            shape_value::v2::ConcreteType::Function(_)
+                                | shape_value::v2::ConcreteType::Closure(_)
+                        )
+                    )
+            }
+            _ => matches!(
+                super::monomorphization::type_resolution::concrete_type_for_expr(self, elem),
+                Some(
+                    shape_value::v2::ConcreteType::Function(_)
+                        | shape_value::v2::ConcreteType::Closure(_)
+                )
+            ),
+        })
+    }
+
     /// Compiler-aware resolution of a `let arr: Array<T> = [...]` binding's
     /// element annotation to a [`TypedArrayKind`]. Wraps the
     /// `v2_array_emission::typed_array_from_annotation` →
@@ -740,6 +794,12 @@ impl super::BytecodeCompiler {
             _ => None,
         };
         if let Some(inner) = dyn_inner {
+            if matches!(inner, TypeAnnotation::Function { .. })
+                || matches!(inner, TypeAnnotation::Basic(name) if name == "function")
+                || matches!(inner, TypeAnnotation::Generic { name, .. } if name.as_str() == "Function")
+            {
+                return Some(TypedArrayKind::Callable);
+            }
             if crate::compiler::trait_object_emission::trait_name_from_annotation(inner).is_some() {
                 return Some(TypedArrayKind::TraitObject);
             }
@@ -1468,6 +1528,9 @@ mod tests {
             TypedArrayKind::String,
             TypedArrayKind::Decimal,
             TypedArrayKind::TypedObject,
+            TypedArrayKind::TraitObject,
+            TypedArrayKind::TypedArray,
+            TypedArrayKind::Callable,
         ] {
             let _ = kind.new_opcode();
             let _ = kind.get_opcode();

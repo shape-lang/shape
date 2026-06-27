@@ -2178,6 +2178,22 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
             args,
             ..
         } => {
+            // W22 callable-array carrier follow-up: `arr[i](args...)` parses as
+            // a `__call__` method on an `IndexAccess` receiver. The strict
+            // checker already proves its return through
+            // `indexed_callable_array_return_type`, backed by inference facts for
+            // `Array<Function<...>>`. Mirror that proof here so array literals
+            // containing such call results (`[fns[0](10), ...]`) can choose a
+            // typed result carrier without runtime probing or numeric defaulting.
+            if method == "__call__"
+                && let Expr::IndexAccess { object, .. } = receiver.as_ref()
+                && let Expr::Identifier(arr_name, _) = object.as_ref()
+                && let Some(return_ty) =
+                    compiler.indexed_callable_array_return_type(arr_name, Some(args.len()))
+            {
+                return concrete_type_from_inference_fact(compiler, &return_ty);
+            }
+
             // The `DateTime` namespace constructors all yield a `DateTime`
             // value (datetime book chapter). Recording `ConcreteType::DateTime`
             // for `let a = DateTime.parse(..)` is what lets the binding's

@@ -2886,7 +2886,19 @@ impl VirtualMachine {
                 length: view.len as usize,
             });
         }
-        let elem_kind = view.elem_type.elem_kind();
+        let elem_kind = match view.elem_type.elem_kind() {
+            Some(kind) => kind,
+            None => {
+                drop(base_arc);
+                return Err(VMError::NotImplemented(
+                    "MakeIndexRef: callable typed-array elements carry per-element \
+                     callable kinds, so indexed references need a kinded-reference \
+                     redesign. W22 keeps get/push/set/call consumption live without \
+                     fabricating a single element NativeKind."
+                        .to_string(),
+                ));
+            }
+        };
         // Bump the array's on-header refcount once and hand the resulting
         // independent share to an owning `TypedArrayPtr` — the base binding
         // retains its own share. `TypedArrayPtr::new` takes ownership of the

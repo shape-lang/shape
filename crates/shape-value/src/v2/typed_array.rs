@@ -17,6 +17,7 @@
 //! ```
 
 use super::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
+use crate::{HeapKind, HeapValue, NativeKind};
 use std::alloc::{Layout, alloc, dealloc, realloc};
 use std::ptr;
 
@@ -404,6 +405,12 @@ pub const ELEM_TYPE_TYPED_ARRAY: u8 = 16;
 /// `_drop`s the inner TypedObject share + the vtable Arc. Mirror of
 /// `ELEM_TYPE_TYPED_OBJECT`.
 pub const ELEM_TYPE_TRAIT_OBJECT: u8 = 17;
+/// `_pad`-byte discriminant for `TypedArray<CallableArrayElem>` — the backing
+/// carrier for compile-time-proven `Array<Function<...>>` literals. Elements are
+/// small descriptors, not `HeapHeader` pointers: closures own one
+/// `Arc<HeapValue>` share, named functions carry an inline `UInt64` function id,
+/// and module functions carry an inline `Ptr(HeapKind::ModuleFn)` id.
+pub const ELEM_TYPE_CALLABLE: u8 = 18;
 
 /// Read the element-type discriminant stamped in the `_pad` byte (offset 7).
 ///
@@ -462,6 +469,109 @@ pub struct TypedArrayElem {
 unsafe impl super::heap_element::HeapElement for TypedArrayElem {
     unsafe fn release_elem(ptr: *const Self) {
         unsafe { release_v2_typed_array(ptr as *mut u8) };
+    }
+}
+
+/// Exact callable carrier shape stored in `TypedArray<CallableArrayElem>`.
+///
+/// This is intentionally not a `*const HeapHeader` element. Only closure values
+/// are `Arc<HeapValue>` shares; named functions and module functions are inline
+/// IDs. The `kind` byte records which callable shape the bits represent so array
+/// reads can push the same `(bits, NativeKind)` shape consumed by call dispatch.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallableArrayElemKind {
+    Closure = 1,
+    FunctionId = 2,
+    ModuleFn = 3,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallableArrayElem {
+    pub bits: u64,
+    pub kind: CallableArrayElemKind,
+}
+
+impl CallableArrayElem {
+    #[inline]
+    pub fn from_native_kind(bits: u64, kind: NativeKind) -> Option<Self> {
+        let kind = match kind {
+            NativeKind::Ptr(HeapKind::Closure) => CallableArrayElemKind::Closure,
+            NativeKind::UInt64 => CallableArrayElemKind::FunctionId,
+            NativeKind::Ptr(HeapKind::ModuleFn) => CallableArrayElemKind::ModuleFn,
+            _ => return None,
+        };
+        Some(Self { bits, kind })
+    }
+
+    #[inline]
+    pub fn native_kind(self) -> NativeKind {
+        match self.kind {
+            CallableArrayElemKind::Closure => NativeKind::Ptr(HeapKind::Closure),
+            CallableArrayElemKind::FunctionId => NativeKind::UInt64,
+            CallableArrayElemKind::ModuleFn => NativeKind::Ptr(HeapKind::ModuleFn),
+        }
+    }
+
+    /// Retain one read/clone share for this callable element.
+    ///
+    /// # Safety
+    /// For `Closure`, `bits` must be a live `Arc::into_raw(Arc<HeapValue>)`
+    /// pointer. Inline function ids perform no refcount operation.
+    #[inline]
+    pub unsafe fn retain(self) {
+        if self.bits == 0 {
+            return;
+        }
+        if self.kind == CallableArrayElemKind::Closure {
+            unsafe {
+                std::sync::Arc::increment_strong_count(self.bits as *const HeapValue);
+            }
+        }
+    }
+
+    /// Release one owned share for this callable element.
+    ///
+    /// # Safety
+    /// For `Closure`, `bits` must be a live `Arc::into_raw(Arc<HeapValue>)`
+    /// pointer owned by the caller. Inline function ids perform no refcount
+    /// operation.
+    #[inline]
+    pub unsafe fn release(self) {
+        if self.bits == 0 {
+            return;
+        }
+        if self.kind == CallableArrayElemKind::Closure {
+            unsafe {
+                std::sync::Arc::decrement_strong_count(self.bits as *const HeapValue);
+            }
+        }
+    }
+}
+
+impl TypedArray<CallableArrayElem> {
+    /// Deallocate a callable array, releasing each stored closure share exactly
+    /// once and freeing the element buffer + typed-array header.
+    ///
+    /// # Safety
+    /// `ptr` must point to a live `TypedArray<CallableArrayElem>` allocated by
+    /// this module. Each closure element must own one `Arc<HeapValue>` share.
+    pub unsafe fn drop_array_callable(ptr: *mut Self) {
+        unsafe {
+            let arr = &*ptr;
+            if arr.cap > 0 && !arr.data.is_null() {
+                for i in 0..arr.len {
+                    let elem = ptr::read(arr.data.add(i as usize));
+                    elem.release();
+                }
+                let data_layout = Layout::array::<CallableArrayElem>(arr.cap as usize)
+                    .expect("invalid array layout");
+                dealloc(arr.data as *mut u8, data_layout);
+            }
+            let layout = Layout::new::<Self>();
+            dealloc(ptr as *mut u8, layout);
+        }
     }
 }
 
@@ -547,6 +657,9 @@ pub unsafe fn release_v2_typed_array(ptr: *mut u8) {
                     ptr as *mut TypedArray<*const TypedArrayElem>,
                 )
             }
+            ELEM_TYPE_CALLABLE => TypedArray::<CallableArrayElem>::drop_array_callable(
+                ptr as *mut TypedArray<CallableArrayElem>,
+            ),
             // An unstamped (`ELEM_TYPE_UNKNOWN`) or unrecognised discriminant
             // at refcount-0 means the producer-side stamp contract was
             // violated. The element-buffer monomorphization is unknown so a

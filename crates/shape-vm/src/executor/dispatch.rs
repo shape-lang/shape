@@ -975,6 +975,13 @@ impl VirtualMachine {
             | TypedArrayGetTraitObject
             | TypedArrayPushTraitObject
             | TypedArraySetTraitObject
+            // W22 callable-array element carrier (2026-06-27) —
+            // `TypedArray<CallableArrayElem>` stores per-element callable
+            // descriptors for closure shares and inline function ids.
+            | NewTypedArrayCallable
+            | TypedArrayGetCallable
+            | TypedArrayPushCallable
+            | TypedArraySetCallable
             // Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade (2026-05-15) —
             // v2-raw String/Decimal literal constructors (closes the literal-element
             // kind mismatch surfaced at Round 3a' gate-flip: `let xs: Array<string>

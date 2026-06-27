@@ -443,7 +443,7 @@ impl VirtualMachine {
             crate::executor::v2_handlers::v2_array_detect::as_v2_typed_array(iter_bits, iter_kind)
         {
             use crate::executor::v2_handlers::v2_array_detect::V2ElemType;
-            use shape_value::v2::typed_array::TypedArray;
+            use shape_value::v2::typed_array::{CallableArrayElem, TypedArray};
             // Out-of-range push the §2 sentinel (zero bits + Bool kind).
             if idx < 0 || idx as u32 >= view.len {
                 drop_with_kind(idx_bits, idx_kind);
@@ -568,6 +568,16 @@ impl VirtualMachine {
                         unsafe { TypedArray::<*const TypedArrayElem>::get_unchecked(arr, i) };
                     unsafe { v2_retain(&(*elem_ptr).header) };
                     self.push_kinded(elem_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
+                }
+                // W22 callable-array element carrier. Iteration produces the
+                // stored callable shape exactly (`Ptr(Closure)`, `UInt64`
+                // function id, or `Ptr(ModuleFn)`) and retains closure shares
+                // so the loop body owns the pushed callable slot.
+                V2ElemType::Callable => {
+                    let arr = view.ptr as *const TypedArray<CallableArrayElem>;
+                    let elem = unsafe { TypedArray::<CallableArrayElem>::get_unchecked(arr, i) };
+                    unsafe { elem.retain() };
+                    self.push_kinded(elem.bits, elem.native_kind())
                 }
             };
             drop_with_kind(idx_bits, idx_kind);

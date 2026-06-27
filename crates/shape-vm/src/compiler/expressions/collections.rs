@@ -452,6 +452,14 @@ impl BytecodeCompiler {
             // structural proof), never decoded from runtime bits.
             self.pending_variable_typed_array_kind = Some(kind);
             Some(kind)
+        } else if self.array_elements_all_callable(elements) {
+            // W22 callable-array carrier: every element is statically proven to
+            // be a function value (closure literal, named function, or a binding
+            // with `ConcreteType::Function` / `Closure`). Lower to the dedicated
+            // descriptor carrier; no runtime probing and no heap-element pointer
+            // reinterpretation.
+            self.pending_variable_typed_array_kind = Some(TypedArrayKind::Callable);
+            Some(TypedArrayKind::Callable)
         } else {
             None
         };
@@ -1805,6 +1813,18 @@ impl BytecodeCompiler {
         elem: &Expr,
     ) -> Result<()> {
         use super::super::v2_typed_emission::TypedArrayKind;
+        if kind == TypedArrayKind::Callable
+            && !self.array_elements_all_callable(std::slice::from_ref(elem))
+        {
+            return Err(ShapeError::SemanticError {
+                message: "type mismatch: cannot push a non-callable value into an \
+                          array whose element type is `function`. Array<Function<...>> \
+                          elements must be closure literals, named functions, or \
+                          expressions statically typed as function/closure values."
+                    .to_string(),
+                location: Some(self.span_to_source_location(elem.span())),
+            });
+        }
         // WS-1b W16.2-C residual: a literal element whose own type FAMILY
         // disagrees with the array's proven element kind is a HETEROGENEOUS
         // push — a clean compile error, not a silent wrong result.
@@ -1852,7 +1872,8 @@ impl BytecodeCompiler {
                 | TypedArrayKind::TypedObject
                 // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
                 | TypedArrayKind::TraitObject
-                | TypedArrayKind::TypedArray => None,
+                | TypedArrayKind::TypedArray
+                | TypedArrayKind::Callable => None,
             };
             // R5a-literal lossless-context-adoption (numeric-conversion-spec
             // §4, USER RULING 2026-06-01) — array-element position. A bare

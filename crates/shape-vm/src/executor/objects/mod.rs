@@ -229,7 +229,8 @@ fn typed_array_method_registry(
         // lowers to `TypedArrayGetTraitObject` then `DynMethodCall`. Generic
         // ARRAY_METHODS covers `.length`/`.first`/etc.
         | V2ElemType::TraitObject
-        | V2ElemType::TypedArray => None,
+        | V2ElemType::TypedArray
+        | V2ElemType::Callable => None,
     }
 }
 

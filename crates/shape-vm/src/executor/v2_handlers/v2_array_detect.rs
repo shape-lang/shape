@@ -40,7 +40,7 @@ use shape_value::v2::heap_element::HeapElement;
 use shape_value::v2::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
 use shape_value::v2::refcount::v2_retain;
 use shape_value::v2::string_obj::StringObj;
-use shape_value::v2::typed_array::{TypedArray, TypedArrayElem};
+use shape_value::v2::typed_array::{CallableArrayElem, TypedArray, TypedArrayElem};
 
 use crate::executor::vm_impl::stack::drop_with_kind;
 
@@ -60,10 +60,10 @@ use crate::executor::vm_impl::stack::drop_with_kind;
 // reopen — Array<u64> excluded pending the §2.7.7/Q9 native-kind
 // discriminator).
 pub use shape_value::v2::typed_array::{
-    ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I8,
-    ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT,
-    ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32,
-    ELEM_TYPE_UNKNOWN,
+    ELEM_TYPE_BOOL, ELEM_TYPE_CALLABLE, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32,
+    ELEM_TYPE_F64, ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING,
+    ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8,
+    ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_UNKNOWN,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +110,10 @@ pub enum V2ElemType {
     // `release_v2_typed_array`, which reads the inner array's own `_pad`
     // discriminant.
     TypedArray,
+    // W22 callable-array element carrier. Elements are descriptors that carry
+    // exact callable bits + shape; closures retain/release `Arc<HeapValue>`
+    // shares, while named/module functions are inline ids.
+    Callable,
 }
 
 impl V2ElemType {
@@ -137,37 +141,40 @@ impl V2ElemType {
             ELEM_TYPE_TRAIT_OBJECT => Some(V2ElemType::TraitObject),
             // Construction strict-typing close (2026-06-05) — nested array.
             ELEM_TYPE_TYPED_ARRAY => Some(V2ElemType::TypedArray),
+            ELEM_TYPE_CALLABLE => Some(V2ElemType::Callable),
             _ => None,
         }
     }
 
-    /// Native kind of the array's elements (read result kind / write input
-    /// kind family).
+    /// Native kind of the array's elements when the element family has a single
+    /// fixed kind. Callable arrays return `None`: each stored descriptor carries
+    /// its own exact callable kind.
     #[inline]
-    pub fn elem_kind(self) -> NativeKind {
+    pub fn elem_kind(self) -> Option<NativeKind> {
         match self {
-            V2ElemType::F64 => NativeKind::Float64,
-            V2ElemType::I64 => NativeKind::Int64,
-            V2ElemType::I32 => NativeKind::Int32,
-            V2ElemType::Bool => NativeKind::Bool,
-            V2ElemType::I8 => NativeKind::Int8,
-            V2ElemType::U8 => NativeKind::UInt8,
-            V2ElemType::I16 => NativeKind::Int16,
-            V2ElemType::U16 => NativeKind::UInt16,
-            V2ElemType::U32 => NativeKind::UInt32,
-            V2ElemType::F32 => NativeKind::Float32,
-            V2ElemType::Char => NativeKind::Char,
-            V2ElemType::String => NativeKind::StringV2,
-            V2ElemType::Decimal => NativeKind::DecimalV2,
+            V2ElemType::F64 => Some(NativeKind::Float64),
+            V2ElemType::I64 => Some(NativeKind::Int64),
+            V2ElemType::I32 => Some(NativeKind::Int32),
+            V2ElemType::Bool => Some(NativeKind::Bool),
+            V2ElemType::I8 => Some(NativeKind::Int8),
+            V2ElemType::U8 => Some(NativeKind::UInt8),
+            V2ElemType::I16 => Some(NativeKind::Int16),
+            V2ElemType::U16 => Some(NativeKind::UInt16),
+            V2ElemType::U32 => Some(NativeKind::UInt32),
+            V2ElemType::F32 => Some(NativeKind::Float32),
+            V2ElemType::Char => Some(NativeKind::Char),
+            V2ElemType::String => Some(NativeKind::StringV2),
+            V2ElemType::Decimal => Some(NativeKind::DecimalV2),
             // Phase 4b Round 4 W16.2-A op_new_array-typed-object-element (2026-05-18) —
             // element-read result carries the existing TypedObject pointer kind label.
-            V2ElemType::TypedObject => NativeKind::Ptr(shape_value::HeapKind::TypedObject),
+            V2ElemType::TypedObject => Some(NativeKind::Ptr(shape_value::HeapKind::TypedObject)),
             // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05) —
             // element-read result carries the existing TraitObject pointer kind.
-            V2ElemType::TraitObject => NativeKind::Ptr(shape_value::HeapKind::TraitObject),
+            V2ElemType::TraitObject => Some(NativeKind::Ptr(shape_value::HeapKind::TraitObject)),
             // Nested array — the element carrier kind is the SAME as the outer
             // array's own carrier kind (a v2-raw `*mut TypedArray<U>`).
-            V2ElemType::TypedArray => NativeKind::Ptr(shape_value::HeapKind::TypedArray),
+            V2ElemType::TypedArray => Some(NativeKind::Ptr(shape_value::HeapKind::TypedArray)),
+            V2ElemType::Callable => None,
         }
     }
 }
@@ -465,6 +472,12 @@ pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<(u64, NativeK
             v2_retain(&(*elem_ptr).header);
             (elem_ptr as u64, NativeKind::Ptr(HeapKind::TypedArray))
         },
+        V2ElemType::Callable => unsafe {
+            let arr = view.ptr as *const TypedArray<CallableArrayElem>;
+            let elem = TypedArray::<CallableArrayElem>::get_unchecked(arr, index);
+            elem.retain();
+            (elem.bits, elem.native_kind())
+        },
     };
     Some(pair)
 }
@@ -700,6 +713,16 @@ pub fn write_element(
                 TypedArray::<*const TypedArrayElem>::set(arr, index, new_ptr);
             }
         }
+        V2ElemType::Callable => {
+            let elem = CallableArrayElem::from_native_kind(bits, kind)
+                .ok_or("expected callable value for Array<function> write")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<CallableArrayElem>;
+                let old = TypedArray::<CallableArrayElem>::get_unchecked(arr, index);
+                old.release();
+                TypedArray::<CallableArrayElem>::set(arr, index, elem);
+            }
+        }
     }
     Ok(())
 }
@@ -877,6 +900,14 @@ pub fn push_element(
                 TypedArray::<*const TypedArrayElem>::push(arr, new_ptr);
             }
         }
+        V2ElemType::Callable => {
+            let elem = CallableArrayElem::from_native_kind(bits, kind)
+                .ok_or("expected callable value for Array<function> push")?;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<CallableArrayElem>;
+                TypedArray::<CallableArrayElem>::push(arr, elem);
+            }
+        }
     }
     Ok(())
 }
@@ -963,6 +994,10 @@ pub fn pop_element(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             TypedArray::<*const TypedArrayElem>::pop(arr)
                 .map(|v| (v as u64, NativeKind::Ptr(HeapKind::TypedArray)))
         },
+        V2ElemType::Callable => unsafe {
+            let arr = view.ptr as *mut TypedArray<CallableArrayElem>;
+            TypedArray::<CallableArrayElem>::pop(arr).map(|v| (v.bits, v.native_kind()))
+        },
     }
 }
 
@@ -1035,8 +1070,9 @@ pub fn sum_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::String
         | V2ElemType::Decimal
         | V2ElemType::TypedObject
-            | V2ElemType::TraitObject
-            | V2ElemType::TypedArray => None,
+        | V2ElemType::TraitObject
+        | V2ElemType::TypedArray
+        | V2ElemType::Callable => None,
     }
 }
 
@@ -1269,7 +1305,8 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::Decimal
             | V2ElemType::TypedObject
             | V2ElemType::TraitObject
-            | V2ElemType::TypedArray => None,
+            | V2ElemType::TypedArray
+            | V2ElemType::Callable => None,
         };
     }
     match view.elem_type {
@@ -1320,7 +1357,8 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::Decimal
         | V2ElemType::TypedObject
         | V2ElemType::TraitObject
-        | V2ElemType::TypedArray => None,
+        | V2ElemType::TypedArray
+        | V2ElemType::Callable => None,
     }
 }
 
@@ -1350,7 +1388,8 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::Decimal
             | V2ElemType::TypedObject
             | V2ElemType::TraitObject
-            | V2ElemType::TypedArray => None,
+            | V2ElemType::TypedArray
+            | V2ElemType::Callable => None,
         };
     }
     match view.elem_type {
@@ -1405,7 +1444,8 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::Decimal
         | V2ElemType::TypedObject
         | V2ElemType::TraitObject
-        | V2ElemType::TypedArray => None,
+        | V2ElemType::TypedArray
+        | V2ElemType::Callable => None,
     }
 }
 
@@ -1430,7 +1470,8 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::Decimal
             | V2ElemType::TypedObject
             | V2ElemType::TraitObject
-            | V2ElemType::TypedArray => None,
+            | V2ElemType::TypedArray
+            | V2ElemType::Callable => None,
         };
     }
     match view.elem_type {
@@ -1485,7 +1526,8 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::Decimal
         | V2ElemType::TypedObject
         | V2ElemType::TraitObject
-        | V2ElemType::TypedArray => None,
+        | V2ElemType::TypedArray
+        | V2ElemType::Callable => None,
     }
 }
 
@@ -1910,6 +1952,25 @@ pub fn clone_array(view: &V2TypedArrayView) -> *mut u8 {
                 (*new_arr).len = view.len;
                 let p = new_arr as *mut u8;
                 stamp_elem_type(p, ELEM_TYPE_TYPED_ARRAY);
+                p
+            }
+        }
+        V2ElemType::Callable => {
+            let new_arr = TypedArray::<CallableArrayElem>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<CallableArrayElem>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                if view.len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    for i in 0..(view.len as usize) {
+                        let elem = *src_data.add(i);
+                        elem.retain();
+                        *dst_data.add(i) = elem;
+                    }
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_CALLABLE);
                 p
             }
         }
@@ -2338,6 +2399,26 @@ pub fn reverse_array(view: &V2TypedArrayView) -> *mut u8 {
                 p
             }
         }
+        V2ElemType::Callable => {
+            let new_arr = TypedArray::<CallableArrayElem>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<CallableArrayElem>;
+                let src_data = (*src).data;
+                let dst_data = (*new_arr).data;
+                let len = view.len as usize;
+                if len > 0 && !src_data.is_null() && !dst_data.is_null() {
+                    for i in 0..len {
+                        let elem = *src_data.add(len - 1 - i);
+                        elem.retain();
+                        *dst_data.add(i) = elem;
+                    }
+                }
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_CALLABLE);
+                p
+            }
+        }
     }
 }
 
@@ -2702,6 +2783,35 @@ pub fn concat_arrays(a: &V2TypedArrayView, b: &V2TypedArrayView) -> Result<*mut 
             stamp_elem_type(p, ELEM_TYPE_TYPED_ARRAY);
             p
         },
+        V2ElemType::Callable => unsafe {
+            let new_arr = TypedArray::<CallableArrayElem>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<CallableArrayElem>;
+            let b_arr = b.ptr as *const TypedArray<CallableArrayElem>;
+            let dst_data = (*new_arr).data;
+            let a_data = (*a_arr).data;
+            let b_data = (*b_arr).data;
+            if !dst_data.is_null() {
+                if a.len > 0 && !a_data.is_null() {
+                    for i in 0..(a.len as usize) {
+                        let elem = *a_data.add(i);
+                        elem.retain();
+                        *dst_data.add(i) = elem;
+                    }
+                }
+                if b.len > 0 && !b_data.is_null() {
+                    let off = a.len as usize;
+                    for i in 0..(b.len as usize) {
+                        let elem = *b_data.add(i);
+                        elem.retain();
+                        *dst_data.add(off + i) = elem;
+                    }
+                }
+            }
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_CALLABLE);
+            p
+        },
     };
     Ok(result)
 }
@@ -2924,6 +3034,23 @@ fn copy_range_to_new_array(view: &V2TypedArrayView, start: u32, end: u32) -> *mu
             stamp_elem_type(p, ELEM_TYPE_TYPED_ARRAY);
             p
         },
+        V2ElemType::Callable => unsafe {
+            let new_arr = TypedArray::<CallableArrayElem>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<CallableArrayElem>;
+            let src_data = (*src).data;
+            let dst_data = (*new_arr).data;
+            if n > 0 && !src_data.is_null() && !dst_data.is_null() {
+                for i in 0..n {
+                    let elem = *src_data.add(s + i);
+                    elem.retain();
+                    *dst_data.add(i) = elem;
+                }
+            }
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_CALLABLE);
+            p
+        },
     }
 }
 
@@ -3055,6 +3182,9 @@ pub fn allocate_empty_typed_array(elem_type: V2ElemType, capacity: u32) -> *mut 
             V2ElemType::TypedArray => TypedArray::<
                 *const shape_value::v2::typed_array::TypedArrayElem,
             >::with_capacity(capacity) as *mut u8,
+            V2ElemType::Callable => {
+                TypedArray::<CallableArrayElem>::with_capacity(capacity) as *mut u8
+            }
         };
         let stamp_byte: u8 = match elem_type {
             V2ElemType::F64 => ELEM_TYPE_F64,
@@ -3074,6 +3204,7 @@ pub fn allocate_empty_typed_array(elem_type: V2ElemType, capacity: u32) -> *mut 
             // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
             V2ElemType::TraitObject => ELEM_TYPE_TRAIT_OBJECT,
             V2ElemType::TypedArray => ELEM_TYPE_TYPED_ARRAY,
+            V2ElemType::Callable => ELEM_TYPE_CALLABLE,
         };
         stamp_elem_type(p, stamp_byte);
         p
@@ -3226,6 +3357,10 @@ pub fn eq_element(a_bits: u64, b_bits: u64, elem_type: V2ElemType) -> bool {
         // of nested arrays is a separate stage. Distinct inner-array
         // allocations compare unequal (no false positives).
         V2ElemType::TypedArray => a_bits == b_bits,
+        // Callable equality is identity over the stored callable bits. The
+        // query helpers do not currently thread the needle's callable shape, so
+        // `position_of` refuses callable arrays before calling this arm.
+        V2ElemType::Callable => a_bits == b_bits,
     }
 }
 
@@ -3446,6 +3581,7 @@ pub fn position_of(view: &V2TypedArrayView, needle_bits: u64) -> Option<u32> {
             }
             None
         },
+        V2ElemType::Callable => None,
     }
 }
 
@@ -3552,6 +3688,7 @@ pub fn cmp_element_natural(
             // structured RuntimeError naming the elem_type.
             None
         }
+        V2ElemType::Callable => None,
         _ => {
             // Defensive: any other elem_type without natural ordering.
             // Returns None; caller surfaces structured RuntimeError.
@@ -3823,6 +3960,28 @@ pub fn permute_array(view: &V2TypedArrayView, indices: &[u32]) -> *mut u8 {
             (*new_arr).len = w;
             let p = new_arr as *mut u8;
             stamp_elem_type(p, ELEM_TYPE_TYPED_ARRAY);
+            p
+        },
+        V2ElemType::Callable => unsafe {
+            let new_arr = TypedArray::<CallableArrayElem>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<CallableArrayElem>;
+            let src_data = (*src).data;
+            let dst_data = (*new_arr).data;
+            let mut w: u32 = 0;
+            if !src_data.is_null() && !dst_data.is_null() {
+                for &idx in indices {
+                    if idx >= view.len {
+                        continue;
+                    }
+                    let elem = *src_data.add(idx as usize);
+                    elem.retain();
+                    *dst_data.add(w as usize) = elem;
+                    w += 1;
+                }
+            }
+            (*new_arr).len = w;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_CALLABLE);
             p
         },
     }

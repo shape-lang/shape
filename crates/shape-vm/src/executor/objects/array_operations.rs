@@ -34,12 +34,12 @@
 use crate::bytecode::{Instruction, Operand};
 use crate::executor::VirtualMachine;
 use crate::executor::v2_handlers::v2_array_detect::{
-    self, ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64,
-    ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING, ELEM_TYPE_U8,
-    ELEM_TYPE_U16, ELEM_TYPE_U32, V2ElemType, V2TypedArrayView,
+    self, ELEM_TYPE_BOOL, ELEM_TYPE_CALLABLE, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32,
+    ELEM_TYPE_F64, ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING,
+    ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32, V2ElemType, V2TypedArrayView,
 };
 use crate::executor::vm_impl::stack::drop_with_kind;
-use shape_value::v2::typed_array::TypedArray;
+use shape_value::v2::typed_array::{CallableArrayElem, TypedArray};
 use shape_value::{HeapKind, NativeKind, VMError};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -601,6 +601,23 @@ fn slice_v2_typed_array(view: &V2TypedArrayView, s: usize, e: usize) -> *mut u8 
                 (*new_ptr).len = count as u32;
             }
             stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_TYPED_ARRAY);
+            new_ptr as *mut u8
+        },
+        V2ElemType::Callable => unsafe {
+            let src = view.ptr as *const TypedArray<CallableArrayElem>;
+            let count = e.saturating_sub(s);
+            let new_ptr = TypedArray::<CallableArrayElem>::with_capacity(count as u32);
+            if count > 0 {
+                let src_data = (*src).data;
+                let dst_data = (*new_ptr).data;
+                for i in 0..count {
+                    let elem = *src_data.add(s + i);
+                    elem.retain();
+                    *dst_data.add(i) = elem;
+                }
+                (*new_ptr).len = count as u32;
+            }
+            stamp_elem_type(new_ptr as *mut u8, ELEM_TYPE_CALLABLE);
             new_ptr as *mut u8
         },
     }

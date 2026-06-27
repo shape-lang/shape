@@ -455,6 +455,17 @@ fn sort_by_natural(view: &V2TypedArrayView, op: &'static str) -> Result<Vec<u32>
         return Ok(indices);
     }
 
+    if matches!(
+        view.elem_type,
+        crate::executor::v2_handlers::v2_array_detect::V2ElemType::Callable
+    ) {
+        return Err(VMError::RuntimeError(format!(
+            "Array.{op}: natural-ordering comparison failed for element kind {:?} \
+             (function values have no canonical Ord at v0.3)",
+            view.elem_type
+        )));
+    }
+
     // Read every element once into a (bits, kind) pair — the natural-
     // ordering comparator only needs the bits + the view's elem_type.
     let mut bits_vec: Vec<u64> = Vec::with_capacity(len as usize);
