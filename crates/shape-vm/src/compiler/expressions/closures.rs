@@ -753,6 +753,33 @@ pub(crate) fn infer_param_type_from_body(
             }
             Expr::Array(elements, _) => elements.iter().any(|e| expr_mentions_name(e, name)),
             Expr::Return(Some(e), _) => expr_mentions_name(e, name),
+            Expr::Block(block, _) => block.items.iter().any(|item| match item {
+                shape_ast::ast::BlockItem::VariableDecl(decl) => decl
+                    .value
+                    .as_ref()
+                    .is_some_and(|e| expr_mentions_name(e, name)),
+                shape_ast::ast::BlockItem::Assignment(assign) => {
+                    expr_mentions_name(&assign.value, name)
+                }
+                shape_ast::ast::BlockItem::Statement(stmt) => stmt_mentions_name(stmt, name),
+                shape_ast::ast::BlockItem::Expression(expr) => expr_mentions_name(expr, name),
+            }),
+            Expr::Assign(assign, _) => {
+                expr_mentions_name(&assign.target, name) || expr_mentions_name(&assign.value, name)
+            }
+            _ => false,
+        }
+    }
+    fn stmt_mentions_name(stmt: &Statement, name: &str) -> bool {
+        match stmt {
+            Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+                expr_mentions_name(expr, name)
+            }
+            Statement::VariableDecl(decl, _) => decl
+                .value
+                .as_ref()
+                .is_some_and(|e| expr_mentions_name(e, name)),
+            Statement::Assignment(assign, _) => expr_mentions_name(&assign.value, name),
             _ => false,
         }
     }
@@ -770,6 +797,31 @@ pub(crate) fn infer_param_type_from_body(
             }
             Expr::Array(elements, _) => elements.iter().any(expr_contains_string_literal),
             Expr::Return(Some(e), _) => expr_contains_string_literal(e),
+            Expr::Block(block, _) => block.items.iter().any(|item| match item {
+                shape_ast::ast::BlockItem::VariableDecl(decl) => decl
+                    .value
+                    .as_ref()
+                    .is_some_and(expr_contains_string_literal),
+                shape_ast::ast::BlockItem::Assignment(assign) => {
+                    expr_contains_string_literal(&assign.value)
+                }
+                shape_ast::ast::BlockItem::Statement(stmt) => stmt_contains_string_literal(stmt),
+                shape_ast::ast::BlockItem::Expression(expr) => expr_contains_string_literal(expr),
+            }),
+            Expr::Assign(assign, _) => expr_contains_string_literal(&assign.value),
+            _ => false,
+        }
+    }
+    fn stmt_contains_string_literal(stmt: &Statement) -> bool {
+        match stmt {
+            Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+                expr_contains_string_literal(expr)
+            }
+            Statement::VariableDecl(decl, _) => decl
+                .value
+                .as_ref()
+                .is_some_and(expr_contains_string_literal),
+            Statement::Assignment(assign, _) => expr_contains_string_literal(&assign.value),
             _ => false,
         }
     }
@@ -811,6 +863,15 @@ pub(crate) fn infer_param_type_from_body(
             }
             Expr::Array(elements, _) => elements.iter().find_map(|e| scan_expr(name, e)),
             Expr::Return(Some(e), _) => scan_expr(name, e),
+            Expr::Block(block, _) => block.items.iter().find_map(|item| match item {
+                shape_ast::ast::BlockItem::VariableDecl(decl) => {
+                    decl.value.as_ref().and_then(|e| scan_expr(name, e))
+                }
+                shape_ast::ast::BlockItem::Assignment(assign) => scan_expr(name, &assign.value),
+                shape_ast::ast::BlockItem::Statement(stmt) => scan_stmt(name, stmt),
+                shape_ast::ast::BlockItem::Expression(expr) => scan_expr(name, expr),
+            }),
+            Expr::Assign(assign, _) => scan_expr(name, &assign.value),
             // Match: when the scrutinee is the bare `name`, look at any
             // arm-pattern binding of an identifier and propagate its
             // body/guard usage back to `name`'s type. Conservatively
@@ -887,6 +948,20 @@ fn closure_body_requires_numeric_param(
             }
             Expr::Array(elements, _) => elements.iter().any(|e| expr_mentions_name(e, name)),
             Expr::Return(Some(e), _) => expr_mentions_name(e, name),
+            Expr::Block(block, _) => block.items.iter().any(|item| match item {
+                shape_ast::ast::BlockItem::VariableDecl(decl) => decl
+                    .value
+                    .as_ref()
+                    .is_some_and(|e| expr_mentions_name(e, name)),
+                shape_ast::ast::BlockItem::Assignment(assign) => {
+                    expr_mentions_name(&assign.value, name)
+                }
+                shape_ast::ast::BlockItem::Statement(stmt) => stmt_mentions_name(stmt, name),
+                shape_ast::ast::BlockItem::Expression(expr) => expr_mentions_name(expr, name),
+            }),
+            Expr::Assign(assign, _) => {
+                expr_mentions_name(&assign.target, name) || expr_mentions_name(&assign.value, name)
+            }
             Expr::Match(match_expr, _) => {
                 expr_mentions_name(&match_expr.scrutinee, name)
                     || match_expr.arms.iter().any(|arm| {
@@ -896,6 +971,20 @@ fn closure_body_requires_numeric_param(
                             || expr_mentions_name(&arm.body, name)
                     })
             }
+            _ => false,
+        }
+    }
+
+    fn stmt_mentions_name(stmt: &Statement, name: &str) -> bool {
+        match stmt {
+            Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+                expr_mentions_name(expr, name)
+            }
+            Statement::VariableDecl(decl, _) => decl
+                .value
+                .as_ref()
+                .is_some_and(|e| expr_mentions_name(e, name)),
+            Statement::Assignment(assign, _) => expr_mentions_name(&assign.value, name),
             _ => false,
         }
     }
@@ -936,6 +1025,15 @@ fn closure_body_requires_numeric_param(
             }
             Expr::Array(elements, _) => elements.iter().any(|e| scan_expr(e, name)),
             Expr::Return(Some(e), _) => scan_expr(e, name),
+            Expr::Block(block, _) => block.items.iter().any(|item| match item {
+                shape_ast::ast::BlockItem::VariableDecl(decl) => {
+                    decl.value.as_ref().is_some_and(|e| scan_expr(e, name))
+                }
+                shape_ast::ast::BlockItem::Assignment(assign) => scan_expr(&assign.value, name),
+                shape_ast::ast::BlockItem::Statement(stmt) => scan_stmt(stmt, name),
+                shape_ast::ast::BlockItem::Expression(expr) => scan_expr(expr, name),
+            }),
+            Expr::Assign(assign, _) => scan_expr(&assign.value, name),
             Expr::Match(match_expr, _) => {
                 scan_expr(&match_expr.scrutinee, name)
                     || match_expr.arms.iter().any(|arm| {
@@ -961,6 +1059,18 @@ fn closure_body_requires_numeric_param(
             }
             Expr::Array(elements, _) => elements.iter().any(expr_contains_string_literal),
             Expr::Return(Some(e), _) => expr_contains_string_literal(e),
+            Expr::Block(block, _) => block.items.iter().any(|item| match item {
+                shape_ast::ast::BlockItem::VariableDecl(decl) => decl
+                    .value
+                    .as_ref()
+                    .is_some_and(expr_contains_string_literal),
+                shape_ast::ast::BlockItem::Assignment(assign) => {
+                    expr_contains_string_literal(&assign.value)
+                }
+                shape_ast::ast::BlockItem::Statement(stmt) => stmt_contains_string_literal(stmt),
+                shape_ast::ast::BlockItem::Expression(expr) => expr_contains_string_literal(expr),
+            }),
+            Expr::Assign(assign, _) => expr_contains_string_literal(&assign.value),
             Expr::Match(match_expr, _) => {
                 expr_contains_string_literal(&match_expr.scrutinee)
                     || match_expr.arms.iter().any(|arm| {
@@ -970,6 +1080,20 @@ fn closure_body_requires_numeric_param(
                             || expr_contains_string_literal(&arm.body)
                     })
             }
+            _ => false,
+        }
+    }
+
+    fn stmt_contains_string_literal(stmt: &Statement) -> bool {
+        match stmt {
+            Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+                expr_contains_string_literal(expr)
+            }
+            Statement::VariableDecl(decl, _) => decl
+                .value
+                .as_ref()
+                .is_some_and(expr_contains_string_literal),
+            Statement::Assignment(assign, _) => expr_contains_string_literal(&assign.value),
             _ => false,
         }
     }
@@ -2426,6 +2550,18 @@ impl BytecodeCompiler {
                     elements.iter().find_map(|e| scan_expr(compiler, name, e))
                 }
                 Expr::Return(Some(e), _) => scan_expr(compiler, name, e),
+                Expr::Block(block, _) => block.items.iter().find_map(|item| match item {
+                    shape_ast::ast::BlockItem::VariableDecl(decl) => decl
+                        .value
+                        .as_ref()
+                        .and_then(|e| scan_expr(compiler, name, e)),
+                    shape_ast::ast::BlockItem::Assignment(assign) => {
+                        scan_expr(compiler, name, &assign.value)
+                    }
+                    shape_ast::ast::BlockItem::Statement(stmt) => scan_stmt(compiler, name, stmt),
+                    shape_ast::ast::BlockItem::Expression(expr) => scan_expr(compiler, name, expr),
+                }),
+                Expr::Assign(assign, _) => scan_expr(compiler, name, &assign.value),
                 _ => None,
             }
         }
@@ -2457,8 +2593,45 @@ impl BytecodeCompiler {
                 _ => return None,
             };
             let ident_expr = Expr::Identifier(other_name.clone(), Span::DUMMY);
-            let ct = concrete_type_for_expr(compiler, &ident_expr)?;
-            concrete_type_to_type_annotation(&ct)
+            if let Some(ct) = concrete_type_for_expr(compiler, &ident_expr) {
+                return concrete_type_to_type_annotation(&ct);
+            }
+            let hint = if let Some(local_idx) = compiler.resolve_local(other_name) {
+                compiler.type_tracker.get_local_storage_hint(local_idx)
+            } else {
+                let scoped = compiler
+                    .resolve_scoped_module_binding_name(other_name)
+                    .unwrap_or_else(|| other_name.to_string());
+                compiler
+                    .module_bindings
+                    .get(&scoped)
+                    .or_else(|| compiler.module_bindings.get(other_name))
+                    .and_then(|&idx| compiler.type_tracker.get_binding_type(idx))
+                    .and_then(|info| info.storage_hint)
+            }?;
+            storage_hint_to_type_annotation(hint)
+        }
+
+        fn storage_hint_to_type_annotation(
+            hint: crate::type_tracking::StorageHint,
+        ) -> Option<TypeAnnotation> {
+            use shape_value::NativeKind;
+
+            let name = match hint {
+                NativeKind::Float64 => "number",
+                NativeKind::Int64 => "int",
+                NativeKind::Int32 => "i32",
+                NativeKind::Int16 => "i16",
+                NativeKind::Int8 => "i8",
+                NativeKind::UInt64 => "u64",
+                NativeKind::UInt32 => "u32",
+                NativeKind::UInt16 => "u16",
+                NativeKind::UInt8 => "u8",
+                NativeKind::Bool => "bool",
+                NativeKind::String => "string",
+                _ => return None,
+            };
+            Some(TypeAnnotation::Basic(name.to_string()))
         }
         body.iter().find_map(|s| scan_stmt(self, param_name, s))
     }

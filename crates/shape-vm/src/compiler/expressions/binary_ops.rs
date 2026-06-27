@@ -463,9 +463,10 @@ impl BytecodeCompiler {
         }
     }
 
-    /// Resolve the `NumericType` of an `Identifier` read from its tracker
-    /// slot's PROVEN storage hint (U4-4 — the kind the deleted register stamped
-    /// at variable-load time). Width-aware. Returns `None` for non-identifiers,
+    /// Resolve the `NumericType` of an `Identifier` read from its typed storage
+    /// proof: a captured cell's recorded `FieldKind`, or a tracker slot's
+    /// PROVEN storage hint (U4-4 — the kind the deleted register stamped at
+    /// variable-load time). Width-aware. Returns `None` for non-identifiers,
     /// unresolvable names, or slots with no proven numeric storage hint. This
     /// takes priority over the engine span-table specifically so a monomorphized
     /// specialization's substituted param kind wins over the shared
@@ -475,6 +476,9 @@ impl BytecodeCompiler {
         let Expr::Identifier(name, _) = expr else {
             return None;
         };
+        if let Some(nt) = self.capture_cell_numeric_type(name) {
+            return Some(nt);
+        }
         let hint = if let Some(local_idx) = self.resolve_local(name) {
             self.type_tracker.get_local_storage_hint(local_idx)
         } else {
@@ -499,6 +503,33 @@ impl BytecodeCompiler {
             StorageHint::UInt32 => Some(NumericType::IntWidth(IntWidth::U32)),
             StorageHint::UInt64 => Some(NumericType::IntWidth(IntWidth::U64)),
             _ => None,
+        }
+    }
+
+    fn capture_cell_numeric_type(&self, name: &str) -> Option<NumericType> {
+        use shape_ast::IntWidth;
+        use shape_value::v2::struct_layout::FieldKind;
+
+        // Mutable/shared closure captures are already lowered through typed
+        // per-FieldKind load/store opcodes. Reuse that compile-time capture
+        // stamp for binary-op opcode selection; this is not a runtime probe.
+        let kind = self
+            .owned_mutable_capture_inner_kinds
+            .get(name)
+            .copied()
+            .or_else(|| self.shared_capture_inner_kinds.get(name).copied())?;
+
+        match kind {
+            FieldKind::F64 => Some(NumericType::Number),
+            FieldKind::I64 => Some(NumericType::Int),
+            FieldKind::I32 => Some(NumericType::IntWidth(IntWidth::I32)),
+            FieldKind::I16 => Some(NumericType::IntWidth(IntWidth::I16)),
+            FieldKind::I8 => Some(NumericType::IntWidth(IntWidth::I8)),
+            FieldKind::U64 => Some(NumericType::IntWidth(IntWidth::U64)),
+            FieldKind::U32 => Some(NumericType::IntWidth(IntWidth::U32)),
+            FieldKind::U16 => Some(NumericType::IntWidth(IntWidth::U16)),
+            FieldKind::U8 => Some(NumericType::IntWidth(IntWidth::U8)),
+            FieldKind::Bool | FieldKind::Ptr => None,
         }
     }
 

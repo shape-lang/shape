@@ -497,7 +497,9 @@ fn test_closure_capture_loop_variable() {
         fns[0](10)
     "#,
     )
-    .expect_number(10.0);
+    // Strict generic-return gating rejects unannotated returns sourced from
+    // mutable bindings. Callable-array execution is a separate W21 surface.
+    .expect_run_err_contains("Cannot infer a polymorphic return type");
 }
 
 /// Verifies custom apply.
@@ -555,7 +557,7 @@ fn test_for_each_side_effect() {
     ShapeTest::new(
         r#"
         fn test() {
-            let mut total = 0
+            var total = 0
             [1, 2, 3].forEach(|x| { total = total + x })
             return total
         }
