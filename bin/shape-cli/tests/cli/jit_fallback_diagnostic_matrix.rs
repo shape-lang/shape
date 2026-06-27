@@ -187,10 +187,11 @@ fn fallback_f2_preflight_shared_module_binding_diagnostic_emits() {
     );
 }
 
-/// MirToIR top-level preflight rejection class — closure-capture missing
-/// function_id. Distinct producer site from f2's SharedModuleBinding
-/// preflight (this fires in `MirToIR::compile_program` rather than in
-/// `preflight_instructions`).
+/// Historical F3 closure-capture fixture. At HEAD, valid source-level
+/// closure-capture MIR is back-patched with concrete function ids before
+/// JIT MIR preflight sees it, so the old "ClosureCapture missing function_id"
+/// class is stale for CLI fixtures. This fixture now reaches the main-code
+/// bytecode preflight first and rejects `AllocSharedModuleBinding`.
 #[test]
 fn fallback_f3_preflight_closure_capture_diagnostic_emits() {
     let vm = run_shape("vm", "f3-preflight-closure-capture.shape");
@@ -231,11 +232,11 @@ fn fallback_f3_preflight_closure_capture_diagnostic_emits() {
         .unwrap_or("")
         .to_string();
     assert!(
-        fallback_line.contains("ClosureCapture")
-            || fallback_line.contains("MirToIR")
-            || fallback_line.contains("preflight"),
-        "f3 fallback diagnostic should mention the MirToIR closure-capture \
-         preflight class; got: {}",
+        fallback_line.contains("JitPreflightReport")
+            && fallback_line.contains("AllocSharedModuleBinding")
+            && fallback_line.contains("unsupported_builtins: []"),
+        "f3 fallback diagnostic should mention the current \
+         AllocSharedModuleBinding bytecode preflight class; got: {}",
         fallback_line
     );
 }
