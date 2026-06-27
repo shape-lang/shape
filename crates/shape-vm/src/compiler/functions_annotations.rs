@@ -3,8 +3,8 @@
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use shape_ast::ast::{
-    DestructurePattern, Expr, FunctionDef, Literal, ObjectEntry, Span, Statement, VarKind,
-    VariableDecl,
+    DestructurePattern, Expr, FunctionDef, Literal, ObjectEntry, Span, Statement, TypeAnnotation,
+    VarKind, VariableDecl,
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::FieldType;
@@ -27,7 +27,7 @@ impl BytecodeCompiler {
         impl_idx: u16,
     ) -> Result<crate::compiler::v2_typed_emission::TypedArrayKind> {
         use crate::compiler::v2_typed_emission::{
-            should_use_typed_array_from_slot_kind, TypedArrayKind,
+            TypedArrayKind, should_use_typed_array_from_slot_kind,
         };
         use shape_ast::ast::TypeAnnotation;
         use shape_value::HeapKind;
@@ -1020,12 +1020,246 @@ impl BytecodeCompiler {
             _ => {}
         }
 
+        self.annotate_comptime_extend_method_params(&mut extend.methods, target_name);
+
         for method in &extend.methods {
             let func_def = self.desugar_extend_method(method, &extend.type_name)?;
             self.register_function(&func_def)?;
             self.compile_function_body(&func_def)?;
         }
         Ok(())
+    }
+
+    fn annotate_comptime_extend_method_params(
+        &self,
+        methods: &mut [shape_ast::ast::types::MethodDef],
+        target_name: &str,
+    ) {
+        let Some(struct_def) = self.comptime_context_struct_defs.get(target_name) else {
+            return;
+        };
+        let field_types: HashMap<&str, &TypeAnnotation> = struct_def
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str(), &field.type_annotation))
+            .collect();
+        let target_annotation = TypeAnnotation::Basic(target_name.to_string());
+
+        for method in methods {
+            for param_idx in 0..method.params.len() {
+                if method.params[param_idx].type_annotation.is_some() {
+                    continue;
+                }
+                let Some(param_name) = method.params[param_idx].simple_name() else {
+                    continue;
+                };
+
+                let inferred = if Self::body_accesses_target_field_on_param(
+                    &method.body,
+                    param_name,
+                    &field_types,
+                ) {
+                    Some(target_annotation.clone())
+                } else {
+                    Self::infer_param_type_from_self_field_binary(
+                        &method.body,
+                        param_name,
+                        &field_types,
+                    )
+                };
+
+                if let Some(type_annotation) = inferred {
+                    method.params[param_idx].type_annotation = Some(type_annotation);
+                }
+            }
+        }
+    }
+
+    fn body_accesses_target_field_on_param(
+        body: &[Statement],
+        param_name: &str,
+        field_types: &HashMap<&str, &TypeAnnotation>,
+    ) -> bool {
+        body.iter().any(|stmt| {
+            Self::statement_accesses_target_field_on_param(stmt, param_name, field_types)
+        })
+    }
+
+    fn statement_accesses_target_field_on_param(
+        stmt: &Statement,
+        param_name: &str,
+        field_types: &HashMap<&str, &TypeAnnotation>,
+    ) -> bool {
+        match stmt {
+            Statement::Return(Some(expr), _) | Statement::Expression(expr, _) => {
+                Self::expr_accesses_target_field_on_param(expr, param_name, field_types)
+            }
+            Statement::VariableDecl(decl, _) => decl.value.as_ref().is_some_and(|expr| {
+                Self::expr_accesses_target_field_on_param(expr, param_name, field_types)
+            }),
+            Statement::Assignment(assign, _) => {
+                Self::expr_accesses_target_field_on_param(&assign.value, param_name, field_types)
+            }
+            Statement::If(if_stmt, _) => {
+                Self::expr_accesses_target_field_on_param(
+                    &if_stmt.condition,
+                    param_name,
+                    field_types,
+                ) || if_stmt.then_body.iter().any(|stmt| {
+                    Self::statement_accesses_target_field_on_param(stmt, param_name, field_types)
+                }) || if_stmt.else_body.as_ref().is_some_and(|body| {
+                    body.iter().any(|stmt| {
+                        Self::statement_accesses_target_field_on_param(
+                            stmt,
+                            param_name,
+                            field_types,
+                        )
+                    })
+                })
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_accesses_target_field_on_param(
+        expr: &Expr,
+        param_name: &str,
+        field_types: &HashMap<&str, &TypeAnnotation>,
+    ) -> bool {
+        match expr {
+            Expr::PropertyAccess { object, .. } => {
+                matches!(&**object, Expr::Identifier(name, _) if name == param_name)
+                    || Self::expr_accesses_target_field_on_param(object, param_name, field_types)
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                Self::expr_accesses_target_field_on_param(left, param_name, field_types)
+                    || Self::expr_accesses_target_field_on_param(right, param_name, field_types)
+            }
+            Expr::UnaryOp { operand, .. } => {
+                Self::expr_accesses_target_field_on_param(operand, param_name, field_types)
+            }
+            Expr::FunctionCall { args, .. }
+            | Expr::QualifiedFunctionCall { args, .. }
+            | Expr::Array(args, _) => args.iter().any(|expr| {
+                Self::expr_accesses_target_field_on_param(expr, param_name, field_types)
+            }),
+            _ => false,
+        }
+    }
+
+    fn infer_param_type_from_self_field_binary(
+        body: &[Statement],
+        param_name: &str,
+        field_types: &HashMap<&str, &TypeAnnotation>,
+    ) -> Option<TypeAnnotation> {
+        body.iter().find_map(|stmt| {
+            Self::statement_infer_param_type_from_self_field_binary(stmt, param_name, field_types)
+        })
+    }
+
+    fn statement_infer_param_type_from_self_field_binary(
+        stmt: &Statement,
+        param_name: &str,
+        field_types: &HashMap<&str, &TypeAnnotation>,
+    ) -> Option<TypeAnnotation> {
+        match stmt {
+            Statement::Return(Some(expr), _) | Statement::Expression(expr, _) => {
+                Self::expr_infer_param_type_from_self_field_binary(expr, param_name, field_types)
+            }
+            Statement::VariableDecl(decl, _) => decl.value.as_ref().and_then(|expr| {
+                Self::expr_infer_param_type_from_self_field_binary(expr, param_name, field_types)
+            }),
+            Statement::Assignment(assign, _) => Self::expr_infer_param_type_from_self_field_binary(
+                &assign.value,
+                param_name,
+                field_types,
+            ),
+            Statement::If(if_stmt, _) => Self::expr_infer_param_type_from_self_field_binary(
+                &if_stmt.condition,
+                param_name,
+                field_types,
+            )
+            .or_else(|| {
+                if_stmt.then_body.iter().find_map(|stmt| {
+                    Self::statement_infer_param_type_from_self_field_binary(
+                        stmt,
+                        param_name,
+                        field_types,
+                    )
+                })
+            })
+            .or_else(|| {
+                if_stmt.else_body.as_ref().and_then(|body| {
+                    body.iter().find_map(|stmt| {
+                        Self::statement_infer_param_type_from_self_field_binary(
+                            stmt,
+                            param_name,
+                            field_types,
+                        )
+                    })
+                })
+            }),
+            _ => None,
+        }
+    }
+
+    fn expr_infer_param_type_from_self_field_binary(
+        expr: &Expr,
+        param_name: &str,
+        field_types: &HashMap<&str, &TypeAnnotation>,
+    ) -> Option<TypeAnnotation> {
+        match expr {
+            Expr::BinaryOp { left, right, .. } => {
+                if Self::expr_is_identifier(right, param_name) {
+                    if let Some(field_type) = Self::self_field_type(left, field_types) {
+                        return Some(field_type.clone());
+                    }
+                }
+                if Self::expr_is_identifier(left, param_name) {
+                    if let Some(field_type) = Self::self_field_type(right, field_types) {
+                        return Some(field_type.clone());
+                    }
+                }
+                Self::expr_infer_param_type_from_self_field_binary(left, param_name, field_types)
+                    .or_else(|| {
+                        Self::expr_infer_param_type_from_self_field_binary(
+                            right,
+                            param_name,
+                            field_types,
+                        )
+                    })
+            }
+            Expr::UnaryOp { operand, .. } => {
+                Self::expr_infer_param_type_from_self_field_binary(operand, param_name, field_types)
+            }
+            Expr::FunctionCall { args, .. }
+            | Expr::QualifiedFunctionCall { args, .. }
+            | Expr::Array(args, _) => args.iter().find_map(|expr| {
+                Self::expr_infer_param_type_from_self_field_binary(expr, param_name, field_types)
+            }),
+            _ => None,
+        }
+    }
+
+    fn self_field_type<'a>(
+        expr: &Expr,
+        field_types: &HashMap<&str, &'a TypeAnnotation>,
+    ) -> Option<&'a TypeAnnotation> {
+        let Expr::PropertyAccess {
+            object, property, ..
+        } = expr
+        else {
+            return None;
+        };
+        if matches!(&**object, Expr::Identifier(name, _) if name == "self") {
+            field_types.get(property.as_str()).copied()
+        } else {
+            None
+        }
+    }
+
+    fn expr_is_identifier(expr: &Expr, expected: &str) -> bool {
+        matches!(expr, Expr::Identifier(name, _) if name == expected)
     }
 
     pub(super) fn process_comptime_directives(
@@ -1222,21 +1456,23 @@ impl BytecodeCompiler {
                                 .map(|n| Expr::Identifier(n.to_string(), Span::DUMMY))
                         })
                         .collect();
-                    let args_decl = Statement::VariableDecl(
-                        VariableDecl {
-                            kind: VarKind::Let,
-                            is_mut: false,
-                            pattern: DestructurePattern::Identifier(
-                                "args".to_string(),
-                                Span::DUMMY,
-                            ),
-                            type_annotation: None,
-                            value: Some(Expr::Array(param_idents, Span::DUMMY)),
-                            ownership: Default::default(),
-                        },
-                        Span::DUMMY,
-                    );
-                    let mut new_body = vec![args_decl];
+                    let mut new_body = Vec::new();
+                    if !param_idents.is_empty() {
+                        new_body.push(Statement::VariableDecl(
+                            VariableDecl {
+                                kind: VarKind::Let,
+                                is_mut: false,
+                                pattern: DestructurePattern::Identifier(
+                                    "args".to_string(),
+                                    Span::DUMMY,
+                                ),
+                                type_annotation: None,
+                                value: Some(Expr::Array(param_idents, Span::DUMMY)),
+                                ownership: Default::default(),
+                            },
+                            Span::DUMMY,
+                        ));
+                    }
                     new_body.extend(body);
                     func_def.body = new_body;
                 }
