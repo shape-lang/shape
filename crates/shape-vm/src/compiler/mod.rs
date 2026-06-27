@@ -731,6 +731,16 @@ pub struct BytecodeCompiler {
     ///   slot are a conflict.
     pub(crate) closure_callsite_param_hints: std::collections::HashMap<String, ClosureCallsiteHint>,
 
+    /// Producer-function hint key while compiling a returned callable value.
+    ///
+    /// `pending_variable_name` covers `let f = |...|` and now
+    /// `let f = match/if { |...| }` initializers. Returned callable producers
+    /// (`fn chooser(){ if c { |...| } else { |...| } }`) have no binding name at
+    /// the closure literal site, so explicit/implicit return compilation scopes
+    /// this to the producer function name only while compiling that returned
+    /// callable expression.
+    pub(crate) pending_callable_hint_name: Option<String>,
+
     /// Unified type metadata for the last compiled expression.
     ///
     /// This is the single source for relational/value kind propagation

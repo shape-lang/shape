@@ -1725,6 +1725,47 @@ impl TypeInferenceEngine {
         }))
     }
 
+    /// Join branch/return values that are all callable signatures.
+    ///
+    /// This is deliberately narrower than `types_equal`: a value-level
+    /// `if`/`match` that selects among closures is valid only when every arm is
+    /// callable with the same arity and the ordinary solver can unify each
+    /// parameter and return slot. The returned representative is the first
+    /// callable signature; constraints connect every sibling arm to it, so
+    /// `int` versus `number` still rejects through the normal unifier.
+    pub(crate) fn try_join_callable_types(&mut self, types: &[Type]) -> Option<Type> {
+        let first = types.first()?;
+        let Type::Function {
+            params: head_params,
+            returns: head_returns,
+        } = first
+        else {
+            return None;
+        };
+
+        let head_params = head_params.clone();
+        let head_return = head_returns.as_ref().clone();
+
+        for ty in types.iter().skip(1) {
+            let Type::Function { params, returns } = ty else {
+                return None;
+            };
+            if params.len() != head_params.len() {
+                return None;
+            }
+            for (head, other) in head_params.iter().cloned().zip(params.iter().cloned()) {
+                self.constraints.push((head, other));
+            }
+            self.constraints
+                .push((head_return.clone(), returns.as_ref().clone()));
+        }
+
+        Some(Type::Function {
+            params: head_params,
+            returns: Box::new(head_return),
+        })
+    }
+
     fn combine_return_types_internal(
         &mut self,
         candidates: &[Type],
@@ -1755,6 +1796,10 @@ impl TypeInferenceEngine {
                 self.ensure_no_unresolved_generic_args(&merged_generic)?;
             }
             return Ok(merged_generic);
+        }
+
+        if let Some(callable) = self.try_join_callable_types(&unique) {
+            return Ok(callable);
         }
 
         if allow_unresolved_generic_args

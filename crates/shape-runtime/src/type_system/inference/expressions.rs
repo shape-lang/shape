@@ -1958,6 +1958,10 @@ impl TypeInferenceEngine {
                     return Ok(common);
                 }
 
+                if let Some(callable) = self.try_join_callable_types(&arm_types) {
+                    return Ok(callable);
+                }
+
                 // Every arm diverges → the match is Never (bottom). Only reach
                 // here when there was at least one arm and all of them diverged;
                 // a genuinely empty `match` (no arms) keeps the fresh-var path.

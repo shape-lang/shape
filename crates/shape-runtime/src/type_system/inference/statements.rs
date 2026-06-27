@@ -597,6 +597,23 @@ impl TypeInferenceEngine {
         }
     }
 
+    fn is_constructor_like_call_name(name: &str) -> bool {
+        matches!(name, "Ok" | "Err" | "Some" | "None")
+            || name.chars().next().is_some_and(char::is_uppercase)
+    }
+
+    fn expression_statement_records_implicit_return(expr: &Expr) -> bool {
+        match expr {
+            Expr::FunctionCall { name, .. } => Self::is_constructor_like_call_name(name),
+            Expr::QualifiedFunctionCall { function, .. } => {
+                Self::is_constructor_like_call_name(function)
+            }
+            Expr::MethodCall { .. } => false,
+            Expr::EnumConstructor { .. } => true,
+            _ => true,
+        }
+    }
+
     /// Infer type of a single statement
     pub(crate) fn infer_statement(&mut self, stmt: &Statement) -> TypeResult<Type> {
         match stmt {
@@ -666,7 +683,9 @@ impl TypeInferenceEngine {
                 // bare values) keep recording — Shape collects these across
                 // multiple statements for `Result`/union return inference
                 // (`fn f() { Ok(1) \n Err("e") }` ⇒ `Result<int, string>`).
-                self.record_implicit_return_type(expr_type.clone());
+                if Self::expression_statement_records_implicit_return(expr) {
+                    self.record_implicit_return_type(expr_type.clone());
+                }
                 Ok(expr_type)
             }
             Statement::If(if_stmt, _) => {

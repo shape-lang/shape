@@ -2028,11 +2028,18 @@ impl BytecodeCompiler {
                         let return_expr: &shape_ast::ast::Expr =
                             return_widened.as_ref().unwrap_or(expr);
                         // Compile expression and keep value on stack for implicit return.
-                        if self.current_function_return_reference_summary.is_some() {
-                            self.compile_expr_preserving_refs(return_expr)?;
-                        } else {
-                            self.compile_expr(return_expr)?;
-                        }
+                        let saved_pending_callable_hint_name =
+                            self.pending_callable_hint_name.clone();
+                        self.pending_callable_hint_name =
+                            self.callable_return_hint_name_for_expr(return_expr);
+                        let compile_result =
+                            if self.current_function_return_reference_summary.is_some() {
+                                self.compile_expr_preserving_refs(return_expr)
+                            } else {
+                                self.compile_expr(return_expr)
+                            };
+                        self.pending_callable_hint_name = saved_pending_callable_hint_name;
+                        compile_result?;
                         // ADR-006 §2.7.30 (escape-Drop-deferral): an implicit
                         // tail-return of a bare Drop-bearing local (`fn f() ->
                         // R { let r = R{..}; r }`) moves the value to the

@@ -55,6 +55,7 @@ impl BytecodeCompiler {
             closure_row_schema: None,
             pending_closure_param_types: None,
             closure_callsite_param_hints: HashMap::new(),
+            pending_callable_hint_name: None,
             last_expr_type_info: None,
             type_tracker: TypeTracker::with_stdlib(),
             last_expr_schema: None,

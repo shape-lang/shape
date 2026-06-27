@@ -5152,11 +5152,17 @@ impl BytecodeCompiler {
                             )
                         });
                     let return_expr: &Expr = return_widened.as_ref().unwrap_or(expr);
-                    if self.current_function_return_reference_summary.is_some() {
-                        self.compile_expr_preserving_refs(return_expr)?;
+                    let saved_pending_callable_hint_name = self.pending_callable_hint_name.clone();
+                    self.pending_callable_hint_name =
+                        self.callable_return_hint_name_for_expr(return_expr);
+                    let compile_result = if self.current_function_return_reference_summary.is_some()
+                    {
+                        self.compile_expr_preserving_refs(return_expr)
                     } else {
-                        self.compile_expr(return_expr)?;
-                    }
+                        self.compile_expr(return_expr)
+                    };
+                    self.pending_callable_hint_name = saved_pending_callable_hint_name;
+                    compile_result?;
                 } else {
                     self.emit(Instruction::simple(OpCode::PushNull));
                 }

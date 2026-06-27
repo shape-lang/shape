@@ -309,6 +309,117 @@ fn merge_callsite_hint(
     }
 }
 
+fn merge_callable_arities(arities: impl IntoIterator<Item = Option<usize>>) -> Option<usize> {
+    let mut merged = None;
+    for arity in arities {
+        let arity = arity?;
+        match merged {
+            None => merged = Some(arity),
+            Some(prev) if prev == arity => {}
+            Some(_) => return None,
+        }
+    }
+    merged
+}
+
+/// Returns the callable arity when an expression statically selects only
+/// closure literals of one arity. Signature compatibility is still enforced by
+/// the runtime type checker; this is only a producer-side hint classifier for
+/// closure parameter facts.
+pub(crate) fn callable_selection_arity(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::FunctionExpr { params, .. } => Some(params.len()),
+        Expr::If(if_expr, _) => {
+            let else_branch = if_expr.else_branch.as_ref()?;
+            merge_callable_arities([
+                callable_selection_arity(&if_expr.then_branch),
+                callable_selection_arity(else_branch),
+            ])
+        }
+        Expr::Conditional {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            let else_expr = else_expr.as_ref()?;
+            merge_callable_arities([
+                callable_selection_arity(then_expr),
+                callable_selection_arity(else_expr),
+            ])
+        }
+        Expr::Match(match_expr, _) => {
+            if match_expr.arms.is_empty() {
+                return None;
+            }
+            merge_callable_arities(
+                match_expr
+                    .arms
+                    .iter()
+                    .map(|arm| callable_selection_arity(&arm.body)),
+            )
+        }
+        Expr::Block(block, _) => block.items.last().and_then(|item| match item {
+            shape_ast::ast::BlockItem::Expression(expr) => callable_selection_arity(expr),
+            shape_ast::ast::BlockItem::Statement(shape_ast::ast::Statement::Expression(
+                expr,
+                _,
+            )) => callable_selection_arity(expr),
+            _ => None,
+        }),
+        Expr::Return(Some(expr), _) => callable_selection_arity(expr),
+        _ => None,
+    }
+}
+
+fn collect_return_callable_arities_from_stmt(
+    stmt: &shape_ast::ast::Statement,
+    arities: &mut Vec<Option<usize>>,
+) {
+    use shape_ast::ast::Statement;
+    match stmt {
+        Statement::Return(Some(expr), _) => arities.push(callable_selection_arity(expr)),
+        Statement::If(if_stmt, _) => {
+            for stmt in &if_stmt.then_body {
+                collect_return_callable_arities_from_stmt(stmt, arities);
+            }
+            if let Some(else_body) = &if_stmt.else_body {
+                for stmt in else_body {
+                    collect_return_callable_arities_from_stmt(stmt, arities);
+                }
+            }
+        }
+        Statement::For(for_stmt, _) => {
+            for stmt in &for_stmt.body {
+                collect_return_callable_arities_from_stmt(stmt, arities);
+            }
+        }
+        Statement::While(while_stmt, _) => {
+            for stmt in &while_stmt.body {
+                collect_return_callable_arities_from_stmt(stmt, arities);
+            }
+        }
+        Statement::Expression(Expr::Return(Some(expr), _), _) => {
+            arities.push(callable_selection_arity(expr));
+        }
+        _ => {}
+    }
+}
+
+fn function_return_callable_arity(func: &FunctionDef) -> Option<usize> {
+    let mut explicit_return_arities = Vec::new();
+    for stmt in &func.body {
+        collect_return_callable_arities_from_stmt(stmt, &mut explicit_return_arities);
+    }
+    if !explicit_return_arities.is_empty() {
+        return merge_callable_arities(explicit_return_arities);
+    }
+
+    match func.body.last() {
+        Some(shape_ast::ast::Statement::Expression(expr, _)) => callable_selection_arity(expr),
+        _ => None,
+    }
+}
+
 /// Wave 1a PART A: whole-program pre-pass that, for every binding whose
 /// initializer is a closure literal, scans the program for DIRECT calls
 /// `name(args)` and records the per-arg call-site argument types so
@@ -338,6 +449,17 @@ pub(crate) fn collect_closure_callsite_param_hints(
 
     let mut closure_binding_names: HashSet<String> = HashSet::new();
     let mut shadowed_names: HashSet<String> = HashSet::new();
+    let callable_return_functions: HashSet<String> = program
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Function(func, _) if function_return_callable_arity(func).is_some() => {
+                Some(func.name.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let mut callable_return_bindings: HashMap<String, String> = HashMap::new();
 
     fn note_binding(
         name: &str,
@@ -349,8 +471,33 @@ pub(crate) fn collect_closure_callsite_param_hints(
         }
     }
 
+    fn note_decl_value(
+        name: &str,
+        value: &Expr,
+        callable_return_functions: &HashSet<String>,
+        callable_return_bindings: &mut HashMap<String, String>,
+        closure_names: &mut HashSet<String>,
+        shadowed: &mut HashSet<String>,
+    ) {
+        if callable_selection_arity(value).is_some() {
+            note_binding(name, closure_names, shadowed);
+            return;
+        }
+        if let Expr::FunctionCall {
+            name: callee_name, ..
+        } = value
+        {
+            if callable_return_functions.contains(callee_name) {
+                note_binding(name, closure_names, shadowed);
+                callable_return_bindings.insert(name.to_string(), callee_name.clone());
+            }
+        }
+    }
+
     fn bind_stmt(
         stmt: &Statement,
+        callable_return_functions: &HashSet<String>,
+        callable_return_bindings: &mut HashMap<String, String>,
         closure_names: &mut HashSet<String>,
         shadowed: &mut HashSet<String>,
     ) {
@@ -359,32 +506,85 @@ pub(crate) fn collect_closure_callsite_param_hints(
                 if let (Some(name), Some(value)) =
                     (decl.pattern.as_identifier(), decl.value.as_ref())
                 {
-                    if matches!(value, Expr::FunctionExpr { .. }) {
-                        note_binding(name, closure_names, shadowed);
-                    }
-                    bind_expr(value, closure_names, shadowed);
+                    note_decl_value(
+                        name,
+                        value,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
+                    bind_expr(
+                        value,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
             }
-            Statement::Assignment(asgn, _) => bind_expr(&asgn.value, closure_names, shadowed),
-            Statement::Expression(e, _) => bind_expr(e, closure_names, shadowed),
-            Statement::Return(Some(e), _) => bind_expr(e, closure_names, shadowed),
+            Statement::Assignment(asgn, _) => bind_expr(
+                &asgn.value,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
+            Statement::Expression(e, _) => bind_expr(
+                e,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
+            Statement::Return(Some(e), _) => bind_expr(
+                e,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
             Statement::For(f, _) => {
                 for s in &f.body {
-                    bind_stmt(s, closure_names, shadowed);
+                    bind_stmt(
+                        s,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
             }
             Statement::While(w, _) => {
                 for s in &w.body {
-                    bind_stmt(s, closure_names, shadowed);
+                    bind_stmt(
+                        s,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
             }
             Statement::If(i, _) => {
                 for s in &i.then_body {
-                    bind_stmt(s, closure_names, shadowed);
+                    bind_stmt(
+                        s,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
                 if let Some(else_body) = &i.else_body {
                     for s in else_body {
-                        bind_stmt(s, closure_names, shadowed);
+                        bind_stmt(
+                            s,
+                            callable_return_functions,
+                            callable_return_bindings,
+                            closure_names,
+                            shadowed,
+                        );
                     }
                 }
             }
@@ -394,6 +594,8 @@ pub(crate) fn collect_closure_callsite_param_hints(
 
     fn bind_block_item(
         item: &BlockItem,
+        callable_return_functions: &HashSet<String>,
+        callable_return_bindings: &mut HashMap<String, String>,
         closure_names: &mut HashSet<String>,
         shadowed: &mut HashSet<String>,
     ) {
@@ -402,115 +604,359 @@ pub(crate) fn collect_closure_callsite_param_hints(
                 if let (Some(name), Some(value)) =
                     (decl.pattern.as_identifier(), decl.value.as_ref())
                 {
-                    if matches!(value, Expr::FunctionExpr { .. }) {
-                        note_binding(name, closure_names, shadowed);
-                    }
-                    bind_expr(value, closure_names, shadowed);
+                    note_decl_value(
+                        name,
+                        value,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
+                    bind_expr(
+                        value,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
             }
-            BlockItem::Assignment(asgn) => bind_expr(&asgn.value, closure_names, shadowed),
-            BlockItem::Statement(stmt) => bind_stmt(stmt, closure_names, shadowed),
-            BlockItem::Expression(e) => bind_expr(e, closure_names, shadowed),
+            BlockItem::Assignment(asgn) => bind_expr(
+                &asgn.value,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
+            BlockItem::Statement(stmt) => bind_stmt(
+                stmt,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
+            BlockItem::Expression(e) => bind_expr(
+                e,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
         }
     }
 
-    fn bind_expr(expr: &Expr, closure_names: &mut HashSet<String>, shadowed: &mut HashSet<String>) {
+    fn bind_expr(
+        expr: &Expr,
+        callable_return_functions: &HashSet<String>,
+        callable_return_bindings: &mut HashMap<String, String>,
+        closure_names: &mut HashSet<String>,
+        shadowed: &mut HashSet<String>,
+    ) {
         match expr {
             Expr::FunctionCall { args, .. } | Expr::QualifiedFunctionCall { args, .. } => {
                 for a in args {
-                    bind_expr(a, closure_names, shadowed);
+                    bind_expr(
+                        a,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
             }
             Expr::MethodCall { receiver, args, .. } => {
-                bind_expr(receiver, closure_names, shadowed);
+                bind_expr(
+                    receiver,
+                    callable_return_functions,
+                    callable_return_bindings,
+                    closure_names,
+                    shadowed,
+                );
                 for a in args {
-                    bind_expr(a, closure_names, shadowed);
+                    bind_expr(
+                        a,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
             }
             Expr::BinaryOp { left, right, .. } => {
-                bind_expr(left, closure_names, shadowed);
-                bind_expr(right, closure_names, shadowed);
+                bind_expr(
+                    left,
+                    callable_return_functions,
+                    callable_return_bindings,
+                    closure_names,
+                    shadowed,
+                );
+                bind_expr(
+                    right,
+                    callable_return_functions,
+                    callable_return_bindings,
+                    closure_names,
+                    shadowed,
+                );
             }
-            Expr::UnaryOp { operand, .. } => bind_expr(operand, closure_names, shadowed),
-            Expr::Reference { expr, .. } => bind_expr(expr, closure_names, shadowed),
+            Expr::UnaryOp { operand, .. } => bind_expr(
+                operand,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
+            Expr::Reference { expr, .. } => bind_expr(
+                expr,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
             Expr::Array(elems, _) => {
                 for e in elems {
-                    bind_expr(e, closure_names, shadowed);
+                    bind_expr(
+                        e,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
             }
             Expr::IndexAccess { object, index, .. } => {
-                bind_expr(object, closure_names, shadowed);
-                bind_expr(index, closure_names, shadowed);
+                bind_expr(
+                    object,
+                    callable_return_functions,
+                    callable_return_bindings,
+                    closure_names,
+                    shadowed,
+                );
+                bind_expr(
+                    index,
+                    callable_return_functions,
+                    callable_return_bindings,
+                    closure_names,
+                    shadowed,
+                );
             }
-            Expr::PropertyAccess { object, .. } => bind_expr(object, closure_names, shadowed),
+            Expr::PropertyAccess { object, .. } => bind_expr(
+                object,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
             Expr::Conditional {
                 condition,
                 then_expr,
                 else_expr,
                 ..
             } => {
-                bind_expr(condition, closure_names, shadowed);
-                bind_expr(then_expr, closure_names, shadowed);
+                bind_expr(
+                    condition,
+                    callable_return_functions,
+                    callable_return_bindings,
+                    closure_names,
+                    shadowed,
+                );
+                bind_expr(
+                    then_expr,
+                    callable_return_functions,
+                    callable_return_bindings,
+                    closure_names,
+                    shadowed,
+                );
                 if let Some(e) = else_expr {
-                    bind_expr(e, closure_names, shadowed);
+                    bind_expr(
+                        e,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
             }
             Expr::FunctionExpr { body, .. } => {
                 for s in body {
-                    bind_stmt(s, closure_names, shadowed);
+                    bind_stmt(
+                        s,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
             }
             Expr::Block(block, _) => {
                 for it in &block.items {
-                    bind_block_item(it, closure_names, shadowed);
+                    bind_block_item(
+                        it,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
             }
             Expr::If(i, _) => {
-                bind_expr(&i.condition, closure_names, shadowed);
-                bind_expr(&i.then_branch, closure_names, shadowed);
+                bind_expr(
+                    &i.condition,
+                    callable_return_functions,
+                    callable_return_bindings,
+                    closure_names,
+                    shadowed,
+                );
+                bind_expr(
+                    &i.then_branch,
+                    callable_return_functions,
+                    callable_return_bindings,
+                    closure_names,
+                    shadowed,
+                );
                 if let Some(e) = &i.else_branch {
-                    bind_expr(e, closure_names, shadowed);
+                    bind_expr(
+                        e,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
             }
             Expr::While(w, _) => {
-                bind_expr(&w.condition, closure_names, shadowed);
-                bind_expr(&w.body, closure_names, shadowed);
+                bind_expr(
+                    &w.condition,
+                    callable_return_functions,
+                    callable_return_bindings,
+                    closure_names,
+                    shadowed,
+                );
+                bind_expr(
+                    &w.body,
+                    callable_return_functions,
+                    callable_return_bindings,
+                    closure_names,
+                    shadowed,
+                );
             }
             Expr::For(f, _) => {
-                bind_expr(&f.iterable, closure_names, shadowed);
-                bind_expr(&f.body, closure_names, shadowed);
+                bind_expr(
+                    &f.iterable,
+                    callable_return_functions,
+                    callable_return_bindings,
+                    closure_names,
+                    shadowed,
+                );
+                bind_expr(
+                    &f.body,
+                    callable_return_functions,
+                    callable_return_bindings,
+                    closure_names,
+                    shadowed,
+                );
             }
-            Expr::Loop(l, _) => bind_expr(&l.body, closure_names, shadowed),
+            Expr::Loop(l, _) => bind_expr(
+                &l.body,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
             Expr::Match(m, _) => {
-                bind_expr(&m.scrutinee, closure_names, shadowed);
+                bind_expr(
+                    &m.scrutinee,
+                    callable_return_functions,
+                    callable_return_bindings,
+                    closure_names,
+                    shadowed,
+                );
                 for arm in &m.arms {
-                    bind_expr(&arm.body, closure_names, shadowed);
+                    bind_expr(
+                        &arm.body,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
             }
-            Expr::Return(Some(e), _) => bind_expr(e, closure_names, shadowed),
-            Expr::Await(e, _) => bind_expr(e, closure_names, shadowed),
+            Expr::Return(Some(e), _) => bind_expr(
+                e,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
+            Expr::Await(e, _) => bind_expr(
+                e,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
             _ => {}
         }
     }
 
-    fn bind_item(item: &Item, closure_names: &mut HashSet<String>, shadowed: &mut HashSet<String>) {
+    fn bind_item(
+        item: &Item,
+        callable_return_functions: &HashSet<String>,
+        callable_return_bindings: &mut HashMap<String, String>,
+        closure_names: &mut HashSet<String>,
+        shadowed: &mut HashSet<String>,
+    ) {
         match item {
-            Item::Statement(stmt, _) => bind_stmt(stmt, closure_names, shadowed),
-            Item::Expression(e, _) => bind_expr(e, closure_names, shadowed),
-            Item::Assignment(asgn, _) => bind_expr(&asgn.value, closure_names, shadowed),
+            Item::Statement(stmt, _) => bind_stmt(
+                stmt,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
+            Item::Expression(e, _) => bind_expr(
+                e,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
+            Item::Assignment(asgn, _) => bind_expr(
+                &asgn.value,
+                callable_return_functions,
+                callable_return_bindings,
+                closure_names,
+                shadowed,
+            ),
             Item::VariableDecl(decl, _) => {
                 if let (Some(name), Some(value)) =
                     (decl.pattern.as_identifier(), decl.value.as_ref())
                 {
-                    if matches!(value, Expr::FunctionExpr { .. }) {
-                        note_binding(name, closure_names, shadowed);
-                    }
-                    bind_expr(value, closure_names, shadowed);
+                    note_decl_value(
+                        name,
+                        value,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
+                    bind_expr(
+                        value,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
             }
             Item::Function(func, _) => {
                 for s in &func.body {
-                    bind_stmt(s, closure_names, shadowed);
+                    bind_stmt(
+                        s,
+                        callable_return_functions,
+                        callable_return_bindings,
+                        closure_names,
+                        shadowed,
+                    );
                 }
             }
             _ => {}
@@ -518,7 +964,13 @@ pub(crate) fn collect_closure_callsite_param_hints(
     }
 
     for item in &program.items {
-        bind_item(item, &mut closure_binding_names, &mut shadowed_names);
+        bind_item(
+            item,
+            &callable_return_functions,
+            &mut callable_return_bindings,
+            &mut closure_binding_names,
+            &mut shadowed_names,
+        );
     }
 
     // ----- Pass 2: collect call-site arg types for eligible names -----
@@ -529,6 +981,7 @@ pub(crate) fn collect_closure_callsite_param_hints(
         name: &str,
         args: &[Expr],
         eligible: &HashSet<String>,
+        callable_return_bindings: &HashMap<String, String>,
         hints: &mut HashMap<String, ClosureCallsiteHint>,
     ) {
         if !eligible.contains(name) {
@@ -536,95 +989,106 @@ pub(crate) fn collect_closure_callsite_param_hints(
         }
         let observed: Vec<Option<TypeAnnotation>> =
             args.iter().map(infer_callsite_arg_type).collect();
-        let merged = merge_callsite_hint(hints.remove(name), observed);
+        let merged = merge_callsite_hint(hints.remove(name), observed.clone());
         hints.insert(name.to_string(), merged);
+        if let Some(producer_name) = callable_return_bindings.get(name) {
+            let merged = merge_callsite_hint(hints.remove(producer_name), observed);
+            hints.insert(producer_name.clone(), merged);
+        }
     }
 
     fn walk_expr(
         expr: &Expr,
         eligible: &HashSet<String>,
+        callable_return_bindings: &HashMap<String, String>,
         hints: &mut HashMap<String, ClosureCallsiteHint>,
     ) {
         match expr {
             Expr::FunctionCall { name, args, .. } => {
-                handle_call(name, args, eligible, hints);
+                handle_call(name, args, eligible, callable_return_bindings, hints);
                 for a in args {
-                    walk_expr(a, eligible, hints);
+                    walk_expr(a, eligible, callable_return_bindings, hints);
                 }
             }
             Expr::QualifiedFunctionCall { args, .. } => {
                 for a in args {
-                    walk_expr(a, eligible, hints);
+                    walk_expr(a, eligible, callable_return_bindings, hints);
                 }
             }
             Expr::MethodCall { receiver, args, .. } => {
-                walk_expr(receiver, eligible, hints);
+                walk_expr(receiver, eligible, callable_return_bindings, hints);
                 for a in args {
-                    walk_expr(a, eligible, hints);
+                    walk_expr(a, eligible, callable_return_bindings, hints);
                 }
             }
             Expr::BinaryOp { left, right, .. } => {
-                walk_expr(left, eligible, hints);
-                walk_expr(right, eligible, hints);
+                walk_expr(left, eligible, callable_return_bindings, hints);
+                walk_expr(right, eligible, callable_return_bindings, hints);
             }
-            Expr::UnaryOp { operand, .. } => walk_expr(operand, eligible, hints),
-            Expr::Reference { expr, .. } => walk_expr(expr, eligible, hints),
+            Expr::UnaryOp { operand, .. } => {
+                walk_expr(operand, eligible, callable_return_bindings, hints)
+            }
+            Expr::Reference { expr, .. } => {
+                walk_expr(expr, eligible, callable_return_bindings, hints)
+            }
             Expr::Array(elems, _) => {
                 for e in elems {
-                    walk_expr(e, eligible, hints);
+                    walk_expr(e, eligible, callable_return_bindings, hints);
                 }
             }
             Expr::IndexAccess { object, index, .. } => {
-                walk_expr(object, eligible, hints);
-                walk_expr(index, eligible, hints);
+                walk_expr(object, eligible, callable_return_bindings, hints);
+                walk_expr(index, eligible, callable_return_bindings, hints);
             }
-            Expr::PropertyAccess { object, .. } => walk_expr(object, eligible, hints),
+            Expr::PropertyAccess { object, .. } => {
+                walk_expr(object, eligible, callable_return_bindings, hints)
+            }
             Expr::Conditional {
                 condition,
                 then_expr,
                 else_expr,
                 ..
             } => {
-                walk_expr(condition, eligible, hints);
-                walk_expr(then_expr, eligible, hints);
+                walk_expr(condition, eligible, callable_return_bindings, hints);
+                walk_expr(then_expr, eligible, callable_return_bindings, hints);
                 if let Some(else_e) = else_expr {
-                    walk_expr(else_e, eligible, hints);
+                    walk_expr(else_e, eligible, callable_return_bindings, hints);
                 }
             }
             Expr::FunctionExpr { body, .. } => {
                 for s in body {
-                    walk_stmt(s, eligible, hints);
+                    walk_stmt(s, eligible, callable_return_bindings, hints);
                 }
             }
             Expr::Block(block, _) => {
                 for it in &block.items {
-                    walk_block_item(it, eligible, hints);
+                    walk_block_item(it, eligible, callable_return_bindings, hints);
                 }
             }
             Expr::If(i, _) => {
-                walk_expr(&i.condition, eligible, hints);
-                walk_expr(&i.then_branch, eligible, hints);
+                walk_expr(&i.condition, eligible, callable_return_bindings, hints);
+                walk_expr(&i.then_branch, eligible, callable_return_bindings, hints);
                 if let Some(e) = &i.else_branch {
-                    walk_expr(e, eligible, hints);
+                    walk_expr(e, eligible, callable_return_bindings, hints);
                 }
             }
             Expr::While(w, _) => {
-                walk_expr(&w.condition, eligible, hints);
-                walk_expr(&w.body, eligible, hints);
+                walk_expr(&w.condition, eligible, callable_return_bindings, hints);
+                walk_expr(&w.body, eligible, callable_return_bindings, hints);
             }
             Expr::For(f, _) => {
-                walk_expr(&f.iterable, eligible, hints);
-                walk_expr(&f.body, eligible, hints);
+                walk_expr(&f.iterable, eligible, callable_return_bindings, hints);
+                walk_expr(&f.body, eligible, callable_return_bindings, hints);
             }
-            Expr::Loop(l, _) => walk_expr(&l.body, eligible, hints),
+            Expr::Loop(l, _) => walk_expr(&l.body, eligible, callable_return_bindings, hints),
             Expr::Match(m, _) => {
-                walk_expr(&m.scrutinee, eligible, hints);
+                walk_expr(&m.scrutinee, eligible, callable_return_bindings, hints);
                 for arm in &m.arms {
-                    walk_expr(&arm.body, eligible, hints);
+                    walk_expr(&arm.body, eligible, callable_return_bindings, hints);
                 }
             }
-            Expr::Return(Some(e), _) => walk_expr(e, eligible, hints),
-            Expr::Await(e, _) => walk_expr(e, eligible, hints),
+            Expr::Return(Some(e), _) => walk_expr(e, eligible, callable_return_bindings, hints),
+            Expr::Await(e, _) => walk_expr(e, eligible, callable_return_bindings, hints),
             _ => {}
         }
     }
@@ -632,53 +1096,63 @@ pub(crate) fn collect_closure_callsite_param_hints(
     fn walk_block_item(
         item: &BlockItem,
         eligible: &HashSet<String>,
+        callable_return_bindings: &HashMap<String, String>,
         hints: &mut HashMap<String, ClosureCallsiteHint>,
     ) {
         match item {
             BlockItem::VariableDecl(decl) => {
                 if let Some(v) = decl.value.as_ref() {
-                    walk_expr(v, eligible, hints);
+                    walk_expr(v, eligible, callable_return_bindings, hints);
                 }
             }
-            BlockItem::Assignment(asgn) => walk_expr(&asgn.value, eligible, hints),
-            BlockItem::Statement(stmt) => walk_stmt(stmt, eligible, hints),
-            BlockItem::Expression(e) => walk_expr(e, eligible, hints),
+            BlockItem::Assignment(asgn) => {
+                walk_expr(&asgn.value, eligible, callable_return_bindings, hints)
+            }
+            BlockItem::Statement(stmt) => {
+                walk_stmt(stmt, eligible, callable_return_bindings, hints)
+            }
+            BlockItem::Expression(e) => walk_expr(e, eligible, callable_return_bindings, hints),
         }
     }
 
     fn walk_stmt(
         stmt: &Statement,
         eligible: &HashSet<String>,
+        callable_return_bindings: &HashMap<String, String>,
         hints: &mut HashMap<String, ClosureCallsiteHint>,
     ) {
         match stmt {
-            Statement::Expression(e, _) => walk_expr(e, eligible, hints),
-            Statement::Return(Some(e), _) => walk_expr(e, eligible, hints),
+            Statement::Expression(e, _) => walk_expr(e, eligible, callable_return_bindings, hints),
+            Statement::Return(Some(e), _) => {
+                walk_expr(e, eligible, callable_return_bindings, hints)
+            }
             Statement::VariableDecl(decl, _) => {
                 if let Some(v) = decl.value.as_ref() {
-                    walk_expr(v, eligible, hints);
+                    walk_expr(v, eligible, callable_return_bindings, hints);
                 }
             }
-            Statement::Assignment(asgn, _) => walk_expr(&asgn.value, eligible, hints),
+            Statement::Assignment(asgn, _) => {
+                walk_expr(&asgn.value, eligible, callable_return_bindings, hints)
+            }
             Statement::For(f, _) => {
                 for s in &f.body {
-                    walk_stmt(s, eligible, hints);
+                    walk_stmt(s, eligible, callable_return_bindings, hints);
                 }
             }
             Statement::While(w, _) => {
-                walk_expr(&w.condition, eligible, hints);
+                walk_expr(&w.condition, eligible, callable_return_bindings, hints);
                 for s in &w.body {
-                    walk_stmt(s, eligible, hints);
+                    walk_stmt(s, eligible, callable_return_bindings, hints);
                 }
             }
             Statement::If(i, _) => {
-                walk_expr(&i.condition, eligible, hints);
+                walk_expr(&i.condition, eligible, callable_return_bindings, hints);
                 for s in &i.then_body {
-                    walk_stmt(s, eligible, hints);
+                    walk_stmt(s, eligible, callable_return_bindings, hints);
                 }
                 if let Some(else_body) = &i.else_body {
                     for s in else_body {
-                        walk_stmt(s, eligible, hints);
+                        walk_stmt(s, eligible, callable_return_bindings, hints);
                     }
                 }
             }
@@ -688,17 +1162,42 @@ pub(crate) fn collect_closure_callsite_param_hints(
 
     for item in &program.items {
         match item {
-            Item::Statement(stmt, _) => walk_stmt(stmt, &closure_binding_names, &mut hints),
-            Item::Expression(e, _) => walk_expr(e, &closure_binding_names, &mut hints),
-            Item::Assignment(asgn, _) => walk_expr(&asgn.value, &closure_binding_names, &mut hints),
+            Item::Statement(stmt, _) => walk_stmt(
+                stmt,
+                &closure_binding_names,
+                &callable_return_bindings,
+                &mut hints,
+            ),
+            Item::Expression(e, _) => walk_expr(
+                e,
+                &closure_binding_names,
+                &callable_return_bindings,
+                &mut hints,
+            ),
+            Item::Assignment(asgn, _) => walk_expr(
+                &asgn.value,
+                &closure_binding_names,
+                &callable_return_bindings,
+                &mut hints,
+            ),
             Item::VariableDecl(decl, _) => {
                 if let Some(v) = decl.value.as_ref() {
-                    walk_expr(v, &closure_binding_names, &mut hints);
+                    walk_expr(
+                        v,
+                        &closure_binding_names,
+                        &callable_return_bindings,
+                        &mut hints,
+                    );
                 }
             }
             Item::Function(func, _) => {
                 for s in &func.body {
-                    walk_stmt(s, &closure_binding_names, &mut hints);
+                    walk_stmt(
+                        s,
+                        &closure_binding_names,
+                        &callable_return_bindings,
+                        &mut hints,
+                    );
                 }
             }
             _ => {}
@@ -1316,6 +1815,20 @@ fn closure_body_terminal_expr(body: &[shape_ast::ast::Statement]) -> Option<&Exp
 }
 
 impl BytecodeCompiler {
+    pub(crate) fn callable_return_hint_name_for_expr(&self, expr: &Expr) -> Option<String> {
+        callable_selection_arity(expr)?;
+        let function_name = self
+            .current_function
+            .and_then(|idx| self.program.functions.get(idx))
+            .map(|function| function.name.clone())?;
+        if function_name.starts_with("__closure_") {
+            return None;
+        }
+        self.closure_callsite_param_hints
+            .contains_key(&function_name)
+            .then_some(function_name)
+    }
+
     /// Compile a function expression (closure)
     ///
     /// `closure_span` is the span of the `||`/`|args|` expression itself
@@ -1488,6 +2001,7 @@ impl BytecodeCompiler {
         let callsite_param_hints: Option<Vec<Option<TypeAnnotation>>> = self
             .pending_variable_name
             .as_ref()
+            .or(self.pending_callable_hint_name.as_ref())
             .and_then(|name| self.closure_callsite_param_hints.get(name))
             .and_then(|hint| match hint {
                 ClosureCallsiteHint::Types(types) => Some(types.clone()),
@@ -1943,8 +2457,11 @@ impl BytecodeCompiler {
         // closure's entry_point (post-the-outer-jump) would point at the
         // inner jump, which then skips the body entirely. Don't.
         let saved_closure_ids = self.closure_function_ids.clone();
-        self.compile_function(&closure_def)?;
+        let saved_pending_callable_hint_name = self.pending_callable_hint_name.take();
+        let compile_result = self.compile_function(&closure_def);
+        self.pending_callable_hint_name = saved_pending_callable_hint_name;
         self.closure_function_ids = saved_closure_ids;
+        compile_result?;
 
         // Restore mutable_closure_captures
         self.mutable_closure_captures = saved_mutable_captures;
