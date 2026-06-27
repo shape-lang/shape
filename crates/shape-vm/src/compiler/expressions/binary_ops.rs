@@ -1091,6 +1091,10 @@ impl BytecodeCompiler {
             return Ok(true);
         }
 
+        if self.try_compile_same_unit_enum_equality(op, left, right)? {
+            return Ok(true);
+        }
+
         // W1.7: user-defined `impl Eq for X` dispatch. Mirrors the
         // arithmetic-trait retargets at L1461-1475 / L1493 / L1512.
         // `compile_typed_equality` runs BEFORE either operand has been
@@ -1164,6 +1168,106 @@ impl BytecodeCompiler {
             BinaryOp::Equal
         };
         Err(strict_typing_binop_error(self, &typed_op, left, right))
+    }
+
+    /// Strict structural-unification proof for equality over unit-only enums.
+    ///
+    /// This is a positive static proof, not a runtime tag fallback: both
+    /// operands must resolve to the same registered `ConcreteType::Enum` (or
+    /// an inference type whose display name resolves to that enum schema), and
+    /// every variant in the schema must be unit-shaped. The lowering then
+    /// reuses the typed enum pattern-check path: read field 0 (`__variant`) via
+    /// `GetFieldTyped` and compare the two i64 discriminants with `EqInt` /
+    /// `NeqInt`.
+    fn try_compile_same_unit_enum_equality(
+        &mut self,
+        op: &BinaryOp,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<bool> {
+        if !matches!(op, BinaryOp::Equal | BinaryOp::NotEqual) {
+            return Ok(false);
+        }
+
+        let Some(left_enum) = self.equality_enum_type_name(left) else {
+            return Ok(false);
+        };
+        let Some(right_enum) = self.equality_enum_type_name(right) else {
+            return Ok(false);
+        };
+        if left_enum != right_enum {
+            return Ok(false);
+        }
+
+        let Some(schema) = self.type_tracker.schema_registry().get(left_enum.as_str()) else {
+            return Ok(false);
+        };
+        let Some(enum_info) = schema.get_enum_info() else {
+            return Ok(false);
+        };
+        if enum_info
+            .variants
+            .iter()
+            .any(|variant| variant.payload_fields != 0)
+        {
+            return Ok(false);
+        }
+        let Ok(schema_id) = u16::try_from(schema.id) else {
+            return Ok(false);
+        };
+
+        self.emit_enum_variant_field(left, schema_id)?;
+        self.emit_enum_variant_field(right, schema_id)?;
+        self.emit(Instruction::simple(if matches!(op, BinaryOp::NotEqual) {
+            OpCode::NeqInt
+        } else {
+            OpCode::EqInt
+        }));
+        self.last_expr_schema = None;
+        self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::with_storage(
+            "bool".to_string(),
+            crate::type_tracking::StorageHint::Bool,
+        ));
+        Ok(true)
+    }
+
+    fn equality_enum_type_name(&mut self, expr: &Expr) -> Option<String> {
+        if let Some(shape_value::v2::ConcreteType::Enum(named)) =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, expr)
+        {
+            if let Some(name) = named.name_str() {
+                let resolved = self.resolve_type_name(name);
+                if self
+                    .type_tracker
+                    .schema_registry()
+                    .get(resolved.as_str())
+                    .is_some_and(|schema| schema.get_enum_info().is_some())
+                {
+                    return Some(resolved);
+                }
+            }
+        }
+
+        let ty = self.infer_expr_type(expr).ok()?;
+        let display = type_display_name(&ty);
+        let resolved = self.resolve_type_name(&display);
+        self.type_tracker
+            .schema_registry()
+            .get(resolved.as_str())
+            .and_then(|schema| schema.get_enum_info().map(|_| resolved))
+    }
+
+    fn emit_enum_variant_field(&mut self, expr: &Expr, schema_id: u16) -> Result<()> {
+        self.compile_expr(expr)?;
+        self.emit(Instruction::new(
+            OpCode::GetFieldTyped,
+            Some(Operand::TypedField {
+                type_id: schema_id,
+                field_idx: 0,
+                field_type_tag: crate::executor::typed_object_ops::FIELD_TAG_I64,
+            }),
+        ));
+        Ok(())
     }
 
     /// Resolve the equality-relevant type of an expression from multiple
