@@ -72,6 +72,7 @@ fn prefer_native_array_phf_method(method: &str) -> bool {
             | "skip"
             | "concat"
             | "flatten"
+            | "groupBy"
             | "pop"
     )
 }
@@ -2225,7 +2226,15 @@ impl BytecodeCompiler {
         // `v0.3-d-alpha-audit.md` §4 trigger KC #6(f)).
         let is_single_arg_hof = matches!(
             method,
-            "map" | "filter" | "forEach" | "find" | "findIndex" | "some" | "every" | "flatMap"
+            "map"
+                | "filter"
+                | "forEach"
+                | "find"
+                | "findIndex"
+                | "some"
+                | "every"
+                | "flatMap"
+                | "groupBy"
         );
         let is_reduce = method == "reduce";
         let is_sort = method == "sort";
@@ -2355,6 +2364,16 @@ impl BytecodeCompiler {
             // closes KC #6(f) test_array_sort_ascending /
             // test_array_sort_descending; see audit §4 sort row.)
             vec![Some(elem_ann.clone()), Some(elem_ann)]
+        } else if matches!(method, "map" | "filter" | "groupBy") {
+            match args.first() {
+                Some(Expr::FunctionExpr { params, .. }) if params.len() >= 2 => {
+                    vec![
+                        Some(elem_ann),
+                        Some(shape_ast::ast::TypeAnnotation::Basic("int".to_string())),
+                    ]
+                }
+                _ => vec![Some(elem_ann)],
+            }
         } else {
             vec![Some(elem_ann)]
         };
@@ -3433,11 +3452,44 @@ impl BytecodeCompiler {
         // proof here is compile-time `ConcreteType::Array(_)`, not runtime
         // value inspection.
         let receiver_concrete_type = concrete_type_for_expr(self, receiver);
-        let prefer_native_array_method = prefer_native_array_phf_method(method)
-            && matches!(
-                receiver_concrete_type.as_ref(),
-                Some(ConcreteType::Array(_))
-            );
+        let static_array_callback_arity = match args.first() {
+            Some(Expr::FunctionExpr { params, .. }) => Some(params.len()),
+            Some(Expr::Identifier(name, _)) => self
+                .find_function(name)
+                .map(|idx| self.program.functions[idx].arity as usize),
+            _ => None,
+        };
+        let array_hof_with_index_form = matches!(method, "map" | "filter" | "groupBy");
+        let receiver_is_array = matches!(
+            receiver_concrete_type.as_ref(),
+            Some(ConcreteType::Array(_))
+        );
+        if receiver_is_array
+            && array_hof_with_index_form
+            && let Some(arity) = static_array_callback_arity
+            && !(arity == 1 || arity == 2)
+        {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "`{method}` callback must accept one parameter `(element)` or two \
+                     `(element, index)`; statically found arity {arity}"
+                ),
+                location: args
+                    .first()
+                    .map(|arg| self.span_to_source_location(arg.span())),
+            });
+        }
+        let indexed_native_array_callback =
+            array_hof_with_index_form && static_array_callback_arity == Some(2);
+        let prefer_native_array_method = (prefer_native_array_phf_method(method)
+            || indexed_native_array_callback)
+            && receiver_is_array;
+        let emitted_method_name = match (method, indexed_native_array_callback) {
+            ("map", true) => "mapIndexed",
+            ("filter", true) => "filterIndexed",
+            ("groupBy", true) => "groupByIndexed",
+            _ => method,
+        };
         let native_array_element_kind = receiver_concrete_type
             .as_ref()
             .and_then(array_element_kind_from_concrete_type);
@@ -3947,7 +3999,7 @@ impl BytecodeCompiler {
         // Standard method call dispatch (runtime via CallMethod opcode)
         // Resolve method name to a typed MethodId at compile time
         let method_id = shape_value::MethodId::from_name(method);
-        let string_idx = self.program.add_string(method.to_string());
+        let string_idx = self.program.add_string(emitted_method_name.to_string());
 
         // Resolve receiver ConcreteType tag for type-tagged dispatch
         let rtt = Self::resolve_type_tag(receiver_numeric_type, &receiver_type_info);

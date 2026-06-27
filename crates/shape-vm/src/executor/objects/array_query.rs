@@ -268,6 +268,7 @@ fn run_filter_builder(
     vm: &mut VirtualMachine,
     view: &V2TypedArrayView,
     closure: &KindedSlot,
+    include_index: bool,
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     // Output element kind = input elem_type (filter ops never change the
@@ -309,11 +310,22 @@ fn run_filter_builder(
         // copy pushed into the output. Clone the slot bits to share the
         // refcount for heap-element carriers.
         let elem_for_pred = elem_slot.clone();
-        let pred = match vm.call_value_immediate_nb(closure, &[elem_for_pred], ctx.as_deref_mut()) {
-            Ok(p) => p,
-            Err(e) => {
-                unsafe { release_v2_typed_array(out_ptr) };
-                return Err(e);
+        let pred = if include_index {
+            let index = KindedSlot::from_int(i as i64);
+            match vm.call_value_immediate_nb(closure, &[elem_for_pred, index], ctx.as_deref_mut()) {
+                Ok(p) => p,
+                Err(e) => {
+                    unsafe { release_v2_typed_array(out_ptr) };
+                    return Err(e);
+                }
+            }
+        } else {
+            match vm.call_value_immediate_nb(closure, &[elem_for_pred], ctx.as_deref_mut()) {
+                Ok(p) => p,
+                Err(e) => {
+                    unsafe { release_v2_typed_array(out_ptr) };
+                    return Err(e);
+                }
             }
         };
         let truthy = slot_truthy(&pred);
@@ -373,6 +385,7 @@ fn run_select_builder(
     vm: &mut VirtualMachine,
     view: &V2TypedArrayView,
     closure: &KindedSlot,
+    include_index: bool,
     mut ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     // Edge case: empty input. No closure runs → no kind to establish.
@@ -397,7 +410,12 @@ fn run_select_builder(
             ))
         })?;
         let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
-        let result = vm.call_value_immediate_nb(closure, &[elem_slot], ctx.as_deref_mut())?;
+        let result = if include_index {
+            let index = KindedSlot::from_int(i as i64);
+            vm.call_value_immediate_nb(closure, &[elem_slot, index], ctx.as_deref_mut())?
+        } else {
+            vm.call_value_immediate_nb(closure, &[elem_slot], ctx.as_deref_mut())?
+        };
 
         match established_kind {
             None => {
@@ -493,7 +511,31 @@ pub(crate) fn handle_where_v2(
     require_closure("where", &args[1])?;
     let view = extract_view("where", &args[0])?;
     let closure = &args[1];
-    run_filter_builder("where", FilterMode::All, vm, &view, closure, ctx)
+    run_filter_builder("where", FilterMode::All, vm, &view, closure, false, ctx)
+}
+
+pub(crate) fn handle_where_indexed_v2(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.filterIndexed expects 1 argument: (predicate)".into(),
+        ));
+    }
+    require_closure("filterIndexed", &args[1])?;
+    let view = extract_view("filterIndexed", &args[0])?;
+    let closure = &args[1];
+    run_filter_builder(
+        "filterIndexed",
+        FilterMode::All,
+        vm,
+        &view,
+        closure,
+        true,
+        ctx,
+    )
 }
 
 /// `arr.select(|x| ...)` — per-element transform projection. Output
@@ -514,7 +556,23 @@ pub(crate) fn handle_select_v2(
     require_closure("select", &args[1])?;
     let view = extract_view("select", &args[0])?;
     let closure = &args[1];
-    run_select_builder(vm, &view, closure, ctx)
+    run_select_builder(vm, &view, closure, false, ctx)
+}
+
+pub(crate) fn handle_select_indexed_v2(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.mapIndexed expects 1 argument: (transform)".into(),
+        ));
+    }
+    require_closure("mapIndexed", &args[1])?;
+    let view = extract_view("mapIndexed", &args[0])?;
+    let closure = &args[1];
+    run_select_builder(vm, &view, closure, true, ctx)
 }
 
 /// `arr.find(|x| ...)` — first element satisfying the predicate, or the
@@ -834,7 +892,15 @@ pub(crate) fn handle_take_while_v2(
     require_closure("takeWhile", &args[1])?;
     let view = extract_view("takeWhile", &args[0])?;
     let closure = &args[1];
-    run_filter_builder("takeWhile", FilterMode::TakePrefix, vm, &view, closure, ctx)
+    run_filter_builder(
+        "takeWhile",
+        FilterMode::TakePrefix,
+        vm,
+        &view,
+        closure,
+        false,
+        ctx,
+    )
 }
 
 /// `arr.skipWhile(|x| ...)` — drop prefix elements while the predicate
@@ -854,7 +920,15 @@ pub(crate) fn handle_skip_while_v2(
     require_closure("skipWhile", &args[1])?;
     let view = extract_view("skipWhile", &args[0])?;
     let closure = &args[1];
-    run_filter_builder("skipWhile", FilterMode::SkipPrefix, vm, &view, closure, ctx)
+    run_filter_builder(
+        "skipWhile",
+        FilterMode::SkipPrefix,
+        vm,
+        &view,
+        closure,
+        false,
+        ctx,
+    )
 }
 
 /// `arr.forEach(|x| ...)` — invoke the closure per element for side

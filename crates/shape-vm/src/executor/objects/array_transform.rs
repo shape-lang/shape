@@ -95,6 +95,7 @@ use crate::executor::v2_handlers::v2_array_detect::{
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
 use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
+use std::sync::Arc;
 
 // ───────────────────────────────────────────────────────────────────────────
 // Wave 2 Round 3a' sub-cluster α — v2-raw `TypedArray<*const StringObj>` /
@@ -203,52 +204,6 @@ pub(super) fn bump_closure_share(slot: &KindedSlot) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// V3-S5 ckpt-2 surface-and-stop builder
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Common surface-and-stop body for every public handler in this file.
-///
-/// Returns a structured `VMError::NotImplemented` citing the V3-S5 ckpt-2
-/// cascade-broken state: the previous per-`TypedArrayData::X` variant
-/// dispatch path is gone (ckpt-1 deleted the enum); the v2-raw
-/// `TypedArray<T>` flat-struct consumer cascade lands across ckpt-3 / 4 /
-/// 5 per W12-typed-array-data-deletion audit §A.3 per-variant migration
-/// disposition. Closure-callback handlers (`map / filter / sort / count
-/// / reduce / etc.`) preserve their `Ptr(HeapKind::Closure)` arity
-/// validation pre-surface so the closure-arg-shape contract gets a
-/// structured early-error rather than getting swallowed by the surface.
-#[cold]
-#[inline(never)]
-fn ckpt2_surface(op: &'static str, args: &[KindedSlot]) -> VMError {
-    let receiver_kind = if args.is_empty() {
-        "<no args>".to_string()
-    } else {
-        format!("{:?}", args[0].kind)
-    };
-    VMError::NotImplemented(format!(
-        "{op}: SURFACE — V3-S5 ckpt-2 consumer-cascade tier 1 surface. \
-         `TypedArrayData` enum DELETED at ckpt-1 (2026-05-15) per W12-\
-         typed-array-data-deletion audit §3.5 + ADR-006 §2.7.24 Q25.A \
-         SUPERSEDED. The previous `Arc<TypedArrayData>` receiver-recovery \
-         + per-variant match-arm dispatch path (~206 references across \
-         11 public handlers in this file) cascade-broke at the enum \
-         deletion site (`crates/shape-value/src/heap_value.rs:3944`). \
-         Post-deletion target is the v2-raw `TypedArray<T>` flat-struct \
-         carrier per audit §1.2 + §A.3 + §3.1 scalar recipe + §2.2 \
-         heap-element variants; per-T monomorphization landing across \
-         ckpt-3 (array_ops/typed_array_methods/iterator_methods/array_sort\
-         /concat/property_access) + ckpt-4 (TypedBuffer<T> / \
-         HeapValue::TypedArray arm / HeapKind::TypedArray ordinal) + \
-         ckpt-5 (wire/json/marshal + 4-table lockstep) + ckpt-6 (JIT \
-         FFI). Receiver kind: {kind}. UNREACHABLE until ckpt-6 STRICT \
-         close. REFUSED ON SIGHT: TypedArrayData resurrection under any \
-         rename (Refusal #1, W12 audit §7).",
-        op = op,
-        kind = receiver_kind,
-    ))
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // J.5a primitive-routing helpers (R8 W3, 2026-05-24)
 //
 // Per `docs/cluster-audits/v0.3-j4-rest-reaudit.md` §6 J.5a row: the
@@ -328,6 +283,14 @@ pub(crate) fn handle_map_v2(
     crate::executor::objects::array_query::handle_select_v2(vm, args, ctx)
 }
 
+pub(crate) fn handle_map_indexed_v2(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    crate::executor::objects::array_query::handle_select_indexed_v2(vm, args, ctx)
+}
+
 /// `arr.filter(|x| ...)` — per-element predicate keep-mask.
 ///
 /// V3-S5 consumer-cascade close (2026-06-05): `filter` is the canonical
@@ -343,6 +306,14 @@ pub(crate) fn handle_filter_v2(
     ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     crate::executor::objects::array_query::handle_where_v2(vm, args, ctx)
+}
+
+pub(crate) fn handle_filter_indexed_v2(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    crate::executor::objects::array_query::handle_where_indexed_v2(vm, args, ctx)
 }
 
 /// `arr.sort()` / `arr.sort(|a, b| ...)` — per-element comparator sort.
@@ -828,17 +799,231 @@ pub(crate) fn handle_flat_map_v2(
     Ok(new_array_slot(out_ptr))
 }
 
-/// `arr.groupBy(|x| ...)` — group-by-key projection.
-pub(crate) fn handle_group_by_v2(
+fn element_to_string(slot: &KindedSlot) -> Result<String, VMError> {
+    match slot.kind {
+        NativeKind::Null => Ok("null".to_string()),
+        NativeKind::Bool => Ok((slot.slot.raw() != 0).to_string()),
+        NativeKind::Float64 => Ok(f64::from_bits(slot.slot.raw()).to_string()),
+        NativeKind::Float32 => Ok(f32::from_bits(slot.slot.raw() as u32).to_string()),
+        NativeKind::Int8 => Ok((slot.slot.raw() as u8 as i8).to_string()),
+        NativeKind::Int16 => Ok((slot.slot.raw() as u16 as i16).to_string()),
+        NativeKind::Int32 => Ok((slot.slot.raw() as u32 as i32).to_string()),
+        NativeKind::Int64 | NativeKind::IntSize => Ok((slot.slot.raw() as i64).to_string()),
+        NativeKind::UInt8 => Ok((slot.slot.raw() as u8).to_string()),
+        NativeKind::UInt16 => Ok((slot.slot.raw() as u16).to_string()),
+        NativeKind::UInt32 => Ok((slot.slot.raw() as u32).to_string()),
+        NativeKind::UInt64 | NativeKind::UIntSize => Ok(slot.slot.raw().to_string()),
+        NativeKind::Char => char::from_u32(slot.slot.raw() as u32)
+            .map(|c| c.to_string())
+            .ok_or_else(|| VMError::RuntimeError("Array.join: invalid char element".into())),
+        NativeKind::String | NativeKind::StringV2 => {
+            slot.as_str().map(str::to_string).ok_or_else(|| {
+                VMError::RuntimeError("Array.join: string element carried null bits".into())
+            })
+        }
+        NativeKind::DecimalV2 => {
+            let ptr = slot.slot.raw() as *const shape_value::v2::decimal_obj::DecimalObj;
+            if ptr.is_null() {
+                return Err(VMError::RuntimeError(
+                    "Array.join: decimal element carried null bits".into(),
+                ));
+            }
+            let value = unsafe { shape_value::v2::decimal_obj::DecimalObj::value(ptr) };
+            Ok(value.to_string())
+        }
+        NativeKind::NullableFloat64
+        | NativeKind::NullableInt8
+        | NativeKind::NullableInt16
+        | NativeKind::NullableInt32
+        | NativeKind::NullableInt64
+        | NativeKind::NullableIntSize
+        | NativeKind::NullableUInt8
+        | NativeKind::NullableUInt16
+        | NativeKind::NullableUInt32
+        | NativeKind::NullableUInt64
+        | NativeKind::NullableUIntSize
+        | NativeKind::Ptr(_) => Err(VMError::RuntimeError(format!(
+            "Array.join: element kind {:?} does not have native join stringification",
+            slot.kind
+        ))),
+    }
+}
+
+/// `arr.join(separator)` — native element stringification over the stamped
+/// v2 typed-array element kind.
+pub(crate) fn handle_join_v2(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() >= 2 && args[1].kind != NativeKind::Ptr(HeapKind::Closure) {
+    use crate::executor::v2_handlers::v2_array_detect::read_element;
+
+    if args.len() != 2 {
+        return Err(VMError::RuntimeError(
+            "Array.join expects 1 argument (separator)".into(),
+        ));
+    }
+    let sep = args[1].as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.join: separator must be a string, got kind {:?}",
+            args[1].kind
+        ))
+    })?;
+    let view = extract_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.join: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+
+    let mut out = String::new();
+    for i in 0..view.len {
+        if i > 0 {
+            out.push_str(sep);
+        }
+        let (bits, kind) = read_element(&view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Array.join: read_element({i}) returned None for element kind {:?}",
+                view.elem_type
+            ))
+        })?;
+        let elem = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        out.push_str(&element_to_string(&elem)?);
+    }
+    Ok(KindedSlot::from_string_arc(Arc::new(out)))
+}
+
+fn keys_equal(a: &KindedSlot, b: &KindedSlot) -> bool {
+    if a.kind != b.kind {
+        return false;
+    }
+    match a.kind {
+        NativeKind::String | NativeKind::StringV2 => a.as_str() == b.as_str(),
+        NativeKind::DecimalV2 => {
+            let a_ptr = a.slot.raw() as *const shape_value::v2::decimal_obj::DecimalObj;
+            let b_ptr = b.slot.raw() as *const shape_value::v2::decimal_obj::DecimalObj;
+            if a_ptr.is_null() || b_ptr.is_null() {
+                return a_ptr == b_ptr;
+            }
+            unsafe {
+                shape_value::v2::decimal_obj::DecimalObj::value(a_ptr)
+                    == shape_value::v2::decimal_obj::DecimalObj::value(b_ptr)
+            }
+        }
+        _ => a.slot.raw() == b.slot.raw(),
+    }
+}
+
+fn handle_group_by_impl(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    include_index: bool,
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    use crate::executor::v2_handlers::v2_array_detect::{
+        allocate_empty_typed_array, push_element, read_element,
+    };
+    use shape_value::v2::typed_array::release_v2_typed_array;
+
+    if args.len() < 2 {
+        return Err(VMError::RuntimeError(
+            "Array.groupBy expects 1 argument (key_fn)".into(),
+        ));
+    }
+    if args[1].kind != NativeKind::Ptr(HeapKind::Closure) && args[1].kind != NativeKind::UInt64 {
         return Err(VMError::RuntimeError(format!(
-            "groupBy: second argument must be a closure, got kind {:?}",
+            "groupBy: second argument must be a closure or function reference, got kind {:?}",
             args[1].kind
         )));
     }
-    Err(ckpt2_surface("groupBy", args))
+    let view = extract_view(&args[0]).ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.groupBy: expected v2 TypedArray receiver, got kind {:?}",
+            args[0].kind
+        ))
+    })?;
+    let closure = &args[1];
+
+    let mut elems: Vec<KindedSlot> = Vec::with_capacity(view.len as usize);
+    let mut keys: Vec<KindedSlot> = Vec::with_capacity(view.len as usize);
+    let mut key_kind: Option<NativeKind> = None;
+    for i in 0..view.len {
+        let (bits, kind) = read_element(&view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Array.groupBy: read_element({i}) returned None for element kind {:?}",
+                view.elem_type
+            ))
+        })?;
+        let elem = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let elem_for_key = elem.clone();
+        let key = if include_index {
+            let index = KindedSlot::from_int(i as i64);
+            vm.call_value_immediate_nb(closure, &[elem_for_key, index], ctx.as_deref_mut())?
+        } else {
+            vm.call_value_immediate_nb(closure, &[elem_for_key], ctx.as_deref_mut())?
+        };
+        match key_kind {
+            None => key_kind = Some(key.kind),
+            Some(expected) if expected != key.kind => {
+                return Err(VMError::RuntimeError(format!(
+                    "Array.groupBy: key kind mismatch at index {i}: expected {expected:?}, got {:?}",
+                    key.kind
+                )));
+            }
+            _ => {}
+        }
+        elems.push(elem);
+        keys.push(key);
+    }
+
+    let out_ptr = allocate_empty_typed_array(view.elem_type, view.len);
+    let out_view = as_v2_typed_array(
+        out_ptr as usize as u64,
+        NativeKind::Ptr(HeapKind::TypedArray),
+    )
+    .ok_or_else(|| {
+        unsafe { release_v2_typed_array(out_ptr) };
+        VMError::RuntimeError(format!(
+            "Array.groupBy: failed to re-detect freshly-allocated TypedArray<{:?}>",
+            view.elem_type
+        ))
+    })?;
+
+    for i in 0..keys.len() {
+        let first = (0..i).all(|j| !keys_equal(&keys[j], &keys[i]));
+        if !first {
+            continue;
+        }
+        for j in i..keys.len() {
+            if keys_equal(&keys[i], &keys[j]) {
+                let elem = elems[j].clone();
+                if let Err(msg) = push_element(&out_view, elem.slot.raw(), elem.kind) {
+                    unsafe { release_v2_typed_array(out_ptr) };
+                    return Err(VMError::RuntimeError(format!(
+                        "Array.groupBy: push_element failed at source index {j}: {msg}"
+                    )));
+                }
+                std::mem::forget(elem);
+            }
+        }
+    }
+
+    Ok(new_array_slot(out_ptr))
+}
+
+/// `arr.groupBy(|x| ...)` — group-by-key projection.
+pub(crate) fn handle_group_by_v2(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    handle_group_by_impl(vm, args, false, ctx)
+}
+
+pub(crate) fn handle_group_by_indexed_v2(
+    vm: &mut VirtualMachine,
+    args: &[KindedSlot],
+    ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    handle_group_by_impl(vm, args, true, ctx)
 }

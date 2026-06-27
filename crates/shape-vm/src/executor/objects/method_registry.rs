@@ -260,7 +260,9 @@ pub fn is_mut_self_tuple_return_method_name(method: &str) -> bool {
 pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     // Higher-order — Native (closure-based, handler manages VM callbacks)
     "map" => crate::executor::objects::array_transform::handle_map_v2,
+    "mapIndexed" => crate::executor::objects::array_transform::handle_map_indexed_v2,
     "filter" => crate::executor::objects::array_transform::handle_filter_v2,
+    "filterIndexed" => crate::executor::objects::array_transform::handle_filter_indexed_v2,
     "reduce" => crate::executor::objects::array_aggregation::handle_reduce_v2,
     "fold" => crate::executor::objects::array_aggregation::handle_reduce_v2,
     "forEach" => crate::executor::objects::array_query::handle_for_each_v2,
@@ -270,6 +272,7 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "every" => crate::executor::objects::array_query::handle_every_v2,
     "sort" => crate::executor::objects::array_transform::handle_sort_v2,
     "groupBy" => crate::executor::objects::array_transform::handle_group_by_v2,
+    "groupByIndexed" => crate::executor::objects::array_transform::handle_group_by_indexed_v2,
     "flatMap" => crate::executor::objects::array_transform::handle_flat_map_v2,
 
     // Basic operations — Native
@@ -307,7 +310,7 @@ pub static ARRAY_METHODS: phf::Map<&'static str, MethodHandler> = phf_map! {
     "includes" => crate::executor::objects::array_query::handle_includes_v2,
 
     // Transform — Native
-    "join" => crate::executor::objects::array_sort::handle_join_str_v2,
+    "join" => crate::executor::objects::array_transform::handle_join_v2,
     "flatten" => crate::executor::objects::array_transform::handle_flatten_v2,
     "unique" => crate::executor::objects::array_sets::handle_unique_v2,
     "distinct" => crate::executor::objects::array_sets::handle_distinct_v2,
