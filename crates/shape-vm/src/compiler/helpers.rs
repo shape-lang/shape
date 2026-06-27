@@ -4326,7 +4326,7 @@ impl BytecodeCompiler {
                 .program
                 .functions
                 .iter()
-                .position(|f| f.name == *actual_name)
+                .rposition(|f| f.name == *actual_name)
             {
                 return Some(idx);
             }
@@ -4338,7 +4338,7 @@ impl BytecodeCompiler {
                 .program
                 .functions
                 .iter()
-                .position(|f| f.name == resolved)
+                .rposition(|f| f.name == resolved)
             {
                 return Some(idx);
             }
@@ -4355,7 +4355,7 @@ impl BytecodeCompiler {
                 .program
                 .functions
                 .iter()
-                .position(|f| f.name == *original)
+                .rposition(|f| f.name == *original)
             {
                 return Some(idx);
             }
@@ -4365,7 +4365,7 @@ impl BytecodeCompiler {
                     .program
                     .functions
                     .iter()
-                    .position(|f| f.name == resolved)
+                    .rposition(|f| f.name == resolved)
                 {
                     return Some(idx);
                 }
@@ -4379,7 +4379,7 @@ impl BytecodeCompiler {
                     .program
                     .functions
                     .iter()
-                    .position(|f| f.name == qualified)
+                    .rposition(|f| f.name == qualified)
                 {
                     return Some(idx);
                 }
@@ -8261,5 +8261,43 @@ mod w17_3_4_2_type_annotation_lowering_tests {
         let ann = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("int".to_string())));
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
         assert_eq!(ft, FieldType::Array(Box::new(FieldType::I64)));
+    }
+}
+
+#[cfg(test)]
+mod function_name_resolution_tests {
+    use crate::bytecode::Function;
+    use crate::compiler::BytecodeCompiler;
+
+    fn function_named(name: &str, entry_point: usize) -> Function {
+        Function {
+            name: name.to_string(),
+            arity: 2,
+            param_names: vec!["a".to_string(), "b".to_string()],
+            locals_count: 0,
+            entry_point,
+            body_length: 0,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: vec![false, false],
+            ref_mutates: vec![false, false],
+            mutable_captures: Vec::new(),
+            frame_descriptor: None,
+            osr_entry_points: Vec::new(),
+            mir_data: None,
+        }
+    }
+
+    #[test]
+    fn bare_name_resolves_later_lexical_function_before_prelude_entry() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.program.functions.push(function_named("max", 100));
+        compiler.program.functions.push(function_named("max", 200));
+
+        let idx = compiler.find_function("max").expect("resolve max");
+
+        assert_eq!(idx, 1);
+        assert_eq!(compiler.program.functions[idx].entry_point, 200);
     }
 }
