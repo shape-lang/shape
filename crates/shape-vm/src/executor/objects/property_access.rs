@@ -49,12 +49,12 @@
 //! per ckpt-1 close-marker at `heap_value.rs:3956`).
 
 use crate::bytecode::{Instruction, Operand};
-use crate::executor::vm_impl::stack::drop_with_kind;
 use crate::executor::VirtualMachine;
+use crate::executor::vm_impl::stack::drop_with_kind;
 use shape_value::aligned_vec::AlignedVec;
 use shape_value::{
-    heap_value::{HashMapKindedRef, HeapKind, MatrixData},
     KindedSlot, NativeKind, VMError,
+    heap_value::{HashMapKindedRef, HeapKind, MatrixData},
 };
 use std::sync::Arc;
 
@@ -960,10 +960,10 @@ fn string_key_slot_as_str(slot: &KindedSlot) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::executor::VMConfig;
+    use shape_value::ValueSlot;
     #[cfg(miri)]
     use shape_value::heap_value::MiriSlotProvenance;
     use shape_value::heap_value::TypedObjectStorage;
-    use shape_value::ValueSlot;
 
     fn push_typed_object_raw(vm: &mut VirtualMachine, ptr: *mut TypedObjectStorage) {
         let bits = ptr as u64;

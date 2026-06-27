@@ -6,10 +6,10 @@
 mod typed_object_regression_tests {
     use crate::compiler::BytecodeCompiler;
     use crate::executor::{VMConfig, VirtualMachine};
-    use shape_value::{ValueWord, ValueWordExt};
+    use shape_value::KindedSlot;
 
     /// Helper that compiles and executes a Shape snippet through the VM.
-    fn eval(code: &str) -> ValueWord {
+    fn eval(code: &str) -> KindedSlot {
         // Per-test TypeSchemaRegistry scope; see module_qualified_type_tests
         // for the rationale. Without this, concurrent compiles of enum
         // payload types with overlapping field layouts can observe each
@@ -27,7 +27,11 @@ mod typed_object_regression_tests {
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(bytecode);
         vm.populate_module_objects();
-        vm.execute(None).expect("execution failed").clone()
+        vm.execute(None).expect("execution failed")
+    }
+
+    fn as_test_number(slot: &KindedSlot) -> Option<f64> {
+        slot.as_f64().or_else(|| slot.as_i64().map(|i| i as f64))
     }
 
     /// Enum with a string payload must preserve the string through TypedObject slots.
@@ -45,7 +49,7 @@ mod typed_object_regression_tests {
         "#,
         );
         assert_eq!(
-            result.as_arc_string().expect("Expected String").as_ref() as &str,
+            result.as_str().expect("Expected String"),
             "hello",
             "String payload should be preserved through TypedObject match"
         );
@@ -65,8 +69,7 @@ mod typed_object_regression_tests {
         "#,
         );
         assert_eq!(
-            result
-                .to_number()
+            as_test_number(&result)
                 .expect("Numeric payload should be preserved through TypedObject match"),
             42.0
         );

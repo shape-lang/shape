@@ -150,8 +150,7 @@ impl VirtualMachine {
                                 // same UB the adjacent TypedArray arm avoids).
                                 // Retain via `v2_retain` against the HeapHeader
                                 // — pairs with the `release_elem` drop arm.
-                                let hdr =
-                                    bits as *const shape_value::v2::heap_header::HeapHeader;
+                                let hdr = bits as *const shape_value::v2::heap_header::HeapHeader;
                                 shape_value::v2::refcount::v2_retain(hdr);
                             }
                             NativeKind::Ptr(HeapKind::HashMap) => {
@@ -218,8 +217,8 @@ mod r6_carrier_soundness_tests {
     //! release; Miri (SB + TB) flags the byte_sub(16) UB if the Arc op
     //! ever returns.
     use super::*;
-    use shape_value::v2::heap_element::HeapElement;
     use shape_value::ValueSlot;
+    use shape_value::v2::heap_element::HeapElement;
 
     #[test]
     fn r6_subset_builder_retains_nested_typed_object_field_via_header() {

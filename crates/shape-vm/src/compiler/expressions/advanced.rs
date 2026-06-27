@@ -84,10 +84,7 @@ impl BytecodeCompiler {
 
     /// Consume the current top-of-stack fallible carrier with the same
     /// unwrap/early-return sequence used by `?`.
-    pub(super) fn emit_try_unwrap_current_value(
-        &mut self,
-        skip_local: Option<u16>,
-    ) -> Result<()> {
+    pub(super) fn emit_try_unwrap_current_value(&mut self, skip_local: Option<u16>) -> Result<()> {
         if self.has_failure_drop_locals(skip_local) {
             self.emit(Instruction::simple(OpCode::Dup));
             self.emit(Instruction::simple(OpCode::IsTryFailure));

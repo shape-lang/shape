@@ -2532,12 +2532,8 @@ const X = comptime {
         use std::sync::Arc;
 
         // Nested child: an empty-field `_new` TypedObject (schema 7000).
-        let child_ptr = TypedObjectStorage::_new(
-            7000,
-            Box::new([]),
-            0,
-            Arc::from(Vec::<NativeKind>::new()),
-        );
+        let child_ptr =
+            TypedObjectStorage::_new(7000, Box::new([]), 0, Arc::from(Vec::<NativeKind>::new()));
         // Parent: one heap field (idx 0) pointing at the child, heap_mask bit 0.
         let parent_slot = ValueSlot::from_raw(child_ptr as u64);
         let field_kind = NativeKind::Ptr(HeapKind::TypedObject);

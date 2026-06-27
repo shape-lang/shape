@@ -8,11 +8,11 @@
 //! guarded (runtime-checked) execution paths.
 
 use super::*;
-use crate::bytecode::{BytecodeProgram, OpCode};
-use shape_value::{VMError, ValueWord, ValueWordExt};
+use crate::bytecode::BytecodeProgram;
+use shape_value::{KindedSlot, VMError};
 
 /// Compile and run a Shape program normally (trusted opcodes may be emitted).
-fn run_with_trusted(source: &str) -> Result<ValueWord, VMError> {
+fn run_with_trusted(source: &str) -> Result<KindedSlot, VMError> {
     let program = shape_ast::parser::parse_program(source)
         .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
     let mut compiler = crate::compiler::BytecodeCompiler::new();
@@ -22,12 +22,12 @@ fn run_with_trusted(source: &str) -> Result<ValueWord, VMError> {
         .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
-    vm.execute(None).map(|nb| nb.clone())
+    vm.execute(None)
 }
 
 /// Post-process bytecode to downgrade all trusted opcodes to their guarded
 /// counterparts, then run.
-fn run_guarded_only(source: &str) -> Result<ValueWord, VMError> {
+fn run_guarded_only(source: &str) -> Result<KindedSlot, VMError> {
     let program = shape_ast::parser::parse_program(source)
         .map_err(|e| VMError::RuntimeError(format!("{:?}", e)))?;
     let mut compiler = crate::compiler::BytecodeCompiler::new();
@@ -38,7 +38,7 @@ fn run_guarded_only(source: &str) -> Result<ValueWord, VMError> {
     downgrade_trusted_opcodes(&mut bytecode);
     let mut vm = VirtualMachine::new(VMConfig::default());
     vm.load_program(bytecode);
-    vm.execute(None).map(|nb| nb.clone())
+    vm.execute(None)
 }
 
 /// Replace all *Trusted opcodes in the program with their guarded equivalents.
@@ -72,8 +72,8 @@ fn assert_same(source: &str) {
             } else {
                 // Fallback: both should have the same tag structure
                 assert_eq!(
-                    format!("{}", t),
-                    format!("{}", g),
+                    format!("{:?}", t),
+                    format!("{:?}", g),
                     "Display mismatch for: {}",
                     source
                 );

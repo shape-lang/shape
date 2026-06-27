@@ -1014,8 +1014,8 @@ fn set_in_place_dispatch(
                     )));
                 }
             };
-            let this =
-                Arc::as_ptr(arc) as *mut HashMapData<*const shape_value::v2::decimal_obj::DecimalObj>;
+            let this = Arc::as_ptr(arc)
+                as *mut HashMapData<*const shape_value::v2::decimal_obj::DecimalObj>;
             unsafe {
                 HashMapData::<*const shape_value::v2::decimal_obj::DecimalObj>::insert_at(
                     this, key, v_ptr,

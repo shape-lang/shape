@@ -1732,7 +1732,7 @@ fn random_int_arg(
 }
 
 fn random_array_number_slot(values: Vec<f64>) -> KindedSlot {
-    use shape_value::v2::typed_array::{stamp_elem_type, TypedArray, ELEM_TYPE_F64};
+    use shape_value::v2::typed_array::{ELEM_TYPE_F64, TypedArray, stamp_elem_type};
 
     let ptr = TypedArray::<f64>::from_slice(&values);
     unsafe {
@@ -1841,7 +1841,7 @@ fn vm_random_intrinsic_slot(
 /// contents — each element is copied out of the array's interned UTF-8.
 pub(in crate::executor) fn read_string_array(slot: &KindedSlot) -> Option<Vec<String>> {
     use crate::executor::v2_handlers::v2_array_detect::{
-        as_v2_typed_array, read_element, V2ElemType,
+        V2ElemType, as_v2_typed_array, read_element,
     };
     use shape_value::{HeapKind, NativeKind};
     if slot.kind != NativeKind::Ptr(HeapKind::TypedArray) {
@@ -2048,7 +2048,7 @@ fn project_typed_object_array_chart_columns(
     y_columns: &[String],
 ) -> Result<ChartProjection, VMError> {
     use crate::executor::v2_handlers::v2_array_detect::{
-        as_v2_typed_array, read_element, V2ElemType,
+        V2ElemType, as_v2_typed_array, read_element,
     };
     let view = as_v2_typed_array(value.raw(), value.kind).ok_or_else(|| {
         VMError::RuntimeError(

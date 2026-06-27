@@ -5,8 +5,8 @@
 
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::type_tracking::NativeKind;
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use shape_runtime::type_schema::FieldType;
 use shape_value::{HeapKind, KindedSlot};
 
