@@ -212,14 +212,6 @@ pub struct TypeInferenceEngine {
     /// Observed argument types at call sites for each function.
     /// Used to widen unannotated parameter type variables into unions.
     pub(crate) callsite_param_types: HashMap<String, Vec<Vec<Type>>>,
-    /// Instantiated result types at named-function call sites.
-    ///
-    /// Function schemes are instantiated per call, so the return variable held
-    /// by `let x = f(...)` is a fresh call-site instance, not necessarily the
-    /// same variable stored in `types["f"]`. Once post-callsite proof resolves
-    /// the canonical function return, this map lets finalization constrain all
-    /// earlier call-result instances to that static return fact.
-    pub(crate) callsite_return_types: HashMap<String, Vec<Type>>,
     /// Source type variables for callable parameters, indexed by parameter
     /// position. `None` means parameter was explicitly annotated.
     pub(crate) callable_param_source_vars: HashMap<String, Vec<Option<TypeVar>>>,
@@ -467,7 +459,6 @@ impl TypeInferenceEngine {
             fallible_scopes: Vec::new(),
             method_table: MethodTable::new(),
             callsite_param_types: HashMap::new(),
-            callsite_return_types: HashMap::new(),
             callable_param_source_vars: HashMap::new(),
             callable_return_from_fn_param: HashMap::new(),
             callable_array_return_from_fn_param: HashMap::new(),
@@ -1066,45 +1057,6 @@ impl TypeInferenceEngine {
 
         for (index, arg_type) in arg_types.iter().enumerate() {
             entry[index].push(arg_type.clone());
-        }
-    }
-
-    pub(crate) fn record_function_callsite_return(
-        &mut self,
-        function_name: &str,
-        return_type: Type,
-    ) {
-        self.callsite_return_types
-            .entry(function_name.to_string())
-            .or_default()
-            .push(return_type);
-    }
-
-    fn propagate_resolved_call_returns_to_callsite_instances(
-        &mut self,
-        types: &HashMap<String, Type>,
-    ) -> Vec<TypeError> {
-        let mut constraints = Vec::new();
-        for (function_name, call_returns) in &self.callsite_return_types {
-            let Some(Type::Function { returns, .. }) = types.get(function_name) else {
-                continue;
-            };
-            let resolved_return = self.solver.unifier().apply_substitutions(returns.as_ref());
-            if !Self::type_is_fully_resolved(&resolved_return) {
-                continue;
-            }
-            for call_return in call_returns {
-                constraints.push((call_return.clone(), resolved_return.clone()));
-            }
-        }
-
-        if constraints.is_empty() {
-            return Vec::new();
-        }
-
-        match self.solver.solve(&mut constraints) {
-            Ok(()) => Vec::new(),
-            Err(err) => vec![err],
         }
     }
 
@@ -1978,7 +1930,6 @@ impl TypeInferenceEngine {
         // callable/property/variable origin maps) that carries the registered M
         // interface across into the consumer check.
         self.pending_return_unions.clear();
-        self.callsite_return_types.clear();
         self.callable_param_source_vars.clear();
         self.callable_return_from_fn_param.clear();
         self.callable_array_return_from_fn_param.clear();
@@ -2072,7 +2023,6 @@ impl TypeInferenceEngine {
         program: &Program,
     ) -> (HashMap<String, Type>, Vec<TypeError>) {
         self.pending_return_unions.clear();
-        self.callsite_return_types.clear();
         self.callable_param_source_vars.clear();
         self.callable_return_from_fn_param.clear();
         self.callable_array_return_from_fn_param.clear();
@@ -2232,7 +2182,6 @@ impl TypeInferenceEngine {
         // CONFLICTING observed pair still produces the genuine union mismatch.
         self.apply_callsite_unions(&mut types);
         errors.extend(self.propagate_param_destructure_field_links());
-        self.rewalk_resolved_function_bodies(program, &mut types);
 
         // HOF return-type soundness re-check (the sg2 root, int/number guard).
         //
@@ -2304,7 +2253,6 @@ impl TypeInferenceEngine {
                 errors.push(err);
             }
         }
-        errors.extend(self.propagate_resolved_call_returns_to_callsite_instances(&types));
 
         // Apply substitutions to get final types
         for (_name, ty) in types.iter_mut() {
