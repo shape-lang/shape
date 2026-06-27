@@ -25,6 +25,14 @@ use shape_value::v2::ConcreteType;
 
 use crate::bytecode::OpCode;
 
+#[derive(Debug, Clone, Copy)]
+enum EmptyArrayAccumulatorAccess {
+    Binding(super::EmptyArrayAccumulatorKey),
+    SharedCapture(u16),
+    OwnedMutableCapture(u16),
+    LegacyCapture(u16),
+}
+
 /// The kind of typed array the compiler should emit for a known element type.
 ///
 /// Each variant corresponds to a `TypedArray<T>` instantiation that has a
@@ -1043,28 +1051,67 @@ impl super::BytecodeCompiler {
     ///
     /// Mirrors the local-then-module-binding lookup order of
     /// [`resolve_receiver_typed_array_kind`].
-    fn empty_array_accumulator_key(
+    fn empty_array_accumulator_resolution(
         &self,
         recv_name: &str,
-    ) -> Option<super::EmptyArrayAccumulatorKey> {
+    ) -> Option<(super::EmptyArrayAccumulatorKey, EmptyArrayAccumulatorAccess)> {
         if let Some(local_idx) = self.resolve_local(recv_name) {
             let key = super::EmptyArrayAccumulatorKey::Local(local_idx);
-            return self
-                .empty_array_accumulators
-                .contains_key(&key)
-                .then_some(key);
+            if self.empty_array_accumulators.contains_key(&key) {
+                return Some((key, EmptyArrayAccumulatorAccess::Binding(key)));
+            }
+            // Closure bodies synthesize leading capture params, so a captured
+            // module binding can resolve as a local even though the pending
+            // empty-array accumulator belongs to the original module binding.
+            // Only fall through in that captured-name case; an ordinary local
+            // shadow must not consume a module accumulator with the same name.
+            if !self.mutable_closure_captures.contains_key(recv_name) {
+                return None;
+            }
         }
         let scoped_name = self
             .resolve_scoped_module_binding_name(recv_name)
             .unwrap_or_else(|| recv_name.to_string());
         if let Some(&binding_idx) = self.module_bindings.get(&scoped_name) {
             let key = super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx);
-            return self
-                .empty_array_accumulators
-                .contains_key(&key)
-                .then_some(key);
+            if self.empty_array_accumulators.contains_key(&key) {
+                let access = self.capture_or_binding_access(recv_name, key);
+                return Some((key, access));
+            }
         }
         None
+    }
+
+    fn capture_or_binding_access(
+        &self,
+        recv_name: &str,
+        key: super::EmptyArrayAccumulatorKey,
+    ) -> EmptyArrayAccumulatorAccess {
+        if let Some(&shared_idx) = self.shared_closure_captures.get(recv_name) {
+            EmptyArrayAccumulatorAccess::SharedCapture(shared_idx)
+        } else if let Some(&owned_idx) = self.owned_mutable_closure_captures.get(recv_name) {
+            EmptyArrayAccumulatorAccess::OwnedMutableCapture(owned_idx)
+        } else if let Some(&capture_idx) = self.mutable_closure_captures.get(recv_name) {
+            EmptyArrayAccumulatorAccess::LegacyCapture(capture_idx)
+        } else {
+            EmptyArrayAccumulatorAccess::Binding(key)
+        }
+    }
+
+    fn captured_typed_array_receiver_resolution(
+        &self,
+        recv_name: &str,
+    ) -> Option<(TypedArrayKind, EmptyArrayAccumulatorAccess)> {
+        if !self.mutable_closure_captures.contains_key(recv_name) {
+            return None;
+        }
+        let scoped_name = self
+            .resolve_scoped_module_binding_name(recv_name)
+            .unwrap_or_else(|| recv_name.to_string());
+        let binding_idx = *self.module_bindings.get(&scoped_name)?;
+        let kind = *self.v2_typed_array_module_bindings.get(&binding_idx)?;
+        let key = super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx);
+        Some((kind, self.capture_or_binding_access(recv_name, key)))
     }
 
     /// Resolve the `TypedArrayKind` an `arr.push(arg)` argument contributes
@@ -1204,7 +1251,17 @@ impl super::BytecodeCompiler {
         arg: &shape_ast::ast::Expr,
         receiver_loc: Option<shape_ast::error::SourceLocation>,
     ) -> shape_ast::error::Result<bool> {
-        let Some(key) = self.empty_array_accumulator_key(recv_name) else {
+        let Some((key, access)) = self.empty_array_accumulator_resolution(recv_name) else {
+            if let Some((kind, access)) = self.captured_typed_array_receiver_resolution(recv_name) {
+                self.check_named_binding_write_allowed(recv_name, receiver_loc)?;
+                self.stamp_empty_array_capture_access_as_ptr(recv_name, access);
+                self.record_pushed_element_concrete_type(recv_name, arg);
+                self.emit_load_accumulator_access(access);
+                self.compile_typed_array_element_value(kind, arg)?;
+                self.emit(crate::bytecode::Instruction::simple(kind.push_opcode()));
+                self.emit_load_accumulator_access(access);
+                return Ok(true);
+            }
             return Ok(false);
         };
         // Immutability check — `let out = []` (no `mut`) cannot be pushed
@@ -1220,11 +1277,12 @@ impl super::BytecodeCompiler {
         // Tier 1: structural resolution (literal / type-tracked identifier).
         if let Some(kind) = self.structural_push_argument_typed_array_kind(arg) {
             self.finalize_empty_array_accumulator_kind(key, kind);
+            self.stamp_empty_array_capture_access_as_ptr(recv_name, access);
             self.record_pushed_element_concrete_type(recv_name, arg);
-            self.emit_load_accumulator_binding(key);
+            self.emit_load_accumulator_access(access);
             self.compile_typed_array_element_value(kind, arg)?;
             self.emit(crate::bytecode::Instruction::simple(kind.push_opcode()));
-            self.emit_load_accumulator_binding(key);
+            self.emit_load_accumulator_access(access);
             return Ok(true);
         }
 
@@ -1251,35 +1309,164 @@ impl super::BytecodeCompiler {
             });
         };
         self.finalize_empty_array_accumulator_kind(key, kind);
+        self.stamp_empty_array_capture_access_as_ptr(recv_name, access);
         self.record_pushed_element_concrete_type(recv_name, arg);
         // Stack: [value]. The typed push needs [arr, value] — load the
         // array and swap it under the already-compiled value.
-        self.emit_load_accumulator_binding(key);
+        self.emit_load_accumulator_access(access);
         self.emit(crate::bytecode::Instruction::simple(
             crate::bytecode::OpCode::Swap,
         ));
         self.emit(crate::bytecode::Instruction::simple(kind.push_opcode()));
-        self.emit_load_accumulator_binding(key);
+        self.emit_load_accumulator_access(access);
         Ok(true)
     }
 
-    /// Emit a `LoadLocal` / `LoadModuleBinding` for an empty-array
-    /// accumulator's binding slot.
-    fn emit_load_accumulator_binding(&mut self, key: super::EmptyArrayAccumulatorKey) {
-        match key {
-            super::EmptyArrayAccumulatorKey::Local(local_idx) => {
+    /// A captured empty accumulator stores the array pointer in the capture
+    /// cell. Once the first push proves `Array<T>`, the capture's cell payload
+    /// kind is statically `Ptr`; update the closure-body load/store maps so
+    /// generated bytecode reads the typed-array pointer from the cell instead
+    /// of falling back to a stale unresolved scalar kind.
+    fn stamp_empty_array_capture_access_as_ptr(
+        &mut self,
+        recv_name: &str,
+        access: EmptyArrayAccumulatorAccess,
+    ) {
+        use shape_value::v2::struct_layout::FieldKind;
+        match access {
+            EmptyArrayAccumulatorAccess::SharedCapture(_) => {
+                self.shared_capture_inner_kinds
+                    .insert(recv_name.to_string(), FieldKind::Ptr);
+            }
+            EmptyArrayAccumulatorAccess::OwnedMutableCapture(_) => {
+                self.owned_mutable_capture_inner_kinds
+                    .insert(recv_name.to_string(), FieldKind::Ptr);
+            }
+            EmptyArrayAccumulatorAccess::Binding(_)
+            | EmptyArrayAccumulatorAccess::LegacyCapture(_) => {}
+        }
+    }
+
+    /// Emit a load for the accumulator storage selected by
+    /// [`Self::empty_array_accumulator_resolution`].
+    fn emit_load_accumulator_access(&mut self, access: EmptyArrayAccumulatorAccess) {
+        use shape_value::v2::struct_layout::FieldKind;
+        match access {
+            EmptyArrayAccumulatorAccess::Binding(super::EmptyArrayAccumulatorKey::Local(
+                local_idx,
+            )) => {
                 self.emit(crate::bytecode::Instruction::new(
                     crate::bytecode::OpCode::LoadLocal,
                     Some(crate::bytecode::Operand::Local(local_idx)),
                 ));
             }
-            super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx) => {
+            EmptyArrayAccumulatorAccess::Binding(
+                super::EmptyArrayAccumulatorKey::ModuleBinding(binding_idx),
+            ) => {
                 self.emit(crate::bytecode::Instruction::new(
                     crate::bytecode::OpCode::LoadModuleBinding,
                     Some(crate::bytecode::Operand::ModuleBinding(binding_idx)),
                 ));
             }
+            EmptyArrayAccumulatorAccess::SharedCapture(capture_idx) => {
+                self.emit(crate::bytecode::Instruction::new(
+                    crate::compiler::helpers::shared_typed_load_opcode(FieldKind::Ptr),
+                    Some(crate::bytecode::Operand::Local(capture_idx)),
+                ));
+            }
+            EmptyArrayAccumulatorAccess::OwnedMutableCapture(capture_idx) => {
+                self.emit(crate::bytecode::Instruction::new(
+                    crate::compiler::helpers::owned_mutable_typed_load_opcode(FieldKind::Ptr),
+                    Some(crate::bytecode::Operand::Local(capture_idx)),
+                ));
+            }
+            EmptyArrayAccumulatorAccess::LegacyCapture(capture_idx) => {
+                self.emit(crate::bytecode::Instruction::new(
+                    crate::bytecode::OpCode::LoadClosure,
+                    Some(crate::bytecode::Operand::Local(capture_idx)),
+                ));
+            }
         }
+    }
+
+    /// Function compilation must isolate function-local empty-array
+    /// accumulators because local slot indices are reused per function.
+    /// Module-binding accumulators are different: they name top-level storage
+    /// and may be resolved by a nested function such as
+    /// `fn push(v) { stack = stack.push(v) }`. Keep those visible while
+    /// compiling functions, but save caller-local entries here.
+    pub(crate) fn take_local_empty_array_accumulators(
+        &mut self,
+    ) -> std::collections::HashMap<super::EmptyArrayAccumulatorKey, super::EmptyArrayAccumulator>
+    {
+        let mut saved = std::collections::HashMap::new();
+        let mut retained = std::collections::HashMap::new();
+        for (key, acc) in std::mem::take(&mut self.empty_array_accumulators) {
+            match key {
+                super::EmptyArrayAccumulatorKey::Local(_) => {
+                    saved.insert(key, acc);
+                }
+                super::EmptyArrayAccumulatorKey::ModuleBinding(_) => {
+                    retained.insert(key, acc);
+                }
+            }
+        }
+        self.empty_array_accumulators = retained;
+        saved
+    }
+
+    /// Restore caller-local empty-array accumulators after a nested function
+    /// compile. Any local accumulators created by the nested function are
+    /// discarded here after its local-only finalizer has run; module-binding
+    /// accumulators stay in the live map so a function body can promote them.
+    pub(crate) fn restore_local_empty_array_accumulators(
+        &mut self,
+        saved: std::collections::HashMap<
+            super::EmptyArrayAccumulatorKey,
+            super::EmptyArrayAccumulator,
+        >,
+    ) {
+        self.empty_array_accumulators
+            .retain(|key, _| !matches!(key, super::EmptyArrayAccumulatorKey::Local(_)));
+        self.empty_array_accumulators.extend(saved);
+    }
+
+    /// Surface unresolved function-local `let mut out = []` accumulators while
+    /// leaving module-binding accumulators for the top-level finalizer. This
+    /// mirrors [`Self::finalize_unresolved_empty_array_accumulators`] but is
+    /// scoped to local-slot entries so nested function compilation can still
+    /// consume top-level grow-pattern proofs.
+    pub(crate) fn finalize_unresolved_local_empty_array_accumulators(
+        &mut self,
+    ) -> shape_ast::error::Result<()> {
+        let unresolved_key = self
+            .empty_array_accumulators
+            .keys()
+            .find(|key| matches!(key, super::EmptyArrayAccumulatorKey::Local(_)))
+            .copied();
+        if let Some(key) = unresolved_key {
+            let acc = self
+                .empty_array_accumulators
+                .get(&key)
+                .expect("key came from the accumulator map")
+                .clone();
+            self.empty_array_accumulators
+                .retain(|key, _| !matches!(key, super::EmptyArrayAccumulatorKey::Local(_)));
+            return Err(shape_ast::error::ShapeError::SemanticError {
+                message: format!(
+                    "empty array `{}` has an un-resolvable element type. \
+                     It is created empty (`[]`) with no `Array<T>` \
+                     annotation and is never pushed to, so the compiler \
+                     cannot prove what element type it holds. Strict typing \
+                     requires a known concrete element type: add an \
+                     annotation (`let {}: Array<T> = []`) or remove the \
+                     unused binding.",
+                    acc.var_name, acc.var_name,
+                ),
+                location: acc.literal_loc.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21): surface-and-stop
@@ -1851,6 +2038,56 @@ mod compile_integration_tests {
             "function-local int accumulator must allocate via NewTypedArrayI64"
         );
         assert!(!has_opcode(&prog, OpCode::NewArray));
+    }
+
+    #[test]
+    fn ws1b_module_accumulator_promoted_from_nested_function_push() {
+        // W25 empty-grow proof: a top-level unannotated accumulator can be
+        // grown through a nested function. The module-binding placeholder must
+        // stay visible during function compilation so the `push(val)` body can
+        // patch it from the statically inferred type of `val`.
+        let prog = compile(
+            "let mut stack = []\nfn push(val) { stack = stack.push(val) }\npush(10)\npush(20)\nstack.len()\n",
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayI64),
+            "module accumulator grown via nested function must allocate via NewTypedArrayI64"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushI64),
+            "nested function push must use TypedArrayPushI64 after static proof"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "nested function promotion must not leave the generic NewArray placeholder"
+        );
+    }
+
+    #[test]
+    fn ws1b_captured_module_accumulator_push_uses_typed_capture_load() {
+        // W25 empty-grow proof: a mutable closure captures a top-level empty
+        // accumulator as a synthetic local. The push proof must still attach to
+        // the original module binding and emit a typed push through the capture
+        // cell, not the legacy ArrayPushLocal local-slot fast path.
+        let prog = compile(
+            "let mut items = []\nlet add = |item| { items = items.push(item) }\nadd(10)\nitems.len()\n",
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayI64),
+            "captured accumulator grown through closure must allocate via NewTypedArrayI64"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushI64),
+            "captured accumulator push must use TypedArrayPushI64 after static proof"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::ArrayPushLocal),
+            "captured accumulator push must not fall back to legacy ArrayPushLocal"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "captured accumulator promotion must not leave the generic NewArray placeholder"
+        );
     }
 
     #[test]
