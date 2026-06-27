@@ -4521,6 +4521,210 @@ let ints = singleton(1)
 }
 
 #[test]
+fn w27_rewalk_records_resolved_param_binary_op_span() {
+    use shape_ast::ast::{BinaryOp, Expr};
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn reverse_string(s) {
+    let mut i = s.length - 1
+    i
+}
+reverse_string("hello")
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let sub_span = u40_find_expr_span(&program, &|e| {
+        matches!(
+            e,
+            Expr::BinaryOp {
+                op: BinaryOp::Sub,
+                ..
+            }
+        )
+    })
+    .expect("sub expression span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "resolved-param function body should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.expression_type(sub_span).is_some_and(u40_is_int),
+        "s.length - 1 should be recorded as int after callsite proof, got {:?}",
+        facts.expression_type(sub_span)
+    );
+}
+
+#[test]
+fn w27_rewalk_resolves_zip_sum_empty_grow_return() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn zip_sum(a, b) {
+    let mut result = []
+    let mut i = 0
+    let len = if a.length < b.length { a.length } else { b.length }
+    while i < len {
+        result = result.push(a[i] + b[i])
+        i = i + 1
+    }
+    result
+}
+let zipped = zip_sum([1, 2, 3], [10, 20, 30])
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let zipped_span = u40_find_binding_span(&program, "zipped").expect("zipped binding span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "zip_sum empty-grow return should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts
+            .binding_type(zipped_span)
+            .is_some_and(u40_is_array_of_int),
+        "zipped should resolve to Array<int>, got {:?}",
+        facts.binding_type(zipped_span)
+    );
+}
+
+#[test]
+fn w27_rewalk_resolves_array_length_property_after_callsite_proof() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn min_len(a, b) {
+    min(a.length, b.length)
+}
+let n = min_len([1, 2], [3])
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let n_span = u40_find_binding_span(&program, "n").expect("n binding span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "array length over callsite-proven params should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.binding_type(n_span).is_some_and(u40_is_int),
+        "n should resolve to int, got {:?}",
+        facts.binding_type(n_span)
+    );
+}
+
+#[test]
+fn w27_rewalk_resolves_length_empty_grow_return() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn lengths(a, b) {
+    let mut out = []
+    out = out.push(a.length)
+    out = out.push(b.length)
+    out
+}
+let xs = lengths([1], [2, 3])
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let xs_span = u40_find_binding_span(&program, "xs").expect("xs binding span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "length empty-grow return should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.binding_type(xs_span).is_some_and(u40_is_array_of_int),
+        "xs should resolve to Array<int>, got {:?}",
+        facts.binding_type(xs_span)
+    );
+}
+
+#[test]
+fn w27_rewalk_records_nested_push_param_binding_fact() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+let mut stack = []
+fn push(val) { stack = stack.push(val) }
+push(10)
+push(20)
+stack.len()
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let stack_span = u40_find_binding_span(&program, "stack").expect("stack binding span");
+    let val_span = u40_find_binding_span(&program, "val").expect("val binding span");
+    let empty_array_span = u40_find_expr_span(
+        &program,
+        &|expr| matches!(expr, shape_ast::ast::Expr::Array(elements, _) if elements.is_empty()),
+    )
+    .expect("empty array literal span");
+    let val_use_span = {
+        use shape_ast::ast::{Expr, Item, Span, Spanned, Statement};
+
+        fn find_in_expr(expr: &Expr) -> Option<Span> {
+            match expr {
+                Expr::Identifier(name, _) if name == "val" => Some(Spanned::span(expr)),
+                Expr::MethodCall { receiver, args, .. } => {
+                    find_in_expr(receiver).or_else(|| args.iter().find_map(find_in_expr))
+                }
+                _ => None,
+            }
+        }
+
+        program.items.iter().find_map(|item| match item {
+            Item::Function(func, _) => func.body.iter().find_map(|stmt| match stmt {
+                Statement::Assignment(assign, _) => find_in_expr(&assign.value),
+                _ => None,
+            }),
+            _ => None,
+        })
+    }
+    .expect("val use span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "nested module accumulator push should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts
+            .binding_type(stack_span)
+            .is_some_and(u40_is_array_of_int),
+        "module accumulator binding should resolve to Array<int>, got {:?}",
+        facts.binding_type(stack_span)
+    );
+    assert!(
+        facts.binding_type(val_span).is_some_and(u40_is_int),
+        "nested push parameter should resolve to int, got {:?}",
+        facts.binding_type(val_span)
+    );
+    assert!(
+        facts.expression_type(val_use_span).is_some_and(u40_is_int),
+        "nested push argument use should resolve to int, got {:?}",
+        facts.expression_type(val_use_span)
+    );
+    assert!(
+        facts.expression_type(empty_array_span).is_none(),
+        "bare empty literal should not bypass VM accumulator promotion, got {:?}",
+        facts.expression_type(empty_array_span)
+    );
+}
+
+#[test]
 fn u42_typed_array_sum_resolves_to_element_type() {
     use shape_ast::ast::Expr;
     use shape_ast::parser::parse_program;

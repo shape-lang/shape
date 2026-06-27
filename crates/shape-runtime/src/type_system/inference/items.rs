@@ -981,6 +981,113 @@ impl TypeInferenceEngine {
         Ok(function_type)
     }
 
+    /// Re-walk named function bodies after callsite propagation has resolved
+    /// unannotated parameters to concrete types.
+    ///
+    /// The initial body walk must happen before call sites are known, so
+    /// expressions like `s.length - 1` or `age > 150` can be recorded with
+    /// unresolved operand variables. Once `apply_callsite_unions` proves the
+    /// function parameter types, this pass reuses the same body inference with
+    /// those proven parameter types in scope. It only runs for functions whose
+    /// parameters are fully resolved, and it unifies the replayed return with
+    /// the existing function return variable instead of inventing a fallback.
+    pub(crate) fn rewalk_resolved_function_bodies(
+        &mut self,
+        program: &shape_ast::ast::Program,
+        types: &mut HashMap<String, Type>,
+    ) {
+        for item in &program.items {
+            self.rewalk_resolved_function_bodies_for_item(item, types);
+        }
+    }
+
+    fn rewalk_resolved_function_bodies_for_item(
+        &mut self,
+        item: &Item,
+        types: &mut HashMap<String, Type>,
+    ) {
+        match item {
+            Item::Function(func, _) => self.rewalk_resolved_function_body(func, types),
+            Item::Export(export, _) => {
+                if let shape_ast::ast::ExportItem::Function(func) = &export.item {
+                    self.rewalk_resolved_function_body(func, types);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rewalk_resolved_function_body(
+        &mut self,
+        func: &FunctionDef,
+        types: &mut HashMap<String, Type>,
+    ) {
+        let Some(Type::Function { params, returns }) = types.get(&func.name).cloned() else {
+            return;
+        };
+
+        let resolved_params: Vec<Type> = params
+            .iter()
+            .map(|param| self.solver.unifier().apply_substitutions(param))
+            .collect();
+        if resolved_params
+            .iter()
+            .any(|param| self.type_contains_unresolved_vars(param))
+        {
+            return;
+        }
+
+        self.env.push_scope();
+        self.push_fallible_scope();
+
+        for (param, param_type) in func.params.iter().zip(resolved_params.iter()) {
+            self.bind_function_param_pattern(&param.pattern, param_type);
+            self.record_binding_facts_for_param_pattern(&param.pattern);
+        }
+
+        let empty_grow_return = Self::fn_body_returns_empty_grow_carrier(func);
+        let mut empty_grow_return_carriers = std::collections::HashSet::new();
+        if empty_grow_return {
+            Self::collect_empty_array_carriers(&func.body, &mut empty_grow_return_carriers);
+        }
+
+        self.expected_return_types.push(None);
+        self.empty_grow_return_carrier_scopes
+            .push(empty_grow_return_carriers);
+        let constraint_start = self.constraints.len();
+        let replayed_return = self.infer_callable_return_type(&func.body, true);
+        self.empty_grow_return_carrier_scopes.pop();
+        self.expected_return_types.pop();
+
+        let _ = self.pop_fallible_scope();
+        self.env.pop_scope();
+
+        let Ok(replayed_return) = replayed_return else {
+            return;
+        };
+
+        let mut replay_constraints = self.constraints[constraint_start..].to_vec();
+        replay_constraints.push((returns.as_ref().clone(), replayed_return.clone()));
+        if self.solver.solve(&mut replay_constraints).is_err() {
+            return;
+        }
+
+        let replayed_return = self.solver.unifier().apply_substitutions(&replayed_return);
+        let returns = self.solver.unifier().apply_substitutions(returns.as_ref());
+        let new_return = if self.type_contains_unresolved_vars(&returns)
+            && !self.type_contains_unresolved_vars(&replayed_return)
+        {
+            replayed_return
+        } else {
+            returns
+        };
+
+        types.insert(
+            func.name.clone(),
+            BuiltinTypes::function(resolved_params, new_return),
+        );
+    }
+
     fn bind_function_param_pattern(&mut self, pattern: &DestructurePattern, scrutinee: &Type) {
         match pattern {
             DestructurePattern::Identifier(name, _) => {

@@ -431,7 +431,7 @@ impl TypeInferenceEngine {
         // desugared nodes with no source location): they collide on `(0,0)` and
         // would alias unrelated expressions.
         let span = shape_ast::ast::Spanned::span(expr);
-        if !span.is_dummy() {
+        if !span.is_dummy() && !matches!(expr, Expr::Array(elements, _) if elements.is_empty()) {
             self.expr_type_table
                 .insert(span, self.recorded_type_for(expr, &ty));
         }
@@ -729,7 +729,12 @@ impl TypeInferenceEngine {
                 self.env.set_current_access_variable(var_name);
 
                 let object_type = self.infer_expr(object)?;
-                let result = self.infer_property_access(&object_type, property);
+                let access_object_type = if property == "length" {
+                    self.solver.unifier().apply_substitutions(&object_type)
+                } else {
+                    object_type
+                };
+                let result = self.infer_property_access(&access_object_type, property);
                 if let Err(TypeError::UnknownProperty(_, missing)) = &result {
                     self.register_unknown_property_origin(missing, *span);
                 }
