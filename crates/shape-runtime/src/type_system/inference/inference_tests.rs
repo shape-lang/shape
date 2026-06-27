@@ -4521,6 +4521,137 @@ let ints = singleton(1)
 }
 
 #[test]
+fn w27_rewalk_records_resolved_param_binary_op_span() {
+    use shape_ast::ast::{BinaryOp, Expr};
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn reverse_string(s) {
+    let mut i = s.length - 1
+    i
+}
+reverse_string("hello")
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let sub_span = u40_find_expr_span(&program, &|e| {
+        matches!(
+            e,
+            Expr::BinaryOp {
+                op: BinaryOp::Sub,
+                ..
+            }
+        )
+    })
+    .expect("sub expression span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "resolved-param function body should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.expression_type(sub_span).is_some_and(u40_is_int),
+        "s.length - 1 should be recorded as int after callsite proof, got {:?}",
+        facts.expression_type(sub_span)
+    );
+}
+
+#[test]
+fn w27_rewalk_resolves_zip_sum_empty_grow_return() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn zip_sum(a, b) {
+    let mut result = []
+    let mut i = 0
+    let len = if a.length < b.length { a.length } else { b.length }
+    while i < len {
+        result = result.push(a[i] + b[i])
+        i = i + 1
+    }
+    result
+}
+let zipped = zip_sum([1, 2, 3], [10, 20, 30])
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let zipped_span = u40_find_binding_span(&program, "zipped").expect("zipped binding span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "zip_sum empty-grow return should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts
+            .binding_type(zipped_span)
+            .is_some_and(u40_is_array_of_int),
+        "zipped should resolve to Array<int>, got {:?}",
+        facts.binding_type(zipped_span)
+    );
+}
+
+#[test]
+fn w27_rewalk_resolves_array_length_property_after_callsite_proof() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn min_len(a, b) {
+    min(a.length, b.length)
+}
+let n = min_len([1, 2], [3])
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let n_span = u40_find_binding_span(&program, "n").expect("n binding span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "array length over callsite-proven params should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.binding_type(n_span).is_some_and(u40_is_int),
+        "n should resolve to int, got {:?}",
+        facts.binding_type(n_span)
+    );
+}
+
+#[test]
+fn w27_rewalk_resolves_length_empty_grow_return() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn lengths(a, b) {
+    let mut out = []
+    out = out.push(a.length)
+    out = out.push(b.length)
+    out
+}
+let xs = lengths([1], [2, 3])
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let xs_span = u40_find_binding_span(&program, "xs").expect("xs binding span");
+
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(
+        errors.is_empty(),
+        "length empty-grow return should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        facts.binding_type(xs_span).is_some_and(u40_is_array_of_int),
+        "xs should resolve to Array<int>, got {:?}",
+        facts.binding_type(xs_span)
+    );
+}
+
+#[test]
 fn u42_typed_array_sum_resolves_to_element_type() {
     use shape_ast::ast::Expr;
     use shape_ast::parser::parse_program;
