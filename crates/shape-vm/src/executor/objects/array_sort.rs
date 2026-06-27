@@ -1,6 +1,6 @@
 //! Array sort operations
 //!
-//! Handles: order_by, then_by, join_str
+//! Handles: order_by, then_by
 //!
 //! ## R8 W4 J.5f sort + orderBy + thenBy (2026-05-24)
 //!
@@ -69,15 +69,6 @@
 //! - ADR-006 §2.7.10 / Q11 MethodFnV2 ABI unchanged.
 //! - ADR-006 §2.7.11 / Q12 value-call ABI unchanged.
 //!
-//! ### joinStr
-//!
-//! `joinStr` remains SURFACE — element stringification per V2ElemType is
-//! covered by the pre-deletion path that dispatched on `TypedArrayData::X`
-//! arms (now deleted). The replacement requires a per-kind
-//! `element_to_string` primitive in `v2_array_detect.rs`, which is its own
-//! ckpt-3 sub-cluster (not J.5f scope per supervisor D4). The SURFACE body
-//! is retained but with an updated docstring naming the territory.
-
 use crate::executor::VirtualMachine;
 use crate::executor::v2_handlers::v2_array_detect::{
     V2TypedArrayView, as_v2_typed_array, cmp_element_natural, permute_array, read_element,
@@ -788,76 +779,4 @@ pub(crate) fn handle_then_by_v2(
     let indices = sort_by_key_fn(vm, &view, closure, direction, ctx, "thenBy")?;
     let out_ptr = permute_array(&view, &indices);
     Ok(new_array_slot(out_ptr))
-}
-
-/// v2 `joinStr` — join array elements into a single string with a
-/// separator. SURFACE: per-V2ElemType element stringification is a
-/// separate ckpt-3 sub-cluster (not J.5f scope per supervisor D4). The
-/// J.5f sort body uses `read_element` for raw `(bits, kind)` access, but
-/// stringification per kind needs its own per-kind `element_to_string`
-/// primitive in `v2_array_detect.rs`.
-pub(crate) fn handle_join_str_v2(
-    _vm: &mut VirtualMachine,
-    args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
-) -> Result<KindedSlot, VMError> {
-    if args.len() != 2 {
-        return Err(VMError::RuntimeError(
-            "joinStr() requires 2 arguments (array, separator)".to_string(),
-        ));
-    }
-    if !matches!(args[1].kind, NativeKind::String | NativeKind::StringV2) {
-        return Err(VMError::RuntimeError(format!(
-            "joinStr(): separator must be a string, got {:?}",
-            args[1].kind
-        )));
-    }
-
-    // V3-S5 ckpt-6 STRICT close (2026-06-16): `Array<string>.join` — the String
-    // elem_type carrier (the result of `split`, string-array literals) walks via
-    // `read_element` + concatenates with the separator. This is the SplitJoin
-    // round-trip path. Other V2ElemType arms (numeric stringification) remain the
-    // separate ckpt-3 sub-cluster SURFACE below — out of SplitJoin scope.
-    use crate::executor::v2_handlers::v2_array_detect::V2ElemType;
-    let view = extract_view("join", &args[0])?;
-    if view.elem_type == V2ElemType::String {
-        let sep = args[1].as_str().ok_or(VMError::TypeError {
-            expected: "string separator",
-            got: "non-string kind",
-        })?;
-        let mut out = String::new();
-        for i in 0..view.len {
-            if i > 0 {
-                out.push_str(sep);
-            }
-            let (bits, kind) = read_element(&view, i).ok_or_else(|| {
-                VMError::RuntimeError(format!(
-                    "Array.join: read_element({i}) returned None for Array<string>"
-                ))
-            })?;
-            // `read_element` bumped the StringV2 refcount (fresh share). Wrap so
-            // the share is released on Drop; read the &str by borrow (no consume,
-            // the receiver array is left untouched — refcount-balanced).
-            let elem = KindedSlot::new(ValueSlot::from_raw(bits), kind);
-            match elem.as_str() {
-                Some(piece) => out.push_str(piece),
-                None => {
-                    return Err(VMError::RuntimeError(format!(
-                        "Array.join: element {i} was not a string (kind {kind:?})"
-                    )));
-                }
-            }
-            // `elem` drops here → releases the fresh share read_element handed us.
-        }
-        return Ok(KindedSlot::from_string_arc(Arc::new(out)));
-    }
-
-    Err(VMError::NotImplemented(
-        "joinStr: SURFACE — per-V2ElemType element stringification primitive \
-         not yet landed (separate ckpt-3 sub-cluster, not J.5f scope per \
-         supervisor D4 2026-05-24). Use `.map(|x| x.toString()).reduce(\"\", \
-         |acc, s| acc + sep + s)` as a pure-Shape workaround until the \
-         `v2_array_detect::element_to_string` primitive lands."
-            .to_string(),
-    ))
 }
