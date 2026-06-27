@@ -1,8 +1,11 @@
-// W14.2-F1: MirToIR top-level preflight-rejection class
+// W23 F3: bytecode preflight-rejection class at HEAD
 // Trigger shape: a closure captures `n` (promoting it to shared), then
-// a plain function reads it. The MirToIR top-level preflight rejects
-// with "ClosureCapture missing function_id" so the W12 fall-through
-// emits the [jit-fallback] diagnostic + routes execution through the VM.
+// a plain function reads it. At HEAD this reaches the bytecode preflight
+// first and rejects `AllocSharedModuleBinding` in main code, so the W12
+// fall-through emits the [jit-fallback] diagnostic + routes execution
+// through the VM. The older "ClosureCapture missing function_id" class
+// is stale for valid CLI fixtures because closure-capture MIR is patched
+// with a function_id before JIT MIR preflight sees it.
 var n = 100
 let _ = || { n }
 fn read() -> int { n }
