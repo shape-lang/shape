@@ -350,6 +350,11 @@ pub struct TypeInferenceEngine {
     /// expression whose type is the unified type of all break values
     /// (control-flow.mdx "Break with Value"). A value-less `loop` stays Void.
     pub(crate) break_scopes: Vec<Vec<Type>>,
+    /// Stack of function-local empty-array accumulator names that are returned
+    /// by the current callable body. Only these carriers may bind their
+    /// element variable to an unresolved pushed argument; other accumulators
+    /// must wait for concrete producer proof.
+    pub(crate) empty_grow_return_carrier_scopes: Vec<std::collections::HashSet<String>>,
     /// Numeric-conversion §4 literal adoption (return context). Stack of the
     /// currently-enclosing callables' DECLARED return types (one entry pushed
     /// per callable body with an explicit numeric `-> T` annotation; `None`
@@ -470,6 +475,7 @@ impl TypeInferenceEngine {
             return_scopes: Vec::new(),
             implicit_return_scopes: Vec::new(),
             break_scopes: Vec::new(),
+            empty_grow_return_carrier_scopes: Vec::new(),
             expected_return_types: Vec::new(),
             struct_type_defs: HashMap::new(),
             callsite_type_args: HashMap::new(),

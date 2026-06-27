@@ -2353,6 +2353,24 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
             }
         }
 
+        Expr::QualifiedFunctionCall {
+            namespace,
+            function,
+            args,
+            ..
+        } => {
+            if let Some(schema) = compiler.type_tracker.schema_registry().get(namespace)
+                && let Some(enum_info) = schema.get_enum_info()
+                && let Some(variant) = enum_info.variant_by_name(function)
+                && variant.payload_fields as usize == args.len()
+            {
+                struct_or_enum_concrete_type(compiler, namespace)
+            } else {
+                let qualified = format!("{}::{}", namespace, function);
+                function_call_return_concrete_type(compiler, &qualified, args)
+            }
+        }
+
         // v0.3 WS-6 generic-arg-fix: a struct literal `P { a: 7 }` is a
         // fully type-known argument expression. Resolve it to the named
         // struct ConcreteType so a generic free-function call like
@@ -2411,15 +2429,24 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
         // yields `None` (clean fall-through, no fabrication).
         Expr::PropertyAccess {
             object, property, ..
-        } => match concrete_type_for_expr(compiler, object)? {
-            ConcreteType::Struct(layout) => {
-                let struct_name = layout.name.as_ref()?;
-                let schema = compiler.type_tracker.schema_registry().get(struct_name)?;
-                let field = schema.get_field(property)?;
-                field_type_to_concrete(&field.field_type)
+        } => {
+            if let Expr::Identifier(enum_name, _) = object.as_ref()
+                && let Some(schema) = compiler.type_tracker.schema_registry().get(enum_name)
+                && let Some(enum_info) = schema.get_enum_info()
+                && enum_info.variant_by_name(property).is_some()
+            {
+                return struct_or_enum_concrete_type(compiler, enum_name);
             }
-            _ => None,
-        },
+            match concrete_type_for_expr(compiler, object)? {
+                ConcreteType::Struct(layout) => {
+                    let struct_name = layout.name.as_ref()?;
+                    let schema = compiler.type_tracker.schema_registry().get(struct_name)?;
+                    let field = schema.get_field(property)?;
+                    field_type_to_concrete(&field.field_type)
+                }
+                _ => None,
+            }
+        }
 
         // Anything else (member accesses, closures, …) is opaque until we
         // have richer side-tables. Returning None lets the resolver fall back
@@ -4808,6 +4835,28 @@ mod tests {
                  p.a + q.b"
             ),
             16
+        );
+    }
+
+    #[test]
+    fn w26_enum_array_with_unit_variant_has_static_typed_object_kind() {
+        // The unit variant (`Token::End`) must contribute the same statically
+        // known enum ConcreteType as the payload variants, so the unannotated
+        // literal lowers to `TypedArray<TypedObject>` without runtime probing.
+        assert_eq!(
+            eval_typed_i64(
+                "enum Token { Num(int), End }\n\
+                 let tokens = [Token::Num(3), Token::End, Token::Num(4)]\n\
+                 let mut total = 0\n\
+                 for t in tokens {\n\
+                     total = total + match t {\n\
+                         Token::Num(n) => n,\n\
+                         Token::End => 10\n\
+                     }\n\
+                 }\n\
+                 total"
+            ),
+            17
         );
     }
 

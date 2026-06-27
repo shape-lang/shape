@@ -671,6 +671,27 @@ impl TypeInferenceEngine {
                 span,
                 ..
             } => {
+                // Unit enum variants (`Enum::Variant` with no payload) parse as
+                // a property access over the enum namespace. Stamp the declared
+                // enum type here only when the left side is a registered enum
+                // and the property is one of its declared members. Tuple/struct
+                // payload variants are handled by the QualifiedFunctionCall /
+                // EnumConstructor arms above. This is a pure declaration-table
+                // proof, not runtime variant inference.
+                if let Expr::Identifier(enum_name, _) = object.as_ref()
+                    && let Some(enum_def) = self.env.get_enum(enum_name.as_str())
+                {
+                    if enum_def.members.iter().any(|m| m.name == *property) {
+                        return Ok(Type::Concrete(TypeAnnotation::Reference(
+                            enum_name.as_str().into(),
+                        )));
+                    }
+                    return Err(TypeError::UnknownProperty(
+                        enum_name.clone(),
+                        property.clone(),
+                    ));
+                }
+
                 // SC1 (R8 — supervisor): style-spec namespace member access.
                 // `Color.red` / `Border.rounded` / `ChartType.line` are NOT
                 // variables — `Color` etc. are compile-time-constant
@@ -1477,9 +1498,18 @@ impl TypeInferenceEngine {
                         let resolved_element =
                             self.solver.unifier().apply_substitutions(&element_type);
                         let resolved_arg = self.solver.unifier().apply_substitutions(&arg_types[0]);
+                        let receiver_is_empty_grow_return_carrier = match receiver.as_ref() {
+                            Expr::Identifier(name, _) => self
+                                .empty_grow_return_carrier_scopes
+                                .last()
+                                .is_some_and(|carriers| carriers.contains(name)),
+                            _ => false,
+                        };
                         match &resolved_element {
                             Type::Variable(var) | Type::Constrained { var, .. }
-                                if !self.type_contains_unresolved_vars(&resolved_arg) =>
+                                if !self.type_contains_unresolved_vars(&resolved_arg)
+                                    || (receiver_is_empty_grow_return_carrier
+                                        && !Self::is_unknown_marker_type(&resolved_arg)) =>
                             {
                                 if self.solver.unifier().lookup(var).is_none() {
                                     self.solver

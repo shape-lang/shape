@@ -4437,6 +4437,90 @@ for r in rs { r.n + 1 }
 }
 
 #[test]
+fn w26_unit_enum_variant_property_access_contributes_enum_array_type() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+enum Action { Add(int), Reset }
+let actions = [Action::Add(1), Action::Reset]
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let types = engine
+        .infer_program(&program)
+        .expect("unit enum variant should infer as the enum type");
+
+    let actions = types
+        .get("actions")
+        .expect("actions binding should be inferred")
+        .canonicalize();
+    match actions {
+        Type::Generic { base, args } => {
+            assert!(
+                matches!(
+                    base.as_ref(),
+                    Type::Concrete(TypeAnnotation::Reference(name)) if name.as_str() == "Array"
+                ),
+                "actions should be an Array, got {:?}",
+                base
+            );
+            assert_eq!(args.len(), 1);
+            assert!(
+                matches!(&args[0], Type::Concrete(TypeAnnotation::Reference(name)) if name.as_str() == "Action"),
+                "actions element should be Action, got {:?}",
+                args[0]
+            );
+        }
+        other => panic!("actions should infer as Array<Action>, got {:?}", other),
+    }
+}
+
+#[test]
+fn w26_empty_array_push_return_resolves_from_callsite_argument_type() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn singleton(x) {
+    let mut result = []
+    result = result.push(x)
+    result
+}
+let ints = singleton(1)
+"#;
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let types = engine
+        .infer_program(&program)
+        .expect("empty-grow return should be resolved by the call site");
+
+    let ints = types
+        .get("ints")
+        .expect("ints binding should be inferred")
+        .canonicalize();
+    match ints {
+        Type::Generic { base, args } => {
+            assert!(
+                matches!(
+                    base.as_ref(),
+                    Type::Concrete(TypeAnnotation::Reference(name)) if name.as_str() == "Array"
+                ),
+                "ints should be an Array, got {:?}",
+                base
+            );
+            assert_eq!(args.len(), 1);
+            assert!(
+                matches!(&args[0], Type::Concrete(TypeAnnotation::Basic(name)) if name == "int"),
+                "ints element should be int, got {:?}",
+                args[0]
+            );
+        }
+        other => panic!("ints should infer as Array<int>, got {:?}", other),
+    }
+}
+
+#[test]
 fn u42_typed_array_sum_resolves_to_element_type() {
     use shape_ast::ast::Expr;
     use shape_ast::parser::parse_program;

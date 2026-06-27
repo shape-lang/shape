@@ -812,8 +812,13 @@ impl TypeInferenceEngine {
         // unsoundness). The flag is gated on cond-4 at THIS single call site
         // only; it is NOT unconditionally `true` for every unannotated fn (spec
         // §2.1 "Critical").
+        let empty_grow_return = Self::fn_body_returns_empty_grow_carrier(func);
+        let mut empty_grow_return_carriers = std::collections::HashSet::new();
+        if empty_grow_return {
+            Self::collect_empty_array_carriers(&func.body, &mut empty_grow_return_carriers);
+        }
         let allow_unresolved_return =
-            func.return_type.is_some() || Self::fn_body_is_non_expansive(func);
+            func.return_type.is_some() || Self::fn_body_is_non_expansive(func) || empty_grow_return;
 
         // Numeric-conversion §4 literal adoption (return context): make the
         // declared return type visible to `return <lit>` / tail-expr adoption
@@ -842,7 +847,10 @@ impl TypeInferenceEngine {
 
         // Infer callable return type from all explicit returns (or final expression)
         let local_constraint_start = self.constraints.len();
+        self.empty_grow_return_carrier_scopes
+            .push(empty_grow_return_carriers);
         let inferred_result = self.infer_callable_return_type(&func.body, allow_unresolved_return);
+        self.empty_grow_return_carrier_scopes.pop();
 
         self.expected_return_types.pop();
         // `include_numeric_refinement: false` — defer the `number` default for
@@ -892,7 +900,7 @@ impl TypeInferenceEngine {
                 // `let mut` / module-scope binding or a reference into one), this
                 // is the §3.2 value-restriction refusal: a shared mutable cell's
                 // element type is not fixed and must not be generalized.
-                if !Self::fn_body_is_non_expansive(func) {
+                if !allow_unresolved_return {
                     return Err(TypeError::GenericTypeError {
                         message: format!(
                             "Cannot infer a polymorphic return type for '{}': its result is read \
@@ -958,6 +966,13 @@ impl TypeInferenceEngine {
         }
 
         let actual_return_type = self.apply_fallibility_to_return_type(return_base, is_fallible);
+        let actual_return_type = if empty_grow_return {
+            self.solver
+                .unifier()
+                .apply_substitutions(&actual_return_type)
+        } else {
+            actual_return_type
+        };
         let function_type = BuiltinTypes::function(param_types, actual_return_type);
         if let Some(origin) = local_origin {
             self.register_callable_origin_for_name(&func.name, origin);
@@ -2344,6 +2359,283 @@ impl TypeInferenceEngine {
         returned
             .iter()
             .all(|expr| Self::expr_is_nonexpansive(expr, &immutable_lets, 0))
+    }
+
+    /// Empty-grow return proof: an unannotated function may return a freshly
+    /// allocated local array whose element type is established only by later
+    /// `.push` operations. The local's element variable is still static; the
+    /// function-boundary gate just needs to let call-site propagation solve it.
+    ///
+    /// This deliberately recognizes only a small AST class:
+    /// - a fn-local mutable/var binding initialized exactly to `[]`;
+    /// - assignments to that binding are only `name = name.push(..)` or
+    ///   `name = name.slice(..)` (both preserve a single element type);
+    /// - every returned value is that binding or an array literal containing
+    ///   only such bindings.
+    ///
+    /// Anything else stays expansive and keeps the existing unresolved-generic
+    /// rejection. No element type is defaulted here.
+    fn fn_body_returns_empty_grow_carrier(func: &FunctionDef) -> bool {
+        let mut carriers = std::collections::HashSet::new();
+        Self::collect_empty_array_carriers(&func.body, &mut carriers);
+        if carriers.is_empty() {
+            return false;
+        }
+        if !Self::empty_array_carrier_assignments_are_preserving(&func.body, &carriers) {
+            return false;
+        }
+
+        let mut returned: Vec<&Expr> = Vec::new();
+        Self::collect_explicit_returns(&func.body, &mut returned);
+        Self::collect_tail_values(&func.body, &mut returned);
+        !returned.is_empty()
+            && returned
+                .iter()
+                .all(|expr| Self::expr_returns_empty_array_carrier(expr, &carriers))
+    }
+
+    fn collect_empty_array_carriers(
+        stmts: &[Statement],
+        carriers: &mut std::collections::HashSet<String>,
+    ) {
+        for stmt in stmts {
+            match stmt {
+                Statement::VariableDecl(decl, _) => {
+                    let is_mutable = decl.is_mut || matches!(decl.kind, VarKind::Var);
+                    if is_mutable
+                        && matches!(decl.value.as_ref(), Some(Expr::Array(elements, _)) if elements.is_empty())
+                    {
+                        for name in decl.pattern.get_identifiers() {
+                            carriers.insert(name);
+                        }
+                    }
+                }
+                Statement::If(if_stmt, _) => {
+                    Self::collect_empty_array_carriers(&if_stmt.then_body, carriers);
+                    if let Some(else_body) = &if_stmt.else_body {
+                        Self::collect_empty_array_carriers(else_body, carriers);
+                    }
+                }
+                Statement::For(for_loop, _) => {
+                    Self::collect_empty_array_carriers(&for_loop.body, carriers);
+                }
+                Statement::While(while_loop, _) => {
+                    Self::collect_empty_array_carriers(&while_loop.body, carriers);
+                }
+                Statement::Expression(expr, _) => {
+                    Self::collect_empty_array_carriers_in_expr(expr, carriers);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn collect_empty_array_carriers_in_expr(
+        expr: &Expr,
+        carriers: &mut std::collections::HashSet<String>,
+    ) {
+        match expr {
+            Expr::Block(block, _) => {
+                for item in &block.items {
+                    match item {
+                        shape_ast::ast::BlockItem::VariableDecl(decl) => {
+                            let is_mutable = decl.is_mut || matches!(decl.kind, VarKind::Var);
+                            if is_mutable
+                                && matches!(decl.value.as_ref(), Some(Expr::Array(elements, _)) if elements.is_empty())
+                            {
+                                for name in decl.pattern.get_identifiers() {
+                                    carriers.insert(name);
+                                }
+                            }
+                        }
+                        shape_ast::ast::BlockItem::Statement(stmt) => {
+                            Self::collect_empty_array_carriers(
+                                std::slice::from_ref(stmt),
+                                carriers,
+                            );
+                        }
+                        shape_ast::ast::BlockItem::Expression(expr) => {
+                            Self::collect_empty_array_carriers_in_expr(expr, carriers);
+                        }
+                        shape_ast::ast::BlockItem::Assignment(_) => {}
+                    }
+                }
+            }
+            Expr::If(if_expr, _) => {
+                Self::collect_empty_array_carriers_in_expr(&if_expr.then_branch, carriers);
+                if let Some(else_branch) = &if_expr.else_branch {
+                    Self::collect_empty_array_carriers_in_expr(else_branch, carriers);
+                }
+            }
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                Self::collect_empty_array_carriers_in_expr(then_expr, carriers);
+                if let Some(else_expr) = else_expr {
+                    Self::collect_empty_array_carriers_in_expr(else_expr, carriers);
+                }
+            }
+            Expr::Match(match_expr, _) => {
+                for arm in &match_expr.arms {
+                    Self::collect_empty_array_carriers_in_expr(&arm.body, carriers);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn empty_array_carrier_assignments_are_preserving(
+        stmts: &[Statement],
+        carriers: &std::collections::HashSet<String>,
+    ) -> bool {
+        for stmt in stmts {
+            match stmt {
+                Statement::Assignment(assign, _) => {
+                    if !Self::empty_array_carrier_assignment_is_preserving(assign, carriers) {
+                        return false;
+                    }
+                }
+                Statement::If(if_stmt, _) => {
+                    if !Self::empty_array_carrier_assignments_are_preserving(
+                        &if_stmt.then_body,
+                        carriers,
+                    ) {
+                        return false;
+                    }
+                    if let Some(else_body) = &if_stmt.else_body
+                        && !Self::empty_array_carrier_assignments_are_preserving(
+                            else_body, carriers,
+                        )
+                    {
+                        return false;
+                    }
+                }
+                Statement::For(for_loop, _) => {
+                    if !Self::empty_array_carrier_assignments_are_preserving(
+                        &for_loop.body,
+                        carriers,
+                    ) {
+                        return false;
+                    }
+                }
+                Statement::While(while_loop, _) => {
+                    if !Self::empty_array_carrier_assignments_are_preserving(
+                        &while_loop.body,
+                        carriers,
+                    ) {
+                        return false;
+                    }
+                }
+                Statement::Expression(expr, _) => {
+                    if !Self::empty_array_carrier_assignments_in_expr_are_preserving(expr, carriers)
+                    {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
+    fn empty_array_carrier_assignments_in_expr_are_preserving(
+        expr: &Expr,
+        carriers: &std::collections::HashSet<String>,
+    ) -> bool {
+        match expr {
+            Expr::Block(block, _) => {
+                for item in &block.items {
+                    let ok = match item {
+                        shape_ast::ast::BlockItem::Assignment(assign) => {
+                            Self::empty_array_carrier_assignment_is_preserving(assign, carriers)
+                        }
+                        shape_ast::ast::BlockItem::Statement(stmt) => {
+                            Self::empty_array_carrier_assignments_are_preserving(
+                                std::slice::from_ref(stmt),
+                                carriers,
+                            )
+                        }
+                        shape_ast::ast::BlockItem::Expression(expr) => {
+                            Self::empty_array_carrier_assignments_in_expr_are_preserving(
+                                expr, carriers,
+                            )
+                        }
+                        shape_ast::ast::BlockItem::VariableDecl(_) => true,
+                    };
+                    if !ok {
+                        return false;
+                    }
+                }
+                true
+            }
+            Expr::If(if_expr, _) => {
+                Self::empty_array_carrier_assignments_in_expr_are_preserving(
+                    &if_expr.then_branch,
+                    carriers,
+                ) && if let Some(else_branch) = &if_expr.else_branch {
+                    Self::empty_array_carrier_assignments_in_expr_are_preserving(
+                        else_branch,
+                        carriers,
+                    )
+                } else {
+                    true
+                }
+            }
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                Self::empty_array_carrier_assignments_in_expr_are_preserving(then_expr, carriers)
+                    && if let Some(else_expr) = else_expr {
+                        Self::empty_array_carrier_assignments_in_expr_are_preserving(
+                            else_expr, carriers,
+                        )
+                    } else {
+                        true
+                    }
+            }
+            Expr::Match(match_expr, _) => match_expr.arms.iter().all(|arm| {
+                Self::empty_array_carrier_assignments_in_expr_are_preserving(&arm.body, carriers)
+            }),
+            _ => true,
+        }
+    }
+
+    fn empty_array_carrier_assignment_is_preserving(
+        assign: &shape_ast::ast::Assignment,
+        carriers: &std::collections::HashSet<String>,
+    ) -> bool {
+        let Some(target_name) = assign.pattern.as_identifier() else {
+            return true;
+        };
+        if !carriers.contains(target_name) {
+            return true;
+        }
+        matches!(
+            &assign.value,
+            Expr::MethodCall {
+                receiver,
+                method,
+                ..
+            } if matches!(receiver.as_ref(), Expr::Identifier(name, _) if name == target_name)
+                && matches!(method.as_str(), "push" | "slice")
+        )
+    }
+
+    fn expr_returns_empty_array_carrier(
+        expr: &Expr,
+        carriers: &std::collections::HashSet<String>,
+    ) -> bool {
+        match expr {
+            Expr::Identifier(name, _) => carriers.contains(name),
+            Expr::Array(elements, _) => elements
+                .iter()
+                .all(|elem| Self::expr_returns_empty_array_carrier(elem, carriers)),
+            _ => false,
+        }
     }
 
     /// Collect fn-local binding names. Immutable `let`/`const` bindings are
