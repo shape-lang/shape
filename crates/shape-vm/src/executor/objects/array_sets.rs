@@ -523,6 +523,201 @@ fn run_v2_set_op(
     ))
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum DistinctKeyClass {
+    Exact(NativeKind),
+    String,
+    Decimal,
+    Char,
+}
+
+fn distinct_key_class(kind: NativeKind) -> Option<DistinctKeyClass> {
+    match kind {
+        NativeKind::String | NativeKind::StringV2 => Some(DistinctKeyClass::String),
+        NativeKind::DecimalV2 | NativeKind::Ptr(HeapKind::Decimal) => {
+            Some(DistinctKeyClass::Decimal)
+        }
+        NativeKind::Char | NativeKind::Ptr(HeapKind::Char) => Some(DistinctKeyClass::Char),
+        NativeKind::Bool | NativeKind::Null => Some(DistinctKeyClass::Exact(kind)),
+        k if k.is_numeric_family() => Some(DistinctKeyClass::Exact(k)),
+        _ => None,
+    }
+}
+
+fn distinct_key_decimal(slot: &KindedSlot) -> Option<rust_decimal::Decimal> {
+    match slot.kind {
+        NativeKind::DecimalV2 => {
+            use shape_value::v2::decimal_obj::DecimalObj;
+            let ptr = slot.slot.raw() as usize as *const DecimalObj;
+            if ptr.is_null() {
+                None
+            } else {
+                Some(unsafe { DecimalObj::value(ptr) })
+            }
+        }
+        NativeKind::Ptr(HeapKind::Decimal) => {
+            let ptr = slot.slot.raw() as usize as *const rust_decimal::Decimal;
+            if ptr.is_null() {
+                None
+            } else {
+                Some(unsafe { *ptr })
+            }
+        }
+        _ => None,
+    }
+}
+
+fn distinct_key_eq(
+    lhs: &KindedSlot,
+    rhs: &KindedSlot,
+    class: DistinctKeyClass,
+) -> Result<bool, VMError> {
+    match class {
+        DistinctKeyClass::Exact(_) | DistinctKeyClass::Char => Ok(lhs.slot.raw() == rhs.slot.raw()),
+        DistinctKeyClass::String => {
+            let lhs = lhs
+                .as_str()
+                .ok_or_else(|| type_error("distinctBy: string key has invalid carrier bits"))?;
+            let rhs = rhs
+                .as_str()
+                .ok_or_else(|| type_error("distinctBy: string key has invalid carrier bits"))?;
+            Ok(lhs == rhs)
+        }
+        DistinctKeyClass::Decimal => {
+            let lhs = distinct_key_decimal(lhs)
+                .ok_or_else(|| type_error("distinctBy: decimal key has invalid carrier bits"))?;
+            let rhs = distinct_key_decimal(rhs)
+                .ok_or_else(|| type_error("distinctBy: decimal key has invalid carrier bits"))?;
+            Ok(lhs == rhs)
+        }
+    }
+}
+
+/// `distinctBy` over v2-raw typed arrays.
+///
+/// The receiver element carrier is preserved: accepted elements are pushed
+/// into a freshly allocated `TypedArray<T>` with the same stamped element
+/// type as the receiver. Key equality is intentionally narrower than general
+/// Shape `==`: the first key establishes an explicit key class, and every
+/// later key must produce the same class. Supported key classes are inline
+/// scalar bits, string content (`String` / `StringV2`), decimal value
+/// (`Ptr(Decimal)` / `DecimalV2`), and char codepoint.
+fn run_distinct_by_v2(
+    vm: &mut VirtualMachine,
+    receiver: &KindedSlot,
+    key_fn: &KindedSlot,
+    mut ctx: Option<&mut ExecutionContext>,
+) -> Result<KindedSlot, VMError> {
+    use crate::executor::v2_handlers::v2_array_detect::{
+        allocate_empty_typed_array, as_v2_typed_array, push_element, read_element,
+    };
+    use shape_value::ValueSlot;
+    use shape_value::v2::typed_array::release_v2_typed_array;
+
+    if receiver.kind != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err(type_error(format!(
+            "distinctBy: expected v2 TypedArray receiver, got kind {:?}",
+            receiver.kind
+        )));
+    }
+    let view = as_v2_typed_array(receiver.slot.raw(), receiver.kind)
+        .ok_or_else(|| type_error("distinctBy: receiver failed v2 TypedArray detection"))?;
+
+    let out_ptr = allocate_empty_typed_array(view.elem_type, view.len);
+    let out_view = as_v2_typed_array(
+        out_ptr as usize as u64,
+        NativeKind::Ptr(HeapKind::TypedArray),
+    )
+    .ok_or_else(|| {
+        unsafe { release_v2_typed_array(out_ptr) };
+        type_error("distinctBy: freshly-allocated array failed re-detection")
+    })?;
+
+    let mut key_class: Option<DistinctKeyClass> = None;
+    let mut seen_keys: Vec<KindedSlot> = Vec::new();
+
+    for i in 0..view.len {
+        let (bits, kind) = match read_element(&view, i) {
+            Some(pair) => pair,
+            None => {
+                unsafe { release_v2_typed_array(out_ptr) };
+                return Err(type_error(format!(
+                    "distinctBy: read_element({i}) returned None for element kind {:?}",
+                    view.elem_type
+                )));
+            }
+        };
+        let elem_slot = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        let key_arg = elem_slot.clone();
+        let key = match vm.call_value_immediate_nb(key_fn, &[key_arg], ctx.as_deref_mut()) {
+            Ok(slot) => slot,
+            Err(e) => {
+                unsafe { release_v2_typed_array(out_ptr) };
+                return Err(e);
+            }
+        };
+
+        let current_class = match distinct_key_class(key.kind) {
+            Some(class) => class,
+            None => {
+                unsafe { release_v2_typed_array(out_ptr) };
+                return Err(type_error(format!(
+                    "distinctBy: key function returned unsupported key kind {:?}; \
+                     supported key kinds are numeric/bool/null scalars, string, decimal, and char",
+                    key.kind
+                )));
+            }
+        };
+        match key_class {
+            Some(expected) if expected != current_class => {
+                unsafe { release_v2_typed_array(out_ptr) };
+                return Err(type_error(format!(
+                    "distinctBy: key kind mismatch at index {i}: expected {expected:?}, got {got:?}. \
+                     distinctBy requires one static key kind; no runtime coercion is applied.",
+                    got = current_class
+                )));
+            }
+            None => key_class = Some(current_class),
+            _ => {}
+        }
+
+        let class = key_class.expect("key_class established above");
+        let mut duplicate = false;
+        for seen in &seen_keys {
+            match distinct_key_eq(&key, seen, class) {
+                Ok(true) => {
+                    duplicate = true;
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    unsafe { release_v2_typed_array(out_ptr) };
+                    return Err(e);
+                }
+            }
+        }
+
+        if duplicate {
+            drop(elem_slot);
+        } else {
+            if let Err(msg) = push_element(&out_view, elem_slot.slot.raw(), elem_slot.kind) {
+                unsafe { release_v2_typed_array(out_ptr) };
+                return Err(type_error(format!(
+                    "distinctBy: push_element failed at index {i}: {msg}"
+                )));
+            }
+            std::mem::forget(elem_slot);
+            seen_keys.push(key);
+            continue;
+        }
+    }
+
+    Ok(KindedSlot::new(
+        ValueSlot::from_raw(out_ptr as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    ))
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // MethodFnV2 (native ABI) public handlers
 // Signatures preserved for `method_registry.rs` PHF integrity. v2-raw
@@ -603,17 +798,16 @@ pub(crate) fn handle_distinct_v2(
 
 /// v2 `distinctBy` — deduplicate by a key function.
 ///
-/// The closure-callback dispatch shape (ADR-006 §2.7.11 / Q12) re-instates
-/// once the receiver-shape migration lands at ckpt-6 STRICT close —
-/// `vm.call_value_immediate_nb(key_fn, [elem], ctx)` itself is unaffected
-/// by `TypedArrayData` deletion. Closure-arg shape validation preserved at
-/// the entry-point.
+/// Closure-callback dispatch uses the same ADR-006 §2.7.11 / Q12
+/// `vm.call_value_immediate_nb(key_fn, [elem], ctx)` shape as `where` /
+/// `select`, while the result builder preserves the receiver's v2-raw
+/// typed-array carrier.
 pub(crate) fn handle_distinct_by_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    _ctx: Option<&mut ExecutionContext>,
+    ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return Err(type_error(
             "distinctBy() requires 2 arguments (array, key_fn)",
         ));
@@ -627,5 +821,5 @@ pub(crate) fn handle_distinct_by_v2(
             )));
         }
     }
-    Err(ckpt2_surface("distinctBy", args))
+    run_distinct_by_v2(vm, &args[0], &args[1], ctx)
 }
