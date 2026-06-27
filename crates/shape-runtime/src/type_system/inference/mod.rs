@@ -971,6 +971,13 @@ impl TypeInferenceEngine {
     /// direct `inferred ~ declared` constraint is kept. A value whose inner
     /// type genuinely mismatches `T` still rejects via `inferred ~ T`.
     pub(crate) fn push_return_constraint(&mut self, inferred: Type, declared: Type) {
+        // `-> any` is an explicit static top-type return contract. Accept the
+        // body type proven by inference without turning `any` into a general
+        // equality sink for assignments, fields, or unrelated constraints.
+        if self.is_any_type(&declared) {
+            return;
+        }
+
         let declared_is_result_or_option =
             self.is_result_type(&declared) || self.is_option_type(&declared);
         let inferred_is_result_or_option =
@@ -1504,6 +1511,10 @@ impl TypeInferenceEngine {
 
     pub(crate) fn is_void_type(&self, ty: &Type) -> bool {
         matches!(ty, Type::Concrete(TypeAnnotation::Void))
+    }
+
+    pub(crate) fn is_any_type(&self, ty: &Type) -> bool {
+        matches!(ty, Type::Concrete(ann) if ann.as_type_name_str() == Some("any"))
     }
 
     pub(crate) fn type_contains_unresolved_vars(&self, ty: &Type) -> bool {
