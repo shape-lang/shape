@@ -713,7 +713,6 @@ fn hof_return_function_from_if_else_branch() {
     .expect_number(12.0);
 }
 
-// BUG: Chained closure calls `curried_add(1)(2)(3)` fail -- see hof_adder_chained_call
 #[test]
 fn hof_curried_add() {
     ShapeTest::new(
@@ -728,11 +727,7 @@ fn hof_curried_add() {
         f2(3)
     "#,
     )
-    // W20 strict-flip: reject before closure materialization. The innermost
-    // numeric op has no compile-time proof for `c`, so the compiler surfaces a
-    // parameter-annotation diagnostic instead of reaching the old runtime
-    // scalar-into-heap-carrier guard.
-    .expect_run_err_contains("cannot infer the numeric type of closure parameter `c`");
+    .expect_number(6.0);
 }
 
 #[test]

@@ -1870,23 +1870,11 @@ impl BytecodeCompiler {
                         return Ok(());
                     }
 
-                    // Strict no-coercion ruling (user 2026-06-14): `string +
-                    // non-string` is a COMPILE ERROR. The former R5.5 typed
-                    // string + scalar concat path (which emitted
-                    // `StringConcatInt`/`Number`/`Bool` auto-stringify opcodes)
-                    // is deleted. Under strict typing the non-string operand is
-                    // NOT implicitly stringified; the both-strings case already
-                    // returned above via `StringConcatTyped`. Here we detect the
-                    // mixed case (exactly one operand a string/char, the other a
-                    // known non-string concrete type) and reject with a
-                    // diagnostic that names f-string interpolation as the
-                    // alternative.
-                    //
-                    // Resolve string-ness via the same multi-source order the
-                    // surrounding arithmetic branch uses: `infer_expr_type`
-                    // display name, then the `storage_hint_for_expr`
-                    // `NativeKind::String` hint (set by `let x: string = ...`
-                    // annotations and by literals).
+                    // Strict no-coercion ruling (user 2026-06-14): resolve
+                    // string-ness via the same multi-source order the
+                    // surrounding arithmetic branch uses, but do not lower
+                    // mixed string + scalar `+` to the old auto-stringify
+                    // opcodes. Exactly-one-string rejects below.
                     let lhs_is_string = is_strish(&lhs_name)
                         || matches!(
                             self.storage_hint_for_expr(left),
@@ -4251,6 +4239,31 @@ mod u4_4_numeric_opcode_golden {
             "fn add(a: number, b: number) -> number { a + b }\nadd(2.0, 3.0)\n",
         ),
     ];
+}
+
+#[cfg(test)]
+mod strict_string_concat_tests {
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::parser::parse_program;
+
+    #[test]
+    fn string_plus_scalar_rejects_without_implicit_stringify() {
+        for code in [
+            "let v: int = 1\n\"ok: \" + v\n",
+            "let v: number = 1.5\n\"ok: \" + v\n",
+            "let v: bool = true\n\"ok: \" + v\n",
+        ] {
+            let program = parse_program(code).expect("parse");
+            let err = BytecodeCompiler::new()
+                .compile(&program)
+                .expect_err("string + scalar must remain a compile error");
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains("Strict typing does not implicitly convert"),
+                "unexpected diagnostic for `{code}`: {msg}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
