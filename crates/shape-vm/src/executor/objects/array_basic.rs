@@ -243,7 +243,7 @@ pub(crate) fn handle_push_v2(
 /// if empty. Kind-generic via `v2_array_detect::pop_element`; result kind
 /// is the per-element kind from the view (`Int64`/`Float64`/etc.).
 pub(crate) fn handle_pop_v2(
-    _vm: &mut VirtualMachine,
+    vm: &mut VirtualMachine,
     args: &[KindedSlot],
     _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
@@ -253,10 +253,20 @@ pub(crate) fn handle_pop_v2(
             args[0].kind
         ))
     })?;
-    match pop_element(&view) {
-        Some(pair) => Ok(pair_to_slot(pair)),
-        None => Ok(KindedSlot::none()),
-    }
+    let popped = match pop_element(&view) {
+        Some(pair) => pair_to_slot(pair),
+        None => KindedSlot::none(),
+    };
+
+    // W18 arrays/vectors: `pop` participates in the tuple-return mutator ABI
+    // (`[..., NewSelf, popped]`). The v2 typed-array pop mutates the carrier
+    // in place, so the side-channel NewSelf is the same proven receiver
+    // pointer with an independently retained stack share.
+    let self_bits = args[0].slot.raw();
+    let self_kind = args[0].kind;
+    crate::executor::vm_impl::stack::clone_with_kind(self_bits, self_kind);
+    vm.push_kinded(self_bits, self_kind)?;
+    Ok(popped)
 }
 
 /// `arr.zip(other)` — pairwise element zip into `Array<Pair<A, B>>`.

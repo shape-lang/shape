@@ -93,7 +93,7 @@ extend Vec<T> {
         true
     }
 
-    method join(separator: string) -> string {
+    method join(separator: string = ",") -> string {
         let mut result = ""
         for i in 0..self.len() {
             if i > 0 { result = result + separator }

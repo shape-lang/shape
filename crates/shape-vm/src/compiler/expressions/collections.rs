@@ -265,6 +265,42 @@ fn type_annotation_to_compact_string(annotation: &TypeAnnotation) -> String {
 use super::super::BytecodeCompiler;
 
 impl BytecodeCompiler {
+    fn infer_nested_empty_array_kind_from_siblings(
+        &mut self,
+        elements: &[Expr],
+    ) -> Option<super::super::v2_typed_emission::TypedArrayKind> {
+        use super::super::v2_array_emission::infer_array_element_type;
+        use super::super::v2_typed_emission::{
+            TypedArrayKind, should_use_typed_array_from_slot_kind,
+        };
+
+        let mut proven: Option<TypedArrayKind> = None;
+        for elem in elements {
+            let Expr::Array(inner, _) = elem else {
+                continue;
+            };
+            if inner.is_empty() {
+                continue;
+            }
+            let kind = if inner.iter().all(|e| matches!(e, Expr::Array(..))) {
+                Some(TypedArrayKind::TypedArray)
+            } else if let Some(slot_kind) = infer_array_element_type(inner, &self.type_tracker) {
+                should_use_typed_array_from_slot_kind(slot_kind)
+            } else if self.array_elements_all_typed_object(inner) {
+                Some(TypedArrayKind::TypedObject)
+            } else {
+                self.infer_array_element_kind_from_concrete_types(inner)
+            }?;
+
+            match proven {
+                Some(prev) if prev != kind => return None,
+                Some(_) => {}
+                None => proven = Some(kind),
+            }
+        }
+        proven
+    }
+
     /// Reject reference storage in collections/aggregates for **top-level code only**.
     /// Inside function bodies the MIR solver detects these via `array_store_loans`,
     /// `object_store_loans`, and `enum_store_loans` facts, so we defer to it.
@@ -363,6 +399,9 @@ impl BytecodeCompiler {
         // the producer site without runtime inspection.
         let all_nested_array_elem =
             !elements.is_empty() && elements.iter().all(|e| matches!(e, Expr::Array(..)));
+        let nested_empty_inner_typed_kind = all_nested_array_elem
+            .then(|| self.infer_nested_empty_array_kind_from_siblings(elements))
+            .flatten();
         let has_spread = elements.iter().any(|e| matches!(e, Expr::Spread(..)));
         let typed_kind: Option<TypedArrayKind> = if has_spread {
             None
@@ -482,9 +521,14 @@ impl BytecodeCompiler {
                 // element kind). Clear the outer's pending kind so the inner
                 // `compile_expr_array` resolves independently, then restore it.
                 if kind == TypedArrayKind::TypedArray {
-                    let saved = self.pending_variable_typed_array_kind.take();
-                    self.compile_expr(elem)?;
+                    let saved = self.pending_variable_typed_array_kind;
+                    self.pending_variable_typed_array_kind = match elem {
+                        Expr::Array(inner, _) if inner.is_empty() => nested_empty_inner_typed_kind,
+                        _ => None,
+                    };
+                    let result = self.compile_expr(elem);
                     self.pending_variable_typed_array_kind = saved;
+                    result?;
                 } else {
                     self.compile_typed_array_element_value(kind, elem)?;
                 }
