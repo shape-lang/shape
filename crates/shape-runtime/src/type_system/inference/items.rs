@@ -1084,6 +1084,9 @@ impl TypeInferenceEngine {
             // Check if this is a type parameter reference
             ann @ (TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_)) => {
                 let name = ann.as_type_name_str().unwrap();
+                if name == "void" {
+                    return BuiltinTypes::void();
+                }
                 if let Some(scheme) = self.env.lookup(name) {
                     // If it's a type parameter (a type variable), use it
                     if let Type::Variable(_) = &scheme.ty {
@@ -1405,6 +1408,10 @@ impl TypeInferenceEngine {
         let trait_name = Self::type_name_str(&impl_block.trait_name);
         let self_ann = Self::type_name_to_annotation_for_impl(&impl_block.target_type);
         let trait_def = self.env.lookup_trait(&trait_name).cloned();
+        let trait_type_args = trait_def
+            .as_ref()
+            .map(|def| Self::impl_trait_type_arg_substitutions(def, &impl_block.trait_name))
+            .unwrap_or_default();
 
         for method in &impl_block.methods {
             let func = self.inference_function_for_impl_method(
@@ -1412,6 +1419,7 @@ impl TypeInferenceEngine {
                 &type_name,
                 &self_ann,
                 trait_def.as_ref(),
+                &trait_type_args,
             )?;
             let _ = self.infer_function(&func)?;
         }
@@ -1429,6 +1437,7 @@ impl TypeInferenceEngine {
                         &type_name,
                         &self_ann,
                         Some(&trait_def),
+                        &trait_type_args,
                     )?;
                     let _ = self.infer_function(&func)?;
                 }
@@ -1444,6 +1453,7 @@ impl TypeInferenceEngine {
         type_name: &str,
         self_ann: &TypeAnnotation,
         trait_def: Option<&shape_ast::ast::TraitDef>,
+        trait_type_args: &HashMap<String, TypeAnnotation>,
     ) -> TypeResult<FunctionDef> {
         let mut params = Vec::with_capacity(method.params.len() + 1);
         params.push(shape_ast::ast::FunctionParameter {
@@ -1459,12 +1469,19 @@ impl TypeInferenceEngine {
         for (idx, param) in method.params.iter().enumerate() {
             let mut param = param.clone();
             if let Some(ann) = param.type_annotation.as_ref() {
-                param.type_annotation = Some(Self::substitute_trait_self_annotation(ann, self_ann));
+                param.type_annotation = Some(Self::substitute_trait_impl_annotation(
+                    ann,
+                    self_ann,
+                    trait_type_args,
+                ));
             } else if let Some(sig_param) = trait_def
                 .and_then(|def| Self::trait_method_value_param_annotation(def, &method.name, idx))
             {
-                param.type_annotation =
-                    Some(Self::substitute_trait_self_annotation(sig_param, self_ann));
+                param.type_annotation = Some(Self::substitute_trait_impl_annotation(
+                    sig_param,
+                    self_ann,
+                    trait_type_args,
+                ));
             }
             params.push(param);
         }
@@ -1472,11 +1489,13 @@ impl TypeInferenceEngine {
         let return_type = method
             .return_type
             .as_ref()
-            .map(|ann| Self::substitute_trait_self_annotation(ann, self_ann))
+            .map(|ann| Self::substitute_trait_impl_annotation(ann, self_ann, trait_type_args))
             .or_else(|| {
                 trait_def
                     .and_then(|def| Self::trait_method_return_annotation(def, &method.name))
-                    .map(|ret| Self::substitute_trait_self_annotation(ret, self_ann))
+                    .map(|ret| {
+                        Self::substitute_trait_impl_annotation(ret, self_ann, trait_type_args)
+                    })
             });
 
         Ok(FunctionDef {
@@ -1493,6 +1512,129 @@ impl TypeInferenceEngine {
             is_comptime: false,
             where_clause: None,
         })
+    }
+
+    fn impl_trait_type_arg_substitutions(
+        trait_def: &shape_ast::ast::TraitDef,
+        trait_name: &TypeName,
+    ) -> HashMap<String, TypeAnnotation> {
+        let TypeName::Generic { type_args, .. } = trait_name else {
+            return HashMap::new();
+        };
+
+        let Some(type_params) = trait_def.type_params.as_ref() else {
+            return HashMap::new();
+        };
+
+        type_params
+            .iter()
+            .zip(type_args.iter())
+            .map(|(param, arg)| (param.name().to_string(), arg.clone()))
+            .collect()
+    }
+
+    fn substitute_trait_impl_annotation(
+        ann: &TypeAnnotation,
+        self_ann: &TypeAnnotation,
+        trait_type_args: &HashMap<String, TypeAnnotation>,
+    ) -> TypeAnnotation {
+        fn replacement<'a>(
+            ann: &TypeAnnotation,
+            trait_type_args: &'a HashMap<String, TypeAnnotation>,
+        ) -> Option<&'a TypeAnnotation> {
+            match ann {
+                TypeAnnotation::Basic(name) => trait_type_args.get(name.as_str()),
+                TypeAnnotation::Reference(path) => trait_type_args.get(path.as_str()),
+                TypeAnnotation::Generic { name, args } if args.is_empty() => {
+                    trait_type_args.get(name.as_str())
+                }
+                _ => None,
+            }
+        }
+
+        if let Some(arg) = replacement(ann, trait_type_args) {
+            return Self::substitute_trait_self_annotation(arg, self_ann);
+        }
+
+        let with_self = Self::substitute_trait_self_annotation(ann, self_ann);
+        match with_self {
+            TypeAnnotation::Array(inner) => TypeAnnotation::Array(Box::new(
+                Self::substitute_trait_impl_annotation(&inner, self_ann, trait_type_args),
+            )),
+            TypeAnnotation::Tuple(items) => TypeAnnotation::Tuple(
+                items
+                    .iter()
+                    .map(|item| {
+                        Self::substitute_trait_impl_annotation(item, self_ann, trait_type_args)
+                    })
+                    .collect(),
+            ),
+            TypeAnnotation::Object(fields) => TypeAnnotation::Object(
+                fields
+                    .into_iter()
+                    .map(|mut field| {
+                        field.type_annotation = Self::substitute_trait_impl_annotation(
+                            &field.type_annotation,
+                            self_ann,
+                            trait_type_args,
+                        );
+                        field
+                    })
+                    .collect(),
+            ),
+            TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+                params: params
+                    .into_iter()
+                    .map(|mut param| {
+                        param.type_annotation = Self::substitute_trait_impl_annotation(
+                            &param.type_annotation,
+                            self_ann,
+                            trait_type_args,
+                        );
+                        param
+                    })
+                    .collect(),
+                returns: Box::new(Self::substitute_trait_impl_annotation(
+                    &returns,
+                    self_ann,
+                    trait_type_args,
+                )),
+            },
+            TypeAnnotation::Union(items) => TypeAnnotation::Union(
+                items
+                    .iter()
+                    .map(|item| {
+                        Self::substitute_trait_impl_annotation(item, self_ann, trait_type_args)
+                    })
+                    .collect(),
+            ),
+            TypeAnnotation::Intersection(items) => TypeAnnotation::Intersection(
+                items
+                    .iter()
+                    .map(|item| {
+                        Self::substitute_trait_impl_annotation(item, self_ann, trait_type_args)
+                    })
+                    .collect(),
+            ),
+            TypeAnnotation::Generic { name, args } => TypeAnnotation::Generic {
+                name,
+                args: args
+                    .iter()
+                    .map(|arg| {
+                        Self::substitute_trait_impl_annotation(arg, self_ann, trait_type_args)
+                    })
+                    .collect(),
+            },
+            TypeAnnotation::Borrow { mutable, inner } => TypeAnnotation::Borrow {
+                mutable,
+                inner: Box::new(Self::substitute_trait_impl_annotation(
+                    &inner,
+                    self_ann,
+                    trait_type_args,
+                )),
+            },
+            other => other,
+        }
     }
 
     fn trait_method_value_param_annotation<'a>(

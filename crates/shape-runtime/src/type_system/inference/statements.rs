@@ -644,11 +644,19 @@ impl TypeInferenceEngine {
             }
             Statement::Expression(expr, _) => {
                 let expr_type = self.infer_expr(expr)?;
-                // Record the expression's type as an implicit-return candidate
-                // — EXCEPT for a bare method-call statement, whose value is a
-                // side-effecting / fluent return that is conventionally
-                // discarded (`m.set(k, v)`, `arr.push(x)`). Recording such a
-                // statement wrongly unioned the receiver's type (e.g.
+                // Fluent mutator method statements are conventionally
+                // discarded (`m.set(k, v)`, `arr.push(x)`). They still get
+                // inferred above for constraints, but they do not become the
+                // enclosing function's body type. Value-producing methods
+                // (`map`, `filter`, `sum`, callable `__call__`, etc.) stay
+                // eligible as expression-style returns.
+                if matches!(expr, Expr::MethodCall { method, .. } if Self::method_statement_discards_value(method))
+                {
+                    return Ok(BuiltinTypes::void());
+                }
+                // Record the expression's type as an implicit-return candidate.
+                // Recording ordinary method-call statements previously unioned
+                // the receiver's type (e.g.
                 // `HashMap<string,int>` from `m.set(...)`) into the enclosing
                 // fn's implicit return, producing a spurious
                 // `() -> HashMap<…> | int` constraint mis-solve.
@@ -658,9 +666,7 @@ impl TypeInferenceEngine {
                 // bare values) keep recording — Shape collects these across
                 // multiple statements for `Result`/union return inference
                 // (`fn f() { Ok(1) \n Err("e") }` ⇒ `Result<int, string>`).
-                if !matches!(expr, Expr::MethodCall { .. }) {
-                    self.record_implicit_return_type(expr_type.clone());
-                }
+                self.record_implicit_return_type(expr_type.clone());
                 Ok(expr_type)
             }
             Statement::If(if_stmt, _) => {
@@ -779,6 +785,10 @@ impl TypeInferenceEngine {
             }
             _ => Ok(BuiltinTypes::void()),
         }
+    }
+
+    fn method_statement_discards_value(method: &str) -> bool {
+        matches!(method, "push" | "set" | "delete" | "pushBack" | "pushFront")
     }
 
     /// Extract narrowing info from a condition expression.
