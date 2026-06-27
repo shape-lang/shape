@@ -14,6 +14,107 @@ use std::collections::{HashMap, HashSet};
 use super::BytecodeCompiler;
 
 impl BytecodeCompiler {
+    fn emit_empty_annotation_event_log(&mut self) {
+        self.emit(Instruction::new(
+            crate::compiler::v2_typed_emission::TypedArrayKind::String.new_opcode(),
+            Some(Operand::Count(0)),
+        ));
+    }
+
+    fn annotation_arg_array_kind(
+        &self,
+        func_def: &FunctionDef,
+        impl_idx: u16,
+    ) -> Result<crate::compiler::v2_typed_emission::TypedArrayKind> {
+        use crate::compiler::v2_typed_emission::{
+            should_use_typed_array_from_slot_kind, TypedArrayKind,
+        };
+        use shape_ast::ast::TypeAnnotation;
+        use shape_value::HeapKind;
+
+        if func_def.params.is_empty() {
+            return Ok(TypedArrayKind::I64);
+        }
+
+        let impl_hints = self
+            .program
+            .function_local_storage_hints
+            .get(impl_idx as usize);
+        let mut resolved = None;
+        for (idx, param) in func_def.params.iter().enumerate() {
+            let kind = impl_hints
+                .and_then(|hints| hints.get(idx).copied())
+                .and_then(|hint| match hint {
+                    shape_value::NativeKind::Ptr(HeapKind::TypedArray) => {
+                        Some(TypedArrayKind::TypedArray)
+                    }
+                    other => should_use_typed_array_from_slot_kind(other),
+                })
+                .or_else(|| {
+                    let ann = param.type_annotation.as_ref()?;
+                    let array_ann = TypeAnnotation::Array(Box::new(ann.clone()));
+                    self.resolve_typed_array_kind_from_annotation(&array_ann)
+                })
+                .ok_or_else(|| ShapeError::SemanticError {
+                    message: format!(
+                        "cannot build annotation args for function '{}': parameter #{} has no \
+                         statically proven typed-array element carrier. Add a concrete parameter \
+                         annotation or avoid runtime before/after annotations for this function.",
+                        func_def.name,
+                        idx + 1
+                    ),
+                    location: Some(self.span_to_source_location(param.span())),
+                })?;
+
+            match resolved {
+                Some(prev) if prev != kind => {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "cannot build annotation args for function '{}': parameters have \
+                             heterogeneous storage carriers. Runtime annotation args require a \
+                             single statically proven typed-array element carrier.",
+                            func_def.name
+                        ),
+                        location: Some(self.span_to_source_location(param.span())),
+                    });
+                }
+                Some(_) => {}
+                None => resolved = Some(kind),
+            }
+        }
+
+        Ok(resolved.expect("non-empty params set a kind"))
+    }
+
+    fn emit_annotation_args_array(
+        &mut self,
+        func_def: &FunctionDef,
+        wrapper_ref_params: &[bool],
+        impl_idx: u16,
+    ) -> Result<()> {
+        let kind = self.annotation_arg_array_kind(func_def, impl_idx)?;
+        self.emit(Instruction::new(
+            kind.new_opcode(),
+            Some(Operand::Count(func_def.params.len() as u16)),
+        ));
+        for (i, _param) in func_def.params.iter().enumerate() {
+            self.emit(Instruction::simple(OpCode::Dup));
+            if wrapper_ref_params.get(i).copied().unwrap_or(false) {
+                self.emit(Instruction::new(
+                    OpCode::DerefLoad,
+                    Some(Operand::Local(i as u16)),
+                ));
+            } else {
+                self.emit(Instruction::new(
+                    OpCode::LoadLocal,
+                    Some(Operand::Local(i as u16)),
+                ));
+            }
+            self.emit(Instruction::simple(kind.push_opcode()));
+        }
+        Ok(())
+    }
+
     pub(super) fn emit_annotation_lifecycle_calls(&mut self, func_def: &FunctionDef) -> Result<()> {
         if self.current_function.is_some() {
             return Ok(());
@@ -224,7 +325,7 @@ impl BytecodeCompiler {
                 field_count: 0,
             }),
         ));
-        self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
+        self.emit_empty_annotation_event_log();
 
         let ctx_schema_id = self.type_tracker.register_inline_object_schema_typed(&[
             ("state", FieldType::Any),
@@ -1401,23 +1502,7 @@ impl BytecodeCompiler {
         // params, so local slots contain TAG_REF values. We must DerefLoad
         // to get the actual values before putting them in the args array.
         let wrapper_ref_params = self.program.functions[wrapper_func_idx].ref_params.clone();
-        for (i, _param) in func_def.params.iter().enumerate() {
-            if wrapper_ref_params.get(i).copied().unwrap_or(false) {
-                self.emit(Instruction::new(
-                    OpCode::DerefLoad,
-                    Some(Operand::Local(i as u16)),
-                ));
-            } else {
-                self.emit(Instruction::new(
-                    OpCode::LoadLocal,
-                    Some(Operand::Local(i as u16)),
-                ));
-            }
-        }
-        self.emit(Instruction::new(
-            OpCode::NewArray,
-            Some(Operand::Count(func_def.params.len() as u16)),
-        ));
+        self.emit_annotation_args_array(func_def, &wrapper_ref_params, impl_idx)?;
         self.emit(Instruction::new(
             OpCode::StoreLocal,
             Some(Operand::Local(args_local)),
@@ -1444,7 +1529,7 @@ impl BytecodeCompiler {
             }),
         ));
 
-        self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
+        self.emit_empty_annotation_event_log();
 
         let ctx_schema_id = self.type_tracker.register_inline_object_schema_typed(&[
             ("__impl", FieldType::Any),
@@ -1679,7 +1764,7 @@ impl BytecodeCompiler {
             self.emit(Instruction::simple(OpCode::Dup));
             self.emit(Instruction::simple(OpCode::IsNull));
             let skip_state = self.emit_jump(OpCode::JumpIfTrue, 0);
-            self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
+            self.emit_empty_annotation_event_log();
             self.emit(Instruction::new(
                 OpCode::NewTypedObject,
                 Some(Operand::TypedObjectAlloc {
