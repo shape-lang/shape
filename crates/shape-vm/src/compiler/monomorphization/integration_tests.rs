@@ -492,9 +492,10 @@ mod e2e_tests {
         );
     }
 
-    /// Captured vs uncaptured closures produce distinct Phase C keys.
+    /// Captured closures do not enter Phase C until capture-hoisting is part
+    /// of the monomorphized ABI; uncaptured closures still produce keys.
     #[test]
-    fn phase_c_captured_vs_uncaptured_closures_keyed_distinctly() {
+    fn phase_c_captured_closures_use_value_call_path() {
         let source = r#"
             let a = [1, 2, 3]
             let r1 = a.map(|x| x + 1)
@@ -510,15 +511,10 @@ mod e2e_tests {
             .collect();
         assert_eq!(
             phase_c_keys.len(),
-            2,
-            "captured vs uncaptured closures must produce distinct Phase C keys, got: {:?}",
+            1,
+            "only the uncaptured closure should produce a Phase C key; captured closures use the kinded value-call path, got: {:?}",
             phase_c_keys
         );
-        let mut unique: std::collections::HashSet<&&String> = std::collections::HashSet::new();
-        for k in &phase_c_keys {
-            unique.insert(k);
-        }
-        assert_eq!(unique.len(), 2, "keys must be distinct: {:?}", phase_c_keys);
     }
 
     /// Calling `arr.map(|x| x+1)` twice with identical receiver type +
