@@ -729,7 +729,8 @@ impl TypeInferenceEngine {
                 self.env.set_current_access_variable(var_name);
 
                 let object_type = self.infer_expr(object)?;
-                let result = self.infer_property_access(&object_type, property);
+                let resolved_object_type = self.solver.unifier().apply_substitutions(&object_type);
+                let result = self.infer_property_access(&resolved_object_type, property);
                 if let Err(TypeError::UnknownProperty(_, missing)) = &result {
                     self.register_unknown_property_origin(missing, *span);
                 }
