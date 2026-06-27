@@ -1188,7 +1188,7 @@ fn grammar_parity(root: &Path, corpus_dir: Option<PathBuf>) -> Result<()> {
 }
 
 fn run_doctest(root: &Path, verbose: bool) -> Result<()> {
-    let docs_dir = root.join("docs/book/book/book-site/src/content/docs");
+    let docs_dir = resolve_book_docs_dir(root)?;
 
     println!("=== Shape Doctest CI ===");
     println!("Docs directory: {}", docs_dir.display());
@@ -1211,6 +1211,57 @@ fn run_doctest(root: &Path, verbose: bool) -> Result<()> {
     }
 
     run_command("cargo", &args, root)
+}
+
+fn resolve_book_docs_dir(root: &Path) -> Result<PathBuf> {
+    const DOCS_REL: &str = "book-site/src/content/docs";
+
+    let in_repo = root.join("docs/book/book").join(DOCS_REL);
+    if in_repo.is_dir() {
+        ensure_markdown_inputs(&in_repo)?;
+        return Ok(in_repo);
+    }
+
+    let sibling = root
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("shape-web/book")
+        .join(DOCS_REL);
+    if sibling.is_dir() {
+        ensure_markdown_inputs(&sibling)?;
+        return Ok(sibling);
+    }
+
+    bail!(
+        "book docs directory not found; checked {} and {}",
+        in_repo.display(),
+        sibling.display()
+    );
+}
+
+fn ensure_markdown_inputs(docs_dir: &Path) -> Result<()> {
+    if contains_markdown_file(docs_dir) {
+        Ok(())
+    } else {
+        bail!(
+            "book docs directory contains no markdown files (.md or .mdx): {}",
+            docs_dir.display()
+        )
+    }
+}
+
+fn contains_markdown_file(dir: &Path) -> bool {
+    WalkDir::new(dir)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .any(|entry| entry.file_type().is_file() && is_markdown_path(entry.path()))
+}
+
+fn is_markdown_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("md" | "mdx")
+    )
 }
 
 fn workspace_smoke(root: &Path) -> Result<()> {
