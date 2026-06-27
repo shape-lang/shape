@@ -13,6 +13,216 @@ use std::collections::BTreeSet;
 use super::super::BytecodeCompiler;
 use crate::compiler::ClosureCallsiteHint;
 
+fn container_kind_from_concrete_type(
+    ct: &ConcreteType,
+) -> Option<crate::compiler::mutation_writeback::ContainerKind> {
+    use crate::compiler::mutation_writeback::ContainerKind;
+    match ct {
+        ConcreteType::HashMap(_, _) => Some(ContainerKind::HashMap),
+        ConcreteType::HashSet(_) => Some(ContainerKind::HashSet),
+        ConcreteType::Deque(_) => Some(ContainerKind::Deque),
+        ConcreteType::PriorityQueue => Some(ContainerKind::PriorityQueue),
+        ConcreteType::Array(_) => Some(ContainerKind::Array),
+        _ => None,
+    }
+}
+
+fn collect_static_mut_self_container_captures(
+    compiler: &BytecodeCompiler,
+    body: &[shape_ast::ast::Statement],
+    captured_vars: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    use shape_ast::ast::{BlockItem, Expr, Statement};
+
+    fn note_if_static_mut_self_capture(
+        compiler: &BytecodeCompiler,
+        captured_vars: &BTreeSet<String>,
+        receiver: &Expr,
+        method: &str,
+        out: &mut BTreeSet<String>,
+    ) {
+        let Expr::Identifier(name, _) = receiver else {
+            return;
+        };
+        if !captured_vars.contains(name) {
+            return;
+        }
+        let ident = Expr::Identifier(name.clone(), Span::DUMMY);
+        let Some(container_kind) = concrete_type_for_expr(compiler, &ident)
+            .as_ref()
+            .and_then(container_kind_from_concrete_type)
+        else {
+            return;
+        };
+        if container_kind.is_mut_self_method(method) {
+            out.insert(name.clone());
+        }
+    }
+
+    fn scan_expr(
+        compiler: &BytecodeCompiler,
+        captured_vars: &BTreeSet<String>,
+        expr: &Expr,
+        out: &mut BTreeSet<String>,
+    ) {
+        match expr {
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+                ..
+            } => {
+                note_if_static_mut_self_capture(compiler, captured_vars, receiver, method, out);
+                scan_expr(compiler, captured_vars, receiver, out);
+                for arg in args {
+                    scan_expr(compiler, captured_vars, arg, out);
+                }
+            }
+            Expr::FunctionCall { args, .. } | Expr::QualifiedFunctionCall { args, .. } => {
+                for arg in args {
+                    scan_expr(compiler, captured_vars, arg, out);
+                }
+            }
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                scan_expr(compiler, captured_vars, left, out);
+                scan_expr(compiler, captured_vars, right, out);
+            }
+            Expr::UnaryOp { operand, .. } | Expr::Reference { expr: operand, .. } => {
+                scan_expr(compiler, captured_vars, operand, out);
+            }
+            Expr::Array(elements, _) => {
+                for element in elements {
+                    scan_expr(compiler, captured_vars, element, out);
+                }
+            }
+            Expr::IndexAccess { object, index, .. } => {
+                scan_expr(compiler, captured_vars, object, out);
+                scan_expr(compiler, captured_vars, index, out);
+            }
+            Expr::PropertyAccess { object, .. } => {
+                scan_expr(compiler, captured_vars, object, out);
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                scan_expr(compiler, captured_vars, condition, out);
+                scan_expr(compiler, captured_vars, then_expr, out);
+                if let Some(else_expr) = else_expr {
+                    scan_expr(compiler, captured_vars, else_expr, out);
+                }
+            }
+            Expr::FunctionExpr { body, .. } => {
+                for stmt in body {
+                    scan_stmt(compiler, captured_vars, stmt, out);
+                }
+            }
+            Expr::Block(block, _) => {
+                for item in &block.items {
+                    scan_block_item(compiler, captured_vars, item, out);
+                }
+            }
+            Expr::If(if_expr, _) => {
+                scan_expr(compiler, captured_vars, &if_expr.condition, out);
+                scan_expr(compiler, captured_vars, &if_expr.then_branch, out);
+                if let Some(else_branch) = &if_expr.else_branch {
+                    scan_expr(compiler, captured_vars, else_branch, out);
+                }
+            }
+            Expr::While(while_expr, _) => {
+                scan_expr(compiler, captured_vars, &while_expr.condition, out);
+                scan_expr(compiler, captured_vars, &while_expr.body, out);
+            }
+            Expr::For(for_expr, _) => {
+                scan_expr(compiler, captured_vars, &for_expr.iterable, out);
+                scan_expr(compiler, captured_vars, &for_expr.body, out);
+            }
+            Expr::Loop(loop_expr, _) => scan_expr(compiler, captured_vars, &loop_expr.body, out),
+            Expr::Match(match_expr, _) => {
+                scan_expr(compiler, captured_vars, &match_expr.scrutinee, out);
+                for arm in &match_expr.arms {
+                    if let Some(guard) = &arm.guard {
+                        scan_expr(compiler, captured_vars, guard, out);
+                    }
+                    scan_expr(compiler, captured_vars, &arm.body, out);
+                }
+            }
+            Expr::Return(Some(expr), _) | Expr::Await(expr, _) => {
+                scan_expr(compiler, captured_vars, expr, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn scan_block_item(
+        compiler: &BytecodeCompiler,
+        captured_vars: &BTreeSet<String>,
+        item: &BlockItem,
+        out: &mut BTreeSet<String>,
+    ) {
+        match item {
+            BlockItem::VariableDecl(decl) => {
+                if let Some(value) = &decl.value {
+                    scan_expr(compiler, captured_vars, value, out);
+                }
+            }
+            BlockItem::Assignment(asgn) => scan_expr(compiler, captured_vars, &asgn.value, out),
+            BlockItem::Statement(stmt) => scan_stmt(compiler, captured_vars, stmt, out),
+            BlockItem::Expression(expr) => scan_expr(compiler, captured_vars, expr, out),
+        }
+    }
+
+    fn scan_stmt(
+        compiler: &BytecodeCompiler,
+        captured_vars: &BTreeSet<String>,
+        stmt: &Statement,
+        out: &mut BTreeSet<String>,
+    ) {
+        match stmt {
+            Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+                scan_expr(compiler, captured_vars, expr, out);
+            }
+            Statement::VariableDecl(decl, _) => {
+                if let Some(value) = &decl.value {
+                    scan_expr(compiler, captured_vars, value, out);
+                }
+            }
+            Statement::Assignment(asgn, _) => scan_expr(compiler, captured_vars, &asgn.value, out),
+            Statement::For(for_stmt, _) => {
+                for stmt in &for_stmt.body {
+                    scan_stmt(compiler, captured_vars, stmt, out);
+                }
+            }
+            Statement::While(while_stmt, _) => {
+                scan_expr(compiler, captured_vars, &while_stmt.condition, out);
+                for stmt in &while_stmt.body {
+                    scan_stmt(compiler, captured_vars, stmt, out);
+                }
+            }
+            Statement::If(if_stmt, _) => {
+                scan_expr(compiler, captured_vars, &if_stmt.condition, out);
+                for stmt in &if_stmt.then_body {
+                    scan_stmt(compiler, captured_vars, stmt, out);
+                }
+                if let Some(else_body) = &if_stmt.else_body {
+                    for stmt in else_body {
+                        scan_stmt(compiler, captured_vars, stmt, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = BTreeSet::new();
+    for stmt in body {
+        scan_stmt(compiler, captured_vars, stmt, &mut out);
+    }
+    out
+}
+
 /// Wave 1a PART A: infer a `TypeAnnotation` for a single call-site argument
 /// expression, conservatively. Returns `None` when the argument's type cannot
 /// be determined structurally (the corresponding param slot then stays
@@ -529,9 +739,51 @@ pub(crate) fn infer_param_type_from_body(
             _ => return None,
         })
     }
+    fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
+        match expr {
+            Expr::Identifier(n, _) => n == name,
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                expr_mentions_name(left, name) || expr_mentions_name(right, name)
+            }
+            Expr::UnaryOp { operand, .. } => expr_mentions_name(operand, name),
+            Expr::FunctionCall { args, .. } => args.iter().any(|a| expr_mentions_name(a, name)),
+            Expr::MethodCall { receiver, args, .. } => {
+                expr_mentions_name(receiver, name)
+                    || args.iter().any(|a| expr_mentions_name(a, name))
+            }
+            Expr::Array(elements, _) => elements.iter().any(|e| expr_mentions_name(e, name)),
+            Expr::Return(Some(e), _) => expr_mentions_name(e, name),
+            _ => false,
+        }
+    }
+    fn expr_contains_string_literal(expr: &Expr) -> bool {
+        match expr {
+            Expr::Literal(Literal::String(_), _) => true,
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                expr_contains_string_literal(left) || expr_contains_string_literal(right)
+            }
+            Expr::UnaryOp { operand, .. } => expr_contains_string_literal(operand),
+            Expr::FunctionCall { args, .. } => args.iter().any(expr_contains_string_literal),
+            Expr::MethodCall { receiver, args, .. } => {
+                expr_contains_string_literal(receiver)
+                    || args.iter().any(expr_contains_string_literal)
+            }
+            Expr::Array(elements, _) => elements.iter().any(expr_contains_string_literal),
+            Expr::Return(Some(e), _) => expr_contains_string_literal(e),
+            _ => false,
+        }
+    }
     fn scan_expr(name: &str, expr: &Expr) -> Option<TypeAnnotation> {
         match expr {
-            Expr::BinaryOp { left, right, .. } => {
+            Expr::BinaryOp {
+                left, op, right, ..
+            } => {
+                if matches!(op, shape_ast::ast::BinaryOp::Add)
+                    && expr_mentions_name(expr, name)
+                    && expr_contains_string_literal(expr)
+                {
+                    return Some(TypeAnnotation::Basic("string".to_string()));
+                }
                 if let (Expr::Identifier(n, _), Expr::Literal(lit, _)) =
                     (left.as_ref(), right.as_ref())
                 {
@@ -653,20 +905,26 @@ fn closure_body_requires_numeric_param(
             Expr::BinaryOp {
                 left, op, right, ..
             } => {
-                let numeric_op = matches!(
-                    op,
-                    BinaryOp::Add
-                        | BinaryOp::Sub
-                        | BinaryOp::Mul
-                        | BinaryOp::Div
-                        | BinaryOp::Mod
-                        | BinaryOp::Pow
-                        | BinaryOp::BitAnd
-                        | BinaryOp::BitOr
-                        | BinaryOp::BitXor
-                        | BinaryOp::BitShl
-                        | BinaryOp::BitShr
-                );
+                let numeric_op = match op {
+                    // `+` is overloaded for string concatenation. When a
+                    // param appears in an additive expression that already
+                    // carries a string literal, the param is in string
+                    // context, not an unproven numeric context.
+                    BinaryOp::Add => {
+                        !expr_contains_string_literal(left) && !expr_contains_string_literal(right)
+                    }
+                    BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+                    | BinaryOp::Pow
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::BitShl
+                    | BinaryOp::BitShr => true,
+                    _ => false,
+                };
                 (numeric_op && (expr_mentions_name(left, name) || expr_mentions_name(right, name)))
                     || scan_expr(left, name)
                     || scan_expr(right, name)
@@ -683,6 +941,33 @@ fn closure_body_requires_numeric_param(
                     || match_expr.arms.iter().any(|arm| {
                         arm.guard.as_ref().is_some_and(|g| scan_expr(g, name))
                             || scan_expr(&arm.body, name)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_contains_string_literal(expr: &Expr) -> bool {
+        match expr {
+            Expr::Literal(shape_ast::ast::Literal::String(_), _) => true,
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                expr_contains_string_literal(left) || expr_contains_string_literal(right)
+            }
+            Expr::UnaryOp { operand, .. } => expr_contains_string_literal(operand),
+            Expr::FunctionCall { args, .. } => args.iter().any(expr_contains_string_literal),
+            Expr::MethodCall { receiver, args, .. } => {
+                expr_contains_string_literal(receiver)
+                    || args.iter().any(expr_contains_string_literal)
+            }
+            Expr::Array(elements, _) => elements.iter().any(expr_contains_string_literal),
+            Expr::Return(Some(e), _) => expr_contains_string_literal(e),
+            Expr::Match(match_expr, _) => {
+                expr_contains_string_literal(&match_expr.scrutinee)
+                    || match_expr.arms.iter().any(|arm| {
+                        arm.guard
+                            .as_ref()
+                            .is_some_and(|g| expr_contains_string_literal(g))
+                            || expr_contains_string_literal(&arm.body)
                     })
             }
             _ => false,
@@ -937,12 +1222,18 @@ impl BytecodeCompiler {
         };
 
         let outer_vars = self.collect_outer_scope_vars();
-        let (mut captured_vars, mutated_captures) =
+        let (mut captured_vars, mut mutated_captures) =
             EnvironmentAnalyzer::analyze_function_with_mutability(&proto_def, &outer_vars);
         captured_vars.sort();
         let param_names: BTreeSet<String> =
             params.iter().flat_map(|p| p.get_identifiers()).collect();
         captured_vars.retain(|name| !param_names.contains(name));
+        let captured_var_set: BTreeSet<String> = captured_vars.iter().cloned().collect();
+        mutated_captures.extend(collect_static_mut_self_container_captures(
+            self,
+            body,
+            &captured_var_set,
+        ));
 
         // Inside function bodies the MIR solver detects reference-capture errors
         // via `closure_capture_loans` facts, producing `ReferenceEscapeIntoClosure`.
@@ -1040,11 +1331,8 @@ impl BytecodeCompiler {
         // closure body fail with "Cannot infer types for binary operation".
         let mut closure_params = Vec::with_capacity(captured_vars.len() + params.len());
         for name in &captured_vars {
-            let ident_expr = Expr::Identifier(name.clone(), Span::DUMMY);
-            let capture_ct = concrete_type_for_expr(self, &ident_expr);
-            let type_annotation = capture_ct
-                .as_ref()
-                .and_then(concrete_type_to_type_annotation);
+            let capture_ct = self.resolve_capture_concrete_type(name);
+            let type_annotation = concrete_type_to_type_annotation(&capture_ct);
             closure_params.push(shape_ast::ast::FunctionParameter {
                 pattern: shape_ast::ast::DestructurePattern::Identifier(name.clone(), Span::DUMMY),
                 is_const: false,
@@ -1494,10 +1782,7 @@ impl BytecodeCompiler {
                     // inner kind is derived from the captured binding's
                     // resolved `ConcreteType`. Falls back to `Ptr` when
                     // the type isn't statically resolved.
-                    let ident_expr = Expr::Identifier(name.clone(), Span::DUMMY);
-                    let inner_kind = concrete_type_for_expr(self, &ident_expr)
-                        .map(|ct| ct.to_field_kind())
-                        .unwrap_or(shape_value::v2::struct_layout::FieldKind::Ptr);
+                    let inner_kind = self.resolve_capture_concrete_type(name).to_field_kind();
                     self.shared_capture_inner_kinds
                         .insert(name.clone(), inner_kind);
                 }
@@ -1521,10 +1806,7 @@ impl BytecodeCompiler {
                     // `Ptr` when the type isn't statically resolved
                     // (matches `concrete_type_for_expr`'s default for
                     // unresolved heap-typed captures).
-                    let ident_expr = Expr::Identifier(name.clone(), Span::DUMMY);
-                    let inner_kind = concrete_type_for_expr(self, &ident_expr)
-                        .map(|ct| ct.to_field_kind())
-                        .unwrap_or(shape_value::v2::struct_layout::FieldKind::Ptr);
+                    let inner_kind = self.resolve_capture_concrete_type(name).to_field_kind();
                     self.owned_mutable_capture_inner_kinds
                         .insert(name.clone(), inner_kind);
                 }
@@ -1890,7 +2172,7 @@ impl BytecodeCompiler {
     /// 1. `concrete_type_for_expr` — the side-table / element-type path
     ///    (covers annotated params, array/map element types, recorded
     ///    let-binding ConcreteTypes).
-    /// 2. The runtime inference engine via `infer_expr_type`. An
+    /// 2. Compile-time inference/type facts via `infer_expr_type`. An
     ///    **unannotated function/closure param** (e.g. `g` in
     ///    `fn wrap(g) { |x| g(x) }`) has no side-table entry, but inference
     ///    resolves it to `Type::Function`. Mapping it to
@@ -1912,7 +2194,7 @@ impl BytecodeCompiler {
             return ct;
         }
         // U4-6: when the regular slot concrete tables miss, recover the
-        // binding's finalized type from the runtime inference facts through the
+        // binding's finalized type from compile-time inference facts through the
         // binder span recorded at slot creation. This replaces the former
         // collection-constructor side-table and keeps the capture stamp tied to
         // the canonical inference pass.

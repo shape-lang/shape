@@ -84,6 +84,26 @@ fn array_element_kind_from_concrete_type(ct: &ConcreteType) -> Option<TypedArray
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum CaptureMutSelfWriteBackTarget {
+    OwnedMutable { capture_idx: u16, opcode: OpCode },
+    Shared { capture_idx: u16, opcode: OpCode },
+}
+
+fn container_kind_from_concrete_type(
+    ct: &ConcreteType,
+) -> Option<crate::compiler::mutation_writeback::ContainerKind> {
+    use crate::compiler::mutation_writeback::ContainerKind;
+    match ct {
+        ConcreteType::HashMap(_, _) => Some(ContainerKind::HashMap),
+        ConcreteType::HashSet(_) => Some(ContainerKind::HashSet),
+        ConcreteType::Deque(_) => Some(ContainerKind::Deque),
+        ConcreteType::PriorityQueue => Some(ContainerKind::PriorityQueue),
+        ConcreteType::Array(_) => Some(ContainerKind::Array),
+        _ => None,
+    }
+}
+
 /// Task #108 companion: rewrite a return-type annotation by prefixing
 /// any bare `Basic`/`Reference` names with the given namespace. Module-
 /// qualified callees (`m::mk` returns `P`) carry their return type in
@@ -2654,6 +2674,80 @@ impl BytecodeCompiler {
         None
     }
 
+    /// Resolve a self-returning mutating method writeback whose receiver is a
+    /// mutable closure capture rather than an ordinary local/module binding.
+    ///
+    /// This is still fully static: the receiver must be an identifier present
+    /// in the closure-capture maps, its container kind must be proven from
+    /// `ConcreteType`, and the capture cell's interior `FieldKind` must have
+    /// been recorded when the closure layout was compiled. No runtime
+    /// receiver classification is introduced here.
+    fn resolve_mut_self_capture_writeback_target(
+        &self,
+        receiver: &Expr,
+        method: &str,
+    ) -> Result<Option<CaptureMutSelfWriteBackTarget>> {
+        let Expr::Identifier(name, span) = receiver else {
+            return Ok(None);
+        };
+        if !self.mutable_closure_captures.contains_key(name.as_str()) {
+            return Ok(None);
+        }
+
+        let receiver_ct = concrete_type_for_expr(self, receiver).or_else(|| {
+            crate::compiler::monomorphization::type_resolution::binding_fact_capture_type(
+                self, name,
+            )
+        });
+        let Some(container_kind) = receiver_ct
+            .as_ref()
+            .and_then(container_kind_from_concrete_type)
+        else {
+            return Ok(None);
+        };
+        if !container_kind.is_mut_self_method(method) {
+            return Ok(None);
+        }
+
+        if let Some(&shared_idx) = self.shared_closure_captures.get(name.as_str()) {
+            let kind = self
+                .shared_capture_inner_kinds
+                .get(name.as_str())
+                .copied()
+                .ok_or_else(|| ShapeError::SemanticError {
+                    message: format!(
+                        "cannot write back mutating method `{method}` on captured container \
+                         `{name}` without a statically proven shared-capture kind"
+                    ),
+                    location: Some(self.span_to_source_location(*span)),
+                })?;
+            return Ok(Some(CaptureMutSelfWriteBackTarget::Shared {
+                capture_idx: shared_idx,
+                opcode: crate::compiler::helpers::shared_typed_store_opcode(kind),
+            }));
+        }
+
+        if let Some(&owned_idx) = self.owned_mutable_closure_captures.get(name.as_str()) {
+            let kind = self
+                .owned_mutable_capture_inner_kinds
+                .get(name.as_str())
+                .copied()
+                .ok_or_else(|| ShapeError::SemanticError {
+                    message: format!(
+                        "cannot write back mutating method `{method}` on captured container \
+                         `{name}` without a statically proven owned-capture kind"
+                    ),
+                    location: Some(self.span_to_source_location(*span)),
+                })?;
+            return Ok(Some(CaptureMutSelfWriteBackTarget::OwnedMutable {
+                capture_idx: owned_idx,
+                opcode: crate::compiler::helpers::owned_mutable_typed_store_opcode(kind),
+            }));
+        }
+
+        Ok(None)
+    }
+
     /// Tuple-return resolver — ADR-006 §2.7.27 amendment (W17-pop-mutation).
     ///
     /// Returns `Some(target)` when:
@@ -3386,13 +3480,15 @@ impl BytecodeCompiler {
         let mut_self_writeback_target: Option<
             crate::compiler::mutation_writeback::MutSelfWriteBackTarget,
         > = self.resolve_mut_self_writeback_target(receiver, method);
+        let mut_self_capture_writeback_target =
+            self.resolve_mut_self_capture_writeback_target(receiver, method)?;
 
         // ADR-006 §2.7.27 amendment (W17-pop-mutation): tuple-return
         // pop-shape detection. Mutually exclusive with the self-return
         // case above (a method is registered in at most one set).
         let mut_self_tuple_return_target: Option<
             crate::compiler::mutation_writeback::MutSelfWriteBackTarget,
-        > = if mut_self_writeback_target.is_some() {
+        > = if mut_self_writeback_target.is_some() || mut_self_capture_writeback_target.is_some() {
             // A method is never registered as both self-return and
             // tuple-return — the registries are partitioned by ABI.
             None
@@ -4044,6 +4140,20 @@ impl BytecodeCompiler {
                         OpCode::StoreModuleBinding,
                         Some(Operand::ModuleBinding(binding_idx)),
                     ));
+                }
+            }
+        } else if let Some(target) = mut_self_capture_writeback_target {
+            self.emit(Instruction::simple(OpCode::Dup));
+            match target {
+                CaptureMutSelfWriteBackTarget::OwnedMutable {
+                    capture_idx,
+                    opcode,
+                }
+                | CaptureMutSelfWriteBackTarget::Shared {
+                    capture_idx,
+                    opcode,
+                } => {
+                    self.emit(Instruction::new(opcode, Some(Operand::Local(capture_idx))));
                 }
             }
         } else if let Some(target) = mut_self_tuple_return_target {
@@ -4902,6 +5012,20 @@ impl BytecodeCompiler {
         // aware specialization's success branch with the same shape.
         call_site_span: Span,
     ) -> Option<usize> {
+        // W20 closures_hof guard (2026-06-27): Phase-C inlining is only
+        // sound for closure literals with no captures. The inliner rewrites
+        // `f(item)` inside the specialized stdlib template, but it does not
+        // extend that specialized function's ABI with captured locals. A
+        // read-only capture such as `vals.map(|x| x + base)` inside another
+        // function therefore leaves `base` as an unproven identifier in the
+        // specialized `Vec.map` body and can miscompile into an unbounded
+        // allocation loop. Until capture hoisting is represented in compiler
+        // metadata and call-site bytecode, route captured closures through
+        // the existing kinded closure value-call path.
+        if self.any_closure_arg_captures_outer_binding(combined_args) {
+            return None;
+        }
+
         // SOUNDNESS GUARD (F1 mutating-capture-closure HOF segfault, 2026-06-18):
         // The closure-aware specialization INLINES the closure body into the
         // monomorphized stdlib template (`ensure_monomorphic_function_with_closures`
@@ -5017,6 +5141,233 @@ impl BytecodeCompiler {
             }
             _ => None,
         }
+    }
+
+    /// True if any closure literal argument captures an outer binding. Phase-C
+    /// HOF inlining has no capture-hoisting ABI yet, so captured closures must
+    /// stay on the value-call path where `MakeClosure` and
+    /// `call_value_immediate_nb` carry the statically stamped closure layout.
+    fn any_closure_arg_captures_outer_binding(&self, args: &[Expr]) -> bool {
+        fn expr_has_outer_mut_self_method(expr: &Expr, outer_captures: &BTreeSet<String>) -> bool {
+            match expr {
+                Expr::MethodCall {
+                    receiver,
+                    method,
+                    args,
+                    ..
+                } => {
+                    matches!(
+                        receiver.as_ref(),
+                        Expr::Identifier(name, _) if outer_captures.contains(name)
+                    ) && crate::executor::objects::method_registry::is_mut_self_method_name(method)
+                        || expr_has_outer_mut_self_method(receiver, outer_captures)
+                        || args
+                            .iter()
+                            .any(|arg| expr_has_outer_mut_self_method(arg, outer_captures))
+                }
+                Expr::Assign(assign, _) => {
+                    expr_has_outer_mut_self_method(&assign.value, outer_captures)
+                }
+                Expr::Block(block, _) => block.items.iter().any(|item| match item {
+                    shape_ast::ast::BlockItem::VariableDecl(decl) => decl
+                        .value
+                        .as_ref()
+                        .is_some_and(|expr| expr_has_outer_mut_self_method(expr, outer_captures)),
+                    shape_ast::ast::BlockItem::Assignment(assign) => {
+                        expr_has_outer_mut_self_method(&assign.value, outer_captures)
+                    }
+                    shape_ast::ast::BlockItem::Statement(stmt) => {
+                        stmt_has_outer_mut_self_method(stmt, outer_captures)
+                    }
+                    shape_ast::ast::BlockItem::Expression(expr) => {
+                        expr_has_outer_mut_self_method(expr, outer_captures)
+                    }
+                }),
+                Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                    expr_has_outer_mut_self_method(left, outer_captures)
+                        || expr_has_outer_mut_self_method(right, outer_captures)
+                }
+                Expr::UnaryOp { operand, .. } => {
+                    expr_has_outer_mut_self_method(operand, outer_captures)
+                }
+                Expr::FunctionCall { args, .. } => args
+                    .iter()
+                    .any(|arg| expr_has_outer_mut_self_method(arg, outer_captures)),
+                Expr::Array(elements, _) => elements
+                    .iter()
+                    .any(|elem| expr_has_outer_mut_self_method(elem, outer_captures)),
+                Expr::Return(Some(expr), _) => expr_has_outer_mut_self_method(expr, outer_captures),
+                Expr::If(if_expr, _) => {
+                    expr_has_outer_mut_self_method(&if_expr.condition, outer_captures)
+                        || expr_has_outer_mut_self_method(&if_expr.then_branch, outer_captures)
+                        || if_expr.else_branch.as_ref().is_some_and(|expr| {
+                            expr_has_outer_mut_self_method(expr, outer_captures)
+                        })
+                }
+                Expr::Match(match_expr, _) => {
+                    expr_has_outer_mut_self_method(&match_expr.scrutinee, outer_captures)
+                        || match_expr.arms.iter().any(|arm| {
+                            arm.guard.as_ref().is_some_and(|guard| {
+                                expr_has_outer_mut_self_method(guard, outer_captures)
+                            }) || expr_has_outer_mut_self_method(&arm.body, outer_captures)
+                        })
+                }
+                Expr::FunctionExpr { .. } => false,
+                _ => false,
+            }
+        }
+
+        fn stmt_has_outer_mut_self_method(
+            stmt: &shape_ast::ast::Statement,
+            outer_captures: &BTreeSet<String>,
+        ) -> bool {
+            match stmt {
+                shape_ast::ast::Statement::Assignment(assign, _) => {
+                    expr_has_outer_mut_self_method(&assign.value, outer_captures)
+                }
+                shape_ast::ast::Statement::Expression(expr, _)
+                | shape_ast::ast::Statement::Return(Some(expr), _) => {
+                    expr_has_outer_mut_self_method(expr, outer_captures)
+                }
+                shape_ast::ast::Statement::VariableDecl(decl, _) => decl
+                    .value
+                    .as_ref()
+                    .is_some_and(|expr| expr_has_outer_mut_self_method(expr, outer_captures)),
+                _ => false,
+            }
+        }
+
+        fn expr_assigns_outer(expr: &Expr, outer_captures: &BTreeSet<String>) -> bool {
+            match expr {
+                Expr::Assign(assign, _) => {
+                    matches!(
+                        assign.target.as_ref(),
+                        Expr::Identifier(name, _) if outer_captures.contains(name)
+                    ) || expr_assigns_outer(&assign.value, outer_captures)
+                }
+                Expr::Block(block, _) => block.items.iter().any(|item| match item {
+                    shape_ast::ast::BlockItem::VariableDecl(decl) => decl
+                        .value
+                        .as_ref()
+                        .is_some_and(|expr| expr_assigns_outer(expr, outer_captures)),
+                    shape_ast::ast::BlockItem::Assignment(assign) => {
+                        assign
+                            .pattern
+                            .as_identifier()
+                            .is_some_and(|name| outer_captures.contains(name))
+                            || expr_assigns_outer(&assign.value, outer_captures)
+                    }
+                    shape_ast::ast::BlockItem::Statement(stmt) => {
+                        assignment_targets_outer(stmt, outer_captures)
+                    }
+                    shape_ast::ast::BlockItem::Expression(expr) => {
+                        expr_assigns_outer(expr, outer_captures)
+                    }
+                }),
+                Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                    expr_assigns_outer(left, outer_captures)
+                        || expr_assigns_outer(right, outer_captures)
+                }
+                Expr::UnaryOp { operand, .. } => expr_assigns_outer(operand, outer_captures),
+                Expr::FunctionCall { args, .. } => args
+                    .iter()
+                    .any(|arg| expr_assigns_outer(arg, outer_captures)),
+                Expr::MethodCall { receiver, args, .. } => {
+                    expr_assigns_outer(receiver, outer_captures)
+                        || args
+                            .iter()
+                            .any(|arg| expr_assigns_outer(arg, outer_captures))
+                }
+                Expr::Array(elements, _) => elements
+                    .iter()
+                    .any(|elem| expr_assigns_outer(elem, outer_captures)),
+                Expr::Return(Some(expr), _) => expr_assigns_outer(expr, outer_captures),
+                Expr::If(if_expr, _) => {
+                    expr_assigns_outer(&if_expr.condition, outer_captures)
+                        || expr_assigns_outer(&if_expr.then_branch, outer_captures)
+                        || if_expr
+                            .else_branch
+                            .as_ref()
+                            .is_some_and(|expr| expr_assigns_outer(expr, outer_captures))
+                }
+                Expr::Match(match_expr, _) => {
+                    expr_assigns_outer(&match_expr.scrutinee, outer_captures)
+                        || match_expr.arms.iter().any(|arm| {
+                            arm.guard
+                                .as_ref()
+                                .is_some_and(|guard| expr_assigns_outer(guard, outer_captures))
+                                || expr_assigns_outer(&arm.body, outer_captures)
+                        })
+                }
+                Expr::FunctionExpr { .. } => false,
+                _ => false,
+            }
+        }
+
+        fn assignment_targets_outer(
+            stmt: &shape_ast::ast::Statement,
+            outer_captures: &BTreeSet<String>,
+        ) -> bool {
+            match stmt {
+                shape_ast::ast::Statement::Assignment(assign, _) => {
+                    assign
+                        .pattern
+                        .as_identifier()
+                        .is_some_and(|name| outer_captures.contains(name))
+                        || expr_assigns_outer(&assign.value, outer_captures)
+                }
+                shape_ast::ast::Statement::Expression(expr, _)
+                | shape_ast::ast::Statement::Return(Some(expr), _) => {
+                    expr_assigns_outer(expr, outer_captures)
+                }
+                shape_ast::ast::Statement::VariableDecl(decl, _) => decl
+                    .value
+                    .as_ref()
+                    .is_some_and(|expr| expr_assigns_outer(expr, outer_captures)),
+                _ => false,
+            }
+        }
+
+        let outer_vars = self.collect_outer_scope_vars();
+        args.iter().any(|a| {
+            let Expr::FunctionExpr { params, body, .. } = a else {
+                return false;
+            };
+            let proto_def = shape_ast::ast::FunctionDef {
+                name: "__capturecheck_closure__".to_string(),
+                name_span: Span::DUMMY,
+                declaring_module_path: None,
+                doc_comment: None,
+                type_params: None,
+                params: params.clone(),
+                return_type: None,
+                body: body.clone(),
+                annotations: vec![],
+                where_clause: None,
+                is_async: false,
+                is_comptime: false,
+            };
+            let (captured, mutated) =
+                EnvironmentAnalyzer::analyze_function_with_mutability(&proto_def, &outer_vars);
+            let param_names: BTreeSet<String> =
+                params.iter().flat_map(|p| p.get_identifiers()).collect();
+            let outer_captures: BTreeSet<String> = captured
+                .iter()
+                .filter(|n| !param_names.contains(*n))
+                .cloned()
+                .collect();
+            if outer_captures.is_empty() {
+                return false;
+            }
+            let mutates_outer = mutated.iter().any(|n| outer_captures.contains(n))
+                || body
+                    .iter()
+                    .any(|stmt| assignment_targets_outer(stmt, &outer_captures));
+            let mutates_outer_container_by_method = body
+                .iter()
+                .any(|stmt| stmt_has_outer_mut_self_method(stmt, &outer_captures));
+            !mutates_outer || mutates_outer_container_by_method
+        })
     }
 
     /// F1 soundness guard: true if ANY `Expr::FunctionExpr` argument mutates

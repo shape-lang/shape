@@ -314,19 +314,11 @@ fn edge_closure_three_deep() {
         f2(3)
     "#,
     )
-    // strict-flip transitive-capture soundness (TP-rebaseline, closures_hof
-    // SIGSEGV fix 2026-06-22): the innermost closure `|c| a + b + c` captures
-    // BOTH `a` (the outer fn param, captured TRANSITIVELY through the middle
-    // closure) AND `b` (the middle closure's un-annotated param). The capture
-    // resolver cannot prove `b`'s `ConcreteType`, so its layout slot is stamped
-    // the `Pointer(Void)` → `Ptr(HeapKind::NativeView)` opaque-heap sentinel.
-    // Pre-fix, `op_make_closure` wrote `b`'s scalar `Int64` bits into that
-    // heap-drop-masked slot and `release_typed_closure` later reinterpreted the
-    // small integer as an `Arc<NativeViewData>` → SIGSEGV. The carrier-mismatch
-    // guard now surfaces-and-stops cleanly: a capture whose proven runtime kind
-    // is a scalar must never land in a heap-drop-masked slot. int and number do
-    // not unify and an un-inferable transitively-captured operand must SURFACE.
-    .expect_run_err_contains("stamped a heap carrier");
+    // W20 strict-flip: reject before closure materialization. The innermost
+    // numeric op has no compile-time proof for `c`, so the compiler surfaces a
+    // parameter-annotation diagnostic instead of reaching the old runtime
+    // scalar-into-heap-carrier guard.
+    .expect_run_err_contains("cannot infer the numeric type of closure parameter `c`");
 }
 
 // Memory-safety regression pin (closures_hof transitive-capture SIGSEGV fix,
@@ -351,10 +343,25 @@ fn edge_transitive_scalar_capture_is_memory_safe_not_segv() {
         level1(1)(2)(3)
     "#,
     )
-    // The transitively-captured + directly-captured-scalar mix cannot prove
-    // `b`'s carrier kind; the guard surfaces a clean RuntimeError. The crucial
-    // property is that this is a clean error — NOT a segfault / heap corruption.
-    .expect_run_err_contains("stamped a heap carrier");
+    // The crucial property is still a clean error, not a segfault or heap
+    // corruption. W20 rejects earlier, at compile time, before the old carrier
+    // stamping path is reached.
+    .expect_run_err_contains("cannot infer the numeric type of closure parameter `c`");
+}
+
+#[test]
+fn edge_closure_three_deep_accepts_numeric_annotations() {
+    ShapeTest::new(
+        r#"
+        fn level1(a: int) {
+            |b: int| {
+                |c: int| { a + b + c }
+            }
+        }
+        level1(1)(2)(3)
+    "#,
+    )
+    .expect_number(6.0);
 }
 
 // Companion to the guard pin: the sibling shape where the inner closure

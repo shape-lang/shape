@@ -542,7 +542,6 @@ fn hof_compose_two_functions() {
     .expect_number(41.0);
 }
 
-// BUG: Chained closure calls `compose(...)(20)` fail -- see hof_adder_chained_call
 #[test]
 fn hof_compose_used_directly() {
     ShapeTest::new(
@@ -554,16 +553,10 @@ fn hof_compose_used_directly() {
         h(20)
     "#,
     )
-    // strict-flip indirected-callable soundness (TP-rebaseline): the closures
-    // `|x| x*2` / `|x| x+1` ESCAPE into `compose`, which returns a closure
-    // capturing them (`|x| f(g(x))`) — the closure params are never pinned to a
-    // concrete type, so pre-fix they DEFAULTED to `number` and the all-int
-    // computation produced an unsound `42.0` (and CRASHED "no method 'add' on
-    // receiver kind Int64" when the result flowed into an `int` slot). int and
-    // number do NOT unify and an un-inferable numeric operand must SURFACE — the
-    // engine cannot thread the type through the returned-closure capture, so it
-    // now REJECTS cleanly at compile time.
-    .expect_run_err_contains("cannot infer the element/operand type of a closure");
+    // W20: direct compose is now pinned by compile-time literal/callable facts
+    // through the closure call-sites. No numeric defaulting or runtime callable
+    // probing is involved; the all-int computation returns the book result.
+    .expect_number(42.0);
 }
 
 // BUG: Chained closure calls `twice(inc)(40)` fail -- see hof_adder_chained_call
@@ -735,17 +728,11 @@ fn hof_curried_add() {
         f2(3)
     "#,
     )
-    // strict-flip transitive-capture soundness (TP-rebaseline, closures_hof
-    // SIGSEGV fix 2026-06-22): identical shape to `edge_closure_three_deep`.
-    // `|c| a + b + c` captures `a` transitively (through the middle closure)
-    // AND the middle closure's un-annotated param `b`. `b`'s `ConcreteType`
-    // cannot be proven at compile time, so its layout slot defaults to the
-    // `Ptr(HeapKind::NativeView)` opaque-heap sentinel; pre-fix the scalar
-    // `Int64` bits written there were dropped as an `Arc<NativeViewData>` →
-    // SIGSEGV. The carrier-mismatch guard now surfaces-and-stops: a scalar
-    // capture is refused from a heap-drop-masked slot rather than corrupting
-    // the heap. The un-inferable transitive operand must SURFACE.
-    .expect_run_err_contains("stamped a heap carrier");
+    // W20 strict-flip: reject before closure materialization. The innermost
+    // numeric op has no compile-time proof for `c`, so the compiler surfaces a
+    // parameter-annotation diagnostic instead of reaching the old runtime
+    // scalar-into-heap-carrier guard.
+    .expect_run_err_contains("cannot infer the numeric type of closure parameter `c`");
 }
 
 #[test]
