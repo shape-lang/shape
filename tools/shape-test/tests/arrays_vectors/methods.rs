@@ -51,16 +51,18 @@ fn array_push() {
 
 #[test]
 fn array_pop() {
-    // pop() returns the array without the last element, not the removed element
+    // Strict structural array pop returns the removed element and publishes
+    // the shortened receiver through the tuple-return mutator ABI.
     ShapeTest::new(
         r#"
-        let arr = [1, 2, 3]
+        let mut arr = [1, 2, 3]
         let popped = arr.pop()
-        print(popped.length)
+        print(popped)
+        print(arr.length)
     "#,
     )
     .expect_run_ok()
-    .expect_output("2");
+    .expect_output("3\n2");
 }
 
 // =========================================================================
@@ -95,7 +97,9 @@ fn array_last() {
 // Contains / IndexOf
 // =========================================================================
 
-// TDD: contains() method not yet implemented on Array type
+// Array membership is `.includes(value)`. `.contains` is not an Array method;
+// the current type checker surfaces this through its generic-container method
+// diagnostic rather than a runtime method miss.
 #[test]
 fn array_contains_found() {
     ShapeTest::new(
@@ -104,10 +108,13 @@ fn array_contains_found() {
         print(arr.contains(3))
     "#,
     )
-    .expect_run_err_contains("Unknown method 'contains'");
+    .expect_run_err_contains_any(&[
+        "Method 'contains' not found on type 'Array'",
+        "cannot have fields",
+    ]);
 }
 
-// TDD: contains() method not yet implemented on Array type
+// Array membership is `.includes(value)`. `.contains` remains unsupported.
 #[test]
 fn array_contains_not_found() {
     ShapeTest::new(
@@ -116,7 +123,10 @@ fn array_contains_not_found() {
         print(arr.contains(99))
     "#,
     )
-    .expect_run_err_contains("Unknown method 'contains'");
+    .expect_run_err_contains_any(&[
+        "Method 'contains' not found on type 'Array'",
+        "cannot have fields",
+    ]);
 }
 
 #[test]

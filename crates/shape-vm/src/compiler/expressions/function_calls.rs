@@ -7,6 +7,7 @@ use crate::compiler::monomorphization::type_resolution::{
     resolve_call_site_type_args_with_closures,
 };
 use crate::compiler::string_interpolation::has_interpolation;
+use crate::compiler::v2_typed_emission::{TypedArrayKind, should_use_typed_array};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::{VariableKind, VariableTypeInfo};
 use shape_ast::ast::{Expr, InterpolationMode, Literal, ObjectEntry, Span, Spanned, Statement};
@@ -47,6 +48,39 @@ fn slot_kind_to_type_annotation(
         // which is identical to the pre-fix behaviour.
         _ => return None,
     })
+}
+
+/// Array methods whose Rust PHF handlers are the canonical strict-carrier
+/// implementation when the receiver is statically proven as `Array<T>`.
+///
+/// This gate is deliberately compile-time only: receiver proof comes from the
+/// existing `ConcreteType::Array(_)` metadata, and runtime dispatch still uses
+/// the kinded `CallMethod` path. `push` stays out because identifier receivers
+/// use the bespoke typed push/writeback path and the generic PHF handler has a
+/// different return shape.
+fn prefer_native_array_phf_method(method: &str) -> bool {
+    matches!(
+        method,
+        "clone"
+            | "forEach"
+            | "findIndex"
+            | "indexOf"
+            | "includes"
+            | "slice"
+            | "take"
+            | "drop"
+            | "skip"
+            | "concat"
+            | "flatten"
+            | "pop"
+    )
+}
+
+fn array_element_kind_from_concrete_type(ct: &ConcreteType) -> Option<TypedArrayKind> {
+    match ct {
+        ConcreteType::Array(elem) => should_use_typed_array(elem.as_ref()),
+        _ => None,
+    }
 }
 
 /// Task #108 companion: rewrite a return-type annotation by prefixing
@@ -3391,18 +3425,22 @@ impl BytecodeCompiler {
         // Capture receiver's extend type before args compilation overwrites compiler state.
         let receiver_extend_type =
             self.resolve_receiver_extend_type(receiver, &receiver_type_info, receiver_schema);
-        // Array `clone` is a native typed-array method. Letting the stdlib
-        // `Vec.clone` UFCS body win routes through `Vec.slice`, whose integer
-        // comparisons require a Number.cmp surface that is not the array clone
-        // carrier proof.
-        let prefer_native_array_clone = method == "clone"
-            && args.is_empty()
+        // Native array PHF methods take precedence when the receiver is
+        // statically proven as `Array<T>`. The core `extend Vec<T>` bodies for
+        // these names are useful documentation/fallbacks, but several still
+        // depend on generic scalar/operator surfaces (`len`, `cmp`, generic
+        // recursion) that are not the strict typed-array carrier proof. The
+        // proof here is compile-time `ConcreteType::Array(_)`, not runtime
+        // value inspection.
+        let receiver_concrete_type = concrete_type_for_expr(self, receiver);
+        let prefer_native_array_method = prefer_native_array_phf_method(method)
             && matches!(
-                crate::compiler::monomorphization::type_resolution::method_call_receiver_derived_concrete_type(
-                    self, receiver, method,
-                ),
-                Some(shape_value::v2::ConcreteType::Array(_))
+                receiver_concrete_type.as_ref(),
+                Some(ConcreteType::Array(_))
             );
+        let native_array_element_kind = receiver_concrete_type
+            .as_ref()
+            .and_then(array_element_kind_from_concrete_type);
 
         // Resolve closure-row schema from the receiver contract.
         // `receiver` was compiled immediately above and may carry Table<T> metadata.
@@ -3522,9 +3560,34 @@ impl BytecodeCompiler {
         // closure-compile path consumes `pending_closure_param_types`.
         self.install_pending_closure_param_types_for_hof(receiver, method, args)?;
 
-        // Compile arguments (closure_row_schema is consumed during closure compilation)
-        for arg in args {
-            self.compile_expr_as_value_or_placeholder(arg)?;
+        // Compile arguments (closure_row_schema is consumed during closure compilation).
+        //
+        // W18 arrays/vectors: `Array<T>.concat([])` has a compile-time receiver
+        // proof for the empty argument's element type (`T`). Thread that proof
+        // through the same `pending_variable_typed_array_kind` hand-off used by
+        // annotated empty arrays so the literal lowers to `NewTypedArray*(0)`
+        // instead of the deleted untyped `NewArray(0)` placeholder.
+        for (idx, arg) in args.iter().enumerate() {
+            let contextual_empty_array_kind = if prefer_native_array_method
+                && method == "concat"
+                && idx == 0
+            {
+                match arg {
+                    Expr::Array(elements, _) if elements.is_empty() => native_array_element_kind,
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(kind) = contextual_empty_array_kind {
+                let saved = self.pending_variable_typed_array_kind;
+                self.pending_variable_typed_array_kind = Some(kind);
+                let result = self.compile_expr_as_value_or_placeholder(arg);
+                self.pending_variable_typed_array_kind = saved;
+                result?;
+            } else {
+                self.compile_expr_as_value_or_placeholder(arg)?;
+            }
         }
 
         // Clear closure_row_schema after compiling args (in case it wasn't consumed)
@@ -3562,7 +3625,7 @@ impl BytecodeCompiler {
         // extend-method qualified name "Type.method" using the captured receiver type.
         // For numeric types, also check parent type: Int → Number (Int is a subtype of
         // Number for method dispatch, so `extend Number` methods apply to Int values).
-        let extend_func_idx = if prefer_native_array_clone {
+        let extend_func_idx = if prefer_native_array_method {
             None
         } else {
             receiver_extend_type.as_deref().and_then(|type_name| {
@@ -3580,7 +3643,7 @@ impl BytecodeCompiler {
                 })
             })
         };
-        let free_func_idx = if prefer_native_array_clone {
+        let free_func_idx = if prefer_native_array_method {
             None
         } else {
             self.find_function(method)
@@ -3720,7 +3783,7 @@ impl BytecodeCompiler {
                 None => vec![],
             };
             // Check impl methods (Type::method) and extend methods (Type.method)
-            let scoped_func_idx = if prefer_native_array_clone {
+            let scoped_func_idx = if prefer_native_array_method {
                 None
             } else {
                 extend_type_names.iter().find_map(|type_name| {
@@ -3734,7 +3797,7 @@ impl BytecodeCompiler {
             let trait_func_idx = scoped_func_idx
                 .is_none()
                 .then(|| {
-                    if prefer_native_array_clone {
+                    if prefer_native_array_method {
                         None
                     } else {
                         extend_type_names.iter().find_map(|type_name| {
@@ -3977,8 +4040,20 @@ impl BytecodeCompiler {
         // Propagate known return type for standard method calls
         self.last_expr_schema = None;
 
-        if prefer_native_array_clone {
-            self.last_expr_type_info = receiver_type_info.clone();
+        if prefer_native_array_method {
+            let method_expr = Expr::MethodCall {
+                receiver: Box::new(receiver.clone()),
+                method: method.to_string(),
+                args: args.to_vec(),
+                named_args: vec![],
+                optional: false,
+                span: call_site_span,
+            };
+            self.last_expr_type_info = self
+                .infer_expr_type(&method_expr)
+                .ok()
+                .as_ref()
+                .and_then(|ty| self.type_info_from_inferred_type(ty));
             self.clear_last_expr_reference_result();
             return Ok(());
         }

@@ -95,13 +95,10 @@ pub static MUT_SELF_HASHMAP_METHODS: phf::Set<&'static str> = phf_set! {
 /// `compile_expr_method_call`); listed here so the generic fallback
 /// path also writes back when the bespoke path isn't taken.
 ///
-/// **NOT listed:** `pop`. Pop's return value is the popped element
-/// (`Option<T>`), not the mutated array — generic-writeback semantics
-/// would corrupt the binding by writing the element bits into the
-/// array slot. The pre-ruling `pop` behaviour (mutation visible only
-/// when the user does `arr = arr.pop()` and discards the popped
-/// element) is preserved; a future amendment can add a tuple-return
-/// ABI for pop-shaped methods.
+/// **NOT listed:** `pop`. Pop's return value is the popped element, not
+/// the mutated array — generic-writeback semantics would corrupt the
+/// binding by writing the element bits into the array slot. Pop is
+/// registered below in the tuple-return ABI set instead.
 pub static MUT_SELF_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
     "push",
 };
@@ -110,8 +107,9 @@ pub static MUT_SELF_ARRAY_METHODS: phf::Set<&'static str> = phf_set! {
 ///
 /// Same return-value rule as `MUT_SELF_ARRAY_METHODS`: only listed when
 /// the handler returns the (mutated) receiver Arc. `popBack` /
-/// `popFront` return the popped element, so they stay off the writeback
-/// set (deferred to a future tuple-return ABI).
+/// `popFront` return the popped element, so they stay off this
+/// self-returning writeback set and are registered below in the
+/// tuple-return ABI set instead.
 pub static MUT_SELF_DEQUE_METHODS: phf::Set<&'static str> = phf_set! {
     "pushBack",
     "pushFront",
@@ -119,8 +117,8 @@ pub static MUT_SELF_DEQUE_METHODS: phf::Set<&'static str> = phf_set! {
 
 /// PriorityQueue methods that opt into `&mut self` semantics.
 ///
-/// `pop` returns the popped element, not the mutated queue — see
-/// `MUT_SELF_ARRAY_METHODS` for the return-value rule.
+/// `pop` returns the popped element, not the mutated queue, so it is
+/// registered below in the tuple-return ABI set instead.
 pub static MUT_SELF_PRIORITY_QUEUE_METHODS: phf::Set<&'static str> = phf_set! {
     "push",
 };

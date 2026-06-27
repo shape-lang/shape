@@ -157,6 +157,32 @@ fn require_closure(op: &str, arg: &KindedSlot) -> Result<(), VMError> {
     }
 }
 
+fn position_of_string_needle(
+    op: &'static str,
+    view: &V2TypedArrayView,
+    needle: &KindedSlot,
+) -> Result<Option<u32>, VMError> {
+    let needle_str = needle.as_str().ok_or_else(|| {
+        VMError::RuntimeError(format!(
+            "Array.{op}: expected string-compatible needle for Array<string>, got kind {:?}",
+            needle.kind
+        ))
+    })?;
+    for i in 0..view.len {
+        let (bits, kind) = read_element(view, i).ok_or_else(|| {
+            VMError::RuntimeError(format!(
+                "Array.{op}: read_element({i}) returned None for element kind {:?}",
+                view.elem_type
+            ))
+        })?;
+        let elem = KindedSlot::new(ValueSlot::from_raw(bits), kind);
+        if elem.as_str() == Some(needle_str) {
+            return Ok(Some(i));
+        }
+    }
+    Ok(None)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // J.5c SURFACE (value-equality handlers: `indexOf`, `includes`)
 //
@@ -591,6 +617,12 @@ pub(crate) fn handle_index_of_v2(
     }
     let view = extract_view("indexOf", &args[0])?;
     let needle = &args[1];
+    if view.elem_type == V2ElemType::String && needle.kind == NativeKind::String {
+        return match position_of_string_needle("indexOf", &view, needle)? {
+            Some(i) => Ok(KindedSlot::from_int(i as i64)),
+            None => Ok(KindedSlot::from_int(-1)),
+        };
+    }
     if !needle_kind_matches(view.elem_type, needle.kind) {
         return Ok(KindedSlot::from_int(-1));
     }
@@ -620,6 +652,11 @@ pub(crate) fn handle_includes_v2(
     }
     let view = extract_view("includes", &args[0])?;
     let needle = &args[1];
+    if view.elem_type == V2ElemType::String && needle.kind == NativeKind::String {
+        return Ok(KindedSlot::from_bool(
+            position_of_string_needle("includes", &view, needle)?.is_some(),
+        ));
+    }
     if !needle_kind_matches(view.elem_type, needle.kind) {
         return Ok(KindedSlot::from_bool(false));
     }

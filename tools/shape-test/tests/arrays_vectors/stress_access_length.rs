@@ -366,11 +366,14 @@ test()"#,
 /// Verifies array flatten already flat.
 #[test]
 fn test_array_flatten_already_flat() {
+    // Shape's strict flatten signature removes one nested array level and
+    // returns the receiver element type. For `Array<int>`, that result is
+    // `int`, so `.length()` is a static error rather than a no-op flatten.
     ShapeTest::new(
         r#"function test() { [1, 2, 3].flatten().length() }
 test()"#,
     )
-    .expect_number(3.0);
+    .expect_run_err_contains("Method 'length' not found on type 'int'");
 }
 
 /// Verifies array flatten mixed nested.
