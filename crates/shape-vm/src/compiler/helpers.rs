@@ -4326,7 +4326,7 @@ impl BytecodeCompiler {
                 .program
                 .functions
                 .iter()
-                .position(|f| f.name == *actual_name)
+                .rposition(|f| f.name == *actual_name)
             {
                 return Some(idx);
             }
@@ -4338,7 +4338,7 @@ impl BytecodeCompiler {
                 .program
                 .functions
                 .iter()
-                .position(|f| f.name == resolved)
+                .rposition(|f| f.name == resolved)
             {
                 return Some(idx);
             }
@@ -4355,7 +4355,7 @@ impl BytecodeCompiler {
                 .program
                 .functions
                 .iter()
-                .position(|f| f.name == *original)
+                .rposition(|f| f.name == *original)
             {
                 return Some(idx);
             }
@@ -4365,7 +4365,7 @@ impl BytecodeCompiler {
                     .program
                     .functions
                     .iter()
-                    .position(|f| f.name == resolved)
+                    .rposition(|f| f.name == resolved)
                 {
                     return Some(idx);
                 }
@@ -4379,7 +4379,7 @@ impl BytecodeCompiler {
                     .program
                     .functions
                     .iter()
-                    .position(|f| f.name == qualified)
+                    .rposition(|f| f.name == qualified)
                 {
                     return Some(idx);
                 }

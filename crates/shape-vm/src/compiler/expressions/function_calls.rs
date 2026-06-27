@@ -988,9 +988,13 @@ impl BytecodeCompiler {
         // callable values) must take priority over global function lookup.  Without this,
         // `fn apply(f, x) { f(x) }` would fail because `find_function("f")` returns None
         // and the code falls through to "Undefined function" error.
+        let resolved_module_binding_name = self.resolve_scoped_module_binding_name(name);
+        let source_function_shadows_builtin_binding = resolved_module_binding_name.is_some()
+            && self.classify_builtin_function(name).is_some()
+            && self.resolve_scoped_function_name(name).is_some();
         if self.resolve_local(name).is_some()
             || self.mutable_closure_captures.contains_key(name)
-            || self.resolve_scoped_module_binding_name(name).is_some()
+            || (resolved_module_binding_name.is_some() && !source_function_shadows_builtin_binding)
         {
             // R8 W9 B1 W17-marshal-return JIT surface-and-stop flag
             // (2026-05-25). Direct call to an imported stdlib function —
@@ -1023,9 +1027,7 @@ impl BytecodeCompiler {
             // Restrict to user-space main compilation (see
             // `compile_module_builtin_function_call` below for the
             // dep-module-bootstrap rationale).
-            if self.resolve_scoped_module_binding_name(name).is_some()
-                && self.module_scope_stack.is_empty()
-            {
+            if resolved_module_binding_name.is_some() && self.module_scope_stack.is_empty() {
                 self.program.has_w17_marshal_residual = true;
             }
             let expected_param_modes = if let Some(local_idx) = self.resolve_local(name) {
@@ -5793,6 +5795,98 @@ mod ws2_zeta_b_tests {
              let r = countdown(3, 42)\n",
         )
         .expect("self-recursive generic must compile");
+    }
+}
+
+#[cfg(test)]
+mod local_builtin_shadowing_tests {
+    use crate::bytecode::{BuiltinFunction, OpCode, Operand};
+    use crate::compiler::BytecodeCompiler;
+
+    fn compile_with_graph_prelude(source: &str) -> crate::bytecode::BytecodeProgram {
+        let program = shape_ast::parser::parse_program(source).expect("parse failed");
+        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+        let (graph, stdlib_names, prelude_imports) =
+            crate::module_resolution::build_graph_and_stdlib_names(&program, &mut loader, &[])
+                .expect("graph build failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.stdlib_function_names = stdlib_names;
+        compiler
+            .compile_with_graph_and_prelude(&program, graph, &prelude_imports)
+            .expect("compile failed")
+    }
+
+    fn main_body(bytecode: &crate::bytecode::BytecodeProgram) -> &[crate::bytecode::Instruction] {
+        let main = bytecode
+            .functions
+            .iter()
+            .find(|f| f.name == "__main__")
+            .expect("__main__ function exists");
+        &bytecode.instructions[main.entry_point..main.entry_point + main.body_length]
+    }
+
+    #[test]
+    fn complex_math_library_calls_source_functions_not_builtin_names() {
+        let bytecode = compile_with_graph_prelude(
+            r#"
+            fn abs(x) { if x < 0 { 0 - x } else { x } }
+            fn max(a, b) { if a > b { a } else { b } }
+            fn min(a, b) { if a < b { a } else { b } }
+            fn clamp(x, lo, hi) { max(lo, min(x, hi)) }
+
+            print(abs(-7))
+            print(max(3, 9))
+            print(min(3, 9))
+            print(clamp(15, 0, 10))
+            print(clamp(-5, 0, 10))
+            print(clamp(5, 0, 10))
+            "#,
+        );
+
+        let body = main_body(&bytecode);
+        let called_names: Vec<&str> = body
+            .iter()
+            .filter_map(|instr| match (&instr.opcode, &instr.operand) {
+                (OpCode::Call, Some(Operand::Function(id))) => {
+                    Some(bytecode.functions[id.0 as usize].name.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+
+        for expected in ["abs", "max", "min", "clamp"] {
+            assert!(
+                called_names.contains(&expected),
+                "__main__ should call local function {expected}, calls were {called_names:?}"
+            );
+        }
+
+        let shadowed_builtin_calls: Vec<BuiltinFunction> =
+            body.iter()
+                .filter_map(|instr| match (&instr.opcode, &instr.operand) {
+                    (
+                        OpCode::BuiltinCall,
+                        Some(Operand::Builtin(builtin @ BuiltinFunction::Max)),
+                    )
+                    | (
+                        OpCode::BuiltinCall,
+                        Some(Operand::Builtin(builtin @ BuiltinFunction::Min)),
+                    )
+                    | (
+                        OpCode::BuiltinCall,
+                        Some(Operand::Builtin(builtin @ BuiltinFunction::Clamp)),
+                    ) => Some(*builtin),
+                    _ => None,
+                })
+                .collect();
+        assert!(
+            shadowed_builtin_calls.is_empty(),
+            "__main__ must not lower local max/min/clamp calls as builtins: {shadowed_builtin_calls:?}"
+        );
+        assert!(
+            !body.iter().any(|instr| instr.opcode == OpCode::CallValue),
+            "__main__ must not lower local max/min/clamp calls through module-binding CallValue"
+        );
     }
 }
 
