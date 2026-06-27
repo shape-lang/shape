@@ -126,10 +126,10 @@ async fn run_doctests(path: &Path, verbose: bool) -> Result<()> {
     if path.is_dir() {
         // Recursively find all markdown files
         collect_markdown_files(path, &mut files).await?;
-    } else if path.extension().is_some_and(|e| e == "md") {
+    } else if is_markdown_file(path) {
         files.push(path.to_path_buf());
     } else {
-        bail!("path must be a markdown file or directory");
+        bail!("path must be a markdown (.md or .mdx) file or directory");
     }
 
     if files.is_empty() {
@@ -137,6 +137,7 @@ async fn run_doctests(path: &Path, verbose: bool) -> Result<()> {
         return Ok(());
     }
 
+    files.sort();
     println!("Running doctests on {} markdown files...\n", files.len());
 
     let mut total_tests = 0;
@@ -289,6 +290,13 @@ fn indent_code(code: &str, prefix: &str) -> String {
         .join("\n")
 }
 
+fn is_markdown_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("md" | "mdx")
+    )
+}
+
 async fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     let mut entries = fs::read_dir(dir).await?;
 
@@ -301,7 +309,7 @@ async fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<
                     Box::pin(collect_markdown_files(&path, files)).await?;
                 }
             }
-        } else if path.extension().is_some_and(|e| e == "md") {
+        } else if is_markdown_file(&path) {
             files.push(path);
         }
     }
@@ -426,5 +434,12 @@ let x = 1
         assert_eq!(tests.len(), 2);
         assert_eq!(tests[0].language, "javascript");
         assert_eq!(tests[1].language, "shape");
+    }
+
+    #[test]
+    fn test_markdown_file_extensions_include_mdx() {
+        assert!(is_markdown_file(Path::new("chapter.md")));
+        assert!(is_markdown_file(Path::new("chapter.mdx")));
+        assert!(!is_markdown_file(Path::new("chapter.txt")));
     }
 }
