@@ -1282,6 +1282,86 @@ impl super::BytecodeCompiler {
         }
     }
 
+    /// Function compilation must isolate function-local empty-array
+    /// accumulators because local slot indices are reused per function.
+    /// Module-binding accumulators are different: they name top-level storage
+    /// and may be resolved by a nested function such as
+    /// `fn push(v) { stack = stack.push(v) }`. Keep those visible while
+    /// compiling functions, but save caller-local entries here.
+    pub(crate) fn take_local_empty_array_accumulators(
+        &mut self,
+    ) -> std::collections::HashMap<super::EmptyArrayAccumulatorKey, super::EmptyArrayAccumulator>
+    {
+        let mut saved = std::collections::HashMap::new();
+        let mut retained = std::collections::HashMap::new();
+        for (key, acc) in std::mem::take(&mut self.empty_array_accumulators) {
+            match key {
+                super::EmptyArrayAccumulatorKey::Local(_) => {
+                    saved.insert(key, acc);
+                }
+                super::EmptyArrayAccumulatorKey::ModuleBinding(_) => {
+                    retained.insert(key, acc);
+                }
+            }
+        }
+        self.empty_array_accumulators = retained;
+        saved
+    }
+
+    /// Restore caller-local empty-array accumulators after a nested function
+    /// compile. Any local accumulators created by the nested function are
+    /// discarded here after its local-only finalizer has run; module-binding
+    /// accumulators stay in the live map so a function body can promote them.
+    pub(crate) fn restore_local_empty_array_accumulators(
+        &mut self,
+        saved: std::collections::HashMap<
+            super::EmptyArrayAccumulatorKey,
+            super::EmptyArrayAccumulator,
+        >,
+    ) {
+        self.empty_array_accumulators
+            .retain(|key, _| !matches!(key, super::EmptyArrayAccumulatorKey::Local(_)));
+        self.empty_array_accumulators.extend(saved);
+    }
+
+    /// Surface unresolved function-local `let mut out = []` accumulators while
+    /// leaving module-binding accumulators for the top-level finalizer. This
+    /// mirrors [`Self::finalize_unresolved_empty_array_accumulators`] but is
+    /// scoped to local-slot entries so nested function compilation can still
+    /// consume top-level grow-pattern proofs.
+    pub(crate) fn finalize_unresolved_local_empty_array_accumulators(
+        &mut self,
+    ) -> shape_ast::error::Result<()> {
+        let unresolved_key = self
+            .empty_array_accumulators
+            .keys()
+            .find(|key| matches!(key, super::EmptyArrayAccumulatorKey::Local(_)))
+            .copied();
+        if let Some(key) = unresolved_key {
+            let acc = self
+                .empty_array_accumulators
+                .get(&key)
+                .expect("key came from the accumulator map")
+                .clone();
+            self.empty_array_accumulators
+                .retain(|key, _| !matches!(key, super::EmptyArrayAccumulatorKey::Local(_)));
+            return Err(shape_ast::error::ShapeError::SemanticError {
+                message: format!(
+                    "empty array `{}` has an un-resolvable element type. \
+                     It is created empty (`[]`) with no `Array<T>` \
+                     annotation and is never pushed to, so the compiler \
+                     cannot prove what element type it holds. Strict typing \
+                     requires a known concrete element type: add an \
+                     annotation (`let {}: Array<T> = []`) or remove the \
+                     unused binding.",
+                    acc.var_name, acc.var_name,
+                ),
+                location: acc.literal_loc.clone(),
+            });
+        }
+        Ok(())
+    }
+
     /// Phase 4b Round 6 WS-1b W16.2-C residual (2026-05-21): surface-and-stop
     /// for bare empty-array accumulators whose element type was never
     /// resolved.
@@ -1851,6 +1931,29 @@ mod compile_integration_tests {
             "function-local int accumulator must allocate via NewTypedArrayI64"
         );
         assert!(!has_opcode(&prog, OpCode::NewArray));
+    }
+
+    #[test]
+    fn ws1b_module_accumulator_promoted_from_nested_function_push() {
+        // W25 empty-grow proof: a top-level unannotated accumulator can be
+        // grown through a nested function. The module-binding placeholder must
+        // stay visible during function compilation so the `push(val)` body can
+        // patch it from the statically inferred type of `val`.
+        let prog = compile(
+            "let mut stack = []\nfn push(val) { stack = stack.push(val) }\npush(10)\npush(20)\nstack.len()\n",
+        );
+        assert!(
+            has_opcode(&prog, OpCode::NewTypedArrayI64),
+            "module accumulator grown via nested function must allocate via NewTypedArrayI64"
+        );
+        assert!(
+            has_opcode(&prog, OpCode::TypedArrayPushI64),
+            "nested function push must use TypedArrayPushI64 after static proof"
+        );
+        assert!(
+            !has_opcode(&prog, OpCode::NewArray),
+            "nested function promotion must not leave the generic NewArray placeholder"
+        );
     }
 
     #[test]
