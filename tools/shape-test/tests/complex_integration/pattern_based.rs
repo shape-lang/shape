@@ -129,7 +129,7 @@ fn test_complex_option_chain_safe_operations() {
         fn compute(a, b) {
             match safe_div(a, b) {
                 Ok(v) => match safe_sqrt(v) {
-                    Ok(r) => "ok: " + r,
+                    Ok(r) => f"ok: {r}",
                     Err(e) => e
                 },
                 Err(e) => e
@@ -157,7 +157,7 @@ fn test_complex_result_chain() {
         fn process(s) {
             match parse_positive(s) {
                 Ok(v) => match validate(v) {
-                    Ok(n) => "valid: " + n,
+                    Ok(n) => f"valid: {n}",
                     Err(e) => "validation: " + e
                 },
                 Err(e) => "parse: " + e
@@ -235,13 +235,17 @@ fn test_complex_dispatch_table() {
     ShapeTest::new(
         r#"
         let ops = HashMap()
-            .set("add", |a, b| a + b)
-            .set("mul", |a, b| a * b)
-            .set("sub", |a, b| a - b)
-        let add_fn = ops.get("add")
-        let mul_fn = ops.get("mul")
-        print(add_fn(3, 4))
-        print(mul_fn(5, 6))
+            .set("add", |a: int, b: int| { a + b })
+            .set("mul", |a: int, b: int| { a * b })
+            .set("sub", |a: int, b: int| { a - b })
+        match ops.get("add") {
+            Some(add_fn) => print(add_fn(3, 4)),
+            None => print(0)
+        }
+        match ops.get("mul") {
+            Some(mul_fn) => print(mul_fn(5, 6)),
+            None => print(0)
+        }
     "#,
     )
     .expect_output("7\n30");
@@ -256,7 +260,7 @@ fn test_complex_fizzbuzz_match_guards() {
                 x where x % 15 == 0 => "FizzBuzz",
                 x where x % 3 == 0 => "Fizz",
                 x where x % 5 == 0 => "Buzz",
-                x => x
+                x => f"{x}"
             }
         }
         print(fizzbuzz(3))

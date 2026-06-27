@@ -39,14 +39,15 @@ fn test_program_score_tracker() {
 fn test_program_task_list_manager() {
     ShapeTest::new(
         r#"
+        type Task { name: string, done: bool }
         let mut tasks = []
         fn add_task(name, done) {
-            tasks = tasks.push(HashMap().set("name", name).set("done", done))
+            tasks = tasks.push(Task { name: name, done: done })
         }
         fn count_done() {
             let mut c = 0
             for t in tasks {
-                if t.get("done") == true { c = c + 1 }
+                if t.done { c = c + 1 }
             }
             c
         }
@@ -154,9 +155,9 @@ fn test_program_number_formatter() {
     ShapeTest::new(
         r#"
         fn format_number(n) {
-            if n < 1000 { return n + "" }
-            if n < 1000000 { return (n / 1000) + "K" }
-            return (n / 1000000) + "M"
+            if n < 1000 { return f"{n}" }
+            if n < 1000000 { return f"{n / 1000}K" }
+            return f"{n / 1000000}M"
         }
         print(format_number(42))
         print(format_number(1500))
@@ -171,6 +172,7 @@ fn test_program_simple_calculator_repl() {
     ShapeTest::new(
         r#"
         enum Op { Add, Sub, Mul, Div }
+        type Operation { a: int, op: Op, b: int }
         fn calc(a, op, b) {
             match op {
                 Op::Add => Ok(a + b),
@@ -180,14 +182,14 @@ fn test_program_simple_calculator_repl() {
             }
         }
         let operations = [
-            [10, Op::Add, 5],
-            [20, Op::Sub, 8],
-            [6, Op::Mul, 7],
-            [15, Op::Div, 3],
-            [10, Op::Div, 0]
+            Operation { a: 10, op: Op::Add, b: 5 },
+            Operation { a: 20, op: Op::Sub, b: 8 },
+            Operation { a: 6, op: Op::Mul, b: 7 },
+            Operation { a: 15, op: Op::Div, b: 3 },
+            Operation { a: 10, op: Op::Div, b: 0 }
         ]
-        for op in operations {
-            match calc(op[0], op[1], op[2]) {
+        for entry in operations {
+            match calc(entry.a, entry.op, entry.b) {
                 Ok(v) => print(v),
                 Err(e) => print("Error: " + e)
             }
@@ -205,19 +207,17 @@ fn test_program_word_counter() {
             let words = text.split(" ")
             let mut counts = HashMap()
             for word in words {
-                let existing = counts.get(word)
-                if existing == None {
-                    counts = counts.set(word, 1)
-                } else {
-                    counts = counts.set(word, existing + 1)
+                match counts.get(word) {
+                    Some(existing) => { counts = counts.set(word, existing + 1) },
+                    None => { counts = counts.set(word, 1) }
                 }
             }
             counts
         }
         let wc = count_words("the cat sat on the mat the cat")
-        print(wc.get("the"))
-        print(wc.get("cat"))
-        print(wc.get("sat"))
+        print(match wc.get("the") { Some(count) => count, None => 0 })
+        print(match wc.get("cat") { Some(count) => count, None => 0 })
+        print(match wc.get("sat") { Some(count) => count, None => 0 })
     "#,
     )
     .expect_output("3\n2\n1");
@@ -252,7 +252,7 @@ fn test_program_matrix_operations() {
         print(scaled[1][1])
     "#,
     )
-    .expect_output("6\n8\n10\n12\n3.0\n12.0");
+    .expect_output("6\n8\n10\n12\n3\n12");
 }
 
 #[test]
