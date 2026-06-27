@@ -274,6 +274,38 @@ fn string_plus_nonstring_error(
     }
 }
 
+fn string_scalar_concat_opcode_for_type_name(type_name: &str) -> Option<OpCode> {
+    if shape_runtime::type_system::BuiltinTypes::is_integer_type_name(type_name) {
+        return Some(OpCode::StringConcatInt);
+    }
+    match type_name {
+        "number" | "f64" => Some(OpCode::StringConcatNumber),
+        "bool" => Some(OpCode::StringConcatBool),
+        _ => None,
+    }
+}
+
+fn string_scalar_concat_opcode_for_native_kind(
+    kind: crate::type_tracking::NativeKind,
+) -> Option<OpCode> {
+    use crate::type_tracking::NativeKind;
+    match kind {
+        NativeKind::Int8
+        | NativeKind::Int16
+        | NativeKind::Int32
+        | NativeKind::Int64
+        | NativeKind::IntSize
+        | NativeKind::UInt8
+        | NativeKind::UInt16
+        | NativeKind::UInt32
+        | NativeKind::UInt64
+        | NativeKind::UIntSize => Some(OpCode::StringConcatInt),
+        NativeKind::Float64 | NativeKind::NullableFloat64 => Some(OpCode::StringConcatNumber),
+        NativeKind::Bool => Some(OpCode::StringConcatBool),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NumericEmitResult {
     EmittedTyped,
@@ -1870,17 +1902,11 @@ impl BytecodeCompiler {
                         return Ok(());
                     }
 
-                    // Strict no-coercion ruling (user 2026-06-14): `string +
-                    // non-string` is a COMPILE ERROR. The former R5.5 typed
-                    // string + scalar concat path (which emitted
-                    // `StringConcatInt`/`Number`/`Bool` auto-stringify opcodes)
-                    // is deleted. Under strict typing the non-string operand is
-                    // NOT implicitly stringified; the both-strings case already
-                    // returned above via `StringConcatTyped`. Here we detect the
-                    // mixed case (exactly one operand a string/char, the other a
-                    // known non-string concrete type) and reject with a
-                    // diagnostic that names f-string interpolation as the
-                    // alternative.
+                    // Static string + scalar concat. This is selected only
+                    // when the left operand is proven string-like and the right
+                    // operand's scalar kind is proven at compile time. Unknown
+                    // or unsupported mixed cases still reject below; no generic
+                    // stringify or runtime tag probe is used.
                     //
                     // Resolve string-ness via the same multi-source order the
                     // surrounding arithmetic branch uses: `infer_expr_type`
@@ -1897,6 +1923,23 @@ impl BytecodeCompiler {
                             self.storage_hint_for_expr(right),
                             Some(crate::type_tracking::NativeKind::String)
                         );
+                    if lhs_is_string && !rhs_is_string {
+                        let scalar_opcode = rhs_name
+                            .as_deref()
+                            .and_then(string_scalar_concat_opcode_for_type_name)
+                            .or_else(|| {
+                                self.storage_hint_for_expr(right)
+                                    .and_then(string_scalar_concat_opcode_for_native_kind)
+                            });
+                        if let Some(opcode) = scalar_opcode {
+                            self.emit(Instruction::simple(opcode));
+                            self.last_expr_schema = None;
+                            self.last_expr_type_info = Some(
+                                crate::type_tracking::VariableTypeInfo::named("string".to_string()),
+                            );
+                            return Ok(());
+                        }
+                    }
                     // Exactly one side is a string. The other operand's type is
                     // resolved (numeric/bool/heap) — there is no valid `+` here.
                     if lhs_is_string != rhs_is_string {

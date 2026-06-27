@@ -267,6 +267,76 @@ impl BytecodeCompiler {
         format!("__imported_module__::{}", module_path)
     }
 
+    fn stamp_last_expr_from_static_type(&mut self, ty: &Type) -> bool {
+        if Self::type_contains_unknown(ty) {
+            return false;
+        }
+        let Some(annotation) = ty.to_annotation() else {
+            return false;
+        };
+        let Some(type_info) = self.type_info_from_annotation(&annotation) else {
+            return false;
+        };
+        self.last_expr_type_info = Some(type_info);
+        self.last_expr_schema = self
+            .last_expr_type_info
+            .as_ref()
+            .and_then(Self::value_schema_from_type_info);
+        true
+    }
+
+    fn stamp_last_expr_from_static_call_expr(&mut self, name: &str, args: &[Expr], span: Span) {
+        if self.last_expr_type_info.is_some() {
+            return;
+        }
+        let call_expr = Expr::FunctionCall {
+            name: name.to_string(),
+            args: args.to_vec(),
+            named_args: Vec::new(),
+            span,
+        };
+        if let Ok(return_ty) = self.infer_expr_type(&call_expr) {
+            self.stamp_last_expr_from_static_type(&return_ty);
+        }
+    }
+
+    fn current_function_callable_param_return_type(
+        &self,
+        param_name: &str,
+        arg_count: Option<usize>,
+    ) -> Option<Type> {
+        let current_idx = self.current_function?;
+        let function_name = self.program.functions.get(current_idx)?.name.as_str();
+        let Type::Function { params, .. } = self
+            .inference_facts
+            .function_signature(function_name)?
+            .canonicalize()
+        else {
+            return None;
+        };
+        let param_idx = self
+            .current_function_params
+            .iter()
+            .position(|param| param.simple_name() == Some(param_name))?;
+        let Type::Function {
+            params: callable_params,
+            returns,
+        } = params.get(param_idx)?.canonicalize()
+        else {
+            return None;
+        };
+        if let Some(expected) = arg_count
+            && callable_params.len() != expected
+        {
+            return None;
+        }
+        let return_ty = *returns;
+        if Self::type_contains_unknown(&return_ty) {
+            return None;
+        }
+        Some(return_ty)
+    }
+
     fn ensure_hidden_native_module_binding(&mut self, module_path: &str) -> String {
         let binding_name = Self::hidden_native_module_binding_name(module_path);
         if !self.module_bindings.contains_key(&binding_name) {
@@ -1028,8 +1098,11 @@ impl BytecodeCompiler {
             // callable binding structurally from `InferenceFacts` or a retained
             // closure body peek, then render it only for the residual tracker
             // display-name stamp. No slot-indexed return string map remains.
-            let tracked_callable_return_type =
-                self.callable_binding_return_type(name, Some(args.len()));
+            let tracked_callable_return_type = self
+                .callable_binding_return_type(name, Some(args.len()))
+                .or_else(|| {
+                    self.current_function_callable_param_return_type(name, Some(args.len()))
+                });
             let tracked_callable_rt: Option<String> = tracked_callable_return_type
                 .as_ref()
                 .and_then(Self::inferred_type_to_hint_name);
@@ -1731,6 +1804,7 @@ impl BytecodeCompiler {
                 .last_expr_type_info
                 .as_ref()
                 .and_then(Self::value_schema_from_type_info);
+            self.stamp_last_expr_from_static_call_expr(&call_name, args, span);
 
             // Propagate return type for typed opcode emission
             if let Some(return_reference_summary) = return_reference_summary {
@@ -5832,6 +5906,66 @@ mod wave1a_partb_fn_typed_param_tests {
             ),
             42,
         );
+    }
+
+    #[test]
+    fn callable_param_return_stamps_local_result() {
+        try_compile(
+            r#"
+            fn try_apply(f, val) {
+                let result = f(val)
+                if result < 0 { Err("negative result") } else { Ok(result) }
+            }
+            match try_apply(|x| x * 2 - 100, 30) {
+                Ok(v) => "ok: " + v,
+                Err(e) => "err: " + e
+            }
+            "#,
+        )
+        .expect("callable param return type must flow into local result and Result payload");
+    }
+
+    #[test]
+    fn unannotated_result_payload_flows_through_named_calls() {
+        try_compile(
+            r#"
+            fn safe_divide(a, b) {
+                if b == 0 { return Err("division by zero") }
+                Ok(a / b)
+            }
+            fn process_division(a, b) {
+                match safe_divide(a, b) {
+                    Ok(v) => {
+                        if v > 10 {
+                            "large: " + v
+                        } else {
+                            "small: " + v
+                        }
+                    },
+                    Err(e) => "error: " + e
+                }
+            }
+            process_division(100, 5)
+            "#,
+        )
+        .expect("unannotated named Result payloads must remain statically typed through match");
+    }
+
+    #[test]
+    fn nested_returned_closure_call_compiles_with_static_param_facts() {
+        try_compile(
+            r#"
+            fn make_adder(base) {
+                |offset| {
+                    |x| base + offset + x
+                }
+            }
+            let intermediate = make_adder(5)
+            let add_fn = intermediate(3)
+            add_fn(10)
+            "#,
+        )
+        .expect("nested returned closure params and return must be statically provable");
     }
 
     // -- Indirected-callable COMPLETENESS (full-inference ruling) -----------
