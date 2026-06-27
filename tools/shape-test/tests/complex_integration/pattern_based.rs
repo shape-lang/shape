@@ -119,17 +119,17 @@ fn test_complex_pipeline_with_named_functions() {
 fn test_complex_option_chain_safe_operations() {
     ShapeTest::new(
         r#"
-        fn safe_div(a, b) {
+        fn safe_div(a: int, b: int) -> Result<int> {
             if b == 0 { Err("div error") } else { Ok(a / b) }
         }
-        fn safe_sqrt(x) {
+        fn safe_sqrt(x: int) -> Result<int> {
             if x < 0 { Err("sqrt error") } else { Ok(x) }
         }
 
         fn compute(a, b) {
             match safe_div(a, b) {
                 Ok(v) => match safe_sqrt(v) {
-                    Ok(r) => "ok: " + r,
+                    Ok(r) => f"ok: {r}",
                     Err(e) => e
                 },
                 Err(e) => e
@@ -157,10 +157,10 @@ fn test_complex_result_chain() {
         fn process(s) {
             match parse_positive(s) {
                 Ok(v) => match validate(v) {
-                    Ok(n) => "valid: " + n,
-                    Err(e) => "validation: " + e
+                    Ok(n) => f"valid: {n}",
+                    Err(e) => f"validation: {e}"
                 },
-                Err(e) => "parse: " + e
+                Err(e) => f"parse: {e}"
             }
         }
         print(process("5"))
@@ -256,7 +256,7 @@ fn test_complex_fizzbuzz_match_guards() {
                 x where x % 15 == 0 => "FizzBuzz",
                 x where x % 3 == 0 => "Fizz",
                 x where x % 5 == 0 => "Buzz",
-                x => x
+                x => f"{x}"
             }
         }
         print(fizzbuzz(3))
