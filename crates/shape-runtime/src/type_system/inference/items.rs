@@ -744,6 +744,34 @@ impl TypeInferenceEngine {
                                 .insert(func.name.clone(), idx);
                         }
                     }
+                    if let Expr::Array(elements, _) = tail_values[0] {
+                        let mut array_param_idx: Option<usize> = None;
+                        let mut all_elements_match = !elements.is_empty();
+                        for element in elements {
+                            let Expr::FunctionCall { name, .. } = element else {
+                                all_elements_match = false;
+                                break;
+                            };
+                            let Some(&idx) = unannotated_param_index.get(name.as_str()) else {
+                                all_elements_match = false;
+                                break;
+                            };
+                            match array_param_idx {
+                                Some(existing) if existing != idx => {
+                                    all_elements_match = false;
+                                    break;
+                                }
+                                Some(_) => {}
+                                None => array_param_idx = Some(idx),
+                            }
+                        }
+                        if all_elements_match {
+                            if let Some(idx) = array_param_idx {
+                                self.callable_array_return_from_fn_param
+                                    .insert(func.name.clone(), idx);
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -1206,12 +1206,14 @@ impl BytecodeCompiler {
                 let mut ref_borrow = None;
                 let init_err = if let Some(init_expr) = &var_decl.value {
                     let saved_pending_variable_name = self.pending_variable_name.clone();
+                    let saved_pending_variable_span = self.pending_variable_span;
                     let saved_pending_variable_typed_array_kind =
                         self.pending_variable_typed_array_kind;
                     self.pending_variable_name = var_decl
                         .pattern
                         .as_identifier()
                         .map(|name| name.to_string());
+                    self.pending_variable_span = var_decl.pattern.as_identifier_span();
                     // v2 Phase 3.1 (Agent 3): when the binding has an
                     // explicit `Array<T>` annotation whose element type
                     // maps to a typed-array kind, signal it to
@@ -1231,12 +1233,14 @@ impl BytecodeCompiler {
                         Ok(tracked_borrow) => {
                             ref_borrow = tracked_borrow;
                             self.pending_variable_name = saved_pending_variable_name;
+                            self.pending_variable_span = saved_pending_variable_span;
                             self.pending_variable_typed_array_kind =
                                 saved_pending_variable_typed_array_kind;
                             None
                         }
                         Err(e) => {
                             self.pending_variable_name = saved_pending_variable_name;
+                            self.pending_variable_span = saved_pending_variable_span;
                             self.pending_variable_typed_array_kind =
                                 saved_pending_variable_typed_array_kind;
                             // Push null as placeholder so the variable still gets registered
@@ -1439,12 +1443,14 @@ impl BytecodeCompiler {
                     let mut ref_borrow = None;
                     if let Some(init_expr) = &var_decl.value {
                         let saved_pending_variable_name = self.pending_variable_name.clone();
+                        let saved_pending_variable_span = self.pending_variable_span;
                         let saved_pending_variable_typed_array_kind =
                             self.pending_variable_typed_array_kind;
                         self.pending_variable_name = var_decl
                             .pattern
                             .as_identifier()
                             .map(|name| name.to_string());
+                        self.pending_variable_span = var_decl.pattern.as_identifier_span();
                         // v2 Phase 3.1 (Agent 3): see ModuleBinding case above.
                         // Phase 4b Round 4 W16.2-A (2026-05-18): user-struct
                         // annotation support via `resolve_typed_array_kind_from_annotation`.
@@ -1454,6 +1460,7 @@ impl BytecodeCompiler {
                             .and_then(|ann| self.resolve_typed_array_kind_and_record_trait(ann));
                         let compile_result = self.compile_expr_for_reference_binding(init_expr);
                         self.pending_variable_name = saved_pending_variable_name;
+                        self.pending_variable_span = saved_pending_variable_span;
                         self.pending_variable_typed_array_kind =
                             saved_pending_variable_typed_array_kind;
                         ref_borrow = compile_result?;
@@ -5286,6 +5293,7 @@ impl BytecodeCompiler {
                 // compile_typed_object_literal uses self to include hoisted fields in the schema.
                 self.pending_variable_name =
                     var_decl.pattern.as_identifier().map(|s| s.to_string());
+                self.pending_variable_span = var_decl.pattern.as_identifier_span();
                 // v2 Phase 3.1 (Agent 3): when the binding has an explicit
                 // `Array<T>` annotation whose element type maps to a
                 // typed-array kind, signal it to `compile_expr_array` so
@@ -5401,6 +5409,7 @@ impl BytecodeCompiler {
                 // so subsequent typed Get/Set/Push opcode emission can
                 // verify the receiver is actually a v2 typed array.
                 self.pending_variable_name = None;
+                self.pending_variable_span = None;
                 let mut captured_typed_array_kind = self.pending_variable_typed_array_kind;
                 self.pending_variable_typed_array_kind = None;
                 // Kind-changing-map carrier reconciliation (2026-06-15):
@@ -6411,8 +6420,10 @@ impl BytecodeCompiler {
 
                 // Compile value
                 let saved_pending_variable_name = self.pending_variable_name.clone();
+                let saved_pending_variable_span = self.pending_variable_span;
                 self.pending_variable_name =
                     assign.pattern.as_identifier().map(|name| name.to_string());
+                self.pending_variable_span = assign.pattern.as_identifier_span();
                 // V3-S5 empty-array reassign (STAGE T4, 2026-06-20): an empty
                 // array literal RHS (`a = []`) carries no element type of its
                 // own — the var-decl path proves it from the `Array<T>`
@@ -6447,6 +6458,7 @@ impl BytecodeCompiler {
                 let compile_result = self.compile_expr_for_reference_binding(&assign.value);
                 self.pending_variable_typed_array_kind = saved_pending_typed_array_kind;
                 self.pending_variable_name = saved_pending_variable_name;
+                self.pending_variable_span = saved_pending_variable_span;
                 let ref_borrow = compile_result?;
                 let assigned_ident = assign.pattern.as_identifier().map(str::to_string);
 

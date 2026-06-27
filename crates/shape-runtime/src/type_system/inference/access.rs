@@ -1376,6 +1376,30 @@ impl TypeInferenceEngine {
                 }
             }
         }
+        if let Some(&fn_param_idx) = self.callable_array_return_from_fn_param.get(name) {
+            if let Some(arg_ty) = arg_types.get(fn_param_idx) {
+                let resolved_arg = self.solver.unifier().apply_substitutions(arg_ty);
+                let arg_return = match &resolved_arg {
+                    Type::Function { returns, .. } => Some((**returns).clone()),
+                    Type::Concrete(TypeAnnotation::Function { returns, .. }) => {
+                        match annotation_as_tyvar(returns) {
+                            Some(_) => None,
+                            None => Some(Type::Concrete((**returns).clone())),
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(genuine) = arg_return {
+                    let array_return = BuiltinTypes::array(genuine);
+                    self.push_constraint_with_origin(
+                        inferred_result_type.clone(),
+                        array_return.clone(),
+                        origin,
+                    );
+                    return Ok(array_return);
+                }
+            }
+        }
 
         Ok(inferred_result_type)
     }

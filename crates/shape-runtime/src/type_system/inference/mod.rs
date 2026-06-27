@@ -225,6 +225,11 @@ pub struct TypeInferenceEngine {
     /// number — no defaulting). An unresolved `R` leaves the return a variable,
     /// so the case SURFACEs exactly as before (no fabrication).
     pub(crate) callable_return_from_fn_param: HashMap<String, usize>,
+    /// HOF array-return aliasing. For a function whose return is an array literal
+    /// whose elements are calls to the same fn-typed parameter
+    /// (`fn map_pair(f,a,b){ [f(a), f(b)] }`), records the callable parameter
+    /// index so the array element type is the genuine callable return.
+    pub(crate) callable_array_return_from_fn_param: HashMap<String, usize>,
     /// Whether each callable parameter has a default value.
     /// Used for compile-time arity validation at call sites.
     pub(crate) callable_param_defaults: HashMap<String, Vec<bool>>,
@@ -451,6 +456,7 @@ impl TypeInferenceEngine {
             callsite_param_types: HashMap::new(),
             callable_param_source_vars: HashMap::new(),
             callable_return_from_fn_param: HashMap::new(),
+            callable_array_return_from_fn_param: HashMap::new(),
             callable_param_defaults,
             callable_numeric_param_indices: HashMap::new(),
             deferred_closure_numeric_param_vars: std::collections::HashSet::new(),
@@ -1920,6 +1926,7 @@ impl TypeInferenceEngine {
         self.pending_return_unions.clear();
         self.callable_param_source_vars.clear();
         self.callable_return_from_fn_param.clear();
+        self.callable_array_return_from_fn_param.clear();
         self.callable_param_defaults.clear();
         self.callable_numeric_param_indices.clear();
         self.deferred_closure_numeric_param_vars.clear();
@@ -2012,6 +2019,7 @@ impl TypeInferenceEngine {
         self.pending_return_unions.clear();
         self.callable_param_source_vars.clear();
         self.callable_return_from_fn_param.clear();
+        self.callable_array_return_from_fn_param.clear();
         self.callable_param_defaults.clear();
         self.callable_numeric_param_indices.clear();
         self.deferred_closure_numeric_param_vars.clear();
@@ -2213,6 +2221,26 @@ impl TypeInferenceEngine {
                 continue;
             }
             hof_return_constraints.push(((**returns).clone(), genuine));
+        }
+        for (fn_name, &fn_param_idx) in &self.callable_array_return_from_fn_param {
+            let Some(Type::Function { params, returns }) = types.get(fn_name) else {
+                continue;
+            };
+            let Some(Type::Function {
+                returns: param_returns,
+                ..
+            }) = params.get(fn_param_idx)
+            else {
+                continue;
+            };
+            let genuine = self
+                .solver
+                .unifier()
+                .apply_substitutions(param_returns.as_ref());
+            if matches!(genuine, Type::Variable(_) | Type::Constrained { .. }) {
+                continue;
+            }
+            hof_return_constraints.push(((**returns).clone(), BuiltinTypes::array(genuine)));
         }
         if !hof_return_constraints.is_empty() {
             if let Err(err) = self.solver.solve(&mut hof_return_constraints) {
@@ -2430,6 +2458,38 @@ impl TypeInferenceEngine {
                     }
                 }
             }
+
+            // (3) RETURNED CLOSURE WRAPPER: the callee returns a closure whose
+            // body invokes its callable param (`fn flip(f){ |a,b| f(b,a) }`).
+            // A later call of the returned binding pins the returned closure's
+            // params; map those positions back onto the original closure arg.
+            if let Some(returned_param_indices) = self.returned_closure_callable_arg_param_indices(
+                &funcs,
+                callee_name,
+                *closure_arg_idx,
+            ) {
+                if returned_param_indices.len() == closure_param_vars.len() {
+                    if let Some(returned_arg_types) =
+                        self.returned_closure_invocation_arg_types(program, callee_name)
+                    {
+                        let mut mapped = Vec::with_capacity(closure_param_vars.len());
+                        let mut ok = true;
+                        for &idx in &returned_param_indices {
+                            let Some(ty) = returned_arg_types.get(idx).cloned() else {
+                                ok = false;
+                                break;
+                            };
+                            mapped.push(ty);
+                        }
+                        if ok {
+                            for (var, ty) in closure_param_vars.iter().zip(mapped.into_iter()) {
+                                to_push.push((Type::Variable(var.clone()), ty));
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
         }
 
         for (lhs, rhs) in to_push {
@@ -2475,20 +2535,11 @@ impl TypeInferenceEngine {
             }
         }
 
-        // Scan the body for the single sound usage of `callable_name`.
-        let mut tail_values: Vec<&shape_ast::ast::Expr> = Vec::new();
-        Self::collect_tail_values(&func.body, &mut tail_values);
-        let mut explicit: Vec<&shape_ast::ast::Expr> = Vec::new();
-        Self::collect_explicit_returns(&func.body, &mut explicit);
-        // Conservative: only a single tail value, no explicit returns.
-        if !explicit.is_empty() || tail_values.len() != 1 {
-            return None;
-        }
         let shape_ast::ast::Expr::FunctionCall {
             name: tail_callee,
             args: tail_args,
             ..
-        } = tail_values[0]
+        } = Self::single_return_or_tail_expr(&func.body)?
         else {
             return None;
         };
@@ -2517,6 +2568,73 @@ impl TypeInferenceEngine {
         Some(mapped)
     }
 
+    fn single_return_or_tail_expr(
+        body: &[shape_ast::ast::Statement],
+    ) -> Option<&shape_ast::ast::Expr> {
+        let mut explicit: Vec<&shape_ast::ast::Expr> = Vec::new();
+        Self::collect_explicit_returns(body, &mut explicit);
+        match explicit.as_slice() {
+            [expr] => return Some(*expr),
+            [] => {}
+            _ => return None,
+        }
+
+        let mut tail_values: Vec<&shape_ast::ast::Expr> = Vec::new();
+        Self::collect_tail_values(body, &mut tail_values);
+        match tail_values.as_slice() {
+            [expr] => Some(*expr),
+            _ => None,
+        }
+    }
+
+    fn returned_closure_callable_arg_param_indices(
+        &self,
+        funcs: &HashMap<String, &shape_ast::ast::FunctionDef>,
+        callee_name: &str,
+        callable_param_idx: usize,
+    ) -> Option<Vec<usize>> {
+        let func = funcs.get(callee_name)?;
+        let callable_name = func.params.get(callable_param_idx)?.simple_name()?;
+        if func
+            .params
+            .get(callable_param_idx)?
+            .type_annotation
+            .is_some()
+        {
+            return None;
+        }
+
+        let shape_ast::ast::Expr::FunctionExpr { params, body, .. } =
+            Self::single_return_or_tail_expr(&func.body)?
+        else {
+            return None;
+        };
+
+        let mut closure_param_index: HashMap<&str, usize> = HashMap::new();
+        for (idx, param) in params.iter().enumerate() {
+            let name = param.simple_name()?;
+            closure_param_index.insert(name, idx);
+        }
+
+        let shape_ast::ast::Expr::FunctionCall { name, args, .. } =
+            Self::single_return_or_tail_expr(body)?
+        else {
+            return None;
+        };
+        if name != callable_name {
+            return None;
+        }
+
+        let mut out = Vec::with_capacity(args.len());
+        for arg in args {
+            let shape_ast::ast::Expr::Identifier(id, _) = arg else {
+                return None;
+            };
+            out.push(*closure_param_index.get(id.as_str())?);
+        }
+        Some(out)
+    }
+
     /// True when `func_name`'s body is identity-like for its param at
     /// `param_idx`: an unannotated function with no explicit returns whose single
     /// tail value is the bare param identifier (`fn id(g){ g }`). This is the
@@ -2538,16 +2656,9 @@ impl TypeInferenceEngine {
         if func.params[param_idx].type_annotation.is_some() {
             return false;
         }
-        let mut explicit: Vec<&shape_ast::ast::Expr> = Vec::new();
-        Self::collect_explicit_returns(&func.body, &mut explicit);
-        if !explicit.is_empty() {
-            return false;
-        }
-        let mut tail_values: Vec<&shape_ast::ast::Expr> = Vec::new();
-        Self::collect_tail_values(&func.body, &mut tail_values);
         matches!(
-            tail_values.as_slice(),
-            [shape_ast::ast::Expr::Identifier(id, _)] if id == param_name
+            Self::single_return_or_tail_expr(&func.body),
+            Some(shape_ast::ast::Expr::Identifier(id, _)) if id == param_name
         )
     }
 
@@ -2588,6 +2699,114 @@ impl TypeInferenceEngine {
             out.push(resolved);
         }
         Some(out)
+    }
+
+    fn returned_closure_invocation_arg_types(
+        &mut self,
+        program: &Program,
+        returned_from_name: &str,
+    ) -> Option<Vec<Type>> {
+        use shape_ast::ast::{Expr, Item, Statement};
+
+        let mut result: Option<Vec<Type>> = None;
+
+        fn scan_stmts(
+            engine: &mut TypeInferenceEngine,
+            returned_from_name: &str,
+            stmts: &[Statement],
+            result: &mut Option<Vec<Type>>,
+        ) {
+            let mut returned_bindings: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for stmt in stmts {
+                if result.is_some() {
+                    return;
+                }
+                match stmt {
+                    Statement::VariableDecl(decl, _) => {
+                        if let Some(Expr::FunctionCall { name, .. }) = decl.value.as_ref() {
+                            if name == returned_from_name {
+                                for binding in decl.pattern.get_identifiers() {
+                                    returned_bindings.insert(binding);
+                                }
+                                continue;
+                            }
+                        }
+                        if let Some(value) = decl.value.as_ref() {
+                            try_use(engine, &returned_bindings, value, result);
+                        }
+                    }
+                    Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+                        try_use(engine, &returned_bindings, expr, result);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn try_use(
+            engine: &mut TypeInferenceEngine,
+            returned_bindings: &std::collections::HashSet<String>,
+            expr: &Expr,
+            result: &mut Option<Vec<Type>>,
+        ) {
+            if result.is_some() {
+                return;
+            }
+            let mut collector = CallCollector { calls: Vec::new() };
+            crate::visitor::walk_expr(&mut collector, expr);
+            for (name, args) in collector.calls {
+                if !returned_bindings.contains(&name) {
+                    continue;
+                }
+                let indices: Vec<usize> = (0..args.len()).collect();
+                if let Some(types) = engine.concrete_arg_types_at_indices(&args, &indices) {
+                    *result = Some(types);
+                    return;
+                }
+            }
+        }
+
+        struct CallCollector {
+            calls: Vec<(String, Vec<Expr>)>,
+        }
+        impl crate::visitor::Visitor for CallCollector {
+            fn visit_expr(&mut self, expr: &Expr) -> bool {
+                if let Expr::FunctionCall { name, args, .. } = expr {
+                    self.calls.push((name.clone(), args.clone()));
+                }
+                true
+            }
+        }
+
+        let mut top_level: Vec<Statement> = Vec::new();
+        for item in &program.items {
+            match item {
+                Item::Statement(stmt, _) => top_level.push(stmt.clone()),
+                Item::VariableDecl(decl, span) => {
+                    top_level.push(Statement::VariableDecl(decl.clone(), *span))
+                }
+                Item::Expression(expr, span) => {
+                    top_level.push(Statement::Expression(expr.clone(), *span))
+                }
+                Item::Assignment(assign, span) => {
+                    top_level.push(Statement::Assignment(assign.clone(), *span))
+                }
+                _ => {}
+            }
+        }
+        scan_stmts(self, returned_from_name, &top_level, &mut result);
+
+        for item in &program.items {
+            if result.is_some() {
+                break;
+            }
+            if let Item::Function(func, _) = item {
+                scan_stmts(self, returned_from_name, &func.body, &mut result);
+            }
+        }
+
+        result
     }
 
     /// Identity-launder strategy. `id_name` is an identity-like function (returns
@@ -2847,8 +3066,28 @@ impl TypeInferenceEngine {
                 }
 
                 self.propagate_return_alias_substitution(returns.clone(), &mut substitutions);
-                let widened_return =
+                let mut widened_return =
                     self.materialize_pending_return_union(returns.clone(), &substitutions);
+                if let Some(&fn_param_idx) =
+                    self.callable_array_return_from_fn_param.get(function_name)
+                {
+                    if let Some(Type::Function {
+                        returns: param_returns,
+                        ..
+                    }) = widened_params.get(fn_param_idx)
+                    {
+                        let resolved_param_return = self
+                            .solver
+                            .unifier()
+                            .apply_substitutions(param_returns.as_ref());
+                        if !matches!(
+                            resolved_param_return,
+                            Type::Variable(_) | Type::Constrained { .. }
+                        ) {
+                            widened_return = BuiltinTypes::array(resolved_param_return);
+                        }
+                    }
+                }
 
                 let new_type = Type::Function {
                     params: widened_params.clone(),

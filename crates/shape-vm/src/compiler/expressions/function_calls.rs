@@ -2903,7 +2903,23 @@ impl BytecodeCompiler {
             let expected_param_modes = self.callable_pass_modes_from_expr(receiver);
             let return_reference_summary =
                 self.callable_return_reference_summary_from_expr(receiver);
-            self.compile_expr(receiver)?;
+            if let Expr::FunctionExpr { params, .. } = receiver {
+                let saved_pending_closure_param_types = self.pending_closure_param_types.take();
+                let hints: Vec<Option<shape_ast::ast::TypeAnnotation>> = args
+                    .iter()
+                    .map(crate::compiler::expressions::closures::infer_callsite_arg_type)
+                    .collect();
+                if params.len() == hints.len() && hints.iter().any(Option::is_some) {
+                    self.pending_closure_param_types = Some(hints);
+                }
+                let receiver_result = self.compile_expr(receiver);
+                self.pending_closure_param_types = saved_pending_closure_param_types;
+                if let Err(err) = receiver_result {
+                    return Err(err);
+                }
+            } else {
+                self.compile_expr(receiver)?;
+            }
             let writebacks = self.compile_call_args(args, expected_param_modes.as_deref())?;
             let arg_count = self.program.add_constant(Constant::Int(args.len() as i64));
             self.emit(Instruction::new(

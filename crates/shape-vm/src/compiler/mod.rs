@@ -741,6 +741,18 @@ pub struct BytecodeCompiler {
     /// callable expression.
     pub(crate) pending_callable_hint_name: Option<String>,
 
+    /// W21 HOF inference: bidirectional hints for closures returned by a
+    /// function and then invoked through a result binding.
+    ///
+    /// Example: `let add = make_op("add"); add(10, 5)` proves that the
+    /// closure literals returned by `make_op` have `(int, int)` user params.
+    /// The pre-pass records the hint by producer function name, not by the
+    /// result binding, so `compile_expr_closure` can consume it while compiling
+    /// the producer function body. Conflicts are represented exactly like
+    /// `closure_callsite_param_hints`.
+    pub(crate) returned_closure_callsite_param_hints:
+        std::collections::HashMap<String, ClosureCallsiteHint>,
+
     /// Unified type metadata for the last compiled expression.
     ///
     /// This is the single source for relational/value kind propagation
@@ -1045,6 +1057,11 @@ pub struct BytecodeCompiler {
     /// When compiling a variable initializer, the name of the variable being assigned to.
     /// Used by compile_typed_object_literal to include hoisted fields in the schema.
     pub(crate) pending_variable_name: Option<String>,
+
+    /// Binder span for the same initializer tracked by `pending_variable_name`.
+    /// Closure compilation uses this to read finalized inference facts for
+    /// stored function values without relying on name-only lookup.
+    pub(crate) pending_variable_span: Option<shape_ast::ast::Span>,
 
     /// v2 Phase 3.1: when the enclosing `let arr: Array<T> = [...]` declares
     /// an explicit `Array<T>` annotation whose element type maps to a

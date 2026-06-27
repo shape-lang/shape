@@ -1882,6 +1882,10 @@ impl BytecodeCompiler {
         // rejection).
         self.closure_callsite_param_hints =
             crate::compiler::expressions::closures::collect_closure_callsite_param_hints(&program);
+        self.returned_closure_callsite_param_hints =
+            crate::compiler::expressions::closures::collect_returned_closure_callsite_param_hints(
+                &program,
+            );
         let mut analysis_program =
             shape_ast::transform::augment_program_with_generated_extends(&program);
         let native_auto_items = Self::native_auto_conversion_analysis_items(&analysis_program);

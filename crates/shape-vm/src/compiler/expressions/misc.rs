@@ -109,12 +109,15 @@ impl BytecodeCompiler {
                 shape_ast::ast::BlockItem::VariableDecl(var_decl) => {
                     if let Some(init_expr) = &var_decl.value {
                         let saved_pending_variable_name = self.pending_variable_name.clone();
+                        let saved_pending_variable_span = self.pending_variable_span;
                         self.pending_variable_name = var_decl
                             .pattern
                             .as_identifier()
                             .map(|name| name.to_string());
+                        self.pending_variable_span = var_decl.pattern.as_identifier_span();
                         let compile_result = self.compile_expr_for_reference_binding(init_expr);
                         self.pending_variable_name = saved_pending_variable_name;
+                        self.pending_variable_span = saved_pending_variable_span;
                         let ref_borrow = compile_result?;
                         // Use full destructure pattern support (array, object, identifier)
                         self.compile_destructure_pattern(&var_decl.pattern)?;
@@ -281,12 +284,15 @@ impl BytecodeCompiler {
                     }
 
                     let saved_pending_variable_name = self.pending_variable_name.clone();
+                    let saved_pending_variable_span = self.pending_variable_span;
                     self.pending_variable_name = assignment
                         .pattern
                         .as_identifier()
                         .map(|name| name.to_string());
+                    self.pending_variable_span = assignment.pattern.as_identifier_span();
                     let compile_result = self.compile_expr_for_reference_binding(&assignment.value);
                     self.pending_variable_name = saved_pending_variable_name;
+                    self.pending_variable_span = saved_pending_variable_span;
                     let ref_borrow = compile_result?;
                     // Store in local/module_binding/closure variable
                     self.compile_destructure_assignment(&assignment.pattern)?;

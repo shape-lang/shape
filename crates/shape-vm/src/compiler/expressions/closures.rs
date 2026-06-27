@@ -7,6 +7,7 @@ use shape_ast::ast::type_path::TypePath;
 use shape_ast::ast::{Expr, FunctionDef, Span, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::closure::EnvironmentAnalyzer;
+use shape_runtime::type_system::Type;
 use shape_value::v2::concrete_type::{ClosureTypeId, ConcreteType};
 use std::collections::BTreeSet;
 
@@ -235,7 +236,7 @@ fn collect_static_mut_self_container_captures(
 /// `int` and `number` are kept distinct (`2` → int, `2.0` → number) so a
 /// later conflicting site (`f(2.0)`) is detected as a conflict rather than
 /// silently unified.
-fn infer_callsite_arg_type(arg: &Expr) -> Option<TypeAnnotation> {
+pub(crate) fn infer_callsite_arg_type(arg: &Expr) -> Option<TypeAnnotation> {
     use shape_ast::ast::{Literal, UnaryOp};
     match arg {
         Expr::Literal(lit, _) => match lit {
@@ -263,6 +264,64 @@ fn infer_callsite_arg_type(arg: &Expr) -> Option<TypeAnnotation> {
         Expr::UnaryOp {
             op: UnaryOp::Not, ..
         } => Some(TypeAnnotation::Basic("bool".to_string())),
+        _ => None,
+    }
+}
+
+fn annotation_contains_unknown(ann: &TypeAnnotation) -> bool {
+    match ann {
+        TypeAnnotation::Basic(name) => name == "unknown",
+        TypeAnnotation::Array(inner) => annotation_contains_unknown(inner),
+        TypeAnnotation::Tuple(items)
+        | TypeAnnotation::Union(items)
+        | TypeAnnotation::Intersection(items) => items.iter().any(annotation_contains_unknown),
+        TypeAnnotation::Object(fields) => fields
+            .iter()
+            .any(|field| annotation_contains_unknown(&field.type_annotation)),
+        TypeAnnotation::Function { params, returns } => {
+            params
+                .iter()
+                .any(|param| annotation_contains_unknown(&param.type_annotation))
+                || annotation_contains_unknown(returns)
+        }
+        TypeAnnotation::Generic { args, .. } => args.iter().any(annotation_contains_unknown),
+        TypeAnnotation::Borrow { inner, .. } => annotation_contains_unknown(inner),
+        TypeAnnotation::Reference(_)
+        | TypeAnnotation::Dyn(_)
+        | TypeAnnotation::Void
+        | TypeAnnotation::Never
+        | TypeAnnotation::Null
+        | TypeAnnotation::Undefined => false,
+    }
+}
+
+fn type_to_concrete_annotation(ty: &Type) -> Option<TypeAnnotation> {
+    let ann = match ty {
+        Type::Variable(_) | Type::Constrained { .. } => return None,
+        Type::Concrete(ann) => ann.clone(),
+        Type::Generic { .. } | Type::Function { .. } => ty.to_annotation()?,
+    };
+    if annotation_contains_unknown(&ann) {
+        None
+    } else {
+        Some(ann)
+    }
+}
+
+fn function_type_param_hints(
+    ty: &Type,
+    expected_arity: usize,
+) -> Option<Vec<Option<TypeAnnotation>>> {
+    match ty.canonicalize() {
+        Type::Function { params, .. } if params.len() == expected_arity => {
+            let hints: Vec<Option<TypeAnnotation>> =
+                params.iter().map(type_to_concrete_annotation).collect();
+            if hints.iter().any(Option::is_some) {
+                Some(hints)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -1213,6 +1272,790 @@ pub(crate) fn collect_closure_callsite_param_hints(
     hints
 }
 
+/// W21 HOF inference: whole-program pre-pass for factory-returned closures.
+///
+/// Direct closure bindings are handled by `collect_closure_callsite_param_hints`
+/// (`let f = |a| ...; f(1)`). This pass covers the adjacent factory shape:
+/// `let f = make_op(...); f(1)`, where `make_op` syntactically returns closure
+/// literals. The hint is keyed by `make_op`, because the closure literal is
+/// compiled while the producer function body is being compiled.
+///
+/// Soundness mirrors the direct-binding pass:
+/// * only syntactic closure-returning functions are eligible;
+/// * only literal / structurally-obvious call arguments produce types;
+/// * duplicate result-binding names, arity mismatches, or `int`/`number`
+///   disagreements become `Conflict`, so no type is guessed.
+pub(crate) fn collect_returned_closure_callsite_param_hints(
+    program: &shape_ast::ast::Program,
+) -> std::collections::HashMap<String, ClosureCallsiteHint> {
+    use shape_ast::ast::{BlockItem, Expr, Item, Statement};
+    use std::collections::{HashMap, HashSet};
+
+    fn expr_returns_closure(expr: &Expr) -> bool {
+        match expr {
+            Expr::FunctionExpr { .. } => true,
+            Expr::If(if_expr, _) => {
+                expr_returns_closure(&if_expr.then_branch)
+                    && if_expr
+                        .else_branch
+                        .as_ref()
+                        .is_some_and(|else_expr| expr_returns_closure(else_expr))
+            }
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                expr_returns_closure(then_expr)
+                    && else_expr
+                        .as_ref()
+                        .is_some_and(|else_expr| expr_returns_closure(else_expr))
+            }
+            Expr::Block(block, _) => block_expr_returns_closure(block),
+            Expr::Match(match_expr, _) => {
+                !match_expr.arms.is_empty()
+                    && match_expr
+                        .arms
+                        .iter()
+                        .all(|arm| expr_returns_closure(&arm.body))
+            }
+            Expr::Return(Some(expr), _) => expr_returns_closure(expr),
+            _ => false,
+        }
+    }
+
+    fn stmt_tail_returns_closure(stmt: &Statement) -> bool {
+        match stmt {
+            Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+                expr_returns_closure(expr)
+            }
+            Statement::If(if_stmt, _) => {
+                block_returns_closure(&if_stmt.then_body)
+                    && if_stmt
+                        .else_body
+                        .as_ref()
+                        .is_some_and(|body| block_returns_closure(body))
+            }
+            _ => false,
+        }
+    }
+
+    fn block_returns_closure(body: &[Statement]) -> bool {
+        body.iter().any(
+            |stmt| matches!(stmt, Statement::Return(Some(expr), _) if expr_returns_closure(expr)),
+        ) || body
+            .last()
+            .is_some_and(|stmt| stmt_tail_returns_closure(stmt))
+    }
+
+    fn block_expr_returns_closure(block: &shape_ast::ast::BlockExpr) -> bool {
+        block.items.iter().any(|item| {
+            matches!(
+                item,
+                BlockItem::Statement(Statement::Return(Some(expr), _))
+                    if expr_returns_closure(expr)
+            )
+        }) || block.items.last().is_some_and(|item| match item {
+            BlockItem::Expression(expr) => expr_returns_closure(expr),
+            BlockItem::Statement(stmt) => stmt_tail_returns_closure(stmt),
+            _ => false,
+        })
+    }
+
+    fn note_result_binding(
+        binding_name: &str,
+        function_name: &str,
+        eligible_functions: &HashSet<String>,
+        result_bindings: &mut HashMap<String, String>,
+        conflicted_bindings: &mut HashSet<String>,
+    ) {
+        if !eligible_functions.contains(function_name) {
+            return;
+        }
+        if result_bindings.contains_key(binding_name) {
+            result_bindings.remove(binding_name);
+            conflicted_bindings.insert(binding_name.to_string());
+            return;
+        }
+        if !conflicted_bindings.contains(binding_name) {
+            result_bindings.insert(binding_name.to_string(), function_name.to_string());
+        }
+    }
+
+    fn bind_decl(
+        decl: &shape_ast::ast::VariableDecl,
+        eligible_functions: &HashSet<String>,
+        result_bindings: &mut HashMap<String, String>,
+        conflicted_bindings: &mut HashSet<String>,
+    ) {
+        if let (Some(binding_name), Some(value)) =
+            (decl.pattern.as_identifier(), decl.value.as_ref())
+        {
+            if let Expr::FunctionCall { name, .. } = value {
+                note_result_binding(
+                    binding_name,
+                    name,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+            }
+            bind_expr(
+                value,
+                eligible_functions,
+                result_bindings,
+                conflicted_bindings,
+            );
+        }
+    }
+
+    fn bind_stmt(
+        stmt: &Statement,
+        eligible_functions: &HashSet<String>,
+        result_bindings: &mut HashMap<String, String>,
+        conflicted_bindings: &mut HashSet<String>,
+    ) {
+        match stmt {
+            Statement::VariableDecl(decl, _) => bind_decl(
+                decl,
+                eligible_functions,
+                result_bindings,
+                conflicted_bindings,
+            ),
+            Statement::Assignment(asgn, _) => bind_expr(
+                &asgn.value,
+                eligible_functions,
+                result_bindings,
+                conflicted_bindings,
+            ),
+            Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => bind_expr(
+                expr,
+                eligible_functions,
+                result_bindings,
+                conflicted_bindings,
+            ),
+            Statement::For(for_stmt, _) => {
+                for stmt in &for_stmt.body {
+                    bind_stmt(
+                        stmt,
+                        eligible_functions,
+                        result_bindings,
+                        conflicted_bindings,
+                    );
+                }
+            }
+            Statement::While(while_stmt, _) => {
+                bind_expr(
+                    &while_stmt.condition,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+                for stmt in &while_stmt.body {
+                    bind_stmt(
+                        stmt,
+                        eligible_functions,
+                        result_bindings,
+                        conflicted_bindings,
+                    );
+                }
+            }
+            Statement::If(if_stmt, _) => {
+                bind_expr(
+                    &if_stmt.condition,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+                for stmt in &if_stmt.then_body {
+                    bind_stmt(
+                        stmt,
+                        eligible_functions,
+                        result_bindings,
+                        conflicted_bindings,
+                    );
+                }
+                if let Some(else_body) = &if_stmt.else_body {
+                    for stmt in else_body {
+                        bind_stmt(
+                            stmt,
+                            eligible_functions,
+                            result_bindings,
+                            conflicted_bindings,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn bind_block_item(
+        item: &BlockItem,
+        eligible_functions: &HashSet<String>,
+        result_bindings: &mut HashMap<String, String>,
+        conflicted_bindings: &mut HashSet<String>,
+    ) {
+        match item {
+            BlockItem::VariableDecl(decl) => bind_decl(
+                decl,
+                eligible_functions,
+                result_bindings,
+                conflicted_bindings,
+            ),
+            BlockItem::Assignment(asgn) => bind_expr(
+                &asgn.value,
+                eligible_functions,
+                result_bindings,
+                conflicted_bindings,
+            ),
+            BlockItem::Statement(stmt) => bind_stmt(
+                stmt,
+                eligible_functions,
+                result_bindings,
+                conflicted_bindings,
+            ),
+            BlockItem::Expression(expr) => bind_expr(
+                expr,
+                eligible_functions,
+                result_bindings,
+                conflicted_bindings,
+            ),
+        }
+    }
+
+    fn bind_expr(
+        expr: &Expr,
+        eligible_functions: &HashSet<String>,
+        result_bindings: &mut HashMap<String, String>,
+        conflicted_bindings: &mut HashSet<String>,
+    ) {
+        match expr {
+            Expr::FunctionCall { args, .. } | Expr::QualifiedFunctionCall { args, .. } => {
+                for arg in args {
+                    bind_expr(
+                        arg,
+                        eligible_functions,
+                        result_bindings,
+                        conflicted_bindings,
+                    );
+                }
+            }
+            Expr::MethodCall { receiver, args, .. } => {
+                bind_expr(
+                    receiver,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+                for arg in args {
+                    bind_expr(
+                        arg,
+                        eligible_functions,
+                        result_bindings,
+                        conflicted_bindings,
+                    );
+                }
+            }
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                bind_expr(
+                    left,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+                bind_expr(
+                    right,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+            }
+            Expr::UnaryOp { operand, .. } | Expr::Reference { expr: operand, .. } => bind_expr(
+                operand,
+                eligible_functions,
+                result_bindings,
+                conflicted_bindings,
+            ),
+            Expr::Array(elements, _) => {
+                for element in elements {
+                    bind_expr(
+                        element,
+                        eligible_functions,
+                        result_bindings,
+                        conflicted_bindings,
+                    );
+                }
+            }
+            Expr::IndexAccess { object, index, .. } => {
+                bind_expr(
+                    object,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+                bind_expr(
+                    index,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+            }
+            Expr::PropertyAccess { object, .. } => bind_expr(
+                object,
+                eligible_functions,
+                result_bindings,
+                conflicted_bindings,
+            ),
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                bind_expr(
+                    condition,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+                bind_expr(
+                    then_expr,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+                if let Some(else_expr) = else_expr {
+                    bind_expr(
+                        else_expr,
+                        eligible_functions,
+                        result_bindings,
+                        conflicted_bindings,
+                    );
+                }
+            }
+            Expr::FunctionExpr { body, .. } => {
+                for stmt in body {
+                    bind_stmt(
+                        stmt,
+                        eligible_functions,
+                        result_bindings,
+                        conflicted_bindings,
+                    );
+                }
+            }
+            Expr::Block(block, _) => {
+                for item in &block.items {
+                    bind_block_item(
+                        item,
+                        eligible_functions,
+                        result_bindings,
+                        conflicted_bindings,
+                    );
+                }
+            }
+            Expr::If(if_expr, _) => {
+                bind_expr(
+                    &if_expr.condition,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+                bind_expr(
+                    &if_expr.then_branch,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+                if let Some(else_branch) = &if_expr.else_branch {
+                    bind_expr(
+                        else_branch,
+                        eligible_functions,
+                        result_bindings,
+                        conflicted_bindings,
+                    );
+                }
+            }
+            Expr::While(while_expr, _) => {
+                bind_expr(
+                    &while_expr.condition,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+                bind_expr(
+                    &while_expr.body,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+            }
+            Expr::For(for_expr, _) => {
+                bind_expr(
+                    &for_expr.iterable,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+                bind_expr(
+                    &for_expr.body,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+            }
+            Expr::Loop(loop_expr, _) => bind_expr(
+                &loop_expr.body,
+                eligible_functions,
+                result_bindings,
+                conflicted_bindings,
+            ),
+            Expr::Match(match_expr, _) => {
+                bind_expr(
+                    &match_expr.scrutinee,
+                    eligible_functions,
+                    result_bindings,
+                    conflicted_bindings,
+                );
+                for arm in &match_expr.arms {
+                    if let Some(guard) = &arm.guard {
+                        bind_expr(
+                            guard,
+                            eligible_functions,
+                            result_bindings,
+                            conflicted_bindings,
+                        );
+                    }
+                    bind_expr(
+                        &arm.body,
+                        eligible_functions,
+                        result_bindings,
+                        conflicted_bindings,
+                    );
+                }
+            }
+            Expr::Return(Some(expr), _) | Expr::Await(expr, _) => bind_expr(
+                expr,
+                eligible_functions,
+                result_bindings,
+                conflicted_bindings,
+            ),
+            _ => {}
+        }
+    }
+
+    fn handle_call(
+        binding_name: &str,
+        args: &[Expr],
+        result_bindings: &HashMap<String, String>,
+        conflicted_bindings: &HashSet<String>,
+        hints: &mut HashMap<String, ClosureCallsiteHint>,
+    ) {
+        if conflicted_bindings.contains(binding_name) {
+            return;
+        }
+        let Some(function_name) = result_bindings.get(binding_name) else {
+            return;
+        };
+        let observed: Vec<Option<TypeAnnotation>> =
+            args.iter().map(infer_callsite_arg_type).collect();
+        let merged = merge_callsite_hint(hints.remove(function_name), observed);
+        hints.insert(function_name.clone(), merged);
+    }
+
+    fn walk_expr(
+        expr: &Expr,
+        result_bindings: &HashMap<String, String>,
+        conflicted_bindings: &HashSet<String>,
+        hints: &mut HashMap<String, ClosureCallsiteHint>,
+    ) {
+        match expr {
+            Expr::FunctionCall { name, args, .. } => {
+                handle_call(name, args, result_bindings, conflicted_bindings, hints);
+                for arg in args {
+                    walk_expr(arg, result_bindings, conflicted_bindings, hints);
+                }
+            }
+            Expr::QualifiedFunctionCall { args, .. } => {
+                for arg in args {
+                    walk_expr(arg, result_bindings, conflicted_bindings, hints);
+                }
+            }
+            Expr::MethodCall { receiver, args, .. } => {
+                walk_expr(receiver, result_bindings, conflicted_bindings, hints);
+                for arg in args {
+                    walk_expr(arg, result_bindings, conflicted_bindings, hints);
+                }
+            }
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                walk_expr(left, result_bindings, conflicted_bindings, hints);
+                walk_expr(right, result_bindings, conflicted_bindings, hints);
+            }
+            Expr::UnaryOp { operand, .. } | Expr::Reference { expr: operand, .. } => {
+                walk_expr(operand, result_bindings, conflicted_bindings, hints)
+            }
+            Expr::Array(elements, _) => {
+                for element in elements {
+                    walk_expr(element, result_bindings, conflicted_bindings, hints);
+                }
+            }
+            Expr::IndexAccess { object, index, .. } => {
+                walk_expr(object, result_bindings, conflicted_bindings, hints);
+                walk_expr(index, result_bindings, conflicted_bindings, hints);
+            }
+            Expr::PropertyAccess { object, .. } => {
+                walk_expr(object, result_bindings, conflicted_bindings, hints)
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                walk_expr(condition, result_bindings, conflicted_bindings, hints);
+                walk_expr(then_expr, result_bindings, conflicted_bindings, hints);
+                if let Some(else_expr) = else_expr {
+                    walk_expr(else_expr, result_bindings, conflicted_bindings, hints);
+                }
+            }
+            Expr::FunctionExpr { body, .. } => {
+                for stmt in body {
+                    walk_stmt(stmt, result_bindings, conflicted_bindings, hints);
+                }
+            }
+            Expr::Block(block, _) => {
+                for item in &block.items {
+                    walk_block_item(item, result_bindings, conflicted_bindings, hints);
+                }
+            }
+            Expr::If(if_expr, _) => {
+                walk_expr(
+                    &if_expr.condition,
+                    result_bindings,
+                    conflicted_bindings,
+                    hints,
+                );
+                walk_expr(
+                    &if_expr.then_branch,
+                    result_bindings,
+                    conflicted_bindings,
+                    hints,
+                );
+                if let Some(else_branch) = &if_expr.else_branch {
+                    walk_expr(else_branch, result_bindings, conflicted_bindings, hints);
+                }
+            }
+            Expr::While(while_expr, _) => {
+                walk_expr(
+                    &while_expr.condition,
+                    result_bindings,
+                    conflicted_bindings,
+                    hints,
+                );
+                walk_expr(
+                    &while_expr.body,
+                    result_bindings,
+                    conflicted_bindings,
+                    hints,
+                );
+            }
+            Expr::For(for_expr, _) => {
+                walk_expr(
+                    &for_expr.iterable,
+                    result_bindings,
+                    conflicted_bindings,
+                    hints,
+                );
+                walk_expr(&for_expr.body, result_bindings, conflicted_bindings, hints);
+            }
+            Expr::Loop(loop_expr, _) => {
+                walk_expr(&loop_expr.body, result_bindings, conflicted_bindings, hints)
+            }
+            Expr::Match(match_expr, _) => {
+                walk_expr(
+                    &match_expr.scrutinee,
+                    result_bindings,
+                    conflicted_bindings,
+                    hints,
+                );
+                for arm in &match_expr.arms {
+                    if let Some(guard) = &arm.guard {
+                        walk_expr(guard, result_bindings, conflicted_bindings, hints);
+                    }
+                    walk_expr(&arm.body, result_bindings, conflicted_bindings, hints);
+                }
+            }
+            Expr::Return(Some(expr), _) | Expr::Await(expr, _) => {
+                walk_expr(expr, result_bindings, conflicted_bindings, hints)
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_block_item(
+        item: &BlockItem,
+        result_bindings: &HashMap<String, String>,
+        conflicted_bindings: &HashSet<String>,
+        hints: &mut HashMap<String, ClosureCallsiteHint>,
+    ) {
+        match item {
+            BlockItem::VariableDecl(decl) => {
+                if let Some(value) = decl.value.as_ref() {
+                    walk_expr(value, result_bindings, conflicted_bindings, hints);
+                }
+            }
+            BlockItem::Assignment(asgn) => {
+                walk_expr(&asgn.value, result_bindings, conflicted_bindings, hints)
+            }
+            BlockItem::Statement(stmt) => {
+                walk_stmt(stmt, result_bindings, conflicted_bindings, hints)
+            }
+            BlockItem::Expression(expr) => {
+                walk_expr(expr, result_bindings, conflicted_bindings, hints)
+            }
+        }
+    }
+
+    fn walk_stmt(
+        stmt: &Statement,
+        result_bindings: &HashMap<String, String>,
+        conflicted_bindings: &HashSet<String>,
+        hints: &mut HashMap<String, ClosureCallsiteHint>,
+    ) {
+        match stmt {
+            Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+                walk_expr(expr, result_bindings, conflicted_bindings, hints)
+            }
+            Statement::VariableDecl(decl, _) => {
+                if let Some(value) = decl.value.as_ref() {
+                    walk_expr(value, result_bindings, conflicted_bindings, hints);
+                }
+            }
+            Statement::Assignment(asgn, _) => {
+                walk_expr(&asgn.value, result_bindings, conflicted_bindings, hints)
+            }
+            Statement::For(for_stmt, _) => {
+                for stmt in &for_stmt.body {
+                    walk_stmt(stmt, result_bindings, conflicted_bindings, hints);
+                }
+            }
+            Statement::While(while_stmt, _) => {
+                walk_expr(
+                    &while_stmt.condition,
+                    result_bindings,
+                    conflicted_bindings,
+                    hints,
+                );
+                for stmt in &while_stmt.body {
+                    walk_stmt(stmt, result_bindings, conflicted_bindings, hints);
+                }
+            }
+            Statement::If(if_stmt, _) => {
+                walk_expr(
+                    &if_stmt.condition,
+                    result_bindings,
+                    conflicted_bindings,
+                    hints,
+                );
+                for stmt in &if_stmt.then_body {
+                    walk_stmt(stmt, result_bindings, conflicted_bindings, hints);
+                }
+                if let Some(else_body) = &if_stmt.else_body {
+                    for stmt in else_body {
+                        walk_stmt(stmt, result_bindings, conflicted_bindings, hints);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut eligible_functions = HashSet::new();
+    for item in &program.items {
+        if let Item::Function(func, _) = item {
+            if block_returns_closure(&func.body) {
+                eligible_functions.insert(func.name.clone());
+            }
+        }
+    }
+    if eligible_functions.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut result_bindings = HashMap::new();
+    let mut conflicted_bindings = HashSet::new();
+    for item in &program.items {
+        match item {
+            Item::Statement(stmt, _) => bind_stmt(
+                stmt,
+                &eligible_functions,
+                &mut result_bindings,
+                &mut conflicted_bindings,
+            ),
+            Item::Expression(expr, _) => bind_expr(
+                expr,
+                &eligible_functions,
+                &mut result_bindings,
+                &mut conflicted_bindings,
+            ),
+            Item::Assignment(asgn, _) => bind_expr(
+                &asgn.value,
+                &eligible_functions,
+                &mut result_bindings,
+                &mut conflicted_bindings,
+            ),
+            Item::VariableDecl(decl, _) => bind_decl(
+                decl,
+                &eligible_functions,
+                &mut result_bindings,
+                &mut conflicted_bindings,
+            ),
+            Item::Function(func, _) => {
+                for stmt in &func.body {
+                    bind_stmt(
+                        stmt,
+                        &eligible_functions,
+                        &mut result_bindings,
+                        &mut conflicted_bindings,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut hints = HashMap::new();
+    for item in &program.items {
+        match item {
+            Item::Statement(stmt, _) => {
+                walk_stmt(stmt, &result_bindings, &conflicted_bindings, &mut hints)
+            }
+            Item::Expression(expr, _) => {
+                walk_expr(expr, &result_bindings, &conflicted_bindings, &mut hints)
+            }
+            Item::Assignment(asgn, _) => walk_expr(
+                &asgn.value,
+                &result_bindings,
+                &conflicted_bindings,
+                &mut hints,
+            ),
+            Item::VariableDecl(decl, _) => {
+                if let Some(value) = decl.value.as_ref() {
+                    walk_expr(value, &result_bindings, &conflicted_bindings, &mut hints);
+                }
+            }
+            Item::Function(func, _) => {
+                for stmt in &func.body {
+                    walk_stmt(stmt, &result_bindings, &conflicted_bindings, &mut hints);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    hints
+}
+
 /// Strict-typing-sweep (Cluster 2): scan a closure body for binary ops
 /// of the form `<param_name> <op> <literal>` (or the symmetric form), and
 /// derive a `TypeAnnotation` for `param_name` from the literal's type when
@@ -2007,6 +2850,31 @@ impl BytecodeCompiler {
                 ClosureCallsiteHint::Types(types) => Some(types.clone()),
                 ClosureCallsiteHint::Conflict => None,
             });
+        let binding_fact_param_hints: Option<Vec<Option<TypeAnnotation>>> = self
+            .pending_variable_span
+            .and_then(|span| self.inference_facts.binding_type(span))
+            .and_then(|ty| function_type_param_hints(ty, params.len()));
+        let returned_callsite_param_hints: Option<Vec<Option<TypeAnnotation>>> = self
+            .current_function
+            .and_then(|idx| self.program.functions.get(idx))
+            .and_then(|function| {
+                self.returned_closure_callsite_param_hints
+                    .get(&function.name)
+            })
+            .and_then(|hint| match hint {
+                ClosureCallsiteHint::Types(types) => Some(types.clone()),
+                ClosureCallsiteHint::Conflict => None,
+            });
+        let returned_closure_param_hints: Option<Vec<Option<TypeAnnotation>>> = self
+            .current_function
+            .and_then(|idx| self.program.functions.get(idx))
+            .and_then(|function| self.inference_facts.function_signature(&function.name))
+            .and_then(|signature| match signature.canonicalize() {
+                Type::Function { returns, .. } => {
+                    function_type_param_hints(returns.as_ref(), params.len())
+                }
+                _ => None,
+            });
 
         // Strict-typing-sweep (Cluster 2): closure-body param inference.
         // For closures bound to a `let` and called via the local (or
@@ -2033,6 +2901,32 @@ impl BytecodeCompiler {
                 //     unannotated after the HOF hint.
                 if p.type_annotation.is_none() {
                     if let Some(hints) = callsite_param_hints.as_ref() {
+                        if let Some(Some(ann)) = hints.get(idx) {
+                            p.type_annotation = Some(ann.clone());
+                        }
+                    }
+                }
+                // 1c. Function-typed facts from the binder span and from an
+                //     enclosing function's inferred function return. These are
+                //     solver-produced compile-time facts, so they rescue
+                //     stored closures and factory-returned closures without
+                //     runtime probing or numeric defaulting.
+                if p.type_annotation.is_none() {
+                    if let Some(hints) = binding_fact_param_hints.as_ref() {
+                        if let Some(Some(ann)) = hints.get(idx) {
+                            p.type_annotation = Some(ann.clone());
+                        }
+                    }
+                }
+                if p.type_annotation.is_none() {
+                    if let Some(hints) = returned_callsite_param_hints.as_ref() {
+                        if let Some(Some(ann)) = hints.get(idx) {
+                            p.type_annotation = Some(ann.clone());
+                        }
+                    }
+                }
+                if p.type_annotation.is_none() {
+                    if let Some(hints) = returned_closure_param_hints.as_ref() {
                         if let Some(Some(ann)) = hints.get(idx) {
                             p.type_annotation = Some(ann.clone());
                         }

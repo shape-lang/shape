@@ -407,11 +407,12 @@ impl BytecodeCompiler {
         if let Some(nt) = self.identifier_slot_numeric_type(expr) {
             return Some(nt);
         }
-        if let Some(nt) = self
-            .infer_expr_type(expr)
-            .ok()
-            .and_then(|t| inferred_type_to_numeric(&t))
-        {
+        // Binop-result proof (U4-4): an arithmetic binop over locally proven
+        // operands has a result kind determined by operand coercion. This must
+        // beat the engine span-table for returned/factory closures, where the
+        // shared unspecialized body span can be broader than the closure's
+        // call-site-pinned parameter locals.
+        if let Some(nt) = self.binop_result_numeric_type(expr) {
             return Some(nt);
         }
         // WS-9b fallback (U4-4): a field read `a.x` on an unannotated parameter
@@ -427,14 +428,9 @@ impl BytecodeCompiler {
         if let Some(nt) = self.property_access_field_numeric_type(expr) {
             return Some(nt);
         }
-        // Binop-result fallback (U4-4): an arithmetic/comparison binop expr
-        // (e.g. a list-comprehension element `x * 1.5`, where the comprehension
-        // loop var `x` is not in the engine span-table) has a result kind
-        // determined by coercing its operands. Comparisons yield `bool` (not a
-        // NumericType — `None` here, surfaced as a Bool kind elsewhere). This
-        // mirrors the result-kind the deleted register held after the binop
-        // compiled. Recurses through `numeric_type_of`.
-        self.binop_result_numeric_type(expr)
+        self.infer_expr_type(expr)
+            .ok()
+            .and_then(|t| inferred_type_to_numeric(&t))
     }
 
     /// Result `NumericType` of an arithmetic binop expr, derived by coercing
@@ -695,6 +691,17 @@ impl BytecodeCompiler {
         // A float literal proves float directly.
         if matches!(expr, Expr::Literal(shape_ast::ast::Literal::Number(_), _)) {
             return true;
+        }
+        // Locally proven numeric facts beat the program-wide span table here
+        // for the same reason they do in `numeric_type_of`: returned/factory
+        // closures share unspecialized body spans, while their locals and
+        // parameters have already been pinned from call-site facts.
+        if let Some(nt) = self
+            .identifier_slot_numeric_type(expr)
+            .or_else(|| self.property_access_field_numeric_type(expr))
+            .or_else(|| self.binop_result_numeric_type(expr))
+        {
+            return matches!(nt, NumericType::Number);
         }
         matches!(
             self.infer_expr_type(expr)
@@ -3915,11 +3922,12 @@ mod forwarded_hof_closure_kind_soundness_tests {
 
     #[test]
     fn genuinely_uninferable_forwarded_closure_is_compile_error() {
-        // `|x| x * x` has NO literal pairing — its param kind is genuinely
-        // un-inferable when forwarded. Strict typing: this MUST be a compile
-        // error (surface-and-stop), NOT a silent `number` default / bit-leak.
-        let code = "fn use_it(f) { f(5) }\n\
-                    fn main() { let sq = |x| x * x\n print(use_it(sq)) }\n\
+        // `use_it(f) { f(5) }` is now statically provable: the HOF body calls
+        // the forwarded closure with an int literal. Keep the strict rejection
+        // guard on a true no-callsite shape, where the HOF only stores/returns
+        // the callable and `|x| x * x` still has no literal pairing.
+        let code = "fn keep(f) { f }\n\
+                    fn main() { let sq = |x| x * x\n let kept = keep(sq)\n 0 }\n\
                     main()";
         assert!(
             !compiles(code),

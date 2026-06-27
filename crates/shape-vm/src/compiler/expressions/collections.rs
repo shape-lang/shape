@@ -412,6 +412,14 @@ impl BytecodeCompiler {
             // The enclosing `let arr: Array<T> = [...]` already proved
             // the element type via annotation; trust it.
             Some(kind)
+        } else if let Some(kind) = self.infer_array_kind_from_inference_fact(span) {
+            // The reference-model inference pass can prove an array literal's
+            // full `Array<T>` type from callsite/function facts even when the
+            // literal elements are indirect callable results (`[f(a), f(b)]`).
+            // This is a finalized compile-time span fact; no runtime element
+            // probing or numeric defaulting is involved.
+            self.pending_variable_typed_array_kind = Some(kind);
+            Some(kind)
         } else if let Some(slot_kind) = infer_array_element_type(elements, &self.type_tracker) {
             // Bare literal with a homogeneous, statically-resolvable
             // element type. Pick a typed kind if we have one and signal
@@ -669,6 +677,24 @@ impl BytecodeCompiler {
         // literal compiled later in the same initializer expression.
         self.pending_variable_typed_array_kind = entry_pending_typed_array_kind;
         Ok(())
+    }
+
+    fn infer_array_kind_from_inference_fact(
+        &self,
+        span: Span,
+    ) -> Option<super::super::v2_typed_emission::TypedArrayKind> {
+        use shape_value::v2::ConcreteType;
+
+        let ty = self
+            .resolved_expr_types
+            .get(&span)
+            .or_else(|| self.inference_facts.expression_type(span))?;
+        let ann = ty.to_annotation()?;
+        let ct = super::super::v2_map_emission::concrete_type_from_annotation(&ann)?;
+        let ConcreteType::Array(elem) = ct else {
+            return None;
+        };
+        super::super::v2_typed_emission::should_use_typed_array(elem.as_ref())
     }
 
     /// Compile an object expression

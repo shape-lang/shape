@@ -25,12 +25,15 @@ impl BytecodeCompiler {
             let mut ref_borrow = None;
             if let Some(value) = &let_expr.value {
                 let saved_pending_variable_name = self.pending_variable_name.clone();
+                let saved_pending_variable_span = self.pending_variable_span;
                 self.pending_variable_name = let_expr
                     .pattern
                     .as_simple_name()
                     .map(|name| name.to_string());
+                self.pending_variable_span = let_expr.pattern.binder_span();
                 let compile_result = self.compile_expr_for_reference_binding(value);
                 self.pending_variable_name = saved_pending_variable_name;
+                self.pending_variable_span = saved_pending_variable_span;
                 ref_borrow = compile_result?;
             } else {
                 self.emit(Instruction::simple(OpCode::PushNull));
@@ -248,9 +251,12 @@ impl BytecodeCompiler {
                 }
 
                 let saved_pending_variable_name = self.pending_variable_name.clone();
+                let saved_pending_variable_span = self.pending_variable_span;
                 self.pending_variable_name = Some(name.clone());
+                self.pending_variable_span = Some(*id_span);
                 let compile_result = self.compile_expr_for_reference_binding(&assign_expr.value);
                 self.pending_variable_name = saved_pending_variable_name;
+                self.pending_variable_span = saved_pending_variable_span;
                 let ref_borrow = compile_result?;
                 // Phase V1.2C/D — Site B: a `var`-like assignment whose
                 // target is `SharedCow` (Arc-shared) receives a freshly-
