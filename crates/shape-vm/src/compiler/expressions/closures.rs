@@ -2792,12 +2792,38 @@ impl BytecodeCompiler {
             });
         }
 
-        // Build per-capture mutability flags (aligned with captured_vars order).
-        // A capture is mutable if the closure itself mutates it OR if a previous
-        // closure in the same scope already boxed it into a SharedCell.
+        // Build per-capture cell-access flags (aligned with captured_vars order).
+        // Historically this vector was named "mutable_captures", but in the
+        // strict layout it means "not a leading immutable param": the body
+        // must access the capture through `frame.upvalues` because the slot is
+        // `CaptureKind::OwnedMutable` or `CaptureKind::Shared`.
+        //
+        // A capture needs that path if the closure itself mutates it, if a
+        // previous closure already promoted the source to a SharedCell, or if
+        // the source binding is `var` (`BindingOwnershipClass::Flexible`).
+        // The last case matters for sibling closures: a read-only closure over
+        // a `var` must observe the same shared cell as a mutating sibling, not
+        // snapshot the current cell contents at construction time.
         let mutable_flags: Vec<bool> = captured_vars
             .iter()
-            .map(|name| mutated_captures.contains(name) || self.boxed_locals.contains(name))
+            .map(|name| {
+                let is_local_slot = self.resolve_local(name).is_some();
+                let is_module_binding_slot = !is_local_slot
+                    && (self.resolve_scoped_module_binding_name(name).is_some()
+                        || self.module_bindings.contains_key(name));
+                let ownership = self
+                    .binding_semantics_for_name(name)
+                    .map(|(_, _, sem)| sem.ownership_class);
+                let is_flexible_capture =
+                    matches!(ownership, Some(BindingOwnershipClass::Flexible))
+                        && (is_local_slot || is_module_binding_slot);
+
+                mutated_captures.contains(name)
+                    || self.boxed_locals.contains(name)
+                    || self.shared_locals.contains(name)
+                    || self.shared_module_binding_contains(name)
+                    || is_flexible_capture
+            })
             .collect();
 
         // Build closure parameters: only immutable captures become leading params.
@@ -3067,16 +3093,17 @@ impl BytecodeCompiler {
 
         // Track A.1C — derive the `CaptureKind` for each capture based on
         // the source binding's declared form AND whether the closure body
-        // actually mutates the capture.
+        // actually needs cell-backed capture access.
         //
-        // Binding form (when mutated inside the closure) → CaptureKind:
+        // Binding form (when cell-backed) → CaptureKind:
         //   `let mut x = ...`   (OwnedMutable source)   → CaptureKind::OwnedMutable
         //   `var x = ...`       (Flexible source)       → CaptureKind::Shared
         //
-        // Everything else (including read-only captures of `let mut` /
-        // `var` bindings, and all captures of `let` / function parameters)
-        // → `CaptureKind::Immutable`. A read-only capture is semantically
-        // a by-value snapshot and does not require cell indirection.
+        // Everything else (including read-only captures of `let mut`, and all
+        // captures of `let` / function parameters) → `CaptureKind::Immutable`.
+        // Read-only `var` captures are intentionally excluded from the
+        // snapshot path: `var` is the shared/smart binding form, so sibling
+        // closures must observe the same `SharedCell` state.
         //
         // Note (A.1C partial): this metadata rides on the layout's
         // `capture_kinds` field only. The mutable-mask bits on the layout
@@ -3095,13 +3122,12 @@ impl BytecodeCompiler {
             .iter()
             .enumerate()
             .map(|(i, name)| {
-                // Only mutated captures need cell indirection. Read-only
-                // captures are snapshot-by-value and stay Immutable
-                // regardless of the source binding's ownership class —
-                // this keeps function-parameter captures (default
-                // `OwnedMutable` per `binding_semantics_for_param`) on
-                // the Immutable path when the closure doesn't write
-                // through them.
+                // Only cell-access captures need indirection. Read-only
+                // non-`var` captures are snapshot-by-value and stay Immutable
+                // regardless of the source binding's ownership class. This
+                // keeps function-parameter captures (default `OwnedMutable`
+                // per `binding_semantics_for_param`) on the Immutable path
+                // when the closure doesn't write through them.
                 if !mutable_flags.get(i).copied().unwrap_or(false) {
                     return CaptureKind::Immutable;
                 }
