@@ -212,14 +212,6 @@ pub struct TypeInferenceEngine {
     /// Observed argument types at call sites for each function.
     /// Used to widen unannotated parameter type variables into unions.
     pub(crate) callsite_param_types: HashMap<String, Vec<Vec<Type>>>,
-    /// Instantiated result types at named-function call sites.
-    ///
-    /// Function schemes are instantiated per call, so the return variable held
-    /// by `let x = f(...)` is a fresh call-site instance, not necessarily the
-    /// same variable stored in `types["f"]`. Once post-callsite proof resolves
-    /// the canonical function return, this map lets finalization constrain all
-    /// earlier call-result instances to that static return fact.
-    pub(crate) callsite_return_types: HashMap<String, Vec<Type>>,
     /// Source type variables for callable parameters, indexed by parameter
     /// position. `None` means parameter was explicitly annotated.
     pub(crate) callable_param_source_vars: HashMap<String, Vec<Option<TypeVar>>>,
@@ -467,7 +459,6 @@ impl TypeInferenceEngine {
             fallible_scopes: Vec::new(),
             method_table: MethodTable::new(),
             callsite_param_types: HashMap::new(),
-            callsite_return_types: HashMap::new(),
             callable_param_source_vars: HashMap::new(),
             callable_return_from_fn_param: HashMap::new(),
             callable_array_return_from_fn_param: HashMap::new(),
@@ -1066,133 +1057,6 @@ impl TypeInferenceEngine {
 
         for (index, arg_type) in arg_types.iter().enumerate() {
             entry[index].push(arg_type.clone());
-        }
-    }
-
-    pub(crate) fn record_function_callsite_return(
-        &mut self,
-        function_name: &str,
-        return_type: Type,
-    ) {
-        self.callsite_return_types
-            .entry(function_name.to_string())
-            .or_default()
-            .push(return_type);
-    }
-
-    fn propagate_resolved_call_returns_to_callsite_instances(
-        &mut self,
-        types: &HashMap<String, Type>,
-    ) -> Vec<TypeError> {
-        let mut errors = Vec::new();
-        let callsite_return_types = self.callsite_return_types.clone();
-        for (function_name, call_returns) in callsite_return_types {
-            let Some(Type::Function { returns, .. }) = types.get(&function_name) else {
-                continue;
-            };
-            let resolved_return = self.solver.unifier().apply_substitutions(returns.as_ref());
-            if !Self::type_is_fully_resolved(&resolved_return) {
-                continue;
-            }
-            for call_return in &call_returns {
-                if let Err(err) =
-                    self.bind_callsite_return_to_proven_shape(call_return, &resolved_return)
-                {
-                    errors.push(err);
-                }
-            }
-        }
-        errors
-    }
-
-    fn bind_callsite_return_to_proven_shape(
-        &mut self,
-        instance: &Type,
-        proven: &Type,
-    ) -> TypeResult<()> {
-        let instance = self
-            .solver
-            .unifier()
-            .apply_substitutions(instance)
-            .canonicalize();
-        let proven = self
-            .solver
-            .unifier()
-            .apply_substitutions(proven)
-            .canonicalize();
-        self.bind_callsite_return_shape(&instance, &proven)
-    }
-
-    fn bind_callsite_return_shape(&mut self, instance: &Type, proven: &Type) -> TypeResult<()> {
-        match (instance, proven) {
-            (
-                Type::Variable(var) | Type::Constrained { var, .. },
-                Type::Concrete(TypeAnnotation::Union(_)),
-            ) => self.bind_callsite_return_var(var, proven),
-            (Type::Variable(var) | Type::Constrained { var, .. }, ty) => {
-                self.bind_callsite_return_var(var, ty)
-            }
-            (
-                Type::Generic {
-                    base: instance_base,
-                    args: instance_args,
-                },
-                Type::Generic {
-                    base: proven_base,
-                    args: proven_args,
-                },
-            ) if instance_args.len() == proven_args.len()
-                && self.solver.probe_equal(instance_base, proven_base) =>
-            {
-                for (instance_arg, proven_arg) in instance_args.iter().zip(proven_args.iter()) {
-                    self.bind_callsite_return_shape(instance_arg, proven_arg)?;
-                }
-                Ok(())
-            }
-            (
-                Type::Function {
-                    params: instance_params,
-                    returns: instance_returns,
-                },
-                Type::Function {
-                    params: proven_params,
-                    returns: proven_returns,
-                },
-            ) if instance_params.len() == proven_params.len() => {
-                for (instance_param, proven_param) in
-                    instance_params.iter().zip(proven_params.iter())
-                {
-                    self.bind_callsite_return_shape(instance_param, proven_param)?;
-                }
-                self.bind_callsite_return_shape(instance_returns, proven_returns)
-            }
-            (instance, Type::Concrete(TypeAnnotation::Union(members)))
-                if members.iter().any(|member| {
-                    let member = Type::Concrete(member.clone()).canonicalize();
-                    self.solver.probe_equal(instance, &member)
-                }) =>
-            {
-                Ok(())
-            }
-            _ if self.solver.probe_equal(instance, proven) => Ok(()),
-            _ => Err(TypeError::ConstraintViolation(format!(
-                "call result type '{}' is not compatible with proven return type '{}'",
-                self.render_type_for_diag(instance),
-                self.render_type_for_diag(proven)
-            ))),
-        }
-    }
-
-    fn bind_callsite_return_var(&mut self, var: &TypeVar, proven: &Type) -> TypeResult<()> {
-        match self.solver.unifier().lookup(var).cloned() {
-            Some(existing) => {
-                let existing = self.solver.unifier().apply_substitutions(&existing);
-                self.bind_callsite_return_shape(&existing, proven)
-            }
-            None => {
-                self.solver.unifier_mut().bind(var.clone(), proven.clone());
-                Ok(())
-            }
         }
     }
 
@@ -2066,7 +1930,6 @@ impl TypeInferenceEngine {
         // callable/property/variable origin maps) that carries the registered M
         // interface across into the consumer check.
         self.pending_return_unions.clear();
-        self.callsite_return_types.clear();
         self.callable_param_source_vars.clear();
         self.callable_return_from_fn_param.clear();
         self.callable_array_return_from_fn_param.clear();
@@ -2160,7 +2023,6 @@ impl TypeInferenceEngine {
         program: &Program,
     ) -> (HashMap<String, Type>, Vec<TypeError>) {
         self.pending_return_unions.clear();
-        self.callsite_return_types.clear();
         self.callable_param_source_vars.clear();
         self.callable_return_from_fn_param.clear();
         self.callable_array_return_from_fn_param.clear();
@@ -2320,7 +2182,6 @@ impl TypeInferenceEngine {
         // CONFLICTING observed pair still produces the genuine union mismatch.
         self.apply_callsite_unions(&mut types);
         errors.extend(self.propagate_param_destructure_field_links());
-        self.rewalk_resolved_function_bodies(program, &mut types);
 
         // HOF return-type soundness re-check (the sg2 root, int/number guard).
         //
@@ -2392,7 +2253,6 @@ impl TypeInferenceEngine {
                 errors.push(err);
             }
         }
-        errors.extend(self.propagate_resolved_call_returns_to_callsite_instances(&types));
 
         // Apply substitutions to get final types
         for (_name, ty) in types.iter_mut() {
