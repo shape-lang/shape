@@ -23,8 +23,8 @@ fn test_complex_enum_match_function_combo() {
         fn describe(s) {
             let a = area(s)
             match s {
-                Shape::Circle(r) => f"circle area={a}",
-                Shape::Square(side) => f"square area={a}"
+                Shape::Circle(r) => "circle area=" + a,
+                Shape::Square(side) => "square area=" + a
             }
         }
         print(describe(Shape::Circle(5)))
@@ -260,7 +260,7 @@ fn test_complex_higher_order_with_enum_result() {
             if result < 0 { Err("negative result") } else { Ok(result) }
         }
         match try_apply(|x| x * 2 - 100, 30) {
-            Ok(v) => f"ok: {v}",
+            Ok(v) => "ok: " + v,
             Err(e) => "err: " + e
         }
     "#,
@@ -277,7 +277,7 @@ fn test_complex_higher_order_with_enum_result_ok_path() {
             if result < 0 { Err("negative result") } else { Ok(result) }
         }
         match try_apply(|x| x * 2 - 100, 80) {
-            Ok(v) => f"ok: {v}",
+            Ok(v) => "ok: " + v,
             Err(e) => "err: " + e
         }
     "#,

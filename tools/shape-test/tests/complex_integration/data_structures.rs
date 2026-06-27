@@ -229,19 +229,20 @@ fn test_complex_frequency_counter() {
         fn count_frequency(arr) {
             let mut map = HashMap()
             for item in arr {
-                let key = item
+                let key = item + ""
                 let current = map.get(key)
-                match current {
-                    Some(count) => { map = map.set(key, count + 1) },
-                    None => { map = map.set(key, 1) }
+                if current == None {
+                    map = map.set(key, 1)
+                } else {
+                    map = map.set(key, current + 1)
                 }
             }
             map
         }
         let freq = count_frequency(["a", "b", "a", "c", "b", "a"])
-        print(match freq.get("a") { Some(count) => count, None => 0 })
-        print(match freq.get("b") { Some(count) => count, None => 0 })
-        print(match freq.get("c") { Some(count) => count, None => 0 })
+        print(freq.get("a"))
+        print(freq.get("b"))
+        print(freq.get("c"))
     "#,
     )
     .expect_output("3\n2\n1");

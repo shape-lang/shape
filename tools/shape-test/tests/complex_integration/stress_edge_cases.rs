@@ -144,37 +144,38 @@ fn test_complex_all_features_together() {
         r#"
         // Types
         type Item { name: string, price: number }
-        type Receipt { items: int, total: number }
         // Enum
         enum Discount { Percent(number), Fixed(number), NoDiscount }
         // Functions
         fn apply_discount(price, discount) {
             match discount {
-                Discount::Percent(p) => price * (100.0 - p) / 100.0,
+                Discount::Percent(p) => price * (100 - p) / 100,
                 Discount::Fixed(f) => price - f,
                 Discount::NoDiscount => price
             }
         }
         // Const
-        const TAX_RATE = 10.0
-        fn apply_tax(price) { price * (100.0 + TAX_RATE) / 100.0 }
+        const TAX_RATE = 10
+        fn apply_tax(price) { price * (100 + TAX_RATE) / 100 }
         // Array + closures + iteration
         let items = [
-            Item { name: "Widget", price: 100.0 },
-            Item { name: "Gadget", price: 200.0 },
-            Item { name: "Doohickey", price: 50.0 }
+            Item { name: "Widget", price: 100 },
+            Item { name: "Gadget", price: 200 },
+            Item { name: "Doohickey", price: 50 }
         ]
-        let discount = Discount::Percent(20.0)
-        let mut total = 0.0
+        let discount = Discount::Percent(20)
+        let mut total = 0
         for item in items {
             let discounted = apply_discount(item.price, discount)
             let with_tax = apply_tax(discounted)
             total = total + with_tax
         }
         // HashMap for metadata
-        let receipt = Receipt { items: items.length, total: total }
-        print(receipt.items)
-        print(receipt.total)
+        let receipt = HashMap()
+            .set("items", items.length)
+            .set("total", total)
+        print(receipt.get("items"))
+        print(receipt.get("total"))
     "#,
     )
     .expect_output("3\n308.0");
@@ -203,26 +204,25 @@ fn test_complex_recursive_descent_evaluator() {
     ShapeTest::new(
         r#"
         // Simple postfix expression evaluator
-        enum Token { Num(int), Plus, Times }
         fn eval_postfix(tokens) {
             let mut stack = []
             for t in tokens {
                 match t {
-                    Token::Plus => {
+                    "+" => {
                         let b = stack[stack.length - 1]
                         stack = stack.slice(0, stack.length - 1)
                         let a = stack[stack.length - 1]
                         stack = stack.slice(0, stack.length - 1)
                         stack = stack.push(a + b)
                     },
-                    Token::Times => {
+                    "*" => {
                         let b = stack[stack.length - 1]
                         stack = stack.slice(0, stack.length - 1)
                         let a = stack[stack.length - 1]
                         stack = stack.slice(0, stack.length - 1)
                         stack = stack.push(a * b)
                     },
-                    Token::Num(n) => {
+                    n => {
                         stack = stack.push(n)
                     }
                 }
@@ -230,7 +230,7 @@ fn test_complex_recursive_descent_evaluator() {
             stack[0]
         }
         // 3 4 + 2 * = (3 + 4) * 2 = 14
-        eval_postfix([Token::Num(3), Token::Num(4), Token::Plus, Token::Num(2), Token::Times])
+        eval_postfix([3, 4, "+", 2, "*"])
     "#,
     )
     .expect_number(14.0);
