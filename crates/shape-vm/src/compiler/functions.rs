@@ -278,7 +278,7 @@ impl BytecodeCompiler {
     ///   structural type and is likewise not generic.
     /// - The function must have at least one such unresolved param; a function
     ///   with zero unannotated value params is never implicitly generic.
-    pub(super) fn is_uninstantiated_implicit_generic(&self, func_def: &FunctionDef) -> bool {
+    fn is_uninstantiated_implicit_generic(&self, func_def: &FunctionDef) -> bool {
         // A-final ROOT-1 (closure-layout gap): a closure literal is NOT a
         // deferrable template. Unlike a named `fn f<T>(...)` — whose body the
         // deferral skips because each concrete call site re-emits a
