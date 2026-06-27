@@ -173,13 +173,13 @@ impl TypeSchemaRegistry {
         fields: Vec<(String, FieldType)>,
         field_annotations: Vec<Vec<FieldAnnotation>>,
     ) -> SchemaId {
-        let mut schema = TypeSchema::new(name, fields);
+        let id = self.allocate_id();
+        let mut schema = TypeSchema::with_id(id, name, fields);
         for (i, annotations) in field_annotations.into_iter().enumerate() {
             if i < schema.fields.len() && !annotations.is_empty() {
                 schema.fields[i].annotations = annotations;
             }
         }
-        let id = schema.id;
         self.register(schema);
         id
     }
@@ -371,6 +371,44 @@ impl TypeSchemaRegistry {
         let schema = TypeSchema::with_id(id, name, fields);
         self.register(schema);
         id
+    }
+
+    /// Register or refresh a named type using this registry's local ID domain.
+    ///
+    /// If the schema already exists and contains every requested field, this is
+    /// a no-op. If requested fields are missing, the schema is rebuilt with the
+    /// same schema ID and the union of existing + requested fields. This is
+    /// used for synthetic module-object schemas whose export set may be
+    /// observed in more than one compiler phase.
+    pub fn upsert_type_scoped_union_fields(
+        &mut self,
+        name: impl Into<String>,
+        fields: Vec<(String, FieldType)>,
+    ) -> SchemaId {
+        let name = name.into();
+        if let Some(existing) = self.by_name.get(&name) {
+            let id = existing.id;
+            let mut merged: Vec<(String, FieldType)> = existing
+                .fields
+                .iter()
+                .map(|field| (field.name.clone(), field.field_type.clone()))
+                .collect();
+            let mut changed = false;
+            for (field_name, field_type) in fields {
+                if merged.iter().any(|(name, _)| name == &field_name) {
+                    continue;
+                }
+                merged.push((field_name, field_type));
+                changed = true;
+            }
+            if changed {
+                let schema = TypeSchema::with_id(id, name, merged);
+                self.register(schema);
+            }
+            return id;
+        }
+
+        self.register_type_scoped(name, fields)
     }
 
     /// Register an enum whose ID is drawn from this registry's per-instance

@@ -681,10 +681,6 @@ fn ensure_module_object_schema(
     module: &shape_runtime::module_exports::ModuleExports,
 ) {
     let schema_name = format!("__mod_{}", module.name);
-    if bytecode.type_schema_registry.get(&schema_name).is_some() {
-        return;
-    }
-
     let mut export_names: Vec<String> = module
         .export_names_available(true)
         .into_iter()
@@ -699,7 +695,7 @@ fn ensure_module_object_schema(
         .collect();
     bytecode
         .type_schema_registry
-        .register_type(schema_name, fields);
+        .upsert_type_scoped_union_fields(schema_name, fields);
 }
 
 /// Execute a comptime handler with a target parameter bound.
