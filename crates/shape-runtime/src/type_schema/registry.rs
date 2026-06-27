@@ -3,13 +3,13 @@
 //! This module provides the shared registry for type schemas and a fluent
 //! builder API for creating schemas.
 
+use super::SchemaId;
 use super::enum_support::EnumVariantInfo;
 use super::field_types::{FieldAnnotation, FieldType};
 use super::schema::TypeSchema;
-use super::SchemaId;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Starting value for per-registry schema ID counters.
 ///
