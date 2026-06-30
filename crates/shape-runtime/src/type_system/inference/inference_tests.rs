@@ -725,6 +725,75 @@ let b = afunc(x)
 }
 
 #[test]
+fn test_recursive_numeric_function_ignores_never_bottom_in_callsite_union() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+function fibonacci(n) {
+  if n <= 1 {
+    return n
+  } else {
+    return fibonacci(n - 1) + fibonacci(n - 2)
+  }
+}
+
+let result = fibonacci(15)
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let types = engine
+        .infer_program(&program)
+        .expect("recursive numeric inference should succeed");
+
+    let (param, ret) =
+        fn_param_return_basic(types.get("fibonacci").expect("fibonacci should infer"))
+            .expect("fibonacci should infer as fn(basic)->basic");
+    assert_eq!(
+        (param.as_str(), ret.as_str()),
+        ("int", "int"),
+        "recursive numeric proof should collapse int|never to int"
+    );
+    assert!(
+        matches!(types.get("result"), Some(Type::Concrete(TypeAnnotation::Basic(name))) if name == "int"),
+        "recursive call result should infer as int, got {:?}",
+        types.get("result")
+    );
+}
+
+#[test]
+fn test_recursive_numeric_function_rejects_non_numeric_recursive_arg() {
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+function bad(n) {
+  if n <= 1 {
+    return n
+  } else {
+    return bad(n - 1) + bad("nope")
+  }
+}
+
+let result = bad(2)
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let (_types, errors) = engine.infer_program_best_effort(&program);
+    assert!(
+        errors.iter().any(|err| matches!(
+            err,
+            TypeError::ConstraintViolation(message)
+                if message.contains("parameter at position 0 of 'bad' must be numeric")
+                    && message.contains("string")
+        )),
+        "non-numeric recursive call should reject, got {:?}",
+        errors
+    );
+}
+
+#[test]
 fn test_numeric_body_constraint_refines_unannotated_param_type() {
     use shape_ast::ast::TypeAnnotation;
     use shape_ast::parser::parse_program;

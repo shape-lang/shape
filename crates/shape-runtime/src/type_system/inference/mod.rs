@@ -1535,6 +1535,10 @@ impl TypeInferenceEngine {
         self.solver.probe_equal(a, b)
     }
 
+    fn type_is_never(ty: &Type) -> bool {
+        matches!(ty, Type::Concrete(TypeAnnotation::Never))
+    }
+
     /// Create a nominal union type from heterogeneous types
     ///
     /// Generates a union type with an auto-generated brand name.
@@ -1542,8 +1546,10 @@ impl TypeInferenceEngine {
     pub(crate) fn create_nominal_union(&mut self, types: &[Type]) -> TypeResult<Type> {
         use shape_ast::ast::TypeAnnotation;
 
-        // Flatten nested unions and deduplicate (preserve first occurrence).
+        // Flatten nested unions, drop bottom (`Never`) when any inhabited
+        // member exists, and deduplicate (preserve first occurrence).
         let mut unique_types = Vec::new();
+        let mut saw_never = false;
         for ty in types {
             let mut candidates = Vec::new();
             match ty {
@@ -1556,6 +1562,10 @@ impl TypeInferenceEngine {
             }
 
             for candidate in candidates {
+                if Self::type_is_never(&candidate) {
+                    saw_never = true;
+                    continue;
+                }
                 if !unique_types
                     .iter()
                     .any(|existing| self.types_equal(existing, &candidate))
@@ -1563,6 +1573,10 @@ impl TypeInferenceEngine {
                     unique_types.push(candidate);
                 }
             }
+        }
+
+        if unique_types.is_empty() && saw_never {
+            return Ok(Type::Concrete(TypeAnnotation::Never));
         }
 
         // If only one unique type remains after dedup, return it directly
@@ -3361,10 +3375,14 @@ impl TypeInferenceEngine {
                 .is_some_and(BuiltinTypes::is_numeric_type_name)
         };
         match ty {
+            Type::Concrete(TypeAnnotation::Never) => true,
             Type::Concrete(ann @ (TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_))) => {
                 name_is_numeric(ann)
             }
-            Type::Concrete(TypeAnnotation::Union(members)) => members.iter().all(name_is_numeric),
+            Type::Concrete(TypeAnnotation::Union(members)) => members
+                .iter()
+                .filter(|member| !matches!(member, TypeAnnotation::Never))
+                .all(name_is_numeric),
             _ => false,
         }
     }
@@ -3895,7 +3913,7 @@ impl TypeInferenceEngine {
         let mut unique = Vec::new();
         for ty in observed_types {
             let normalized = self.resolve_through_callsite_map(ty, resolved);
-            if matches!(normalized, Type::Variable(_)) {
+            if matches!(normalized, Type::Variable(_)) || Self::type_is_never(&normalized) {
                 continue;
             }
             if !unique
