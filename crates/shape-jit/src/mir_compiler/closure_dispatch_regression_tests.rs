@@ -131,16 +131,16 @@ times_two(7)
 /// F64 bit pattern to zero, and `result ?? 42.0` evaluated to 42.0 for
 /// every branch of the caller.
 ///
-/// Case 1: function returns `number?`, two `return` paths (literal F64
+/// Case 1: function returns `number?`, two `return` paths (`Some(F64)`
 /// and `None`). Pre-fix: returns 42.0 (None-ness was forced). Post-fix:
-/// returns 7.0.
+/// returns 7.0. Strict typing requires the option lift to be explicit.
 #[test]
 fn option_return_conditional_number_some() {
     jit_expect_number(
         r#"
 fn get_val(flag: bool) -> number? {
     if flag {
-        return 7.0
+        return Some(7.0)
     }
     return None
 }
@@ -162,7 +162,7 @@ fn option_return_conditional_number_none() {
         r#"
 fn get_val(flag: bool) -> number? {
     if flag {
-        return 7.0
+        return Some(7.0)
     }
     return None
 }
