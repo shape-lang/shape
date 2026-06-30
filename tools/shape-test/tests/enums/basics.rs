@@ -396,6 +396,38 @@ print(a == b)
     ShapeTest::new(code).expect_run_ok().expect_output("false");
 }
 
+/// Fixed: Data-carrying enum variants with string payloads compare by
+/// string content, not raw heap pointer identity.
+#[test]
+fn enum_equality_same_string_payload_content() {
+    let code = r#"
+enum Status {
+  Ok(int),
+  Error(string)
+}
+
+let a = Status::Error("same")
+let b = Status::Error("sa" + "me")
+print(a == b)
+"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("true");
+}
+
+#[test]
+fn enum_equality_different_string_payload_content() {
+    let code = r#"
+enum Status {
+  Ok(int),
+  Error(string)
+}
+
+let a = Status::Error("same")
+let b = Status::Error("other")
+print(a == b)
+"#;
+    ShapeTest::new(code).expect_run_ok().expect_output("false");
+}
+
 /// Fixed: Different variants of the same enum now correctly compare as not equal.
 /// Previously BUG-ENUM-001.
 #[test]

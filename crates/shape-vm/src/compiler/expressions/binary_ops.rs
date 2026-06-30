@@ -1091,7 +1091,7 @@ impl BytecodeCompiler {
             return Ok(true);
         }
 
-        if self.try_compile_same_unit_enum_equality(op, left, right)? {
+        if self.try_compile_same_enum_equality(op, left, right)? {
             return Ok(true);
         }
 
@@ -1170,16 +1170,14 @@ impl BytecodeCompiler {
         Err(strict_typing_binop_error(self, &typed_op, left, right))
     }
 
-    /// Strict structural-unification proof for equality over unit-only enums.
+    /// Strict structural-unification proof for equality over same-schema enums.
     ///
     /// This is a positive static proof, not a runtime tag fallback: both
     /// operands must resolve to the same registered `ConcreteType::Enum` (or
-    /// an inference type whose display name resolves to that enum schema), and
-    /// every variant in the schema must be unit-shaped. The lowering then
-    /// reuses the typed enum pattern-check path: read field 0 (`__variant`) via
-    /// `GetFieldTyped` and compare the two i64 discriminants with `EqInt` /
-    /// `NeqInt`.
-    fn try_compile_same_unit_enum_equality(
+    /// an inference type whose display name resolves to that enum schema).
+    /// The lowering emits typed-object equality over the full enum object, so
+    /// data variants compare both discriminator and payload slots.
+    fn try_compile_same_enum_equality(
         &mut self,
         op: &BinaryOp,
         left: &Expr,
@@ -1202,27 +1200,16 @@ impl BytecodeCompiler {
         let Some(schema) = self.type_tracker.schema_registry().get(left_enum.as_str()) else {
             return Ok(false);
         };
-        let Some(enum_info) = schema.get_enum_info() else {
-            return Ok(false);
-        };
-        if enum_info
-            .variants
-            .iter()
-            .any(|variant| variant.payload_fields != 0)
-        {
+        if schema.get_enum_info().is_none() {
             return Ok(false);
         }
-        let Ok(schema_id) = u16::try_from(schema.id) else {
-            return Ok(false);
-        };
 
-        self.emit_enum_variant_field(left, schema_id)?;
-        self.emit_enum_variant_field(right, schema_id)?;
-        self.emit(Instruction::simple(if matches!(op, BinaryOp::NotEqual) {
-            OpCode::NeqInt
-        } else {
-            OpCode::EqInt
-        }));
+        self.compile_expr(left)?;
+        self.compile_expr(right)?;
+        self.emit(Instruction::simple(OpCode::EqTypedObject));
+        if matches!(op, BinaryOp::NotEqual) {
+            self.emit(Instruction::simple(OpCode::Not));
+        }
         self.last_expr_schema = None;
         self.last_expr_type_info = Some(crate::type_tracking::VariableTypeInfo::with_storage(
             "bool".to_string(),
@@ -1326,19 +1313,6 @@ impl BytecodeCompiler {
             return None;
         };
         self.equality_enum_schema_name_if_known(&enum_name)
-    }
-
-    fn emit_enum_variant_field(&mut self, expr: &Expr, schema_id: u16) -> Result<()> {
-        self.compile_expr(expr)?;
-        self.emit(Instruction::new(
-            OpCode::GetFieldTyped,
-            Some(Operand::TypedField {
-                type_id: schema_id,
-                field_idx: 0,
-                field_type_tag: crate::executor::typed_object_ops::FIELD_TAG_I64,
-            }),
-        ));
-        Ok(())
     }
 
     /// Resolve the equality-relevant type of an expression from multiple
@@ -4410,6 +4384,7 @@ mod u4_4_regression_probe {
 
 #[cfg(test)]
 mod w28_enum_field_equality_static_proof_tests {
+    use crate::bytecode::OpCode;
     use crate::test_utils::compile_with_prelude;
 
     #[test]
@@ -4455,6 +4430,48 @@ mod w28_enum_field_equality_static_proof_tests {
         assert!(
             compile_with_prelude(src).is_ok(),
             "specialized extend method enum-field equality should compile"
+        );
+    }
+
+    #[test]
+    fn same_enum_data_equality_emits_typed_object_equality() {
+        let src = r#"
+            enum Status {
+                Ok(int),
+                Error(string)
+            }
+
+            let a = Status::Ok(1)
+            let b = Status::Ok(2)
+            print(a == b)
+        "#;
+
+        let bytecode = compile_with_prelude(src).expect("same-enum equality should compile");
+        assert!(
+            bytecode
+                .instructions
+                .iter()
+                .any(|instr| instr.opcode == OpCode::EqTypedObject),
+            "same-enum data equality should lower through EqTypedObject"
+        );
+    }
+
+    #[test]
+    fn cross_enum_equality_still_rejects() {
+        let src = r#"
+            enum A { X }
+            enum B { X }
+            let a = A::X
+            let b = B::X
+            print(a == b)
+        "#;
+
+        let err = compile_with_prelude(src).expect_err("cross-enum equality must reject");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("A is not compatible with B")
+                || msg.contains("Cannot infer types for binary operation"),
+            "unexpected cross-enum equality diagnostic: {msg}"
         );
     }
 }
