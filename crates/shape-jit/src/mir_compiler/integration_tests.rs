@@ -2117,6 +2117,27 @@ let b = 10
     );
 }
 
+/// W32 bitwise book-snippet regression. Mirrors
+/// `fundamentals/operators.mdx:195`: `&`, `|`, `^`, `~`, `<<`, and `>>`
+/// must execute as one JIT-compiled program instead of hanging or surfacing.
+#[test]
+fn aggregate_book_bitwise_operator_cluster_baseline() {
+    jit_expect_int(
+        r#"
+let a = 0b1100
+let b = 0b1010
+let bit_and = a & b
+let bit_or = a | b
+let bit_xor = a ^ b
+let bit_not = ~a
+let shift_left = a << 2
+let shift_right = a >> 1
+bit_and + (bit_or * 10) + (bit_xor * 100) + (bit_not * 1000) + (shift_left * 10000) + (shift_right * 100000)
+"#,
+        1_067_748,
+    );
+}
+
 /// W14.2-E2 Pow chain in mixed expression. VM==JIT=10 (`2**3 + 2`).
 #[test]
 fn aggregate_pow_in_chain_baseline() {
