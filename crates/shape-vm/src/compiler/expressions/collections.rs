@@ -36,6 +36,32 @@ pub(super) fn infer_field_type_from_expr(expr: &Expr) -> Option<FieldType> {
     }
 }
 
+fn field_type_is_strictly_proven(ft: &FieldType) -> bool {
+    match ft {
+        FieldType::Any => false,
+        FieldType::Object(name) => name != "unknown",
+        FieldType::Array(inner) | FieldType::Option(inner) | FieldType::Set(inner) => {
+            field_type_is_strictly_proven(inner)
+        }
+        FieldType::HashMap { key, value } => {
+            field_type_is_strictly_proven(key) && field_type_is_strictly_proven(value)
+        }
+        FieldType::F64
+        | FieldType::I64
+        | FieldType::Bool
+        | FieldType::String
+        | FieldType::Timestamp
+        | FieldType::Decimal
+        | FieldType::I8
+        | FieldType::U8
+        | FieldType::I16
+        | FieldType::U16
+        | FieldType::I32
+        | FieldType::U32
+        | FieldType::U64 => true,
+    }
+}
+
 /// Numeric-conversion LITERAL ADOPTION (numeric-conversion-spec §4), struct
 /// construction site. A bare integer literal field value adopts the field's
 /// declared numeric `FieldType` IFF the literal value is losslessly
@@ -911,7 +937,7 @@ impl BytecodeCompiler {
     fn compile_dynamic_object(&mut self, entries: &[shape_ast::ast::ObjectEntry]) -> Result<()> {
         use shape_ast::ast::ObjectEntry;
 
-        let mut pending_field_names: Vec<String> = Vec::new();
+        let mut pending_fields: Vec<(String, FieldType)> = Vec::new();
         let mut has_initial_object = false;
         let mut current_schema: Option<shape_runtime::type_schema::SchemaId> = None;
 
@@ -919,19 +945,17 @@ impl BytecodeCompiler {
             match entry {
                 ObjectEntry::Field { key, value, .. } => {
                     // Push ONLY the value (keys are embedded in the schema)
+                    let field_type = self.prove_object_spread_field_type(key, value)?;
                     self.plan_flexible_binding_escape_from_expr(value);
                     self.compile_expr_as_value_or_placeholder(value)?;
-                    pending_field_names.push(key.clone());
+                    pending_fields.push((key.clone(), field_type));
                 }
                 ObjectEntry::Spread(spread_expr) => {
                     // Create TypedObject from pending fields before the spread
-                    if !pending_field_names.is_empty() || !has_initial_object {
-                        // W17.2-C §4.D.5 migration: pending spread-fields
-                        // have no per-field type info at this dynamic
-                        // construction site; route through typed-with-Any.
-                        let typed_fields: Vec<(&str, FieldType)> = pending_field_names
+                    if !pending_fields.is_empty() || !has_initial_object {
+                        let typed_fields: Vec<(&str, FieldType)> = pending_fields
                             .iter()
-                            .map(|s| (s.as_str(), FieldType::Any))
+                            .map(|(name, ft)| (name.as_str(), ft.clone()))
                             .collect();
                         let schema_id = self
                             .type_tracker
@@ -940,7 +964,7 @@ impl BytecodeCompiler {
                             OpCode::NewTypedObject,
                             Some(Operand::TypedObjectAlloc {
                                 schema_id: schema_id as u16,
-                                field_count: pending_field_names.len() as u16,
+                                field_count: pending_fields.len() as u16,
                             }),
                         ));
                         if let Some(base_schema) = current_schema {
@@ -953,7 +977,7 @@ impl BytecodeCompiler {
                             current_schema = Some(schema_id);
                             self.last_expr_schema = Some(schema_id);
                         }
-                        pending_field_names.clear();
+                        pending_fields.clear();
                         has_initial_object = true;
                     }
 
@@ -987,12 +1011,10 @@ impl BytecodeCompiler {
         }
 
         // Finalize remaining fields
-        if !pending_field_names.is_empty() {
-            // W17.2-C §4.D.5 migration: pending-fields finalize site, no
-            // per-field type info available; typed-with-Any + verification.
-            let typed_fields: Vec<(&str, FieldType)> = pending_field_names
+        if !pending_fields.is_empty() {
+            let typed_fields: Vec<(&str, FieldType)> = pending_fields
                 .iter()
-                .map(|s| (s.as_str(), FieldType::Any))
+                .map(|(name, ft)| (name.as_str(), ft.clone()))
                 .collect();
             let schema_id = self
                 .type_tracker
@@ -1001,7 +1023,7 @@ impl BytecodeCompiler {
                 OpCode::NewTypedObject,
                 Some(Operand::TypedObjectAlloc {
                     schema_id: schema_id as u16,
-                    field_count: pending_field_names.len() as u16,
+                    field_count: pending_fields.len() as u16,
                 }),
             ));
             if has_initial_object {
@@ -1040,6 +1062,35 @@ impl BytecodeCompiler {
         }
 
         Ok(())
+    }
+
+    fn prove_object_spread_field_type(&self, key: &str, value: &Expr) -> Result<FieldType> {
+        if let Some(ft) = infer_field_type_from_expr(value)
+            && field_type_is_strictly_proven(&ft)
+        {
+            return Ok(ft);
+        }
+
+        let span = value.span();
+        if let Some(ft) = self
+            .resolved_expr_types
+            .get(&span)
+            .or_else(|| self.inference_facts.expression_type(span))
+            .and_then(|ty| ty.to_annotation())
+            .map(|ann| Self::type_annotation_to_field_type(&ann))
+            .filter(field_type_is_strictly_proven)
+        {
+            return Ok(ft);
+        }
+
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "Object spread field '{}' requires a statically proven concrete field type; \
+                 refusing to register a user-facing schema with FieldType::Any",
+                key
+            ),
+            location: Some(self.span_to_source_location(value.span())),
+        })
     }
 
     fn register_object_merge_schema(
@@ -2014,9 +2065,73 @@ impl BytecodeCompiler {
 
 #[cfg(test)]
 mod tests {
+    use super::field_type_is_strictly_proven;
     use crate::compiler::BytecodeCompiler;
     use shape_ast::parser::parse_program;
     use shape_runtime::type_schema::FieldType;
+
+    fn compile_object_spread_source(code: &str) -> crate::bytecode::BytecodeProgram {
+        let program = parse_program(code).expect("parse");
+        BytecodeCompiler::new()
+            .compile_with_source(&program, code)
+            .expect("compile")
+    }
+
+    fn merged_schema_field_type(
+        bytecode: &crate::bytecode::BytecodeProgram,
+        field_name: &str,
+    ) -> FieldType {
+        bytecode
+            .type_schema_registry
+            .type_names()
+            .filter(|name| name.starts_with("__merged_"))
+            .filter_map(|name| bytecode.type_schema_registry.get(name))
+            .find_map(|schema| {
+                schema
+                    .fields
+                    .iter()
+                    .find(|field| field.name == field_name)
+                    .map(|field| field.field_type.clone())
+            })
+            .unwrap_or_else(|| panic!("merged schema field `{}` must exist", field_name))
+    }
+
+    #[test]
+    fn object_spread_merged_schema_stamps_literal_field_type() {
+        let bytecode = compile_object_spread_source(
+            r#"
+            let base = { x: 1, y: 2 }
+            let extended = { ...base, z: 3 }
+            extended.z
+        "#,
+        );
+
+        let z_type = merged_schema_field_type(&bytecode, "z");
+        assert_eq!(z_type, FieldType::I64);
+        assert!(
+            field_type_is_strictly_proven(&z_type),
+            "merged spread field `z` must not contain FieldType::Any"
+        );
+    }
+
+    #[test]
+    fn object_spread_merged_schema_stamps_inferred_field_type() {
+        let bytecode = compile_object_spread_source(
+            r#"
+            let base = { x: 1, y: 2 }
+            let proven = 3
+            let extended = { ...base, z: proven }
+            extended.z
+        "#,
+        );
+
+        let z_type = merged_schema_field_type(&bytecode, "z");
+        assert_eq!(z_type, FieldType::I64);
+        assert!(
+            field_type_is_strictly_proven(&z_type),
+            "merged spread field `z` must be statically proven"
+        );
+    }
 
     #[test]
     fn test_struct_literal_type_mismatch_decimal_for_int() {
