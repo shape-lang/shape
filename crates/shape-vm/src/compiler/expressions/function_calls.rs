@@ -52,6 +52,22 @@ fn concrete_type_cache_key(ct: &ConcreteType) -> String {
         .unwrap_or_else(|| format!("{:?}", ct).replace(|ch: char| !ch.is_ascii_alphanumeric(), "_"))
 }
 
+fn adopt_int_literal_for_implicit_numeric_expr(
+    left_ct: &ConcreteType,
+    left: &Expr,
+    right_ct: &ConcreteType,
+    right: &Expr,
+) -> Option<ConcreteType> {
+    let is_int_lit = |expr: &Expr| matches!(expr, Expr::Literal(Literal::Int(_), _));
+    if *left_ct == ConcreteType::F64 && *right_ct == ConcreteType::I64 && is_int_lit(right) {
+        return Some(ConcreteType::F64);
+    }
+    if *right_ct == ConcreteType::F64 && *left_ct == ConcreteType::I64 && is_int_lit(left) {
+        return Some(ConcreteType::F64);
+    }
+    None
+}
+
 #[cfg(test)]
 mod w27_implicit_generic_tests {
     use crate::bytecode::OpCode;
@@ -222,6 +238,47 @@ mod w27_implicit_generic_tests {
         assert_eq!(
             eval_with_source_and_kind(source, NativeKind::Float64).as_f64(),
             Some(2.5)
+        );
+    }
+
+    #[test]
+    fn pipe_chain_preserves_float64_implicit_generic_callsite() {
+        let source = r#"
+            function double(x) {
+                return x * 2
+            }
+            function add_one(x) {
+                return x + 1
+            }
+            5.0 |> double |> add_one
+        "#;
+
+        assert_eq!(
+            eval_with_source_and_kind(source, NativeKind::Float64).as_f64(),
+            Some(11.0)
+        );
+    }
+
+    #[test]
+    fn pipe_call_does_not_default_unproven_numeric_specialization() {
+        let source = r#"
+            function add_one(x) {
+                return x + 1
+            }
+            "oops" |> add_one
+        "#;
+
+        let program = parse_program(source).expect("source should parse");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.set_source(source);
+        let err = compiler
+            .compile(&program)
+            .expect_err("string pipe into numeric implicit generic must reject");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("Cannot apply `+` to a `string` and a `int`")
+                && msg.contains("Strict typing does not implicitly convert"),
+            "unexpected diagnostic: {msg}"
         );
     }
 
@@ -6349,6 +6406,14 @@ impl BytecodeCompiler {
         if let Some(ct) = concrete_type_for_expr(self, expr) {
             return Ok(Some(ct));
         }
+        if let Expr::BinaryOp {
+            left, op, right, ..
+        } = expr
+        {
+            if matches!(op, shape_ast::ast::BinaryOp::Pipe) {
+                return self.concrete_type_for_implicit_pipe_call(left, right);
+            }
+        }
         let Expr::FunctionCall { name, args, .. } = expr else {
             return Ok(None);
         };
@@ -6365,6 +6430,41 @@ impl BytecodeCompiler {
             };
             arg_cts.push(ct);
         }
+        Ok(self.implicit_specialization_return_concrete_type(&func_def, &arg_cts, 0))
+    }
+
+    fn concrete_type_for_implicit_pipe_call(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<Option<ConcreteType>> {
+        let (name, pipe_args) = match right {
+            Expr::Identifier(name, _) => (name.as_str(), &[][..]),
+            Expr::FunctionCall { name, args, .. } => (name.as_str(), args.as_slice()),
+            _ => return Ok(None),
+        };
+
+        let Some(func_def) = self.function_defs.get(name).cloned() else {
+            return Ok(None);
+        };
+        if !self.is_uninstantiated_implicit_generic(&func_def)
+            || func_def.params.len() != pipe_args.len() + 1
+        {
+            return Ok(None);
+        }
+
+        let mut arg_cts = Vec::with_capacity(pipe_args.len() + 1);
+        let Some(left_ct) = self.concrete_type_for_implicit_specialization_arg(left)? else {
+            return Ok(None);
+        };
+        arg_cts.push(left_ct);
+        for arg in pipe_args {
+            let Some(ct) = self.concrete_type_for_implicit_specialization_arg(arg)? else {
+                return Ok(None);
+            };
+            arg_cts.push(ct);
+        }
+
         Ok(self.implicit_specialization_return_concrete_type(&func_def, &arg_cts, 0))
     }
 
@@ -6517,7 +6617,9 @@ impl BytecodeCompiler {
                         if left_ct == right_ct {
                             Some(left_ct)
                         } else {
-                            None
+                            adopt_int_literal_for_implicit_numeric_expr(
+                                &left_ct, left, &right_ct, right,
+                            )
                         }
                     }
                 }
