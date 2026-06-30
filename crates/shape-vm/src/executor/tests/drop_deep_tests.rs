@@ -10,7 +10,7 @@
 //! 7. Async Drop (~10 tests)
 
 use crate::bytecode::OpCode;
-use crate::executor::tests::test_utils::{KindedSlotTestExt, compile, eval};
+use crate::executor::tests::test_utils::{KindedSlotTestExt, compile, eval, eval_result};
 
 /// Count occurrences of a specific opcode in compiled bytecode.
 fn count_opcode(source: &str, opcode: OpCode) -> usize {
@@ -2604,6 +2604,25 @@ fn test_drop_edge_recursive_function() {
 #[test]
 fn test_drop_edge_mutual_recursion() {
     let src = r#"
+        function is_even(n: int) -> bool {
+            let val = n
+            if val == 0 { return true }
+            return is_odd(val - 1)
+        }
+        function is_odd(n: int) -> bool {
+            let val = n
+            if val == 0 { return false }
+            return is_even(val - 1)
+        }
+        is_even(10)
+    "#;
+    let result = eval(src);
+    assert_eq!(result.as_bool(), Some(true));
+}
+
+#[test]
+fn test_drop_edge_unannotated_mutual_recursion_rejects_before_runtime() {
+    let src = r#"
         function is_even(n) {
             let val = n
             if val == 0 { return true }
@@ -2616,8 +2635,18 @@ fn test_drop_edge_mutual_recursion() {
         }
         is_even(10)
     "#;
-    let result = eval(src);
-    assert_eq!(result.as_bool(), Some(true));
+    let err = eval_result(src).expect_err("unannotated mutual recursion should reject statically");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("cannot safely pass argument #1")
+            && msg.contains("statically proven as")
+            && msg.contains("callee parameter slot is"),
+        "expected a static call-boundary diagnostic, got: {msg}"
+    );
+    assert!(
+        !msg.contains("Stack overflow"),
+        "unannotated mutual recursion must not reach runtime stack overflow: {msg}"
+    );
 }
 
 #[test]

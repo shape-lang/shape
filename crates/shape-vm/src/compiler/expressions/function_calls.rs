@@ -55,7 +55,9 @@ fn concrete_type_cache_key(ct: &ConcreteType) -> String {
 #[cfg(test)]
 mod w27_implicit_generic_tests {
     use crate::bytecode::OpCode;
+    use crate::compiler::BytecodeCompiler;
     use crate::test_utils::compile_with_prelude;
+    use shape_ast::parser::parse_program;
 
     #[test]
     fn complex_math_library_calls_concrete_implicit_specializations() {
@@ -130,6 +132,37 @@ mod w27_implicit_generic_tests {
                     .any(|name| name.contains("__w27_implicit_min")),
             "clamp specialization should call concrete max/min specializations, got {:?}",
             clamp_blob.callee_names
+        );
+    }
+
+    #[test]
+    fn unannotated_mutual_recursion_rejects_wrong_kind_call_boundary() {
+        let source = r#"
+            function is_even(n) {
+                let val = n
+                if val == 0 { return true }
+                return is_odd(val - 1)
+            }
+            function is_odd(n) {
+                let val = n
+                if val == 0 { return false }
+                return is_even(val - 1)
+            }
+            is_even(10)
+        "#;
+
+        let program = parse_program(source).expect("source should parse");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.set_source(source);
+        let err = compiler
+            .compile(&program)
+            .expect_err("unannotated mutual recursion must reject before execution");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("cannot safely pass argument #1")
+                && msg.contains("statically proven as")
+                && msg.contains("callee parameter slot is"),
+            "unexpected diagnostic: {msg}"
         );
     }
 }
@@ -2230,6 +2263,7 @@ impl BytecodeCompiler {
                 args,
                 param_annotations.as_deref(),
             )?;
+            self.reject_mismatched_arg_kind_into_call_frame(&call_name, args, call_func_idx)?;
 
             let writebacks = self.compile_call_args_with_param_types(
                 args,
@@ -2570,6 +2604,83 @@ impl BytecodeCompiler {
             }
         }
         Ok(())
+    }
+
+    fn reject_mismatched_arg_kind_into_call_frame(
+        &mut self,
+        call_name: &str,
+        args: &[Expr],
+        call_func_idx: usize,
+    ) -> Result<()> {
+        let Some(func) = self.program.functions.get(call_func_idx) else {
+            return Ok(());
+        };
+        let Some(frame) = func.frame_descriptor.as_ref() else {
+            return Ok(());
+        };
+        let slot_kinds = frame.slots.clone();
+
+        for (idx, arg) in args.iter().enumerate() {
+            let Some(expected_kind) = slot_kinds.get(idx).copied() else {
+                continue;
+            };
+            if !Self::direct_call_scalar_kind_guard_applies(expected_kind) {
+                continue;
+            }
+            let Some(arg_ct) = self.direct_call_arg_concrete_type(arg) else {
+                continue;
+            };
+            let actual_kind =
+                shape_value::v2::closure_layout::native_kind_from_concrete_type(&arg_ct);
+            if !Self::direct_call_scalar_kind_guard_applies(actual_kind)
+                || actual_kind == expected_kind
+            {
+                continue;
+            }
+
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "cannot safely pass argument #{} to '{}': argument is statically proven as {:?}, \
+                     but the callee parameter slot is {:?}. Add an explicit annotation or make the \
+                     call-site proof match the callee signature.",
+                    idx + 1,
+                    call_name,
+                    actual_kind,
+                    expected_kind
+                ),
+                location: Some(self.span_to_source_location(arg.span())),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn direct_call_arg_concrete_type(&mut self, arg: &Expr) -> Option<ConcreteType> {
+        concrete_type_for_expr(self, arg).or_else(|| {
+            let Type::Concrete(ann) = self.infer_expr_type(arg).ok()? else {
+                return None;
+            };
+            crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                self, &ann,
+            )
+        })
+    }
+
+    fn direct_call_scalar_kind_guard_applies(kind: shape_value::NativeKind) -> bool {
+        matches!(
+            kind,
+            shape_value::NativeKind::Int64
+                | shape_value::NativeKind::UInt64
+                | shape_value::NativeKind::Int32
+                | shape_value::NativeKind::UInt32
+                | shape_value::NativeKind::Int16
+                | shape_value::NativeKind::UInt16
+                | shape_value::NativeKind::Int8
+                | shape_value::NativeKind::UInt8
+                | shape_value::NativeKind::Float64
+                | shape_value::NativeKind::Float32
+                | shape_value::NativeKind::Bool
+        )
     }
 
     /// True when a parameter's declared annotation resolves to a PROVEN concrete
