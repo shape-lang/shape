@@ -3573,6 +3573,12 @@ mod tests {
         // W12-stdlib-intrinsic-collapse (Wave-2-Agent-G, 2026-05-14):
         // `__intrinsic_sum` was deleted — substitute `__intrinsic_std`
         // (still gated) to exercise the gating path.
+        //
+        // Method syntax is rejected by strict field/method resolution before
+        // compiler-internal builtin name routing. Depending on the strict
+        // checker branch reached first, this can surface as "Array has no such
+        // method" or "Array cannot have fields"; both are compile-time
+        // rejections of user-visible intrinsic method syntax.
         let code = r#"
             fn test() {
                 [1, 2, 3].__intrinsic_std()
@@ -3584,8 +3590,11 @@ mod tests {
             .compile(&program)
             .expect_err("__intrinsic_* method syntax should be blocked from user code");
         let msg = format!("{}", err);
+        let strict_method_not_found =
+            msg.contains("Method '__intrinsic_std' not found on type 'Array'");
+        let strict_field_rejection = msg.contains("cannot have fields");
         assert!(
-            msg.contains("cannot have fields"),
+            strict_method_not_found || strict_field_rejection,
             "Expected strict field/method-resolution error for internal intrinsic method syntax, got: {}",
             msg
         );
