@@ -1810,48 +1810,39 @@ impl BytecodeCompiler {
                                 ),
                             );
                         }
-                        // W14.2-G4-derefstore-drift fix (ADR-006 §2.7.13
-                        // producer-side ref-chain stamp): for ref-params
-                        // (`&x`) without type annotation, the program-wide
-                        // function-signature fact can widen int-only ref-param
-                        // bodies to `"number"` because the engine's
-                        // reference-erasure path drops the integer-literal
-                        // pairing signal present in `x = x + 1`. The body-local
-                        // heuristic `infer_param_type_from_body` recovers
-                        // `"int"` from the literal pairing (closures.rs:43-50).
-                        // Prefer the body-local heuristic for ref-params when
-                        // global inference produced the wider `"number"` — this
-                        // re-stamps the ref-param's local-slot type tracker with
-                        // the producer-side (caller's `let a = 0`) projected kind,
-                        // matching the `RefTarget::Local { kind: Int64 }`
-                        // carried through the ref chain.
+                        // W14.2-G4-derefstore-drift fix + W37 mutual recursion:
+                        // a program-wide function-signature fact can widen an
+                        // int-only unannotated param to `"number"` when the
+                        // inference cycle loses the integer-literal pairing
+                        // signal present in shapes like `x = x + 1` or
+                        // `return peer(x - 1)`. The body-local heuristic
+                        // `infer_param_type_from_body` recovers `"int"` (or a
+                        // narrower integer family) from that literal pairing.
+                        // Prefer it only for the specific global-`number` /
+                        // body-integer conflict, so actual number call sites
+                        // are not narrowed by default and unresolved params
+                        // remain compile-time errors.
                         let global_inferred =
                             self.inferred_param_type_name_from_facts(&func_def.name, func_def, idx);
-                        let body_local_inferred = if param.is_reference {
+                        let body_local_inferred =
                             crate::compiler::expressions::closures::infer_param_type_from_body(
                                 name,
                                 &func_def.body,
                             )
                             .as_ref()
-                            .and_then(Self::tracked_type_name_from_annotation)
-                        } else {
-                            None
-                        };
+                            .and_then(Self::tracked_type_name_from_annotation);
                         let inferred_type_name =
                             match (global_inferred.as_deref(), body_local_inferred.as_deref()) {
-                                // Ref-param widening attractor: global says
-                                // "number", body-local literal pairing says
-                                // "int" (or another narrower primitive). The
-                                // body-local signal observed the actual
-                                // operand in `x op <int-literal>` —
-                                // authoritative for the producer-side stamp.
+                                // Widening attractor: global says "number",
+                                // body-local literal pairing says "int" (or
+                                // another narrower integer primitive).
                                 (
                                     Some("number"),
                                     Some(
                                         local @ ("int" | "i8" | "i16" | "i32" | "i64" | "u8"
                                         | "u16" | "u32" | "u64"),
                                     ),
-                                ) if param.is_reference => Some(local.to_string()),
+                                ) => Some(local.to_string()),
                                 _ => global_inferred,
                             };
                         if stamped_object_schema {

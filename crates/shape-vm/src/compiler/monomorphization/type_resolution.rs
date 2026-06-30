@@ -2004,11 +2004,15 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
     match expr {
         Expr::Literal(literal, _) => literal_concrete_type(literal),
 
-        Expr::Identifier(name, span) => compiler
-            .resolved_expr_types
-            .get(span)
-            .and_then(|ty| concrete_type_from_inference_fact(compiler, ty))
-            .or_else(|| identifier_concrete_type(compiler, name)),
+        Expr::Identifier(name, span) => {
+            current_function_param_context_concrete_type(compiler, name).or_else(|| {
+                compiler
+                    .resolved_expr_types
+                    .get(span)
+                    .and_then(|ty| concrete_type_from_inference_fact(compiler, ty))
+                    .or_else(|| identifier_concrete_type(compiler, name))
+            })
+        }
 
         Expr::Array(elements, _) => {
             // U4-6a: the array element ConcreteType is derived STRUCTURALLY from
@@ -3496,6 +3500,32 @@ fn current_function_param_concrete_type_from_facts(
         return None;
     };
     concrete_type_from_inference_fact(compiler, params.get(param_idx)?)
+}
+
+fn current_function_param_context_concrete_type(
+    compiler: &BytecodeCompiler,
+    name: &str,
+) -> Option<ConcreteType> {
+    let local_idx = compiler_resolve_local(compiler, name)?;
+    let param_idx = compiler
+        .current_function_params
+        .iter()
+        .position(|param| param.simple_name() == Some(name))?;
+    if usize::from(local_idx) != param_idx {
+        return None;
+    }
+
+    compiler
+        .current_function_local_concrete_facts
+        .get(&local_idx)
+        .map(|fact| fact.concrete_type.clone())
+        .or_else(|| {
+            compiler
+                .type_tracker
+                .get_local_type(local_idx)
+                .and_then(|info| concrete_type_from_tracker_info(compiler, info))
+        })
+        .or_else(|| current_function_param_concrete_type_from_facts(compiler, name, local_idx))
 }
 
 /// T1 sub-case (a) (strict-flip, 2026-06-20): map a schema `FieldType` to its

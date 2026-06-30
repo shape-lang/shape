@@ -56,7 +56,7 @@ fn concrete_type_cache_key(ct: &ConcreteType) -> String {
 mod w27_implicit_generic_tests {
     use crate::bytecode::OpCode;
     use crate::compiler::BytecodeCompiler;
-    use crate::test_utils::compile_with_prelude;
+    use crate::test_utils::{compile_with_prelude, eval_typed_i64};
     use shape_ast::parser::parse_program;
 
     #[test]
@@ -164,6 +164,23 @@ mod w27_implicit_generic_tests {
                 && msg.contains("callee parameter slot is"),
             "unexpected diagnostic: {msg}"
         );
+    }
+
+    #[test]
+    fn unannotated_numeric_mutual_recursion_specializes_param_kind() {
+        let source = r#"
+            function is_even(n) {
+                if n == 0 { return 1 }
+                return is_odd(n - 1)
+            }
+            function is_odd(n) {
+                if n == 0 { return 0 }
+                return is_even(n - 1)
+            }
+            is_even(10)
+        "#;
+
+        assert_eq!(eval_typed_i64(source), 1);
     }
 }
 
