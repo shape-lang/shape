@@ -887,6 +887,9 @@ define_opcodes! {
     /// content-compares the decimal payloads, pushes bool. Both operands
     /// must be non-null v2 DecimalObj pointers. Use Neq via `EqDecimal; Not`.
     EqDecimal = 0xFF, Comparison, pops: 2, pushes: 1;
+    /// Equal (typed object × typed object → bool); compiler-proven same schema.
+    /// Use Neq via `EqTypedObject; Not`.
+    EqTypedObject = 0x1C8, Comparison, pops: 2, pushes: 1;
 
     // ===== v2 Stage 4.2: Typed Ordered Comparison for Strings =====
     /// Greater than (string × string → bool). Lexicographic comparison.

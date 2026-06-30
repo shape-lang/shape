@@ -591,7 +591,7 @@ impl VirtualMachine {
             GtInt | GtNumber | GtDecimal | LtInt | LtNumber | LtDecimal | GteInt | GteNumber
             | GteDecimal | LteInt | LteNumber | LteDecimal | EqInt | EqNumber | NeqInt
             | NeqNumber | EqString | EqDecimal | IsNull | GtString | LtString | GteString
-            | LteString => {
+            | LteString | EqTypedObject => {
                 return self.exec_typed_comparison(instruction);
             }
 

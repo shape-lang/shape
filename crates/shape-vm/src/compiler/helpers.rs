@@ -2202,6 +2202,7 @@ impl BytecodeCompiler {
                         | OpCode::NeqNumber
                         | OpCode::EqString
                         | OpCode::EqDecimal
+                        | OpCode::EqTypedObject
                         | OpCode::IsNull
                         | OpCode::Not
                 )
@@ -2385,6 +2386,7 @@ impl BytecodeCompiler {
             | OpCode::GteNumber
             | OpCode::EqString
             | OpCode::EqDecimal
+            | OpCode::EqTypedObject
             | OpCode::LtDecimal
             | OpCode::LteDecimal
             | OpCode::GtDecimal
