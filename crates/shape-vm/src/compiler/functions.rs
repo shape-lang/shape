@@ -1,9 +1,9 @@
 //! Function and closure compilation
 
 use crate::bytecode::{Instruction, OpCode, Operand};
-use shape_ast::ast::{FunctionDef, Item, Span, Statement};
+use shape_ast::ast::{Expr, FunctionDef, Item, Span, Spanned, Statement};
 use shape_ast::error::{ErrorNote, Result, ShapeError, SourceLocation};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{BytecodeCompiler, ParamPassMode};
 
@@ -50,6 +50,212 @@ pub(crate) fn diagnostic_to_shape_error(diag: &shape_diagnostics::Diagnostic) ->
 }
 
 impl BytecodeCompiler {
+    fn type_name_is_integer_proof(name: &str) -> bool {
+        name == "int" || shape_runtime::type_system::BuiltinTypes::is_integer_type_name(name)
+    }
+
+    fn expression_type_name_from_static_facts(&self, expr: &Expr) -> Option<String> {
+        let span = expr.span();
+        if !span.is_dummy() {
+            if let Some(type_name) = self
+                .resolved_expr_types
+                .get(&span)
+                .or_else(|| self.inference_facts.expression_type(span))
+                .and_then(|ty| ty.to_annotation())
+                .and_then(|ann| Self::tracked_type_name_from_annotation(&ann))
+            {
+                return Some(type_name);
+            }
+        }
+
+        crate::compiler::expressions::closures::infer_callsite_arg_type(expr)
+            .as_ref()
+            .and_then(Self::tracked_type_name_from_annotation)
+    }
+
+    fn direct_callees_in_function_body(func_def: &FunctionDef) -> HashSet<String> {
+        struct CalleeCollector {
+            callees: HashSet<String>,
+        }
+
+        impl shape_runtime::visitor::Visitor for CalleeCollector {
+            fn visit_expr_function_call(&mut self, expr: &Expr, _span: Span) -> bool {
+                match expr {
+                    Expr::FunctionCall { name, .. } => {
+                        self.callees.insert(name.clone());
+                    }
+                    Expr::QualifiedFunctionCall {
+                        namespace,
+                        function,
+                        ..
+                    } => {
+                        self.callees.insert(format!("{namespace}::{function}"));
+                    }
+                    _ => {}
+                }
+                true
+            }
+        }
+
+        let mut collector = CalleeCollector {
+            callees: HashSet::new(),
+        };
+        for stmt in &func_def.body {
+            shape_runtime::visitor::walk_stmt(&mut collector, stmt);
+        }
+        collector.callees
+    }
+
+    fn function_names_reachable_from(&self, start: &str) -> HashSet<String> {
+        let mut reachable = HashSet::new();
+        let mut stack = vec![start.to_string()];
+
+        while let Some(name) = stack.pop() {
+            let Some(func_def) = self.function_defs.get(&name) else {
+                continue;
+            };
+            for callee in Self::direct_callees_in_function_body(func_def) {
+                if reachable.insert(callee.clone()) {
+                    stack.push(callee);
+                }
+            }
+        }
+
+        reachable
+    }
+
+    fn recursive_component_for_function(&self, func_name: &str) -> HashSet<String> {
+        let reachable_from_target = self.function_names_reachable_from(func_name);
+        let mut component = HashSet::from([func_name.to_string()]);
+
+        for candidate in &reachable_from_target {
+            if self.function_names_reachable_from(candidate).contains(func_name) {
+                component.insert(candidate.clone());
+            }
+        }
+
+        component
+    }
+
+    fn direct_callsite_param_evidence_is_integer_only(
+        &self,
+        func_name: &str,
+        param_idx: usize,
+        param_name: &str,
+    ) -> bool {
+        let Some(source) = self.source_text.as_deref() else {
+            return false;
+        };
+        let Ok(program) = shape_ast::parser::parse_program(source) else {
+            return false;
+        };
+
+        let recursive_component = self.recursive_component_for_function(func_name);
+
+        struct EvidenceCollector<'a> {
+            compiler: &'a BytecodeCompiler,
+            recursive_component: &'a HashSet<String>,
+            param_idx: usize,
+            param_name: &'a str,
+            current_function_stack: Vec<String>,
+            saw_integer: bool,
+            veto: bool,
+        }
+
+        impl EvidenceCollector<'_> {
+            fn callee_is_component_member(&self, callee: &str) -> bool {
+                self.recursive_component.contains(callee)
+            }
+
+            fn current_context_is_recursive_component(&self) -> bool {
+                self.current_function_stack
+                    .last()
+                    .is_some_and(|name| self.recursive_component.contains(name))
+            }
+
+            fn record_call_args(&mut self, args: &[Expr], named_args: &[(String, Expr)]) {
+                if self.current_context_is_recursive_component() {
+                    return;
+                }
+
+                let arg = args.get(self.param_idx).or_else(|| {
+                    named_args
+                        .iter()
+                        .find(|(name, _)| name == self.param_name)
+                        .map(|(_, expr)| expr)
+                });
+
+                let Some(arg) = arg else {
+                    self.veto = true;
+                    return;
+                };
+
+                match self
+                    .compiler
+                    .expression_type_name_from_static_facts(arg)
+                    .as_deref()
+                {
+                    Some(name) if BytecodeCompiler::type_name_is_integer_proof(name) => {
+                        self.saw_integer = true;
+                    }
+                    _ => {
+                        self.veto = true;
+                    }
+                }
+            }
+        }
+
+        impl shape_runtime::visitor::Visitor for EvidenceCollector<'_> {
+            fn visit_function(&mut self, func: &FunctionDef) -> bool {
+                self.current_function_stack.push(func.name.clone());
+                true
+            }
+
+            fn leave_function(&mut self, _func: &FunctionDef) {
+                self.current_function_stack.pop();
+            }
+
+            fn visit_expr_function_call(&mut self, expr: &Expr, _span: Span) -> bool {
+                match expr {
+                    Expr::FunctionCall {
+                        name,
+                        args,
+                        named_args,
+                        ..
+                    } if self.callee_is_component_member(name) => {
+                        self.record_call_args(args, named_args);
+                    }
+                    Expr::QualifiedFunctionCall {
+                        namespace,
+                        function,
+                        args,
+                        named_args,
+                        ..
+                    } => {
+                        let qualified = format!("{namespace}::{function}");
+                        if self.callee_is_component_member(&qualified) {
+                            self.record_call_args(args, named_args);
+                        }
+                    }
+                    _ => {}
+                }
+                true
+            }
+        }
+
+        let mut collector = EvidenceCollector {
+            compiler: self,
+            recursive_component: &recursive_component,
+            param_idx,
+            param_name,
+            current_function_stack: Vec::new(),
+            saw_integer: false,
+            veto: false,
+        };
+        shape_runtime::visitor::walk_program(&mut collector, &program);
+        collector.saw_integer && !collector.veto
+    }
+
     /// Build the function-name → return-type `LocalTypeInfo` seed for MIR
     /// lowering (strict REAL-MOVE close H1, 2026-06-21). Walks the type-checked
     /// function registry (`self.function_defs`) and classifies each function's
@@ -1812,16 +2018,21 @@ impl BytecodeCompiler {
                         }
                         // W14.2-G4-derefstore-drift fix + W37 mutual recursion:
                         // a program-wide function-signature fact can widen an
-                        // int-only unannotated param to `"number"` when the
-                        // inference cycle loses the integer-literal pairing
-                        // signal present in shapes like `x = x + 1` or
-                        // `return peer(x - 1)`. The body-local heuristic
-                        // `infer_param_type_from_body` recovers `"int"` (or a
-                        // narrower integer family) from that literal pairing.
-                        // Prefer it only for the specific global-`number` /
-                        // body-integer conflict, so actual number call sites
-                        // are not narrowed by default and unresolved params
-                        // remain compile-time errors.
+                        // int-only unannotated param to `"number"`. For
+                        // reference params, keep the old ref-chain rule: the
+                        // body-local literal pairing is the producer-side
+                        // stamp. For by-value params, accept that body-local
+                        // integer proof only when direct calls into this
+                        // function's recursive component prove integer args
+                        // at the same param slot and no direct call proves a
+                        // wider/unknown arg. That preserves real Float64 call
+                        // sites like `add_one(1.5)` while still specializing
+                        // `is_even(10)` / `is_odd(n - 1)` cycles. The JIT
+                        // engine path can arrive without source text; in that
+                        // case this source-level direct-call audit is
+                        // unavailable, so the by-value override is restricted
+                        // to multi-function recursive components instead of
+                        // all unannotated numeric helpers.
                         let global_inferred =
                             self.inferred_param_type_name_from_facts(&func_def.name, func_def, idx);
                         let body_local_inferred =
@@ -1831,6 +2042,9 @@ impl BytecodeCompiler {
                             )
                             .as_ref()
                             .and_then(Self::tracked_type_name_from_annotation);
+                        let source_unavailable_mutual_recursion =
+                            self.source_text.is_none()
+                                && self.recursive_component_for_function(&func_def.name).len() > 1;
                         let inferred_type_name =
                             match (global_inferred.as_deref(), body_local_inferred.as_deref()) {
                                 // Widening attractor: global says "number",
@@ -1842,7 +2056,24 @@ impl BytecodeCompiler {
                                         local @ ("int" | "i8" | "i16" | "i32" | "i64" | "u8"
                                         | "u16" | "u32" | "u64"),
                                     ),
-                                ) => Some(local.to_string()),
+                                ) if param.is_reference
+                                    || self.direct_callsite_param_evidence_is_integer_only(
+                                        &func_def.name,
+                                        idx,
+                                        name,
+                                    ) =>
+                                {
+                                    Some(local.to_string())
+                                }
+                                (
+                                    Some("number"),
+                                    Some(
+                                        local @ ("int" | "i8" | "i16" | "i32" | "i64" | "u8"
+                                        | "u16" | "u32" | "u64"),
+                                    ),
+                                ) if source_unavailable_mutual_recursion => {
+                                    Some(local.to_string())
+                                }
                                 _ => global_inferred,
                             };
                         if stamped_object_schema {

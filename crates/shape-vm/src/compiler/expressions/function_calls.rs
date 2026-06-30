@@ -56,8 +56,22 @@ fn concrete_type_cache_key(ct: &ConcreteType) -> String {
 mod w27_implicit_generic_tests {
     use crate::bytecode::OpCode;
     use crate::compiler::BytecodeCompiler;
-    use crate::test_utils::{compile_with_prelude, eval_typed_i64};
+    use crate::executor::{VMConfig, VirtualMachine};
+    use crate::test_utils::compile_with_prelude;
+    use crate::type_tracking::NativeKind;
     use shape_ast::parser::parse_program;
+    use shape_value::{KindedSlot, ValueSlot};
+
+    fn eval_with_source_and_kind(source: &str, expected: NativeKind) -> KindedSlot {
+        let program = parse_program(source).expect("source should parse");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.set_source(source);
+        let bytecode = compiler.compile(&program).expect("compile should succeed");
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        let bits = vm.execute_raw(None).expect("execution should succeed");
+        KindedSlot::new(ValueSlot::from_raw(bits), expected)
+    }
 
     #[test]
     fn complex_math_library_calls_concrete_implicit_specializations() {
@@ -180,7 +194,25 @@ mod w27_implicit_generic_tests {
             is_even(10)
         "#;
 
-        assert_eq!(eval_typed_i64(source), 1);
+        assert_eq!(
+            eval_with_source_and_kind(source, NativeKind::Int64).as_i64(),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn unannotated_numeric_function_preserves_float64_callsite() {
+        let source = r#"
+            function add_one(x) {
+                return x + 1
+            }
+            add_one(1.5)
+        "#;
+
+        assert_eq!(
+            eval_with_source_and_kind(source, NativeKind::Float64).as_f64(),
+            Some(2.5)
+        );
     }
 }
 
