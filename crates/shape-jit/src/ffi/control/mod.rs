@@ -415,7 +415,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
     use crate::context::JITClosure;
     use crate::ffi::jit_kinds::unified_unbox;
     use crate::ffi::stack_kind_code;
-    use shape_value::{heap_value::HeapValue, HeapKind, NativeKind};
+    use shape_value::{HeapKind, NativeKind, heap_value::HeapValue};
     use std::sync::Arc;
 
     unsafe {
