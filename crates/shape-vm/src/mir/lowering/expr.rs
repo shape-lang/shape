@@ -1625,8 +1625,9 @@ pub(super) fn lower_match_expr(
     }
 
     let scrutinee_slot = lower_expr_to_temp(builder, &match_expr.scrutinee);
-    let merge_block = builder.new_block();
+
     let no_match_block = builder.new_block();
+    let merge_placeholder = BasicBlockId(u32::MAX - builder.next_block_id);
     let mut next_test_block = builder.current_block;
 
     for (idx, arm) in match_expr.arms.iter().enumerate() {
@@ -1738,7 +1739,7 @@ pub(super) fn lower_match_expr(
             ),
             arm.body.span(),
         );
-        builder.finish_block(TerminatorKind::Goto(merge_block), arm.body.span());
+        builder.finish_block(TerminatorKind::Goto(merge_placeholder), arm.body.span());
 
         if binding_scope_active {
             builder.pop_scope();
@@ -1754,9 +1755,30 @@ pub(super) fn lower_match_expr(
         ),
         span,
     );
-    builder.finish_block(TerminatorKind::Goto(merge_block), span);
+    builder.finish_block(TerminatorKind::Goto(merge_placeholder), span);
 
+    // MirBuilder::build sorts completed blocks by BasicBlockId. The JIT's
+    // static kind walk uses that sorted order, so the match merge block must
+    // have an ID after every arm/no-match writer. Otherwise a downstream
+    // `let r = match ...` copy in the merge sees the match temp before any arm
+    // has stamped its kind and the return path can be misclassified as unit.
+    let merge_block = builder.new_block();
+    retarget_match_merge_gotos(builder, merge_placeholder, merge_block);
     builder.start_block(merge_block);
+}
+
+fn retarget_match_merge_gotos(
+    builder: &mut MirBuilder,
+    placeholder: BasicBlockId,
+    merge_block: BasicBlockId,
+) {
+    for block in &mut builder.blocks {
+        if let TerminatorKind::Goto(target) = &mut block.terminator.kind
+            && *target == placeholder
+        {
+            *target = merge_block;
+        }
+    }
 }
 
 fn lower_match_pattern_condition_operand(
@@ -2949,6 +2971,94 @@ fn lower_type_assertion_expr(
         builder.push_stmt(
             StatementKind::Assign(Place::Local(temp), Rvalue::Aggregate(operands)),
             span,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn match_result_writers_sort_before_merge_copy() {
+        let program = shape_ast::parser::parse_program(
+            r#"
+function main() {
+    let x = 2
+    let result = match x {
+        1 => 10,
+        2 => if true { 20 } else { 21 },
+        3 => 30,
+        _ => 0
+    }
+    result
+}
+"#,
+        )
+        .expect("parse failed");
+        let func = match &program.items[0] {
+            ast::Item::Function(func, _) => func,
+            other => panic!("expected function item, got {other:?}"),
+        };
+        let lowering = crate::mir::lowering::lower_function_detailed(
+            &func.name,
+            &func.params,
+            &func.body,
+            func.name_span,
+        );
+        let result_slot = lowering
+            .binding_infos
+            .iter()
+            .find(|binding| binding.name == "result")
+            .expect("result binding missing")
+            .slot;
+
+        let mut merge_copy: Option<(BasicBlockId, SlotId)> = None;
+        for block in &lowering.mir.blocks {
+            for stmt in &block.statements {
+                if let StatementKind::Assign(
+                    Place::Local(dst),
+                    Rvalue::Use(
+                        Operand::Copy(Place::Local(src))
+                        | Operand::Move(Place::Local(src))
+                        | Operand::MoveExplicit(Place::Local(src)),
+                    ),
+                ) = &stmt.kind
+                {
+                    if *dst == result_slot {
+                        merge_copy = Some((block.id, *src));
+                    }
+                }
+            }
+        }
+        let (merge_block, match_temp) = merge_copy.expect("match result merge copy missing");
+
+        let writer_blocks: Vec<_> = lowering
+            .mir
+            .blocks
+            .iter()
+            .filter(|block| {
+                block.statements.iter().any(|stmt| {
+                    matches!(
+                        &stmt.kind,
+                        StatementKind::Assign(Place::Local(dst), _) if *dst == match_temp
+                    )
+                })
+            })
+            .map(|block| block.id)
+            .collect();
+
+        assert!(
+            writer_blocks.len() >= 4,
+            "expected arm writers for match temp {:?}, got {:?}",
+            match_temp,
+            writer_blocks
+        );
+        assert!(
+            writer_blocks.iter().all(|block| block.0 < merge_block.0),
+            "match temp writers must sort before merge block {:?}; writers: {:?}",
+            merge_block,
+            writer_blocks
         );
     }
 }
