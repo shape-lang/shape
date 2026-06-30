@@ -42,8 +42,7 @@ impl JITCompiler {
         // the `[jit-fallback]` path) preserves VM == JIT. Root-cause fix (a
         // JIT-consumable top-level MIR carrying the baked literal) is v0.4.
         if program.top_level_has_comptime {
-            return Err(
-                "v0.3.3 comptime SURFACE (ADR-006 §2.7.14): top-level code \
+            return Err("v0.3.3 comptime SURFACE (ADR-006 §2.7.14): top-level code \
                  contains a `comptime { ... }` block. The borrow-solver \
                  top-level MIR re-lowers the comptime body's statements rather \
                  than the compile-time-baked literal; the JIT would re-run the \
@@ -54,8 +53,7 @@ impl JITCompiler {
                  the baked bytecode) preserves VM == JIT. Root-cause fix (a \
                  JIT-consumable top-level MIR carrying the baked comptime \
                  literal) is v0.4."
-                    .to_string(),
-            );
+                .to_string());
         }
 
         // MirToIR is the ONLY compilation path.
@@ -205,6 +203,7 @@ impl JITCompiler {
         program: &BytecodeProgram,
         user_func_ids: &HashMap<u16, cranelift_module::FuncId>,
         user_func_arities: &HashMap<u16, u16>,
+        user_func_return_kinds: &HashMap<u16, shape_vm::type_tracking::NativeKind>,
     ) -> Result<cranelift_module::FuncId, String> {
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
@@ -223,16 +222,14 @@ impl JITCompiler {
         // top-level program to the bytecode interpreter when top-level code
         // contains a `comptime { ... }` block, so VM == JIT.
         if program.top_level_has_comptime {
-            return Err(
-                "v0.3.3 comptime SURFACE (ADR-006 §2.7.14): top-level code \
+            return Err("v0.3.3 comptime SURFACE (ADR-006 §2.7.14): top-level code \
                  contains a `comptime { ... }` block; the borrow-solver \
                  top-level MIR re-lowers the comptime body rather than the \
                  baked literal, so the JIT would leak the body's trailing value \
                  into the program-return slot. Whole-program deopting to the \
                  bytecode interpreter preserves VM == JIT. Root-cause fix is \
                  v0.4."
-                    .to_string(),
-            );
+                .to_string());
         }
 
         // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).
@@ -295,20 +292,22 @@ impl JITCompiler {
                     .enumerate()
                     .filter_map(|(i, opt)| opt.as_ref().map(|l| (i as u16, l.clone())))
                     .collect();
-                let mut mir_compiler = crate::mir_compiler::MirToIR::new_with_closure_layouts(
-                    &mut builder,
-                    ctx_ptr,
-                    ffi,
-                    mir_data,
-                    slot_kinds,
-                    concrete_types,
-                    &program.strings,
-                    entry_block,
-                    &function_indices,
-                    user_func_refs.clone(),
-                    user_func_arities.clone(),
-                    closure_function_layouts,
-                );
+                let mut mir_compiler =
+                    crate::mir_compiler::MirToIR::new_with_closure_layouts_and_function_returns(
+                        &mut builder,
+                        ctx_ptr,
+                        ffi,
+                        mir_data,
+                        slot_kinds,
+                        concrete_types,
+                        &program.strings,
+                        entry_block,
+                        &function_indices,
+                        user_func_refs.clone(),
+                        user_func_arities.clone(),
+                        user_func_return_kinds.clone(),
+                        closure_function_layouts,
+                    );
                 // V3-S6c-jit-method-monomorph-routing: top-level path with
                 // user-funcs visible. Caller id = None per the same
                 // convention as the no-user-funcs path above.

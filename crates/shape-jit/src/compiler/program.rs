@@ -183,8 +183,14 @@ impl JITCompiler {
 
         let mut user_func_arities: HashMap<u16, u16> = HashMap::new();
         let mut user_func_ids: HashMap<u16, cranelift_module::FuncId> = HashMap::new();
+        let mut user_func_return_kinds: HashMap<u16, shape_vm::type_tracking::NativeKind> =
+            HashMap::new();
 
         for (idx, func) in program.functions.iter().enumerate() {
+            if let Some(return_kind) = func.frame_descriptor.as_ref().and_then(|fd| fd.return_kind)
+            {
+                user_func_return_kinds.insert(idx as u16, return_kind);
+            }
             let func_name = format!("{}_{}", name, func.name.replace("::", "__"));
             let mut user_sig = self.module.make_signature();
             user_sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
@@ -205,6 +211,7 @@ impl JITCompiler {
             program,
             &user_func_ids,
             &user_func_arities,
+            &user_func_return_kinds,
         )?;
 
         for (idx, func) in program.functions.iter().enumerate() {
@@ -215,6 +222,7 @@ impl JITCompiler {
                 idx,
                 &user_func_ids,
                 &user_func_arities,
+                &user_func_return_kinds,
             )?;
         }
 
@@ -249,6 +257,7 @@ impl JITCompiler {
         func_idx: usize,
         user_func_ids: &HashMap<u16, cranelift_module::FuncId>,
         user_func_arities: &HashMap<u16, u16>,
+        user_func_return_kinds: &HashMap<u16, shape_vm::type_tracking::NativeKind>,
     ) -> Result<(), String> {
         let func = &program.functions[func_idx];
         let func_id = *user_func_ids
@@ -256,7 +265,8 @@ impl JITCompiler {
             .ok_or_else(|| format!("Function {} not pre-declared", name))?;
 
         let mut sig = self.module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+        // ctx_ptr
+        sig.params.push(AbiParam::new(types::I64));
         // Closures receive captures as leading native args, followed by user params.
         let effective_arity = func.captures_count + func.arity;
         for _ in 0..effective_arity {
@@ -398,20 +408,22 @@ impl JITCompiler {
                     .enumerate()
                     .filter_map(|(i, opt)| opt.as_ref().map(|l| (i as u16, l.clone())))
                     .collect();
-                let mut mir_compiler = crate::mir_compiler::MirToIR::new_with_closure_layouts(
-                    &mut builder,
-                    ctx_ptr,
-                    ffi,
-                    mir_data,
-                    slot_kinds,
-                    concrete_types,
-                    &sub_program.strings,
-                    entry_block,
-                    &function_indices,
-                    user_func_refs.clone(),
-                    user_func_arities.clone(),
-                    closure_function_layouts,
-                );
+                let mut mir_compiler =
+                    crate::mir_compiler::MirToIR::new_with_closure_layouts_and_function_returns(
+                        &mut builder,
+                        ctx_ptr,
+                        ffi,
+                        mir_data,
+                        slot_kinds,
+                        concrete_types,
+                        &sub_program.strings,
+                        entry_block,
+                        &function_indices,
+                        user_func_refs.clone(),
+                        user_func_arities.clone(),
+                        user_func_return_kinds.clone(),
+                        closure_function_layouts,
+                    );
                 // V3-S6c-jit-method-monomorph-routing (ADR-006 §2.7.5
                 // stamp-at-compile-time; supervisor 2026-05-15 PATH α-prime
                 // RATIFIED): thread the V3-S6b side-table from the ORIGINAL
@@ -749,8 +761,14 @@ impl JITCompiler {
         // but won't have a body defined - they'll use the trampoline.
         let mut user_func_arities: HashMap<u16, u16> = HashMap::new();
         let mut user_func_ids: HashMap<u16, cranelift_module::FuncId> = HashMap::new();
+        let mut user_func_return_kinds: HashMap<u16, shape_vm::type_tracking::NativeKind> =
+            HashMap::new();
 
         for (idx, func) in program.functions.iter().enumerate() {
+            if let Some(return_kind) = func.frame_descriptor.as_ref().and_then(|fd| fd.return_kind)
+            {
+                user_func_return_kinds.insert(idx as u16, return_kind);
+            }
             if !jit_compatible[idx] {
                 user_func_arities.insert(idx as u16, func.arity);
                 continue;
@@ -760,7 +778,8 @@ impl JITCompiler {
             // (e.g., multiple __closure_0 from different stdlib modules).
             let func_name = format!("{}_f{}_{}", name, idx, func.name.replace("::", "__"));
             let mut user_sig = self.module.make_signature();
-            user_sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
+            // ctx_ptr
+            user_sig.params.push(AbiParam::new(types::I64));
             // Closures receive captures as leading native args, followed by user params.
             let effective_arity = func.captures_count + func.arity;
             for _ in 0..effective_arity {
@@ -782,6 +801,7 @@ impl JITCompiler {
             program,
             &user_func_ids,
             &user_func_arities,
+            &user_func_return_kinds,
         )?;
 
         // Phase 4: Compile only JIT-compatible function bodies.
@@ -815,6 +835,7 @@ impl JITCompiler {
                 idx,
                 &user_func_ids,
                 &user_func_arities,
+                &user_func_return_kinds,
             ) {
                 tracing::debug!(
                     target: "shape_jit",

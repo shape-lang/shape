@@ -1773,6 +1773,38 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Check if we have a direct FuncRef for the callee.
                 let func_ref = func_id.and_then(|fid| self.user_func_refs.get(&fid).copied());
 
+                if let (
+                    Some(fid),
+                    Operand::Constant(MirConstant::Function(name)),
+                    Place::Local(dst),
+                ) = (func_id, func, destination)
+                {
+                    if !self.user_func_return_kinds.contains_key(&fid) {
+                        return Err(format!(
+                            "Route A surface-and-stop: SURFACE — direct call \
+                             to `{}` resolved to function index {} but has no \
+                             compile-time-proven FrameDescriptor.return_kind. \
+                             W36 named-function callgraph requires a static \
+                             return-kind proof before lowering the call-site \
+                             destination; no runtime inference or Null fallback. \
+                             ADR-006 §2.7.5.",
+                            name, fid
+                        ));
+                    }
+                    if super::types::slot_kind_for_local(&self.slot_kinds, dst.0).is_none() {
+                        return Err(format!(
+                            "Route A surface-and-stop: SURFACE — direct call \
+                             to `{}` resolved to function index {} but \
+                             destination slot {} was not stamped with a \
+                             compile-time return kind. W36 named-function \
+                             callgraph requires the call-site result kind \
+                             before lowering; no runtime inference or Null \
+                             fallback. ADR-006 §2.7.5.",
+                            name, fid, dst.0
+                        ));
+                    }
+                }
+
                 // Surface-and-stop guard, part 2: a `MirConstant::Function`
                 // resolved to a `func_id` but with no `user_func_ref`
                 // (declaration race / function not in the JIT-compiled set)

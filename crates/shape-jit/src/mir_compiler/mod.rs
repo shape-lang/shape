@@ -145,9 +145,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::ffi_refs::FFIFuncRefs;
-use shape_value::v2::ConcreteType;
 use shape_value::v2::closure_layout::ClosureLayout;
 use shape_value::v2::struct_layout::FieldKind;
+use shape_value::v2::ConcreteType;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::NativeKind;
@@ -224,6 +224,8 @@ pub struct MirToIR<'a, 'b> {
     pub(crate) user_func_refs: HashMap<u16, FuncRef>,
     /// Function index → arity for call validation.
     pub(crate) user_func_arities: HashMap<u16, u16>,
+    /// Function index → statically proven return kind from FrameDescriptor.
+    pub(crate) user_func_return_kinds: HashMap<u16, NativeKind>,
 
     // ── Borrow support ──────────────────────────────────────────────
     /// MIR SlotId → (Cranelift StackSlot, Cranelift Type) for references
@@ -859,6 +861,43 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         user_func_arities: HashMap<u16, u16>,
         closure_function_layouts: HashMap<u16, Arc<ClosureLayout>>,
     ) -> Self {
+        Self::new_with_closure_layouts_and_function_returns(
+            builder,
+            ctx_ptr,
+            ffi,
+            mir_data,
+            slot_kinds,
+            concrete_types,
+            strings,
+            entry_block,
+            function_indices,
+            user_func_refs,
+            user_func_arities,
+            HashMap::new(),
+            closure_function_layouts,
+        )
+    }
+
+    /// Same as `new_with_closure_layouts`, plus the compile-time return
+    /// kind table for named user functions. The table is consumed only for
+    /// MIR `MirConstant::Function` call-site destination stamping; missing
+    /// entries remain unproven and surface through the normal strict path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_closure_layouts_and_function_returns(
+        builder: &'a mut FunctionBuilder<'b>,
+        ctx_ptr: Value,
+        ffi: FFIFuncRefs,
+        mir_data: &'a MirFunctionData,
+        slot_kinds: Vec<Option<NativeKind>>,
+        concrete_types: Vec<ConcreteType>,
+        strings: &'a [String],
+        entry_block: Block,
+        function_indices: &'a HashMap<String, u16>,
+        user_func_refs: HashMap<u16, FuncRef>,
+        user_func_arities: HashMap<u16, u16>,
+        user_func_return_kinds: HashMap<u16, NativeKind>,
+        closure_function_layouts: HashMap<u16, Arc<ClosureLayout>>,
+    ) -> Self {
         let local_types = mir_data.mir.local_types.clone();
         // Slot-numbering correction: the bytecode compiler's
         // `FrameDescriptor.slots` and the MIR's local slots use different
@@ -876,9 +915,25 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // F64 through `ensure_kind(_, Bool)` truncated to 0 and
         // `None ?? 42.0` then evaluated to 42.0 for every branch.
         //
-        // Until the two tables share a slot-numbering convention, drop
-        // the bytecode seed and rely on MIR-level inference only.
-        let _ = slot_kinds;
+        // Shift the bytecode frame seed only onto MIR parameter slots.
+        // `FrameDescriptor.slots[0]` is the first ABI parameter, while MIR
+        // reserves `SlotId(0)` for `__mir_return`. Whole-frame seeding is
+        // unsound (see above), but param-slot seeding is a direct
+        // compile-time proof of the argument kinds consumed by this body.
+        let mut frame_seed: Vec<Option<NativeKind>> = vec![None; mir_data.mir.num_locals as usize];
+        for (param_idx, mir_slot) in mir_data.mir.param_slots.iter().enumerate() {
+            let dst_idx = mir_slot.0 as usize;
+            if dst_idx < frame_seed.len() {
+                frame_seed[dst_idx] = slot_kinds.get(param_idx).copied().flatten();
+            }
+        }
+        if let Some(current_fn_idx) = function_indices.get(mir_data.mir.name.as_str()) {
+            if let Some(return_kind) = user_func_return_kinds.get(current_fn_idx).copied() {
+                if !frame_seed.is_empty() {
+                    frame_seed[0] = Some(return_kind);
+                }
+            }
+        }
         // ADR-006 §2.7.7 / §2.7.11 kind-source seed: when the bytecode
         // compiler has populated `concrete_types[slot]` with a precise
         // `ConcreteType`, project it to `NativeKind` for the parallel-kind
@@ -888,10 +943,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // `Function<(int), int>` / `ConcreteType::Closure`), which
         // `infer_slot_kinds` alone cannot derive from MIR-observable
         // statements.
-        let concrete_seed: Vec<Option<NativeKind>> = concrete_types
+        let mut concrete_seed: Vec<Option<NativeKind>> = concrete_types
             .iter()
             .map(|ct| types::native_kind_from_concrete_type(ct))
             .collect();
+        if concrete_seed.len() < frame_seed.len() {
+            concrete_seed.resize(frame_seed.len(), None);
+        }
+        for (idx, kind) in frame_seed.into_iter().enumerate() {
+            if let Some(kind) = kind {
+                if idx < concrete_seed.len() {
+                    concrete_seed[idx] = Some(kind);
+                }
+            }
+        }
         // ADR-006 §2.7.5 producing-site classification: pass the per-
         // slot `ConcreteType` map into the inference so two projections
         // both work end-to-end —
@@ -908,8 +973,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // `v2_typed_array_elem_kind` projection uses. Without this seed
         // `print(xs[0])` on `xs: Array<int>` falls into the kind-blind
         // print decoder.
-        let slot_kinds =
-            types::infer_slot_kinds_with_concrete(&mir_data.mir, &concrete_seed, &concrete_types);
+        let slot_kinds = types::infer_slot_kinds_with_concrete_and_function_returns(
+            &mir_data.mir,
+            &concrete_seed,
+            &concrete_types,
+            Some(function_indices),
+            Some(&user_func_return_kinds),
+        );
         // Phase E: pull the set of non-escaping closure slots out of the MIR
         // storage plan so `ClosureCapture` lowering can pick the stack-slot
         // fast path. Slots absent from this set fall back to the legacy
@@ -1101,6 +1171,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             function_indices,
             user_func_refs,
             user_func_arities,
+            user_func_return_kinds,
             ref_stack_slots: HashMap::new(),
             field_byte_offsets: HashMap::new(),
             field_native_kinds,

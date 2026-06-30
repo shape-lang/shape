@@ -6,9 +6,10 @@
 
 use cranelift::prelude::types;
 use shape_value::heap_value::HeapKind;
-use shape_value::v2::{ConcreteType, closure_layout};
+use shape_value::v2::{closure_layout, ConcreteType};
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::NativeKind;
+use std::collections::HashMap;
 
 /// Whether a local slot holds a heap value that needs reference counting.
 pub(crate) fn is_heap_type(type_info: &LocalTypeInfo) -> bool {
@@ -220,6 +221,16 @@ pub(crate) fn infer_slot_kinds_with_concrete(
     existing: &[Option<NativeKind>],
     concrete_types: &[ConcreteType],
 ) -> Vec<Option<NativeKind>> {
+    infer_slot_kinds_with_concrete_and_function_returns(mir, existing, concrete_types, None, None)
+}
+
+pub(crate) fn infer_slot_kinds_with_concrete_and_function_returns(
+    mir: &MirFunction,
+    existing: &[Option<NativeKind>],
+    concrete_types: &[ConcreteType],
+    function_indices: Option<&HashMap<String, u16>>,
+    function_return_kinds: Option<&HashMap<u16, NativeKind>>,
+) -> Vec<Option<NativeKind>> {
     let n = mir.num_locals as usize;
     let mut kinds: Vec<Option<NativeKind>> = vec![None; n];
 
@@ -327,7 +338,12 @@ pub(crate) fn infer_slot_kinds_with_concrete(
                                 .or_else(|| iterator_adapter_return_kind(name, args, &kinds))
                         }
                         Operand::Constant(MirConstant::Function(name)) => {
-                            well_known_function_return_kind(name)
+                            named_function_return_kind(
+                                name,
+                                function_indices,
+                                function_return_kinds,
+                            )
+                            .or_else(|| well_known_function_return_kind(name))
                         }
                         _ => None,
                     };
@@ -701,6 +717,13 @@ pub(crate) fn infer_slot_kinds_with_concrete(
                             Operand::Constant(MirConstant::Method(name)) => {
                                 method_return_kind_from_in_pass_kinds(name, args, &kinds)
                             }
+                            Operand::Constant(MirConstant::Function(name)) => {
+                                named_function_return_kind(
+                                    name,
+                                    function_indices,
+                                    function_return_kinds,
+                                )
+                            }
                             _ => None,
                         };
                         if let Some(k) = ret_kind {
@@ -818,6 +841,40 @@ pub(crate) fn infer_slot_kinds_with_concrete(
     }
 
     kinds
+}
+
+fn named_function_return_kind(
+    name: &str,
+    function_indices: Option<&HashMap<String, u16>>,
+    function_return_kinds: Option<&HashMap<u16, NativeKind>>,
+) -> Option<NativeKind> {
+    let function_indices = function_indices?;
+    let function_return_kinds = function_return_kinds?;
+    let idx = resolve_named_function_index(name, function_indices)?;
+    function_return_kinds.get(&idx).copied()
+}
+
+fn resolve_named_function_index(
+    name: &str,
+    function_indices: &HashMap<String, u16>,
+) -> Option<u16> {
+    if let Some(idx) = function_indices.get(name).copied() {
+        return Some(idx);
+    }
+    if name.contains("::") {
+        return None;
+    }
+    let suffix = format!("::{}", name);
+    let mut found = None;
+    for (full_name, idx) in function_indices {
+        if full_name.ends_with(&suffix) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(*idx);
+        }
+    }
+    found
 }
 
 /// Return the statically-known return `NativeKind` for a well-known
