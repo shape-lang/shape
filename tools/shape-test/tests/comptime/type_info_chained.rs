@@ -38,7 +38,7 @@ use shape_test::shape_test::ShapeTest;
 #[test]
 fn w14_2_c1_chained_kind_access_then_string_return() {
     let code = r#"
-const TAG = comptime {
+let TAG: string = comptime {
   let info = type_info("Point")
   let k = info.kind
   "kind-accessed"
@@ -56,7 +56,7 @@ print(TAG)
 #[test]
 fn w14_2_c1_chained_name_access_then_string_return() {
     let code = r#"
-const TAG = comptime {
+let TAG: string = comptime {
   let info = type_info("Point")
   let n = info.name
   "name-accessed"
@@ -77,7 +77,7 @@ print(TAG)
 #[test]
 fn w14_2_c1_chained_kind_inline_access() {
     let code = r#"
-const K = comptime {
+let K: unknown = comptime {
   type_info("Point").kind
 }
 print("inline-ok")
@@ -99,7 +99,7 @@ print("inline-ok")
 #[test]
 fn w14_2_c1_build_config_and_type_info_in_same_block() {
     let code = r#"
-const COMBO = comptime {
+let COMBO: string = comptime {
   let cfg = build_config()
   let info = type_info("Point")
   "combo-ok"
@@ -119,7 +119,7 @@ print(COMBO)
 #[test]
 fn w14_2_c1_chained_access_on_both_builtins() {
     let code = r#"
-const X = comptime {
+let X: string = comptime {
   let cfg = build_config()
   let arch = cfg.target_arch
   let info = type_info("Point")
@@ -143,7 +143,7 @@ print(X)
 #[test]
 fn w14_2_c1_type_info_on_array_generic() {
     let code = r#"
-const X = comptime {
+let X: string = comptime {
   let info = type_info("Array<int>")
   "array-generic-ok"
 }
@@ -164,7 +164,7 @@ type Point {
   x: int
 }
 
-const X = comptime {
+let X: string = comptime {
   let info = type_info("Option<Point>")
   "option-generic-ok"
 }
@@ -181,7 +181,7 @@ print(X)
 #[test]
 fn w14_2_c1_type_info_on_result_generic() {
     let code = r#"
-const X = comptime {
+let X: string = comptime {
   let info = type_info("Result<int, string>")
   "result-generic-ok"
 }
@@ -197,7 +197,7 @@ print(X)
 #[test]
 fn w14_2_c1_type_info_on_hashmap_generic_chained() {
     let code = r#"
-const X = comptime {
+let X: string = comptime {
   let info = type_info("HashMap<string, int>")
   let k = info.kind
   "hashmap-generic-ok"
@@ -226,7 +226,7 @@ enum Color {
   Blue
 }
 
-const X = comptime {
+let X: string = comptime {
   let info = type_info("Color")
   "enum-ok"
 }
@@ -250,7 +250,7 @@ enum Color {
   Blue
 }
 
-const X = comptime {
+let X: string = comptime {
   let info = type_info("Color")
   let k = info.kind
   "enum-kind-ok"
@@ -274,7 +274,7 @@ enum Shape {
   Rectangle { width: int, height: int }
 }
 
-const X = comptime {
+let X: string = comptime {
   let info = type_info("Shape")
   "payload-enum-ok"
 }
@@ -300,7 +300,7 @@ print(X)
 #[test]
 fn w14_2_c1_type_info_on_undefined_type_does_not_panic() {
     let code = r#"
-const X = comptime {
+let X: string = comptime {
   let info = type_info("UndefinedXYZ")
   "undef-ok"
 }
@@ -320,7 +320,7 @@ print(X)
 #[test]
 fn w14_2_c1_chained_access_on_undefined_type_does_not_panic() {
     let code = r#"
-const X = comptime {
+let X: string = comptime {
   let info = type_info("UndefinedXYZ")
   let k = info.kind
   "undef-chained-ok"
@@ -342,7 +342,7 @@ print(X)
 #[test]
 fn w14_2_c1_type_info_on_primitive_int() {
     let code = r#"
-const X = comptime {
+let X: string = comptime {
   let info = type_info("int")
   "int-ok"
 }
@@ -356,7 +356,7 @@ print(X)
 #[test]
 fn w14_2_c1_type_info_on_primitive_string() {
     let code = r#"
-const X = comptime {
+let X: string = comptime {
   let info = type_info("string")
   "string-ok"
 }
@@ -372,7 +372,7 @@ print(X)
 #[test]
 fn w14_2_c1_type_info_chained_kind_on_primitive_bool() {
     let code = r#"
-const X = comptime {
+let X: string = comptime {
   let info = type_info("bool")
   let k = info.kind
   "bool-chained-ok"

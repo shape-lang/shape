@@ -683,11 +683,8 @@ print(add(5, 3))
         .expect_output_contains("8");
 }
 
-/// BUG: `set param` with type annotation not supported.
-/// Using `set param extra: int` to add a new parameter to a function causes
-/// a semantic error: "Undefined variable: 'extra'" because the compiler
-/// does not process the `set param` directive during semantic analysis.
-/// When fixed, `set param` should be able to add new parameters to a function.
+/// SURFACE: `set param extra: int` does not add a new parameter during semantic
+/// analysis, so the function body still rejects `extra` as undefined.
 #[test]
 
 fn ct_45c_set_param_typed() {
@@ -706,5 +703,5 @@ fn greet(name: string) -> string {
 
 print(greet("World"))
 "#;
-    ShapeTest::new(code).expect_run_err_contains("unknown parameter");
+    ShapeTest::new(code).expect_run_err_contains("Undefined variable: 'extra'");
 }

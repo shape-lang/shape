@@ -1671,9 +1671,9 @@ mod tests {
         );
     }
 
-    /// `comptime { implements("int", "Add") }` dispatches end-to-end —
-    /// the registered-trait-keyspace is empty so it returns false. No
-    /// `populate_module_objects` no-op surface, no NotImplemented.
+    /// `comptime { implements("T", "Trait") }` dispatches end-to-end
+    /// through typed string arguments. Empty keyspace returns false; a
+    /// matching registered trait key returns true.
     #[test]
     fn w17_comptime_implements_dispatches_end_to_end() {
         let stmts = vec![Statement::Return(
@@ -1695,12 +1695,34 @@ mod tests {
             Default::default(),
             Default::default(),
             Default::default(),
-        );
-        assert!(
-            result.is_ok(),
-            "implements() should dispatch end-to-end: {:?}",
-            result.err()
-        );
+        )
+        .expect("implements() should dispatch end-to-end");
+        assert_eq!(result.value.as_bool(), Some(false));
+
+        let stmts = vec![Statement::Return(
+            Some(Expr::FunctionCall {
+                name: "implements".to_string(),
+                args: vec![
+                    Expr::Literal(Literal::String("Dog".to_string()), Span::DUMMY),
+                    Expr::Literal(Literal::String("Speak".to_string()), Span::DUMMY),
+                ],
+                named_args: Vec::new(),
+                span: Span::DUMMY,
+            }),
+            Span::DUMMY,
+        )];
+        let mut trait_impl_keys = std::collections::HashSet::new();
+        trait_impl_keys.insert("Speak::Dog".to_string());
+        let result = execute_comptime(
+            &stmts,
+            &[],
+            &[],
+            trait_impl_keys,
+            Default::default(),
+            Default::default(),
+        )
+        .expect("implements() should see typed string args and registered impl keys");
+        assert_eq!(result.value.as_bool(), Some(true));
     }
 
     /// `comptime { warning("hello") }` dispatches end-to-end and

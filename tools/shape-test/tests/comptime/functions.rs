@@ -17,7 +17,7 @@ comptime fn make_greeting(name: string) {
   f"Hello {name}"
 }
 
-const GREETING = comptime {
+let GREETING: string = comptime {
   make_greeting("Shape")
 }
 print(GREETING)
@@ -38,7 +38,7 @@ comptime fn make_loud(name: string) {
   upper(f"HELLO {name}")
 }
 
-const LOUD = comptime {
+let LOUD: string = comptime {
   make_loud("WORLD")
 }
 print(LOUD)
@@ -55,7 +55,7 @@ comptime fn upper(s: string) {
   f"{s}"
 }
 
-const LOUD = comptime {
+let LOUD: string = comptime {
   upper(f"HELLO WORLD")
 }
 print(LOUD)
@@ -72,7 +72,7 @@ comptime fn tag(prefix: string, suffix: string) {
   f"{prefix}_{suffix}"
 }
 
-const TAG = comptime {
+let TAG: string = comptime {
   tag("v1", "release")
 }
 print(TAG)
@@ -93,7 +93,7 @@ comptime fn greet(name: string) {
   f"Hello {name}"
 }
 
-const MSG = comptime {
+let MSG: string = comptime {
   let g = greet("World")
   prefix(g)
 }
@@ -111,7 +111,7 @@ comptime fn format_pair(key: string, val: int) {
   f"{key} = {val}"
 }
 
-const PAIR = comptime {
+let PAIR: string = comptime {
   format_pair("count", 42)
 }
 print(PAIR)
@@ -128,7 +128,7 @@ comptime fn version() {
   "1.0.0"
 }
 
-const VER = comptime {
+let VER: string = comptime {
   version()
 }
 print(VER)
@@ -147,7 +147,7 @@ comptime fn factorial(n: int) {
   }
 }
 
-const FACT5 = comptime {
+let FACT5: int = comptime {
   factorial(5)
 }
 print(FACT5)
@@ -172,7 +172,7 @@ impl Speak for Dog {
   }
 }
 
-const DOG_SPEAKS = comptime {
+let DOG_SPEAKS: bool = comptime {
   implements("Dog", "Speak")
 }
 print(DOG_SPEAKS)
@@ -204,22 +204,21 @@ fn normal_add(a: int, b: int) -> int {
   a + b
 }
 
-const SUM = comptime {
+let SUM: int = comptime {
   normal_add(10, 20)
 }
 print(SUM)
 "#;
-    ShapeTest::new(code).expect_run_err_contains("Undefined function: normal_add");
+    ShapeTest::new(code).expect_run_err_contains("Undefined function: 'normal_add'");
 }
 
 // ============================================================================
 // FAILING tests (TDD) -- document expected behavior for unimplemented features
 // ============================================================================
 
-/// BUG: `implements()` does not accept identifier type names, only strings.
-/// Using `implements(Dog, Speak)` (bare identifiers) causes a runtime error
-/// "Undefined variable: Dog". The workaround is `implements("Dog", "Speak")`.
-/// When fixed, bare identifiers should be accepted.
+/// `implements()` accepts bare type/trait identifiers inside comptime blocks;
+/// the comptime evaluator rewrites those identifiers to string literals before
+/// dispatching the statically typed builtin.
 #[test]
 
 fn ct_18_implements_check() {
@@ -238,7 +237,7 @@ impl Speak for Dog {
   }
 }
 
-const DOG_SPEAKS = comptime {
+let DOG_SPEAKS: bool = comptime {
   implements(Dog, Speak)
 }
 print(DOG_SPEAKS)

@@ -258,22 +258,13 @@ pub(crate) fn create_comptime_builtins_module(
 
     // implements(type_name: string, trait_name: string) -> bool
     // Checks the TypeRegistry's trait impl data captured at compile time.
-    register_typed_function(
+    register_typed_fn_2::<_, Arc<String>, Arc<String>>(
         &mut module,
         "implements",
         "Check if a type implements a trait at compile time",
-        vec![],
+        [("type_name", "string"), ("trait_name", "string")],
         ConcreteType::Bool,
-        move |nb_args, _ctx| {
-            let type_name = match nb_args.first().and_then(|nb| nb.as_str()) {
-                Some(s) => s.to_string(),
-                None => return Ok(TypedReturn::Concrete(ConcreteReturn::Bool(false))),
-            };
-            let trait_name = match nb_args.get(1).and_then(|nb| nb.as_str()) {
-                Some(s) => s.to_string(),
-                None => return Ok(TypedReturn::Concrete(ConcreteReturn::Bool(false))),
-            };
-
+        move |type_name, trait_name, _ctx| {
             let has_impl = |ty: &str| {
                 let legacy = format!("{}::{}", trait_name, ty);
                 let canonical_prefix = format!("{}::{}::", trait_name, ty);
@@ -283,12 +274,12 @@ pub(crate) fn create_comptime_builtins_module(
                         .any(|key| key.starts_with(&canonical_prefix))
             };
 
-            if has_impl(&type_name) {
+            if has_impl(type_name.as_str()) {
                 return Ok(TypedReturn::Concrete(ConcreteReturn::Bool(true)));
             }
 
             // Numeric widening: integer-family aliases can satisfy number-family impls.
-            if BuiltinTypes::is_integer_type_name(&type_name) {
+            if BuiltinTypes::is_integer_type_name(type_name.as_str()) {
                 for widen_to in &["number", "float", "f64"] {
                     if has_impl(widen_to) {
                         return Ok(TypedReturn::Concrete(ConcreteReturn::Bool(true)));
