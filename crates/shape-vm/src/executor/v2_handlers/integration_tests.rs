@@ -261,3 +261,33 @@ fn test_v2_typed_array_index_assignment_roundtrip() {
     );
     assert_eq!(v.as_i64(), Some(99));
 }
+
+#[test]
+fn test_v2_typed_array_oob_index_assignment_errors() {
+    let r = eval_result(
+        r#"
+        let mut arr: Array<int> = [10, 20, 30]
+        arr[100] = 7
+        arr[0]
+    "#,
+    );
+    assert!(
+        r.is_err(),
+        "out-of-bounds typed-array assignment must surface a runtime error"
+    );
+}
+
+#[test]
+fn test_v2_string_typed_array_oob_index_assignment_errors() {
+    let r = eval_result(
+        r#"
+        let mut arr: Array<string> = ["a", "b"]
+        arr[10] = "c"
+        arr[0]
+    "#,
+    );
+    assert!(
+        r.is_err(),
+        "out-of-bounds string typed-array assignment must surface a runtime error"
+    );
+}

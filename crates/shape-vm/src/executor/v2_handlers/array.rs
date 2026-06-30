@@ -238,6 +238,14 @@ macro_rules! define_exec_v2_typed_array {
                             let index = idx_bits as i64 as u32;
                             let (arr_bits, arr_kind) = self.pop_kinded()?;
                             let arr = arr_bits as usize as *mut TypedArray<$s_storage>;
+                            let len = unsafe { TypedArray::len(arr) };
+                            if index >= len {
+                                drop_with_kind(arr_bits, arr_kind);
+                                return Err(VMError::IndexOutOfBounds {
+                                    index: index as i32,
+                                    length: len as usize,
+                                });
+                            }
                             unsafe { TypedArray::set(arr, index, val); }
                             drop_with_kind(arr_bits, arr_kind);
                             Ok(())
@@ -309,6 +317,14 @@ macro_rules! define_exec_v2_typed_array {
                             let index = idx_bits as i64 as u32;
                             let (arr_bits, arr_kind) = self.pop_kinded()?;
                             let arr = arr_bits as usize as *mut TypedArray<char>;
+                            let len = unsafe { TypedArray::len(arr) };
+                            if index >= len {
+                                drop_with_kind(arr_bits, arr_kind);
+                                return Err(VMError::IndexOutOfBounds {
+                                    index: index as i32,
+                                    length: len as usize,
+                                });
+                            }
                             unsafe { TypedArray::set(arr, index, val); }
                             drop_with_kind(arr_bits, arr_kind);
                             Ok(())
@@ -410,6 +426,15 @@ macro_rules! define_exec_v2_typed_array {
                             let (arr_bits, arr_kind) = self.pop_kinded()?;
                             let arr =
                                 arr_bits as usize as *mut TypedArray<*const $h_obj>;
+                            let len = unsafe { TypedArray::len(arr) };
+                            if index >= len {
+                                unsafe { <$h_obj as HeapElement>::release_elem(val) };
+                                drop_with_kind(arr_bits, arr_kind);
+                                return Err(VMError::IndexOutOfBounds {
+                                    index: index as i32,
+                                    length: len as usize,
+                                });
+                            }
                             unsafe {
                                 let old_ptr =
                                     TypedArray::<*const $h_obj>::get_unchecked(arr, index);
@@ -544,6 +569,15 @@ macro_rules! define_exec_v2_typed_array {
                                 )));
                             }
                         };
+                        let len = unsafe { TypedArray::len(arr) };
+                        if index >= len {
+                            unsafe { <StringObj as HeapElement>::release_elem(new_ptr) };
+                            drop_with_kind(arr_bits, arr_kind);
+                            return Err(VMError::IndexOutOfBounds {
+                                index: index as i32,
+                                length: len as usize,
+                            });
+                        }
                         unsafe {
                             let old_ptr =
                                 TypedArray::<*const StringObj>::get_unchecked(arr, index);
