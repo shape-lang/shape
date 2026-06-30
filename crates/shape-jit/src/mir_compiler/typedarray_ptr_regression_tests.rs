@@ -20,31 +20,25 @@
 //! `TypeSchemaRegistry` `FieldType::Array(elem)` declaration). The
 //! field-projected v2 array then uses the correct v2 layout.
 //!
-//! ## 7b — closure-capture array refcount imbalance → SIGABRT
+//! ## 7b — closure-capture ownership mismatch → SIGABRT
 //!
 //! `let data = [1,2,3]; let g = || data.sum(); g(); g(); ...` — the VM
 //! prints `6` every call; the JIT SIGABRTed (`malloc(): unaligned
 //! tcache chunk`, ec=134) on the 3rd+ call.
 //!
-//! Root cause: a per-call refcount imbalance on the closure-captured
-//! array. `jit_call_value`'s `Ptr(HeapKind::Closure)` dispatch arm
-//! extracted each capture via `block.read_capture_kinded(idx)` — a RAW
-//! bit read that does NOT bump the refcount — and handed the bits to
-//! `jit_trampoline_call_closure`. That trampoline materialises a FRESH
-//! `OwnedClosureBlock` from those bits and the fresh block's `Drop`
-//! (`release_typed_closure`) releases each heap capture per the layout
-//! capture masks. Its doc-comment states the contract: "the JIT
-//! pre-incremented each share before crossing the FFI boundary." The
-//! JIT did NOT. So every closure call retired one share of the
-//! captured array; after the original binding's + the closure block's
-//! shares were consumed the next access dereferenced freed memory.
+//! Root cause: a per-call ownership mismatch on closure captures.
+//! `jit_call_value`'s `Ptr(HeapKind::Closure)` dispatch arm extracted
+//! raw capture bits and handed them to `jit_trampoline_call_closure`.
+//! That trampoline materialises a fresh owning `OwnedClosureBlock` and
+//! drops it after the call. For heap captures that required a matching
+//! retain; for cell-storage captures (`OwnedMutable` / `Shared`) there is
+//! no legal clone of the raw cell pointer, so the same shape can double
+//! free the original cell.
 //!
-//! Fix (producer-side, balanced): `jit_call_value` retains each
-//! heap-typed capture via the kind-driven `KindedSlot::clone` dispatch
-//! before handing it to the trampoline — the same dispatch table as the
-//! VM's per-capture `clone_with_kind` at `call_convention.rs:776`.
-//! Retain-on-extract + release-at-fresh-block-drop nets to zero per
-//! call; the closure is callable any number of times.
+//! Fix: raw-Arc closure calls now borrow the existing `OwnedClosureBlock`
+//! into `VirtualMachine::execute_closure`. The VM frame setup clones only
+//! the immutable captures it installs into locals, while owned/shared
+//! cell pointers remain owned by the original closure block.
 //!
 //! Gated behind `deep-tests` for the same reason as
 //! `closure_dispatch_regression_tests` / `field_ref_regression_tests`:
@@ -188,16 +182,16 @@ sum_all(b)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// 7b — closure-capture array refcount balance
+// 7b — closure-capture array ownership balance
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Primary 7b gate: a closure that captures an array, called five times.
 /// Pre-fix the JIT SIGABRTed (`malloc(): unaligned tcache chunk`,
-/// ec=134) on the 3rd call — a per-call refcount imbalance freed the
-/// captured array's allocation under the still-live closure. Post-fix
-/// `jit_call_value` retains each heap capture per call, balancing the
-/// fresh trampoline block's release; the closure is callable any number
-/// of times. The final `g()` returns `6` (`1 + 2 + 3`).
+/// ec=134) on the 3rd call because raw capture bits were copied into a
+/// fresh owning trampoline block. Post-fix `jit_call_value` borrows the
+/// existing `OwnedClosureBlock` into the VM; frame setup performs the
+/// normal kinded capture cloning for immutable values, and the closure is
+/// callable any number of times. The final `g()` returns `6` (`1 + 2 + 3`).
 #[test]
 fn jit_closure_capture_array_called_five_times() {
     jit_expect_int(
@@ -215,10 +209,10 @@ g()
 }
 
 /// 7b stress: the same closure called many times in a loop (≥10 calls).
-/// Each call must balance the captured array's refcount — a leak or an
-/// over-release accumulates and either grows the refcount unbounded or
-/// (the observed failure) frees the allocation mid-program. The loop
-/// body returns the running sum; the final result pins the closure
+/// Each call must borrow the original closure block rather than
+/// constructing a new owner for its raw captures; otherwise repeated calls
+/// accumulate ownership damage and eventually free a live allocation. The
+/// loop body returns the running sum; the final result pins the closure
 /// still produces `6` after 20 calls.
 #[test]
 fn jit_closure_capture_array_called_in_loop() {
@@ -239,10 +233,10 @@ total
 }
 
 /// 7b: a closure capturing an array, called ten times — twice the
-/// failure threshold of the primary gate. The imbalance was in
-/// `jit_call_value`'s capture extraction (one missing retain per call);
-/// ten calls without it would over-release the captured array four
-/// times past free. Post-fix the closure stays callable.
+/// failure threshold of the primary gate. The bug was in
+/// `jit_call_value`'s capture extraction: it rebuilt ownership from raw
+/// bits instead of borrowing the existing closure block. Post-fix the
+/// closure stays callable.
 #[test]
 fn jit_closure_capture_array_called_ten_times() {
     jit_expect_int(
@@ -265,9 +259,10 @@ g()
 }
 
 /// 7b: two distinct arrays captured by two distinct closures, each
-/// called repeatedly. Confirms per-capture retain accounting is keyed
-/// to the right allocation — a cross-capture imbalance would corrupt
-/// one array's refcount while the other stays balanced.
+/// called repeatedly. Confirms borrowed-block dispatch keeps each
+/// closure's captures tied to its original allocation — a cross-capture
+/// ownership mismatch would corrupt one captured array while the other
+/// stays balanced.
 #[test]
 fn jit_two_closures_capture_distinct_arrays() {
     jit_expect_int(

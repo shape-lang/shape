@@ -178,6 +178,10 @@ fn closure_non_jit_compiled_dispatches_through_trampoline_vm() {
     // `|| { x = x + base; x }` with `let base` (immutable capture) and
     // `let mut x` (OwnedMutable capture) exercises the exact shape from
     // the original bug report. Calling it twice sums base twice into x.
+    //
+    // Wave 33: the JIT-to-VM trampoline must borrow the original
+    // `OwnedClosureBlock`. Rebuilding a fresh owning block from raw capture
+    // bits double-frees the owned-mutable `x` cell after repeated calls.
     jit_expect_int(
         r#"
 fn main() -> int {
@@ -190,6 +194,24 @@ fn main() -> int {
 main()
 "#,
         20,
+    );
+}
+
+#[test]
+fn closure_trampoline_owned_mutable_capture_called_three_times() {
+    jit_expect_int(
+        r#"
+fn main() -> int {
+    let base: int = 10
+    let mut x: int = 0
+    let f = || { x = x + base; x }
+    f()
+    f()
+    f()
+}
+main()
+"#,
+        30,
     );
 }
 

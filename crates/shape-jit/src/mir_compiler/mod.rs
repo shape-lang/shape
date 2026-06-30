@@ -118,11 +118,10 @@ mod fuzzy_comparison_regression_tests;
 // TypedArray fix: 7a — `Place::Index` codegen on a `Place::Field` base
 // (`b.items[i]` for a struct field of type `Array<int>`) must use the
 // v2 `TypedArray` layout (data@8/len@16), recognised via the
-// schema-derived `field_array_elem_kinds` map; 7b — `jit_call_value`
-// must retain each heap-typed closure capture (kind-driven
-// `KindedSlot::clone`) before handing it to `jit_trampoline_call_closure`,
-// which builds a fresh `OwnedClosureBlock` whose `Drop` releases each
-// capture. Gated behind `deep-tests` for the same reason as
+// schema-derived `field_array_elem_kinds` map; 7b — raw-Arc closure calls
+// must borrow the existing `OwnedClosureBlock` into the trampoline VM rather
+// than rebuilding a fresh owning block from raw captures. Gated behind
+// `deep-tests` for the same reason as
 // `field_ref_regression_tests`: `JITExecutor::execute_program`
 // JIT-compiles the stdlib on every test.
 #[cfg(all(test, feature = "deep-tests"))]
