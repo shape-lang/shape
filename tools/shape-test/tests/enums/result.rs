@@ -248,6 +248,9 @@ fn test_result_ok_bool() {
 
 #[test]
 fn test_result_in_array() {
+    // Strict array literals require one proven concrete element type. Mixing
+    // `Ok(int)` and `Err(string)` without an annotation leaves the Result
+    // element type unproven.
     ShapeTest::new(
         r#"
         let results = [Ok(1), Err("bad"), Ok(3)]
@@ -261,7 +264,7 @@ fn test_result_in_array() {
         sum
     "#,
     )
-    .expect_number(4.0);
+    .expect_run_err_contains("cannot infer the element type");
 }
 
 #[test]

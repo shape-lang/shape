@@ -2773,22 +2773,6 @@ impl TypeInferenceEngine {
                     return Ok(unwrapped);
                 }
 
-                // Strict-flip `!!`: `expr !! ctx` is already typed as the
-                // success arm `T` because bytecode lowers it to
-                // `ErrorContext; TryUnwrap`. A following `?` is redundant but
-                // accepted for legacy `!!?` call sites; it preserves the same
-                // compile-time-proven success type instead of fabricating a
-                // second wrapper.
-                if matches!(
-                    inner.as_ref(),
-                    Expr::BinaryOp {
-                        op: BinaryOp::ErrorContext,
-                        ..
-                    }
-                ) {
-                    return Ok(inner_type);
-                }
-
                 // When the inner type is an unresolved type variable (e.g. untyped
                 // lambda parameter), we cannot reject it — it may later resolve to
                 // Result<T,E> or Option<T>.  Return a fresh type variable for the

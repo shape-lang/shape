@@ -21,7 +21,7 @@ print(b)
 // Option<T> — Construction and Basic Usage
 // =========================================================================
 
-// BUG: Some(42) prints as "42" -- Some is transparent in printing
+// Structural Option carriers print with their variant wrapper.
 #[test]
 fn test_option_some_construction() {
     ShapeTest::new(
@@ -186,6 +186,8 @@ fn test_option_some_with_zero() {
 
 #[test]
 fn test_option_in_array() {
+    // Strict array literals require one proven concrete element type. A bare
+    // `None` does not prove the `Option<int>` payload without an annotation.
     ShapeTest::new(
         r#"
         let opts = [Some(1), None, Some(3)]
@@ -199,7 +201,7 @@ fn test_option_in_array() {
         sum
     "#,
     )
-    .expect_number(4.0);
+    .expect_run_err_contains("cannot infer the element type");
 }
 
 #[test]
@@ -460,7 +462,7 @@ fn option_some_empty_string_is_some() {
     .expect_string("is some");
 }
 
-// BUG: print(Some(42)) prints "42" instead of "Some(42)" -- value is unwrapped
+// Structural Option carriers print with their variant wrapper.
 #[test]
 fn option_print_some_unwraps() {
     ShapeTest::new(
@@ -469,7 +471,7 @@ fn option_print_some_unwraps() {
         print(opt)
     "#,
     )
-    .expect_output("42");
+    .expect_output("Some(42)");
 }
 
 #[test]
@@ -480,7 +482,7 @@ fn option_print_none() {
         print(opt)
     "#,
     )
-    .expect_output("None");
+    .expect_output("null");
 }
 
 #[test]

@@ -1747,17 +1747,22 @@ impl BytecodeCompiler {
                 // (`executor/exceptions/mod.rs`) pops `context` (top of
                 // stack) then `value`, so we compile `left` (value) then
                 // `right` (context). That opcode builds the contexted
-                // Result/AnyError carrier; `!!` then immediately consumes it
-                // through the same `TryUnwrap` path as `?`, so the expression
-                // value that reaches a binding is the success arm `T`.
+                // Result/AnyError carrier. `!!` is a wrap operator; an
+                // explicit outer `?` is what unwraps or propagates it.
                 self.compile_expr(left)?;
                 self.compile_expr(right)?;
                 self.emit(Instruction::simple(OpCode::ErrorContext));
-                self.emit_try_unwrap_current_value(None)?;
-                // `!!` yields the UNWRAPPED success value `T` (same as `?`).
-                // Stamp the tracker with the unwrapped success type so a
-                // downstream `let v = expr !! "ctx"` records `v`'s type.
-                self.stamp_unwrapped_success_type(left);
+                self.last_expr_schema = None;
+                self.last_expr_type_info = self
+                    .infer_expr_type(&Expr::BinaryOp {
+                        left: Box::new(left.clone()),
+                        op: op.clone(),
+                        right: Box::new(right.clone()),
+                        span: op_span,
+                    })
+                    .ok()
+                    .and_then(|ty| ty.to_annotation())
+                    .map(|ann| VariableTypeInfo::named(ann.to_type_string()));
             }
             BinaryOp::Pipe => {
                 // Pipe operator: a |> f transforms to f(a)
@@ -3506,6 +3511,7 @@ mod ws3_f3_error_context_tests {
     //! at all. The opcode (`OpCode::ErrorContext`) and the runtime
     //! handler (`op_error_context`) already existed; only the
     //! compiler-dispatch arm was missing.
+    use crate::bytecode::OpCode;
     use crate::compiler::BytecodeCompiler;
     use shape_ast::parser::parse_program;
 
@@ -3529,13 +3535,59 @@ mod ws3_f3_error_context_tests {
     }
 
     #[test]
-    fn ws3_f3_error_context_unwrapped_type_propagates_to_binding() {
-        // `!!` yields the UNWRAPPED success value `T` (`Ok(v) => v`), so
-        // a downstream `v + 1` must type-check as `int + int`.
+    fn ws3_f3_error_context_wraps_result_for_match_recovery() {
         let code = r#"
             fn good() -> Result<int, string> { Ok(99) }
             fn main() -> Result<int, string> {
-                let v = good() !! "ctx"
+                let r = good() !! "ctx"
+                let w = match r {
+                    Ok(v) => v + 1
+                    Err(_) => -1
+                }
+                print(w)
+                Ok(0)
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_ok(),
+            "`!!` must leave a Result wrapper that can be matched: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn ws3_f3_error_context_does_not_emit_implicit_try_unwrap() {
+        let code = r#"
+            let r = Ok(42) !! "ctx"
+            print(r)
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("`!!` should compile");
+        let error_context_idx = bytecode
+            .instructions
+            .iter()
+            .position(|instr| instr.opcode == OpCode::ErrorContext)
+            .expect("expected ErrorContext opcode");
+        assert_ne!(
+            bytecode
+                .instructions
+                .get(error_context_idx + 1)
+                .map(|instr| instr.opcode),
+            Some(OpCode::TryUnwrap),
+            "`!!` is a wrap operator; only an explicit outer `?` may emit TryUnwrap"
+        );
+    }
+
+    #[test]
+    fn ws3_f3_error_context_explicit_try_threads_success_type() {
+        let code = r#"
+            fn good() -> Result<int, string> { Ok(99) }
+            fn main() -> Result<int, string> {
+                let v = (good() !! "ctx")?
                 let w = v + 1
                 print(w)
                 Ok(0)
@@ -3545,7 +3597,7 @@ mod ws3_f3_error_context_tests {
         let result = BytecodeCompiler::new().compile(&program);
         assert!(
             result.is_ok(),
-            "`!!`-unwrapped value must keep its type for a downstream binop: {:?}",
+            "`(expr !! ctx)?` must keep the unwrapped success type: {:?}",
             result.err()
         );
     }

@@ -131,9 +131,6 @@ impl BytecodeCompiler {
     /// wrapper to the success type, and stamp `last_expr_*` so a downstream
     /// `let`-binding records the unwrapped type on its slot.
     ///
-    /// Also reused for the `!!` error-context operator (WS-3 F3): both `?`
-    /// and `!!` yield the UNWRAPPED success value `T` on the success leg
-    /// (`Ok(v) => v`), so both stamp the same unwrapped type.
     pub(super) fn stamp_unwrapped_success_type(&mut self, inner: &Expr) {
         // Clear any stale stamps from `compile_expr(inner)` first — the
         // unwrapped value's type, not the wrapper's, is what flows out.
