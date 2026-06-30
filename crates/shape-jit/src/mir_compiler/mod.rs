@@ -145,9 +145,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::ffi_refs::FFIFuncRefs;
+use shape_value::v2::ConcreteType;
 use shape_value::v2::closure_layout::ClosureLayout;
 use shape_value::v2::struct_layout::FieldKind;
-use shape_value::v2::ConcreteType;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::NativeKind;

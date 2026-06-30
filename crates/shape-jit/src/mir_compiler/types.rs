@@ -6,7 +6,7 @@
 
 use cranelift::prelude::types;
 use shape_value::heap_value::HeapKind;
-use shape_value::v2::{closure_layout, ConcreteType};
+use shape_value::v2::{ConcreteType, closure_layout};
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::NativeKind;
 use std::collections::HashMap;
