@@ -4,8 +4,23 @@
 //! local variable bindings, and that drop works correctly with early
 //! returns, breaks, nested scopes, etc.
 
-use crate::bytecode::OpCode;
+use crate::bytecode::{BytecodeProgram, OpCode, Operand};
 use crate::executor::tests::test_utils::{compile, eval};
+
+fn drop_call_type_name_count(bytecode: &BytecodeProgram, type_name: &str) -> usize {
+    bytecode
+        .instructions
+        .iter()
+        .filter(|i| i.opcode == OpCode::DropCall)
+        .filter(|i| {
+            matches!(
+                i.operand,
+                Some(Operand::Property(sid))
+                    if bytecode.strings.get(sid as usize).map(String::as_str) == Some(type_name)
+            )
+        })
+        .count()
+}
 
 #[test]
 fn test_auto_drop_at_scope_exit() {
@@ -154,6 +169,46 @@ fn test_auto_drop_nested_scopes() {
     "#,
     );
     assert_eq!(result.as_i64(), Some(1));
+}
+
+#[test]
+fn test_inferred_block_binding_drop_call_carries_type_name() {
+    let bytecode = compile(
+        r#"
+        type Handle { id: int }
+        impl Drop for Handle {
+            method drop() { }
+        }
+        {
+            let h = Handle { id: 1 }
+        }
+    "#,
+    );
+    assert_eq!(
+        drop_call_type_name_count(&bytecode, "Handle"),
+        1,
+        "inferred block-expression bindings must emit typed Handle DropCall"
+    );
+}
+
+#[test]
+fn test_range_for_body_drop_scope_covers_fallthrough_and_break() {
+    let bytecode = compile(
+        r#"
+        type Guard { id: int }
+        impl Drop for Guard {
+            method drop() { }
+        }
+        for i in range(0, 3) {
+            let g = Guard { id: i }
+            if i == 1 { break }
+        }
+    "#,
+    );
+    assert!(
+        drop_call_type_name_count(&bytecode, "Guard") >= 2,
+        "range-for body must emit typed Guard DropCall for fallthrough and break exits"
+    );
 }
 
 #[test]

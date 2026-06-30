@@ -189,6 +189,7 @@ impl BytecodeCompiler {
         self.loop_stack.push(loop_ctx);
 
         // Compile body
+        self.push_drop_scope();
         self.push_repeating_reference_release_barrier();
         let body_result = (|| -> Result<()> {
             for (idx, stmt) in while_loop.body.iter().enumerate() {
@@ -210,6 +211,7 @@ impl BytecodeCompiler {
         })();
         self.pop_repeating_reference_release_barrier();
         body_result?;
+        self.pop_drop_scope()?;
 
         // Jump back to LoopStart
         let offset = loop_start as i32 - self.program.current_offset() as i32 - 1;
@@ -334,6 +336,7 @@ impl BytecodeCompiler {
                         });
 
                         // Compile body
+                        self.push_drop_scope();
                         self.push_repeating_reference_release_barrier();
                         let body_result = (|| -> Result<()> {
                             for (idx, stmt) in for_loop.body.iter().enumerate() {
@@ -356,6 +359,7 @@ impl BytecodeCompiler {
                         })();
                         self.pop_repeating_reference_release_barrier();
                         body_result?;
+                        self.pop_drop_scope()?;
 
                         self.end_range_counter_loop(&rcl);
 
@@ -570,6 +574,7 @@ impl BytecodeCompiler {
                 self.loop_stack.push(loop_ctx);
 
                 // Compile body
+                self.push_drop_scope();
                 self.push_repeating_reference_release_barrier();
                 let body_result = (|| -> Result<()> {
                     for (idx, stmt) in for_loop.body.iter().enumerate() {
@@ -592,6 +597,7 @@ impl BytecodeCompiler {
                 })();
                 self.pop_repeating_reference_release_barrier();
                 body_result?;
+                self.pop_drop_scope()?;
 
                 // Jump back to LoopStart
                 let offset = loop_start as i32 - self.program.current_offset() as i32 - 1;
@@ -650,6 +656,7 @@ impl BytecodeCompiler {
                 self.loop_stack.push(loop_ctx);
 
                 // Compile body
+                self.push_drop_scope();
                 self.push_repeating_reference_release_barrier();
                 let body_result = (|| -> Result<()> {
                     for (idx, stmt) in for_loop.body.iter().enumerate() {
@@ -672,6 +679,7 @@ impl BytecodeCompiler {
                 })();
                 self.pop_repeating_reference_release_barrier();
                 body_result?;
+                self.pop_drop_scope()?;
 
                 // Update
                 loop_ctx = self

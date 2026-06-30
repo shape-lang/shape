@@ -169,6 +169,20 @@ impl BytecodeCompiler {
                                         is_mutable,
                                         Some(init_expr),
                                     );
+                                    if let Some(ct) = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, init_expr) {
+                                        if let Some(tn) = crate::compiler::patterns::binding::concrete_type_tracker_name(&ct) {
+                                            let existing = self.type_tracker.get_local_type(local_idx);
+                                            if !Self::ws6b_name_would_downgrade(existing, &tn) {
+                                                self.set_local_type_info(local_idx, &tn);
+                                            }
+                                        }
+                                        crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                            self,
+                                            crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                                            ct,
+                                            crate::compiler::BindingConcreteFactSource::StructuralInitializer,
+                                        );
+                                    }
                                 }
                                 // Track for auto-drop at scope exit
                                 let drop_kind = self.local_drop_kind(local_idx).or_else(|| {
