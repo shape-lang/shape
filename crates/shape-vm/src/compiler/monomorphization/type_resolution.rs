@@ -2113,7 +2113,11 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
                 | BinaryOp::BitShr => {
                     let lt = concrete_type_for_expr(compiler, left)?;
                     let rt = concrete_type_for_expr(compiler, right)?;
-                    if lt == rt { Some(lt) } else { None }
+                    if lt == rt {
+                        Some(lt)
+                    } else {
+                        adopt_int_literal(&lt, left, &rt, right)
+                    }
                 }
                 // NullCoalesce (`a ?? b`): result is the non-null branch type.
                 // Both branches should agree; resolve the right (default) type.

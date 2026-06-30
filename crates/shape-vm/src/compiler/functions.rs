@@ -129,7 +129,10 @@ impl BytecodeCompiler {
         let mut component = HashSet::from([func_name.to_string()]);
 
         for candidate in &reachable_from_target {
-            if self.function_names_reachable_from(candidate).contains(func_name) {
+            if self
+                .function_names_reachable_from(candidate)
+                .contains(func_name)
+            {
                 component.insert(candidate.clone());
             }
         }
@@ -254,6 +257,35 @@ impl BytecodeCompiler {
         };
         shape_runtime::visitor::walk_program(&mut collector, &program);
         collector.saw_integer && !collector.veto
+    }
+
+    fn body_local_integer_param_type_name(
+        &self,
+        func_def: &FunctionDef,
+        param_name: &str,
+    ) -> Option<String> {
+        let type_name = crate::compiler::expressions::closures::infer_param_type_from_body(
+            param_name,
+            &func_def.body,
+        )
+        .as_ref()
+        .and_then(Self::tracked_type_name_from_annotation)?;
+
+        Self::type_name_is_integer_proof(&type_name).then_some(type_name)
+    }
+
+    fn has_global_number_body_integer_conflict(
+        &self,
+        func_def: &FunctionDef,
+        param_idx: usize,
+        param_name: &str,
+    ) -> bool {
+        self.inferred_param_type_name_from_facts(&func_def.name, func_def, param_idx)
+            .as_deref()
+            == Some("number")
+            && self
+                .body_local_integer_param_type_name(func_def, param_name)
+                .is_some()
     }
 
     /// Build the function-name → return-type `LocalTypeInfo` seed for MIR
@@ -520,15 +552,34 @@ impl BytecodeCompiler {
         for (idx, param) in func_def.params.iter().enumerate() {
             // Only bare, by-value, unannotated identifier params can be
             // implicitly generic. Everything else carries (or recovers) a kind.
+            let Some(param_name) = param.simple_name() else {
+                continue;
+            };
             if param.type_annotation.is_some()
                 || param.is_reference
                 || param.is_mut_reference
                 || param.is_const
-                || param.simple_name().is_none()
             {
                 continue;
             }
             saw_unannotated_value_param = true;
+
+            if self.has_global_number_body_integer_conflict(func_def, idx, param_name) {
+                // A program-wide `"number"` signature fact plus a body-local
+                // integer use is a widening conflict, not a concrete emission
+                // proof. With source text available, the direct source call-site
+                // audit can prove every non-recursive entry into the component is
+                // integer-only; otherwise the template stays implicit-generic and
+                // concrete AST call expressions specialize it on demand.
+                if !self.direct_callsite_param_evidence_is_integer_only(
+                    &func_def.name,
+                    idx,
+                    param_name,
+                ) {
+                    return true;
+                }
+                continue;
+            }
 
             // A concrete program-wide signature fact pins this param's kind.
             if self
@@ -2026,13 +2077,12 @@ impl BytecodeCompiler {
                         // function's recursive component prove integer args
                         // at the same param slot and no direct call proves a
                         // wider/unknown arg. That preserves real Float64 call
-                        // sites like `add_one(1.5)` while still specializing
-                        // `is_even(10)` / `is_odd(n - 1)` cycles. The JIT
-                        // engine path can arrive without source text; in that
-                        // case this source-level direct-call audit is
-                        // unavailable, so the by-value override is restricted
-                        // to multi-function recursive components instead of
-                        // all unannotated numeric helpers.
+                        // sites like `add_one(1.5)` while still allowing
+                        // `is_even(10)` / `is_odd(n - 1)` cycles to specialize
+                        // from their actual typed call expressions. If source
+                        // text is unavailable, there is no source-level audit
+                        // here, so by-value unannotated params are left at the
+                        // global fact and the template remains deferrable.
                         let global_inferred =
                             self.inferred_param_type_name_from_facts(&func_def.name, func_def, idx);
                         let body_local_inferred =
@@ -2042,9 +2092,6 @@ impl BytecodeCompiler {
                             )
                             .as_ref()
                             .and_then(Self::tracked_type_name_from_annotation);
-                        let source_unavailable_mutual_recursion =
-                            self.source_text.is_none()
-                                && self.recursive_component_for_function(&func_def.name).len() > 1;
                         let inferred_type_name =
                             match (global_inferred.as_deref(), body_local_inferred.as_deref()) {
                                 // Widening attractor: global says "number",
@@ -2063,15 +2110,6 @@ impl BytecodeCompiler {
                                         name,
                                     ) =>
                                 {
-                                    Some(local.to_string())
-                                }
-                                (
-                                    Some("number"),
-                                    Some(
-                                        local @ ("int" | "i8" | "i16" | "i32" | "i64" | "u8"
-                                        | "u16" | "u32" | "u64"),
-                                    ),
-                                ) if source_unavailable_mutual_recursion => {
                                     Some(local.to_string())
                                 }
                                 _ => global_inferred,

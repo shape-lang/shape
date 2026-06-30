@@ -73,6 +73,16 @@ mod w27_implicit_generic_tests {
         KindedSlot::new(ValueSlot::from_raw(bits), expected)
     }
 
+    fn eval_without_source_and_kind(source: &str, expected: NativeKind) -> KindedSlot {
+        let program = parse_program(source).expect("source should parse");
+        let compiler = BytecodeCompiler::new();
+        let bytecode = compiler.compile(&program).expect("compile should succeed");
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        let bits = vm.execute_raw(None).expect("execution should succeed");
+        KindedSlot::new(ValueSlot::from_raw(bits), expected)
+    }
+
     #[test]
     fn complex_math_library_calls_concrete_implicit_specializations() {
         let source = r#"
@@ -212,6 +222,26 @@ mod w27_implicit_generic_tests {
         assert_eq!(
             eval_with_source_and_kind(source, NativeKind::Float64).as_f64(),
             Some(2.5)
+        );
+    }
+
+    #[test]
+    fn source_unavailable_mutual_recursion_preserves_float64_callsite() {
+        let source = r#"
+            function is_even(n) {
+                if n == 0 { return 1.0 }
+                return is_odd(n - 1)
+            }
+            function is_odd(n) {
+                if n == 0 { return 0.0 }
+                return is_even(n - 1)
+            }
+            is_even(10.0)
+        "#;
+
+        assert_eq!(
+            eval_without_source_and_kind(source, NativeKind::Float64).as_f64(),
+            Some(1.0)
         );
     }
 }
@@ -2312,7 +2342,14 @@ impl BytecodeCompiler {
                 args,
                 param_annotations.as_deref(),
             )?;
-            self.reject_mismatched_arg_kind_into_call_frame(&call_name, args, call_func_idx)?;
+            // Deferred implicit-generic templates are dead bytecode: concrete
+            // call sites re-emit a specialization with proven parameter slots.
+            // Enforcing a frame-kind guard against the template's provisional
+            // descriptor would turn an implementation artifact into a static
+            // proof. Keep the guard for every concrete emission path.
+            if !self.deferring_uninstantiated_template_body {
+                self.reject_mismatched_arg_kind_into_call_frame(&call_name, args, call_func_idx)?;
+            }
 
             let writebacks = self.compile_call_args_with_param_types(
                 args,
