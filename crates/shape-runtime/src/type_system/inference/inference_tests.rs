@@ -306,6 +306,92 @@ let spec = PropertySpec {
     }
 }
 
+#[test]
+fn test_generic_zero_arg_callable_return_binds_named_call_result() {
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::parser::parse_program;
+
+    let code = r#"
+fn apply<T>(gen_fn: () => T) -> T {
+    gen_fn()
+}
+
+let gen: () => number = || 1.0
+let value = apply(gen)
+"#;
+
+    let program = parse_program(code).expect("program should parse");
+    let mut engine = TypeInferenceEngine::new();
+    let types = engine
+        .infer_program(&program)
+        .expect("inference should bind T from () => number return");
+
+    let value_ty = types
+        .get("value")
+        .expect("value should be inferred")
+        .canonicalize();
+    assert_eq!(
+        value_ty,
+        Type::Concrete(TypeAnnotation::Basic("number".into()))
+    );
+}
+
+#[test]
+fn test_generic_zero_arg_callable_return_binds_named_annotation_proof() {
+    use shape_ast::ast::TypeAnnotation;
+    use std::collections::HashSet;
+
+    let mut engine = TypeInferenceEngine::new();
+    let mut generic_params = HashSet::new();
+    generic_params.insert("T".to_string());
+
+    let instance = Type::Function {
+        params: vec![],
+        returns: Box::new(Type::Concrete(TypeAnnotation::Basic("number".into()))),
+    };
+    let proven = Type::Function {
+        params: vec![],
+        returns: Box::new(Type::Concrete(TypeAnnotation::Reference("T".into()))),
+    };
+
+    engine
+        .bind_callsite_return_to_proven_shape_with_params(&instance, &proven, &generic_params)
+        .expect("number should satisfy a proven () => T annotation for this callsite");
+}
+
+#[test]
+fn test_generic_zero_arg_callable_return_rejects_conflicting_proof() {
+    use shape_ast::ast::TypeAnnotation;
+
+    let mut engine = TypeInferenceEngine::new();
+    let t = TypeVar::new("T".to_string());
+    engine.solver.unifier_mut().bind(
+        t.clone(),
+        Type::Concrete(TypeAnnotation::Basic("int".into())),
+    );
+
+    let instance = Type::Function {
+        params: vec![],
+        returns: Box::new(Type::Concrete(TypeAnnotation::Basic("number".into()))),
+    };
+    let proven = Type::Function {
+        params: vec![],
+        returns: Box::new(Type::Variable(t)),
+    };
+
+    let err = engine
+        .bind_callsite_return_to_proven_shape(&instance, &proven)
+        .expect_err("number must not satisfy an already-proven int return");
+
+    match err {
+        TypeError::ConstraintViolation(message) => {
+            assert!(message.contains("number"), "{message}");
+            assert!(message.contains("int"), "{message}");
+        }
+        other => panic!("expected constraint violation, got {other:?}"),
+    }
+}
+
 // ─── SC1: Color / Border / ChartType namespace constructors ───────────
 
 #[test]

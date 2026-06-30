@@ -1094,10 +1094,17 @@ impl TypeInferenceEngine {
             if !Self::type_is_fully_resolved(&resolved_return) {
                 continue;
             }
+            let proven_generic_params: HashSet<String> = self
+                .env
+                .lookup(&function_name)
+                .map(|scheme| scheme.quantified.iter().map(|var| var.0.clone()).collect())
+                .unwrap_or_default();
             for call_return in &call_returns {
-                if let Err(err) =
-                    self.bind_callsite_return_to_proven_shape(call_return, &resolved_return)
-                {
+                if let Err(err) = self.bind_callsite_return_to_proven_shape_with_params(
+                    call_return,
+                    &resolved_return,
+                    &proven_generic_params,
+                ) {
                     errors.push(err);
                 }
             }
@@ -1105,10 +1112,20 @@ impl TypeInferenceEngine {
         errors
     }
 
+    #[cfg(test)]
     fn bind_callsite_return_to_proven_shape(
         &mut self,
         instance: &Type,
         proven: &Type,
+    ) -> TypeResult<()> {
+        self.bind_callsite_return_to_proven_shape_with_params(instance, proven, &HashSet::new())
+    }
+
+    fn bind_callsite_return_to_proven_shape_with_params(
+        &mut self,
+        instance: &Type,
+        proven: &Type,
+        proven_generic_params: &HashSet<String>,
     ) -> TypeResult<()> {
         let instance = self
             .solver
@@ -1120,17 +1137,55 @@ impl TypeInferenceEngine {
             .unifier()
             .apply_substitutions(proven)
             .canonicalize();
-        self.bind_callsite_return_shape(&instance, &proven)
+        let mut proven_return_bindings = HashMap::new();
+        self.bind_callsite_return_shape(
+            &instance,
+            &proven,
+            proven_generic_params,
+            &mut proven_return_bindings,
+        )
     }
 
-    fn bind_callsite_return_shape(&mut self, instance: &Type, proven: &Type) -> TypeResult<()> {
+    fn bind_callsite_return_shape(
+        &mut self,
+        instance: &Type,
+        proven: &Type,
+        proven_generic_params: &HashSet<String>,
+        proven_return_bindings: &mut HashMap<TypeVar, Type>,
+    ) -> TypeResult<()> {
         match (instance, proven) {
             (
                 Type::Variable(var) | Type::Constrained { var, .. },
                 Type::Concrete(TypeAnnotation::Union(_)),
-            ) => self.bind_callsite_return_var(var, proven),
-            (Type::Variable(var) | Type::Constrained { var, .. }, ty) => {
-                self.bind_callsite_return_var(var, ty)
+            ) => self.bind_callsite_return_var(
+                var,
+                proven,
+                proven_generic_params,
+                proven_return_bindings,
+            ),
+            (Type::Variable(var) | Type::Constrained { var, .. }, ty) => self
+                .bind_callsite_return_var(var, ty, proven_generic_params, proven_return_bindings),
+            (ty, Type::Variable(var) | Type::Constrained { var, .. }) => self
+                .bind_proven_callsite_return_var(
+                    var,
+                    ty,
+                    proven_generic_params,
+                    proven_return_bindings,
+                ),
+            (
+                ty,
+                Type::Concrete(ann @ (TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_))),
+            ) if ann
+                .as_type_name_str()
+                .is_some_and(|name| proven_generic_params.contains(name)) =>
+            {
+                let name = ann.as_type_name_str().unwrap();
+                self.bind_proven_callsite_return_var(
+                    &TypeVar::new(name.to_string()),
+                    ty,
+                    proven_generic_params,
+                    proven_return_bindings,
+                )
             }
             (
                 Type::Generic {
@@ -1145,7 +1200,12 @@ impl TypeInferenceEngine {
                 && self.solver.probe_equal(instance_base, proven_base) =>
             {
                 for (instance_arg, proven_arg) in instance_args.iter().zip(proven_args.iter()) {
-                    self.bind_callsite_return_shape(instance_arg, proven_arg)?;
+                    self.bind_callsite_return_shape(
+                        instance_arg,
+                        proven_arg,
+                        proven_generic_params,
+                        proven_return_bindings,
+                    )?;
                 }
                 Ok(())
             }
@@ -1162,9 +1222,19 @@ impl TypeInferenceEngine {
                 for (instance_param, proven_param) in
                     instance_params.iter().zip(proven_params.iter())
                 {
-                    self.bind_callsite_return_shape(instance_param, proven_param)?;
+                    self.bind_callsite_return_shape(
+                        instance_param,
+                        proven_param,
+                        proven_generic_params,
+                        proven_return_bindings,
+                    )?;
                 }
-                self.bind_callsite_return_shape(instance_returns, proven_returns)
+                self.bind_callsite_return_shape(
+                    instance_returns,
+                    proven_returns,
+                    proven_generic_params,
+                    proven_return_bindings,
+                )
             }
             (instance, Type::Concrete(TypeAnnotation::Union(members)))
                 if members.iter().any(|member| {
@@ -1183,17 +1253,85 @@ impl TypeInferenceEngine {
         }
     }
 
-    fn bind_callsite_return_var(&mut self, var: &TypeVar, proven: &Type) -> TypeResult<()> {
+    fn bind_callsite_return_var(
+        &mut self,
+        var: &TypeVar,
+        proven: &Type,
+        proven_generic_params: &HashSet<String>,
+        proven_return_bindings: &mut HashMap<TypeVar, Type>,
+    ) -> TypeResult<()> {
         match self.solver.unifier().lookup(var).cloned() {
             Some(existing) => {
                 let existing = self.solver.unifier().apply_substitutions(&existing);
-                self.bind_callsite_return_shape(&existing, proven)
+                self.bind_callsite_return_shape(
+                    &existing,
+                    proven,
+                    proven_generic_params,
+                    proven_return_bindings,
+                )
             }
             None => {
                 self.solver.unifier_mut().bind(var.clone(), proven.clone());
                 Ok(())
             }
         }
+    }
+
+    fn bind_proven_callsite_return_var(
+        &mut self,
+        var: &TypeVar,
+        instance: &Type,
+        proven_generic_params: &HashSet<String>,
+        proven_return_bindings: &mut HashMap<TypeVar, Type>,
+    ) -> TypeResult<()> {
+        if let Some(existing) = self.solver.unifier().lookup(var).cloned() {
+            let existing = self
+                .solver
+                .unifier()
+                .apply_substitutions(&existing)
+                .canonicalize();
+            if !Self::is_self_named_type_param_annotation(var, &existing) {
+                return self.bind_callsite_return_shape(
+                    instance,
+                    &existing,
+                    proven_generic_params,
+                    proven_return_bindings,
+                );
+            }
+        }
+
+        if let Some(existing) = proven_return_bindings.get(var).cloned() {
+            return self.bind_callsite_return_shape(
+                instance,
+                &existing,
+                proven_generic_params,
+                proven_return_bindings,
+            );
+        }
+
+        let instance = self
+            .solver
+            .unifier()
+            .apply_substitutions(instance)
+            .canonicalize();
+        if self.type_contains_unresolved_vars(&instance) {
+            return Err(TypeError::ConstraintViolation(format!(
+                "call result type '{}' is not compatible with proven return type '{}'",
+                self.render_type_for_diag(&instance),
+                self.render_type_for_diag(&Type::Variable(var.clone()))
+            )));
+        }
+
+        proven_return_bindings.insert(var.clone(), instance);
+        Ok(())
+    }
+
+    fn is_self_named_type_param_annotation(var: &TypeVar, ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Concrete(ann @ (TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_)))
+                if ann.as_type_name_str() == Some(var.0.as_str())
+        )
     }
 
     /// Refine callable parameter types from constraints generated while inferring
