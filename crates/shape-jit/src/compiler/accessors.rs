@@ -89,6 +89,14 @@ pub enum JitParityTarget {
     Builtin(BuiltinFunction),
 }
 
+/// Static evidence that a user function body touches module-binding storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionModuleBindingAccess {
+    pub function_name: String,
+    pub opcode: OpCode,
+    pub instruction_index: usize,
+}
+
 fn push_unique_opcode(out: &mut Vec<OpCode>, opcode: OpCode) {
     if !out.contains(&opcode) {
         out.push(opcode);
@@ -664,6 +672,73 @@ fn is_supported_builtin(_builtin: BuiltinFunction) -> bool {
     true
 }
 
+fn is_module_binding_storage_opcode(opcode: OpCode) -> bool {
+    matches!(
+        opcode,
+        OpCode::LoadModuleBinding
+            | OpCode::StoreModuleBinding
+            | OpCode::StoreModuleBindingTyped
+            | OpCode::SetModuleBindingIndex
+            | OpCode::LoadModuleBindingI64
+            | OpCode::LoadModuleBindingU64
+            | OpCode::LoadModuleBindingF64
+            | OpCode::LoadModuleBindingI32
+            | OpCode::LoadModuleBindingU32
+            | OpCode::LoadModuleBindingI16
+            | OpCode::LoadModuleBindingU16
+            | OpCode::LoadModuleBindingI8
+            | OpCode::LoadModuleBindingU8
+            | OpCode::LoadModuleBindingBool
+            | OpCode::LoadModuleBindingPtr
+            | OpCode::StoreModuleBindingI64
+            | OpCode::StoreModuleBindingU64
+            | OpCode::StoreModuleBindingF64
+            | OpCode::StoreModuleBindingI32
+            | OpCode::StoreModuleBindingU32
+            | OpCode::StoreModuleBindingI16
+            | OpCode::StoreModuleBindingU16
+            | OpCode::StoreModuleBindingI8
+            | OpCode::StoreModuleBindingU8
+            | OpCode::StoreModuleBindingBool
+            | OpCode::StoreModuleBindingPtr
+    )
+}
+
+/// Find module-binding storage accesses inside user function bodies.
+///
+/// The JIT consumes MIR for function bodies, but module bindings are not MIR
+/// places; the bytecode opcodes are the static storage side table. If native
+/// top-level code runs and a function with these opcodes is later interpreted
+/// through the trampoline VM, the VM-side module-binding array is not
+/// synchronized with JITContext locals. Treat this as a whole-program JIT
+/// containment class until module-binding lowering has a compile-time side
+/// table shared by top-level and function bodies.
+pub fn function_body_module_binding_accesses(
+    program: &BytecodeProgram,
+) -> Vec<FunctionModuleBindingAccess> {
+    let mut accesses = Vec::new();
+
+    for func in &program.functions {
+        let start = func.entry_point;
+        let end = start.saturating_add(func.body_length);
+        let Some(instructions) = program.instructions.get(start..end) else {
+            continue;
+        };
+
+        for (offset, instr) in instructions.iter().enumerate() {
+            if is_module_binding_storage_opcode(instr.opcode) {
+                accesses.push(FunctionModuleBindingAccess {
+                    function_name: func.name.clone(),
+                    opcode: instr.opcode,
+                    instruction_index: start + offset,
+                });
+            }
+        }
+    }
+
+    accesses
+}
+
 /// Run JIT compatibility preflight on a raw instruction slice.
 ///
 /// This is the shared core used by both `preflight_blob_jit_compatibility`
@@ -857,6 +932,24 @@ pub fn get_incomplete_opcodes(_program: &BytecodeProgram) -> Vec<OpCode> {
 mod tests {
     use super::*;
     use shape_vm::bytecode::{Instruction, Operand};
+
+    fn compile_source(source: &str) -> BytecodeProgram {
+        use shape_vm::BytecodeCompiler;
+
+        shape_runtime::initialize_shared_runtime().ok();
+        let program = shape_ast::parse_program(source).expect("parse failed");
+        let mut loader = shape_runtime::module_loader::ModuleLoader::new();
+        let (graph, stdlib_names, prelude_imports) =
+            shape_vm::module_resolution::build_graph_and_stdlib_names(&program, &mut loader, &[])
+                .expect("module graph construction failed");
+
+        let mut compiler = BytecodeCompiler::new();
+        compiler.stdlib_function_names = stdlib_names;
+        compiler.set_source(source);
+        compiler
+            .compile_with_graph_and_prelude(&program, graph, &prelude_imports)
+            .expect("bytecode compilation failed")
+    }
 
     #[test]
     fn preflight_accepts_all_opcodes() {
@@ -1172,6 +1265,28 @@ mod tests {
                 op
             );
         }
+    }
+
+    #[test]
+    fn f1_static_preflight_finds_function_body_module_binding_read() {
+        let program = compile_source(
+            r#"
+            var counter = 100
+            fn read() { counter }
+            let val = read()
+            print(val)
+            "#,
+        );
+
+        let accesses = function_body_module_binding_accesses(&program);
+        assert_eq!(
+            accesses.len(),
+            1,
+            "f1 should expose exactly one function-body module-binding \
+             access; got {accesses:?}"
+        );
+        assert_eq!(accesses[0].function_name, "read");
+        assert_eq!(accesses[0].opcode, OpCode::LoadModuleBinding);
     }
 
     #[test]

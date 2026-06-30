@@ -637,9 +637,30 @@ impl JITCompiler {
         name: &str,
         program: &BytecodeProgram,
     ) -> Result<(JittedStrategyFn, MixedFunctionTable), String> {
-        use super::accessors::preflight_instructions;
+        use super::accessors::{function_body_module_binding_accesses, preflight_instructions};
 
         maybe_emit_numeric_metrics(program);
+
+        let module_binding_accesses = function_body_module_binding_accesses(program);
+        if let Some(first) = module_binding_accesses.first() {
+            return Err(format!(
+                "W39 F1 module-binding function-body SURFACE (ADR-006 §2.7.14): \
+                 function '{}' contains {:?} at bytecode instruction {}. \
+                 Module bindings are not MIR places, so the JIT function-body \
+                 lowering has no compile-time side table for this storage. \
+                 Running native top-level code and then interpreting such a \
+                 function through the trampoline VM would read an unsynchronized \
+                 module-binding array (observed VM=100 / JIT=0 on \
+                 f1-shared-module-binding.shape). Whole-program deopting to the \
+                 bytecode interpreter via the existing `[jit-fallback]` path \
+                 preserves VM == JIT semantics until module-binding lowering is \
+                 rebuilt with static metadata. total_accesses={}",
+                first.function_name,
+                first.opcode,
+                first.instruction_index,
+                module_binding_accesses.len(),
+            ));
+        }
 
         // Phase 1: Per-function preflight to classify each function.
         // A function is JIT-compatible if its bytecode passes instruction
