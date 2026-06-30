@@ -1737,11 +1737,11 @@ fn phase_e_escaping_closure_still_correct() {
     // be correct, just via the legacy jit_make_closure FFI.
     jit_expect_int(
         r#"
-fn make_adder() {
-    let n = 10
-    return |x| x + n
+fn make_adder() -> (int) -> int {
+    let n: int = 10
+    return function(x: int) -> int { return x + n }
 }
-let f = make_adder()
+let f: (int) -> int = make_adder()
 f(5)
 "#,
         15,
