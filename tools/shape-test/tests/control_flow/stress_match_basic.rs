@@ -361,10 +361,11 @@ fn test_function_call_in_match_arm_body() {
     ShapeTest::new("function square(n) { return n * n; }\nfunction test() {\n  return match 3 {\n    1 => square(1),\n    2 => square(2),\n    3 => square(3),\n    _ => 0\n  };\n}\ntest()").expect_number(9.0);
 }
 
-/// Verifies match some constructor.
+/// Constructor patterns require an enum-typed scrutinee.
 #[test]
-fn test_match_some_constructor() {
-    ShapeTest::new("function test() {\n  return match { value: 42 } {\n    Ok(x) => x,\n    _ => 0\n  };\n}\ntest()").expect_number(0.0);
+fn test_match_constructor_requires_enum_scrutinee() {
+    ShapeTest::new("function test() {\n  return match { value: 42 } {\n    Ok(x) => x,\n    _ => 0\n  };\n}\ntest()")
+        .expect_run_err_contains("requires an enum-typed value");
 }
 
 /// Verifies match expression sum.

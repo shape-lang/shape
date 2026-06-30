@@ -289,8 +289,8 @@ for {x, y} in points {
 // For loop variable mutation
 // =========================================================================
 
-/// Fixed: Range iteration now produces i64 values instead of f64,
-/// so int arithmetic in for-loop bodies works correctly.
+/// Range-loop bindings are the loop counter; mutating the binding affects the
+/// next range condition check.
 #[test]
 fn cf_20_for_var_mutation() {
     let code = r#"
@@ -299,11 +299,9 @@ for i in 0..5 {
   i = i + 10
   print(i)
 }
-// Expected: error or 10 11 12 13 14 (depending on if loop var is mutable)
+// Expected: 10 because mutating i mutates the range counter.
 "#;
-    ShapeTest::new(code)
-        .expect_run_ok()
-        .expect_output("10\n11\n12\n13\n14");
+    ShapeTest::new(code).expect_run_ok().expect_output("10");
 }
 
 // =========================================================================
