@@ -422,9 +422,9 @@ fn test_complex_multi_return_function_with_option() {
             match safe_divide(a, b) {
                 Ok(v) => {
                     if v > 10 {
-                        "large: " + v
+                        f"large: {v}"
                     } else {
-                        "small: " + v
+                        f"small: {v}"
                     }
                 },
                 Err(e) => "error: " + e
