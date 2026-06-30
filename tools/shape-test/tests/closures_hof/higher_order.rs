@@ -215,7 +215,7 @@ fn test_hof_array_every_false() {
 fn test_hof_multiplier_factory() {
     ShapeTest::new(
         r#"
-        fn multiplier(n) { |x| x * n }
+        fn multiplier(n: int) -> (int) -> int { |x: int| { x * n } }
         let triple = multiplier(3)
         let quadruple = multiplier(4)
         triple(10) + quadruple(10)
@@ -645,8 +645,8 @@ fn hof_apply_two_args_two_calls_same_wrapper_preserves_number() {
 fn hof_function_as_return_value_with_state() {
     ShapeTest::new(
         r#"
-        fn multiplier(factor) {
-            |x| x * factor
+        fn multiplier(factor: int) -> (int) -> int {
+            |x: int| { x * factor }
         }
         let times3 = multiplier(3)
         let times7 = multiplier(7)

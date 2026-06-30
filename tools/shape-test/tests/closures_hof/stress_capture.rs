@@ -497,9 +497,7 @@ fn test_closure_capture_loop_variable() {
         fns[0](10)
     "#,
     )
-    // Strict generic-return gating rejects unannotated returns sourced from
-    // mutable bindings. Callable-array execution is a separate W21 surface.
-    .expect_run_err_contains("Cannot infer a polymorphic return type");
+    .expect_run_err_contains("cannot determine the element type of empty array `closures`");
 }
 
 /// Verifies custom apply.

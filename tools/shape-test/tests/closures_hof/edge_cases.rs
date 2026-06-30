@@ -317,15 +317,10 @@ fn edge_closure_three_deep() {
 }
 
 // Memory-safety regression pin (closures_hof transitive-capture SIGSEGV fix,
-// 2026-06-22). The crash class: an innermost closure that captures a value
-// whose `ConcreteType` cannot be proven at compile time (a transitively-
-// captured un-annotated closure parameter) gets a `Ptr(HeapKind::NativeView)`
-// opaque-heap layout stamp. When the actual captured value is a SCALAR, its
-// integer bits were written into a heap-drop-masked slot and later dropped as
-// an `Arc<NativeViewData>` → SIGSEGV (a small-integer-as-pointer deref). The
-// fix is the `op_make_closure` carrier-mismatch guard: a scalar value must
-// never land in a heap-drop-masked slot — surface-and-stop instead. The
-// contract pinned here is MEMORY SAFETY: rc=1 clean error, NEVER 139/SIGSEGV.
+// 2026-06-22). This shape used to crash when an innermost closure captured a
+// transitively-proven scalar through an opaque heap layout stamp. The contract
+// pinned here is MEMORY SAFETY: a clean, statically proven result, never a
+// segfault or heap corruption.
 #[test]
 fn edge_transitive_scalar_capture_is_memory_safe_not_segv() {
     ShapeTest::new(
@@ -338,10 +333,7 @@ fn edge_transitive_scalar_capture_is_memory_safe_not_segv() {
         level1(1)(2)(3)
     "#,
     )
-    // The crucial property is still a clean error, not a segfault or heap
-    // corruption. W20 rejects earlier, at compile time, before the old carrier
-    // stamping path is reached.
-    .expect_run_err_contains("cannot infer the numeric type of closure parameter `c`");
+    .expect_number(6.0);
 }
 
 #[test]
@@ -536,10 +528,11 @@ fn edge_closure_with_print_side_effect() {
 fn edge_higher_order_with_closure_and_default() {
     ShapeTest::new(
         r#"
-        fn apply_with_default(f, x, default_val = 0) {
+        fn apply_with_default(f: (int) -> int, x: int, default_val: int = 0) -> int {
             if x > 0 { f(x) } else { default_val }
         }
-        apply_with_default(|x| x * 2, 5)
+        let double = |x: int| { x * 2 }
+        apply_with_default(double, 5)
     "#,
     )
     .expect_number(10.0);

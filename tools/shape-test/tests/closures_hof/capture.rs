@@ -178,8 +178,8 @@ fn closure_capture_in_returned_lambda() {
 fn closure_capture_function_param() {
     ShapeTest::new(
         r#"
-        fn make_multiplier(factor) {
-            |x| x * factor
+        fn make_multiplier(factor: int) -> (int) -> int {
+            |x: int| { x * factor }
         }
         let triple = make_multiplier(3)
         triple(10)

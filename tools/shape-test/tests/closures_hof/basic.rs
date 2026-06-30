@@ -425,8 +425,8 @@ fn test_closure_three_params() {
 fn test_closure_scope_isolation() {
     ShapeTest::new(
         r#"
-        fn make_fn() {
-            |x| {
+        fn make_fn() -> (int) -> int {
+            |x: int| {
                 let tmp = x * 2
                 tmp + 1
             }

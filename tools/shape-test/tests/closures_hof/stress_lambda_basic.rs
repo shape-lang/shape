@@ -386,8 +386,8 @@ fn test_closure_as_return_value() {
 fn test_closure_as_return_value_multiplier() {
     ShapeTest::new(
         r#"
-        fn make_multiplier(n) {
-            return |x| x * n
+        fn make_multiplier(n: int) -> (int) -> int {
+            return |x: int| { x * n }
         }
         let triple = make_multiplier(3)
         triple(7)
