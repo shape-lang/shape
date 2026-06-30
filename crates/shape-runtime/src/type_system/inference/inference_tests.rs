@@ -3873,6 +3873,48 @@ let total = match ops.get("add") {
 }
 
 #[test]
+fn hashmap_named_function_values_match_get_payload_value_call_proof() {
+    let (_engine, types, errors) = u40_infer(
+        r#"
+fn add(a: int, b: int) -> int { a + b }
+fn mul(a: int, b: int) -> int { a * b }
+let ops = HashMap()
+  .set("add", add)
+  .set("mul", mul)
+let add_fn = ops.get("add")
+let total = match ops.get("add") {
+  Some(f) => f(3, 4)
+  None => 0
+}
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "named-function HashMap match proof should infer cleanly, got {:?}",
+        errors
+    );
+    assert!(
+        types
+            .get("ops")
+            .is_some_and(u40_is_hashmap_string_int_function),
+        "ops should infer as HashMap<string, (int, int) -> int>, got {:?}",
+        types.get("ops")
+    );
+    assert!(
+        types
+            .get("add_fn")
+            .is_some_and(u40_is_option_function_int_int_to_int),
+        "HashMap.get should preserve Option<(int, int) -> int>, got {:?}",
+        types.get("add_fn")
+    );
+    assert!(
+        types.get("total").is_some_and(u40_is_int),
+        "calling matched named-function HashMap payload should infer int, got {:?}",
+        types.get("total")
+    );
+}
+
+#[test]
 fn hashmap_get_option_function_is_not_directly_callable() {
     let (_engine, _types, errors) = u40_infer(
         r#"

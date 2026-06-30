@@ -955,6 +955,7 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
                         HashMapKindedRef::Decimal(arc) => arc.keys,
                         HashMapKindedRef::TypedObject(arc) => arc.keys,
                         HashMapKindedRef::TraitObject(arc) => arc.keys,
+                        HashMapKindedRef::Callable(arc) => arc.keys,
                         HashMapKindedRef::HashMap(arc) => arc.keys,
                     };
                     for i in 0..n {
@@ -1014,6 +1015,12 @@ impl FromSlot for Vec<(Arc<String>, Arc<shape_value::heap_value::HeapValue>)> {
                                      wired (HeapValue::TraitObject arm exists but \
                                      payload kind dispatch is its own cluster)."
                                 );
+                            }
+                            HashMapKindedRef::Callable(arc) => {
+                                let elem: &shape_value::heap_value::CallablePtr =
+                                    &*(*arc.values).data.add(i);
+                                Arc::increment_strong_count(elem.as_ptr());
+                                Arc::from_raw(elem.as_ptr())
                             }
                             HashMapKindedRef::HashMap(arc) => {
                                 // Recursive carrier (Wave N hashmap-value-v-arm

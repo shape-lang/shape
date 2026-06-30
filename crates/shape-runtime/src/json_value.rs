@@ -116,6 +116,7 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
                 HashMapKindedRef::Decimal(arc) => arc.keys,
                 HashMapKindedRef::TypedObject(arc) => arc.keys,
                 HashMapKindedRef::TraitObject(arc) => arc.keys,
+                HashMapKindedRef::Callable(arc) => arc.keys,
                 HashMapKindedRef::HashMap(arc) => arc.keys,
             };
             for i in 0..n {
@@ -165,6 +166,11 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
                     HashMapKindedRef::TraitObject(_) => {
                         return Err("HeapValue::HashMap<string, TraitObject> → JsonValue: \
                             no canonical JSON shape for TraitObject. Surface-and-stop."
+                            .to_string());
+                    }
+                    HashMapKindedRef::Callable(_) => {
+                        return Err("HeapValue::HashMap<string, Function> → JsonValue: \
+                            no canonical JSON shape for callable values. Surface-and-stop."
                             .to_string());
                     }
                     HashMapKindedRef::HashMap(arc) => {

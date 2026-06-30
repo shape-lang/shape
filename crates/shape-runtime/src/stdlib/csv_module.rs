@@ -306,6 +306,7 @@ pub fn create_csv_module() -> ModuleExports {
                             shape_value::heap_value::HashMapKindedRef::Decimal(arc) => arc.keys,
                             shape_value::heap_value::HashMapKindedRef::TypedObject(arc) => arc.keys,
                             shape_value::heap_value::HashMapKindedRef::TraitObject(arc) => arc.keys,
+                            shape_value::heap_value::HashMapKindedRef::Callable(arc) => arc.keys,
                             shape_value::heap_value::HashMapKindedRef::HashMap(arc) => arc.keys,
                         };
                         let n = unsafe {
@@ -321,15 +322,16 @@ pub fn create_csv_module() -> ModuleExports {
                             .collect()
                     }
                     HeapValue::TypedObject(s) => {
-                        let schema =
-                            crate::type_schema::lookup_schema_by_id_public(s.schema_id as u32)
-                                .ok_or_else(|| {
-                                    format!(
+                        let schema = crate::type_schema::lookup_schema_by_id_public(
+                            s.schema_id as u32,
+                        )
+                        .ok_or_else(|| {
+                            format!(
                                 "csv.method stringify_records() -> TypedObject schema id {} \
                                  not registered",
                                 s.schema_id
                             )
-                                })?;
+                        })?;
                         schema.fields.iter().map(|f| f.name.clone()).collect()
                     }
                     other => {

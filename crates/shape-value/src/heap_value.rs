@@ -832,6 +832,74 @@ impl std::ops::Deref for TraitObjectPtr {
     }
 }
 
+// ── CallablePtr (W29 callable-HashMap, 2026-06-30) ─────────────────────────
+
+/// Owning newtype around `*const HeapValue` carrying one `Arc<HeapValue>`
+/// strong-count share for callable values stored inside `HashMapData`.
+///
+/// Callable HashMap values are normalized to the closure carrier at insertion:
+/// `Arc::into_raw(Arc<HeapValue::ClosureRaw(..)>)` plus
+/// `NativeKind::Ptr(HeapKind::Closure)`. Named function IDs are materialized
+/// into zero-capture closures by the executor before they enter this carrier.
+#[repr(transparent)]
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct CallablePtr(pub *const HeapValue);
+
+// SAFETY: The wrapper carries the same aliasing/thread-safety contract as an
+// `Arc<HeapValue>` raw pointer. Clone/Drop adjust the Arc strong count.
+unsafe impl Send for CallablePtr {}
+unsafe impl Sync for CallablePtr {}
+
+impl Default for CallablePtr {
+    #[inline]
+    fn default() -> Self {
+        Self(std::ptr::null())
+    }
+}
+
+impl Clone for CallablePtr {
+    #[inline]
+    fn clone(&self) -> Self {
+        if !self.0.is_null() {
+            unsafe { Arc::increment_strong_count(self.0) };
+        }
+        Self(self.0)
+    }
+}
+
+impl Drop for CallablePtr {
+    #[inline]
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { Arc::decrement_strong_count(self.0) };
+        }
+    }
+}
+
+impl CallablePtr {
+    #[inline]
+    pub fn new(ptr: *const HeapValue) -> Self {
+        Self(ptr)
+    }
+
+    #[inline]
+    pub fn as_ptr(&self) -> *const HeapValue {
+        self.0
+    }
+
+    #[inline]
+    pub fn is_null(&self) -> bool {
+        self.0.is_null()
+    }
+
+    #[inline]
+    pub fn into_raw(self) -> *const HeapValue {
+        let ptr = self.0;
+        std::mem::forget(self);
+        ptr
+    }
+}
+
 // ── HashMap storage (Stage C P1(b), 2026-05-07) ─────────────────────────────
 //
 // Wave 2 Round 3b C2-joint ckpt-1 (2026-05-14): `HashMapValueBuf` deleted;
@@ -1126,6 +1194,37 @@ unsafe impl HashMapValueElem for TraitObjectPtr {
     #[inline]
     unsafe fn release_owned(_value: Self) {
         // TraitObjectPtr's Drop impl runs at scope-end.
+    }
+}
+
+unsafe impl HashMapValueElem for CallablePtr {
+    /// `CallablePtr` is `#[repr(transparent)]` over `*const HeapValue` and
+    /// has a manual Drop impl that retires the `Arc<HeapValue>` share. Walk
+    /// the buffer via `ptr::read` so each element's Drop runs before freeing
+    /// the typed-array storage.
+    #[inline]
+    unsafe fn release_typed_array(ptr: *mut crate::v2::typed_array::TypedArray<Self>) {
+        unsafe {
+            let arr = &*ptr;
+            if arr.cap > 0 && !arr.data.is_null() {
+                for i in 0..arr.len {
+                    let _elem: CallablePtr = std::ptr::read(arr.data.add(i as usize));
+                }
+                let data_layout = std::alloc::Layout::array::<CallablePtr>(arr.cap as usize)
+                    .expect("invalid array layout");
+                std::alloc::dealloc(arr.data as *mut u8, data_layout);
+            }
+            let layout = std::alloc::Layout::new::<crate::v2::typed_array::TypedArray<Self>>();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+        }
+    }
+    #[inline]
+    unsafe fn share_clone(elem: &Self) -> Self {
+        elem.clone()
+    }
+    #[inline]
+    unsafe fn release_owned(_value: Self) {
+        // CallablePtr's Drop retires the owned Arc<HeapValue> share.
     }
 }
 
@@ -1878,6 +1977,10 @@ pub enum HashMapKindedRef {
     /// `Arc<HashMapData<TraitObjectPtr>>` — V = `TraitObjectPtr`
     /// (#[repr(transparent)] newtype over `*const TraitObjectStorage`).
     TraitObject(Arc<HashMapData<TraitObjectPtr>>),
+    /// `Arc<HashMapData<CallablePtr>>` — V = callable closure carrier.
+    /// Elements own `Arc<HeapValue::ClosureRaw(..)>` shares and project as
+    /// `NativeKind::Ptr(HeapKind::Closure)`.
+    Callable(Arc<HashMapData<CallablePtr>>),
     /// `Arc<HashMapData<HashMapKindedRef>>` — V = `HashMapKindedRef` itself
     /// (recursive carrier). The inner HashMaps' values buffer is a flat
     /// array of `HashMapKindedRef` payloads (per-V kinded refs, each
@@ -1905,6 +2008,7 @@ impl Clone for HashMapKindedRef {
             HashMapKindedRef::Decimal(arc) => HashMapKindedRef::Decimal(Arc::clone(arc)),
             HashMapKindedRef::TypedObject(arc) => HashMapKindedRef::TypedObject(Arc::clone(arc)),
             HashMapKindedRef::TraitObject(arc) => HashMapKindedRef::TraitObject(Arc::clone(arc)),
+            HashMapKindedRef::Callable(arc) => HashMapKindedRef::Callable(Arc::clone(arc)),
             HashMapKindedRef::HashMap(arc) => HashMapKindedRef::HashMap(Arc::clone(arc)),
         }
     }
@@ -1964,6 +2068,7 @@ impl HashMapKindedRef {
             HashMapKindedRef::Decimal(_) => NativeKind::Ptr(HeapKind::Decimal),
             HashMapKindedRef::TypedObject(_) => NativeKind::Ptr(HeapKind::TypedObject),
             HashMapKindedRef::TraitObject(_) => NativeKind::Ptr(HeapKind::TraitObject),
+            HashMapKindedRef::Callable(_) => NativeKind::Ptr(HeapKind::Closure),
             HashMapKindedRef::HashMap(_) => NativeKind::Ptr(HeapKind::HashMap),
         }
     }
@@ -1983,6 +2088,7 @@ impl HashMapKindedRef {
             HashMapKindedRef::Decimal(arc) => arc.len(),
             HashMapKindedRef::TypedObject(arc) => arc.len(),
             HashMapKindedRef::TraitObject(arc) => arc.len(),
+            HashMapKindedRef::Callable(arc) => arc.len(),
             HashMapKindedRef::HashMap(arc) => arc.len(),
         }
     }
@@ -2007,6 +2113,7 @@ impl HashMapKindedRef {
             HashMapKindedRef::Decimal(arc) => arc.contains_key(key),
             HashMapKindedRef::TypedObject(arc) => arc.contains_key(key),
             HashMapKindedRef::TraitObject(arc) => arc.contains_key(key),
+            HashMapKindedRef::Callable(arc) => arc.contains_key(key),
             HashMapKindedRef::HashMap(arc) => arc.contains_key(key),
         }
     }
@@ -2136,6 +2243,14 @@ fn hashmap_kref_display(
                 emit_key(f, i, k)?;
                 let v_ref: &TraitObjectPtr = unsafe { &*(*arc.values).data.add(i) };
                 write!(f, "<trait_object:{:p}>", v_ref.as_ptr())?;
+            }
+        }
+        HashMapKindedRef::Callable(arc) => {
+            let keys = unsafe { read_keys(arc.keys) };
+            for (i, k) in keys.iter().enumerate() {
+                emit_key(f, i, k)?;
+                let v_ref: &CallablePtr = unsafe { &*(*arc.values).data.add(i) };
+                write!(f, "<function:{:p}>", v_ref.as_ptr())?;
             }
         }
         HashMapKindedRef::HashMap(arc) => {

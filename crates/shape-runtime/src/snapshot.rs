@@ -2401,6 +2401,7 @@ fn hashmap_kinded_ref_arm_name(kref: &shape_value::heap_value::HashMapKindedRef)
         K::Decimal(_) => "Decimal",
         K::TypedObject(_) => "TypedObject",
         K::TraitObject(_) => "TraitObject",
+        K::Callable(_) => "Callable",
         K::HashMap(_) => "HashMap",
     }
 }

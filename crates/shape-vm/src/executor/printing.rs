@@ -1178,6 +1178,15 @@ impl<'a> ValueFormatter<'a> {
                         out.push_str(&format!("<trait_object:{:p}>", v_ref.as_ptr()));
                     }
                 }
+                HashMapKindedRef::Callable(arc) => {
+                    let keys = read_keys(arc.keys);
+                    for (i, k) in keys.iter().enumerate() {
+                        render_key(&mut out, i, k);
+                        let v_ref: &shape_value::heap_value::CallablePtr =
+                            &*(*arc.values).data.add(i);
+                        out.push_str(&format!("<function:{:p}>", v_ref.as_ptr()));
+                    }
+                }
                 HashMapKindedRef::HashMap(arc) => {
                     // Recursive carrier (Wave N hashmap-value-v-arm
                     // follow-up, cluster-2 closure-wave-C, 2026-05-16).

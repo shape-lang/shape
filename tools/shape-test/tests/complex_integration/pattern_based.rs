@@ -235,13 +235,19 @@ fn test_complex_dispatch_table() {
     ShapeTest::new(
         r#"
         let ops = HashMap()
-            .set("add", |a, b| a + b)
-            .set("mul", |a, b| a * b)
-            .set("sub", |a, b| a - b)
-        let add_fn = ops.get("add")
-        let mul_fn = ops.get("mul")
-        print(add_fn(3, 4))
-        print(mul_fn(5, 6))
+            .set("add", |a: int, b: int| { a + b })
+            .set("mul", |a: int, b: int| { a * b })
+            .set("sub", |a: int, b: int| { a - b })
+        let add_result = match ops.get("add") {
+            Some(f) => f(3, 4)
+            None => 0
+        }
+        let mul_result = match ops.get("mul") {
+            Some(f) => f(5, 6)
+            None => 0
+        }
+        print(add_result)
+        print(mul_result)
     "#,
     )
     .expect_output("7\n30");

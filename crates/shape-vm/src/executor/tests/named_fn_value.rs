@@ -119,6 +119,56 @@ fn filter_with_named_fn() {
     assert_eq!(eval_typed_i64(src), 2);
 }
 
+/// Callable HashMap values are explicitly unwrapped from `Option<Function>`
+/// before value-call. Direct calls on `HashMap.get` remain rejected by the
+/// type checker.
+#[test]
+fn hashmap_match_unwrapped_closure_value_calls() {
+    let src = r#"
+        let ops = HashMap()
+            .set("add", |a: int, b: int| { a + b })
+            .set("mul", |a: int, b: int| { a * b })
+        match ops.get("add") {
+            Some(f) => f(3, 4)
+            None => 0
+        }
+    "#;
+    assert_eq!(eval_typed_i64(src), 7);
+}
+
+/// Named functions enter a HashMap as `UInt64` function IDs and are
+/// materialized into zero-capture closure carriers at insertion.
+#[test]
+fn hashmap_match_unwrapped_named_function_value_calls() {
+    let src = r#"
+        fn add(a: int, b: int) -> int { a + b }
+        fn mul(a: int, b: int) -> int { a * b }
+        let ops = HashMap()
+            .set("add", add)
+            .set("mul", mul)
+        match ops.get("mul") {
+            Some(f) => f(5, 6)
+            None => 0
+        }
+    "#;
+    assert_eq!(eval_typed_i64(src), 30);
+}
+
+#[test]
+fn hashmap_get_option_function_direct_call_is_rejected() {
+    let src = r#"
+        let ops = HashMap()
+            .set("add", |a: int, b: int| { a + b })
+        let add_fn = ops.get("add")
+        add_fn(3, 4)
+    "#;
+    let err = eval_result(src).expect_err("direct Option<Function> call should reject");
+    assert!(
+        format!("{err:?}").contains("'add_fn' is not callable"),
+        "expected direct Option<Function> call rejection, got {err:?}"
+    );
+}
+
 /// Whatever path a named-fn-as-value takes, it must NEVER segfault: the
 /// worst case is a clean error. This is the binding-compliant
 /// surface-and-stop guarantee — exercised here as "executes to a value or
