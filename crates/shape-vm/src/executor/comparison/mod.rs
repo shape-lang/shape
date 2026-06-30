@@ -391,7 +391,64 @@ fn typed_object_storage_eq(a: *const TypedObjectStorage, b: *const TypedObjectSt
         && a.heap_mask == b.heap_mask
         && a.field_kinds.as_ref() == b.field_kinds.as_ref()
         && a_slots.len() == b_slots.len()
-        && a_slots.iter().zip(b_slots).all(|(a, b)| a.raw() == b.raw())
+        && a.field_kinds.len() == a_slots.len()
+        && a_slots
+            .iter()
+            .zip(b_slots)
+            .zip(a.field_kinds.iter())
+            .all(|((a, b), kind)| typed_object_field_eq(a.raw(), b.raw(), *kind))
+}
+
+#[inline]
+fn typed_object_field_eq(a_bits: u64, b_bits: u64, kind: NativeKind) -> bool {
+    match kind {
+        NativeKind::Null => true,
+        NativeKind::String | NativeKind::StringV2 => {
+            match (str_ref(a_bits, kind), str_ref(b_bits, kind)) {
+                (Some(a), Some(b)) => a == b,
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        NativeKind::DecimalV2 | NativeKind::Ptr(HeapKind::Decimal) => {
+            match (decimal_ref(a_bits, kind), decimal_ref(b_bits, kind)) {
+                (Some(a), Some(b)) => a == b,
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        NativeKind::Ptr(HeapKind::TypedObject) => typed_object_storage_eq(
+            a_bits as *const TypedObjectStorage,
+            b_bits as *const TypedObjectStorage,
+        ),
+        NativeKind::Ptr(HeapKind::Char) => a_bits == b_bits,
+        NativeKind::Ptr(_) => a_bits == b_bits,
+        NativeKind::Float64
+        | NativeKind::NullableFloat64
+        | NativeKind::Float32
+        | NativeKind::Char
+        | NativeKind::Int8
+        | NativeKind::NullableInt8
+        | NativeKind::UInt8
+        | NativeKind::NullableUInt8
+        | NativeKind::Int16
+        | NativeKind::NullableInt16
+        | NativeKind::UInt16
+        | NativeKind::NullableUInt16
+        | NativeKind::Int32
+        | NativeKind::NullableInt32
+        | NativeKind::UInt32
+        | NativeKind::NullableUInt32
+        | NativeKind::Int64
+        | NativeKind::NullableInt64
+        | NativeKind::UInt64
+        | NativeKind::NullableUInt64
+        | NativeKind::IntSize
+        | NativeKind::NullableIntSize
+        | NativeKind::UIntSize
+        | NativeKind::NullableUIntSize
+        | NativeKind::Bool => a_bits == b_bits,
+    }
 }
 
 /// Read a `KindedSlot`-style operand as `i128` if it is integer-family
