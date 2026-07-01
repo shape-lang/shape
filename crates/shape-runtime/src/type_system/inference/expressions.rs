@@ -2354,7 +2354,43 @@ impl TypeInferenceEngine {
                 } else {
                     false
                 };
-                if !bound_via_fields {
+                let bound_via_array = if !bound_via_fields {
+                    if let shape_ast::ast::Pattern::Array(items) = &for_expr.pattern {
+                        let resolved_elem =
+                            self.solver.unifier().apply_substitutions(&element_type);
+                        let elem_ty = Self::pattern_array_element_type(&resolved_elem)
+                            .or_else(|| Self::pattern_array_element_type(&element_type))
+                            .unwrap_or_else(|| {
+                                let elem = self.fresh_type_var();
+                                self.constraints.push((
+                                    element_type.clone(),
+                                    BuiltinTypes::array(elem.clone()),
+                                ));
+                                elem
+                            });
+                        for item in items {
+                            match item {
+                                shape_ast::ast::Pattern::Identifier { name, .. }
+                                | shape_ast::ast::Pattern::Typed { name, .. } => {
+                                    self.env.define(name, TypeScheme::mono(elem_ty.clone()));
+                                }
+                                shape_ast::ast::Pattern::Wildcard => {}
+                                _ => {
+                                    return Err(TypeError::InvalidPatternType(
+                                        "Nested patterns in for-loop array destructure not supported"
+                                            .to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !bound_via_fields && !bound_via_array {
                     let mut pattern_names = Vec::new();
                     collect_pattern_names(&for_expr.pattern, &mut pattern_names);
                     for name in pattern_names {

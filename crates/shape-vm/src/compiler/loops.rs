@@ -393,6 +393,29 @@ impl BytecodeCompiler {
                     Some(Operand::Local(idx_local)),
                 ));
 
+                if let shape_ast::ast::DestructurePattern::Array(items) = pattern {
+                    for item in items {
+                        match item {
+                            shape_ast::ast::DestructurePattern::Identifier(_, _) => {}
+                            shape_ast::ast::DestructurePattern::Rest(_) => {
+                                return Err(ShapeError::SemanticError {
+                                    message: "array rest-pattern (`[a, ...rest]`) is not supported"
+                                        .to_string(),
+                                    location: None,
+                                });
+                            }
+                            _ => {
+                                return Err(ShapeError::SemanticError {
+                                    message:
+                                        "Nested patterns in for-loop array destructure not supported"
+                                            .to_string(),
+                                    location: None,
+                                });
+                            }
+                        }
+                    }
+                }
+
                 // Pre-declare locals for destructuring pattern
                 // This ensures the locals are in scope for the entire loop
                 for name in pattern.get_identifiers() {
@@ -457,7 +480,6 @@ impl BytecodeCompiler {
                         }
                     }
                 }
-
                 let loop_start = self.program.current_offset();
                 self.emit(Instruction::simple(OpCode::LoopStart));
                 let loop_ctx = LoopContext {
@@ -548,6 +570,37 @@ impl BytecodeCompiler {
                                     {
                                         self.set_local_type_info(local_idx, &tn);
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Statement-form `for [a, b] in pairs`: the extracted loop
+                // element is `Array<T>`, so each top-level binder is `T`.
+                // `compile_destructure_pattern` cannot derive that from the
+                // iterator expression's outer `Array<Array<T>>` fact.
+                if let shape_ast::ast::DestructurePattern::Array(items) = pattern {
+                    if let Some(shape_value::v2::ConcreteType::Array(element_ct)) =
+                        self.iter_element_concrete_type(iter)
+                    {
+                        for item in items {
+                            let shape_ast::ast::DestructurePattern::Identifier(name, _) = item
+                            else {
+                                continue;
+                            };
+                            if let Some(local_idx) = self.resolve_local(name) {
+                                crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                                    self,
+                                    crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(local_idx),
+                                    element_ct.as_ref().clone(),
+                                    crate::compiler::BindingConcreteFactSource::IteratorElement,
+                                );
+                                if let Some(tn) =
+                                    crate::compiler::patterns::binding::concrete_type_tracker_name(
+                                        element_ct.as_ref(),
+                                    )
+                                {
+                                    self.set_local_type_info(local_idx, &tn);
                                 }
                             }
                         }
@@ -956,6 +1009,25 @@ impl BytecodeCompiler {
                         {
                             self.set_local_type_info(*local, &tn);
                         }
+                    }
+                }
+            }
+        }
+        if is_array_destructure {
+            if let Some(shape_value::v2::ConcreteType::Array(element_ct)) =
+                self.iter_element_concrete_type(&for_expr.iterable)
+            {
+                for local in &array_destructure_locals {
+                    crate::compiler::monomorphization::type_resolution::record_binding_concrete_fact(
+                        self,
+                        crate::compiler::monomorphization::type_resolution::BindingInitializerTarget::Local(*local),
+                        element_ct.as_ref().clone(),
+                        crate::compiler::BindingConcreteFactSource::IteratorElement,
+                    );
+                    if let Some(tn) = crate::compiler::patterns::binding::concrete_type_tracker_name(
+                        element_ct.as_ref(),
+                    ) {
+                        self.set_local_type_info(*local, &tn);
                     }
                 }
             }
