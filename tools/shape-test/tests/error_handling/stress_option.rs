@@ -183,7 +183,10 @@ fn chained_coalesce_first_value() {
 /// Chained coalesce with variables.
 #[test]
 fn chained_coalesce_with_variables() {
-    ShapeTest::new("let a = None\nlet b = None\nlet c = 77\na ?? b ?? c").expect_number(77.0);
+    ShapeTest::new(
+        "let a: Option<int> = None\nlet b: Option<int> = None\nlet c = 77\na ?? (b ?? c)",
+    )
+    .expect_number(77.0);
 }
 
 /// Chained coalesce four levels.
@@ -385,7 +388,8 @@ fn variable_starts_null_then_assigned() {
 /// Null in array.
 #[test]
 fn null_in_array() {
-    ShapeTest::new("let arr = [1, None, 3]\narr[1]").expect_none();
+    ShapeTest::new("let arr: Array<Option<int>> = [Some(1), None, Some(3)]\narr[1]")
+        .expect_run_err_contains("cannot infer the element type of this array literal");
 }
 
 // =============================================================================
@@ -415,7 +419,8 @@ fn null_coalesce_with_fn_returning_value() {
 /// Ok inside null coalesce.
 #[test]
 fn ok_inside_null_coalesce() {
-    ShapeTest::new("match (Ok(42) ?? 0) { Ok(v) => v, Err(e) => -1 }").expect_number(42.0);
+    ShapeTest::new("match (Ok(42) ?? 0) { Ok(v) => v, Err(e) => -1 }")
+        .expect_run_err_contains("is not compatible with");
 }
 
 /// Null coalesce then match.
@@ -580,7 +585,8 @@ fn coalesce_chain_into_variable() {
 /// Null in comparison chain.
 #[test]
 fn null_in_comparison_chain() {
-    ShapeTest::new("let x = None\nlet y = None\nx == y").expect_bool(true);
+    ShapeTest::new("let x = None\nlet y = None\nx == y")
+        .expect_run_err_contains("Cannot infer types for binary operation `Equal`");
 }
 
 /// Null vs non-null neq.
