@@ -89,6 +89,14 @@ use super::vm_impl::stack::clone_with_kind;
 use super::{CallFrame, VirtualMachine};
 
 impl VirtualMachine {
+    #[inline]
+    fn ensure_call_stack_capacity(&self) -> Result<(), VMError> {
+        if self.call_stack.len() >= self.config.max_call_depth {
+            return Err(VMError::StackOverflow);
+        }
+        Ok(())
+    }
+
     /// Execute a named function with arguments, returning its result.
     ///
     /// **W7-cv-method (Round 3 close).** Resolves `name` to `func_id` via
@@ -578,6 +586,8 @@ impl VirtualMachine {
         func_id: u16,
         args: &[KindedSlot],
     ) -> Result<(), VMError> {
+        self.ensure_call_stack_capacity()?;
+
         let (locals_count, entry_point) = {
             let func = self
                 .program
@@ -702,6 +712,8 @@ impl VirtualMachine {
         closure_heap_bits: Option<u64>,
         closure_heap_kind: Option<NativeKind>,
     ) -> Result<(), VMError> {
+        self.ensure_call_stack_capacity()?;
+
         debug_assert_eq!(
             closure_heap_bits.is_some(),
             closure_heap_kind.is_some(),
@@ -1037,6 +1049,7 @@ impl VirtualMachine {
                 // share-balance pattern as
                 // `execute_function_with_named_args` (lines 246-250)
                 // which clones each named-arg into the positional vec.
+                self.ensure_call_stack_capacity()?;
                 super::vm_impl::stack::clone_with_kind(callee.slot.raw(), callee.kind);
                 self.call_closure_with_nb_args_keepalive(
                     function_id,
@@ -1382,6 +1395,8 @@ impl VirtualMachine {
         func_id: u16,
         arg_count: usize,
     ) -> Result<(), VMError> {
+        self.ensure_call_stack_capacity()?;
+
         let func = self
             .program
             .functions

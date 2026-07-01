@@ -434,7 +434,7 @@ fn runtime_err_stack_overflow() {
         infinite()
     "#,
     )
-    .expect_run_err();
+    .expect_run_err_contains("Stack overflow");
 }
 
 #[test]
