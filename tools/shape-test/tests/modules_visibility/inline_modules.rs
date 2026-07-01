@@ -200,8 +200,7 @@ fn test_mod_with_import_inside_parses() {
 
 // =============================================================================
 // INLINE MODULES — Execution via ShapeEngine (~10 tests)
-// BUG-4 fixed: single-level module member access now works.
-// Nested module access (A::B::f()) still has runtime limitations.
+// BUG-4 fixed: module member access now works, including nested modules.
 // =============================================================================
 
 #[test]
@@ -219,9 +218,8 @@ fn test_mod_simple_function_call_runtime() {
 }
 
 #[test]
-#[should_panic]
 fn test_mod_nested_access_runtime() {
-    // BUG: nested mod :: access parses as enum variant access
+    // Nested module function access resolves through module exports.
     ShapeTest::new(
         r#"
         mod A {
@@ -281,9 +279,8 @@ fn test_mod_function_not_global_runtime() {
 }
 
 #[test]
-#[should_panic]
 fn test_mod_triple_nested_access_runtime() {
-    // BUG: triple-nested mod :: access parses as enum variant access
+    // Triple-nested module function access resolves through module exports.
     ShapeTest::new(
         r#"
         mod A {
