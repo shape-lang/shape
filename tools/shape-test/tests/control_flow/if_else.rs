@@ -495,16 +495,16 @@ print("done")
         .expect_output("greater\ndone");
 }
 
-/// If without else, condition false, used as expression -- returns null.
+/// If without else, condition false, used as expression -- returns None.
 #[test]
 fn cf_37_if_no_else_false() {
     let code = r#"
 // Test 37: If without else, condition false, used as expression
 let x = if false { 42 }
 print(x)
-// Expected: null
+// Expected: None
 "#;
-    ShapeTest::new(code).expect_run_ok().expect_output("null");
+    ShapeTest::new(code).expect_run_ok().expect_output("None");
 }
 
 // =========================================================================

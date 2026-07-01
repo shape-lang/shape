@@ -482,7 +482,7 @@ fn option_print_none() {
         print(opt)
     "#,
     )
-    .expect_output("null");
+    .expect_output("None");
 }
 
 #[test]
