@@ -353,7 +353,7 @@ fn propagation_accumulate_results_one_fails() {
 fn propagation_error_in_recursive_function() {
     ShapeTest::new(
         r#"
-        fn countdown(n) -> Result<number> {
+        fn countdown(n: int) -> Result<int, string> {
             if n < 0 { return Err("negative") }
             if n == 0 { return Ok(0) }
             let v = countdown(n - 1)?
@@ -372,7 +372,7 @@ fn propagation_error_in_recursive_function() {
 fn propagation_error_in_recursive_function_fails() {
     ShapeTest::new(
         r#"
-        fn countdown(n) -> Result<number> {
+        fn countdown(n: int) -> Result<int, string> {
             if n < 0 { return Err("negative") }
             if n == 0 { return Ok(0) }
             let v = countdown(n - 1)?
@@ -396,8 +396,8 @@ fn propagation_try_after_successful_option_coerce() {
     // Use !! to coerce Option to Result instead of bare Some/None match patterns
     ShapeTest::new(
         r#"
-        fn get_opt() { Some(10) }
-        fn process() -> Result<number> {
+        fn get_opt() -> Option<int> { Some(10) }
+        fn process() -> Result<int> {
             let v = (get_opt() !! "missing")?
             Ok(v + 5)
         }

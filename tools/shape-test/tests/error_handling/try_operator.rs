@@ -644,9 +644,10 @@ fn try_op_chained_function_calls() {
 fn try_op_in_closure() {
     ShapeTest::new(
         r#"
-        fn run() -> Result<number> {
-            let f = |x| Ok(x * 3)?
-            Ok(f(5))
+        fn run() -> Result<int> {
+            let f = |x: int| { Ok(x * 3)? }
+            let v = f(5)?
+            Ok(v)
         }
         match run() {
             Ok(v) => v
