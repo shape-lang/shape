@@ -31,7 +31,7 @@ use commands::{
     run_wire_serve,
 };
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -79,8 +79,6 @@ async fn main() -> Result<()> {
         env_logger::init();
     }
 
-    initialize_shared_runtime().context("failed to initialize shared runtime")?;
-
     if cli.expand && cli.file.is_none() && cli.command.is_none() {
         anyhow::bail!("--expand requires a script file: shape <file.shape> --expand");
     }
@@ -88,6 +86,10 @@ async fn main() -> Result<()> {
         anyhow::bail!(
             "--module/--function are only valid with --expand or the expand-comptime subcommand"
         );
+    }
+
+    if should_initialize_shared_runtime_before_dispatch(&cli) {
+        initialize_shared_runtime().context("failed to initialize shared runtime")?;
     }
 
     let Cli {
@@ -375,10 +377,19 @@ async fn main() -> Result<()> {
                 }
             } else {
                 // No shape.toml — launch REPL
+                initialize_shared_runtime().context("failed to initialize shared runtime")?;
                 run_repl(mode, extensions, &provider_opts).await?;
             }
         }
     }
 
     Ok(())
+}
+
+fn should_initialize_shared_runtime_before_dispatch(cli: &Cli) -> bool {
+    match &cli.command {
+        Some(Commands::Run { .. }) | Some(Commands::ExpandComptime { .. }) => false,
+        None => false,
+        Some(_) => true,
+    }
 }

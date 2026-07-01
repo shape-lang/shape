@@ -7,6 +7,7 @@ use shape_runtime::project::ExternalLockMode;
 #[cfg(test)]
 use shape_runtime::project::{NativeDependencyProvider, NativeDependencySpec};
 use shape_runtime::snapshot::{SnapshotStore, VmSnapshot};
+use shape_runtime::sync_bridge::initialize_shared_runtime;
 use shape_vm::BytecodeExecutor;
 use shape_wire::{WireValue, render_wire_terminal};
 #[cfg(test)]
@@ -25,6 +26,12 @@ pub async fn run_script(
     provider_opts: &ProviderOptions,
     resume: Option<String>,
 ) -> Result<()> {
+    if let Some(script_path) = file.as_deref() {
+        fs::metadata(script_path)
+            .await
+            .with_context(|| format!("failed to read {}", script_path.display()))?;
+    }
+
     let execution_mode = match mode {
         ExecutionModeArg::Vm => ExecutionMode::BytecodeVM,
         ExecutionModeArg::Jit => {
@@ -142,6 +149,8 @@ pub async fn run_script(
     if let Some(ref f) = file {
         engine.set_script_path(f.display().to_string());
     }
+
+    initialize_shared_runtime().context("failed to initialize shared runtime")?;
 
     // Install Ctrl+C handler: first press sets flag, second force-exits
     let interrupt_flag = Arc::new(AtomicU8::new(0));
