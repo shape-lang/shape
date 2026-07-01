@@ -8,6 +8,7 @@
 
 use crate::executor::VirtualMachine;
 use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, VMError};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[inline]
@@ -16,40 +17,30 @@ fn type_error(msg: impl Into<String>) -> VMError {
 }
 
 impl VirtualMachine {
-    /// `object_rest(obj, [excluded_keys])` — produce a new object excluding the
-    /// listed keys. Schema-driven on a `TypedObject` receiver; the subset
-    /// schema is derived from the schema registry (must be predeclared by
-    /// the compiler).
+    /// `object_rest(obj, excluded_key...)` — produce a new object excluding
+    /// the listed compile-time-known string keys. Schema-driven on a
+    /// `TypedObject` receiver; the subset schema is derived from the schema
+    /// registry (must be predeclared by the compiler).
     pub(in crate::executor) fn builtin_object_rest(
         &mut self,
         args: &[KindedSlot],
     ) -> Result<KindedSlot, VMError> {
-        if args.len() != 2 {
-            return Err(type_error("object_rest() requires exactly 2 arguments"));
+        if args.is_empty() {
+            return Err(type_error(
+                "object_rest() requires an object receiver argument",
+            ));
         }
 
-        // V3-S5 ckpt-5: extracting exclude keys via the deleted
-        // `TypedArrayData::String` arm + `HeapValue::TypedArray` arm
-        // surface-and-stops. Rebuild at ckpt-6 STRICT close per v2-raw
-        // `TypedArray<*const StringObj>` direct-access target.
-        match args[1].kind {
-            NativeKind::Ptr(HeapKind::TypedArray) => {
-                return Err(VMError::NotImplemented(
-                    "object_rest: SURFACE — V3-S5 ckpt-5 consumer-cascade \
-                     tier 3. The deleted typed-array-data String exclude-keys carrier \
-                     DELETED at ckpt-1..ckpt-4. Rebuild at ckpt-6 STRICT \
-                     close per v2-raw `TypedArray<*const StringObj>` \
-                     direct-access. Refusal #1."
-                        .to_string(),
-                ));
-            }
-            _ => {
-                return Err(type_error("object_rest() second argument must be an array"));
-            }
+        let mut exclude: HashSet<String> = HashSet::with_capacity(args.len().saturating_sub(1));
+        for (idx, key_slot) in args[1..].iter().enumerate() {
+            let key = key_slot.as_str().ok_or_else(|| {
+                type_error(format!(
+                    "object_rest() exclude argument {} must be a string",
+                    idx + 2
+                ))
+            })?;
+            exclude.insert(key.to_string());
         }
-        // Suppress dead-code warnings via fake variable construction.
-        #[allow(unreachable_code)]
-        let exclude: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         // Wave 2 Round 4 D4 ckpt-final-prime² (2026-05-14): canonical
         // 5-arm receiver-recovery soundness rule for v2-raw TypedObject —
@@ -198,6 +189,67 @@ impl VirtualMachine {
             Arc::from(new_kinds.into_boxed_slice()),
         );
         Ok(KindedSlot::from_typed_object_raw(ptr))
+    }
+}
+
+#[cfg(test)]
+mod w65_object_rest_direct_key_tests {
+    use super::*;
+    use crate::VMConfig;
+    use shape_runtime::type_schema::{FieldType, TypeSchemaRegistry};
+    use shape_value::ValueSlot;
+
+    #[test]
+    fn object_rest_accepts_direct_string_exclude_keys() {
+        let mut registry = TypeSchemaRegistry::new();
+        let base_id = registry.register_type_scoped(
+            "W65ObjectRestBase",
+            vec![
+                ("a".to_string(), FieldType::I64),
+                ("b".to_string(), FieldType::I64),
+                ("c".to_string(), FieldType::Bool),
+            ],
+        );
+        let subset_id = registry.register_type_scoped(
+            format!("__sub_{}_exc_a", base_id),
+            vec![
+                ("b".to_string(), FieldType::I64),
+                ("c".to_string(), FieldType::Bool),
+            ],
+        );
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.program.type_schema_registry = registry;
+
+        let receiver_ptr = TypedObjectStorage::_new(
+            base_id as u64,
+            Box::new([
+                ValueSlot::from_int(10),
+                ValueSlot::from_int(20),
+                ValueSlot::from_bool(true),
+            ]),
+            0,
+            Arc::from(
+                vec![NativeKind::Int64, NativeKind::Int64, NativeKind::Bool].into_boxed_slice(),
+            ),
+        );
+
+        let result = vm
+            .builtin_object_rest(&[
+                KindedSlot::from_typed_object_raw(receiver_ptr),
+                KindedSlot::from_string("a"),
+            ])
+            .expect("direct string key object_rest should succeed");
+
+        assert_eq!(result.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        let result_storage = unsafe { &*(result.slot().raw() as *const TypedObjectStorage) };
+        assert_eq!(result_storage.schema_id as u32, subset_id);
+        assert_eq!(
+            result_storage.field_kinds.as_ref(),
+            &[NativeKind::Int64, NativeKind::Bool]
+        );
+        assert_eq!(result_storage.slots()[0].as_i64(), 20);
+        assert!(result_storage.slots()[1].as_bool());
     }
 }
 
