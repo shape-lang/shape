@@ -2969,6 +2969,18 @@ impl BytecodeCompiler {
         self.compile_call_args_with_param_types(args, expected_param_modes, None)
     }
 
+    pub(super) fn compile_expr_with_expected_call_return(
+        &mut self,
+        expr: &shape_ast::ast::Expr,
+        expected_return: Option<&TypeAnnotation>,
+    ) -> Result<()> {
+        let saved = self.pending_expected_call_return_type.clone();
+        self.pending_expected_call_return_type = expected_return.cloned();
+        let result = self.compile_expr(expr);
+        self.pending_expected_call_return_type = saved;
+        result
+    }
+
     /// STAGE F4: is this annotation an `Array<T>` / `T[]` shape (the only param
     /// shape for which a bare `[]` argument is type-correct)? Used to decide
     /// whether an unprovable-element bare-`[]` arg gets a clean array-construction
@@ -3055,16 +3067,16 @@ impl BytecodeCompiler {
                             arg,
                             shape_ast::ast::Expr::Array(elements, _) if elements.is_empty()
                         );
+                        let param_ann = expected_param_annotations
+                            .and_then(|anns| anns.get(idx))
+                            .and_then(|ann| ann.as_ref());
                         if is_bare_empty_array {
-                            let param_ann = expected_param_annotations
-                                .and_then(|anns| anns.get(idx))
-                                .and_then(|ann| ann.as_ref());
                             let param_kind = param_ann
                                 .and_then(|ann| self.resolve_typed_array_kind_from_annotation(ann));
                             if let Some(kind) = param_kind {
                                 let saved = self.pending_variable_typed_array_kind;
                                 self.pending_variable_typed_array_kind = Some(kind);
-                                let r = self.compile_expr(arg);
+                                let r = self.compile_expr_with_expected_call_return(arg, param_ann);
                                 self.pending_variable_typed_array_kind = saved;
                                 r
                             } else if param_ann
@@ -3095,10 +3107,10 @@ impl BytecodeCompiler {
                                     location: Some(self.span_to_source_location(arg.span())),
                                 })
                             } else {
-                                self.compile_expr(arg)
+                                self.compile_expr_with_expected_call_return(arg, param_ann)
                             }
                         } else {
-                            self.compile_expr(arg)
+                            self.compile_expr_with_expected_call_return(arg, param_ann)
                         }
                     }
                 }
@@ -4855,6 +4867,8 @@ impl BytecodeCompiler {
                 | BuiltinFunction::ErrCtor
                 | BuiltinFunction::HashMapCtor
                 | BuiltinFunction::SetCtor
+                | BuiltinFunction::SetCtorString
+                | BuiltinFunction::SetCtorI64
                 | BuiltinFunction::DequeCtor
                 | BuiltinFunction::PriorityQueueCtor
                 | BuiltinFunction::MutexCtor

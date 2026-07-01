@@ -1229,7 +1229,10 @@ impl BytecodeCompiler {
                         .type_annotation
                         .as_ref()
                         .and_then(|ann| self.resolve_typed_array_kind_and_record_trait(ann));
-                    match self.compile_expr_for_reference_binding(init_expr) {
+                    match self.compile_expr_for_reference_binding_with_expected_return(
+                        init_expr,
+                        var_decl.type_annotation.as_ref(),
+                    ) {
                         Ok(tracked_borrow) => {
                             ref_borrow = tracked_borrow;
                             self.pending_variable_name = saved_pending_variable_name;
@@ -1252,6 +1255,12 @@ impl BytecodeCompiler {
                     self.emit(Instruction::simple(OpCode::PushNull));
                     None
                 };
+                if init_err.is_none() {
+                    self.patch_static_set_ctor_from_annotation(
+                        var_decl.value.as_ref(),
+                        var_decl.type_annotation.as_ref(),
+                    );
+                }
                 // Phase 4b Round 6 WS-1b W16.2-C residual: capture the bare
                 // empty-array-accumulator placeholder index now, before any
                 // downstream emission can reset it.
@@ -1458,7 +1467,11 @@ impl BytecodeCompiler {
                             .type_annotation
                             .as_ref()
                             .and_then(|ann| self.resolve_typed_array_kind_and_record_trait(ann));
-                        let compile_result = self.compile_expr_for_reference_binding(init_expr);
+                        let compile_result = self
+                            .compile_expr_for_reference_binding_with_expected_return(
+                                init_expr,
+                                var_decl.type_annotation.as_ref(),
+                            );
                         self.pending_variable_name = saved_pending_variable_name;
                         self.pending_variable_span = saved_pending_variable_span;
                         self.pending_variable_typed_array_kind =
@@ -1481,6 +1494,10 @@ impl BytecodeCompiler {
                     } else {
                         self.emit(Instruction::simple(OpCode::PushNull));
                     }
+                    self.patch_static_set_ctor_from_annotation(
+                        var_decl.value.as_ref(),
+                        var_decl.type_annotation.as_ref(),
+                    );
                     if let Some(name) = var_decl.pattern.as_identifier() {
                         let binding_idx = self.get_or_create_module_binding(name);
                         if let Some(span) = var_decl.pattern.as_identifier_span()
@@ -5118,6 +5135,93 @@ impl BytecodeCompiler {
         self.propagate_assignment_type_to_slot(slot, is_local, true, init_expr);
     }
 
+    pub(super) fn typed_set_ctor_for_annotation(
+        &self,
+        type_ann: &TypeAnnotation,
+    ) -> Option<crate::bytecode::BuiltinFunction> {
+        let ct =
+            crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                self, type_ann,
+            )?;
+        self.typed_set_ctor_for_concrete_type(&ct)
+    }
+
+    pub(super) fn typed_set_ctor_for_concrete_type(
+        &self,
+        ct: &shape_value::v2::ConcreteType,
+    ) -> Option<crate::bytecode::BuiltinFunction> {
+        let shape_value::v2::ConcreteType::HashSet(elem) = ct else {
+            return None;
+        };
+        match elem.as_ref() {
+            shape_value::v2::ConcreteType::String => {
+                Some(crate::bytecode::BuiltinFunction::SetCtorString)
+            }
+            shape_value::v2::ConcreteType::I64 => {
+                Some(crate::bytecode::BuiltinFunction::SetCtorI64)
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn typed_set_ctor_for_call_span(
+        &self,
+        span: Span,
+    ) -> Option<crate::bytecode::BuiltinFunction> {
+        if !span.is_dummy()
+            && let Some(ct) = self
+                .resolved_expr_types
+                .get(&span)
+                .or_else(|| self.inference_facts.expression_type(span))
+                .and_then(|ty| {
+                    crate::compiler::monomorphization::type_resolution::concrete_type_from_inference_fact(
+                        self, ty,
+                    )
+                })
+            && let Some(typed_ctor) = self.typed_set_ctor_for_concrete_type(&ct)
+        {
+            return Some(typed_ctor);
+        }
+
+        self.pending_expected_call_return_type
+            .as_ref()
+            .and_then(|ann| self.typed_set_ctor_for_annotation(ann))
+    }
+
+    pub(super) fn patch_static_set_ctor_from_annotation(
+        &mut self,
+        init_expr: Option<&Expr>,
+        type_ann: Option<&TypeAnnotation>,
+    ) {
+        let Some(Expr::FunctionCall {
+            name,
+            args,
+            named_args,
+            ..
+        }) = init_expr
+        else {
+            return;
+        };
+        if name != "Set" || !args.is_empty() || !named_args.is_empty() {
+            return;
+        }
+        let Some(type_ann) = type_ann else {
+            return;
+        };
+        let Some(typed_ctor) = self.typed_set_ctor_for_annotation(type_ann) else {
+            return;
+        };
+        if let Some(last) = self.program.instructions.last_mut()
+            && last.opcode == OpCode::BuiltinCall
+            && matches!(
+                last.operand,
+                Some(Operand::Builtin(crate::bytecode::BuiltinFunction::SetCtor))
+            )
+        {
+            last.operand = Some(Operand::Builtin(typed_ctor));
+        }
+    }
+
     /// Compile a statement
     pub(super) fn compile_statement(&mut self, stmt: &Statement) -> Result<()> {
         match stmt {
@@ -5171,14 +5275,23 @@ impl BytecodeCompiler {
                     let saved_pending_callable_hint_name = self.pending_callable_hint_name.clone();
                     self.pending_callable_hint_name =
                         self.callable_return_hint_name_for_expr(return_expr);
+                    let return_type_annotation = self.current_function_return_type.clone();
+                    let saved_expected_call_return_type =
+                        self.pending_expected_call_return_type.clone();
+                    self.pending_expected_call_return_type = return_type_annotation.clone();
                     let compile_result = if self.current_function_return_reference_summary.is_some()
                     {
                         self.compile_expr_preserving_refs(return_expr)
                     } else {
                         self.compile_expr(return_expr)
                     };
+                    self.pending_expected_call_return_type = saved_expected_call_return_type;
                     self.pending_callable_hint_name = saved_pending_callable_hint_name;
                     compile_result?;
+                    self.patch_static_set_ctor_from_annotation(
+                        Some(return_expr),
+                        return_type_annotation.as_ref(),
+                    );
                 } else {
                     self.emit(Instruction::simple(OpCode::PushNull));
                 }
@@ -5384,7 +5497,10 @@ impl BytecodeCompiler {
                                 }
                             }
                         } else {
-                            match self.compile_expr_for_reference_binding(init_expr) {
+                            match self.compile_expr_for_reference_binding_with_expected_return(
+                                init_expr,
+                                var_decl.type_annotation.as_ref(),
+                            ) {
                                 Ok(tracked_borrow) => {
                                     ref_borrow = tracked_borrow;
                                     None
@@ -5396,7 +5512,10 @@ impl BytecodeCompiler {
                             }
                         }
                     } else {
-                        match self.compile_expr_for_reference_binding(init_expr) {
+                        match self.compile_expr_for_reference_binding_with_expected_return(
+                            init_expr,
+                            var_decl.type_annotation.as_ref(),
+                        ) {
                             Ok(tracked_borrow) => {
                                 ref_borrow = tracked_borrow;
                                 None
@@ -5411,6 +5530,12 @@ impl BytecodeCompiler {
                     self.emit(Instruction::simple(OpCode::PushNull));
                     None
                 };
+                if init_err.is_none() {
+                    self.patch_static_set_ctor_from_annotation(
+                        var_decl.value.as_ref(),
+                        var_decl.type_annotation.as_ref(),
+                    );
+                }
 
                 // Capture (then clear) pending variable name and v2 typed
                 // array kind after the init expression is compiled. The

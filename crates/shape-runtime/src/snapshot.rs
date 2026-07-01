@@ -1230,10 +1230,23 @@ fn slot_heap_to_serializable(
             }
         }
         HeapKind::HashSet => unsafe {
+            use shape_value::heap_value::HashSetElementKind;
             let arc = Arc::<HashSetData>::from_raw(bits as *const HashSetData);
-            let keys: Vec<String> = arc.keys.iter().map(|k| (**k).clone()).collect();
+            let serializable = match arc.element_kind() {
+                HashSetElementKind::String => {
+                    let keys: Vec<String> = arc
+                        .string_keys()
+                        .iter()
+                        .map(|k| (**k).clone())
+                        .collect();
+                    Ok(SV::HashSet { keys })
+                }
+                HashSetElementKind::I64 => Err(
+                    "slot_to_serializable: HashSet<int> snapshot is not yet represented".to_string(),
+                ),
+            };
             let _ = Arc::into_raw(arc);
-            Ok(SV::HashSet { keys })
+            serializable
         },
         HeapKind::PriorityQueue => unsafe {
             let arc = Arc::<PriorityQueueData>::from_raw(bits as *const PriorityQueueData);

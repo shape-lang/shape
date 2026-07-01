@@ -1014,18 +1014,30 @@ impl<'a> ValueFormatter<'a> {
         out
     }
 
-    /// Format a `HashSetData` as `{"a", "b", ...}`. Wave 13
-    /// W13-hashset-rebuild (ADR-006 §2.7.15) — one-keyspace mirror of
-    /// HashMap's render shape with the values column dropped.
+    /// Format a `HashSetData` as `{...}`. Strings are quoted; ints render as
+    /// scalars. Mirrors the active `HashSetElementKind` arm.
     fn format_hashset(&self, set: &shape_value::heap_value::HashSetData) -> String {
-        let n = set.keys.len();
+        use shape_value::heap_value::HashSetElementKind;
+        let n = set.len();
         let mut out = String::with_capacity(2 + n * 6);
         out.push('{');
-        for (i, k) in set.keys.iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
+        match set.element_kind() {
+            HashSetElementKind::String => {
+                for (i, k) in set.string_keys().iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&format!("\"{}\"", k));
+                }
             }
-            out.push_str(&format!("\"{}\"", k));
+            HashSetElementKind::I64 => {
+                for (i, k) in set.i64_keys().iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&k.to_string());
+                }
+            }
         }
         out.push('}');
         out

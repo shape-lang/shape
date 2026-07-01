@@ -507,9 +507,11 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     BuiltinFunction::SomeCtor,
     BuiltinFunction::OkCtor,
     BuiltinFunction::ErrCtor,
-    // Collection ctors (4)
+    // Collection ctors (6)
     BuiltinFunction::HashMapCtor,
     BuiltinFunction::SetCtor,
+    BuiltinFunction::SetCtorString,
+    BuiltinFunction::SetCtorI64,
     BuiltinFunction::DequeCtor,
     BuiltinFunction::PriorityQueueCtor,
     // JSON (5)

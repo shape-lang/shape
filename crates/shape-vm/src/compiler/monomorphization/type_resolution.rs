@@ -879,16 +879,18 @@ pub fn resolve_call_site_type_args_from_exprs(
         if param_mentions_generic {
             if let Some(arg_expr) = args.get(param_idx) {
                 if let Some(arg_ty) = inference_type_for_arg_expr(compiler, arg_expr) {
-                    if !unify_annotation_with_inference_type(
-                        param_annotation,
-                        &arg_ty,
-                        compiler,
-                        &generics,
-                        &mut bindings,
-                    ) {
-                        return None;
+                    if !inference_type_contains_unresolved_vars(&arg_ty) {
+                        if !unify_annotation_with_inference_type(
+                            param_annotation,
+                            &arg_ty,
+                            compiler,
+                            &generics,
+                            &mut bindings,
+                        ) {
+                            return None;
+                        }
+                        continue;
                     }
-                    continue;
                 }
             }
         }
@@ -900,7 +902,8 @@ pub fn resolve_call_site_type_args_from_exprs(
             let has_unbound_mention = generics.iter().any(|g| {
                 annotation_mentions_any(param_annotation, &[g]) && !bindings.contains_key(*g)
             });
-            if has_unbound_mention {
+            let defer_zero_arg_call = args.get(param_idx).is_some_and(is_zero_arg_call_expr);
+            if has_unbound_mention && !defer_zero_arg_call {
                 return None;
             }
             continue;
@@ -909,6 +912,46 @@ pub fn resolve_call_site_type_args_from_exprs(
         if !unify_annotation_with_concrete(param_annotation, arg_ct, &generics, &mut bindings) {
             return None;
         }
+    }
+
+    let mut type_args: Vec<ConcreteType> = Vec::with_capacity(generic_params.len());
+    for name in generic_params {
+        let binding = bindings.get(name)?.clone();
+        type_args.push(binding);
+    }
+
+    Some(TypeArgResolution::new(fn_name, type_args))
+}
+
+/// Resolve generic type args from an expected return annotation.
+///
+/// This is intentionally used only by zero-argument calls in the emitter:
+/// argument-bearing calls must bind from their arguments so an expected return
+/// type cannot mask an argument mismatch. The motivating strict-static case is
+/// `new<T>() -> Set<T>` compiled under `let s: Set<int> = new()`.
+pub fn resolve_call_site_type_args_from_expected_return(
+    compiler: &BytecodeCompiler,
+    fn_name: &str,
+    expected_return: &TypeAnnotation,
+    generic_params: &[String],
+) -> Option<TypeArgResolution> {
+    if generic_params.is_empty() {
+        return Some(TypeArgResolution::new(fn_name, Vec::new()));
+    }
+
+    let func_def = compiler.function_defs.get(fn_name)?;
+    let return_annotation = func_def.return_type.as_ref()?;
+    let expected_ct = declared_annotation_concrete_type(compiler, expected_return)?;
+
+    let generics: Vec<&str> = generic_params.iter().map(|s| s.as_str()).collect();
+    let mut bindings: HashMap<String, ConcreteType> = HashMap::new();
+    if !unify_annotation_with_concrete(
+        return_annotation,
+        &expected_ct,
+        &generics,
+        &mut bindings,
+    ) {
+        return None;
     }
 
     let mut type_args: Vec<ConcreteType> = Vec::with_capacity(generic_params.len());
@@ -1308,6 +1351,9 @@ fn concrete_type_from_annotation(
                     Box::new(concrete_type_from_annotation(&args[0], bindings)?),
                     Box::new(concrete_type_from_annotation(&args[1], bindings)?),
                 )),
+                "HashSet" | "Set" if args.len() == 1 => Some(ConcreteType::HashSet(Box::new(
+                    concrete_type_from_annotation(&args[0], bindings)?,
+                ))),
                 "Option" if args.len() == 1 => Some(ConcreteType::Option(Box::new(
                     concrete_type_from_annotation(&args[0], bindings)?,
                 ))),
@@ -1381,6 +1427,9 @@ pub fn declared_annotation_concrete_type(
                     Box::new(declared_annotation_concrete_type(compiler, &args[0])?),
                     Box::new(declared_annotation_concrete_type(compiler, &args[1])?),
                 )),
+                "HashSet" | "Set" if args.len() == 1 => Some(ConcreteType::HashSet(Box::new(
+                    declared_annotation_concrete_type(compiler, &args[0])?,
+                ))),
                 "Option" if args.len() == 1 => Some(ConcreteType::Option(Box::new(
                     declared_annotation_concrete_type(compiler, &args[0])?,
                 ))),
@@ -1489,6 +1538,49 @@ fn annotation_mentions_any(annotation: &TypeAnnotation, generics: &[&str]) -> bo
         | TypeAnnotation::Undefined
         | TypeAnnotation::Dyn(_) => false,
     }
+}
+
+fn generic_base_names_match(expected: &str, actual: &str) -> bool {
+    expected == actual
+        || matches!(
+            (expected, actual),
+            ("Array", "Vec")
+                | ("Vec", "Array")
+                | ("HashMap", "Map")
+                | ("Map", "HashMap")
+                | ("HashSet", "Set")
+                | ("Set", "HashSet")
+        )
+}
+
+fn inference_type_contains_unresolved_vars(ty: &Type) -> bool {
+    match ty.canonicalize() {
+        Type::Variable(_) | Type::Constrained { .. } => true,
+        Type::Generic { base, args } => {
+            inference_type_contains_unresolved_vars(&base)
+                || args.iter().any(inference_type_contains_unresolved_vars)
+        }
+        Type::Function { params, returns } => {
+            params.iter().any(inference_type_contains_unresolved_vars)
+                || inference_type_contains_unresolved_vars(&returns)
+        }
+        Type::Concrete(_) => false,
+    }
+}
+
+fn is_zero_arg_call_expr(arg: &Expr) -> bool {
+    matches!(
+        arg,
+        Expr::FunctionCall {
+            args,
+            named_args,
+            ..
+        } | Expr::QualifiedFunctionCall {
+            args,
+            named_args,
+            ..
+        } if args.is_empty() && named_args.is_empty()
+    )
 }
 
 fn inference_type_for_arg_expr(compiler: &BytecodeCompiler, arg: &Expr) -> Option<Type> {
@@ -1612,7 +1704,9 @@ fn unify_annotation_with_inference_type(
                 Type::Concrete(TypeAnnotation::Generic {
                     name: actual_name,
                     args: actual_args,
-                }) if actual_name.as_str() == expected_name && actual_args.len() == args.len() => {
+                }) if generic_base_names_match(expected_name, actual_name.as_str())
+                    && actual_args.len() == args.len() =>
+                {
                     args.iter()
                         .zip(actual_args.iter())
                         .all(|(expected, actual)| {
@@ -1633,7 +1727,9 @@ fn unify_annotation_with_inference_type(
                         Type::Concrete(ann) => ann.as_type_name_str(),
                         _ => None,
                     };
-                    if actual_name == Some(expected_name) {
+                    if actual_name
+                        .is_some_and(|actual| generic_base_names_match(expected_name, actual))
+                    {
                         args.iter()
                             .zip(actual_args.iter())
                             .all(|(expected, actual)| {
@@ -1642,7 +1738,17 @@ fn unify_annotation_with_inference_type(
                                 )
                             })
                     } else {
-                        !args.iter().any(|a| annotation_mentions_any(a, generics))
+                        let actual_generic = Type::Generic {
+                            base,
+                            args: actual_args,
+                        };
+                        if let Some(ct) =
+                            concrete_type_from_inference_fact(compiler, &actual_generic)
+                        {
+                            unify_annotation_with_concrete(annotation, &ct, generics, bindings)
+                        } else {
+                            !args.iter().any(|a| annotation_mentions_any(a, generics))
+                        }
                     }
                 }
                 _ => {
@@ -1803,6 +1909,9 @@ fn unify_annotation_with_concrete(
                     unify_annotation_with_concrete(&args[0], k, generics, bindings)
                         && unify_annotation_with_concrete(&args[1], v, generics, bindings)
                 }
+                ("HashSet" | "Set", ConcreteType::HashSet(elem)) if args.len() == 1 => {
+                    unify_annotation_with_concrete(&args[0], elem, generics, bindings)
+                }
                 ("Option", ConcreteType::Option(inner)) if args.len() == 1 => {
                     unify_annotation_with_concrete(&args[0], inner, generics, bindings)
                 }
@@ -1920,7 +2029,7 @@ pub fn binding_fact_capture_type(compiler: &BytecodeCompiler, name: &str) -> Opt
     None
 }
 
-fn concrete_type_from_inference_fact(
+pub(crate) fn concrete_type_from_inference_fact(
     compiler: &BytecodeCompiler,
     ty: &Type,
 ) -> Option<ConcreteType> {
@@ -1988,14 +2097,8 @@ fn inference_fact_base_name(ty: &Type) -> Option<&str> {
 }
 
 fn compiler_resolve_module_binding(compiler: &BytecodeCompiler, name: &str) -> Option<u16> {
-    if let Some(&idx) = compiler.module_bindings.get(name) {
-        return Some(idx);
-    }
-    for module_path in compiler.module_scope_stack.iter().rev() {
-        let candidate = format!("{}::{}", module_path, name);
-        if let Some(&idx) = compiler.module_bindings.get(&candidate) {
-            return Some(idx);
-        }
+    if let Some(scoped_name) = compiler.resolve_scoped_module_binding_name(name) {
+        return compiler.module_bindings.get(&scoped_name).copied();
     }
     None
 }
@@ -2010,6 +2113,12 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
                     .resolved_expr_types
                     .get(span)
                     .and_then(|ty| concrete_type_from_inference_fact(compiler, ty))
+                    .or_else(|| {
+                        compiler
+                            .inference_facts
+                            .expression_type(*span)
+                            .and_then(|ty| concrete_type_from_inference_fact(compiler, ty))
+                    })
                     .or_else(|| identifier_concrete_type(compiler, name))
             })
         }
@@ -2374,7 +2483,12 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
             {
                 struct_or_enum_concrete_type(compiler, namespace)
             } else {
-                let qualified = format!("{}::{}", namespace, function);
+                let local_qualified = format!("{}::{}", namespace, function);
+                let qualified = compiler
+                    .resolve_canonical_module_path(namespace)
+                    .map(|canonical| format!("{}::{}", canonical, function))
+                    .filter(|canonical| compiler.function_defs.contains_key(canonical))
+                    .unwrap_or(local_qualified);
                 function_call_return_concrete_type(compiler, &qualified, args)
             }
         }
@@ -2592,7 +2706,9 @@ fn function_call_return_concrete_type(
     // Generic callee — recover type-param bindings from the argument types,
     // then substitute them into the return annotation.
     let arg_types = extract_arg_concrete_types(compiler, args);
-    let resolution = resolve_call_site_type_args(compiler, name, &arg_types, &type_params)?;
+    let resolution =
+        resolve_call_site_type_args_from_exprs(compiler, name, args, &arg_types, &type_params)
+            .or_else(|| resolve_call_site_type_args(compiler, name, &arg_types, &type_params))?;
     if resolution.type_args.len() != type_params.len() {
         return None;
     }
@@ -3065,7 +3181,7 @@ pub(crate) fn monomorphized_call_site_return_concrete_type(
         .function_defs
         .get(&specialized_name)
         .and_then(|fd| fd.return_type.as_ref())?;
-    crate::compiler::v2_map_emission::concrete_type_from_annotation(return_annotation)
+    declared_annotation_concrete_type(compiler, return_annotation)
 }
 
 pub fn specialized_call_return_concrete_type(
@@ -3073,7 +3189,9 @@ pub fn specialized_call_return_concrete_type(
     expr: &Expr,
 ) -> Option<ConcreteType> {
     let span = match expr {
-        Expr::MethodCall { span, .. } => *span,
+        Expr::FunctionCall { span, .. }
+        | Expr::QualifiedFunctionCall { span, .. }
+        | Expr::MethodCall { span, .. } => *span,
         _ => return None,
     };
     monomorphized_call_site_return_concrete_type(compiler, span)
@@ -3091,14 +3209,12 @@ pub(crate) fn stamp_binding_initializer_monomorphized_call_return(
     target: BindingInitializerTarget,
     init_expr: &Expr,
 ) -> bool {
-    let Some(ConcreteType::Array(elem)) =
-        specialized_call_return_concrete_type(compiler, init_expr)
-    else {
+    let Some(concrete_type) = specialized_call_return_concrete_type(compiler, init_expr) else {
         return false;
     };
 
-    let concrete_type = ConcreteType::Array(elem.clone());
-    let tracker_name = tracker_name_for_array_element(elem.as_ref());
+    let tracker_name =
+        crate::compiler::patterns::binding::concrete_type_tracker_name(&concrete_type);
     record_binding_concrete_fact(
         compiler,
         target,
@@ -3142,15 +3258,6 @@ pub(crate) fn record_binding_concrete_fact(
                 .insert(binding_idx, fact);
         }
     }
-}
-
-fn tracker_name_for_array_element(elem: &ConcreteType) -> Option<String> {
-    let elem_ann = crate::compiler::expressions::closures::concrete_type_to_type_annotation(elem)?;
-    let vec_ann = TypeAnnotation::Generic {
-        name: shape_ast::ast::TypePath::simple("Vec"),
-        args: vec![elem_ann],
-    };
-    BytecodeCompiler::tracked_type_name_from_annotation(&vec_ann)
 }
 
 /// R3-elemerasure (strict-flip): derive the result `ConcreteType` of a builtin

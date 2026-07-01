@@ -715,13 +715,25 @@ impl VirtualMachine {
                     self.push_kinded_slot(KindedSlot::from_hashmap(hm))?;
                 }
                 BuiltinFunction::SetCtor => {
-                    // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
-                    // 2026-05-10): empty Set ctor — `Set()` takes no
-                    // args at landing; `Set([elements])` initialization
-                    // is a follow-up. Build empty Arc<HashSetData> and
-                    // push via KindedSlot::from_hashset.
                     let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
-                    let empty = std::sync::Arc::new(shape_value::heap_value::HashSetData::new());
+                    return Err(VMError::RuntimeError(
+                        "Set(): missing static element kind; typed Set<T> construction must be stamped by the compiler".to_string(),
+                    ));
+                }
+                BuiltinFunction::SetCtorString | BuiltinFunction::SetCtorI64 => {
+                    // W74B redrive: empty Set constructors are statically
+                    // stamped by the compiler from `Set<T>` proof. The runtime
+                    // never chooses an arm from the first inserted element.
+                    let _args: Vec<KindedSlot> = self.pop_builtin_args()?;
+                    let empty = match builtin {
+                        BuiltinFunction::SetCtorString => std::sync::Arc::new(
+                            shape_value::heap_value::HashSetData::new_string(),
+                        ),
+                        BuiltinFunction::SetCtorI64 => {
+                            std::sync::Arc::new(shape_value::heap_value::HashSetData::new_i64())
+                        }
+                        _ => unreachable!(),
+                    };
                     let result = KindedSlot::from_hashset(empty);
                     self.push_kinded_slot(result)?;
                 }

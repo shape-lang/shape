@@ -2288,18 +2288,20 @@ fn hashmap_kref_display(
 /// ADR-006 §2.7.15 / Q16 amendment (mirror of §2.7.9 FilterExpr / §2.7.13
 /// Reference precedent for the cardinality-amendment shape, but Set is
 /// a HashMap *sibling* — full `HeapValue::HashSet` arm rather than
-/// pure-discriminator). Reuses the Stage C P1(b) Phase 2d Array shape
-/// (`TypedBuffer<Arc<String>>`) for the keys buffer verbatim. Insertion
-/// order is the canonical storage; the `index` is a sidecar acceleration
-/// structure for O(1) `set.has(key)`.
+/// pure-discriminator). Insertion order is the canonical storage; the
+/// `index` sidecars accelerate O(1) `set.has(key)`.
 ///
-/// **String-only keyspace at landing** (per the W9-set-methods owner
-/// audit's Path A scope and the §2.7.15 Q16 ruling). Heterogeneous-
-/// element keysets (int-keyed, TypedObject-keyed) are explicitly
-/// out-of-scope; the Path B (`TypedSet<T>` per element kind) rebuild
-/// is a future Phase-2c amendment with measurement.
+/// W74B redrive (2026-07-01): the public stdlib/type-system contract is
+/// `Set<T>`, and the `std::core::set` module must preserve integer element
+/// coverage. The original W13 string-only landing remains the string arm, but
+/// `HashSetData` now also carries an explicit `i64` arm selected only by a
+/// statically typed construction path. Mixed element-kind writes are rejected
+/// by the storage API in release builds rather than coerced.
 #[derive(Debug)]
 pub struct HashSetData {
+    /// Active element storage. Empty sets still carry this static element arm;
+    /// inserts never infer it from the first runtime element.
+    element_kind: HashSetElementKind,
     /// Insertion-ordered keys (string-typed buffer).
     ///
     /// Storage shape: `Arc<Vec<Arc<String>>>` post-V3-S5 ckpt-5-prime²a
@@ -2307,19 +2309,62 @@ pub struct HashSetData {
     /// `TypedBuffer<T>` wrapper layer retired wholesale at ckpt-4;
     /// `Arc<Vec<T>>` is the smallest delta preserving `Arc::make_mut`
     /// clone-on-write semantics).
-    pub keys: Arc<Vec<Arc<String>>>,
+    keys: Arc<Vec<Arc<String>>>,
     /// Eager bucket-index: hash → list of indices into `keys` array.
     /// Enables O(1) lookup at `set.has(key)`. Hash is FNV-1a over the
     /// key string bytes — same as `HashMapData::index`.
-    pub index: std::collections::HashMap<u64, Vec<u32>>,
+    index: std::collections::HashMap<u64, Vec<u32>>,
+    /// Insertion-ordered integer keys for `Set<int>`.
+    i64_keys: Arc<Vec<i64>>,
+    /// Eager bucket-index for `i64_keys`. Hash is FNV-1a over the little-endian
+    /// integer bytes.
+    i64_index: std::collections::HashMap<u64, Vec<u32>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashSetElementKind {
+    String,
+    I64,
+}
+
+impl HashSetElementKind {
+    #[inline]
+    pub fn name(self) -> &'static str {
+        match self {
+            HashSetElementKind::String => "string",
+            HashSetElementKind::I64 => "int",
+        }
+    }
 }
 
 impl HashSetData {
-    /// Build an empty HashSetData with no entries.
+    /// Build an empty string-key HashSetData with no entries.
+    ///
+    /// Kept as the W13-compatible constructor for existing string-set callers.
+    /// New typed construction paths should prefer `new_string` / `new_i64`
+    /// so the static element arm is visible at the call site.
     pub fn new() -> Self {
+        Self::new_string()
+    }
+
+    /// Build an empty string-key HashSetData with no entries.
+    pub fn new_string() -> Self {
+        Self::empty_for_element_kind(HashSetElementKind::String)
+    }
+
+    /// Build an empty i64-key HashSetData with no entries.
+    pub fn new_i64() -> Self {
+        Self::empty_for_element_kind(HashSetElementKind::I64)
+    }
+
+    /// Build an empty set carrying the supplied static element arm.
+    pub fn empty_for_element_kind(element_kind: HashSetElementKind) -> Self {
         Self {
+            element_kind,
             keys: Arc::new(Vec::new()),
             index: std::collections::HashMap::new(),
+            i64_keys: Arc::new(Vec::new()),
+            i64_index: std::collections::HashMap::new(),
         }
     }
 
@@ -2327,28 +2372,62 @@ impl HashSetData {
     /// index eagerly. Duplicate keys in the input are collapsed
     /// (insertion-order preserved, first occurrence wins).
     pub fn from_keys(keys: Vec<Arc<String>>) -> Self {
-        let mut out = Self::new();
+        let mut out = Self::new_string();
         for k in keys {
-            out.insert(k);
+            out.insert(k)
+                .expect("HashSetData::from_keys constructs a string set");
         }
         out
+    }
+
+    /// Build from a `Vec<i64>` of keys, computing the bucket index eagerly.
+    /// Duplicate keys in the input are collapsed (insertion-order preserved,
+    /// first occurrence wins).
+    pub fn from_i64_keys(keys: Vec<i64>) -> Self {
+        let mut out = Self::new_i64();
+        for k in keys {
+            out.insert_i64(k)
+                .expect("HashSetData::from_i64_keys constructs an i64 set");
+        }
+        out
+    }
+
+    #[inline]
+    pub fn element_kind(&self) -> HashSetElementKind {
+        self.element_kind
+    }
+
+    #[inline]
+    pub fn string_keys(&self) -> &[Arc<String>] {
+        self.keys.as_slice()
+    }
+
+    #[inline]
+    pub fn i64_keys(&self) -> &[i64] {
+        self.i64_keys.as_slice()
     }
 
     /// Number of entries.
     #[inline]
     pub fn len(&self) -> usize {
-        self.keys.len()
+        match self.element_kind {
+            HashSetElementKind::String => self.keys.len(),
+            HashSetElementKind::I64 => self.i64_keys.len(),
+        }
     }
 
     /// Whether the set is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.len() == 0
     }
 
     /// Whether the set contains the given key. O(1) via the bucket
     /// index plus a short bucket scan for collision disambiguation.
     pub fn contains(&self, key: &str) -> bool {
+        if self.element_kind != HashSetElementKind::String {
+            return false;
+        }
         let hash = fnv1a_hash(key.as_bytes());
         let Some(bucket) = self.index.get(&hash) else {
             return false;
@@ -2362,29 +2441,80 @@ impl HashSetData {
         false
     }
 
+    /// Whether the set contains the given i64 key. O(1) via the bucket index
+    /// plus a short bucket scan for collision disambiguation.
+    pub fn contains_i64(&self, key: i64) -> bool {
+        if self.element_kind != HashSetElementKind::I64 {
+            return false;
+        }
+        let hash = fnv1a_hash(&key.to_le_bytes());
+        let Some(bucket) = self.i64_index.get(&hash) else {
+            return false;
+        };
+        for &idx in bucket {
+            let i = idx as usize;
+            if self.i64_keys[i] == key {
+                return true;
+            }
+        }
+        false
+    }
+
     // ── Mutation API (Wave 13 W13-hashset-rebuild, 2026-05-10) ──────────────
     //
     // Mirror of HashMapData's W13-hashmap-mutation API with the values
-    // buffer dropped. `Arc::make_mut` clone-on-write over the inner
-    // `Arc<TypedBuffer<Arc<String>>>` keys plus parallel bucket-index
-    // maintenance — same shape, one less buffer to mutate.
+    // buffer dropped. `Arc::make_mut` clone-on-write over the active keys
+    // vector plus parallel bucket-index maintenance.
 
     /// Insert a key. Returns `true` if the key was newly added,
     /// `false` if it was already present (no-op in the latter case).
-    pub fn insert(&mut self, key: Arc<String>) -> bool {
+    pub fn insert(&mut self, key: Arc<String>) -> Result<bool, String> {
+        if self.element_kind != HashSetElementKind::String {
+            return Err(format!(
+                "HashSetData::insert(string) called on {} set",
+                self.element_kind.name()
+            ));
+        }
         let hash = fnv1a_hash(key.as_bytes());
         if let Some(bucket) = self.index.get(&hash) {
             for &idx in bucket {
                 let i = idx as usize;
                 if self.keys[i].as_str() == key.as_str() {
-                    return false;
+                    return Ok(false);
                 }
             }
         }
         let new_idx = self.keys.len();
         Arc::make_mut(&mut self.keys).push(key);
         self.index.entry(hash).or_default().push(new_idx as u32);
-        true
+        Ok(true)
+    }
+
+    /// Insert an i64 key. Returns `true` if the key was newly added,
+    /// `false` if it was already present.
+    pub fn insert_i64(&mut self, key: i64) -> Result<bool, String> {
+        if self.element_kind != HashSetElementKind::I64 {
+            return Err(format!(
+                "HashSetData::insert_i64 called on {} set",
+                self.element_kind.name()
+            ));
+        }
+        let hash = fnv1a_hash(&key.to_le_bytes());
+        if let Some(bucket) = self.i64_index.get(&hash) {
+            for &idx in bucket {
+                let i = idx as usize;
+                if self.i64_keys[i] == key {
+                    return Ok(false);
+                }
+            }
+        }
+        let new_idx = self.i64_keys.len();
+        Arc::make_mut(&mut self.i64_keys).push(key);
+        self.i64_index
+            .entry(hash)
+            .or_default()
+            .push(new_idx as u32);
+        Ok(true)
     }
 
     /// Remove the entry under `key`. Returns `true` if the key was
@@ -2393,6 +2523,9 @@ impl HashSetData {
     /// every entry after the removed slot shifts down by one position
     /// (mirror of `HashMapData::remove`).
     pub fn remove(&mut self, key: &str) -> bool {
+        if self.element_kind != HashSetElementKind::String {
+            return false;
+        }
         let hash = fnv1a_hash(key.as_bytes());
         let removed_idx: usize = {
             let Some(bucket) = self.index.get(&hash) else {
@@ -2426,6 +2559,46 @@ impl HashSetData {
         }
         true
     }
+
+    /// Remove the i64 entry under `key`. Returns `true` if the key was
+    /// present, `false` if no entry existed.
+    pub fn remove_i64(&mut self, key: i64) -> bool {
+        if self.element_kind != HashSetElementKind::I64 {
+            return false;
+        }
+        let hash = fnv1a_hash(&key.to_le_bytes());
+        let removed_idx: usize = {
+            let Some(bucket) = self.i64_index.get(&hash) else {
+                return false;
+            };
+            let mut found: Option<usize> = None;
+            for (bucket_pos, &idx) in bucket.iter().enumerate() {
+                if self.i64_keys[idx as usize] == key {
+                    found = Some(bucket_pos);
+                    break;
+                }
+            }
+            let bucket_pos = match found {
+                Some(p) => p,
+                None => return false,
+            };
+            let bucket = self.i64_index.get_mut(&hash).expect("bucket present");
+            let removed_idx = bucket.swap_remove(bucket_pos) as usize;
+            if bucket.is_empty() {
+                self.i64_index.remove(&hash);
+            }
+            removed_idx
+        };
+        Arc::make_mut(&mut self.i64_keys).remove(removed_idx);
+        for bucket in self.i64_index.values_mut() {
+            for slot in bucket.iter_mut() {
+                if (*slot as usize) > removed_idx {
+                    *slot -= 1;
+                }
+            }
+        }
+        true
+    }
 }
 
 impl Default for HashSetData {
@@ -2437,8 +2610,11 @@ impl Default for HashSetData {
 impl Clone for HashSetData {
     fn clone(&self) -> Self {
         Self {
+            element_kind: self.element_kind,
             keys: Arc::clone(&self.keys),
             index: self.index.clone(),
+            i64_keys: Arc::clone(&self.i64_keys),
+            i64_index: self.i64_index.clone(),
         }
     }
 }
@@ -4960,17 +5136,27 @@ impl fmt::Display for HeapValue {
                 // SUPERSEDED + audit §C.4.
                 hashmap_kref_display(kref, f)
             }
-            // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
-            // 2026-05-10): one-keyspace mirror of HashMap's Display
-            // shape — `{"a", "b", ...}` braces with comma-separated
-            // quoted strings, no values.
+            // Wave 13 W13-hashset-rebuild plus W74B int-key redrive:
+            // braces with comma-separated elements, quoted for strings.
             HeapValue::HashSet(d) => {
                 write!(f, "{{")?;
-                for (i, k) in d.keys.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
+                match d.element_kind() {
+                    HashSetElementKind::String => {
+                        for (i, k) in d.string_keys().iter().enumerate() {
+                            if i > 0 {
+                                write!(f, ", ")?;
+                            }
+                            write!(f, "\"{}\"", k)?;
+                        }
                     }
-                    write!(f, "\"{}\"", k)?;
+                    HashSetElementKind::I64 => {
+                        for (i, k) in d.i64_keys().iter().enumerate() {
+                            if i > 0 {
+                                write!(f, ", ")?;
+                            }
+                            write!(f, "{k}")?;
+                        }
+                    }
                 }
                 write!(f, "}}")
             }
@@ -6198,19 +6384,19 @@ mod hashset_mutation {
     #[test]
     fn insert_returns_true_for_new_key_false_for_duplicate() {
         let mut s = HashSetData::new();
-        assert!(s.insert(k("a")));
-        assert!(s.insert(k("b")));
+        assert!(s.insert(k("a")).unwrap());
+        assert!(s.insert(k("b")).unwrap());
         assert_eq!(s.len(), 2);
         // Duplicate insert is a no-op.
-        assert!(!s.insert(k("a")));
+        assert!(!s.insert(k("a")).unwrap());
         assert_eq!(s.len(), 2);
     }
 
     #[test]
     fn contains_finds_inserted_keys() {
         let mut s = HashSetData::new();
-        s.insert(k("a"));
-        s.insert(k("b"));
+        s.insert(k("a")).unwrap();
+        s.insert(k("b")).unwrap();
         assert!(s.contains("a"));
         assert!(s.contains("b"));
         assert!(!s.contains("c"));
@@ -6219,8 +6405,8 @@ mod hashset_mutation {
     #[test]
     fn remove_returns_true_for_present_false_for_missing() {
         let mut s = HashSetData::new();
-        s.insert(k("a"));
-        s.insert(k("b"));
+        s.insert(k("a")).unwrap();
+        s.insert(k("b")).unwrap();
         assert!(s.remove("a"));
         assert!(!s.contains("a"));
         assert!(s.contains("b"));
@@ -6234,9 +6420,31 @@ mod hashset_mutation {
     fn from_keys_collapses_duplicates_first_wins() {
         let s = HashSetData::from_keys(vec![k("a"), k("b"), k("a"), k("c")]);
         assert_eq!(s.len(), 3);
-        assert_eq!(s.keys[0].as_str(), "a");
-        assert_eq!(s.keys[1].as_str(), "b");
-        assert_eq!(s.keys[2].as_str(), "c");
+        assert_eq!(s.string_keys()[0].as_str(), "a");
+        assert_eq!(s.string_keys()[1].as_str(), "b");
+        assert_eq!(s.string_keys()[2].as_str(), "c");
+    }
+
+    #[test]
+    fn i64_set_preserves_static_arm() {
+        let mut s = HashSetData::new_i64();
+        assert!(s.insert_i64(1).unwrap());
+        assert!(s.insert_i64(2).unwrap());
+        assert!(!s.insert_i64(1).unwrap());
+        assert_eq!(s.len(), 2);
+        assert!(s.contains_i64(1));
+        assert!(s.contains_i64(2));
+        assert_eq!(s.i64_keys(), &[1, 2]);
+    }
+
+    #[test]
+    fn wrong_arm_insert_returns_error() {
+        let mut strings = HashSetData::new_string();
+        let mut ints = HashSetData::new_i64();
+        assert!(strings.insert_i64(1).is_err());
+        assert!(ints.insert(k("a")).is_err());
+        assert_eq!(strings.len(), 0);
+        assert_eq!(ints.len(), 0);
     }
 
     #[test]
@@ -6245,8 +6453,8 @@ mod hashset_mutation {
         // target: `let s = Set(); s.add("a"); s.add("b"); print(s.size())`
         // outputs 2.
         let mut s = HashSetData::new();
-        s.insert(k("a"));
-        s.insert(k("b"));
+        s.insert(k("a")).unwrap();
+        s.insert(k("b")).unwrap();
         assert_eq!(s.len(), 2);
     }
 
@@ -6258,10 +6466,10 @@ mod hashset_mutation {
         // immutable. Mirror of `hashmap_mutation`'s clone-on-write
         // test.
         let mut a = Arc::new(HashSetData::new());
-        Arc::make_mut(&mut a).insert(k("a"));
+        Arc::make_mut(&mut a).insert(k("a")).unwrap();
         let snapshot = Arc::clone(&a);
         // After the snapshot, mutating `a` clones the inner data.
-        Arc::make_mut(&mut a).insert(k("b"));
+        Arc::make_mut(&mut a).insert(k("b")).unwrap();
         assert_eq!(a.len(), 2);
         // Snapshot retains the pre-mutation length.
         assert_eq!(snapshot.len(), 1);

@@ -23,7 +23,9 @@
 //! `stdlib-src/core/json_value.shape`). See
 //! `docs/adr/005-typed-slot-construction.md`.
 
-use shape_value::heap_value::{HashMapKindedRef, HeapValue, TypedObjectPtr, TypedObjectStorage};
+use shape_value::heap_value::{
+    HashMapKindedRef, HashSetElementKind, HeapValue, TypedObjectPtr, TypedObjectStorage,
+};
 use shape_value::{HeapKind, NativeKind};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,17 +103,21 @@ pub fn heap_to_json_value(hv: &HeapValue) -> Result<JsonValue, String> {
         HeapValue::Char(c) => Ok(JsonValue::String(c.to_string())),
         HeapValue::HashMap(kref) => hashmap_kref_to_json_value(kref),
 
-        // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
-        // 2026-05-10): Set serializes as a JSON array of strings (the
-        // §2.7.15 amendment's documented wire shape — string-only
-        // keyspace at landing). One mechanical-yes mapping; no
-        // architectural-choice deferral.
-        HeapValue::HashSet(d) => Ok(JsonValue::Array(
-            d.keys
-                .iter()
-                .map(|k| JsonValue::String((**k).clone()))
-                .collect(),
-        )),
+        // Wave 13 W13-hashset-rebuild plus W74B int-key redrive: Set
+        // serializes as a JSON array matching its explicit element arm.
+        // No fallback to the string buffer: an int set with zero string keys
+        // must not silently serialize as an empty string set.
+        HeapValue::HashSet(d) => match d.element_kind() {
+            HashSetElementKind::String => Ok(JsonValue::Array(
+                d.string_keys()
+                    .iter()
+                    .map(|k| JsonValue::String((**k).clone()))
+                    .collect(),
+            )),
+            HashSetElementKind::I64 => Ok(JsonValue::Array(
+                d.i64_keys().iter().map(|k| JsonValue::Int(*k)).collect(),
+            )),
+        },
 
         // Wave 15 W15-deque (ADR-006 §2.7.19 / Q20, 2026-05-10):
         // Deque serializes as a JSON array of front-to-back elements.

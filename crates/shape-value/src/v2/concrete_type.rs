@@ -167,10 +167,9 @@ pub enum ConcreteType {
     // §2.7.18 / §2.7.25 "Out-of-scope" notes) these arms grow a
     // `Box<ConcreteType>` parameter at that point.
     //
-    /// HashSet with known element type. String-only at landing per
-    /// ADR-006 §2.7.15 (`HeapKind::HashSet`); the inner `ConcreteType`
-    /// is `String` at construction sites today, and the parametric arm
-    /// shape preserves room for the future typed-payload extension.
+    /// HashSet with known element type. `HashSetData` currently supports
+    /// explicit `string` and `int` storage arms; other element types surface
+    /// until their static carrier plumbing lands.
     HashSet(Box<ConcreteType>),
     /// Heterogeneous-element double-ended queue. Storage at the
     /// `Arc<DequeData>` tier is `VecDeque<Arc<HeapValue>>` (§2.7.17

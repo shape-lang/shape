@@ -5,36 +5,39 @@
 //! Per ADR-006 §2.7.15 / Q16 amendment (Wave 13 W13-hashset-rebuild),
 //! the Set carrier is a typed-`Arc<HashSetData>`-backed `HeapValue`
 //! arm — full HeapValue arm, not pure-discriminator like FilterExpr /
-//! SharedCell. Set is a HashMap sibling: same `Arc<TypedBuffer<Arc<
-//! String>>>` keys + eager FNV-1a bucket index, with the values buffer
-//! dropped.
+//! SharedCell. Set is a HashMap sibling: insertion-ordered keys + eager
+//! FNV-1a bucket index, with the values buffer dropped. W74B extends the
+//! original string arm with an explicit `i64` arm to match the public
+//! `Set<T>` contract for integer elements.
 //!
-//! All 12 handlers (`add`, `has`, `delete`, `size`, `is_empty`,
+//! Most handlers (`add`, `has`, `delete`, `len`/`length`, `is_empty`,
 //! `to_array`, `union`, `intersection`, `difference`, `for_each`,
-//! `map`, `filter`) are real bodies on top of the post-§2.7.15
-//! `HashSetData` shape (`shape_value::heap_value::HashSetData`).
+//! `filter`) are live bodies on top of the post-§2.7.15 `HashSetData`
+//! shape (`shape_value::heap_value::HashSetData`). `map` surfaces until
+//! its result element kind is statically available at this method boundary.
 //!
 //! Receiver dispatch follows §2.7.6 / Q8: kind check on `args[0].kind ==
-//! NativeKind::Ptr(HeapKind::HashSet)`, then `args[0].slot.as_heap_value()`
-//! pattern-matched against `HeapValue::HashSet(arc)` (single-discriminator
-//! per ADR-005 §1 — no per-heap-variant `KindedSlot` accessor).
+//! NativeKind::Ptr(HeapKind::HashSet)`, then reconstruct
+//! `Arc<HashSetData>` directly from the slot bits because
+//! `KindedSlot::from_hashset` stores `Arc::into_raw(Arc<HashSetData>)`.
 //!
-//! Per-key kind classification follows the same shape: `args[1].kind`
-//! against `NativeKind::String | NativeKind::Ptr(HeapKind::String)`,
-//! then `as_str()` for the borrow.
+//! Per-key kind validation is exact: `Int64` is accepted only by the `i64`
+//! arm and string carriers only by the string arm. Empty sets still carry a
+//! static arm from construction; handlers never infer the arm from the first
+//! runtime element. Mixed Set element kinds surface a `RuntimeError`; no key
+//! coercion or stringification is performed.
 //!
 //! Result construction follows playbook §3:
-//! - `size` / `is_empty` / `has` → inline-scalar `KindedSlot::from_int`
+//! - `len` / `is_empty` / `has` → inline-scalar `KindedSlot::from_int`
 //!   / `from_bool`.
 //! - `add` / `delete` → return the post-mutation `Arc<HashSetData>` via
 //!   `KindedSlot::from_hashset` (clone-on-write per ADR-006 §2.7.4 /
 //!   W13-hashmap-mutation precedent).
 //! - `union` / `intersection` / `difference` → build a fresh
-//!   `HashSetData` via `from_keys` (no Arc::make_mut on either input —
-//!   both receivers borrowed read-only).
-//! - `to_array` → reuse the receiver's keys buffer as
-//!   `TypedArrayData::String(Arc<TypedBuffer<Arc<String>>>)` — single
-//!   Arc bump, no per-element clone.
+//!   `HashSetData` via the matching `from_*_keys` constructor (no
+//!   Arc::make_mut on either input — both receivers borrowed read-only).
+//! - `to_array` → materialize a v2 raw `TypedArray<T>` for the active
+//!   element arm.
 //!
 //! ## Wave-9 closure-callback migration
 //!
@@ -47,28 +50,20 @@
 //!
 //! - `for_each` drops the closure's return value (its share is released
 //!   as the `KindedSlot` carrier goes out of scope).
-//! - `map` requires the closure result kind to be `String` (the
-//!   §2.7.15 invariant constrains keys to `Arc<String>`); non-string
-//!   results surface as a `RuntimeError`.
+//! - `map` currently surfaces because its output element kind must be
+//!   statically plumbed into result construction.
 //! - `filter` reads the predicate's `as_bool()`; non-bool results
 //!   surface as a `RuntimeError`.
 //!
 //! ADR-006 §2.7.4 / §2.7.6 / §2.7.10 / §2.7.11 / §2.7.15 + playbook
 //! §1.W13-hashset-rebuild.
 
-// V3-S5 ckpt-5-prime²a (2026-05-15): `TypedArrayData` + `TypedBuffer` imports
-// DELETED — `TypedBuffer<T>` retired at ckpt-4 (wrapper layer wholesale
-// deletion); `TypedArrayData` enum retired across the ckpt-2/3/5 consumer-
-// cascade. Migration shape (a) per supervisor 2026-05-15 ratification:
-// `HashSetData.keys` now stores `Arc<Vec<Arc<String>>>` directly (smallest
-// delta preserving `Arc::make_mut` clone-on-write at the keys-field layer).
-// The `v2_to_array` handler is SURFACE-AND-STOP pending the cluster-2 v2-raw
-// `*mut TypedArray<Arc<String>>` rebuild that owns the `Array<string>`
-// result-construction path (mirrors `array_basic.rs::ckpt5_surface` shape).
 use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
-use shape_value::heap_value::{HashSetData, HeapKind, HeapValue};
-use shape_value::{KindedSlot, NativeKind, VMError};
+use shape_value::heap_value::{HashSetData, HashSetElementKind, HeapKind, HeapValue};
+use shape_value::v2::string_obj::StringObj;
+use shape_value::v2::typed_array::TypedArray;
+use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 use std::sync::Arc;
 
 // ── Local helpers ─────────────────────────────────────────────────────────
@@ -115,52 +110,117 @@ fn as_hashset(slot: &KindedSlot) -> Result<Arc<HashSetData>, VMError> {
     Ok(cloned)
 }
 
-/// Borrow a `&str` key from a `KindedSlot` whose kind is `String` /
-/// `Ptr(HeapKind::String)`. Mirror of `as_string_key` in
-/// `hashmap_methods.rs`. Returns a `RuntimeError` for non-string kinds.
+#[derive(Clone)]
+enum SetKey {
+    String(Arc<String>),
+    I64(i64),
+}
+
+impl SetKey {
+    fn kind_name(&self) -> &'static str {
+        match self {
+            SetKey::String(_) => "string",
+            SetKey::I64(_) => "int",
+        }
+    }
+}
+
+/// Project a `KindedSlot` into a supported Set element key. This is a strict
+/// discriminator dispatch, not a coercion: `Int64` stores in the int arm and
+/// string carriers store in the string arm.
 #[inline]
-fn as_string_key(slot: &KindedSlot) -> Result<&str, VMError> {
+fn set_key_from_slot(slot: &KindedSlot) -> Result<SetKey, VMError> {
     match slot.kind {
-        NativeKind::String => slot
-            .as_str()
-            .ok_or_else(|| type_error("Set key kind=String but slot bits null")),
+        NativeKind::Int64 => Ok(SetKey::I64(slot.raw() as i64)),
+        NativeKind::String | NativeKind::StringV2 => {
+            let s = slot.as_str().ok_or_else(|| {
+                type_error(format!(
+                    "Set key kind {:?} could not be borrowed as string",
+                    slot.kind()
+                ))
+            })?;
+            Ok(SetKey::String(Arc::new(s.to_string())))
+        }
         NativeKind::Ptr(HeapKind::String) => match slot.slot.as_heap_value() {
-            HeapValue::String(s) => Ok(s.as_str()),
+            HeapValue::String(s) => Ok(SetKey::String(Arc::new(s.as_str().to_string()))),
             _ => Err(type_error(
                 "Set key kind=Ptr(String) but heap arm mismatched",
             )),
         },
         _ => Err(type_error(format!(
-            "Set key must be a string (got kind {:?})",
-            slot.kind
+            "Set key must be an int or string (got kind {:?})",
+            slot.kind()
         ))),
     }
 }
 
-/// Project a callback-return `KindedSlot` to an `Arc<String>` for use
-/// as a `HashSetData` key. Mirror of `result_slot_to_string_arc` in
-/// `hashmap_methods.rs`. Returns `None` for non-string kinds — caller
-/// surfaces the kind mismatch as a `RuntimeError`.
-fn result_slot_to_string_arc(result: &KindedSlot) -> Option<Arc<String>> {
-    match result.kind {
-        NativeKind::String | NativeKind::Ptr(HeapKind::String) => {
-            let bits = result.slot.raw();
-            if bits == 0 {
-                return None;
-            }
-            // SAFETY: per the construction-side contract for both
-            // string kinds, the slot bits are `Arc::into_raw::<String>`
-            // and the result `KindedSlot` carrier owns one strong-count
-            // share. Bump the count once via `increment_strong_count`
-            // and reconstruct an owned `Arc<String>` via `Arc::from_raw`;
-            // the carrier's drop releases the original share.
-            unsafe {
-                Arc::increment_strong_count(bits as *const String);
-                Some(Arc::from_raw(bits as *const String))
-            }
-        }
-        _ => None,
+#[inline]
+fn ensure_accepts_key(set: &HashSetData, key: &SetKey, op: &str) -> Result<(), VMError> {
+    let ok = matches!(
+        (set.element_kind(), key),
+        (HashSetElementKind::String, SetKey::String(_))
+            | (HashSetElementKind::I64, SetKey::I64(_))
+    );
+    if ok {
+        Ok(())
+    } else {
+        Err(type_error(format!(
+            "Set.{op}(): key kind {} does not match Set<{}>",
+            key.kind_name(),
+            hashset_kind_name(set.element_kind())
+        )))
     }
+}
+
+#[inline]
+fn hashset_kind_name(kind: HashSetElementKind) -> &'static str {
+    kind.name()
+}
+
+#[inline]
+fn ensure_compatible_sets(
+    lhs: &HashSetData,
+    rhs: &HashSetData,
+    op: &str,
+) -> Result<HashSetElementKind, VMError> {
+    match (lhs.element_kind(), rhs.element_kind()) {
+        (a, b) if a == b => Ok(a),
+        (a, b) => Err(type_error(format!(
+            "Set.{op}(): cannot combine Set<{}> with Set<{}>",
+            hashset_kind_name(a),
+            hashset_kind_name(b)
+        ))),
+    }
+}
+
+#[inline]
+fn string_array_slot(keys: &[Arc<String>]) -> KindedSlot {
+    use crate::executor::v2_handlers::v2_array_detect::{ELEM_TYPE_STRING, stamp_elem_type};
+    let arr = TypedArray::<*const StringObj>::with_capacity(keys.len() as u32);
+    unsafe {
+        for key in keys {
+            let ptr = StringObj::new(key.as_str()) as *const StringObj;
+            TypedArray::<*const StringObj>::push(arr, ptr);
+        }
+        stamp_elem_type(arr as *mut u8, ELEM_TYPE_STRING);
+    }
+    KindedSlot::new(
+        ValueSlot::from_raw(arr as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    )
+}
+
+#[inline]
+fn i64_array_slot(keys: &[i64]) -> KindedSlot {
+    use crate::executor::v2_handlers::v2_array_detect::{ELEM_TYPE_I64, stamp_elem_type};
+    let arr = TypedArray::<i64>::from_slice(keys);
+    unsafe {
+        stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+    }
+    KindedSlot::new(
+        ValueSlot::from_raw(arr as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    )
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -177,8 +237,13 @@ pub fn v2_has(
         return Err(type_error("Set.has() requires exactly 1 argument (key)"));
     }
     let set = as_hashset(&args[0])?;
-    let key = as_string_key(&args[1])?;
-    Ok(KindedSlot::from_bool(set.contains(key)))
+    let key = set_key_from_slot(&args[1])?;
+    ensure_accepts_key(&set, &key, "has")?;
+    let contains = match key {
+        SetKey::String(key) => set.contains(key.as_str()),
+        SetKey::I64(key) => set.contains_i64(key),
+    };
+    Ok(KindedSlot::from_bool(contains))
 }
 
 /// Set.len() / Set.length() -> int
@@ -207,20 +272,7 @@ pub fn v2_is_empty(
     Ok(KindedSlot::from_bool(set.is_empty()))
 }
 
-/// Set.toArray() -> Array<string>
-///
-/// V3-S5 ckpt-5-prime²a SURFACE-AND-STOP (2026-05-15). Pre-deletion shape
-/// reused the receiver's keys buffer as `TypedArrayData::String(Arc<
-/// TypedBuffer<Arc<String>>>)` for a single-Arc-bump, zero-element-copy
-/// result. Post-deletion: `TypedArrayData` enum + `TypedBuffer<T>` /
-/// `AlignedTypedBuffer` wrapper layer + `HeapValue::TypedArray(Arc<
-/// TypedArrayData>)` outer arm + `HeapKind::TypedArray=8` ordinal DELETED
-/// at V3-S5 ckpt-1..ckpt-4 per W12-typed-array-data-deletion audit §3.5 +
-/// §3.6 + §B + ADR-006 §2.7.24 Q25.A SUPERSEDED. Rebuild target =
-/// per-T v2-raw `*mut TypedArray<Arc<String>>` flat-struct construction
-/// per audit §A.3 + §3.1 scalar recipe (lands cluster-2 / ckpt-6).
-/// REFUSED ON SIGHT: `TypedArrayData::String` / `TypedBuffer<Arc<String>>`
-/// resurrection under any rename (Refusal #1).
+/// Set.toArray() -> Array<T>
 pub fn v2_to_array(
     _vm: &mut VirtualMachine,
     args: &[KindedSlot],
@@ -229,16 +281,11 @@ pub fn v2_to_array(
     if args.len() != 1 {
         return Err(type_error("Set.toArray() takes no arguments"));
     }
-    let _set = as_hashset(&args[0])?;
-    Err(VMError::NotImplemented(
-        "Set.toArray: SURFACE — V3-S5 ckpt-5-prime²a consumer-cascade. \
-         The deleted typed-array-data String `Arc<Buf<Arc<String>>>` payload + \
-         `KindedSlot::from_typed_array` DELETED at V3-S5 ckpt-1..ckpt-4. \
-         Rebuild = per-T v2-raw `*mut TypedArray<Arc<String>>` flat-struct \
-         construction (cluster-2 / ckpt-6 territory). REFUSED ON SIGHT: \
-         resurrection under any rename (Refusal #1)."
-            .to_string(),
-    ))
+    let set = as_hashset(&args[0])?;
+    match set.element_kind() {
+        HashSetElementKind::String => Ok(string_array_slot(set.string_keys())),
+        HashSetElementKind::I64 => Ok(i64_array_slot(set.i64_keys())),
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -247,7 +294,7 @@ pub fn v2_to_array(
 
 /// Set.add(key) -> Set
 ///
-/// Routes through `HashSetData::insert(Arc<String>) -> bool`. The
+/// Routes through `HashSetData::insert*` by exact element kind. The
 /// receiver `Arc<HashSetData>` is cloned up-front so `Arc::make_mut`
 /// clones the underlying data only when other shares exist
 /// (clone-on-write per ADR-006 §2.7.4 / W13-hashmap-mutation
@@ -262,20 +309,23 @@ pub fn v2_add(
     if args.len() != 2 {
         return Err(type_error("Set.add() requires exactly 1 argument (key)"));
     }
-    let key_arc: Arc<String> = result_slot_to_string_arc(&args[1]).ok_or_else(|| {
-        type_error(format!(
-            "Set.add(): key must be a string (got kind {:?})",
-            args[1].kind()
-        ))
-    })?;
     let mut hs: Arc<HashSetData> = as_hashset(&args[0])?;
-    Arc::make_mut(&mut hs).insert(key_arc);
+    let key = set_key_from_slot(&args[1])?;
+    ensure_accepts_key(&hs, &key, "add")?;
+    match key {
+        SetKey::String(key) => {
+            Arc::make_mut(&mut hs).insert(key).map_err(type_error)?;
+        }
+        SetKey::I64(key) => {
+            Arc::make_mut(&mut hs).insert_i64(key).map_err(type_error)?;
+        }
+    }
     Ok(KindedSlot::from_hashset(hs))
 }
 
 /// Set.delete(key) -> Set
 ///
-/// Routes through `HashSetData::remove(&str) -> bool`. Returns the
+/// Routes through `HashSetData::remove*` by exact element kind. Returns the
 /// (possibly newly-cloned) `Arc<HashSetData>` post-removal — missing-
 /// key removals are a no-op at the `HashSetData` layer (the `bool`
 /// return is ignored at this surface; the result still carries the
@@ -288,9 +338,17 @@ pub fn v2_delete(
     if args.len() != 2 {
         return Err(type_error("Set.delete() requires exactly 1 argument (key)"));
     }
-    let key = as_string_key(&args[1])?;
     let mut hs: Arc<HashSetData> = as_hashset(&args[0])?;
-    Arc::make_mut(&mut hs).remove(key);
+    let key = set_key_from_slot(&args[1])?;
+    ensure_accepts_key(&hs, &key, "delete")?;
+    match key {
+        SetKey::String(key) => {
+            Arc::make_mut(&mut hs).remove(key.as_str());
+        }
+        SetKey::I64(key) => {
+            Arc::make_mut(&mut hs).remove_i64(key);
+        }
+    }
     Ok(KindedSlot::from_hashset(hs))
 }
 
@@ -315,15 +373,25 @@ pub fn v2_union(
     }
     let lhs: Arc<HashSetData> = as_hashset(&args[0])?;
     let rhs: Arc<HashSetData> = as_hashset(&args[1])?;
-    let mut keys: Vec<Arc<String>> = Vec::with_capacity(lhs.len() + rhs.len());
-    for k in lhs.keys.iter() {
-        keys.push(Arc::clone(k));
-    }
-    for k in rhs.keys.iter() {
-        keys.push(Arc::clone(k));
-    }
-    // `from_keys` collapses duplicates — first occurrence wins.
-    let result = HashSetData::from_keys(keys);
+    let result_kind = ensure_compatible_sets(&lhs, &rhs, "union")?;
+    let result = match result_kind {
+        HashSetElementKind::String => {
+            let mut keys: Vec<Arc<String>> = Vec::with_capacity(lhs.len() + rhs.len());
+            for k in lhs.string_keys().iter() {
+                keys.push(Arc::clone(k));
+            }
+            for k in rhs.string_keys().iter() {
+                keys.push(Arc::clone(k));
+            }
+            HashSetData::from_keys(keys)
+        }
+        HashSetElementKind::I64 => {
+            let mut keys: Vec<i64> = Vec::with_capacity(lhs.len() + rhs.len());
+            keys.extend(lhs.i64_keys().iter().copied());
+            keys.extend(rhs.i64_keys().iter().copied());
+            HashSetData::from_i64_keys(keys)
+        }
+    };
     Ok(KindedSlot::from_hashset(Arc::new(result)))
 }
 
@@ -344,19 +412,37 @@ pub fn v2_intersection(
     }
     let lhs: Arc<HashSetData> = as_hashset(&args[0])?;
     let rhs: Arc<HashSetData> = as_hashset(&args[1])?;
-    // Walk the smaller side; probe the larger for membership.
-    let (small, large) = if lhs.len() <= rhs.len() {
-        (lhs.as_ref(), rhs.as_ref())
-    } else {
-        (rhs.as_ref(), lhs.as_ref())
-    };
-    let mut keys: Vec<Arc<String>> = Vec::new();
-    for k in small.keys.iter() {
-        if large.contains(k.as_str()) {
-            keys.push(Arc::clone(k));
+    let result_kind = ensure_compatible_sets(&lhs, &rhs, "intersection")?;
+    let result = match result_kind {
+        HashSetElementKind::String => {
+            let (small, large) = if lhs.len() <= rhs.len() {
+                (lhs.as_ref(), rhs.as_ref())
+            } else {
+                (rhs.as_ref(), lhs.as_ref())
+            };
+            let mut keys: Vec<Arc<String>> = Vec::new();
+            for k in small.string_keys().iter() {
+                if large.contains(k.as_str()) {
+                    keys.push(Arc::clone(k));
+                }
+            }
+            HashSetData::from_keys(keys)
         }
-    }
-    let result = HashSetData::from_keys(keys);
+        HashSetElementKind::I64 => {
+            let (small, large) = if lhs.len() <= rhs.len() {
+                (lhs.as_ref(), rhs.as_ref())
+            } else {
+                (rhs.as_ref(), lhs.as_ref())
+            };
+            let mut keys: Vec<i64> = Vec::new();
+            for &k in small.i64_keys().iter() {
+                if large.contains_i64(k) {
+                    keys.push(k);
+                }
+            }
+            HashSetData::from_i64_keys(keys)
+        }
+    };
     Ok(KindedSlot::from_hashset(Arc::new(result)))
 }
 
@@ -377,13 +463,27 @@ pub fn v2_difference(
     }
     let lhs: Arc<HashSetData> = as_hashset(&args[0])?;
     let rhs: Arc<HashSetData> = as_hashset(&args[1])?;
-    let mut keys: Vec<Arc<String>> = Vec::new();
-    for k in lhs.keys.iter() {
-        if !rhs.contains(k.as_str()) {
-            keys.push(Arc::clone(k));
+    let result_kind = ensure_compatible_sets(&lhs, &rhs, "difference")?;
+    let result = match result_kind {
+        HashSetElementKind::String => {
+            let mut keys: Vec<Arc<String>> = Vec::new();
+            for k in lhs.string_keys().iter() {
+                if !rhs.contains(k.as_str()) {
+                    keys.push(Arc::clone(k));
+                }
+            }
+            HashSetData::from_keys(keys)
         }
-    }
-    let result = HashSetData::from_keys(keys);
+        HashSetElementKind::I64 => {
+            let mut keys: Vec<i64> = Vec::new();
+            for &k in lhs.i64_keys().iter() {
+                if !rhs.contains_i64(k) {
+                    keys.push(k);
+                }
+            }
+            HashSetData::from_i64_keys(keys)
+        }
+    };
     Ok(KindedSlot::from_hashset(Arc::new(result)))
 }
 
@@ -407,46 +507,40 @@ pub fn v2_for_each(
     }
     let set: Arc<HashSetData> = as_hashset(&args[0])?;
     let closure = &args[1];
-    let n = set.len();
-    for i in 0..n {
-        let key_slot = KindedSlot::from_string_arc(Arc::clone(&set.keys[i]));
-        let _ = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
+    match set.element_kind() {
+        HashSetElementKind::String => {
+            for key in set.string_keys().iter() {
+                let key_slot = KindedSlot::from_string_arc(Arc::clone(key));
+                let _ = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
+            }
+        }
+        HashSetElementKind::I64 => {
+            for &key in set.i64_keys().iter() {
+                let key_slot = KindedSlot::from_int(key);
+                let _ = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
+            }
+        }
     }
     Ok(KindedSlot::none())
 }
 
 /// Set.map(fn(key) -> new_key) -> Set
 ///
-/// Builds a new `Set` whose elements are the closure's per-element
-/// returns. The §2.7.15 invariant constrains keys to `Arc<String>`;
-/// non-string closure results surface as a `RuntimeError`. Duplicate
-/// outputs are collapsed by `HashSetData::from_keys` (first occurrence
-/// wins).
+/// The output element arm must come from static result typing. That plumbing
+/// is not available at this method boundary yet, so this surfaces instead of
+/// inferring the result arm from the first runtime callback result.
 pub fn v2_map(
-    vm: &mut VirtualMachine,
+    _vm: &mut VirtualMachine,
     args: &[KindedSlot],
-    mut ctx: Option<&mut ExecutionContext>,
+    _ctx: Option<&mut ExecutionContext>,
 ) -> Result<KindedSlot, VMError> {
     if args.len() != 2 {
         return Err(type_error("Set.map() requires exactly 1 argument (mapper)"));
     }
-    let set: Arc<HashSetData> = as_hashset(&args[0])?;
-    let closure = &args[1];
-    let n = set.len();
-    let mut out_keys: Vec<Arc<String>> = Vec::with_capacity(n);
-    for i in 0..n {
-        let key_slot = KindedSlot::from_string_arc(Arc::clone(&set.keys[i]));
-        let result = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
-        let new_key: Arc<String> = result_slot_to_string_arc(&result).ok_or_else(|| {
-            type_error(format!(
-                "Set.map(): mapper must return a string (got kind {:?})",
-                result.kind()
-            ))
-        })?;
-        out_keys.push(new_key);
-    }
-    let result = HashSetData::from_keys(out_keys);
-    Ok(KindedSlot::from_hashset(Arc::new(result)))
+    let _set = as_hashset(&args[0])?;
+    Err(VMError::NotImplemented(
+        "Set.map(): SURFACE - result element kind must be statically plumbed into the HashSetData constructor; runtime first-result inference is forbidden".to_string(),
+    ))
 }
 
 /// Set.filter(fn(key) -> bool) -> Set
@@ -466,52 +560,40 @@ pub fn v2_filter(
     }
     let set: Arc<HashSetData> = as_hashset(&args[0])?;
     let closure = &args[1];
-    let n = set.len();
-    let mut out_keys: Vec<Arc<String>> = Vec::new();
-    for i in 0..n {
-        let key_arc = Arc::clone(&set.keys[i]);
-        let key_slot = KindedSlot::from_string_arc(Arc::clone(&key_arc));
-        let result = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
-        let keep = result.as_bool().ok_or_else(|| {
-            type_error(format!(
-                "Set.filter(): predicate must return bool (got kind {:?})",
-                result.kind()
-            ))
-        })?;
-        if keep {
-            out_keys.push(key_arc);
+    let mut result_set = HashSetData::empty_for_element_kind(set.element_kind());
+    match set.element_kind() {
+        HashSetElementKind::String => {
+            for key_arc in set.string_keys().iter() {
+                let key_slot = KindedSlot::from_string_arc(Arc::clone(key_arc));
+                let result = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
+                let keep = result.as_bool().ok_or_else(|| {
+                    type_error(format!(
+                        "Set.filter(): predicate must return bool (got kind {:?})",
+                        result.kind()
+                    ))
+                })?;
+                if keep {
+                    result_set
+                        .insert(Arc::clone(key_arc))
+                        .map_err(type_error)?;
+                }
+            }
+        }
+        HashSetElementKind::I64 => {
+            for &key in set.i64_keys().iter() {
+                let key_slot = KindedSlot::from_int(key);
+                let result = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
+                let keep = result.as_bool().ok_or_else(|| {
+                    type_error(format!(
+                        "Set.filter(): predicate must return bool (got kind {:?})",
+                        result.kind()
+                    ))
+                })?;
+                if keep {
+                    result_set.insert_i64(key).map_err(type_error)?;
+                }
+            }
         }
     }
-    // Filter preserves order with no duplicates (the receiver is
-    // already deduplicated and we don't introduce new keys); construct
-    // directly without going through `from_keys`'s dedup pass.
-    //
-    // V3-S5 ckpt-5-prime²a (2026-05-15): `TypedBuffer::from_vec` retired
-    // (wrapper layer wholesale deletion at ckpt-4); Migration shape (a)
-    // wraps the `Vec<Arc<String>>` directly in the `Arc<Vec<Arc<String>>>`
-    // post-§2.7.15 keys-field layout.
-    let mut index: std::collections::HashMap<u64, Vec<u32>> = std::collections::HashMap::new();
-    for (i, k) in out_keys.iter().enumerate() {
-        let h = fnv1a_hash_local(k.as_bytes());
-        index.entry(h).or_default().push(i as u32);
-    }
-    let result = HashSetData {
-        keys: Arc::new(out_keys),
-        index,
-    };
-    Ok(KindedSlot::from_hashset(Arc::new(result)))
-}
-
-/// Local FNV-1a hash matching `shape_value::heap_value::fnv1a_hash`'s
-/// shape (the `heap_value`-private function isn't `pub`; replicating
-/// the algorithm here keeps the bucket-index hash semantics aligned
-/// with `HashSetData::contains` / `insert`).
-#[inline]
-fn fnv1a_hash_local(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
+    Ok(KindedSlot::from_hashset(Arc::new(result_set)))
 }
