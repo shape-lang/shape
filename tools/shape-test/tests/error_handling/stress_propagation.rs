@@ -183,16 +183,18 @@ fn division_by_zero_float_is_inf_or_error() {
     ShapeTest::new("1.0 / 0.0").expect_run_err();
 }
 
-/// Index out of bounds returns null (not an error).
+/// Index out of bounds is a runtime error.
 #[test]
 fn index_out_of_bounds_fails() {
-    ShapeTest::new("let arr = [1, 2, 3]\narr[10]").expect_none();
+    ShapeTest::new("let arr = [1, 2, 3]\narr[10]")
+        .expect_run_err_contains("Index 10 out of bounds");
 }
 
-/// Negative index out of bounds returns null (not an error).
+/// Negative index out of bounds is a runtime error.
 #[test]
 fn negative_index_out_of_bounds_fails() {
-    ShapeTest::new("let arr = [1, 2, 3]\narr[-10]").expect_none();
+    ShapeTest::new("let arr = [1, 2, 3]\narr[-10]")
+        .expect_run_err_contains("Index -10 out of bounds");
 }
 
 // =============================================================================
