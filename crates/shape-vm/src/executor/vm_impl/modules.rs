@@ -73,6 +73,83 @@ fn project_json_value_return(
     Ok(project_json_value_to_slot(value, json_schema.id as u64))
 }
 
+fn json_payload_field_owns_heap_share(bits: u64, kind: shape_value::NativeKind) -> bool {
+    use shape_value::{HeapKind, NativeKind};
+
+    if bits == 0 {
+        return false;
+    }
+    match kind {
+        NativeKind::String | NativeKind::StringV2 | NativeKind::DecimalV2 => true,
+        NativeKind::Ptr(HeapKind::Future | HeapKind::ModuleFn | HeapKind::Char) => false,
+        NativeKind::Ptr(HeapKind::NativeScalar) => false,
+        NativeKind::Ptr(_) => true,
+        _ => false,
+    }
+}
+
+fn build_json_enum_slot(
+    json_schema_id: u64,
+    variant_id: i64,
+    payload: shape_value::KindedSlot,
+) -> shape_value::KindedSlot {
+    use shape_value::heap_value::TypedObjectStorage;
+    use shape_value::{KindedSlot, NativeKind, ValueSlot};
+    use std::sync::Arc;
+
+    let payload_slot = payload.slot();
+    let payload_kind = payload.kind();
+    let payload_bits = payload_slot.raw();
+    #[cfg(miri)]
+    let payload_provenance = payload.miri_provenance();
+
+    let slots = vec![ValueSlot::from_int(variant_id), payload_slot].into_boxed_slice();
+    let heap_mask = if json_payload_field_owns_heap_share(payload_bits, payload_kind) {
+        1u64 << 1
+    } else {
+        0
+    };
+    let field_kinds: Arc<[NativeKind]> =
+        Arc::from(vec![NativeKind::Int64, payload_kind].into_boxed_slice());
+
+    std::mem::forget(payload);
+    #[cfg(miri)]
+    let ptr = TypedObjectStorage::_new_with_miri_field_provenance(
+        json_schema_id,
+        slots,
+        heap_mask,
+        field_kinds,
+        vec![
+            shape_value::heap_value::MiriSlotProvenance::None,
+            payload_provenance,
+        ]
+        .into_boxed_slice(),
+    );
+    #[cfg(not(miri))]
+    let ptr = TypedObjectStorage::_new(json_schema_id, slots, heap_mask, field_kinds);
+    KindedSlot::from_typed_object_raw(ptr)
+}
+
+fn take_json_typed_object_slot(
+    slot: shape_value::KindedSlot,
+) -> *const shape_value::heap_value::TypedObjectStorage {
+    use shape_value::{HeapKind, NativeKind};
+
+    debug_assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+    #[cfg(miri)]
+    let ptr = match slot.miri_provenance() {
+        shape_value::heap_value::MiriSlotProvenance::TypedObject(ptr) if !ptr.is_null() => ptr,
+        other => panic!(
+            "project_json_value_to_slot: Json child TypedObject missing Miri provenance: {:?}",
+            other
+        ),
+    };
+    #[cfg(not(miri))]
+    let ptr = slot.raw() as *const shape_value::heap_value::TypedObjectStorage;
+    std::mem::forget(slot);
+    ptr
+}
+
 fn project_json_value_to_slot(
     value: shape_runtime::json_value::JsonValue,
     json_schema_id: u64,
@@ -81,7 +158,7 @@ fn project_json_value_to_slot(
     use shape_value::heap_value::{
         HashMapData, HashMapKindedRef, TypedObjectPtr, TypedObjectStorage,
     };
-    use shape_value::v2::typed_array::{ELEM_TYPE_TYPED_OBJECT, TypedArray, stamp_elem_type};
+    use shape_value::v2::typed_array::{stamp_elem_type, TypedArray, ELEM_TYPE_TYPED_OBJECT};
     use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
     use std::sync::Arc;
 
@@ -96,92 +173,67 @@ fn project_json_value_to_slot(
         return project_json_value_to_slot(JsonValue::Array(elems), json_schema_id);
     }
 
-    let (variant_id, payload_slot, payload_kind, payload_is_heap) = match value {
-        JsonValue::Null => (
-            JSON_VARIANT_NULL,
-            ValueSlot::from_raw(0),
-            NativeKind::Null,
-            false,
-        ),
-        JsonValue::Bool(b) => (
-            JSON_VARIANT_BOOL,
-            ValueSlot::from_bool(b),
-            NativeKind::Bool,
-            false,
-        ),
-        JsonValue::Int(i) => (
-            JSON_VARIANT_INT,
-            ValueSlot::from_int(i),
-            NativeKind::Int64,
-            false,
-        ),
-        JsonValue::Number(n) => (
+    match value {
+        JsonValue::Null => {
+            build_json_enum_slot(json_schema_id, JSON_VARIANT_NULL, KindedSlot::none())
+        }
+        JsonValue::Bool(b) => {
+            build_json_enum_slot(json_schema_id, JSON_VARIANT_BOOL, KindedSlot::from_bool(b))
+        }
+        JsonValue::Int(i) => {
+            build_json_enum_slot(json_schema_id, JSON_VARIANT_INT, KindedSlot::from_int(i))
+        }
+        JsonValue::Number(n) => build_json_enum_slot(
+            json_schema_id,
             JSON_VARIANT_NUMBER,
-            ValueSlot::from_number(n),
-            NativeKind::Float64,
-            false,
+            KindedSlot::from_number(n),
         ),
-        JsonValue::String(s) => (
+        JsonValue::String(s) => build_json_enum_slot(
+            json_schema_id,
             JSON_VARIANT_STR,
-            ValueSlot::from_string_arc(Arc::new(s)),
-            NativeKind::String,
-            true,
+            KindedSlot::from_string_arc(Arc::new(s)),
         ),
         JsonValue::Bytes(_) => unreachable!("handled before payload construction"),
         JsonValue::Array(values) => {
             let mut element_ptrs: Vec<*const TypedObjectStorage> = Vec::with_capacity(values.len());
             for value in values {
                 let slot = project_json_value_to_slot(value, json_schema_id);
-                debug_assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
-                let ptr = slot.raw() as *const TypedObjectStorage;
                 // Transfer the slot's typed-object share into the array
                 // element. The stamped typed-object array releases each
                 // element with TypedObjectStorage::release_elem.
-                std::mem::forget(slot);
+                let ptr = take_json_typed_object_slot(slot);
                 element_ptrs.push(ptr);
             }
             let arr = TypedArray::<*const TypedObjectStorage>::from_slice(&element_ptrs);
             unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_TYPED_OBJECT) };
-            (
+            build_json_enum_slot(
+                json_schema_id,
                 JSON_VARIANT_ARRAY,
-                ValueSlot::from_raw(arr as usize as u64),
-                NativeKind::Ptr(HeapKind::TypedArray),
-                true,
+                KindedSlot::new(
+                    ValueSlot::from_raw(arr as usize as u64),
+                    NativeKind::Ptr(HeapKind::TypedArray),
+                ),
             )
         }
         JsonValue::Object(pairs) => {
             let mut data: HashMapData<TypedObjectPtr> = HashMapData::new();
             for (key, value) in pairs {
                 let slot = project_json_value_to_slot(value, json_schema_id);
-                debug_assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
-                let ptr = slot.raw() as *const TypedObjectStorage;
                 // Transfer the slot share into the HashMap value wrapper;
                 // HashMapData owns and later drops the TypedObjectPtr.
-                std::mem::forget(slot);
+                let ptr = take_json_typed_object_slot(slot);
                 unsafe {
                     data.insert(key.as_str(), TypedObjectPtr::new(ptr));
                 }
             }
             let kref = HashMapKindedRef::TypedObject(Arc::new(data));
-            (
+            build_json_enum_slot(
+                json_schema_id,
                 JSON_VARIANT_OBJECT,
-                ValueSlot::from_hashmap(Arc::new(kref)),
-                NativeKind::Ptr(HeapKind::HashMap),
-                true,
+                KindedSlot::from_hashmap(Arc::new(kref)),
             )
         }
-    };
-
-    let heap_mask = if payload_is_heap { 1u64 << 1 } else { 0 };
-    let field_kinds: Arc<[NativeKind]> =
-        Arc::from(vec![NativeKind::Int64, payload_kind].into_boxed_slice());
-    let ptr = TypedObjectStorage::_new(
-        json_schema_id,
-        vec![ValueSlot::from_int(variant_id), payload_slot].into_boxed_slice(),
-        heap_mask,
-        field_kinds,
-    );
-    KindedSlot::from_typed_object_raw(ptr)
+    }
 }
 
 /// Project a single `ConcreteReturn` leaf into a `KindedSlot`.
@@ -204,7 +256,7 @@ fn project_concrete_return(
     use shape_value::heap_value::{HashMapData, HashMapKindedRef};
     use shape_value::v2::string_obj::StringObj;
     use shape_value::v2::typed_array::{
-        ELEM_TYPE_F64, ELEM_TYPE_I64, ELEM_TYPE_STRING, TypedArray, stamp_elem_type,
+        stamp_elem_type, TypedArray, ELEM_TYPE_F64, ELEM_TYPE_I64, ELEM_TYPE_STRING,
     };
     use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
     use std::sync::Arc;
@@ -1165,6 +1217,42 @@ mod stage_k1_tests {
     }
 
     #[test]
+    fn json_value_string_payload_clone_preserves_field_provenance() {
+        use shape_runtime::json_value::JsonValue;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        let json_schema_id = register_json_schema(&mut vm) as u64;
+        let schemas = vm.builtin_schemas.clone();
+        let slot = invoke_typed_return(
+            &mut vm,
+            TypedReturn::Ok(ConcreteReturn::JsonValue(JsonValue::String(
+                "Ada".to_string(),
+            ))),
+        )
+        .expect("JsonValue string should project through registered Json schema");
+
+        let result = result_option_carrier::read_result(&schemas, &slot)
+            .unwrap()
+            .unwrap();
+        assert!(result.is_ok());
+        let payload = result.clone_payload().unwrap();
+        assert_eq!(payload.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+
+        let json_obj = payload.as_typed_object_storage().unwrap();
+        assert_eq!(json_obj.schema_id, json_schema_id);
+        assert_eq!(json_obj.slots()[0].raw() as i64, JSON_VARIANT_STR);
+        assert_eq!(json_obj.field_kinds[1], NativeKind::String);
+
+        let cloned_payload = json_obj
+            .clone_field_kinded(1)
+            .expect("Json::Str payload clone should preserve field provenance");
+        assert_eq!(cloned_payload.kind(), NativeKind::String);
+        assert_eq!(cloned_payload.as_str(), Some("Ada"));
+        drop(cloned_payload);
+        drop(payload);
+    }
+
+    #[test]
     fn json_value_roundtrips_as_schema_backed_json_enum() {
         use shape_runtime::json_value::JsonValue;
 
@@ -1214,6 +1302,12 @@ mod stage_k1_tests {
         assert_eq!(name_storage.field_kinds[1], NativeKind::String);
         let name = unsafe { &*(name_storage.slots()[1].raw() as *const String) };
         assert_eq!(name.as_str(), "Ada");
+        let cloned_name_payload = name_storage
+            .clone_field_kinded(1)
+            .expect("Json::Str payload clone should preserve field provenance");
+        assert_eq!(cloned_name_payload.kind(), NativeKind::String);
+        assert_eq!(cloned_name_payload.as_str(), Some("Ada"));
+        drop(cloned_name_payload);
 
         let items_idx = object_data.get_index("items").unwrap();
         let items_ptr = unsafe { (&*(*object_data.values).data.add(items_idx)).as_ptr() };
@@ -1270,11 +1364,11 @@ mod stage_k1_tests {
 /// the `#[cfg(test)]` module so it can be a `super::` reference from the
 /// nested test module while still being compiled only under `cfg(test)`.
 #[cfg(test)]
-fn project_concrete_return_for_test_typed_object()
--> std::sync::Arc<shape_value::heap_value::HeapValue> {
+fn project_concrete_return_for_test_typed_object(
+) -> std::sync::Arc<shape_value::heap_value::HeapValue> {
     use shape_runtime::type_schema::typed_object_from_pairs;
-    use shape_value::KindedSlot;
     use shape_value::heap_value::HeapValue;
+    use shape_value::KindedSlot;
     // Build a 1-field typed object via the shared builder, then recover its
     // raw TypedObject pointer into an Arc<HeapValue::TypedObject> carrier
     // (the ArrayHeapValue / HashMapStringHeapValue element shape).
