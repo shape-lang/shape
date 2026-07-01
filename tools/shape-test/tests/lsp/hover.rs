@@ -218,8 +218,8 @@ print(afunc(1))
 "#;
 
     ShapeTest::new(code)
-        .expect_semantic_diagnostic_contains("Could not solve type constraints")
-        .expect_semantic_diagnostic_at_line_contains(3, "Could not solve type constraints")
+        .expect_semantic_diagnostic_contains("Type constraint violation")
+        .expect_semantic_diagnostic_at_line_contains(3, "Cannot infer types")
         .at(pos(1, 4))
         .expect_hover_contains("{ x: int, y: int } | int")
         .expect_hover_contains("string")
@@ -317,25 +317,25 @@ fn afunc(c: { x: int, y: int } | int) {
 
 #[test]
 fn definition_from_trait_name() {
-    let code = "trait Queryable {\n    filter(pred): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}\n";
+    let code = "trait Queryable {\n    method filter(self, pred) -> any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}\n";
     ShapeTest::new(code).at(pos(0, 6)).expect_definition();
 }
 
 #[test]
 fn definition_from_impl_trait_name() {
-    let code = "trait Queryable {\n    filter(pred): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}\n";
+    let code = "trait Queryable {\n    method filter(self, pred) -> any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}\n";
     ShapeTest::new(code).at(pos(3, 5)).expect_definition();
 }
 
 #[test]
 fn definition_from_impl_method_name() {
-    let code = "trait Queryable {\n    filter(pred): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}\n";
+    let code = "trait Queryable {\n    method filter(self, pred) -> any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n}\n";
     ShapeTest::new(code).at(pos(4, 11)).expect_definition();
 }
 
 #[test]
 fn hover_on_impl_method_shows_trait_signature() {
-    let code = "trait Queryable {\n    runQuery(q): any\n}\nimpl Queryable for MyTable {\n    method runQuery(q) { self }\n}\n";
+    let code = "trait Queryable {\n    method runQuery(self, q) -> any\n}\nimpl Queryable for MyTable {\n    method runQuery(q) { self }\n}\n";
     ShapeTest::new(code)
         .at(pos(4, 11))
         .expect_hover_contains("Trait Method");
@@ -382,7 +382,7 @@ fn hover_on_self_property_in_impl_method_shows_struct_field_type() {
 
 #[test]
 fn hover_on_bounded_type_param_shows_traits() {
-    let code = "trait Comparable {\n    compare(other): number\n}\nfn foo<T: Comparable>(x: T) {\n    x\n}\n";
+    let code = "trait Comparable {\n    method compare(self, other) -> number\n}\nfn foo<T: Comparable>(x: T) {\n    x\n}\n";
     ShapeTest::new(code)
         .at(pos(3, 7))
         .expect_hover_contains("Type Parameter");
@@ -390,7 +390,7 @@ fn hover_on_bounded_type_param_shows_traits() {
 
 #[test]
 fn hover_on_bounded_type_param_shows_bound_names() {
-    let code = "trait Comparable {\n    compare(other): number\n}\nfn foo<T: Comparable>(x: T) {\n    x\n}\n";
+    let code = "trait Comparable {\n    method compare(self, other) -> number\n}\nfn foo<T: Comparable>(x: T) {\n    x\n}\n";
     ShapeTest::new(code)
         .at(pos(3, 7))
         .expect_hover_contains("Comparable");
@@ -398,7 +398,7 @@ fn hover_on_bounded_type_param_shows_bound_names() {
 
 #[test]
 fn hover_default_method_shows_default_indicator() {
-    let code = "trait Queryable {\n    filter(pred): any;\n    method execute() {\n        return self\n    }\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    method execute() { self }\n}\n";
+    let code = "trait Queryable {\n    method filter(self, pred) -> any;\n    method execute() {\n        return self\n    }\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    method execute() { self }\n}\n";
     ShapeTest::new(code)
         .at(pos(8, 11))
         .expect_hover_contains("default");
@@ -696,7 +696,7 @@ fn test_lsp_hover_on_const_keyword() {
 
 #[test]
 fn test_lsp_hover_bounded_type_param() {
-    let code = "trait Addable {\n  add(other): any\n}\nfn sum<T: Addable>(a: T, b: T) { a }\n";
+    let code = "trait Addable {\n  method add(self, other) -> any\n}\nfn sum<T: Addable>(a: T, b: T) { a }\n";
     ShapeTest::new(code)
         .at(pos(3, 7))
         .expect_hover_contains("Type Parameter");

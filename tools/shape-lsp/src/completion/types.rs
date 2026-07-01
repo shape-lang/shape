@@ -165,6 +165,17 @@ pub fn property_completions(
                 });
             }
         }
+        if method_type == "Vec" && !completions.iter().any(|c| c.label == "len") {
+            completions.push(CompletionItem {
+                label: "len".to_string(),
+                kind: Some(CompletionItemKind::METHOD),
+                detail: Some(format!("{} method", resolved_type)),
+                documentation: None,
+                insert_text: Some("len()".to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..CompletionItem::default()
+            });
+        }
 
         // Add methods for specific types (methods not yet in derive macro system)
         if resolved_type.eq_ignore_ascii_case("backtestresult") {

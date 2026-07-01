@@ -130,7 +130,7 @@ let _ = p.s
 
 #[test]
 fn completion_impl_block_suggests_unimplemented_methods() {
-    let code = "trait Queryable {\n    filter(pred): any;\n    select(cols): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    \n}\n";
+    let code = "trait Queryable {\n    method filter(self, pred) -> any;\n    method select(self, cols) -> any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    \n}\n";
     ShapeTest::new(code)
         .at(pos(6, 4))
         .expect_completion("select");
@@ -138,7 +138,7 @@ fn completion_impl_block_suggests_unimplemented_methods() {
 
 #[test]
 fn completion_impl_block_excludes_already_implemented() {
-    let code = "trait Queryable {\n    filter(pred): any;\n    select(cols): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    \n}\n";
+    let code = "trait Queryable {\n    method filter(self, pred) -> any;\n    method select(self, cols) -> any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    \n}\n";
     ShapeTest::new(code)
         .at(pos(6, 4))
         .expect_no_completion("filter");
@@ -146,7 +146,7 @@ fn completion_impl_block_excludes_already_implemented() {
 
 #[test]
 fn trait_bound_completions_suggest_trait_names() {
-    let code = "trait Comparable {\n    compare(other): number\n}\ntrait Displayable {\n    method display() -> string\n}\nfn foo<T: >(x: T) {\n    x\n}\n";
+    let code = "trait Comparable {\n    method compare(self, other) -> number\n}\ntrait Displayable {\n    method display() -> string\n}\nfn foo<T: >(x: T) {\n    x\n}\n";
     ShapeTest::new(code)
         .at(pos(6, 10))
         .expect_completion("Comparable");
@@ -154,7 +154,7 @@ fn trait_bound_completions_suggest_trait_names() {
 
 #[test]
 fn trait_bound_completions_include_all_traits() {
-    let code = "trait Comparable {\n    compare(other): number\n}\ntrait Displayable {\n    method display() -> string\n}\nfn foo<T: >(x: T) {\n    x\n}\n";
+    let code = "trait Comparable {\n    method compare(self, other) -> number\n}\ntrait Displayable {\n    method display() -> string\n}\nfn foo<T: >(x: T) {\n    x\n}\n";
     ShapeTest::new(code)
         .at(pos(6, 10))
         .expect_completion("Displayable");
@@ -162,7 +162,7 @@ fn trait_bound_completions_include_all_traits() {
 
 #[test]
 fn completion_impl_block_suggests_default_methods() {
-    let code = "trait Queryable {\n    filter(pred): any;\n    method execute() {\n        return self\n    }\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    \n}\n";
+    let code = "trait Queryable {\n    method filter(self, pred) -> any;\n    method execute() {\n        return self\n    }\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    \n}\n";
     ShapeTest::new(code)
         .at(pos(8, 4))
         .expect_completion("execute");
