@@ -33,6 +33,14 @@
 
 use assert_cmd::Command;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+// The matrix is run under low TasksMax cgroups; each child CLI creates a Tokio
+// runtime, so serialize only subprocess launches to keep diagnostics meaningful.
+fn cli_process_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn shape_cmd() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("shape"))
@@ -62,6 +70,9 @@ struct CapturedRun {
 
 fn run_shape(mode: &str, fixture: &str) -> CapturedRun {
     let path = fallback_fixture_path(fixture);
+    let _guard = cli_process_lock()
+        .lock()
+        .expect("JIT fallback diagnostic matrix process lock poisoned");
     let assertion = shape_cmd()
         .args(["run", "--mode", mode])
         .arg(&path)
@@ -353,6 +364,9 @@ fn fallback_negative_pin_clean_jit_does_not_emit_diagnostic() {
         .join("tests")
         .join("smokes")
         .join("s1.shape");
+    let _guard = cli_process_lock()
+        .lock()
+        .expect("JIT fallback diagnostic matrix process lock poisoned");
     let assertion = shape_cmd()
         .args(["run", "--mode", "jit"])
         .arg(&s1_path)
