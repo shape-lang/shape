@@ -10,50 +10,91 @@ use shape_runtime::engine::ShapeEngine;
 use shape_runtime::initialize_shared_runtime;
 use shape_wire::WireValue;
 
+fn vm_eval_result(source: &str) -> Result<WireValue, String> {
+    let _ = initialize_shared_runtime();
+    let mut engine = ShapeEngine::new().expect("engine creation failed");
+    let program = shape_ast::parse_program(source).map_err(|e| format!("parse failed: {e}"))?;
+    let mut vm = shape_vm::BytecodeExecutor::new();
+    vm.execute_program(&mut engine, &program)
+        .map(|result| result.wire_value)
+        .map_err(|e| e.to_string())
+}
+
+fn jit_eval_result(source: &str) -> Result<WireValue, String> {
+    let _ = initialize_shared_runtime();
+    let mut engine = ShapeEngine::new().expect("engine creation failed");
+    let program = shape_ast::parse_program(source).map_err(|e| format!("parse failed: {e}"))?;
+    let mut jit = JITExecutor {
+        bytecode_executor: shape_vm::BytecodeExecutor::new(),
+    };
+    jit.execute_program(&mut engine, &program)
+        .map(|result| result.wire_value)
+        .map_err(|e| e.to_string())
+}
+
 /// Run a Shape program through JIT and return the result as WireValue.
 fn jit_eval(source: &str) -> WireValue {
-    let _ = initialize_shared_runtime();
-    let mut engine = ShapeEngine::new().expect("engine creation failed");
-    let program = shape_ast::parse_program(source).expect("parse failed");
-    let mut jit = JITExecutor {
-        bytecode_executor: shape_vm::BytecodeExecutor::new(),
+    jit_eval_result(source).expect("JIT execution failed")
+}
+
+fn assert_jit_matches_vm(source: &str) -> WireValue {
+    let vm = vm_eval_result(source).expect("VM execution failed");
+    let jit = jit_eval_result(source).expect("JIT execution failed");
+    assert_eq!(
+        jit, vm,
+        "JIT result must match VM oracle\nsource:\n{source}\nVM: {vm:?}\nJIT: {jit:?}"
+    );
+    jit
+}
+
+fn assert_numeric_value(value: &WireValue, expected: f64) {
+    let actual = match value {
+        WireValue::Number(n) => *n,
+        WireValue::Integer(n) | WireValue::I64(n) | WireValue::Isize(n) => *n as f64,
+        WireValue::I8(n) => *n as f64,
+        WireValue::U8(n) => *n as f64,
+        WireValue::I16(n) => *n as f64,
+        WireValue::U16(n) => *n as f64,
+        WireValue::I32(n) => *n as f64,
+        WireValue::U32(n) => *n as f64,
+        WireValue::U64(n) | WireValue::Usize(n) => *n as f64,
+        WireValue::F32(n) => *n as f64,
+        other => panic!("Expected numeric value {expected}, got {other:?}"),
     };
-    let result = jit
-        .execute_program(&mut engine, &program)
-        .expect("JIT execution failed");
-    result.wire_value
+    assert!(
+        (actual - expected).abs() < 1e-6,
+        "Expected numeric value {expected}, got {value:?}"
+    );
 }
 
-/// Run through JIT, expect a Number result (not Integer — type form matters).
-fn jit_expect_number(source: &str, expected: f64) {
-    match jit_eval(source) {
-        WireValue::Number(n) => {
-            assert!(
-                (n - expected).abs() < 1e-6,
-                "Expected {}, got {}",
-                expected,
-                n
-            );
-        }
-        other => panic!("Expected Number({}), got {:?}", expected, other),
-    }
+/// Run through JIT, require VM type/value agreement, then check the scalar value.
+fn jit_expect_numeric(source: &str, expected: f64) {
+    let value = assert_jit_matches_vm(source);
+    assert_numeric_value(&value, expected);
 }
 
-// -- Preflight: all builtins now accepted (100% JIT coverage) -----------------
+fn assert_jit_error_matches_vm(source: &str, expected_substring: &str) {
+    let vm_err = vm_eval_result(source).expect_err("VM should reject this program");
+    let jit_err = jit_eval_result(source).expect_err("JIT should reject this program");
+    assert!(
+        vm_err.contains(expected_substring),
+        "VM error should contain {expected_substring:?}, got: {vm_err}"
+    );
+    assert!(
+        jit_err.contains(expected_substring),
+        "JIT error should contain {expected_substring:?}, got: {jit_err}"
+    );
+}
+
+// -- Preflight: imported builtins match the VM surface ------------------------
 
 #[test]
-fn jit_preflight_accepts_all_builtins() {
-    let _ = initialize_shared_runtime();
-    let mut engine = ShapeEngine::new().expect("engine creation failed");
-    let program = shape_ast::parse_program("toBool(1)").expect("parse failed");
-    let mut jit = JITExecutor {
-        bytecode_executor: shape_vm::BytecodeExecutor::new(),
-    };
-    let result = jit.execute_program(&mut engine, &program);
-    assert!(
-        result.is_ok(),
-        "All builtins should be accepted by JIT preflight (generic FFI trampoline)"
-    );
+fn jit_preflight_imported_builtin_rejection_matches_vm() {
+    // Strict-flip removed the old "all builtins are directly JIT accepted"
+    // assumption. `toBool(1)` is a stale conversion surface under the VM
+    // oracle too; keep the test as a preflight guard that JIT rejection stays
+    // on the same semantic path.
+    assert_jit_error_matches_vm("toBool(1)", "ToBool body migration");
 }
 
 // -- R6 top-level comptime exactly-once (VM == JIT) ---------------------------
@@ -87,8 +128,8 @@ fn jit_r6_top_level_comptime_detected_for_early_deopt() {
     // Pure (side-effect-free) top-level comptime is also detected — same
     // early-deopt path; the difference is only that its double-run was
     // previously invisible.
-    let pure = shape_ast::parse_program("let x = comptime { 3 + 4 }\nprint(x)\n")
-        .expect("parse failed");
+    let pure =
+        shape_ast::parse_program("let x = comptime { 3 + 4 }\nprint(x)\n").expect("parse failed");
     assert!(
         shape_vm::compiler::program_has_top_level_comptime(&pure),
         "pure top-level comptime must take the same early-deopt path"
@@ -146,82 +187,82 @@ fn jit_r6_top_level_comptime_result_matches_vm() {
 
 #[test]
 fn jit_add() {
-    jit_expect_number("10 + 5", 15.0);
+    jit_expect_numeric("10 + 5", 15.0);
 }
 
 #[test]
 fn jit_sub() {
-    jit_expect_number("10 - 3", 7.0);
+    jit_expect_numeric("10 - 3", 7.0);
 }
 
 #[test]
 fn jit_mul() {
-    jit_expect_number("6 * 7", 42.0);
+    jit_expect_numeric("6 * 7", 42.0);
 }
 
 #[test]
 fn jit_div() {
-    jit_expect_number("100 / 4", 25.0);
+    jit_expect_numeric("100 / 4", 25.0);
 }
 
 #[test]
 fn jit_mod() {
-    jit_expect_number("17 % 5", 2.0);
+    jit_expect_numeric("17 % 5", 2.0);
 }
 
 // -- Variables ----------------------------------------------------------------
 
 #[test]
 fn jit_local_variables() {
-    jit_expect_number("let x = 10\nlet y = 20\nx + y", 30.0);
+    jit_expect_numeric("let x = 10\nlet y = 20\nx + y", 30.0);
 }
 
 #[test]
 fn jit_variable_reassignment() {
-    jit_expect_number("let mut x = 1\nx = x + 1\nx = x + 1\nx", 3.0);
+    jit_expect_numeric("let mut x = 1\nx = x + 1\nx = x + 1\nx", 3.0);
 }
 
 // -- Comparisons (via if/else to get numeric result) --------------------------
 
 #[test]
 fn jit_comparison_gt() {
-    jit_expect_number("if 10 > 5 { 1 } else { 0 }", 1.0);
-    jit_expect_number("if 5 > 10 { 1 } else { 0 }", 0.0);
+    jit_expect_numeric("if 10 > 5 { 1 } else { 0 }", 1.0);
+    jit_expect_numeric("if 5 > 10 { 1 } else { 0 }", 0.0);
 }
 
 #[test]
 fn jit_comparison_lt() {
-    jit_expect_number("if 5 < 10 { 1 } else { 0 }", 1.0);
+    jit_expect_numeric("if 5 < 10 { 1 } else { 0 }", 1.0);
 }
 
 #[test]
 fn jit_comparison_eq() {
-    jit_expect_number("if 10 == 10 { 1 } else { 0 }", 1.0);
-    jit_expect_number("if 10 == 5 { 1 } else { 0 }", 0.0);
+    jit_expect_numeric("if 10 == 10 { 1 } else { 0 }", 1.0);
+    jit_expect_numeric("if 10 == 5 { 1 } else { 0 }", 0.0);
 }
 
 #[test]
 fn jit_comparison_neq() {
-    jit_expect_number("if 10 != 5 { 1 } else { 0 }", 1.0);
+    jit_expect_numeric("if 10 != 5 { 1 } else { 0 }", 1.0);
 }
 
 #[test]
 fn jit_comparison_gte_lte() {
-    jit_expect_number("if 10 >= 10 { 1 } else { 0 }", 1.0);
-    jit_expect_number("if 10 <= 10 { 1 } else { 0 }", 1.0);
+    jit_expect_numeric("if 10 >= 10 { 1 } else { 0 }", 1.0);
+    jit_expect_numeric("if 10 <= 10 { 1 } else { 0 }", 1.0);
 }
 
 // -- Control flow -------------------------------------------------------------
 
 #[test]
 fn jit_if_else() {
-    jit_expect_number("if true { 1 } else { 2 }", 1.0);
-    jit_expect_number("if false { 1 } else { 2 }", 2.0);
+    jit_expect_numeric("if true { 1 } else { 2 }", 1.0);
+    jit_expect_numeric("if false { 1 } else { 2 }", 2.0);
 }
 
 #[test]
 fn jit_while_loop() {
-    jit_expect_number(
+    jit_expect_numeric(
         "let mut x = 0\nlet mut i = 0\nwhile i < 10 { x = x + i\ni = i + 1 }\nx",
         45.0,
     );
@@ -229,7 +270,7 @@ fn jit_while_loop() {
 
 #[test]
 fn jit_while_sum_to_100() {
-    jit_expect_number(
+    jit_expect_numeric(
         "let mut sum = 0\nlet mut i = 1\nwhile i <= 100 {\n  sum = sum + i\n  i = i + 1\n}\nsum",
         5050.0,
     );
@@ -237,7 +278,7 @@ fn jit_while_sum_to_100() {
 
 #[test]
 fn jit_float_loop_mixed_bound_comparison() {
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 function sum_to(n) {
     let mut s = 0.0
@@ -258,12 +299,12 @@ sum_to(10)
 
 #[test]
 fn jit_function_call() {
-    jit_expect_number("function double(n) { return n * 2 }\ndouble(21)", 42.0);
+    jit_expect_numeric("function double(n) { return n * 2 }\ndouble(21)", 42.0);
 }
 
 #[test]
 fn jit_recursive_fibonacci() {
-    jit_expect_number(
+    jit_expect_numeric(
         "function fib(n) {\n  if n < 2 { return n }\n  return fib(n - 1) + fib(n - 2)\n}\nfib(20)",
         6765.0,
     );
@@ -273,18 +314,18 @@ fn jit_recursive_fibonacci() {
 
 #[test]
 fn jit_array_create_and_access() {
-    jit_expect_number("let arr = [10, 20, 30]\narr[1]", 20.0);
+    jit_expect_numeric("let arr = [10, 20, 30]\narr[1]", 20.0);
 }
 
 #[test]
 fn jit_array_length() {
-    jit_expect_number("let arr = [1, 2, 3, 4, 5]\narr.length", 5.0);
+    jit_expect_numeric("let arr = [1, 2, 3, 4, 5]\narr.length", 5.0);
 }
 
 #[test]
 fn jit_array_mutation_via_function() {
     // References only work on local variables passed as function arguments
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 function set_elem(&arr, idx, val) {
     arr[idx] = val
@@ -301,9 +342,8 @@ test_mutate()
 }
 
 #[test]
-#[should_panic(expected = "Expected 3")]
-fn jit_array_push_via_function() {
-    jit_expect_number(
+fn jit_array_push_via_function_rejected_like_vm() {
+    assert_jit_error_matches_vm(
         r#"
 function push_vals(&arr) {
     arr = arr.push(10)
@@ -317,7 +357,7 @@ function test_push() {
 }
 test_push()
 "#,
-        3.0,
+        "Method 'push' not found on type 'Array'",
     );
 }
 
@@ -328,7 +368,7 @@ fn jit_loop_comparison_fused() {
     // Tests that fused comparison-branch correctly handles loop conditions.
     // Phase 2 optimization fuses fcmp + boolean boxing + JumpIfFalse into
     // a single fcmp + brif. This test catches SSA/branch target errors.
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 let mut count = 0
 let mut i = 0
@@ -345,7 +385,7 @@ count
 #[test]
 fn jit_nested_loop_comparison() {
     // Nested loops stress-test the fused comparison optimization
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 let mut sum = 0
 let mut i = 0
@@ -364,11 +404,12 @@ sum
 }
 
 #[test]
-#[should_panic(expected = "Expected 5739")]
 fn jit_mandelbrot_mixed_numeric_loop_regression() {
     // Regression: generic numeric loop vars initialized inside outer loops
-    // must not be defaulted to int-unboxed when init type is unknown.
-    jit_expect_number(
+    // must not be defaulted to int-unboxed when init type is unknown. Under
+    // strict typing the count is an Integer; the harness checks that type form
+    // against the VM oracle instead of forcing Number.
+    jit_expect_numeric(
         r#"
 function mandelbrot(size) {
     let mut count = 0;
@@ -411,7 +452,7 @@ mandelbrot(120)
 fn jit_sieve_small() {
     // Small sieve of Eratosthenes -- exercises array read/write in loops.
     // This catches regressions in inline emit_array_data_ptr (JitArray offsets).
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 function mark_composites(&flags, p: int, n: int) {
     let mut j = p * p
@@ -455,19 +496,19 @@ sieve(1000)
 
 #[test]
 fn jit_floating_point_precision() {
-    jit_expect_number("0.1 + 0.2", 0.30000000000000004);
+    jit_expect_numeric("0.1 + 0.2", 0.30000000000000004);
 }
 
 #[test]
 fn jit_large_number_arithmetic() {
-    jit_expect_number("1000000 * 1000000", 1e12);
+    jit_expect_numeric("1000000 * 1000000", 1e12);
 }
 
 // -- Regression: Ackermann function (deep recursion + comparisons) ------------
 
 #[test]
 fn jit_ackermann() {
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 function ack(m, n) {
     if m == 0 { return n + 1 }
@@ -484,7 +525,7 @@ ack(3, 4)
 
 #[test]
 fn jit_fib_iterative() {
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 function fib_iter(n: int) -> int {
     let mut a = 0
@@ -509,7 +550,7 @@ fib_iter(30)
 #[test]
 fn jit_collatz() {
     // Collatz sequence length for n=27 (known to be 111 steps)
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 function collatz_len(n: int) -> int {
     let mut count = 0
@@ -540,7 +581,7 @@ fn jit_matrix_mul_small() {
     // (AA)[1][1] = 4*2+5*5+6*8 = 81
     // (AA)[2][2] = 7*3+8*6+9*9 = 150
     // trace = 30+81+150 = 261
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 function do_mul(&c_ref, a, b, n: int) {
     let mut i = 0
@@ -593,7 +634,7 @@ fn jit_int_unboxing_sum_local() {
     // Integer sum loop using function-scoped local variables.
     // Tests the prelude block pattern: NaN-boxed -> raw i64 at loop entry,
     // native iadd in loop body, raw i64 -> NaN-boxed at loop exit.
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 function sum_test() {
     let mut s = 0
@@ -614,7 +655,7 @@ sum_test()
 fn jit_int_unboxing_sum_module_binding() {
     // Same integer sum but with top-level (module binding) variables.
     // Tests module binding promotion to Cranelift Variables.
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 let mut s = 0
 let mut i = 0
@@ -632,7 +673,7 @@ s
 fn jit_int_unboxing_nested_loops() {
     // Nested loops: outer loop activates unboxing, inner loop must NOT
     // prematurely clear the outer loop's unboxed state.
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 function nested_sum() {
     let mut total = 0
@@ -659,7 +700,7 @@ fn jit_int_unboxing_fib_swap() {
     // `t` should NOT be unboxed because it flows to a plain assignment (b = t).
     // `i` is an induction variable (unboxed).
     // Tests that the accumulator filter correctly excludes `t`.
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 function fib_iter(n: int) -> int {
     let mut a = 0
@@ -684,7 +725,7 @@ fn jit_int_unboxing_mixed_local_types() {
     // Loop with both unboxed (i, count) and non-unboxed variables.
     // `flag` is a boolean variable -- must NOT be unboxed.
     // Tests that non-integer variables remain NaN-boxed.
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 function mixed_test() {
     let mut count = 0
@@ -707,7 +748,7 @@ mixed_test()
 fn jit_int_unboxing_nested_module_bindings() {
     // Top-level nested loops with module bindings.
     // Tests module binding promotion + nested loop depth tracking.
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 let mut total = 0
 let mut i = 0
@@ -729,7 +770,7 @@ total
 fn jit_int_unboxing_large_result() {
     // Large integer result to test precision preservation.
     // 100M sum = 4999999950000000 (exceeds 2^32, needs full i64).
-    jit_expect_number(
+    jit_expect_numeric(
         r#"
 function large_sum() {
     let mut s = 0
@@ -868,10 +909,9 @@ acc
 "#,
         );
         match jit_eval(&src) {
-            WireValue::String(s) => assert_eq!(
-                &s, expected,
-                "string method `{call}` JIT result mismatch"
-            ),
+            WireValue::String(s) => {
+                assert_eq!(&s, expected, "string method `{call}` JIT result mismatch")
+            }
             other => panic!("`{call}`: expected String(\"{expected}\"), got {other:?}"),
         }
     }
@@ -978,10 +1018,9 @@ acc
                 n, *expected,
                 "DateTime method body `{body}` JIT result mismatch"
             ),
-            WireValue::Number(n) => assert!(
-                (n - *expected as f64).abs() < 1e-6,
-                "`{body}`: got {n}"
-            ),
+            WireValue::Number(n) => {
+                assert!((n - *expected as f64).abs() < 1e-6, "`{body}`: got {n}")
+            }
             other => panic!("`{body}`: expected Integer({expected}), got {other:?}"),
         }
     }
@@ -1082,10 +1121,7 @@ fn jit_string_method_string_and_bool_results_match_vm() {
     // String-returning (charAt / slice) + bool-returning (contains) string
     // methods on a hot fn also deopt cleanly and match the VM. `charAt(1)` of
     // "hello" -> "e"; `slice(1,3)` -> "el"; `contains("ll")` -> true.
-    let str_cases: &[(&str, &str)] = &[
-        (r#"s.charAt(1)"#, "e"),
-        (r#"s.slice(1, 3)"#, "el"),
-    ];
+    let str_cases: &[(&str, &str)] = &[(r#"s.charAt(1)"#, "e"), (r#"s.slice(1, 3)"#, "el")];
     for (body, expected) in str_cases {
         let src = format!(
             r#"
