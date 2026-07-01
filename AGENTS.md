@@ -9,11 +9,13 @@ blocked). The supervisor reviews this before dispatching new work.
 
 Cargo/nextest verification is supervisor-tokened and serialized. Agents may do
 small, focused checks only when explicitly assigned, and every cargo/build/test
-command must set `CARGO_BUILD_JOBS=4`. Broad gates (`nextest`, `just test-all`,
-workspace tests, reduced/full suite reruns) are run by the supervisor one at a
-time under `systemd-run --user --wait --collect --pipe -p MemoryMax=24G -p
-MemorySwapMax=0 -p TasksMax=512`. This avoids the N-worktrees x cargo-fanout
-linker storm that OOMed the host during W64.
+command must set `CARGO_BUILD_JOBS=4`. Worker-side focused cargo checks, when
+explicitly allowed, must also run under `systemd-run --user --wait --collect
+--pipe -p MemoryMax=12G -p MemorySwapMax=0 -p TasksMax=256`. Broad gates
+(`nextest`, `just test-all`, workspace tests, reduced/full suite reruns) are
+run by the supervisor one at a time under `systemd-run --user --wait --collect
+--pipe -p MemoryMax=24G -p MemorySwapMax=0 -p TasksMax=512`. This avoids the
+N-worktrees x cargo-fanout linker storm that OOMed the host during W64.
 
 ## Why this exists
 
