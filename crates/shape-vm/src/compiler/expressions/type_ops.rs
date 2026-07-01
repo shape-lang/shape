@@ -3,6 +3,7 @@
 use crate::bytecode::{Constant, Instruction, NumericWidth, OpCode, Operand};
 use shape_ast::ast::{Expr, Spanned, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
+use shape_runtime::type_system::unification::annotations_equal;
 use shape_runtime::type_system::{BuiltinTypes, Type, annotation_to_string};
 use std::collections::HashSet;
 
@@ -167,6 +168,60 @@ impl BytecodeCompiler {
                 TypeAnnotation::Reference(source_name.into()),
                 TypeAnnotation::Reference(target_selector.into()),
             ],
+        }
+    }
+
+    fn annotation_matches_union_member(source: &TypeAnnotation, member: &TypeAnnotation) -> bool {
+        if annotations_equal(source, member) {
+            return true;
+        }
+
+        match (source, member) {
+            (TypeAnnotation::Basic(source), TypeAnnotation::Reference(member))
+            | (TypeAnnotation::Reference(member), TypeAnnotation::Basic(source)) => {
+                Self::canonical_try_into_name(source)
+                    == Self::canonical_try_into_name(member.as_str())
+            }
+            (
+                TypeAnnotation::Generic {
+                    name: source_name,
+                    args: source_args,
+                },
+                TypeAnnotation::Generic {
+                    name: member_name,
+                    args: member_args,
+                },
+            ) => {
+                Self::canonical_try_into_name(source_name)
+                    == Self::canonical_try_into_name(member_name)
+                    && source_args.len() == member_args.len()
+                    && source_args
+                        .iter()
+                        .zip(member_args.iter())
+                        .all(|(source_arg, member_arg)| {
+                            Self::annotation_matches_union_member(source_arg, member_arg)
+                        })
+            }
+            (TypeAnnotation::Array(source_inner), TypeAnnotation::Array(member_inner)) => {
+                Self::annotation_matches_union_member(source_inner, member_inner)
+            }
+            _ => false,
+        }
+    }
+
+    fn source_annotation_fits_union(
+        source: &TypeAnnotation,
+        union_members: &[TypeAnnotation],
+    ) -> bool {
+        match source {
+            TypeAnnotation::Union(source_members) => source_members.iter().all(|source_member| {
+                union_members.iter().any(|union_member| {
+                    Self::annotation_matches_union_member(source_member, union_member)
+                })
+            }),
+            _ => union_members
+                .iter()
+                .any(|member| Self::annotation_matches_union_member(source, member)),
         }
     }
 
@@ -912,6 +967,42 @@ impl BytecodeCompiler {
                 OpCode::Convert,
                 Some(Operand::Const(target)),
             ));
+            return Ok(());
+        }
+
+        // ── Static union widening: `expr as A | B` ──
+        //
+        // Union annotations are compile-time metadata. The runtime carrier stays
+        // the source expression's kinded slot, and downstream typed patterns
+        // (`n: int`, `s: string`) use TypeCheck against that slot kind. Emitting
+        // WrapTypeAnnotation here would re-enter the deleted ValueWord wrapper
+        // path; emitting Convert would require trait dispatch. Accept only when
+        // the compiler can prove the source annotation is a member/subset of the
+        // target union.
+        if let TypeAnnotation::Union(union_members) = type_annotation {
+            let source_annotation = self.resolve_source_annotation(expr).ok_or_else(|| {
+                ShapeError::SemanticError {
+                    message: format!(
+                        "Cannot widen expression to union `{}`: source type is not statically known",
+                        annotation_to_string(type_annotation)
+                    ),
+                    location: Some(self.span_to_source_location(expr.span())),
+                }
+            })?;
+
+            if !Self::source_annotation_fits_union(&source_annotation, union_members) {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Cannot widen `{}` to union `{}`: source type is not a union member",
+                        annotation_to_string(&source_annotation),
+                        annotation_to_string(type_annotation)
+                    ),
+                    location: Some(self.span_to_source_location(expr.span())),
+                });
+            }
+
+            self.compile_expr(expr)?;
+            self.last_expr_type_info = None;
             return Ok(());
         }
 
