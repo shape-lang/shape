@@ -118,10 +118,10 @@ impl<'a> ValueFormatter<'a> {
             // ── Inline scalars ──────────────────────────────────────────
             // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
             // §2.7.7/Q9, 2026-05-19): canonical absence-of-value
-            // discriminator — prints as `null` (mirror of the
-            // pre-disposition `(0, NativeKind::Bool)` sentinel's
-            // intended display surface).
-            NativeKind::Null => "null".to_string(),
+            // discriminator. Shape has no user-facing null sentinel;
+            // display renders absence as `None`. JSON/wire null remains
+            // a serialization-layer concern (`slot_to_wire`).
+            NativeKind::Null => "None".to_string(),
             NativeKind::Bool => slot.slot.as_bool().to_string(),
             NativeKind::Int8
             | NativeKind::NullableInt8
@@ -1489,6 +1489,15 @@ mod tests {
 
         let c2 = KindedSlot::from_char('λ');
         assert_eq!(formatter.format_kinded(&c2), "λ");
+    }
+
+    #[test]
+    fn test_format_bare_none_slot_renders_none() {
+        let reg = create_test_registry();
+        let formatter = ValueFormatter::new(&reg);
+
+        let none = KindedSlot::none();
+        assert_eq!(formatter.format_kinded(&none), "None");
     }
 
     #[test]
