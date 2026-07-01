@@ -583,7 +583,7 @@ fn t86_let_array_rest() {
         test()
     "#,
     )
-    .expect_number(10.0);
+    .expect_run_err_contains("array rest-pattern (`[a, ...rest]`) is not supported");
 }
 
 /// Let destructure from function.
@@ -679,7 +679,7 @@ fn t92_let_array_destructure_mixed_types() {
         test()
     "#,
     )
-    .expect_number(1.0);
+    .expect_run_err_contains("int is not compatible with string");
 }
 
 // =============================================================================

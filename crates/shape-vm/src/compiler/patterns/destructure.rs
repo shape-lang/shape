@@ -130,6 +130,133 @@ impl BytecodeCompiler {
         }
     }
 
+    fn destructure_field_type(
+        &self,
+        schema_id: u32,
+        field_key: &str,
+    ) -> Option<shape_runtime::type_schema::FieldType> {
+        let schema_field = self
+            .type_tracker
+            .schema_registry()
+            .get_by_id(schema_id)
+            .and_then(|schema| schema.get_field(field_key))
+            .map(|field| field.field_type.clone());
+        let contract_field = self
+            .type_tracker
+            .get_object_field_contract(schema_id, field_key)
+            .map(Self::type_annotation_to_field_type);
+
+        match (schema_field, contract_field) {
+            (Some(shape_runtime::type_schema::FieldType::Any), Some(contract)) => Some(contract),
+            (Some(schema), _) => Some(schema),
+            (None, Some(contract)) => Some(contract),
+            (None, None) => None,
+        }
+    }
+
+    fn seed_last_expr_schema_for_destructure(&mut self, schema_id: u32) {
+        let schema_name = self
+            .type_tracker
+            .schema_registry()
+            .get_by_id(schema_id)
+            .map(|schema| schema.name.clone())
+            .unwrap_or_else(|| format!("__typed_obj_{}", schema_id));
+        self.last_expr_schema = Some(schema_id);
+        self.last_expr_type_info = Some(VariableTypeInfo::known(schema_id, schema_name));
+    }
+
+    fn object_rest_schema_id_for_destructure(
+        &mut self,
+        base_schema_id: u32,
+        excluded_keys: &[String],
+    ) -> Option<u32> {
+        let mut excluded_sorted: Vec<&String> = excluded_keys.iter().collect();
+        excluded_sorted.sort();
+        let cache_name = format!(
+            "__sub_{}_exc_{}",
+            base_schema_id,
+            excluded_sorted
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        if let Some(schema) = self.type_tracker.schema_registry().get(&cache_name) {
+            return Some(schema.id);
+        }
+
+        let subset_fields = {
+            let registry = self.type_tracker.schema_registry();
+            registry.get_by_id(base_schema_id).map(|base| {
+                base.fields
+                    .iter()
+                    .filter(|field| !excluded_keys.contains(&field.name))
+                    .map(|field| (field.name.clone(), field.field_type.clone()))
+                    .collect::<Vec<_>>()
+            })
+        }?;
+
+        Some(
+            self.type_tracker
+                .schema_registry_mut()
+                .register_type(cache_name, subset_fields),
+        )
+    }
+
+    fn seed_last_expr_type_name_for_destructure(&mut self, type_name: String) {
+        self.last_expr_schema = self
+            .type_tracker
+            .schema_registry()
+            .get(type_name.as_str())
+            .map(|schema| schema.id);
+        self.last_expr_type_info = Some(match self.last_expr_schema {
+            Some(schema_id) => VariableTypeInfo::known(schema_id, type_name),
+            None => VariableTypeInfo::named(type_name),
+        });
+    }
+
+    fn array_element_type_name_from_info(type_info: &VariableTypeInfo) -> Option<String> {
+        let type_name = type_info.type_name.as_deref()?;
+        let inner = type_name
+            .strip_prefix("Vec<")
+            .or_else(|| type_name.strip_prefix("Array<"))?
+            .strip_suffix('>')?;
+        if inner == "unknown" || inner.contains(',') {
+            None
+        } else {
+            Some(inner.to_string())
+        }
+    }
+
+    fn seed_array_element_context_for_pattern(
+        &mut self,
+        pattern: &shape_ast::ast::DestructurePattern,
+        fallback_element_type: Option<&str>,
+    ) {
+        if let Some(type_name) = self.destructure_pattern_fact_type_name(pattern) {
+            self.seed_last_expr_type_name_for_destructure(type_name);
+        } else if let Some(type_name) = fallback_element_type {
+            self.seed_last_expr_type_name_for_destructure(type_name.to_string());
+        } else {
+            self.last_expr_schema = None;
+            self.last_expr_type_info = None;
+        }
+    }
+
+    fn destructure_pattern_fact_type_name(
+        &self,
+        pattern: &shape_ast::ast::DestructurePattern,
+    ) -> Option<String> {
+        use shape_ast::ast::DestructurePattern;
+        match pattern {
+            DestructurePattern::Identifier(_, span) => {
+                self.destructure_binding_fact_type_name(*span)
+            }
+            _ => None,
+        }
+    }
+
     /// WS-4 4b: propagate the schema field's type onto the
     /// `last_expr_*` tracker state BEFORE the recursive
     /// `compile_destructure_pattern*` call, so the destructured binding
@@ -151,13 +278,7 @@ impl BytecodeCompiler {
         self.last_expr_schema = None;
         self.last_expr_type_info = None;
 
-        let Some(field_type) = self
-            .type_tracker
-            .schema_registry()
-            .get_by_id(schema_id)
-            .and_then(|schema| schema.get_field(field_key))
-            .map(|field| field.field_type.clone())
-        else {
+        let Some(field_type) = self.destructure_field_type(schema_id, field_key) else {
             return;
         };
 
@@ -245,13 +366,7 @@ impl BytecodeCompiler {
         let DestructurePattern::Identifier(name, _) = field_pattern else {
             return;
         };
-        let Some(field_type) = self
-            .type_tracker
-            .schema_registry()
-            .get_by_id(schema_id)
-            .and_then(|schema| schema.get_field(field_key))
-            .map(|field| field.field_type.clone())
-        else {
+        let Some(field_type) = self.destructure_field_type(schema_id, field_key) else {
             return;
         };
         let type_name: Option<String> = match &field_type {
@@ -382,6 +497,10 @@ impl BytecodeCompiler {
                     "Cannot destructure non-array value as array",
                 )?;
 
+                let element_type_name = self
+                    .last_expr_type_info
+                    .as_ref()
+                    .and_then(Self::array_element_type_name_from_info);
                 for (index, pat) in patterns.iter().enumerate() {
                     if let DestructurePattern::Rest(inner) = pat {
                         self.emit(Instruction::new(
@@ -413,6 +532,7 @@ impl BytecodeCompiler {
                         Some(Operand::Const(idx_const)),
                     ));
                     self.emit(Instruction::simple(OpCode::GetProp));
+                    self.seed_array_element_context_for_pattern(pat, element_type_name.as_deref());
                     self.compile_destructure_pattern(pat)?;
                 }
 
@@ -478,11 +598,16 @@ impl BytecodeCompiler {
                 }
 
                 if let Some(rest) = rest_pattern {
+                    let rest_schema_id =
+                        self.object_rest_schema_id_for_destructure(schema_id, &rest_excluded);
                     self.emit(Instruction::new(
                         OpCode::LoadLocal,
                         Some(Operand::Local(value_local)),
                     ));
                     self.emit_object_rest(&rest_excluded, object_schema)?;
+                    if let Some(rest_schema_id) = rest_schema_id {
+                        self.seed_last_expr_schema_for_destructure(rest_schema_id);
+                    }
                     self.compile_destructure_pattern(rest)?;
                 }
 
@@ -624,6 +749,10 @@ impl BytecodeCompiler {
                     "Cannot destructure non-array value as array",
                 )?;
 
+                let element_type_name = self
+                    .last_expr_type_info
+                    .as_ref()
+                    .and_then(Self::array_element_type_name_from_info);
                 for (index, pat) in patterns.iter().enumerate() {
                     if let DestructurePattern::Rest(inner) = pat {
                         self.emit(Instruction::new(
@@ -655,6 +784,7 @@ impl BytecodeCompiler {
                         Some(Operand::Const(idx_const)),
                     ));
                     self.emit(Instruction::simple(OpCode::GetProp));
+                    self.seed_array_element_context_for_pattern(pat, element_type_name.as_deref());
                     self.compile_destructure_pattern_global(pat)?;
                 }
 
@@ -719,11 +849,16 @@ impl BytecodeCompiler {
                 }
 
                 if let Some(rest) = rest_pattern {
+                    let rest_schema_id =
+                        self.object_rest_schema_id_for_destructure(schema_id, &rest_excluded);
                     self.emit(Instruction::new(
                         OpCode::LoadLocal,
                         Some(Operand::Local(value_local)),
                     ));
                     self.emit_object_rest(&rest_excluded, object_schema)?;
+                    if let Some(rest_schema_id) = rest_schema_id {
+                        self.seed_last_expr_schema_for_destructure(rest_schema_id);
+                    }
                     self.compile_destructure_pattern_global(rest)?;
                 }
 
@@ -844,6 +979,10 @@ impl BytecodeCompiler {
                     "Cannot destructure non-array value as array",
                 )?;
 
+                let element_type_name = self
+                    .last_expr_type_info
+                    .as_ref()
+                    .and_then(Self::array_element_type_name_from_info);
                 for (index, pat) in patterns.iter().enumerate() {
                     if let DestructurePattern::Rest(inner) = pat {
                         self.emit(Instruction::new(
@@ -875,6 +1014,7 @@ impl BytecodeCompiler {
                         Some(Operand::Const(idx_const)),
                     ));
                     self.emit(Instruction::simple(OpCode::GetProp));
+                    self.seed_array_element_context_for_pattern(pat, element_type_name.as_deref());
                     self.compile_destructure_assignment(pat)?;
                 }
 
@@ -924,11 +1064,16 @@ impl BytecodeCompiler {
                 }
 
                 if let Some(rest) = rest_pattern {
+                    let rest_schema_id =
+                        self.object_rest_schema_id_for_destructure(schema_id, &rest_excluded);
                     self.emit(Instruction::new(
                         OpCode::LoadLocal,
                         Some(Operand::Local(value_local)),
                     ));
                     self.emit_object_rest(&rest_excluded, object_schema)?;
+                    if let Some(rest_schema_id) = rest_schema_id {
+                        self.seed_last_expr_schema_for_destructure(rest_schema_id);
+                    }
                     self.compile_destructure_assignment(rest)?;
                 }
 
