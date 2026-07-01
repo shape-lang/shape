@@ -5,6 +5,16 @@ Live state of parallel agents working on the strict-typing plan
 this file at every state transition (start of cluster, close of cluster,
 blocked). The supervisor reviews this before dispatching new work.
 
+## Resource policy
+
+Cargo/nextest verification is supervisor-tokened and serialized. Agents may do
+small, focused checks only when explicitly assigned, and every cargo/build/test
+command must set `CARGO_BUILD_JOBS=4`. Broad gates (`nextest`, `just test-all`,
+workspace tests, reduced/full suite reruns) are run by the supervisor one at a
+time, ideally under a per-command memory cgroup once the local `systemd-run`
+wrapper is validated. This avoids the N-worktrees x cargo-fanout linker storm
+that OOMed the host during W64.
+
 ## Why this exists
 
 Two-or-more agents working in parallel on `bulldozer-strictly-typed` can
