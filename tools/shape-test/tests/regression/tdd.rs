@@ -69,9 +69,9 @@ fn bug5_named_fn_as_argument() {
 fn bug6_closure_captures_local_let() {
     ShapeTest::new(
         r#"
-        fn make_adder() {
-            let base = 10
-            let f = |x| base + x
+        fn make_adder() -> (int) -> int {
+            let base: int = 10
+            let f = |x: int| { base + x }
             f
         }
         let f = make_adder()
@@ -141,11 +141,11 @@ fn bug10_nested_field_mutation() {
 fn bug11_push_through_ref() {
     ShapeTest::new(
         r#"
-        fn add_item(&arr, item) { arr = arr.push(item) }
-        let mut items = []
-        add_item(&items, 1)
-        add_item(&items, 2)
-        items.length
+        fn add_item(items: &mut Array<int>, item: int) { items.push(item) }
+        let mut items: Array<int> = []
+        add_item(&mut items, 1)
+        add_item(&mut items, 2)
+        items.len()
     "#,
     )
     .expect_number(2.0);
