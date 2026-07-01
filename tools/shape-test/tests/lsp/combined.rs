@@ -43,7 +43,11 @@ fn test_lsp_combined_string_hover_and_run() {
 #[test]
 fn test_lsp_combined_diagnostics_and_error() {
     let code = "fn bad(c) {\n  c = c + 1\n  return c\n}\nlet obj = { x: 1 }\nbad(obj)\nbad(1)\n";
-    ShapeTest::new(code).expect_semantic_diagnostic_contains("Could not solve type constraints");
+    ShapeTest::new(code)
+        .expect_semantic_diagnostic_contains(
+            "Type constraint violation: parameter at position 0 of 'bad' must be numeric",
+        )
+        .expect_semantic_diagnostic_contains("Cannot infer types for binary operation `Add`");
 }
 
 #[test]

@@ -136,16 +136,35 @@ fn semantic_diagnostic_combines_same_line_and_keeps_next_line() {
 fn function_param_numeric_constraint_rejects_object_callsites() {
     let code = "fn afunc(c) {\n  c = c + 1\n  return c\n}\nlet x = { x: 1 }\nprint(afunc(x))\nprint(afunc(1))\n";
     ShapeTest::new(code)
-        .expect_semantic_diagnostic_contains("Could not solve type constraints")
-        .expect_semantic_diagnostic_at_line_contains(1, "Could not solve type constraints");
+        .expect_semantic_diagnostic_contains(
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(
+            0,
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(
+            1,
+            "Cannot infer types for binary operation `Add`",
+        );
 }
 
 #[test]
 fn function_param_numeric_constraint_with_print_reports_on_numeric_line() {
     let code = "fn afunc(c) {\n  print(\"func called with \" + c)\n  c = c + 1\n  return c\n}\nlet x = { x: 1 }\nprint(afunc(x))\nprint(afunc(1))\n";
     ShapeTest::new(code)
-        .expect_semantic_diagnostic_contains("Could not solve type constraints")
-        .expect_semantic_diagnostic_at_line_contains(2, "Could not solve type constraints");
+        .expect_semantic_diagnostic_contains(
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(
+            0,
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(1, "Cannot apply `+` to a `string`")
+        .expect_semantic_diagnostic_at_line_contains(
+            2,
+            "Cannot infer types for binary operation `Add`",
+        );
 }
 
 #[test]
@@ -166,8 +185,18 @@ print(afunc(1))
 "#;
 
     ShapeTest::new(code)
-        .expect_semantic_diagnostic_contains("Could not solve type constraints")
-        .expect_semantic_diagnostic_at_line_contains(7, "Could not solve type constraints");
+        .expect_semantic_diagnostic_contains(
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(
+            0,
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(2, "Cannot apply `+` to a `string`")
+        .expect_semantic_diagnostic_at_line_contains(
+            7,
+            "Cannot infer types for binary operation `Add`",
+        );
 }
 
 #[test]
@@ -187,8 +216,15 @@ print(afunc(1))
 "#;
 
     ShapeTest::new(code)
-        .expect_semantic_diagnostic_contains("Could not solve type constraints")
-        .expect_semantic_diagnostic_at_line_contains(6, "Could not solve type constraints");
+        .expect_semantic_diagnostic_contains(
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(
+            0,
+            "Type constraint violation: parameter at position 0 of 'afunc' must be numeric",
+        )
+        .expect_semantic_diagnostic_at_line_contains(2, "Cannot apply `+` to a `string`")
+        .expect_semantic_diagnostic_at_line_contains(0, "Non-exhaustive match on 'object | int'");
 }
 
 #[test]
@@ -287,5 +323,9 @@ fn test_lsp_diagnostic_non_exhaustive_enum_match() {
 #[test]
 fn test_lsp_diagnostic_type_constraint_error() {
     let code = "fn add_one(c) {\n  c = c + 1\n  return c\n}\nlet obj = { x: 1 }\nprint(add_one(obj))\nprint(add_one(1))\n";
-    ShapeTest::new(code).expect_semantic_diagnostic_contains("Could not solve type constraints");
+    ShapeTest::new(code)
+        .expect_semantic_diagnostic_contains(
+            "Type constraint violation: parameter at position 0 of 'add_one' must be numeric",
+        )
+        .expect_semantic_diagnostic_contains("Cannot infer types for binary operation `Add`");
 }
