@@ -114,9 +114,10 @@ fn crypto_random_bytes_unique() {
     ShapeTest::new(
         r#"
         use std::core::crypto
-        let a = crypto::random_bytes(32)
-        let b = crypto::random_bytes(32)
-        print(a != b)
+        let a: string = crypto::random_bytes(32)
+        let b: string = crypto::random_bytes(32)
+        let different: bool = a != b
+        print(different)
     "#,
     )
     .with_stdlib()
@@ -128,9 +129,9 @@ fn crypto_ed25519_keypair_generation() {
     ShapeTest::new(
         r#"
         use std::core::crypto
-        let kp = crypto::ed25519_generate_keypair()
-        let pk = kp.get("public_key")
-        let sk = kp.get("secret_key")
+        let kp: {public_key: string, secret_key: string} = crypto::ed25519_generate_keypair()
+        let pk: string = kp.public_key
+        let sk: string = kp.secret_key
         print(pk.length())
         print(sk.length())
     "#,
@@ -144,8 +145,8 @@ fn crypto_ed25519_sign_produces_signature() {
     ShapeTest::new(
         r#"
         use std::core::crypto
-        let kp = crypto::ed25519_generate_keypair()
-        let sk = kp.get("secret_key")
+        let kp: {public_key: string, secret_key: string} = crypto::ed25519_generate_keypair()
+        let sk: string = kp.secret_key
         let sig = crypto::ed25519_sign("hello", sk)
         print(sig.length())
     "#,
@@ -159,9 +160,9 @@ fn crypto_ed25519_sign_verify_roundtrip() {
     ShapeTest::new(
         r#"
         use std::core::crypto
-        let kp = crypto::ed25519_generate_keypair()
-        let pk = kp.get("public_key")
-        let sk = kp.get("secret_key")
+        let kp: {public_key: string, secret_key: string} = crypto::ed25519_generate_keypair()
+        let pk: string = kp.public_key
+        let sk: string = kp.secret_key
         let msg = "test message"
         let sig = crypto::ed25519_sign(msg, sk)
         let valid = crypto::ed25519_verify(msg, sig, pk)
@@ -177,9 +178,9 @@ fn crypto_ed25519_verify_wrong_message() {
     ShapeTest::new(
         r#"
         use std::core::crypto
-        let kp = crypto::ed25519_generate_keypair()
-        let pk = kp.get("public_key")
-        let sk = kp.get("secret_key")
+        let kp: {public_key: string, secret_key: string} = crypto::ed25519_generate_keypair()
+        let pk: string = kp.public_key
+        let sk: string = kp.secret_key
         let sig = crypto::ed25519_sign("correct", sk)
         let valid = crypto::ed25519_verify("wrong", sig, pk)
         print(valid)
@@ -194,9 +195,10 @@ fn crypto_sha512_different_inputs() {
     ShapeTest::new(
         r#"
         use std::core::crypto
-        let h1 = crypto::sha512("hello")
-        let h2 = crypto::sha512("world")
-        print(h1 != h2)
+        let h1: string = crypto::sha512("hello")
+        let h2: string = crypto::sha512("world")
+        let different: bool = h1 != h2
+        print(different)
     "#,
     )
     .with_stdlib()
