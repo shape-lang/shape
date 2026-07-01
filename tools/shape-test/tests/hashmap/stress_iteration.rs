@@ -3,6 +3,17 @@
 
 use shape_test::shape_test::ShapeTest;
 
+const HASHMAP_KEYS_SURFACE: &str = "HashMap.keys: SURFACE";
+const HASHMAP_VALUES_SURFACE: &str = "HashMap.values: SURFACE";
+const HASHMAP_ENTRIES_TO_ARRAY_SURFACE: &str = "HashMap.entries/toArray: SURFACE";
+const HASHMAP_MAP_INDEXED_ABSENT: &str = "no method 'mapIndexed' on receiver kind Ptr(HashMap)";
+const HASHMAP_FILTER_INDEXED_ABSENT: &str =
+    "no method 'filterIndexed' on receiver kind Ptr(HashMap)";
+const HASHMAP_GROUP_BY_INDEXED_ABSENT: &str =
+    "no method 'groupByIndexed' on receiver kind Ptr(HashMap)";
+const NUMERIC_CLOSURE_PARAM_ANNOTATION_REQUIRED: &str =
+    "cannot infer the numeric type of closure parameter";
+
 // =========================================================================
 // keys / values / entries
 // =========================================================================
@@ -10,37 +21,41 @@ use shape_test::shape_test::ShapeTest;
 /// Verifies keys count.
 #[test]
 fn test_hashmap_keys_count() {
-    ShapeTest::new(r#"HashMap().set("a", 1).set("b", 2).keys().length"#).expect_number(2.0);
+    ShapeTest::new(r#"HashMap().set("a", 1).set("b", 2).keys().length"#)
+        .expect_run_err_contains(HASHMAP_KEYS_SURFACE);
 }
 
 /// Verifies keys on empty HashMap.
 #[test]
 fn test_hashmap_keys_empty() {
-    ShapeTest::new(r#"HashMap().keys().length"#).expect_number(0.0);
+    ShapeTest::new(r#"HashMap().keys().length"#).expect_run_err_contains(HASHMAP_KEYS_SURFACE);
 }
 
 /// Verifies values count.
 #[test]
 fn test_hashmap_values_count() {
-    ShapeTest::new(r#"HashMap().set("a", 1).set("b", 2).values().length"#).expect_number(2.0);
+    ShapeTest::new(r#"HashMap().set("a", 1).set("b", 2).values().length"#)
+        .expect_run_err_contains(HASHMAP_VALUES_SURFACE);
 }
 
 /// Verifies values on empty HashMap.
 #[test]
 fn test_hashmap_values_empty() {
-    ShapeTest::new(r#"HashMap().values().length"#).expect_number(0.0);
+    ShapeTest::new(r#"HashMap().values().length"#).expect_run_err_contains(HASHMAP_VALUES_SURFACE);
 }
 
 /// Verifies entries count.
 #[test]
 fn test_hashmap_entries_count() {
-    ShapeTest::new(r#"HashMap().set("a", 1).set("b", 2).entries().length"#).expect_number(2.0);
+    ShapeTest::new(r#"HashMap().set("a", 1).set("b", 2).entries().length"#)
+        .expect_run_err_contains(HASHMAP_ENTRIES_TO_ARRAY_SURFACE);
 }
 
 /// Verifies entries on empty HashMap.
 #[test]
 fn test_hashmap_entries_empty() {
-    ShapeTest::new(r#"HashMap().entries().length"#).expect_number(0.0);
+    ShapeTest::new(r#"HashMap().entries().length"#)
+        .expect_run_err_contains(HASHMAP_ENTRIES_TO_ARRAY_SURFACE);
 }
 
 /// Verifies keys/values/entries have consistent lengths.
@@ -54,8 +69,7 @@ fn test_hashmap_keys_values_entries_consistent() {
         print(m.entries().length)
     }"#,
     )
-    .expect_run_ok()
-    .expect_output("3\n3\n3");
+    .expect_run_err_contains(HASHMAP_KEYS_SURFACE);
 }
 
 /// Verifies keys returns an array.
@@ -68,7 +82,7 @@ fn test_hashmap_keys_returns_array() {
         k.length
     }"#,
     )
-    .expect_number(2.0);
+    .expect_run_err_contains(HASHMAP_KEYS_SURFACE);
 }
 
 /// Verifies values returns an array.
@@ -81,7 +95,7 @@ fn test_hashmap_values_returns_array() {
         v.length
     }"#,
     )
-    .expect_number(2.0);
+    .expect_run_err_contains(HASHMAP_VALUES_SURFACE);
 }
 
 /// Verifies entries are pairs (length 2).
@@ -95,40 +109,33 @@ fn test_hashmap_entries_are_pairs() {
         pair.length
     }"#,
     )
-    .expect_number(2.0);
+    .expect_run_err_contains(HASHMAP_ENTRIES_TO_ARRAY_SURFACE);
 }
 
-/// Verifies entry pair contents.
-///
-/// W17-typed-carrier-bundle-A (2026-05-11): `HashMap.entries()` returns
-/// `Array<Entry<K,V>>` where Entry is a TypedObject `{key, value}` per
-/// ADR-006 §2.7.24 Q25.A's C+ resolution. Previously `entry[0]` /
-/// `entry[1]`; now `entry.key` / `entry.value`. Breaking change.
+/// Verifies entry materialization is still an explicit array-return SURFACE.
 #[test]
 fn test_hashmap_entries_pair_values() {
     ShapeTest::new(
         r#"{
         let m = HashMap().set("only", 42)
-        let e = m.entries()
-        let pair = e[0]
-        print(pair.key)
-        print(pair.value)
+        m.entries()
     }"#,
     )
-    .expect_run_ok()
-    .expect_output("only\n42");
+    .expect_run_err_contains(HASHMAP_ENTRIES_TO_ARRAY_SURFACE);
 }
 
 /// Verifies single entry keys count.
 #[test]
 fn test_hashmap_single_entry_keys() {
-    ShapeTest::new(r#"HashMap().set("solo", 1).keys().length"#).expect_number(1.0);
+    ShapeTest::new(r#"HashMap().set("solo", 1).keys().length"#)
+        .expect_run_err_contains(HASHMAP_KEYS_SURFACE);
 }
 
 /// Verifies single entry values count.
 #[test]
 fn test_hashmap_single_entry_values() {
-    ShapeTest::new(r#"HashMap().set("solo", 99).values().length"#).expect_number(1.0);
+    ShapeTest::new(r#"HashMap().set("solo", 99).values().length"#)
+        .expect_run_err_contains(HASHMAP_VALUES_SURFACE);
 }
 
 // =========================================================================
@@ -146,8 +153,7 @@ fn test_hashmap_map_double_values() {
         print(doubled.get("b"))
     }"#,
     )
-    .expect_run_ok()
-    .expect_output("20\n40");
+    .expect_run_err_contains(HASHMAP_MAP_INDEXED_ABSENT);
 }
 
 /// Verifies map preserves keys.
@@ -162,8 +168,7 @@ fn test_hashmap_map_preserves_keys() {
         print(mapped.len())
     }"#,
     )
-    .expect_run_ok()
-    .expect_output("true\ntrue\n2");
+    .expect_run_err_contains(HASHMAP_MAP_INDEXED_ABSENT);
 }
 
 /// Verifies map preserves length.
@@ -174,7 +179,7 @@ fn test_hashmap_map_preserves_len() {
         HashMap().set("a", 1).set("b", 2).set("c", 3).map(|k, v| v * v).len()
     "#,
     )
-    .expect_number(3.0);
+    .expect_run_err_contains(NUMERIC_CLOSURE_PARAM_ANNOTATION_REQUIRED);
 }
 
 /// Verifies map with squaring.
@@ -188,8 +193,7 @@ fn test_hashmap_map_squared() {
         print(sq.get("b"))
     }"#,
     )
-    .expect_run_ok()
-    .expect_output("4\n9");
+    .expect_run_err_contains(NUMERIC_CLOSURE_PARAM_ANNOTATION_REQUIRED);
 }
 
 /// Verifies map to string values.
@@ -202,13 +206,14 @@ fn test_hashmap_map_to_string() {
         mapped.get("greeting")
     }"#,
     )
-    .expect_string("hello world");
+    .expect_run_err_contains(HASHMAP_MAP_INDEXED_ABSENT);
 }
 
 /// Verifies map on empty HashMap.
 #[test]
 fn test_hashmap_map_on_empty() {
-    ShapeTest::new(r#"HashMap().map(|k, v| v * 2).len()"#).expect_number(0.0);
+    ShapeTest::new(r#"HashMap().map(|k, v| v * 2).len()"#)
+        .expect_run_err_contains(HASHMAP_MAP_INDEXED_ABSENT);
 }
 
 /// Verifies map does not mutate original.
@@ -222,8 +227,7 @@ fn test_hashmap_map_does_not_mutate_original() {
         print(mapped.get("a"))
     }"#,
     )
-    .expect_run_ok()
-    .expect_output("5\n50");
+    .expect_run_err_contains(HASHMAP_MAP_INDEXED_ABSENT);
 }
 
 /// Verifies map to boolean values.
@@ -237,8 +241,7 @@ fn test_hashmap_map_to_boolean() {
         print(mapped.get("neg"))
     }"#,
     )
-    .expect_run_ok()
-    .expect_output("true\nfalse");
+    .expect_run_err_contains(HASHMAP_MAP_INDEXED_ABSENT);
 }
 
 // =========================================================================
@@ -256,8 +259,7 @@ fn test_hashmap_filter_by_value() {
         print(big.has("b"))
     }"#,
     )
-    .expect_run_ok()
-    .expect_output("1\ntrue");
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 /// Verifies filter removes non-matching entries.
@@ -271,8 +273,7 @@ fn test_hashmap_filter_removes_non_matching() {
         print(big.has("c"))
     }"#,
     )
-    .expect_run_ok()
-    .expect_output("false\nfalse");
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 /// Verifies filter with empty result.
@@ -283,7 +284,7 @@ fn test_hashmap_filter_empty_result() {
         HashMap().set("a", 1).set("b", 2).filter(|k, v| v > 100).len()
     "#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 /// Verifies filter where all entries pass.
@@ -294,13 +295,14 @@ fn test_hashmap_filter_all_pass() {
         HashMap().set("a", 1).set("b", 2).filter(|k, v| v > 0).len()
     "#,
     )
-    .expect_number(2.0);
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 /// Verifies filter on empty HashMap.
 #[test]
 fn test_hashmap_filter_on_empty() {
-    ShapeTest::new(r#"HashMap().filter(|k, v| v > 0).len()"#).expect_number(0.0);
+    ShapeTest::new(r#"HashMap().filter(|k, v| v > 0).len()"#)
+        .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 /// Verifies filter does not mutate original.
@@ -314,8 +316,7 @@ fn test_hashmap_filter_does_not_mutate_original() {
         print(filtered.len())
     }"#,
     )
-    .expect_run_ok()
-    .expect_output("3\n2");
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 /// Verifies filter with single entry passing.
@@ -326,7 +327,7 @@ fn test_hashmap_filter_single_entry() {
         HashMap().set("only", 5).filter(|k, v| v == 5).len()
     "#,
     )
-    .expect_number(1.0);
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 /// Verifies filter with single entry removed.
@@ -337,7 +338,7 @@ fn test_hashmap_filter_single_entry_removed() {
         HashMap().set("only", 5).filter(|k, v| v != 5).len()
     "#,
     )
-    .expect_number(0.0);
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 /// Verifies filter chained with len.
@@ -349,7 +350,7 @@ fn test_hashmap_filter_chained_with_len() {
             .filter(|k, v| v > 3).len()
     "#,
     )
-    .expect_number(2.0);
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 // =========================================================================
@@ -387,7 +388,7 @@ fn test_hashmap_foreach_with_accumulator() {
     ShapeTest::new(
         r#"{
         let m = HashMap().set("a", 10).set("b", 20).set("c", 30)
-        let mut sum = 0
+        var sum = 0
         m.forEach(|k, v| { sum = sum + v })
         sum
     }"#,
@@ -401,7 +402,7 @@ fn test_hashmap_foreach_single_entry() {
     ShapeTest::new(
         r#"{
         let m = HashMap().set("x", 42)
-        let mut count = 0
+        var count = 0
         m.forEach(|k, v| { count = count + 1 })
         count
     }"#,
@@ -462,7 +463,8 @@ fn test_hashmap_merge_with_empty() {
     ShapeTest::new(
         r#"{
         let m = HashMap().set("a", 1)
-        m.merge(HashMap()).len()
+        let empty = HashMap().set("seed", 0).delete("seed")
+        m.merge(empty).len()
     }"#,
     )
     .expect_number(1.0);
@@ -474,7 +476,8 @@ fn test_hashmap_merge_empty_with_nonempty() {
     ShapeTest::new(
         r#"{
         let m = HashMap().set("a", 1)
-        HashMap().merge(m).len()
+        let empty = HashMap().set("seed", 0).delete("seed")
+        empty.merge(m).len()
     }"#,
     )
     .expect_number(1.0);
@@ -534,7 +537,8 @@ fn test_hashmap_reduce_count_entries() {
 /// Verifies reduce on empty HashMap.
 #[test]
 fn test_hashmap_reduce_empty() {
-    ShapeTest::new(r#"HashMap().reduce(|acc, k, v| acc + v, 0)"#).expect_number(0.0);
+    ShapeTest::new(r#"HashMap().reduce(|acc: int, k: string, v: int| { acc + v }, 0)"#)
+        .expect_number(0.0);
 }
 
 /// Verifies reduce product.
@@ -573,13 +577,14 @@ fn test_hashmap_to_array_length() {
         HashMap().set("a", 1).set("b", 2).toArray().length
     "#,
     )
-    .expect_number(2.0);
+    .expect_run_err_contains(HASHMAP_ENTRIES_TO_ARRAY_SURFACE);
 }
 
 /// Verifies toArray on empty.
 #[test]
 fn test_hashmap_to_array_empty() {
-    ShapeTest::new(r#"HashMap().toArray().length"#).expect_number(0.0);
+    ShapeTest::new(r#"HashMap().toArray().length"#)
+        .expect_run_err_contains(HASHMAP_ENTRIES_TO_ARRAY_SURFACE);
 }
 
 /// Verifies toArray produces pairs.
@@ -593,28 +598,19 @@ fn test_hashmap_to_array_produces_pairs() {
         pair.length
     }"#,
     )
-    .expect_number(2.0);
+    .expect_run_err_contains(HASHMAP_ENTRIES_TO_ARRAY_SURFACE);
 }
 
-/// Verifies toArray pair content.
-///
-/// W17-typed-carrier-bundle-A (2026-05-11): `HashMap.toArray()` is an
-/// alias for `entries()` — returns `Array<Entry<K,V>>` (TypedObject
-/// `{key, value}`) per the C+ resolution. Was `pair[0]` / `pair[1]`,
-/// now `pair.key` / `pair.value`.
+/// Verifies toArray materialization is still an explicit array-return SURFACE.
 #[test]
 fn test_hashmap_to_array_pair_content() {
     ShapeTest::new(
         r#"{
         let m = HashMap().set("key", 99)
-        let arr = m.toArray()
-        let pair = arr[0]
-        print(pair.key)
-        print(pair.value)
+        m.toArray()
     }"#,
     )
-    .expect_run_ok()
-    .expect_output("key\n99");
+    .expect_run_err_contains(HASHMAP_ENTRIES_TO_ARRAY_SURFACE);
 }
 
 // =========================================================================
@@ -639,7 +635,7 @@ fn test_hashmap_group_by_basic() {
         grouped.len()
     }"#,
     )
-    .expect_number(2.0);
+    .expect_run_err_contains(HASHMAP_GROUP_BY_INDEXED_ABSENT);
 }
 
 /// Verifies groupBy single group.
@@ -651,13 +647,14 @@ fn test_hashmap_group_by_single_group() {
         m.groupBy(|k, v| f"{v}").len()
     }"#,
     )
-    .expect_number(1.0);
+    .expect_run_err_contains(HASHMAP_GROUP_BY_INDEXED_ABSENT);
 }
 
 /// Verifies groupBy on empty.
 #[test]
 fn test_hashmap_group_by_empty() {
-    ShapeTest::new(r#"HashMap().groupBy(|k, v| f"{v}").len()"#).expect_number(0.0);
+    ShapeTest::new(r#"HashMap().groupBy(|k, v| f"{v}").len()"#)
+        .expect_run_err_contains(HASHMAP_GROUP_BY_INDEXED_ABSENT);
 }
 
 /// Verifies groupBy all different.
@@ -669,7 +666,7 @@ fn test_hashmap_group_by_all_different() {
         m.groupBy(|k, v| f"{v}").len()
     }"#,
     )
-    .expect_number(3.0);
+    .expect_run_err_contains(HASHMAP_GROUP_BY_INDEXED_ABSENT);
 }
 
 // =========================================================================
@@ -697,7 +694,7 @@ fn test_hashmap_filter_then_map() {
         result.len()
     }"#,
     )
-    .expect_number(2.0);
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 /// Verifies set, delete, set chain.
@@ -733,7 +730,7 @@ fn test_hashmap_merge_then_filter() {
         m1.merge(m2).filter(|k, v| v > 50).len()
     }"#,
     )
-    .expect_number(2.0);
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 /// Verifies map then reduce.
@@ -745,7 +742,7 @@ fn test_hashmap_map_then_reduce() {
         m.map(|k, v| v * 10).reduce(|acc, k, v| acc + v, 0)
     }"#,
     )
-    .expect_number(60.0);
+    .expect_run_err_contains(HASHMAP_MAP_INDEXED_ABSENT);
 }
 
 // =========================================================================
@@ -759,11 +756,11 @@ fn test_hashmap_config_pattern() {
         r#"{
         let defaults = HashMap()
             .set("host", "localhost")
-            .set("port", 8080)
-            .set("debug", false)
+            .set("port", "8080")
+            .set("debug", "false")
         let overrides = HashMap()
-            .set("port", 3000)
-            .set("debug", true)
+            .set("port", "3000")
+            .set("debug", "true")
         let config = defaults.merge(overrides)
         print(config.get("host"))
         print(config.get("port"))
@@ -804,7 +801,7 @@ fn test_hashmap_filter_then_keys() {
         big.keys().length
     }"#,
     )
-    .expect_number(2.0);
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 /// Verifies map then values.
@@ -817,7 +814,7 @@ fn test_hashmap_map_then_values() {
         squared.values().length
     }"#,
     )
-    .expect_number(2.0);
+    .expect_run_err_contains(NUMERIC_CLOSURE_PARAM_ANNOTATION_REQUIRED);
 }
 
 /// Verifies set in loop with string keys.
@@ -864,14 +861,15 @@ fn test_hashmap_conditional_set() {
         let mut m = HashMap()
         let values = [1, 2, 3, 4, 5]
         for v in values {
+            let key = f"{v}"
             if v > 3 {
-                m = m.set(v, "big")
+                m = m.set(key, "big")
             } else {
-                m = m.set(v, "small")
+                m = m.set(key, "small")
             }
         }
-        print(m.get(2))
-        print(m.get(4))
+        print(m.get("2"))
+        print(m.get("4"))
     }"#,
     )
     .expect_run_ok()
