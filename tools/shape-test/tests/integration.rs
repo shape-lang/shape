@@ -146,7 +146,7 @@ print(result);
 
 #[test]
 fn trait_program_parses_and_has_tokens() {
-    let code = "trait Queryable {\n    filter(pred): any;\n    select(cols): any\n}\nimpl Queryable for MyTable {\n    method filter(pred) { self }\n    method select(cols) { self }\n}\n";
+    let code = "trait Queryable {\n    method filter(self, pred) -> any;\n    method select(self, cols) -> any\n}\nimpl Queryable for MyTable {\n    method filter(self, pred) { self }\n    method select(self, cols) { self }\n}\n";
     ShapeTest::new(code)
         .expect_parse_ok()
         .expect_semantic_tokens();
