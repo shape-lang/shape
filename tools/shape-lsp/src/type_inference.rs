@@ -1419,8 +1419,14 @@ pub fn infer_function_signatures(program: &Program) -> HashMap<String, FunctionT
                 return_type: None,
             });
 
-        if func_def.return_type.is_none() && info.return_type.is_none() {
-            info.return_type = infer_function_return_from_body_via_engine(func_def);
+        if func_def.return_type.is_none() {
+            if let Some(body_return) = infer_function_return_from_body_via_engine(func_def) {
+                // A tail `Err(...)` can leave the success type unresolved; keep
+                // the whole-function engine result when it knows more.
+                if !body_return.contains("unknown") {
+                    info.return_type = Some(body_return);
+                }
+            }
         }
 
         // Fully annotated signatures don't need inferred hints.
