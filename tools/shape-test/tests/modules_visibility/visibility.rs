@@ -166,7 +166,7 @@ fn test_vis_pub_let_destructure_rejected() {
 
 #[test]
 fn test_vis_module_inner_fn_not_accessible_on_outer() {
-    // Inner module fn should not be directly on outer — correctly errors
+    // Inner module fn should not be exported directly on outer.
     ShapeTest::new(
         r#"
         mod outer {
@@ -177,7 +177,7 @@ fn test_vis_module_inner_fn_not_accessible_on_outer() {
         outer::f()
     "#,
     )
-    .expect_run_err_contains("Invalid function call");
+    .expect_run_err_contains("module 'outer' has no export 'f'");
 }
 
 #[test]
