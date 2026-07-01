@@ -296,14 +296,14 @@ fn test_complex_deep_nested_struct_access() {
 fn test_complex_trait_impl_dispatch() {
     // BUG: Multiple extend blocks with same method name cause type confusion
     // Test single extend block dispatch.
-    // v0.3.3 c2a-cluster sub-fix (i): int literal `5` for `radius: number` is
-    // compile-rejected; migrated to `5.0`.
+    // Strict numeric literals: `radius: number` and arithmetic with
+    // `self.radius` must use number literals, not int literals.
     ShapeTest::new(
         r#"
         type Circle { radius: number }
         extend Circle {
-            method area() { 3 * self.radius * self.radius }
-            method circumference() { 2 * 3 * self.radius }
+            method area() { 3.0 * self.radius * self.radius }
+            method circumference() { 2.0 * 3.0 * self.radius }
         }
         let c = Circle { radius: 5.0 }
         print(c.area())
