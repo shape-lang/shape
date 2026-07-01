@@ -5,6 +5,185 @@ use crate::executor::result_option_carrier;
 // `invoke_module_fn_id_stub` surface.
 use shape_value::VMError;
 
+const JSON_VARIANT_NULL: i64 = 0;
+const JSON_VARIANT_BOOL: i64 = 1;
+const JSON_VARIANT_INT: i64 = 2;
+const JSON_VARIANT_NUMBER: i64 = 3;
+const JSON_VARIANT_STR: i64 = 4;
+const JSON_VARIANT_ARRAY: i64 = 5;
+const JSON_VARIANT_OBJECT: i64 = 6;
+
+// JsonValue return projection builds the runtime `Json` enum layout from the
+// registered std::core::json_value schema: __variant plus __payload_0.
+fn validate_json_schema(schema: &shape_runtime::type_schema::TypeSchema) -> Result<(), VMError> {
+    if schema.field_count() != 2
+        || schema.field_index("__variant") != Some(0)
+        || schema.field_index("__payload_0") != Some(1)
+    {
+        return Err(VMError::RuntimeError(format!(
+            "project_concrete_return: Json schema must be the std::core::json_value \
+             enum layout (__variant, __payload_0), got fields {:?}",
+            schema.field_names().collect::<Vec<_>>()
+        )));
+    }
+
+    let enum_info = schema.get_enum_info().ok_or_else(|| {
+        VMError::RuntimeError(
+            "project_concrete_return: registered `Json` schema is not an enum".to_string(),
+        )
+    })?;
+    for (name, id, payload_fields) in [
+        ("Null", JSON_VARIANT_NULL as u16, 0),
+        ("Bool", JSON_VARIANT_BOOL as u16, 1),
+        ("Int", JSON_VARIANT_INT as u16, 1),
+        ("Number", JSON_VARIANT_NUMBER as u16, 1),
+        ("Str", JSON_VARIANT_STR as u16, 1),
+        ("Array", JSON_VARIANT_ARRAY as u16, 1),
+        ("Object", JSON_VARIANT_OBJECT as u16, 1),
+    ] {
+        let Some(variant) = enum_info.variant_by_name(name) else {
+            return Err(VMError::RuntimeError(format!(
+                "project_concrete_return: Json schema missing variant `{name}`"
+            )));
+        };
+        if variant.id != id || variant.payload_fields != payload_fields {
+            return Err(VMError::RuntimeError(format!(
+                "project_concrete_return: Json::{name} schema mismatch \
+                 (id={}, payload_fields={}), expected (id={id}, payload_fields={payload_fields})",
+                variant.id, variant.payload_fields
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn project_json_value_return(
+    schemas: &shape_runtime::type_schema::TypeSchemaRegistry,
+    value: shape_runtime::json_value::JsonValue,
+) -> Result<shape_value::KindedSlot, VMError> {
+    let json_schema = schemas.get("Json").ok_or_else(|| {
+        VMError::RuntimeError(
+            "project_concrete_return: ConcreteReturn::JsonValue requires the \
+             registered `Json` enum schema from std::core::json_value"
+                .to_string(),
+        )
+    })?;
+    validate_json_schema(json_schema)?;
+    Ok(project_json_value_to_slot(value, json_schema.id as u64))
+}
+
+fn project_json_value_to_slot(
+    value: shape_runtime::json_value::JsonValue,
+    json_schema_id: u64,
+) -> shape_value::KindedSlot {
+    use shape_runtime::json_value::JsonValue;
+    use shape_value::heap_value::{
+        HashMapData, HashMapKindedRef, TypedObjectPtr, TypedObjectStorage,
+    };
+    use shape_value::v2::typed_array::{ELEM_TYPE_TYPED_OBJECT, TypedArray, stamp_elem_type};
+    use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
+    use std::sync::Arc;
+
+    if let JsonValue::Bytes(bytes) = value {
+        // The user-facing Json enum has no Bytes variant. Preserve the JSON
+        // wire convention used by json_value_to_serde_json: bytes are a JSON
+        // array of integer byte values.
+        let elems = bytes
+            .into_iter()
+            .map(|b| JsonValue::Int(b as i64))
+            .collect();
+        return project_json_value_to_slot(JsonValue::Array(elems), json_schema_id);
+    }
+
+    let (variant_id, payload_slot, payload_kind, payload_is_heap) = match value {
+        JsonValue::Null => (
+            JSON_VARIANT_NULL,
+            ValueSlot::from_raw(0),
+            NativeKind::Null,
+            false,
+        ),
+        JsonValue::Bool(b) => (
+            JSON_VARIANT_BOOL,
+            ValueSlot::from_bool(b),
+            NativeKind::Bool,
+            false,
+        ),
+        JsonValue::Int(i) => (
+            JSON_VARIANT_INT,
+            ValueSlot::from_int(i),
+            NativeKind::Int64,
+            false,
+        ),
+        JsonValue::Number(n) => (
+            JSON_VARIANT_NUMBER,
+            ValueSlot::from_number(n),
+            NativeKind::Float64,
+            false,
+        ),
+        JsonValue::String(s) => (
+            JSON_VARIANT_STR,
+            ValueSlot::from_string_arc(Arc::new(s)),
+            NativeKind::String,
+            true,
+        ),
+        JsonValue::Bytes(_) => unreachable!("handled before payload construction"),
+        JsonValue::Array(values) => {
+            let mut element_ptrs: Vec<*const TypedObjectStorage> = Vec::with_capacity(values.len());
+            for value in values {
+                let slot = project_json_value_to_slot(value, json_schema_id);
+                debug_assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+                let ptr = slot.raw() as *const TypedObjectStorage;
+                // Transfer the slot's typed-object share into the array
+                // element. The stamped typed-object array releases each
+                // element with TypedObjectStorage::release_elem.
+                std::mem::forget(slot);
+                element_ptrs.push(ptr);
+            }
+            let arr = TypedArray::<*const TypedObjectStorage>::from_slice(&element_ptrs);
+            unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_TYPED_OBJECT) };
+            (
+                JSON_VARIANT_ARRAY,
+                ValueSlot::from_raw(arr as usize as u64),
+                NativeKind::Ptr(HeapKind::TypedArray),
+                true,
+            )
+        }
+        JsonValue::Object(pairs) => {
+            let mut data: HashMapData<TypedObjectPtr> = HashMapData::new();
+            for (key, value) in pairs {
+                let slot = project_json_value_to_slot(value, json_schema_id);
+                debug_assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+                let ptr = slot.raw() as *const TypedObjectStorage;
+                // Transfer the slot share into the HashMap value wrapper;
+                // HashMapData owns and later drops the TypedObjectPtr.
+                std::mem::forget(slot);
+                unsafe {
+                    data.insert(key.as_str(), TypedObjectPtr::new(ptr));
+                }
+            }
+            let kref = HashMapKindedRef::TypedObject(Arc::new(data));
+            (
+                JSON_VARIANT_OBJECT,
+                ValueSlot::from_hashmap(Arc::new(kref)),
+                NativeKind::Ptr(HeapKind::HashMap),
+                true,
+            )
+        }
+    };
+
+    let heap_mask = if payload_is_heap { 1u64 << 1 } else { 0 };
+    let field_kinds: Arc<[NativeKind]> =
+        Arc::from(vec![NativeKind::Int64, payload_kind].into_boxed_slice());
+    let ptr = TypedObjectStorage::_new(
+        json_schema_id,
+        vec![ValueSlot::from_int(variant_id), payload_slot].into_boxed_slice(),
+        heap_mask,
+        field_kinds,
+    );
+    KindedSlot::from_typed_object_raw(ptr)
+}
+
 /// Project a single `ConcreteReturn` leaf into a `KindedSlot`.
 ///
 /// **STAGE K1 (2026-06-02).** The leaf projector shared by both
@@ -15,10 +194,10 @@ use shape_value::VMError;
 /// Every arm builds the typed-Arc carrier directly per ADR-005 §1 /
 /// ADR-006 §2.7 — no `Box<HeapValue>` wrapping, no value synthesis, no
 /// `ValueWord`. Arms that genuinely cannot project typed-Arc-direct at
-/// this boundary (`JsonValue` needs the runtime `Json` enum-construction
-/// subsystem; `HashMapStringHeapValue` needs the K3 `HashMapData`
+/// this boundary (`HashMapStringHeapValue` needs the K3 `HashMapData`
 /// kinded-value-track amendment) surface clean per §2.7.4.
 fn project_concrete_return(
+    schemas: &shape_runtime::type_schema::TypeSchemaRegistry,
     c: shape_runtime::typed_module_exports::ConcreteReturn,
 ) -> Result<shape_value::KindedSlot, VMError> {
     use shape_runtime::typed_module_exports::ConcreteReturn;
@@ -179,25 +358,19 @@ fn project_concrete_return(
             let kref = Arc::new(HashMapKindedRef::String(Arc::new(data)));
             Ok(KindedSlot::from_hashmap(kref))
         }
+        ConcreteReturn::JsonValue(value) => project_json_value_return(schemas, value),
 
         // ── Genuinely-cannot-go-typed-Arc-direct: SURFACE, do not shim ──
         //
-        // `JsonValue` projects to the runtime `Json` ADT
-        // (`stdlib-src/core/json_value.shape`), whose Array/Object
-        // variants are enum-tagged TypedObjects requiring the VM's
-        // schema-registry-backed enum-construction machinery + recursive
-        // descent — neither is reachable from a typed-Arc builder at this
-        // boundary. `HashMapStringHeapValue` is K3 territory: the
-        // polymorphic-value HashMap needs the ADR-006 `HashMapData`
-        // kinded-value-track amendment (a parallel `Vec<NativeKind>` over
-        // the values) before it can carry `Arc<HeapValue>` payloads
-        // without a Bool-default kind. Both surface clean rather than
-        // shim — a fabricated carrier here is exactly the deleted-pattern
-        // class CLAUDE.md §Forbidden refuses.
+        // `HashMapStringHeapValue` is K3 territory: the polymorphic-value
+        // HashMap needs the ADR-006 `HashMapData` kinded-value-track
+        // amendment (a parallel `Vec<NativeKind>` over the values) before
+        // it can carry `Arc<HeapValue>` payloads without a Bool-default
+        // kind. Surface clean rather than shim — a fabricated carrier here
+        // is exactly the deleted-pattern class CLAUDE.md §Forbidden refuses.
         other => Err(VMError::NotImplemented(format!(
             "project_concrete_return: ConcreteReturn::{:?} has no \
              typed-Arc-direct projection at the module-return boundary. \
-             JsonValue needs the runtime Json enum-construction subsystem; \
              HashMapStringHeapValue is K3 (pending the ADR-006 HashMapData \
              kinded-value-track amendment). SURFACED per ADR-006 §2.7.4 — \
              no shim. ",
@@ -222,6 +395,7 @@ fn project_concrete_return(
 /// array-of-heap-value producer and surfaces clean pending that landing.
 fn project_typed_return(
     schemas: &shape_runtime::type_schema::BuiltinSchemaIds,
+    registry: &shape_runtime::type_schema::TypeSchemaRegistry,
     tr: shape_runtime::typed_module_exports::TypedReturn,
 ) -> Result<shape_value::KindedSlot, VMError> {
     use shape_runtime::type_schema::typed_object_from_pairs;
@@ -233,13 +407,14 @@ fn project_typed_return(
     // share is moved into `typed_object_from_pairs`' slot list (which
     // clones-then-forgets per its construction contract).
     fn typed_object_from_concrete_pairs(
+        registry: &shape_runtime::type_schema::TypeSchemaRegistry,
         pairs: Vec<(String, ConcreteReturn)>,
     ) -> Result<KindedSlot, VMError> {
         // Project each leaf, holding the owned (name, KindedSlot) pairs so
         // the `&str` borrows the builder needs live across the call.
         let mut owned: Vec<(String, KindedSlot)> = Vec::with_capacity(pairs.len());
         for (name, c) in pairs {
-            owned.push((name, project_concrete_return(c)?));
+            owned.push((name, project_concrete_return(registry, c)?));
         }
         // `typed_object_from_pairs` borrows each `KindedSlot`, clones it
         // (one refcount bump moved into the slot list), then forgets the
@@ -258,37 +433,37 @@ fn project_typed_return(
     }
 
     match tr {
-        TypedReturn::Concrete(c) => project_concrete_return(c),
+        TypedReturn::Concrete(c) => project_concrete_return(registry, c),
 
         // ── Result / Option wrappers (ADR-006 §2.7.17 / Q18) ───────────
         TypedReturn::Ok(c) => {
-            let payload = project_concrete_return(c)?;
+            let payload = project_concrete_return(registry, c)?;
             Ok(result_option_carrier::build_ok(schemas, payload))
         }
         TypedReturn::Err(c) => {
-            let payload = project_concrete_return(c)?;
+            let payload = project_concrete_return(registry, c)?;
             Ok(result_option_carrier::build_err(schemas, payload))
         }
         TypedReturn::Some(c) => {
-            let payload = project_concrete_return(c)?;
+            let payload = project_concrete_return(registry, c)?;
             Ok(result_option_carrier::build_some(schemas, payload))
         }
         TypedReturn::None => Ok(result_option_carrier::build_none(schemas)),
 
         // ── Typed-object wrappers (TypedObjectStorage builder) ─────────
         TypedReturn::ObjectPairs(pairs) | TypedReturn::TypedObject(pairs) => {
-            typed_object_from_concrete_pairs(pairs)
+            typed_object_from_concrete_pairs(registry, pairs)
         }
         TypedReturn::SomeObjectPairs(pairs) => {
-            let payload = typed_object_from_concrete_pairs(pairs)?;
+            let payload = typed_object_from_concrete_pairs(registry, pairs)?;
             Ok(result_option_carrier::build_some(schemas, payload))
         }
         TypedReturn::OkObjectPairs(pairs) => {
-            let payload = typed_object_from_concrete_pairs(pairs)?;
+            let payload = typed_object_from_concrete_pairs(registry, pairs)?;
             Ok(result_option_carrier::build_ok(schemas, payload))
         }
         TypedReturn::ErrObjectPairs(pairs) => {
-            let payload = typed_object_from_concrete_pairs(pairs)?;
+            let payload = typed_object_from_concrete_pairs(registry, pairs)?;
             Ok(result_option_carrier::build_err(schemas, payload))
         }
 
@@ -443,7 +618,11 @@ impl VirtualMachine {
                 let raw_bits: Vec<u64> = args.iter().map(|s| s.slot().raw()).collect();
                 let typed_return =
                     (typed.invoke)(&raw_bits, &ctx).map_err(VMError::RuntimeError)?;
-                project_typed_return(&self.builtin_schemas, typed_return)
+                project_typed_return(
+                    &self.builtin_schemas,
+                    &self.program.type_schema_registry,
+                    typed_return,
+                )
             }
             shape_runtime::module_exports::ModuleFnEntry::TypedAsync(async_entry) => {
                 let raw_bits: Vec<u64> = args.iter().map(|s| s.slot().raw()).collect();
@@ -467,7 +646,11 @@ impl VirtualMachine {
                         ));
                     }
                 };
-                project_typed_return(&self.builtin_schemas, typed_return)
+                project_typed_return(
+                    &self.builtin_schemas,
+                    &self.program.type_schema_registry,
+                    typed_return,
+                )
             }
         }
     }
@@ -711,11 +894,10 @@ mod stage_k1_tests {
     /// Register a typed module-fn whose 0-arg body returns `tr`, then invoke
     /// it through the real `invoke_module_fn_id_stub` dispatch path. Returns
     /// the projected `KindedSlot`.
-    fn roundtrip_with_schemas(
+    fn invoke_typed_return(
+        vm: &mut VirtualMachine,
         tr: TypedReturn,
-    ) -> (KindedSlot, shape_runtime::type_schema::BuiltinSchemaIds) {
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        let schemas = vm.builtin_schemas.clone();
+    ) -> Result<KindedSlot, VMError> {
         let tr_cell = std::sync::Mutex::new(Some(tr));
         let tmf = TypedModuleFunction {
             invoke: Arc::new(move |_slots, _ctx| {
@@ -731,14 +913,37 @@ mod stage_k1_tests {
         };
         let entry = shape_runtime::module_exports::ModuleFnEntry::Typed(tmf);
         let fn_id = vm.register_module_fn_entry(entry);
-        let slot = vm
-            .invoke_module_fn_id_stub(fn_id, &[])
-            .expect("module-fn invocation projects cleanly");
+        vm.invoke_module_fn_id_stub(fn_id, &[])
+    }
+
+    fn roundtrip_with_schemas(
+        tr: TypedReturn,
+    ) -> (KindedSlot, shape_runtime::type_schema::BuiltinSchemaIds) {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        let schemas = vm.builtin_schemas.clone();
+        let slot = invoke_typed_return(&mut vm, tr).expect("module-fn invocation projects cleanly");
         (slot, schemas)
     }
 
     fn roundtrip(tr: TypedReturn) -> KindedSlot {
         roundtrip_with_schemas(tr).0
+    }
+
+    fn register_json_schema(vm: &mut VirtualMachine) -> u32 {
+        use shape_runtime::type_schema::EnumVariantInfo;
+
+        vm.program.type_schema_registry.register_enum_scoped(
+            "Json",
+            vec![
+                EnumVariantInfo::new("Null", JSON_VARIANT_NULL as u16, 0),
+                EnumVariantInfo::new("Bool", JSON_VARIANT_BOOL as u16, 1),
+                EnumVariantInfo::new("Int", JSON_VARIANT_INT as u16, 1),
+                EnumVariantInfo::new("Number", JSON_VARIANT_NUMBER as u16, 1),
+                EnumVariantInfo::new("Str", JSON_VARIANT_STR as u16, 1),
+                EnumVariantInfo::new("Array", JSON_VARIANT_ARRAY as u16, 1),
+                EnumVariantInfo::new("Object", JSON_VARIANT_OBJECT as u16, 1),
+            ],
+        )
     }
 
     #[test]
@@ -942,26 +1147,97 @@ mod stage_k1_tests {
     }
 
     #[test]
-    fn json_value_surfaces_clean() {
-        // SURFACED arm (genuine — needs the runtime Json enum-construction
-        // subsystem). Must NOT shim.
+    fn json_value_requires_registered_json_schema() {
         let mut vm = VirtualMachine::new(VMConfig::default());
-        let tr_cell = std::sync::Mutex::new(Some(TypedReturn::Ok(ConcreteReturn::JsonValue(
-            shape_runtime::json_value::JsonValue::Int(1),
-        ))));
-        let tmf = TypedModuleFunction {
-            invoke: Arc::new(move |_slots, _ctx| Ok(tr_cell.lock().unwrap().take().unwrap())),
-            return_type: ConcreteType::Any,
-            arg_types: vec![],
-            arg_kinds: vec![],
+        let err = invoke_typed_return(
+            &mut vm,
+            TypedReturn::Ok(ConcreteReturn::JsonValue(
+                shape_runtime::json_value::JsonValue::Int(1),
+            )),
+        )
+        .unwrap_err();
+        match err {
+            shape_value::VMError::RuntimeError(msg) => {
+                assert!(msg.contains("registered `Json` enum schema"), "{msg}");
+            }
+            other => panic!("JsonValue missing-schema must surface RuntimeError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_value_roundtrips_as_schema_backed_json_enum() {
+        use shape_runtime::json_value::JsonValue;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        let json_schema_id = register_json_schema(&mut vm) as u64;
+        let schemas = vm.builtin_schemas.clone();
+        let slot = invoke_typed_return(
+            &mut vm,
+            TypedReturn::Ok(ConcreteReturn::JsonValue(JsonValue::Object(vec![
+                ("name".to_string(), JsonValue::String("Ada".to_string())),
+                (
+                    "items".to_string(),
+                    JsonValue::Array(vec![JsonValue::Int(7), JsonValue::Bool(true)]),
+                ),
+            ]))),
+        )
+        .expect("JsonValue should project through registered Json schema");
+
+        let result = result_option_carrier::read_result(&schemas, &slot)
+            .unwrap()
+            .unwrap();
+        assert!(result.is_ok());
+        let payload = result.clone_payload().unwrap();
+        assert_eq!(payload.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+
+        let json_obj = payload.as_typed_object_storage().unwrap();
+        assert_eq!(json_obj.schema_id, json_schema_id);
+        assert_eq!(json_obj.slots()[0].raw() as i64, JSON_VARIANT_OBJECT);
+        assert_eq!(json_obj.field_kinds[0], NativeKind::Int64);
+        assert_eq!(json_obj.field_kinds[1], NativeKind::Ptr(HeapKind::HashMap));
+
+        let kref = json_obj.slots()[1].raw() as *const HashMapKindedRef;
+        let object_data = match unsafe { &*kref } {
+            HashMapKindedRef::TypedObject(data) => data,
+            other => panic!(
+                "expected Json::Object payload HashMapKindedRef::TypedObject, got {:?}",
+                std::mem::discriminant(other)
+            ),
         };
-        let fn_id =
-            vm.register_module_fn_entry(shape_runtime::module_exports::ModuleFnEntry::Typed(tmf));
-        let err = vm.invoke_module_fn_id_stub(fn_id, &[]).unwrap_err();
-        assert!(
-            matches!(err, shape_value::VMError::NotImplemented(_)),
-            "JsonValue must surface NotImplemented, got {err:?}"
+        assert_eq!(object_data.len(), 2);
+
+        let name_idx = object_data.get_index("name").unwrap();
+        let name_ptr = unsafe { (&*(*object_data.values).data.add(name_idx)).as_ptr() };
+        let name_storage = unsafe { &*name_ptr };
+        assert_eq!(name_storage.schema_id, json_schema_id);
+        assert_eq!(name_storage.slots()[0].raw() as i64, JSON_VARIANT_STR);
+        assert_eq!(name_storage.field_kinds[1], NativeKind::String);
+        let name = unsafe { &*(name_storage.slots()[1].raw() as *const String) };
+        assert_eq!(name.as_str(), "Ada");
+
+        let items_idx = object_data.get_index("items").unwrap();
+        let items_ptr = unsafe { (&*(*object_data.values).data.add(items_idx)).as_ptr() };
+        let items_storage = unsafe { &*items_ptr };
+        assert_eq!(items_storage.schema_id, json_schema_id);
+        assert_eq!(items_storage.slots()[0].raw() as i64, JSON_VARIANT_ARRAY);
+        assert_eq!(
+            items_storage.field_kinds[1],
+            NativeKind::Ptr(HeapKind::TypedArray)
         );
+
+        let arr = items_storage.slots()[1].raw() as *const TypedArray<*const TypedObjectStorage>;
+        let elems = unsafe { TypedArray::<*const TypedObjectStorage>::as_slice(arr) };
+        assert_eq!(elems.len(), 2);
+        let first = unsafe { &*elems[0] };
+        assert_eq!(first.slots()[0].raw() as i64, JSON_VARIANT_INT);
+        assert_eq!(first.slots()[1].raw() as i64, 7);
+        assert_eq!(first.field_kinds[1], NativeKind::Int64);
+        let second = unsafe { &*elems[1] };
+        assert_eq!(second.slots()[0].raw() as i64, JSON_VARIANT_BOOL);
+        assert_eq!(second.slots()[1].raw(), 1);
+        assert_eq!(second.field_kinds[1], NativeKind::Bool);
+
+        drop(payload);
     }
 
     #[test]
