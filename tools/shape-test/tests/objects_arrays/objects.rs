@@ -4,6 +4,14 @@
 
 use shape_test::shape_test::ShapeTest;
 
+const HASHMAP_KEYS_SURFACE: &str = "HashMap.keys: SURFACE";
+const HASHMAP_VALUES_SURFACE: &str = "HashMap.values: SURFACE";
+const HASHMAP_ENTRIES_TO_ARRAY_SURFACE: &str = "HashMap.entries/toArray: SURFACE";
+const HASHMAP_MAP_INDEXED_ABSENT: &str = "no method 'mapIndexed' on receiver kind Ptr(HashMap)";
+const HASHMAP_FILTER_INDEXED_ABSENT: &str =
+    "no method 'filterIndexed' on receiver kind Ptr(HashMap)";
+const HASHMAP_STRING_KEY_REQUIRED: &str = "HashMap key must be a string";
+
 // =====================================================================
 // Basic Objects
 // =====================================================================
@@ -360,7 +368,7 @@ fn hashmap_keys() {
     let code = r#"let m = HashMap()
 let m2 = m.set("a", 1).set("b", 2).set("c", 3)
 print(m2.keys())"#;
-    ShapeTest::new(code).expect_run_ok();
+    ShapeTest::new(code).expect_run_err_contains(HASHMAP_KEYS_SURFACE);
 }
 
 #[test]
@@ -368,7 +376,7 @@ fn hashmap_values() {
     let code = r#"let m = HashMap()
 let m2 = m.set("a", 1).set("b", 2).set("c", 3)
 print(m2.values())"#;
-    ShapeTest::new(code).expect_run_ok();
+    ShapeTest::new(code).expect_run_err_contains(HASHMAP_VALUES_SURFACE);
 }
 
 #[test]
@@ -376,7 +384,7 @@ fn hashmap_entries() {
     let code = r#"let m = HashMap()
 let m2 = m.set("a", 1).set("b", 2)
 print(m2.entries())"#;
-    ShapeTest::new(code).expect_run_ok();
+    ShapeTest::new(code).expect_run_err_contains(HASHMAP_ENTRIES_TO_ARRAY_SURFACE);
 }
 
 #[test]
@@ -386,7 +394,7 @@ fn hashmap_integer_keys() {
     .set(2, "silver")
     .set(3, "bronze")
 print(scores.get(1))"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("gold");
+    ShapeTest::new(code).expect_run_err_contains(HASHMAP_STRING_KEY_REQUIRED);
 }
 
 #[test]
@@ -438,7 +446,7 @@ fn hashmap_map() {
     let code = r#"let m = HashMap().set("a", 1).set("b", 2).set("c", 3)
 let doubled = m.map(|k, v| v * 2)
 print(doubled.get("b"))"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("4");
+    ShapeTest::new(code).expect_run_err_contains(HASHMAP_MAP_INDEXED_ABSENT);
 }
 
 #[test]
@@ -446,7 +454,7 @@ fn hashmap_filter() {
     let code = r#"let m = HashMap().set("a", 1).set("b", 2).set("c", 3)
 let big = m.filter(|k, v| v > 1)
 print(big.len())"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("2");
+    ShapeTest::new(code).expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 #[test]
@@ -506,9 +514,7 @@ let mut q = clone p
 q.x = 99
 print(p.x)
 print(q.x)"#;
-    ShapeTest::new(code)
-        .expect_run_ok()
-        .expect_output("1\n99");
+    ShapeTest::new(code).expect_run_ok().expect_output("1\n99");
 }
 
 #[test]
@@ -520,9 +526,7 @@ let mut b = clone a
 b.inner.v = 77
 print(a.inner.v)
 print(b.inner.v)"#;
-    ShapeTest::new(code)
-        .expect_run_ok()
-        .expect_output("5\n77");
+    ShapeTest::new(code).expect_run_ok().expect_output("5\n77");
 }
 
 #[test]
