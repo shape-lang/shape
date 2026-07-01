@@ -39,8 +39,8 @@
 //! map alongside builtins. A universal receiver key (`__Any__`) is used
 //! for methods available on every value (e.g. `toString`, `toJSON`).
 
-use crate::type_system::{BuiltinTypes, Type, TypeVar};
-use shape_ast::ast::TypeAnnotation;
+use crate::type_system::{BuiltinTypes, Type, TypeVar, tyvar_to_annotation};
+use shape_ast::ast::{ObjectTypeField, TypeAnnotation};
 use std::collections::HashMap;
 
 const UNIVERSAL_RECEIVER: &str = "__Any__";
@@ -69,6 +69,9 @@ pub enum TypeParamExpr {
         name: String,
         args: Vec<TypeParamExpr>,
     },
+    /// Structural object with field types that may reference receiver/method
+    /// params. Used for heap tuple fallbacks such as iterator enumerate pairs.
+    Object(Vec<(String, TypeParamExpr)>),
     /// Returns the same type as the receiver (used for filter, sort, etc.)
     SelfType,
     /// Resolves the inner expression to a container type, then projects out
@@ -1113,8 +1116,18 @@ impl MethodTable {
             // `int` (not number/unknown); a non-array receiver param yields a
             // placeholder var → SURFACE.
             ("flatten", 0, vec![], iter_of(E::ElementOf(Box::new(t())))),
-            // `enumerate()` -> Iterator<[int, T]> ([index, value] pairs).
-            ("enumerate", 0, vec![], iter_of(vec_of(t()))),
+            // `enumerate()` -> Iterator<{ _0: int, _1: T }>. Runtime
+            // materializes the pair as a TypedObject heap tuple fallback, not a
+            // nested array, so the static proof must require field access.
+            (
+                "enumerate",
+                0,
+                vec![],
+                iter_of(E::Object(vec![
+                    ("_0".to_string(), int()),
+                    ("_1".to_string(), t()),
+                ])),
+            ),
             ("chain", 0, vec![iter_of(t())], iter_of(t())),
             // --- eager terminals (consume the iterator) ---
             ("collect", 0, vec![], vec_of(t())),
@@ -1343,6 +1356,35 @@ impl MethodTable {
                     args: resolved_args,
                 }
             }
+            TypeParamExpr::Object(fields) => Type::Concrete(TypeAnnotation::Object(
+                fields
+                    .iter()
+                    .map(|(name, field_expr)| {
+                        let field_type = Self::resolve_type_param_expr(
+                            field_expr,
+                            receiver_type,
+                            receiver_params,
+                            method_vars,
+                        );
+                        ObjectTypeField {
+                            name: name.clone(),
+                            optional: false,
+                            type_annotation: Self::type_to_field_annotation(field_type),
+                            annotations: vec![],
+                        }
+                    })
+                    .collect(),
+            )),
+        }
+    }
+
+    fn type_to_field_annotation(ty: Type) -> TypeAnnotation {
+        match ty {
+            Type::Variable(var) => tyvar_to_annotation(&var),
+            Type::Constrained { var, .. } => tyvar_to_annotation(&var),
+            other => other
+                .to_annotation()
+                .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
         }
     }
 
@@ -1578,18 +1620,26 @@ mod tests {
         let mut tvgen = crate::type_system::TypeVarGen::new();
         let string_type = BuiltinTypes::string();
 
-        assert!(table
-            .resolve_method_call(&set_type, "len", &[], &mut tvgen)
-            .is_some());
-        assert!(table
-            .resolve_method_call(&set_type, "length", &[], &mut tvgen)
-            .is_some());
-        assert!(table
-            .resolve_method_call(&set_type, "includes", &[string_type], &mut tvgen)
-            .is_some());
-        assert!(table
-            .resolve_method_call(&set_type, "size", &[], &mut tvgen)
-            .is_none());
+        assert!(
+            table
+                .resolve_method_call(&set_type, "len", &[], &mut tvgen)
+                .is_some()
+        );
+        assert!(
+            table
+                .resolve_method_call(&set_type, "length", &[], &mut tvgen)
+                .is_some()
+        );
+        assert!(
+            table
+                .resolve_method_call(&set_type, "includes", &[string_type], &mut tvgen)
+                .is_some()
+        );
+        assert!(
+            table
+                .resolve_method_call(&set_type, "size", &[], &mut tvgen)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1726,6 +1776,48 @@ mod tests {
                 );
             }
             other => panic!("flatten must resolve to Iterator<int>, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_iterator_enumerate_resolves_typed_object_pair() {
+        let table = MethodTable::new();
+        let int = || Type::Concrete(TypeAnnotation::Basic("int".into()));
+        let iter_int = Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Iterator".into()))),
+            args: vec![int()],
+        };
+
+        let mut tvgen = crate::type_system::TypeVarGen::new();
+        let result = table
+            .resolve_method_call(&iter_int, "enumerate", &[], &mut tvgen)
+            .expect("enumerate resolves on Iterator<int>");
+
+        match result {
+            Type::Generic { base, args } => {
+                assert!(
+                    matches!(base.as_ref(), Type::Concrete(TypeAnnotation::Reference(n)) if n.as_str() == "Iterator"),
+                    "enumerate result base must be Iterator, got {base:?}"
+                );
+                assert_eq!(args.len(), 1, "Iterator carries one element arg");
+                match &args[0] {
+                    Type::Concrete(TypeAnnotation::Object(fields)) => {
+                        assert_eq!(fields.len(), 2);
+                        assert!(
+                            matches!(&fields[0].type_annotation, TypeAnnotation::Basic(n) if n == "int"),
+                            "enumerate index field must be int, got {:?}",
+                            fields[0].type_annotation
+                        );
+                        assert!(
+                            matches!(&fields[1].type_annotation, TypeAnnotation::Basic(n) if n == "int"),
+                            "enumerate value field must preserve T, got {:?}",
+                            fields[1].type_annotation
+                        );
+                    }
+                    other => panic!("enumerate element must be object pair, got {other:?}"),
+                }
+            }
+            other => panic!("enumerate must resolve to Iterator<object>, got {other:?}"),
         }
     }
 

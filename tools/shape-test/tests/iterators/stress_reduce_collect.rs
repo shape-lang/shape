@@ -96,7 +96,7 @@ fn test_iter_enumerate_collect() {
         {
             let arr = [10, 20, 30].iter().enumerate().collect()
             let pair0 = arr[0]
-            pair0[0] + pair0[1]
+            pair0._0 + pair0._1
         }
     "#,
     )
@@ -414,7 +414,7 @@ fn test_array_foreach() {
     ShapeTest::new(
         r#"
         fn test() -> int {
-            let mut total = 0
+            var total = 0
             [1, 2, 3].forEach(|x| { total = total + x })
             total
         }
