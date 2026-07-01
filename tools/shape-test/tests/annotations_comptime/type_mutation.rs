@@ -150,7 +150,8 @@ print(p.info())
     .expect_output("Alice (age 30)");
 }
 
-// TDD: comptime post handlers with annotation params error "too many annotation arguments"
+// Annotation params are not captured into generated method bodies; the
+// canonical undefined-variable diagnostic quotes the missing identifier.
 #[test]
 fn annotation_with_param_used_in_generated_method() {
     ShapeTest::new(
@@ -179,7 +180,7 @@ print(zero.get_or_default())
 print(nonzero.get_or_default())
 "#,
     )
-    .expect_run_err_contains("Undefined variable: default_val");
+    .expect_run_err_contains("Undefined variable: 'default_val'");
 }
 
 #[test]
