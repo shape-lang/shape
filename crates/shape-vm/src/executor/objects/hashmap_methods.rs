@@ -188,7 +188,7 @@ fn callable_ptr_to_slot(ptr: CallablePtr) -> KindedSlot {
 }
 
 fn named_function_callable_ptr(fn_id: u16) -> CallablePtr {
-    use shape_value::v2::closure_raw::{alloc_typed_closure, OwnedClosureBlock};
+    use shape_value::v2::closure_raw::{OwnedClosureBlock, alloc_typed_closure};
 
     let empty_layout = Arc::new(
         shape_value::v2::closure_layout::ClosureLayout::from_capture_types_with_native_kinds(
@@ -920,11 +920,7 @@ fn set_kinded(
                     let b = value_slot.as_bool().ok_or_else(|| {
                         type_error("HashMap.method set() -> Bool slot bits not a valid bool")
                     })?;
-                    if b {
-                        1
-                    } else {
-                        0
-                    }
+                    if b { 1 } else { 0 }
                 }
                 other => {
                     return Err(type_error(format!(
