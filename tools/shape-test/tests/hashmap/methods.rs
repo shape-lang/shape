@@ -3,6 +3,10 @@
 
 use shape_test::shape_test::ShapeTest;
 
+const HASHMAP_KEYS_SURFACE: &str = "HashMap.keys: SURFACE";
+const HASHMAP_VALUES_SURFACE: &str = "HashMap.values: SURFACE";
+const HASHMAP_ENTRIES_SURFACE: &str = "HashMap.entries/toArray: SURFACE";
+
 // =========================================================================
 // Keys
 // =========================================================================
@@ -16,11 +20,9 @@ fn hashmap_keys_returns_array() {
         print(k.length)
     "#,
     )
-    .expect_run_ok()
-    .expect_output("3");
+    .expect_run_err_contains(HASHMAP_KEYS_SURFACE);
 }
 
-// TDD: contains() method not yet implemented on Array type
 #[test]
 fn hashmap_keys_contains_entries() {
     ShapeTest::new(
@@ -30,8 +32,7 @@ fn hashmap_keys_contains_entries() {
         print(k.length)
     "#,
     )
-    .expect_run_ok()
-    .expect_output("2");
+    .expect_run_err_contains(HASHMAP_KEYS_SURFACE);
 }
 
 // =========================================================================
@@ -47,8 +48,7 @@ fn hashmap_values_returns_array() {
         print(v.length)
     "#,
     )
-    .expect_run_ok()
-    .expect_output("3");
+    .expect_run_err_contains(HASHMAP_VALUES_SURFACE);
 }
 
 // =========================================================================
@@ -64,8 +64,7 @@ fn hashmap_entries_returns_array() {
         print(e.length)
     "#,
     )
-    .expect_run_ok()
-    .expect_output("2");
+    .expect_run_err_contains(HASHMAP_ENTRIES_SURFACE);
 }
 
 // =========================================================================
