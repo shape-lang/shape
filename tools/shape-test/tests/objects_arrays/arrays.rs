@@ -38,15 +38,13 @@ fn array_indexing_last_element_by_index() {
 #[test]
 fn array_negative_indexing_last() {
     ShapeTest::new("let nums = [1, 2, 3, 4]\nprint(nums[-1])")
-        .expect_run_ok()
-        .expect_output("4");
+        .expect_run_err_contains("Index -1 out of bounds");
 }
 
 #[test]
 fn array_negative_indexing_second_last() {
     ShapeTest::new("let nums = [1, 2, 3, 4]\nprint(nums[-2])")
-        .expect_run_ok()
-        .expect_output("3");
+        .expect_run_err_contains("Index -2 out of bounds");
 }
 
 // =====================================================================
@@ -437,26 +435,23 @@ print(users[1].age)"#;
 
 #[test]
 fn array_negative_index_first_element() {
-    // [-4] on a 4-element array should give the first element
     let code = r#"let nums = [1, 2, 3, 4]
 print(nums[-4])"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("1");
+    ShapeTest::new(code).expect_run_err_contains("Index -4 out of bounds");
 }
 
 #[test]
 fn array_out_of_bounds_positive_returns_none() {
-    // Array out-of-bounds returns None in Shape (runtime prints "None").
     let code = r#"let nums = [1, 2, 3]
 print(nums[5])"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("None");
+    ShapeTest::new(code).expect_run_err_contains("Index 5 out of bounds");
 }
 
 #[test]
 fn array_out_of_bounds_negative_returns_none() {
-    // Array out-of-bounds returns None in Shape (runtime prints "None").
     let code = r#"let nums = [1, 2, 3]
 print(nums[-5])"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("None");
+    ShapeTest::new(code).expect_run_err_contains("Index -5 out of bounds");
 }
 
 // =====================================================================
@@ -525,9 +520,7 @@ print(names[1])"#;
 fn array_of_strings_negative_index() {
     let code = r#"let names = ["Alice", "Bob", "Charlie"]
 print(names[-1])"#;
-    ShapeTest::new(code)
-        .expect_run_ok()
-        .expect_output("Charlie");
+    ShapeTest::new(code).expect_run_err_contains("Index -1 out of bounds");
 }
 
 // =====================================================================
@@ -618,7 +611,8 @@ print(sum_pair([10, 20]))"#;
 #[test]
 fn clone_keyword_array_is_independent_copy() {
     // Mutating the clone must NOT affect the source.
-    let code = "let mut a = [1, 2, 3]\nlet mut b = clone a\nb.push(4)\nprint(a.len())\nprint(b.len())";
+    let code =
+        "let mut a = [1, 2, 3]\nlet mut b = clone a\nb.push(4)\nprint(a.len())\nprint(b.len())";
     ShapeTest::new(code)
         .expect_run_ok()
         .expect_output_contains("3")
@@ -659,16 +653,14 @@ fn clone_keyword_string_produces_value() {
 fn var_copy_array_push_does_not_mutate_source() {
     // Mutating the var copy via push must NOT touch the source.
     let code = "var data = [1, 2, 3]\nvar copy = data\ncopy.push(99)\nprint(data)\nprint(copy)";
-    ShapeTest::new(code)
-        .expect_output("[1, 2, 3]\n[1, 2, 3, 99]");
+    ShapeTest::new(code).expect_output("[1, 2, 3]\n[1, 2, 3, 99]");
 }
 
 #[test]
 fn var_copy_array_index_assign_does_not_mutate_source() {
     // Mutating the var copy via index-assign must NOT touch the source.
     let code = "var data = [1, 2, 3]\nvar copy = data\ncopy[0] = 9\nprint(data)\nprint(copy)";
-    ShapeTest::new(code)
-        .expect_output("[1, 2, 3]\n[9, 2, 3]");
+    ShapeTest::new(code).expect_output("[1, 2, 3]\n[9, 2, 3]");
 }
 
 #[test]
@@ -676,16 +668,14 @@ fn var_copy_array_push_in_function_is_independent() {
     // Same independence inside a function body (the local-slot ownership
     // path, distinct from the top-level module-binding path).
     let code = "fn main() {\n  var data = [1, 2, 3]\n  var copy = data\n  copy.push(99)\n  print(data)\n  print(copy)\n}\nmain()";
-    ShapeTest::new(code)
-        .expect_output("[1, 2, 3]\n[1, 2, 3, 99]");
+    ShapeTest::new(code).expect_output("[1, 2, 3]\n[1, 2, 3, 99]");
 }
 
 #[test]
 fn var_copy_struct_field_assign_does_not_mutate_source() {
     // Struct var-copy: field-assign on the copy must NOT touch the source.
     let code = "type Point { x: int, y: int }\nvar p = Point { x: 1, y: 2 }\nvar q = p\nq.x = 99\nprint(p.x)\nprint(q.x)";
-    ShapeTest::new(code)
-        .expect_output("1\n99");
+    ShapeTest::new(code).expect_output("1\n99");
 }
 
 #[test]
@@ -699,9 +689,9 @@ fn var_copy_scalar_is_copy_not_shared() {
 #[test]
 fn var_copy_explicit_clone_still_independent() {
     // Explicit `.clone()` must remain an independent copy (unchanged).
-    let code = "var data = [1, 2, 3]\nvar copy = data.clone()\ncopy.push(99)\nprint(data)\nprint(copy)";
-    ShapeTest::new(code)
-        .expect_output("[1, 2, 3]\n[1, 2, 3, 99]");
+    let code =
+        "var data = [1, 2, 3]\nvar copy = data.clone()\ncopy.push(99)\nprint(data)\nprint(copy)";
+    ShapeTest::new(code).expect_output("[1, 2, 3]\n[1, 2, 3, 99]");
 }
 
 #[test]
@@ -710,6 +700,5 @@ fn let_rebind_of_heap_still_moves_b0005() {
     // compile-time use-after-move (B0005). The var-copy DeepClone path must
     // NOT relax this — only `var` destinations auto-clone.
     let code = "let p = [1, 2, 3]\nlet q = p\nprint(p)";
-    ShapeTest::new(code)
-        .expect_run_err_contains("after it was moved");
+    ShapeTest::new(code).expect_run_err_contains("after it was moved");
 }
