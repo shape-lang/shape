@@ -51,7 +51,8 @@ fn adoptable_int_literal_value(expr: &Expr) -> Option<i128> {
 /// (`u8`, `i32`, …) and `decimal` keep their natural integer-literal lowering
 /// (the Int64 / Decimal bits are the correct slot payload there).
 fn is_number_type_name(name: &str) -> bool {
-    matches!(name, "number" | "f64" | "float")
+    let terminal = name.rsplit("::").next().unwrap_or(name);
+    matches!(terminal, "number" | "f64" | "float")
 }
 
 /// Rewrite a bare integer literal `expr` to a `Number` literal when it adopts a

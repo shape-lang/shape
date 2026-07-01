@@ -1645,8 +1645,15 @@ impl BytecodeCompiler {
         // (`self.function_defs`); a non-literal int arg is NOT rewritten — the
         // p-var `int`-is-not-`number` rejection stays a compile error. Only the
         // direct-named-user-function path resolves param annotations here; the
-        // indirect-callable path keeps the raw args.
-        let widened_args: Option<Vec<Expr>> = self.function_defs.get(name).and_then(|def| {
+        // imported stdlib-wrapper path resolves through its scoped module
+        // binding name; the indirect-callable path keeps the raw args.
+        let scoped_name = self.resolve_scoped_module_binding_name(name);
+        let param_widening_def = self.function_defs.get(name).or_else(|| {
+            scoped_name
+                .as_deref()
+                .and_then(|scoped| self.function_defs.get(scoped))
+        });
+        let widened_args: Option<Vec<Expr>> = param_widening_def.and_then(|def| {
             let params = &def.params;
             let mut changed = false;
             let mut out: Vec<Expr> = Vec::with_capacity(args.len());
@@ -2381,6 +2388,10 @@ impl BytecodeCompiler {
                         .collect()
                 });
 
+            let frame_widened_args =
+                self.widen_int_literal_args_for_call_frame(args, call_func_idx);
+            let args = frame_widened_args.as_deref().unwrap_or(args);
+
             // FIX B (strict-flip, THE GENERAL ROOT): an argument whose inferred
             // type is `unknown` / an unresolved free variable MUST NOT be
             // accepted into a parameter whose declared type is a PROVEN concrete
@@ -2802,6 +2813,37 @@ impl BytecodeCompiler {
         }
 
         Ok(())
+    }
+
+    fn widen_int_literal_args_for_call_frame(
+        &self,
+        args: &[Expr],
+        call_func_idx: usize,
+    ) -> Option<Vec<Expr>> {
+        let frame = self
+            .program
+            .functions
+            .get(call_func_idx)?
+            .frame_descriptor
+            .as_ref()?;
+        let mut changed = false;
+        let mut out = Vec::with_capacity(args.len());
+        for (idx, arg) in args.iter().enumerate() {
+            let widened = match frame.slots.get(idx).copied() {
+                Some(shape_value::NativeKind::Float64) => {
+                    crate::compiler::literal_widen::widen_int_literal_to_number(arg)
+                }
+                _ => None,
+            };
+            match widened {
+                Some(w) => {
+                    changed = true;
+                    out.push(w);
+                }
+                None => out.push(arg.clone()),
+            }
+        }
+        if changed { Some(out) } else { None }
     }
 
     fn direct_call_arg_concrete_type(&mut self, arg: &Expr) -> Option<ConcreteType> {
@@ -7424,6 +7466,43 @@ mod ws2_zeta_b_tests {
              let r = countdown(3, 42)\n",
         )
         .expect("self-recursive generic must compile");
+    }
+}
+
+#[cfg(test)]
+mod imported_wrapper_literal_adoption_tests {
+    use crate::test_utils::compile_with_prelude;
+
+    #[test]
+    fn imported_number_param_accepts_bare_int_literal() {
+        compile_with_prelude(
+            r#"
+            from std::core::math use { sin }
+            sin(2)
+            "#,
+        )
+        .expect("bare int literal should adopt imported wrapper's number parameter");
+    }
+
+    #[test]
+    fn imported_number_param_rejects_int_variable() {
+        let err = compile_with_prelude(
+            r#"
+            from std::core::math use { sin }
+            let x = 2
+            sin(x)
+            "#,
+        )
+        .expect_err("nonliteral int variable must not adopt a number parameter");
+        let msg = format!("{err:?}");
+        assert!(
+            (msg.contains("cannot safely pass argument #1")
+                && msg.contains("std::core::math::sin")
+                && msg.contains("Int64")
+                && msg.contains("Float64"))
+                || msg.contains("(number) -> number is not compatible with (int) -> number"),
+            "expected strict int-variable-to-number rejection, got: {msg}"
+        );
     }
 }
 
