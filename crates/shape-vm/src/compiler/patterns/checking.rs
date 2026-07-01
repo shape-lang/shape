@@ -101,16 +101,28 @@ impl BytecodeCompiler {
                     Some(Operand::Local(value_local)),
                 ));
 
-                // Bool patterns desugar to a direct conditional jump — no
-                // equality opcode at all. The loaded scrutinee is itself
-                // the bool we want to test.
-                if let Literal::Bool(b) = lit {
-                    let jump_op = if *b {
-                        OpCode::JumpIfFalse
-                    } else {
-                        OpCode::JumpIfTrue
-                    };
-                    let jump = self.emit_jump(jump_op, 0);
+                // Bool patterns are strict literal equality, not truthiness.
+                // `match 42 { true => ... }` must not match the bool arm just
+                // because the integer is truthy, so first require a bool-shaped
+                // scrutinee and then compare the bool bits.
+                if let Literal::Bool(_) = lit {
+                    let type_const = self.program.add_constant(Constant::TypeAnnotation(
+                        shape_ast::ast::TypeAnnotation::Basic("bool".to_string()),
+                    ));
+                    self.emit(Instruction::new(
+                        OpCode::TypeCheck,
+                        Some(Operand::Const(type_const)),
+                    ));
+                    let jump = self.emit_jump(OpCode::JumpIfFalse, 0);
+                    fail_jumps.push(jump);
+
+                    self.emit(Instruction::new(
+                        OpCode::LoadLocal,
+                        Some(Operand::Local(value_local)),
+                    ));
+                    self.compile_literal(lit)?;
+                    self.emit(Instruction::simple(OpCode::EqInt));
+                    let jump = self.emit_jump(OpCode::JumpIfFalse, 0);
                     fail_jumps.push(jump);
                     return Ok(());
                 }

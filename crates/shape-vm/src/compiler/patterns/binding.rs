@@ -128,15 +128,33 @@ impl BytecodeCompiler {
                 Ok(())
             }
             Pattern::Literal(lit) => {
-                // Stage 2.6.4: Bool patterns desugar to direct conditional
-                // jump (the scrutinee on top of stack IS the bool to test).
-                if let Literal::Bool(b) = lit {
-                    let jump_op = if *b {
-                        OpCode::JumpIfTrue
-                    } else {
-                        OpCode::JumpIfFalse
-                    };
-                    let ok_jump = self.emit_jump(jump_op, 0);
+                // Bool patterns are strict literal equality, not truthiness.
+                // Keep a copy of the scrutinee for equality after TypeCheck
+                // consumes the duplicate.
+                if let Literal::Bool(_) = lit {
+                    self.emit(Instruction::simple(OpCode::Dup));
+                    let type_const = self.program.add_constant(Constant::TypeAnnotation(
+                        shape_ast::ast::TypeAnnotation::Basic("bool".to_string()),
+                    ));
+                    self.emit(Instruction::new(
+                        OpCode::TypeCheck,
+                        Some(Operand::Const(type_const)),
+                    ));
+                    let ok_type_jump = self.emit_jump(OpCode::JumpIfTrue, 0);
+                    self.emit(Instruction::simple(OpCode::Pop));
+                    let msg = self
+                        .program
+                        .add_constant(Constant::String("Pattern match failed".to_string()));
+                    self.emit(Instruction::new(
+                        OpCode::PushConst,
+                        Some(Operand::Const(msg)),
+                    ));
+                    self.emit(Instruction::simple(OpCode::Throw));
+
+                    self.patch_jump(ok_type_jump);
+                    self.compile_literal(lit)?;
+                    self.emit(Instruction::simple(OpCode::EqInt));
+                    let ok_jump = self.emit_jump(OpCode::JumpIfTrue, 0);
                     let msg = self
                         .program
                         .add_constant(Constant::String("Pattern match failed".to_string()));

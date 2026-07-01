@@ -61,7 +61,7 @@ fn t103_match_null_against_none() {
     .expect_number(1.0);
 }
 
-/// Non-null value matches Some(v) pattern.
+/// Bare non-Option values cannot match Option constructor patterns.
 #[test]
 fn t104_match_non_null_against_some() {
     ShapeTest::new(
@@ -76,7 +76,7 @@ fn t104_match_non_null_against_some() {
         test()
     "#,
     )
-    .expect_number(42.0);
+    .expect_run_err_contains("requires an enum-typed value");
 }
 
 /// Match float literal.

@@ -8,8 +8,8 @@ use crate::compiler::BytecodeCompiler;
 
 /// Pick the typed equality opcode for a literal pattern operand. Returns
 /// `None` for literal kinds that need special-case handling at the call
-/// site (`Bool` desugars to direct conditional jump; `None` is a null
-/// check).
+/// site (`Bool` first proves a bool-shaped scrutinee before comparing
+/// bits; `None` is a null check).
 ///
 /// Stage 2.6.4: replaces generic `OpCode::EqDynamic` emission in pattern
 /// matching with type-specialized opcodes when the literal type is known.
@@ -27,7 +27,8 @@ pub(super) fn typed_eq_opcode_for_literal(lit: &Literal) -> Option<OpCode> {
         Literal::Number(_) => Some(OpCode::EqNumber),
         Literal::Decimal(_) => Some(OpCode::EqDecimal),
         Literal::String(_) => Some(OpCode::EqString),
-        // Bool: caller desugars to JumpIfFalse/JumpIfTrue (no equality op).
+        // Bool: caller emits TypeCheck(bool) before EqInt so truthy
+        // non-bool values do not match `true`.
         // None: caller desugars via Phase 2.6.5 null-sentinel rewrite.
         _ => None,
     }
