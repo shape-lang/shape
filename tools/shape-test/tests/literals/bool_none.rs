@@ -1,6 +1,6 @@
 //! Boolean and none literal tests.
 //!
-//! Covers: true, false, none (Shape's null).
+//! Covers: true, false, and None absence.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -40,6 +40,25 @@ fn none_literal() {
     ShapeTest::new(
         r#"
         let x = None
+        print(x)
+    "#,
+    )
+    .expect_run_ok()
+    .expect_output("None");
+}
+
+#[test]
+fn none_literal_top_level_print() {
+    ShapeTest::new("print(None)")
+        .expect_run_ok()
+        .expect_output("None");
+}
+
+#[test]
+fn typed_option_none_print() {
+    ShapeTest::new(
+        r#"
+        let x: Option<int> = None
         print(x)
     "#,
     )
