@@ -1952,10 +1952,14 @@ impl BytecodeCompiler {
             wrapper_func_idx,
             handler.handler_type.clone(),
         );
+        let declaring_module_path = compiled_ann
+            .name
+            .rsplit_once("::")
+            .map(|(module_path, _)| module_path.to_string());
         let func_def = FunctionDef {
             name: func_name.clone(),
             name_span: Span::DUMMY,
-            declaring_module_path: None,
+            declaring_module_path: declaring_module_path.clone(),
             doc_comment: None,
             params,
             return_type: handler.return_type.clone(),
@@ -1977,7 +1981,14 @@ impl BytecodeCompiler {
                 ),
                 location: None,
             })?;
-        self.compile_function(&func_def)?;
+        if let Some(module_path) = declaring_module_path {
+            self.module_scope_stack.push(module_path);
+            let result = self.compile_function(&func_def);
+            self.module_scope_stack.pop();
+            result?;
+        } else {
+            self.compile_function(&func_def)?;
+        }
         Ok(func_idx as u16)
     }
 

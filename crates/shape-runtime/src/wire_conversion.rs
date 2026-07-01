@@ -24,8 +24,8 @@
 //! - [`datatable_to_wire`] / [`datatable_to_ipc_bytes`] /
 //!   [`datatable_from_ipc_bytes`] — typed `DataTable` ↔ wire/IPC.
 
-use crate::marshal::MarshalError;
 use crate::Context;
+use crate::marshal::MarshalError;
 use arrow_ipc::{reader::FileReader, writer::FileWriter};
 use shape_value::heap_value::HeapValue;
 use shape_value::{DataTable, HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot};
@@ -271,6 +271,9 @@ fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
     if hk == HeapKind::TypedArray {
         return v2_typed_array_to_wire(bits, ctx);
     }
+    if hk == HeapKind::HashMap {
+        return hashmap_to_wire(bits, ctx);
+    }
     let ptr = bits as *const HeapValue;
     // SAFETY: NativeKind::Ptr(hk) contract — bits is a valid Arc<HeapValue> ptr.
     let hv = unsafe { &*ptr };
@@ -284,13 +287,117 @@ fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
     heap_value_to_wire(hv, ctx)
 }
 
+fn hashmap_to_wire(bits: u64, ctx: &Context) -> WireValue {
+    if bits == 0 {
+        return WireValue::Null;
+    }
+    // SAFETY: `KindedSlot::from_hashmap` stores
+    // `Arc::into_raw(Arc<HashMapKindedRef>)` and stamps
+    // `NativeKind::Ptr(HeapKind::HashMap)`.
+    let kref: &shape_value::heap_value::HashMapKindedRef =
+        unsafe { &*(bits as *const shape_value::heap_value::HashMapKindedRef) };
+    hashmap_kref_to_wire(kref, ctx)
+}
+
+fn hashmap_kref_to_wire(
+    kref: &shape_value::heap_value::HashMapKindedRef,
+    ctx: &Context,
+) -> WireValue {
+    use shape_value::heap_value::HashMapKindedRef;
+
+    match kref {
+        HashMapKindedRef::I64(arc) => {
+            hashmap_data_to_wire(arc.as_ref(), ctx, |v, _| WireValue::Integer(*v))
+        }
+        HashMapKindedRef::F64(arc) => {
+            hashmap_data_to_wire(arc.as_ref(), ctx, |v, _| WireValue::Number(*v))
+        }
+        HashMapKindedRef::Bool(arc) => {
+            hashmap_data_to_wire(arc.as_ref(), ctx, |v, _| WireValue::Bool(*v != 0))
+        }
+        HashMapKindedRef::Char(arc) => {
+            hashmap_data_to_wire(arc.as_ref(), ctx, |v, _| WireValue::String(v.to_string()))
+        }
+        HashMapKindedRef::String(arc) => hashmap_data_to_wire(arc.as_ref(), ctx, |ptr, _| {
+            // SAFETY: string-valued HashMapData elements are live StringObj
+            // pointers owned by the values typed array.
+            WireValue::String(
+                unsafe { shape_value::v2::string_obj::StringObj::as_str(*ptr) }.to_owned(),
+            )
+        }),
+        HashMapKindedRef::Decimal(arc) => hashmap_data_to_wire(arc.as_ref(), ctx, |ptr, _| {
+            // SAFETY: decimal-valued HashMapData elements are live DecimalObj
+            // pointers owned by the values typed array.
+            let value = unsafe { shape_value::v2::decimal_obj::DecimalObj::value(*ptr) };
+            WireValue::Number(
+                value
+                    .to_string()
+                    .parse()
+                    .expect("DecimalObj wire conversion to f64 failed"),
+            )
+        }),
+        HashMapKindedRef::TypedObject(arc) => {
+            hashmap_data_to_wire(arc.as_ref(), ctx, |ptr, ctx| {
+                slot_to_wire(
+                    ptr.as_ptr() as u64,
+                    NativeKind::Ptr(HeapKind::TypedObject),
+                    ctx,
+                )
+            })
+        }
+        HashMapKindedRef::TraitObject(arc) => hashmap_data_to_wire(arc.as_ref(), ctx, |_, _| {
+            WireValue::String("<trait_object:phase-2c>".to_string())
+        }),
+        HashMapKindedRef::Callable(arc) => hashmap_data_to_wire(arc.as_ref(), ctx, |ptr, ctx| {
+            if ptr.is_null() {
+                WireValue::Null
+            } else {
+                // SAFETY: callable HashMap elements are Arc<HeapValue> raw
+                // pointers wrapped by CallablePtr and borrowed here.
+                heap_value_to_wire(unsafe { &*ptr.as_ptr() }, ctx)
+            }
+        }),
+        HashMapKindedRef::HashMap(arc) => {
+            hashmap_data_to_wire(arc.as_ref(), ctx, hashmap_kref_to_wire)
+        }
+    }
+}
+
+fn hashmap_data_to_wire<V, F>(
+    data: &shape_value::heap_value::HashMapData<V>,
+    ctx: &Context,
+    mut value_to_wire: F,
+) -> WireValue
+where
+    V: shape_value::heap_value::HashMapValueElem,
+    F: FnMut(&V, &Context) -> WireValue,
+{
+    let mut map = BTreeMap::new();
+    for index in 0..data.len() {
+        let key = unsafe {
+            // SAFETY: HashMapData owns a live keys TypedArray with the same
+            // length as values; each key element is a live StringObj pointer.
+            let key_ptr =
+                shape_value::v2::typed_array::TypedArray::get_unchecked(data.keys, index as u32);
+            shape_value::v2::string_obj::StringObj::as_str(key_ptr).to_owned()
+        };
+        let value = unsafe {
+            // SAFETY: index is in-bounds for the values TypedArray by the
+            // HashMapData keys/values length invariant.
+            &*(*data.values).data.add(index)
+        };
+        map.insert(key, value_to_wire(value, ctx));
+    }
+    WireValue::Object(map)
+}
+
 fn v2_typed_array_to_wire(bits: u64, ctx: &Context) -> WireValue {
-    use shape_value::v2::heap_header::{HeapHeader, HEAP_KIND_V2_TYPED_ARRAY};
+    use shape_value::v2::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
     use shape_value::v2::typed_array::{
-        read_elem_type, TypedArray, TypedArrayElem, ELEM_TYPE_BOOL, ELEM_TYPE_CHAR,
-        ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I16, ELEM_TYPE_I32,
-        ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT,
-        ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_U8,
+        ELEM_TYPE_BOOL, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64,
+        ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING,
+        ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8,
+        ELEM_TYPE_U16, ELEM_TYPE_U32, TypedArray, TypedArrayElem, read_elem_type,
     };
     use shape_value::v2::{decimal_obj::DecimalObj, string_obj::StringObj};
 
@@ -588,11 +695,7 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
                 WireValue::String("<table_view:phase-2c>".to_string())
             }
         },
-        HeapValue::HashMap(_) => {
-            // Phase 1.B (ADR-006 §2.7.4): kind-threaded HashMap-to-wire
-            // serialization is the deferred Phase 2c marshal rebuild.
-            WireValue::String("<hashmap:phase-2c>".to_string())
-        }
+        HeapValue::HashMap(kref) => hashmap_kref_to_wire(kref, ctx),
         // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
         // 2026-05-10): Set wire serialization follows the same
         // phase-2c deferral shape as HashMap; surface as an opaque
@@ -1115,7 +1218,7 @@ mod typed_array_wire_tests {
     use super::slot_to_wire;
     use crate::context::ExecutionContext;
     use shape_value::v2::typed_array::{
-        release_v2_typed_array, stamp_elem_type, TypedArray, ELEM_TYPE_I64,
+        ELEM_TYPE_I64, TypedArray, release_v2_typed_array, stamp_elem_type,
     };
     use shape_value::{HeapKind, NativeKind};
     use shape_wire::WireValue;
@@ -1295,8 +1398,8 @@ mod l5_typed_object_result_option_wire_tests {
     use super::{slot_to_wire, wire_to_slot};
     use crate::context::ExecutionContext;
     use crate::type_schema::builtin_schemas::{
-        resolve_builtin_schema_ids, OPTION_PAYLOAD, OPTION_VARIANT_NONE, OPTION_VARIANT_SOME,
-        RESULT_VARIANT_ERR, RESULT_VARIANT_OK,
+        OPTION_PAYLOAD, OPTION_VARIANT_NONE, OPTION_VARIANT_SOME, RESULT_VARIANT_ERR,
+        RESULT_VARIANT_OK, resolve_builtin_schema_ids,
     };
     use shape_value::{HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot};
     use shape_wire::WireValue;

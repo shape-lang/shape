@@ -1947,15 +1947,24 @@ impl BytecodeCompiler {
                     if local_name != canonical_path {
                         let alias_idx = self.get_or_create_module_binding(local_name);
 
-                        // Copy type info from canonical to alias
-                        let module_schema_name = format!("__mod_{}", canonical_path);
-                        if self
-                            .type_tracker
-                            .schema_registry()
-                            .get(&module_schema_name)
-                            .is_some()
+                        // Copy type info from canonical to alias. Shape-source
+                        // modules get their object schema when the dependency
+                        // module is compiled; native modules use the synthetic
+                        // __mod_* schema registered above.
+                        if let Some(type_info) =
+                            self.type_tracker.get_binding_type(canonical_idx).cloned()
                         {
-                            self.set_module_binding_type_info(alias_idx, &module_schema_name);
+                            self.type_tracker.set_binding_type(alias_idx, type_info);
+                        } else {
+                            let module_schema_name = format!("__mod_{}", canonical_path);
+                            if self
+                                .type_tracker
+                                .schema_registry()
+                                .get(&module_schema_name)
+                                .is_some()
+                            {
+                                self.set_module_binding_type_info(alias_idx, &module_schema_name);
+                            }
                         }
 
                         // Emit runtime binding copy: alias = canonical
