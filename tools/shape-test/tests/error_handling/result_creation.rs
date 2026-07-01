@@ -77,7 +77,7 @@ fn some_constructor_wraps_integer() {
 fn none_value_prints() {
     ShapeTest::new("let missing = None\nprint(missing)")
         .expect_run_ok()
-        .expect_output_contains("null");
+        .expect_output_contains("None");
 }
 
 #[test]

@@ -325,19 +325,19 @@ print(f"while false result: {r3}")
 "#;
     ShapeTest::new(code)
         .expect_run_ok()
-        .expect_output("for result: 2\nfor array result: 60\nwhile false result: null");
+        .expect_output("for result: 2\nfor array result: 60\nwhile false result: None");
 }
 
-/// A while-false loop used as an expression returns null.
+/// A while-false loop used as an expression returns None.
 #[test]
 fn cf_21_while_loop_expression() {
     let code = r#"
 // Test 21: While loop as expression
 let result = while false { 42 }
 print(result)
-// Expected: null
+// Expected: None
 "#;
-    ShapeTest::new(code).expect_run_ok().expect_output("null");
+    ShapeTest::new(code).expect_run_ok().expect_output("None");
 }
 
 /// Break with a value returns that value from the loop expression.
