@@ -1,10 +1,42 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
+use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 fn shape_cmd() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("shape"))
+}
+
+fn has_shape_toml_ancestor(path: &Path) -> bool {
+    path.ancestors()
+        .any(|ancestor| ancestor.join("shape.toml").is_file())
+}
+
+fn tempdir_outside_shape_project() -> tempfile::TempDir {
+    let mut candidates = vec![std::env::temp_dir()];
+    candidates.extend([
+        PathBuf::from("/tmp"),
+        PathBuf::from("/var/tmp"),
+        PathBuf::from("/dev/shm"),
+    ]);
+
+    for candidate in candidates {
+        if !candidate.is_dir() || has_shape_toml_ancestor(&candidate) {
+            continue;
+        }
+
+        if let Ok(dir) = tempfile::Builder::new()
+            .prefix("shape-tree-no-project-")
+            .tempdir_in(&candidate)
+        {
+            if !has_shape_toml_ancestor(dir.path()) {
+                return dir;
+            }
+        }
+    }
+
+    panic!("unable to create a temporary directory outside any shape.toml ancestor");
 }
 
 #[test]
@@ -72,7 +104,7 @@ entry = "main.shape"
 
 #[test]
 fn tree_requires_project_context() {
-    let dir = tempdir().unwrap();
+    let dir = tempdir_outside_shape_project();
 
     shape_cmd()
         .current_dir(dir.path())
