@@ -1160,9 +1160,16 @@ impl TypeInferenceEngine {
                 }
             }
             DestructurePattern::Object(fields) => {
+                let consumed_keys: Vec<&str> = fields
+                    .iter()
+                    .filter(|field| !matches!(field.pattern, DestructurePattern::Rest(_)))
+                    .map(|field| field.key.as_str())
+                    .collect();
                 for field in fields {
                     if let DestructurePattern::Rest(inner) = &field.pattern {
-                        let rest_ty = Type::Concrete(TypeAnnotation::Object(Vec::new()));
+                        let rest_ty = self
+                            .destructure_object_rest_type(scrutinee, &consumed_keys)
+                            .unwrap_or_else(|| Type::Concrete(TypeAnnotation::Object(Vec::new())));
                         self.bind_function_param_pattern(inner, &rest_ty);
                         continue;
                     }
@@ -3191,21 +3198,23 @@ impl TypeInferenceEngine {
                 }
             }
             DestructurePattern::Object(fields) => {
-                // WS-4 4b: when the source type resolves to a known
-                // struct, bind each destructured field pattern to that
-                // field's declared type instead of a fresh type var.
-                // Mirrors the `Decomposition` arm above (which resolves
-                // field annotations) and keeps `let { x, y } = p`
-                // type-sound for downstream inference. Falls back to a
-                // fresh var when the source struct or the field is
-                // unknown.
-                let struct_name = self.struct_name_of_type(&fallback_type);
+                let consumed_keys: Vec<&str> = fields
+                    .iter()
+                    .filter(|field| !matches!(field.pattern, DestructurePattern::Rest(_)))
+                    .map(|field| field.key.as_str())
+                    .collect();
                 for field in fields {
-                    let resolved = struct_name.as_deref().and_then(|name| {
-                        self.struct_field_annotation(name, &field.key)
-                            .map(|ann| self.resolve_type_annotation(&ann))
-                    });
-                    let field_type = resolved.unwrap_or_else(|| self.fresh_type_var());
+                    if let DestructurePattern::Rest(inner) = &field.pattern {
+                        let rest_type = self
+                            .destructure_object_rest_type(&fallback_type, &consumed_keys)
+                            .unwrap_or_else(|| Type::Concrete(TypeAnnotation::Object(Vec::new())));
+                        self.bind_decl_pattern(inner, rest_type);
+                        continue;
+                    }
+
+                    let field_type = self
+                        .destructure_object_field_type(&fallback_type, &field.key)
+                        .unwrap_or_else(|| self.fresh_type_var());
                     self.bind_decl_pattern(&field.pattern, field_type);
                 }
             }
@@ -3229,6 +3238,51 @@ impl TypeInferenceEngine {
                 args.into_iter().next()
             }
             _ => None,
+        }
+    }
+
+    fn destructure_object_rest_type(
+        &self,
+        scrutinee: &Type,
+        consumed_keys: &[&str],
+    ) -> Option<Type> {
+        let fields = self.destructure_object_fields(scrutinee)?;
+        let rest_fields = fields
+            .into_iter()
+            .filter(|field| !consumed_keys.iter().any(|key| *key == field.name.as_str()))
+            .collect();
+        Some(Type::Concrete(TypeAnnotation::Object(rest_fields)))
+    }
+
+    fn destructure_object_fields(
+        &self,
+        scrutinee: &Type,
+    ) -> Option<Vec<shape_ast::ast::ObjectTypeField>> {
+        let resolved = self.solver.unifier().apply_substitutions(scrutinee);
+        match resolved {
+            Type::Concrete(TypeAnnotation::Object(fields)) => Some(fields),
+            other => {
+                let struct_name = self
+                    .struct_name_of_type(&other)
+                    .or_else(|| self.struct_name_of_type(scrutinee))?;
+                let struct_def = self.struct_type_defs.get(&struct_name)?;
+                Some(
+                    struct_def
+                        .fields
+                        .iter()
+                        .filter(|field| !field.is_comptime)
+                        .map(|field| shape_ast::ast::ObjectTypeField {
+                            name: field.name.clone(),
+                            optional: field.default_value.is_some(),
+                            type_annotation: self
+                                .resolve_type_annotation(&field.type_annotation)
+                                .to_annotation()
+                                .unwrap_or_else(|| field.type_annotation.clone()),
+                            annotations: vec![],
+                        })
+                        .collect(),
+                )
+            }
         }
     }
 
