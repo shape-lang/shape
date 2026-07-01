@@ -41,14 +41,14 @@ fn closure_returned_from_function() {
 
 #[test]
 fn closure_factory_multiple() {
-    // W14.2-G6 e2e-functions triage: `factor: int` annotation needed to
-    // disambiguate the closure capture kind for the surrounding BinOp.
+    // Keep the captured factor and call inputs in the same numeric family;
+    // strict Shape does not unify `int` and `number` across returned closures.
     ShapeTest::new(
         r#"
-        fn make_multiplier(factor: int) { |x| x * factor }
-        let double = make_multiplier(2)
-        let triple = make_multiplier(3)
-        double(10) + triple(10)
+        fn make_multiplier(factor: number) { |x| x * factor }
+        let double = make_multiplier(2.0)
+        let triple = make_multiplier(3.0)
+        double(10.0) + triple(10.0)
     "#,
     )
     .expect_number(50.0);

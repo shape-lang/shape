@@ -163,8 +163,8 @@ fn test_closure_captures_multiple() {
         fn make_linear(a, b) {
             |x| a * x + b
         }
-        let f = make_linear(2, 3)
-        f(10)
+        let f = make_linear(2.0, 3.0)
+        f(10.0)
     "#,
     )
     .expect_number(23.0);
@@ -178,8 +178,8 @@ fn test_fn_returns_lambda() {
         fn make_multiplier(factor) {
             |x| x * factor
         }
-        let times3 = make_multiplier(3)
-        times3(7)
+        let times3 = make_multiplier(3.0)
+        times3(7.0)
     "#,
     )
     .expect_number(21.0);

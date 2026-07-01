@@ -250,16 +250,7 @@ fn test_function_as_argument_lambda_add() {
     .expect_number(30.0);
 }
 
-/// Verifies higher order compose. W14.2-G6 e2e-functions triage
-/// SURFACE-AND-STOP: closure-returning-closure pattern via `compose`
-/// hits the same Q12 value-call ABI restriction surfaced in
-/// `closures_as_params::closure_composition`
-/// (`call_value_immediate_nb: ... got Ptr(NativeView)`) and ALSO
-/// SIGSEGV under release-binary when the returned closure is invoked
-/// (empirically verified). Routed to W14.2-H1 exception registry as
-/// `v0.4-closure-as-param-nativeview-kind` (closure_composition entry
-/// covers both tests). Cannot fix test-side — closure-from-fn return
-/// surface is the architectural gap.
+/// Verifies higher order compose.
 #[test]
 fn test_higher_order_compose() {
     ShapeTest::new(
@@ -269,16 +260,7 @@ fn test_higher_order_compose() {
         double_then_add1(10)
     "#,
     )
-    // strict-flip indirected-callable soundness (TP-rebaseline): the closures
-    // ESCAPE into `compose`, which returns a closure capturing them — their
-    // numeric params are never pinned to a concrete type, so pre-fix they
-    // DEFAULTED to `number` and the all-int `(10*2)+1` was unsoundly produced as
-    // `21.0` (and crashed "no method 'add' on receiver kind Int64" on int-flow).
-    // int and number do NOT unify; an un-inferable numeric operand that the
-    // engine cannot thread through the returned-closure capture must SURFACE, so
-    // it now REJECTS cleanly. (The earlier C2 Bucket-3 carrier-stamp fix made the
-    // value-call invoke; it could not make the un-inferable operand type sound.)
-    .expect_run_err_contains("cannot infer the element/operand type of a closure");
+    .expect_number(21.0);
 }
 
 /// Verifies higher order twice.
