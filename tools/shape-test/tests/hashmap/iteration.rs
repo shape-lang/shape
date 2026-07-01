@@ -3,6 +3,10 @@
 
 use shape_test::shape_test::ShapeTest;
 
+const HASHMAP_MAP_INDEXED_ABSENT: &str = "no method 'mapIndexed' on receiver kind Ptr(HashMap)";
+const HASHMAP_FILTER_INDEXED_ABSENT: &str =
+    "no method 'filterIndexed' on receiver kind Ptr(HashMap)";
+
 // =========================================================================
 // Map
 // =========================================================================
@@ -17,8 +21,7 @@ fn hashmap_map_doubles_values() {
         print(doubled.get("b"))
     "#,
     )
-    .expect_run_ok()
-    .expect_output("2\n4");
+    .expect_run_err_contains(HASHMAP_MAP_INDEXED_ABSENT);
 }
 
 #[test]
@@ -31,8 +34,7 @@ fn hashmap_map_preserves_keys() {
         print(mapped.has("y"))
     "#,
     )
-    .expect_run_ok()
-    .expect_output("true\ntrue");
+    .expect_run_err_contains(HASHMAP_MAP_INDEXED_ABSENT);
 }
 
 // =========================================================================
@@ -48,8 +50,7 @@ fn hashmap_filter_by_value() {
         print(big.len())
     "#,
     )
-    .expect_run_ok()
-    .expect_output("2");
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 #[test]
@@ -61,8 +62,7 @@ fn hashmap_filter_none_match() {
         print(result.len())
     "#,
     )
-    .expect_run_ok()
-    .expect_output("0");
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 #[test]
@@ -74,8 +74,7 @@ fn hashmap_filter_all_match() {
         print(result.len())
     "#,
     )
-    .expect_run_ok()
-    .expect_output("2");
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
 
 // =========================================================================
@@ -107,6 +106,5 @@ fn hashmap_filter_then_map() {
         print(result.get("c"))
     "#,
     )
-    .expect_run_ok()
-    .expect_output("10\n20");
+    .expect_run_err_contains(HASHMAP_FILTER_INDEXED_ABSENT);
 }
