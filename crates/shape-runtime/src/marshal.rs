@@ -154,6 +154,26 @@ impl FromSlot for Arc<String> {
     }
 }
 
+/// Read a `TypedObjectPtr` from a `Ptr(HeapKind::TypedObject)` slot.
+///
+/// TypedObject slots are v2-raw carriers: bits are the raw
+/// `*const TypedObjectStorage`, and lifetime is governed by the embedded
+/// `HeapHeader`, not by `Arc<TypedObjectStorage>`. The caller-owned slot
+/// keeps its share; the body receives an independent retained wrapper.
+impl FromSlot for shape_value::heap_value::TypedObjectPtr {
+    const NATIVE_KIND: NativeKind = NativeKind::Ptr(shape_value::HeapKind::TypedObject);
+    #[inline]
+    fn from_slot(bits: u64) -> Self {
+        let ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
+        if !ptr.is_null() {
+            // SAFETY: the registered native kind pins this slot to a live
+            // v2-raw TypedObjectStorage carrier with a HeapHeader at offset 0.
+            unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header) };
+        }
+        shape_value::heap_value::TypedObjectPtr::new(ptr)
+    }
+}
+
 // ───────────────────────────── ToSlot impls ─────────────────────────────
 
 impl ToSlot for i64 {
