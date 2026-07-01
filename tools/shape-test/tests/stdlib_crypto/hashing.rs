@@ -77,9 +77,10 @@ fn crypto_sha256_different_inputs_different_hashes() {
     ShapeTest::new(
         r#"
         use std::core::crypto
-        let h1 = crypto::sha256("hello")
-        let h2 = crypto::sha256("world")
-        print(h1 != h2)
+        let h1: string = crypto::sha256("hello")
+        let h2: string = crypto::sha256("world")
+        let different: bool = h1 != h2
+        print(different)
     "#,
     )
     .with_stdlib()

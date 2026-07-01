@@ -28,7 +28,7 @@ fn crypto_base64_decode() {
     "#,
     )
     .with_stdlib()
-    .expect_output("Ok(Hello, World!)");
+    .expect_output("Ok(\"Hello, World!\")");
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn crypto_base64_roundtrip() {
     "#,
     )
     .with_stdlib()
-    .expect_output("Ok(Shape language rocks)");
+    .expect_output("Ok(\"Shape language rocks\")");
 }
 
 #[test]
@@ -69,7 +69,7 @@ fn crypto_hex_decode() {
     "#,
     )
     .with_stdlib()
-    .expect_output("Ok(hello)");
+    .expect_output("Ok(\"hello\")");
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn crypto_hex_roundtrip() {
     "#,
     )
     .with_stdlib()
-    .expect_output("Ok(test data)");
+    .expect_output("Ok(\"test data\")");
 }
 
 #[test]
