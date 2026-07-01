@@ -400,7 +400,7 @@ fn runtime_err_division_by_zero() {
     .expect_run_err();
 }
 
-// Array out-of-bounds returns null in Shape (not an error).
+// Array indexing is strict: out-of-bounds access is a runtime error.
 #[test]
 fn runtime_err_array_index_out_of_bounds_returns_null() {
     ShapeTest::new(
@@ -410,10 +410,10 @@ fn runtime_err_array_index_out_of_bounds_returns_null() {
         v == None
     "#,
     )
-    .expect_bool(true);
+    .expect_run_err_contains("Index 10 out of bounds (length 3)");
 }
 
-// Negative out-of-bounds also returns null.
+// Negative out-of-bounds indexing is also a runtime error.
 #[test]
 fn runtime_err_negative_index_beyond_length_returns_null() {
     ShapeTest::new(
@@ -423,7 +423,7 @@ fn runtime_err_negative_index_beyond_length_returns_null() {
         v == None
     "#,
     )
-    .expect_bool(true);
+    .expect_run_err_contains("Index -10 out of bounds (length 3)");
 }
 
 #[test]
@@ -478,7 +478,7 @@ fn runtime_err_modulo_by_zero() {
     .expect_run_err();
 }
 
-// Empty array access returns null (not an error).
+// Empty array access is a bounds error, not an implicit None.
 #[test]
 fn runtime_err_empty_array_access_returns_null() {
     ShapeTest::new(
@@ -488,7 +488,7 @@ fn runtime_err_empty_array_access_returns_null() {
         v == None
     "#,
     )
-    .expect_bool(true);
+    .expect_run_err_contains("Index 0 out of bounds (length 0)");
 }
 
 #[test]

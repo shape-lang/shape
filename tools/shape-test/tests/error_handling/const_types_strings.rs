@@ -102,7 +102,7 @@ fn const_complex_expression() {
         X
     "#,
     )
-    .expect_number(14.0);
+    .expect_run_err_contains("must be comptime-evaluable");
 }
 
 #[test]
