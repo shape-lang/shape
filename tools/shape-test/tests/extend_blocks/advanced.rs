@@ -118,7 +118,7 @@ fn extend_method_print_output() {
         type Item { name: string, qty: int }
         extend Item {
             method label() {
-                self.name + ":" + self.qty
+                f"{self.name}:{self.qty}"
             }
         }
         let i = Item { name: "apple", qty: 5 }
@@ -126,6 +126,27 @@ fn extend_method_print_output() {
     "#,
     )
     .expect_output("apple:5");
+}
+
+#[test]
+fn extend_method_rejects_string_scalar_add() {
+    ShapeTest::new(
+        r#"
+        type Item { name: string, qty: int }
+        extend Item {
+            method label() {
+                self.name + ":" + self.qty
+            }
+        }
+        let i = Item { name: "apple", qty: 5 }
+        i.label()
+    "#,
+    )
+    .expect_run_err_contains_any(&[
+        "String concatenation requires both operands to be strings",
+        "Cannot infer types for binary operation `Add`",
+        "Cannot apply `+` to a `string` and a `int`",
+    ]);
 }
 
 // =========================================================================

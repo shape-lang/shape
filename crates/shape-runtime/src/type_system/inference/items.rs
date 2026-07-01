@@ -328,6 +328,7 @@ impl TypeInferenceEngine {
             }
             Item::Extend(extend, _) => {
                 self.register_extend(extend)?;
+                self.infer_extend_method_bodies(extend)?;
             }
             Item::Export(export, _) => {
                 // pub const/let/var NAME = expr : the VariableDecl rides in
@@ -1704,6 +1705,64 @@ impl TypeInferenceEngine {
             is_comptime: false,
             where_clause: None,
         })
+    }
+
+    /// Type-check concrete user-struct extend method bodies with `self` in scope.
+    ///
+    /// `register_extend` publishes the callable surface, but strict expression
+    /// proof also needs the body walk so field reads like `self.name` resolve
+    /// from the target struct schema before overloaded `+` is checked. Builtin
+    /// and generic collection extends are intentionally left to the existing
+    /// specialized paths; this helper only handles registered user structs.
+    fn infer_extend_method_bodies(
+        &mut self,
+        extend: &shape_ast::ast::ExtendStatement,
+    ) -> TypeResult<()> {
+        let type_name = Self::type_name_str(&extend.type_name);
+        if !self.struct_type_defs.contains_key(type_name.as_str()) {
+            return Ok(());
+        }
+
+        let self_ann = Self::type_name_to_annotation_for_impl(&extend.type_name);
+        for method in &extend.methods {
+            let func = Self::inference_function_for_extend_method(method, &type_name, &self_ann);
+            let _ = self.infer_function(&func)?;
+        }
+
+        Ok(())
+    }
+
+    fn inference_function_for_extend_method(
+        method: &shape_ast::ast::MethodDef,
+        type_name: &str,
+        self_ann: &TypeAnnotation,
+    ) -> FunctionDef {
+        let mut params = Vec::with_capacity(method.params.len() + 1);
+        params.push(shape_ast::ast::FunctionParameter {
+            pattern: DestructurePattern::Identifier("self".to_string(), Span::DUMMY),
+            is_const: false,
+            is_reference: false,
+            is_mut_reference: false,
+            is_out: false,
+            type_annotation: Some(self_ann.clone()),
+            default_value: None,
+        });
+        params.extend(method.params.clone());
+
+        FunctionDef {
+            name: format!("{}.{}", type_name, method.name),
+            name_span: method.span,
+            declaring_module_path: method.declaring_module_path.clone(),
+            doc_comment: None,
+            params,
+            return_type: method.return_type.clone(),
+            body: method.body.clone(),
+            type_params: method.type_params.clone(),
+            annotations: method.annotations.clone(),
+            is_async: method.is_async,
+            is_comptime: false,
+            where_clause: None,
+        }
     }
 
     fn impl_trait_type_arg_substitutions(
@@ -3873,6 +3932,29 @@ mod tests {
         assert!(
             engine.method_table.lookup(&table_type, "smooth").is_some(),
             "smooth method should be in method table for Table"
+        );
+    }
+
+    #[test]
+    fn test_extend_user_struct_method_body_types_self_fields() {
+        use shape_ast::parser::parse_program;
+
+        let code = r#"
+            type User { name: string }
+            extend User {
+                method greeting() { "Hello, " + self.name }
+            }
+            let u = User { name: "Ada" }
+            let out = u.greeting()
+        "#;
+
+        let program = parse_program(code).expect("Failed to parse");
+        let mut engine = TypeInferenceEngine::new();
+        let result = engine.infer_program(&program);
+        assert!(
+            result.is_ok(),
+            "Extend method body should type self.name as string: {:?}",
+            result.err()
         );
     }
 
