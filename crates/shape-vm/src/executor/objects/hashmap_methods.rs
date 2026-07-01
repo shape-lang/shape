@@ -188,7 +188,7 @@ fn callable_ptr_to_slot(ptr: CallablePtr) -> KindedSlot {
 }
 
 fn named_function_callable_ptr(fn_id: u16) -> CallablePtr {
-    use shape_value::v2::closure_raw::{OwnedClosureBlock, alloc_typed_closure};
+    use shape_value::v2::closure_raw::{alloc_typed_closure, OwnedClosureBlock};
 
     let empty_layout = Arc::new(
         shape_value::v2::closure_layout::ClosureLayout::from_capture_types_with_native_kinds(
@@ -858,111 +858,29 @@ pub fn v2_set(
     }
     let key = as_string_key(&args[1])?.to_owned();
     let value_slot = &args[2];
+    let recv_view = as_hashmap(&args[0])?;
 
-    // ── Empty-HashMap V-promotion (carrier-variant REPLACEMENT) ──────────
-    //
-    // If the receiver has zero entries AND its current V doesn't match the
-    // incoming value's kind, we cannot mutate in place — the slot's carrier
-    // variant must CHANGE (e.g. `let m = HashMap()` defaults to
-    // V=*const StringObj, but `m.set("k", 1)` needs V=i64). This is a
-    // legitimate pointer-replacement, NOT a per-element insert: we allocate
-    // a brand-new `HashMapKindedRef` carrier (with the first entry) and
-    // return a fresh `Ptr(HeapKind::HashMap)` slot whose bits point at the
-    // new allocation. The MUT_SELF write-back stores those new bits into
-    // the receiver binding. The old empty carrier's share is retired by the
-    // caller's normal slot drop. NO `&mut` is forged against the old shared
-    // carrier — we never touch it. ADR-006 §2.7.24 Q25.B SUPERSEDED.
-    {
-        let recv_view = as_hashmap(&args[0])?;
-        if recv_view.is_empty() && recv_view.values_kind() != value_slot.kind {
-            if let Some(promoted) = empty_set_with_promotion(&key, value_slot)? {
-                return Ok(KindedSlot::from_hashmap(std::sync::Arc::new(promoted)));
-            }
+    // Empty maps default to the string-value carrier. If the first inserted
+    // value proves a different V, allocate the correctly-typed carrier instead
+    // of trying to mutate the default empty carrier.
+    if recv_view.is_empty() && recv_view.values_kind() != value_slot.kind {
+        if let Some(promoted) = empty_set_with_promotion(&key, value_slot)? {
+            return Ok(KindedSlot::from_hashmap(Arc::new(promoted)));
         }
     }
 
-    // ── In-place insert (O(1) amortized) — Array.push raw-ptr-view shape ──
-    //
-    // Derive a raw `*mut HashMapData<V>` from the receiver SLOT BITS (the
-    // heap pointer value), exactly as `extract_typed_array_view` derives a
-    // `*mut u8` from the array receiver's slot bits, and mutate IN PLACE via
-    // `HashMapData::insert_at(this: *mut Self, ...)` (the raw-pointer entry
-    // mirroring `TypedArray::push(this: *mut Self)`). NO Arc::clone, NO
-    // Arc::make_mut, NO deep-copy, NO `&Arc`→`&mut` retag.
-    set_in_place(&args[0], &key, value_slot)?;
-
-    // Mutation is published in place — every alias of the receiver Arc sees
-    // it. Return a retained clone of the receiver slot so chained
-    // `m.set(...).set(...)` and the MUT_SELF write-back re-store the SAME
-    // carrier identity (refcount-neutral no-op rebind). Same shape as
-    // `Array.push` returning the (in-place-mutated) receiver.
-    Ok(args[0].clone())
+    let new_kref = set_kinded(&recv_view, &key, value_slot)?;
+    Ok(KindedSlot::from_hashmap(Arc::new(new_kref)))
 }
 
-/// In-place set: derive a raw `*mut HashMapData<V>` from the receiver SLOT
-/// BITS and insert through `HashMapData::insert_at(this: *mut Self, ...)`.
-///
-/// **Raw-pointer derivation (the load-bearing soundness point).** The
-/// receiver slot bits are `Arc::into_raw(Arc<HashMapKindedRef>)`. We
-/// reconstruct the outer `Arc` (slot's share preserved via the
-/// `into_raw`-back below), match the enum variant to reach the inner
-/// `Arc<HashMapData<V>>`, and take `Arc::as_ptr(inner) as *mut
-/// HashMapData<V>` — the pointer to the heap-resident `HashMapData<V>`
-/// struct. This is structurally identical to `as_v2_typed_array` deriving
-/// `*mut TypedArray<T>` from the array receiver's slot bits, and to
-/// `TypedArray::push(this: *mut Self)`. We do **NOT** materialize a Rust
-/// `&mut HashMapKindedRef` / `&mut HashMapData<V>` from a shared `&Arc`
-/// borrow (the reverted-UB shape); the `*mut` is consumed only by the
-/// raw-pointer `insert_at` entry, which does its own `(*this)` access. The
-/// keys/values buffers reached through `(*this)` are separately-allocated
-/// v2-raw `TypedArray` heap objects — mutating them in place is sound
-/// regardless of the carrier Arc's strong count, exactly as `Array.push`
-/// mutates a possibly-shared array's buffer.
-///
-/// The value is projected per-variant into a `V` (with the same per-V
-/// v2_retain / share-clone discipline as the deleted COW path), then
-/// transferred into the map by `insert_at`. Overwrite drops the old value's
-/// share (SB-13).
-fn set_in_place(recv: &KindedSlot, key: &str, value_slot: &KindedSlot) -> Result<(), VMError> {
-    let bits = recv.slot.raw();
-    if !matches!(recv.kind, NativeKind::Ptr(HeapKind::HashMap)) {
-        return Err(type_error(format!(
-            "HashMap.set(): receiver must be a HashMap (got kind {:?})",
-            recv.kind
-        )));
-    }
-    if bits == 0 {
-        return Err(type_error("HashMap.set(): receiver slot bits null"));
-    }
-
-    // SAFETY: slot bits are `Arc::into_raw(Arc<HashMapKindedRef>)` per the
-    // KindedSlot::from_hashmap construction-side contract. Reconstruct the
-    // outer Arc to reach the enum; `into_raw` it back at the end so the
-    // slot's original share is untouched. No share count is changed.
-    unsafe {
-        let outer = Arc::<HashMapKindedRef>::from_raw(bits as *const HashMapKindedRef);
-        // Derive the raw `*mut HashMapData<V>` per variant from the inner
-        // Arc's data pointer, then drive `insert_at` through it. Each arm
-        // projects the value slot into a V before the (kind-checked) insert.
-        let result = set_in_place_dispatch(&outer, key, value_slot);
-        // Restore the slot's share — `outer` was reconstructed from the
-        // slot's raw bits and must NOT be dropped here.
-        let _ = Arc::into_raw(outer);
-        result
-    }
-}
-
-/// Per-V in-place insert dispatch. `kref` is a borrow of the receiver's
-/// `HashMapKindedRef` (reconstructed from slot bits by the caller, whose
-/// share is restored on return). Each arm derives `*mut HashMapData<V>` via
-/// `Arc::as_ptr(inner) as *mut _` — NOT a `&Arc`→`&mut` retag — and inserts
-/// through the raw-pointer `HashMapData::insert_at` entry.
-fn set_in_place_dispatch(
+/// Per-V persistent insert dispatch. Clones the inner `Arc<HashMapData<V>>`,
+/// applies `Arc::make_mut`, inserts the typed value, and returns a new
+/// `HashMapKindedRef`. Existing aliases keep observing the previous carrier.
+fn set_kinded(
     kref: &HashMapKindedRef,
     key: &str,
     value_slot: &KindedSlot,
-) -> Result<(), VMError> {
-    use shape_value::heap_value::HashMapData;
+) -> Result<HashMapKindedRef, VMError> {
     match kref {
         HashMapKindedRef::I64(arc) => {
             let v = match value_slot.kind {
@@ -976,9 +894,9 @@ fn set_in_place_dispatch(
                     )));
                 }
             };
-            let this = Arc::as_ptr(arc) as *mut HashMapData<i64>;
-            unsafe { HashMapData::<i64>::insert_at(this, key, v) };
-            Ok(())
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v) };
+            Ok(HashMapKindedRef::I64(new_arc))
         }
         HashMapKindedRef::F64(arc) => {
             let v = match value_slot.kind {
@@ -992,9 +910,9 @@ fn set_in_place_dispatch(
                     )));
                 }
             };
-            let this = Arc::as_ptr(arc) as *mut HashMapData<f64>;
-            unsafe { HashMapData::<f64>::insert_at(this, key, v) };
-            Ok(())
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v) };
+            Ok(HashMapKindedRef::F64(new_arc))
         }
         HashMapKindedRef::Bool(arc) => {
             let v: u8 = match value_slot.kind {
@@ -1002,7 +920,11 @@ fn set_in_place_dispatch(
                     let b = value_slot.as_bool().ok_or_else(|| {
                         type_error("HashMap.method set() -> Bool slot bits not a valid bool")
                     })?;
-                    if b { 1 } else { 0 }
+                    if b {
+                        1
+                    } else {
+                        0
+                    }
                 }
                 other => {
                     return Err(type_error(format!(
@@ -1011,9 +933,9 @@ fn set_in_place_dispatch(
                     )));
                 }
             };
-            let this = Arc::as_ptr(arc) as *mut HashMapData<u8>;
-            unsafe { HashMapData::<u8>::insert_at(this, key, v) };
-            Ok(())
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v) };
+            Ok(HashMapKindedRef::Bool(new_arc))
         }
         HashMapKindedRef::Char(arc) => {
             let v: char = match value_slot.kind {
@@ -1027,9 +949,9 @@ fn set_in_place_dispatch(
                     )));
                 }
             };
-            let this = Arc::as_ptr(arc) as *mut HashMapData<char>;
-            unsafe { HashMapData::<char>::insert_at(this, key, v) };
-            Ok(())
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v) };
+            Ok(HashMapKindedRef::Char(new_arc))
         }
         HashMapKindedRef::String(arc) => {
             // V = *const StringObj. Project value slot to a fresh-share
@@ -1040,14 +962,9 @@ fn set_in_place_dispatch(
                     value_slot.kind
                 ))
             })?;
-            let this =
-                Arc::as_ptr(arc) as *mut HashMapData<*const shape_value::v2::string_obj::StringObj>;
-            unsafe {
-                HashMapData::<*const shape_value::v2::string_obj::StringObj>::insert_at(
-                    this, key, v_ptr,
-                )
-            };
-            Ok(())
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v_ptr) };
+            Ok(HashMapKindedRef::String(new_arc))
         }
         HashMapKindedRef::Decimal(arc) => {
             // V = *const DecimalObj. Project from value_slot's kind ==
@@ -1084,14 +1001,9 @@ fn set_in_place_dispatch(
                     )));
                 }
             };
-            let this = Arc::as_ptr(arc)
-                as *mut HashMapData<*const shape_value::v2::decimal_obj::DecimalObj>;
-            unsafe {
-                HashMapData::<*const shape_value::v2::decimal_obj::DecimalObj>::insert_at(
-                    this, key, v_ptr,
-                )
-            };
-            Ok(())
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v_ptr) };
+            Ok(HashMapKindedRef::Decimal(new_arc))
         }
         HashMapKindedRef::TypedObject(arc) => {
             // V = TypedObjectPtr. kind == Ptr(HeapKind::TypedObject) slot
@@ -1120,9 +1032,9 @@ fn set_in_place_dispatch(
                     )));
                 }
             };
-            let this = Arc::as_ptr(arc) as *mut HashMapData<TypedObjectPtr>;
-            unsafe { HashMapData::<TypedObjectPtr>::insert_at(this, key, v_ptr) };
-            Ok(())
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v_ptr) };
+            Ok(HashMapKindedRef::TypedObject(new_arc))
         }
         HashMapKindedRef::TraitObject(arc) => {
             // V = TraitObjectPtr. Mirror of TypedObject — v2_retain on the
@@ -1148,15 +1060,15 @@ fn set_in_place_dispatch(
                     )));
                 }
             };
-            let this = Arc::as_ptr(arc) as *mut HashMapData<TraitObjectPtr>;
-            unsafe { HashMapData::<TraitObjectPtr>::insert_at(this, key, v_ptr) };
-            Ok(())
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v_ptr) };
+            Ok(HashMapKindedRef::TraitObject(new_arc))
         }
         HashMapKindedRef::Callable(arc) => {
             let v_ptr = callable_slot_to_ptr(value_slot)?;
-            let this = Arc::as_ptr(arc) as *mut HashMapData<CallablePtr>;
-            unsafe { HashMapData::<CallablePtr>::insert_at(this, key, v_ptr) };
-            Ok(())
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v_ptr) };
+            Ok(HashMapKindedRef::Callable(new_arc))
         }
         HashMapKindedRef::HashMap(arc) => {
             // V = HashMapKindedRef (recursive carrier). value slot bits are
@@ -1185,9 +1097,9 @@ fn set_in_place_dispatch(
                     )));
                 }
             };
-            let this = Arc::as_ptr(arc) as *mut HashMapData<HashMapKindedRef>;
-            unsafe { HashMapData::<HashMapKindedRef>::insert_at(this, key, v_kref) };
-            Ok(())
+            let mut new_arc = Arc::clone(arc);
+            unsafe { Arc::make_mut(&mut new_arc).insert(key, v_kref) };
+            Ok(HashMapKindedRef::HashMap(new_arc))
         }
     }
 }

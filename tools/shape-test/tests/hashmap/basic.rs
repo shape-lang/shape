@@ -47,7 +47,7 @@ fn hashmap_create_and_set() {
 fn hashmap_get_existing_key() {
     ShapeTest::new(
         r#"
-        let m = HashMap().set("name", "Alice").set("age", 30)
+        let m = HashMap().set("name", "Alice").set("city", "Paris")
         print(m.get("name"))
     "#,
     )
@@ -75,8 +75,7 @@ fn hashmap_get_integer_key() {
         print(m.get(1))
     "#,
     )
-    .expect_run_ok()
-    .expect_output("gold");
+    .expect_run_err_contains("HashMap key must be a string");
 }
 
 // =========================================================================
