@@ -1118,6 +1118,12 @@ impl BytecodeCompiler {
             if let Some(decl) = self.module_builtin_functions.get(&candidate) {
                 return Some(decl.clone());
             }
+            if self.is_native_module_export(module_path, name) {
+                return Some(ModuleBuiltinFunction {
+                    export_name: name.to_string(),
+                    source_module_path: module_path.clone(),
+                });
+            }
         }
         None
     }

@@ -12,12 +12,12 @@
 /// Array/Set/HashMap. No backwards-compat aliases shipped.
 
 /// Create a new empty set
-pub fn new() {
+pub fn new() -> HashMap<_, bool> {
     HashMap()
 }
 
 /// Create a set from an array (deduplicates)
-pub fn from_array(arr) {
+pub fn from_array(arr) -> HashMap<_, bool> {
     var s = HashMap()
     for item in arr {
         s = s.set(item, true)
@@ -77,6 +77,6 @@ pub fn to_array(s) {
 }
 
 /// Get the number of elements (criterion F: renamed from `size`).
-pub fn len(s) {
+pub fn len(s) -> int {
     s.len()
 }
