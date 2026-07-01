@@ -4,12 +4,14 @@ use crate::bytecode::{Function, Instruction, OpCode, Operand};
 use crate::compiler::monomorphization::type_resolution::concrete_type_for_expr;
 use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
 use shape_ast::ast::type_path::TypePath;
-use shape_ast::ast::{Expr, FunctionDef, Span, TypeAnnotation};
+use shape_ast::ast::{
+    DestructurePattern, Expr, FunctionDef, FunctionParameter, Span, TypeAnnotation,
+};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::closure::EnvironmentAnalyzer;
-use shape_runtime::type_system::Type;
+use shape_runtime::type_system::{BindingFact, InferenceFacts, Type};
 use shape_value::v2::concrete_type::{ClosureTypeId, ConcreteType};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::super::BytecodeCompiler;
 use crate::compiler::ClosureCallsiteHint;
@@ -264,8 +266,407 @@ pub(crate) fn infer_callsite_arg_type(arg: &Expr) -> Option<TypeAnnotation> {
         Expr::UnaryOp {
             op: UnaryOp::Not, ..
         } => Some(TypeAnnotation::Basic("bool".to_string())),
+        Expr::Array(elements, _) => {
+            let mut iter = elements.iter();
+            let first = iter.next()?;
+            let element_type = infer_callsite_arg_type(first)?;
+            for element in iter {
+                match infer_callsite_arg_type(element) {
+                    Some(next_type) if next_type == element_type => {}
+                    _ => return None,
+                }
+            }
+            Some(TypeAnnotation::Array(Box::new(element_type)))
+        }
         _ => None,
     }
+}
+
+fn array_element_annotation(ann: &TypeAnnotation) -> Option<&TypeAnnotation> {
+    match ann {
+        TypeAnnotation::Array(inner) => Some(inner),
+        TypeAnnotation::Generic { name, args }
+            if (name.as_str() == "Array" || name.as_str() == "Vec") && args.len() == 1 =>
+        {
+            args.first()
+        }
+        _ => None,
+    }
+}
+
+fn insert_closure_array_binding_fact(
+    facts: &mut HashMap<Span, BindingFact>,
+    name: &str,
+    binder_span: Span,
+    ann: &TypeAnnotation,
+) {
+    if binder_span.is_dummy() {
+        return;
+    }
+    facts.insert(
+        binder_span,
+        BindingFact {
+            name: name.to_string(),
+            binder_span,
+            initializer_span: None,
+            ty: Type::Concrete(ann.clone()),
+        },
+    );
+}
+
+fn collect_closure_array_binding_facts(
+    pattern: &DestructurePattern,
+    ann: &TypeAnnotation,
+    facts: &mut HashMap<Span, BindingFact>,
+) {
+    let Some(element_ann) = array_element_annotation(ann) else {
+        return;
+    };
+    let DestructurePattern::Array(items) = pattern else {
+        return;
+    };
+    for item in items {
+        match item {
+            DestructurePattern::Identifier(name, span) => {
+                insert_closure_array_binding_fact(facts, name, *span, element_ann);
+            }
+            DestructurePattern::Array(_) => {
+                collect_closure_array_binding_facts(item, element_ann, facts);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn closure_array_binding_facts(params: &[FunctionParameter]) -> HashMap<Span, BindingFact> {
+    let mut facts = HashMap::new();
+    for param in params {
+        if let Some(annotation) = param.type_annotation.as_ref() {
+            collect_closure_array_binding_facts(&param.pattern, annotation, &mut facts);
+        }
+    }
+    facts
+}
+
+fn inference_facts_with_closure_binding_facts(
+    base: &InferenceFacts,
+    extra: HashMap<Span, BindingFact>,
+) -> Option<InferenceFacts> {
+    if extra.is_empty() {
+        return None;
+    }
+    let mut binding_facts = base.binding_facts().clone();
+    let mut changed = false;
+    for (span, fact) in extra {
+        match binding_facts.get(&span) {
+            Some(existing) if existing.ty == fact.ty => {}
+            _ => {
+                binding_facts.insert(span, fact);
+                changed = true;
+            }
+        }
+    }
+    changed.then(|| {
+        InferenceFacts::with_binding_facts(
+            base.top_level_types().clone(),
+            base.expression_types().clone(),
+            binding_facts,
+        )
+    })
+}
+
+fn closure_binding_fact_types_by_name(facts: &HashMap<Span, BindingFact>) -> HashMap<String, Type> {
+    let mut out = HashMap::new();
+    let mut ambiguous = HashSet::new();
+    for fact in facts.values() {
+        if out.contains_key(&fact.name) {
+            ambiguous.insert(fact.name.clone());
+        } else {
+            out.insert(fact.name.clone(), fact.ty.clone());
+        }
+    }
+    for name in ambiguous {
+        out.remove(&name);
+    }
+    out
+}
+
+fn collect_closure_expr_type_overrides(
+    body: &[shape_ast::ast::Statement],
+    binding_types: &HashMap<String, Type>,
+) -> HashMap<Span, Type> {
+    use shape_runtime::visitor::{Visitor, walk_expr, walk_stmt};
+
+    fn remove_destructure_bindings(
+        active: &mut HashMap<String, Type>,
+        pattern: &DestructurePattern,
+    ) {
+        for (name, _) in pattern.get_bindings() {
+            active.remove(&name);
+        }
+    }
+
+    fn remove_value_bindings(
+        active: &mut HashMap<String, Type>,
+        pattern: &shape_ast::ast::Pattern,
+    ) {
+        for (name, _) in pattern.get_bindings() {
+            active.remove(&name);
+        }
+    }
+
+    fn remove_named_binding(active: &mut HashMap<String, Type>, name: &str) {
+        active.remove(name);
+    }
+
+    struct Collector {
+        active: HashMap<String, Type>,
+        out: HashMap<Span, Type>,
+    }
+
+    impl Visitor for Collector {
+        fn visit_expr_identifier(&mut self, expr: &Expr, span: Span) -> bool {
+            if let Expr::Identifier(name, _) = expr {
+                if !span.is_dummy() {
+                    if let Some(ty) = self.active.get(name) {
+                        self.out.insert(span, ty.clone());
+                    }
+                }
+            }
+            true
+        }
+
+        fn visit_expr_function_expr(&mut self, _expr: &Expr, _span: Span) -> bool {
+            false
+        }
+
+        fn visit_expr_list_comprehension(&mut self, expr: &Expr, _span: Span) -> bool {
+            let Expr::ListComprehension(comp, _) = expr else {
+                return true;
+            };
+            let saved = self.active.clone();
+            for clause in &comp.clauses {
+                walk_expr(self, &clause.iterable);
+                remove_destructure_bindings(&mut self.active, &clause.pattern);
+                if let Some(filter) = &clause.filter {
+                    walk_expr(self, filter);
+                }
+            }
+            walk_expr(self, &comp.element);
+            self.active = saved;
+            false
+        }
+
+        fn visit_expr_block(&mut self, expr: &Expr, _span: Span) -> bool {
+            let Expr::Block(block, _) = expr else {
+                return true;
+            };
+            let saved = self.active.clone();
+            for item in &block.items {
+                match item {
+                    shape_ast::ast::BlockItem::VariableDecl(decl) => {
+                        if let Some(value) = &decl.value {
+                            walk_expr(self, value);
+                        }
+                        remove_destructure_bindings(&mut self.active, &decl.pattern);
+                    }
+                    shape_ast::ast::BlockItem::Assignment(assign) => walk_expr(self, &assign.value),
+                    shape_ast::ast::BlockItem::Statement(stmt) => walk_stmt(self, stmt),
+                    shape_ast::ast::BlockItem::Expression(expr) => walk_expr(self, expr),
+                }
+            }
+            self.active = saved;
+            false
+        }
+
+        fn visit_expr_for(&mut self, expr: &Expr, _span: Span) -> bool {
+            let Expr::For(for_expr, _) = expr else {
+                return true;
+            };
+            walk_expr(self, &for_expr.iterable);
+            let saved = self.active.clone();
+            remove_value_bindings(&mut self.active, &for_expr.pattern);
+            walk_expr(self, &for_expr.body);
+            self.active = saved;
+            false
+        }
+
+        fn visit_expr_let(&mut self, expr: &Expr, _span: Span) -> bool {
+            let Expr::Let(let_expr, _) = expr else {
+                return true;
+            };
+            if let Some(value) = &let_expr.value {
+                walk_expr(self, value);
+            }
+            let saved = self.active.clone();
+            remove_value_bindings(&mut self.active, &let_expr.pattern);
+            walk_expr(self, &let_expr.body);
+            self.active = saved;
+            false
+        }
+
+        fn visit_expr_match(&mut self, expr: &Expr, _span: Span) -> bool {
+            let Expr::Match(match_expr, _) = expr else {
+                return true;
+            };
+            walk_expr(self, &match_expr.scrutinee);
+            for arm in &match_expr.arms {
+                let saved = self.active.clone();
+                remove_value_bindings(&mut self.active, &arm.pattern);
+                if let Some(guard) = &arm.guard {
+                    walk_expr(self, guard);
+                }
+                walk_expr(self, &arm.body);
+                self.active = saved;
+            }
+            false
+        }
+
+        fn visit_expr_from_query(&mut self, expr: &Expr, _span: Span) -> bool {
+            let Expr::FromQuery(from_query, _) = expr else {
+                return true;
+            };
+            walk_expr(self, &from_query.source);
+            let saved = self.active.clone();
+            remove_named_binding(&mut self.active, &from_query.variable);
+            for clause in &from_query.clauses {
+                match clause {
+                    shape_ast::ast::QueryClause::Where(pred) => walk_expr(self, pred),
+                    shape_ast::ast::QueryClause::OrderBy(specs) => {
+                        for spec in specs {
+                            walk_expr(self, &spec.key);
+                        }
+                    }
+                    shape_ast::ast::QueryClause::GroupBy {
+                        element,
+                        key,
+                        into_var,
+                    } => {
+                        walk_expr(self, element);
+                        walk_expr(self, key);
+                        if let Some(name) = into_var {
+                            remove_named_binding(&mut self.active, name);
+                        }
+                    }
+                    shape_ast::ast::QueryClause::Join {
+                        variable,
+                        source,
+                        left_key,
+                        right_key,
+                        into_var,
+                    } => {
+                        walk_expr(self, source);
+                        walk_expr(self, left_key);
+                        remove_named_binding(&mut self.active, variable);
+                        walk_expr(self, right_key);
+                        if let Some(name) = into_var {
+                            remove_named_binding(&mut self.active, name);
+                        }
+                    }
+                    shape_ast::ast::QueryClause::Let { variable, value } => {
+                        walk_expr(self, value);
+                        remove_named_binding(&mut self.active, variable);
+                    }
+                }
+            }
+            walk_expr(self, &from_query.select);
+            self.active = saved;
+            false
+        }
+
+        fn visit_expr_async_let(&mut self, expr: &Expr, _span: Span) -> bool {
+            let Expr::AsyncLet(async_let, _) = expr else {
+                return true;
+            };
+            walk_expr(self, &async_let.expr);
+            remove_named_binding(&mut self.active, &async_let.name);
+            false
+        }
+
+        fn visit_expr_comptime_for(&mut self, expr: &Expr, _span: Span) -> bool {
+            let Expr::ComptimeFor(comptime_for, _) = expr else {
+                return true;
+            };
+            walk_expr(self, &comptime_for.iterable);
+            let saved = self.active.clone();
+            remove_named_binding(&mut self.active, &comptime_for.variable);
+            for stmt in &comptime_for.body {
+                walk_stmt(self, stmt);
+            }
+            self.active = saved;
+            false
+        }
+
+        fn visit_stmt(&mut self, stmt: &shape_ast::ast::Statement) -> bool {
+            use shape_ast::ast::{ForInit, Statement};
+            match stmt {
+                Statement::VariableDecl(decl, _) => {
+                    if let Some(value) = &decl.value {
+                        walk_expr(self, value);
+                    }
+                    remove_destructure_bindings(&mut self.active, &decl.pattern);
+                    false
+                }
+                Statement::For(for_stmt, _) => {
+                    let saved = self.active.clone();
+                    match &for_stmt.init {
+                        ForInit::ForIn { pattern, iter } => {
+                            walk_expr(self, iter);
+                            remove_destructure_bindings(&mut self.active, pattern);
+                        }
+                        ForInit::ForC {
+                            init,
+                            condition,
+                            update,
+                        } => {
+                            walk_stmt(self, init);
+                            walk_expr(self, condition);
+                            walk_expr(self, update);
+                        }
+                    }
+                    for stmt in &for_stmt.body {
+                        walk_stmt(self, stmt);
+                    }
+                    self.active = saved;
+                    false
+                }
+                Statement::If(if_stmt, _) => {
+                    walk_expr(self, &if_stmt.condition);
+                    let saved = self.active.clone();
+                    for stmt in &if_stmt.then_body {
+                        walk_stmt(self, stmt);
+                    }
+                    self.active = saved.clone();
+                    if let Some(else_body) = &if_stmt.else_body {
+                        for stmt in else_body {
+                            walk_stmt(self, stmt);
+                        }
+                    }
+                    self.active = saved;
+                    false
+                }
+                Statement::While(while_stmt, _) => {
+                    walk_expr(self, &while_stmt.condition);
+                    let saved = self.active.clone();
+                    for stmt in &while_stmt.body {
+                        walk_stmt(self, stmt);
+                    }
+                    self.active = saved;
+                    false
+                }
+                _ => true,
+            }
+        }
+    }
+
+    let mut collector = Collector {
+        active: binding_types.clone(),
+        out: HashMap::new(),
+    };
+    for stmt in body {
+        walk_stmt(&mut collector, stmt);
+    }
+    collector.out
 }
 
 fn annotation_contains_unknown(ann: &TypeAnnotation) -> bool {
@@ -3378,7 +3779,29 @@ impl BytecodeCompiler {
         // inner jump, which then skips the body entirely. Don't.
         let saved_closure_ids = self.closure_function_ids.clone();
         let saved_pending_callable_hint_name = self.pending_callable_hint_name.take();
+        let closure_destructure_facts = closure_array_binding_facts(&closure_def.params);
+        let closure_binding_types = closure_binding_fact_types_by_name(&closure_destructure_facts);
+        let closure_expr_type_overrides =
+            collect_closure_expr_type_overrides(&closure_def.body, &closure_binding_types);
+        let saved_resolved_expr_types = if closure_expr_type_overrides.is_empty() {
+            None
+        } else {
+            let saved = self.resolved_expr_types.clone();
+            self.resolved_expr_types.extend(closure_expr_type_overrides);
+            Some(saved)
+        };
+        let saved_inference_facts = inference_facts_with_closure_binding_facts(
+            &self.inference_facts,
+            closure_destructure_facts,
+        )
+        .map(|facts| std::mem::replace(&mut self.inference_facts, facts));
         let compile_result = self.compile_function(&closure_def);
+        if let Some(saved) = saved_inference_facts {
+            self.inference_facts = saved;
+        }
+        if let Some(saved) = saved_resolved_expr_types {
+            self.resolved_expr_types = saved;
+        }
         self.pending_callable_hint_name = saved_pending_callable_hint_name;
         self.closure_function_ids = saved_closure_ids;
         compile_result?;
