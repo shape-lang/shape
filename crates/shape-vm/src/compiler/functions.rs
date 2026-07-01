@@ -3918,10 +3918,17 @@ mod tests {
             .compile(&program)
             .expect_err("user-defined Json.get must not gain __* access");
         let msg = format!("{}", err);
+        // W49 extend-method body inference can reject the concrete method
+        // body before bytecode builtin classification sees the call. Either
+        // diagnostic is acceptable here; the invariant is that adding the
+        // surface name to stdlib_function_names does not unlock __* access.
+        let strict_inference_rejection = msg.contains("Undefined function: '__json_object_get'");
+        let compiler_scope_rejection = msg
+            .contains("'__json_object_get' resolves to internal intrinsic scope")
+            && msg.contains("not available from ordinary user code");
         assert!(
-            msg.contains("'__json_object_get' resolves to internal intrinsic scope")
-                && msg.contains("not available from ordinary user code"),
-            "Expected internal-only intrinsic error, got: {}",
+            strict_inference_rejection || compiler_scope_rejection,
+            "Expected compile-time rejection of user access to internal JSON intrinsic, got: {}",
             msg
         );
     }
