@@ -29,24 +29,29 @@ print(add(5, 6))
 }
 
 #[test]
-fn comptime_type_info_is_removed_and_not_suggested_by_lsp() {
+fn comptime_type_info_is_available_and_suggested_by_lsp() {
     let code = r#"
-comptime {
+let TAG: string = comptime {
   let info = type_info("Point")
+  "type-info-ok"
 }
+print(TAG)
 "#;
 
     ShapeTest::new(code)
-        .expect_semantic_diagnostic_contains("type_info has been removed")
-        .at(pos(2, 12))
-        .expect_no_completion("type_info");
+        .expect_no_semantic_diagnostics()
+        .expect_output("type-info-ok");
+
+    ShapeTest::new("comptime {\n    \n}\n")
+        .at(pos(1, 4))
+        .expect_completion("type_info");
 }
 
 #[test]
 fn trait_bound_method_dispatch_resolves_at_runtime() {
     let code = r#"
 trait Displayable {
-  display(): string
+  method display() -> string;
 }
 
 type User { name: string }
@@ -68,7 +73,7 @@ print(render(User { name: "Ada" }))
 }
 
 #[test]
-fn expression_annotation_before_after_hooks_execute() {
+fn expression_annotation_before_after_hooks_surface_on_deleted_empty_arg_array() {
     let code = r#"
 annotation trace_expr() {
   targets: [expression]
@@ -88,7 +93,7 @@ print(x)
 
     ShapeTest::new(code)
         .expect_no_semantic_diagnostics()
-        .expect_output("before\nafter\n3");
+        .expect_run_err_contains("op_new_array(0): SURFACE");
 }
 
 #[test]
