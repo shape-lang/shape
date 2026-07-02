@@ -515,7 +515,7 @@ fn extend_method_print_output() {
         type Item { name: string, qty: int }
         extend Item {
             method label() {
-                self.name + ":" + self.qty
+                f"{self.name}:{self.qty}"
             }
         }
         let i = Item { name: "apple", qty: 5 }

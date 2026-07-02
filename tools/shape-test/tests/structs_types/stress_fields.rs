@@ -390,10 +390,10 @@ fn spread_typed_object_extra_field() {
 fn intersection_decomposition_basic() {
     ShapeTest::new(
         r#"
-        type A { x: number, y: number }
-        type B { z: number }
+        type A { x: int, y: int }
+        type B { z: int }
         let value = { x: 10, y: 20, z: 30 }
-        let (a: A, b: B) = value
+        var (a: A, b: B) = value
         a.x + a.y + b.z
     "#,
     )
