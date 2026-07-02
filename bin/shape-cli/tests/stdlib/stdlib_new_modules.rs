@@ -3,7 +3,7 @@
 //! These tests evaluate Shape code through the ShapeEngine, using `use std::core::<module>`
 //! to import the native stdlib modules.
 
-use crate::common::{eval, eval_to_bool, eval_to_number, eval_to_string, init_runtime};
+use crate::common::{eval_to_bool, eval_to_number, eval_to_string, init_runtime};
 
 /// Eval helper that registers the csv extension module (not included by default).
 fn eval_with_csv(code: &str) -> Result<serde_json::Value, String> {
@@ -219,50 +219,49 @@ fn test_set_contains() {
 #[test]
 fn test_set_union() {
     init_runtime();
-    let err = eval(
-        r#"
+    assert_eq!(
+        eval_to_number(
+            r#"
             use std::core::set
             let a = set::from_array(["a", "b"])
             let b = set::from_array(["b", "c"])
             set::len(set::union(a, b))
-        "#,
-    )
-    .expect_err("set::union is blocked until HashMap.keys has a v2 typed-array result carrier");
-    assert!(err.contains("HashMap.keys: SURFACE"), "{err}");
+        "#
+        ),
+        3.0
+    );
 }
 
 #[test]
 fn test_set_intersection() {
     init_runtime();
-    let err = eval(
-        r#"
+    assert_eq!(
+        eval_to_number(
+            r#"
             use std::core::set
             let a = set::from_array(["a", "b", "c"])
             let b = set::from_array(["b", "c", "d"])
             set::len(set::intersection(a, b))
-        "#,
-    )
-    .expect_err(
-        "set::intersection is blocked until HashMap.keys has a v2 typed-array result carrier",
+        "#
+        ),
+        2.0
     );
-    assert!(err.contains("HashMap.keys: SURFACE"), "{err}");
 }
 
 #[test]
 fn test_set_difference() {
     init_runtime();
-    let err = eval(
-        r#"
+    assert_eq!(
+        eval_to_number(
+            r#"
             use std::core::set
             let a = set::from_array(["a", "b", "c"])
             let b = set::from_array(["b", "c"])
             set::len(set::difference(a, b))
-        "#,
-    )
-    .expect_err(
-        "set::difference is blocked until HashMap.keys has a v2 typed-array result carrier",
+        "#
+        ),
+        1.0
     );
-    assert!(err.contains("HashMap.keys: SURFACE"), "{err}");
 }
 
 // === Crypto Module (new functions) ===
