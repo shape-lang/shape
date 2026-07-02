@@ -1,6 +1,6 @@
 //! Stress tests for advanced trait dispatch: conditional logic, local variables,
 //! string interpolation, number method chains, chained trait calls, trait+extend
-//! coexistence, null return, function interaction, bool fields, pythagorean,
+//! coexistence, None return, function interaction, bool fields, pythagorean,
 //! nested fields, early return, loops, array/string ops, nested if, while
 //! accumulator, complex expressions, negative numbers, boundary values,
 //! recursion, and boolean logic.
@@ -105,7 +105,7 @@ fn trait_number_method_call_chain() {
         type Stats { sum: number, count: int }
         trait Aggregatable { method avg() -> number }
         impl Aggregatable for Stats {
-            method avg() { self.sum / self.count.to_number() }
+            method avg() { self.sum / (self.count as number) }
         }
         let s = Stats { sum: 100.0, count: 4 }
         s.avg()
@@ -178,18 +178,18 @@ fn trait_method_and_extend_method_both_callable() {
 // 42-57. VARIOUS DISPATCH SCENARIOS
 // =========================================================================
 
-/// Verifies trait method returning null.
+/// Verifies trait method returning None.
 #[test]
 fn trait_method_returning_null() {
     ShapeTest::new(
         r#"
         type Maybe { has_value: bool }
-        trait Optional { method get_or_null() -> any }
+        trait Optional { method get_optional() -> Option<int> }
         impl Optional for Maybe {
-            method get_or_null() { if self.has_value { 42 } else { None } }
+            method get_optional() { if self.has_value { Some(42) } else { None } }
         }
         let m = Maybe { has_value: false }
-        m.get_or_null() ?? 0
+        m.get_optional() ?? 0
     "#,
     )
     .expect_number(0.0);
@@ -201,12 +201,12 @@ fn trait_method_returning_value_when_present() {
     ShapeTest::new(
         r#"
         type Maybe { has_value: bool }
-        trait Optional { method get_or_null() -> any }
+        trait Optional { method get_optional() -> Option<int> }
         impl Optional for Maybe {
-            method get_or_null() { if self.has_value { 42 } else { None } }
+            method get_optional() { if self.has_value { Some(42) } else { None } }
         }
         let m = Maybe { has_value: true }
-        m.get_or_null() ?? 0
+        m.get_optional() ?? 0
     "#,
     )
     .expect_number(42.0);
@@ -387,7 +387,7 @@ fn trait_method_with_loop() {
 fn trait_method_returns_array_length() {
     ShapeTest::new(
         r#"
-        type Bag { items: any }
+        type Bag { items: Array<int> }
         trait Countable { method count() -> int }
         impl Countable for Bag {
             method count() { self.items.length() }
@@ -878,9 +878,9 @@ fn trait_method_using_closure_variable() {
     ShapeTest::new(
         r#"
         type Mapper { factor: number }
-        trait Applicable { method apply(values: any) -> any }
+        trait Applicable { method apply(values: Array<number>) -> Array<number> }
         impl Applicable for Mapper {
-            method apply(values: any) {
+            method apply(values: Array<number>) {
                 let f = self.factor
                 values.map(|x| x * f)
             }

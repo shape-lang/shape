@@ -33,7 +33,7 @@ fn call_trait_method_print_output() {
             method label() -> string;
         }
         impl Labelable for Product {
-            method label() { self.name + " $" + self.price }
+            method label() { self.name + " $" + self.price.to_string() }
         }
         let p = Product { name: "Pen", price: 1.5 }
         print(p.label())
