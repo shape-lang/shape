@@ -570,13 +570,17 @@ mod tests {
     /// §2.7.17 stack-tier drop dispatch.
     unsafe fn drop_arc_result(bits: u64) {
         if bits != 0 {
-            let _ = Arc::<ResultData>::from_raw(bits as *const ResultData);
+            // SAFETY: test callers pass bits returned by `jit_v2_make_result_*`
+            // and call this helper exactly once to retire that Arc share.
+            let _ = unsafe { Arc::<ResultData>::from_raw(bits as *const ResultData) };
         }
     }
 
     unsafe fn drop_arc_option(bits: u64) {
         if bits != 0 {
-            let _ = Arc::<OptionData>::from_raw(bits as *const OptionData);
+            // SAFETY: test callers pass bits returned by `jit_v2_make_option_*`
+            // and call this helper exactly once to retire that Arc share.
+            let _ = unsafe { Arc::<OptionData>::from_raw(bits as *const OptionData) };
         }
     }
 
