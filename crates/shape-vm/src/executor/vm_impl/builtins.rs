@@ -1603,10 +1603,19 @@ impl VirtualMachine {
     /// concat) and by `FormatValueWithMeta` (single-arg
     /// `expr.to_string()` / interpolation).
     pub(crate) fn builtin_format(&mut self, args: &[KindedSlot]) -> Result<KindedSlot, VMError> {
+        let mut to_format: Vec<KindedSlot> = Vec::with_capacity(args.len());
+        for a in args {
+            if let Some(replaced) = self.try_dispatch_display(a)? {
+                to_format.push(replaced);
+            } else {
+                to_format.push(a.clone());
+            }
+        }
+
         let formatter =
             super::super::printing::ValueFormatter::new(&self.program.type_schema_registry);
         let mut out = String::new();
-        for a in args {
+        for a in &to_format {
             out.push_str(&formatter.format_kinded(a));
         }
         Ok(KindedSlot::from_string_arc(std::sync::Arc::new(out)))
