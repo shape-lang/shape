@@ -21,7 +21,7 @@ fn scoped_contract_regular_named_import_alias_executes() {
     ShapeTest::new(
         r#"
         from std::core::set use { new as new_set, len as set_len }
-        let s = new_set()
+        let s: Set<int> = new_set()
         print(set_len(s))
     "#,
     )
