@@ -1463,8 +1463,9 @@ impl BytecodeCompiler {
                                 (f.name.clone(), ft)
                             })
                             .collect::<Vec<_>>();
-                        let schema = TypeSchema::new(runtime_type_name.clone(), fields);
-                        let schema_id = schema.id;
+                        let schema_id = self.type_tracker.schema_registry().allocate_id();
+                        let schema =
+                            TypeSchema::with_id(schema_id, runtime_type_name.clone(), fields);
                         self.type_tracker.schema_registry_mut().register(schema);
                         schema_id
                     } else if let Some(alias_base) = alias_target.as_deref()
@@ -1479,8 +1480,9 @@ impl BytecodeCompiler {
                             .iter()
                             .map(|f| (f.name.clone(), f.field_type.clone()))
                             .collect::<Vec<_>>();
-                        let schema = TypeSchema::new(runtime_type_name.clone(), fields);
-                        let schema_id = schema.id;
+                        let schema_id = self.type_tracker.schema_registry().allocate_id();
+                        let schema =
+                            TypeSchema::with_id(schema_id, runtime_type_name.clone(), fields);
                         self.type_tracker.schema_registry_mut().register(schema);
                         schema_id
                     } else {
@@ -1529,8 +1531,8 @@ impl BytecodeCompiler {
                         .iter()
                         .map(|f| (f.name.clone(), f.field_type.clone()))
                         .collect::<Vec<_>>();
-                    let schema = TypeSchema::new(runtime_type_name.clone(), fields);
-                    let schema_id = schema.id;
+                    let schema_id = self.type_tracker.schema_registry().allocate_id();
+                    let schema = TypeSchema::with_id(schema_id, runtime_type_name.clone(), fields);
                     self.type_tracker.schema_registry_mut().register(schema);
                     schema_id
                 } else {
@@ -2562,6 +2564,105 @@ mod tests {
             value_field.field_type,
             FieldType::I64,
             "default-type-param monomorphized field `value` must be concrete I64"
+        );
+    }
+
+    /// Function-body variant of the default-param regression. The schema-only
+    /// assertion above proves `Box<int>` exists; this pins the actual executed
+    /// producer path (`let b = ...; return b.value`) so the field read cannot
+    /// drift back to the base `Box` schema's `Object("T")` tag.
+    #[test]
+    fn test_r5c2bb_d_generic_struct_default_param_function_read_stamps_i64() {
+        let code = r#"
+            type Box<T = int> { value: T }
+            function test() {
+                let b = Box { value: 42 }
+                return b.value
+            }
+            test()
+        "#;
+        let program = parse_program(code).unwrap();
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("compile must succeed");
+
+        let mut saw_box_int_i64_value = false;
+        let mut object_value_tags = Vec::new();
+        for instr in &bytecode.instructions {
+            let Some(crate::bytecode::Operand::TypedField {
+                type_id,
+                field_idx,
+                field_type_tag,
+            }) = instr.operand.as_ref()
+            else {
+                continue;
+            };
+            let Some(schema) = bytecode.type_schema_registry.get_by_id(u32::from(*type_id)) else {
+                continue;
+            };
+            let Some(field) = schema.field_by_index(*field_idx) else {
+                continue;
+            };
+            if field.name != "value" {
+                continue;
+            }
+            if schema.name == "Box<int>"
+                && *field_type_tag == crate::executor::typed_object_ops::FIELD_TAG_I64
+            {
+                saw_box_int_i64_value = true;
+            }
+            if *field_type_tag == crate::executor::typed_object_ops::FIELD_TAG_OBJECT {
+                object_value_tags.push(schema.name.clone());
+            }
+        }
+
+        assert!(
+            saw_box_int_i64_value,
+            "`b.value` in the function body must be stamped as `Box<int>.value` \
+             with FIELD_TAG_I64"
+        );
+        assert!(
+            object_value_tags.is_empty(),
+            "`value` field reads must not use FIELD_TAG_OBJECT schemas: {:?}",
+            object_value_tags
+        );
+    }
+
+    /// `a.type().to_string()` is a string-producing static type-name query,
+    /// not a runtime `TypeAnnotation` value. The default-param generic path
+    /// must render the monomorphized name (`MyType<int>`) as a supported string
+    /// constant and never emit `PushConst(Constant::TypeAnnotation)`, which the
+    /// strict VM stack deliberately rejects.
+    #[test]
+    fn test_w75_generic_default_type_name_to_string_lowers_to_string_constant() {
+        let code = r#"
+            type MyType<T = int> { x: T }
+            function test() {
+                let a = MyType { x: 1 }
+                return a.type().to_string()
+            }
+            test()
+        "#;
+        let program = parse_program(code).unwrap();
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("compile must succeed");
+
+        assert!(
+            bytecode
+                .constants
+                .iter()
+                .any(|constant| matches!(constant, crate::bytecode::Constant::String(s) if s == "MyType<int>")),
+            "`a.type().to_string()` for a default generic struct must lower to \
+             the monomorphized type-name string"
+        );
+        assert!(
+            !bytecode
+                .constants
+                .iter()
+                .any(|constant| matches!(constant, crate::bytecode::Constant::TypeAnnotation(_))),
+            "`type().to_string()` must not leave a TypeAnnotation constant for \
+             runtime PushConst"
         );
     }
 

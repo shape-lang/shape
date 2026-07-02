@@ -528,9 +528,8 @@ fn regression_high_10_comptime_if_else_false() {
 /// BUG-MED-9: Comptime fields on types accessible via static path
 #[test]
 fn regression_med_9_comptime_fields() {
-    // Phase-2c surface: comptime field defaults are validated but not baked
-    // into the kinded comptime-field registry yet, so the static path falls
-    // through to runtime name resolution.
+    // W75: comptime field defaults are baked into the strict KindedSlot
+    // registry and static field access emits the stored constant.
     ShapeTest::new(
         r#"
         type Currency {
@@ -540,7 +539,7 @@ fn regression_med_9_comptime_fields() {
         Currency.symbol
     "#,
     )
-    .expect_run_err_contains("Undefined variable: Currency");
+    .expect_string("$");
 }
 
 /// BUG-MED-10: build_config() fields accessible in comptime blocks

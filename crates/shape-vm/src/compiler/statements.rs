@@ -22,6 +22,49 @@ struct NativeFieldLayoutSpec {
 }
 
 impl BytecodeCompiler {
+    fn comptime_field_slot_from_literal(
+        struct_name: &str,
+        field_name: &str,
+        field_type: &FieldType,
+        literal: &Literal,
+    ) -> Result<shape_value::KindedSlot> {
+        let slot = match (field_type, literal) {
+            (FieldType::I64, Literal::Int(value)) => shape_value::KindedSlot::from_int(*value),
+            (FieldType::I64, Literal::UInt(value)) if *value <= i64::MAX as u64 => {
+                shape_value::KindedSlot::from_int(*value as i64)
+            }
+            (FieldType::F64, Literal::Number(value)) => {
+                shape_value::KindedSlot::from_number(*value)
+            }
+            (FieldType::F64, Literal::Int(value))
+                if (*value as i128) >= -(1i128 << 53) && (*value as i128) <= (1i128 << 53) =>
+            {
+                shape_value::KindedSlot::from_number(*value as f64)
+            }
+            (FieldType::F64, Literal::UInt(value)) if *value <= (1u64 << 53) => {
+                shape_value::KindedSlot::from_number(*value as f64)
+            }
+            (FieldType::String, Literal::String(value)) => {
+                shape_value::KindedSlot::from_string(value)
+            }
+            (FieldType::Bool, Literal::Bool(value)) => shape_value::KindedSlot::from_bool(*value),
+            (FieldType::Any | FieldType::Option(_), Literal::None) => {
+                shape_value::KindedSlot::none()
+            }
+            _ => {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Comptime field '{}' on type '{}' has default value incompatible with declared type '{}'",
+                        field_name, struct_name, field_type
+                    ),
+                    location: None,
+                });
+            }
+        };
+
+        Ok(slot)
+    }
+
     fn register_builtin_function_decl(
         &mut self,
         def: &shape_ast::ast::BuiltinFunctionDecl,
@@ -3467,54 +3510,35 @@ impl BytecodeCompiler {
             builder.register(self.type_tracker.schema_registry_mut());
         }
 
-        // Bake comptime field values into the `comptime_fields` registry
-        // for constant-folded property access.
-        //
-        // **Phase-2c rebuild pending — see ADR-006 §2.4.** The previous
-        // body iterated `struct_def.fields`, materialized each comptime
-        // field's literal default value into a per-FieldType `ValueWord`
-        // (`from_f64`, `from_i64`, `from_string`, `from_bool`, `none`),
-        // and stored the result in a `shape_value::ValueMap`. After the
-        // strict-typing bulldozer:
-        //
-        // - `ValueMap` (typedef alias for `HashMap<String, ValueWord>`)
-        //   and `ValueWord` are deleted from `shape-value` (per CLAUDE.md
-        //   "Renames to refuse on sight").
-        // - The `comptime_fields: HashMap<String, ValueMap>` field on the
-        //   compiler struct itself uses the deleted carrier; its
-        //   rebuild lives in the cluster that owns `compiler/mod.rs`.
-        // - The kinded replacement is per-FieldType `KindedSlot::from_int`
-        //   / `from_number` / `from_string_arc(Arc<String>)` / `from_bool`
-        //   / `none()` per ADR-006 §2.4 / Q6 — preserving the source
-        //   literal's kind by construction without ever round-tripping
-        //   through a tagged dynamic word. The literal-arm validation
-        //   (rejecting non-literal default values with the
-        //   "Comptime field … must have a literal default value" error)
-        //   stays — that's an AST-level invariant unaffected by the
-        //   value-tier rewrite.
-        //
-        // Until Phase 2c lands, this branch is a structural no-op:
-        // comptime field defaults are silently dropped, so subsequent
-        // property-access reads against `Currency.symbol` (cluster-level
-        // out-of-territory consumer at `expressions/property_access.rs:194`)
-        // fall through to the runtime field-access path. Suppressing the
-        // bake is the correct boundary per playbook §7 #4: we do not
-        // synthesize a placeholder ValueMap that would poison the
-        // comptime_fields registry.
+        // Bake comptime field values into the strict `KindedSlot` registry
+        // for constant-folded property access. The field's declared type is
+        // the producer-side kind oracle: `number = 2` adopts the integer
+        // literal into a `Float64` slot, while incompatible defaults surface
+        // here instead of reaching runtime as an inferred/probed value.
         for field in &struct_def.fields {
             if !field.is_comptime {
                 continue;
             }
             if let Some(ref default_expr) = field.default_value {
                 match default_expr {
-                    Expr::Literal(Literal::Number(_), _)
-                    | Expr::Literal(Literal::Int(_), _)
-                    | Expr::Literal(Literal::String(_), _)
-                    | Expr::Literal(Literal::Bool(_), _)
-                    | Expr::Literal(Literal::None, _) => {
-                        // Recognised literal — rebuild surface; drop the
-                        // bake until the kinded comptime_fields registry
-                        // lands.
+                    Expr::Literal(literal @ Literal::Number(_), _)
+                    | Expr::Literal(literal @ Literal::Int(_), _)
+                    | Expr::Literal(literal @ Literal::UInt(_), _)
+                    | Expr::Literal(literal @ Literal::String(_), _)
+                    | Expr::Literal(literal @ Literal::Bool(_), _)
+                    | Expr::Literal(literal @ Literal::None, _) => {
+                        let field_type =
+                            Self::type_annotation_to_field_type(&field.type_annotation);
+                        let slot = Self::comptime_field_slot_from_literal(
+                            &struct_def.name,
+                            &field.name,
+                            &field_type,
+                            literal,
+                        )?;
+                        self.comptime_fields
+                            .entry(struct_def.name.clone())
+                            .or_default()
+                            .insert(field.name.clone(), slot);
                     }
                     _ => {
                         return Err(ShapeError::SemanticError {

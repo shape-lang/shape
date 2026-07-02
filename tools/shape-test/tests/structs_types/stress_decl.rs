@@ -577,7 +577,7 @@ fn generic_struct_inferred_type_name() {
     .expect_string("MyType<number>");
 }
 
-/// Verifies generic struct type name with default type.
+/// Verifies generic struct type name with default type rendered explicitly.
 #[test]
 fn generic_struct_default_type_name() {
     ShapeTest::new(
@@ -590,7 +590,7 @@ fn generic_struct_default_type_name() {
         test()
     "#,
     )
-    .expect_string("MyType");
+    .expect_string("MyType<int>");
 }
 
 // =========================================================================

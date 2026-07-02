@@ -184,7 +184,7 @@ fn generic_struct_type_name_with_default() {
         test()
     "#,
     )
-    .expect_string("MyType");
+    .expect_string("MyType<int>");
 }
 
 /// Verifies generic struct type name with non default.

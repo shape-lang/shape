@@ -1717,31 +1717,15 @@ impl BytecodeCompiler {
             } => {
                 // Check if this is a Type::comptime_field access (looks like enum syntax)
                 if matches!(payload, shape_ast::ast::EnumConstructorPayload::Unit) {
-                    if self
+                    if let Some(slot) = self
                         .comptime_fields
                         .get(enum_name.as_str())
                         .and_then(|m| m.get(variant))
-                        .is_some()
+                        .cloned()
                     {
-                        // SURFACE: the kinded `KindedSlot → Constant`
-                        // projection used by comptime field extraction
-                        // (treated here as the enum-constructor-shaped
-                        // dotted path `Currency.symbol` → `Currency::symbol`)
-                        // lives in phase-2c (ADR-006 §2.4 / §2.7.4). The
-                        // producer side that populates `comptime_fields`
-                        // (`statements.rs:2450-2512`) is dormant, so this
-                        // branch is currently unreachable in real
-                        // programs. Tracked as `c3-expr-lowering-misc`
-                        // per playbook §3.
-                        return Err(ShapeError::SemanticError {
-                            message: format!(
-                                "comptime field access '{}.{}' (via enum-constructor path) \
-                                 is dormant pending the phase-2c KindedSlot-to-Constant \
-                                 projection rebuild (ADR-006 §2.4 / §2.7.4)",
-                                enum_name, variant
-                            ),
-                            location: Some(self.span_to_source_location(*span)),
-                        });
+                        return self.emit_comptime_field_constant(
+                            enum_name, variant, &slot, *span,
+                        );
                     }
                 }
                 self.compile_expr_enum_constructor(enum_name, variant, payload)
