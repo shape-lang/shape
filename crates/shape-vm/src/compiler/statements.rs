@@ -4240,6 +4240,20 @@ impl BytecodeCompiler {
         params
     }
 
+    fn collect_type_params_from_type_params(
+        type_params: &Option<Vec<shape_ast::ast::TypeParam>>,
+    ) -> std::collections::HashSet<String> {
+        type_params
+            .as_ref()
+            .map(|params| {
+                params
+                    .iter()
+                    .map(|param| param.name().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn qualify_module_type_annotation(
         annotation: &shape_ast::ast::TypeAnnotation,
         module_path: &str,
@@ -4352,26 +4366,463 @@ impl BytecodeCompiler {
         }
     }
 
+    fn qualify_module_function_params(
+        params: &mut [FunctionParameter],
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) {
+        for param in params {
+            if let Some(annotation) = param.type_annotation.as_mut() {
+                *annotation =
+                    Self::qualify_module_type_annotation(annotation, module_path, type_params);
+            }
+            if let Some(default_value) = param.default_value.as_mut() {
+                Self::qualify_module_expr(default_value, module_path, type_params);
+            }
+        }
+    }
+
+    fn qualify_module_function_signature(
+        func: &mut FunctionDef,
+        module_path: &str,
+    ) -> std::collections::HashSet<String> {
+        let type_params = Self::collect_type_params_from_type_params(&func.type_params);
+        Self::qualify_module_function_params(&mut func.params, module_path, &type_params);
+        if let Some(return_type) = func.return_type.as_mut() {
+            *return_type =
+                Self::qualify_module_type_annotation(return_type, module_path, &type_params);
+        }
+        type_params
+    }
+
     fn qualify_module_method_signature(
         method: &mut shape_ast::ast::types::MethodDef,
         module_path: &str,
         receiver_type_params: &std::collections::HashSet<String>,
-    ) {
+    ) -> std::collections::HashSet<String> {
         let mut type_params = receiver_type_params.clone();
         if let Some(method_type_params) = &method.type_params {
             for param in method_type_params {
                 type_params.insert(param.name().to_string());
             }
         }
-        for param in &mut method.params {
-            if let Some(annotation) = param.type_annotation.as_mut() {
-                *annotation =
-                    Self::qualify_module_type_annotation(annotation, module_path, &type_params);
-            }
-        }
+        Self::qualify_module_function_params(&mut method.params, module_path, &type_params);
         if let Some(return_type) = method.return_type.as_mut() {
             *return_type =
                 Self::qualify_module_type_annotation(return_type, module_path, &type_params);
+        }
+        type_params
+    }
+
+    fn qualify_module_variable_decl(
+        decl: &mut shape_ast::ast::VariableDecl,
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) {
+        if let Some(annotation) = decl.type_annotation.as_mut() {
+            *annotation =
+                Self::qualify_module_type_annotation(annotation, module_path, type_params);
+        }
+        if let Some(value) = decl.value.as_mut() {
+            Self::qualify_module_expr(value, module_path, type_params);
+        }
+    }
+
+    fn qualify_module_assignment(
+        assignment: &mut shape_ast::ast::Assignment,
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) {
+        Self::qualify_module_expr(&mut assignment.value, module_path, type_params);
+    }
+
+    fn qualify_module_statements(
+        statements: &mut [Statement],
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) {
+        for statement in statements {
+            Self::qualify_module_statement(statement, module_path, type_params);
+        }
+    }
+
+    fn qualify_module_statement(
+        statement: &mut Statement,
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) {
+        match statement {
+            Statement::Return(Some(expr), _)
+            | Statement::Expression(expr, _)
+            | Statement::SetParamValue {
+                expression: expr, ..
+            }
+            | Statement::SetReturnExpr {
+                expression: expr, ..
+            }
+            | Statement::ReplaceBodyExpr {
+                expression: expr, ..
+            }
+            | Statement::ReplaceModuleExpr {
+                expression: expr, ..
+            } => Self::qualify_module_expr(expr, module_path, type_params),
+            Statement::VariableDecl(decl, _) => {
+                Self::qualify_module_variable_decl(decl, module_path, type_params);
+            }
+            Statement::Assignment(assignment, _) => {
+                Self::qualify_module_assignment(assignment, module_path, type_params);
+            }
+            Statement::For(for_loop, _) => match &mut for_loop.init {
+                shape_ast::ast::ForInit::ForIn { iter, .. } => {
+                    Self::qualify_module_expr(iter, module_path, type_params);
+                    Self::qualify_module_statements(&mut for_loop.body, module_path, type_params);
+                }
+                shape_ast::ast::ForInit::ForC {
+                    init,
+                    condition,
+                    update,
+                } => {
+                    Self::qualify_module_statement(init, module_path, type_params);
+                    Self::qualify_module_expr(condition, module_path, type_params);
+                    Self::qualify_module_expr(update, module_path, type_params);
+                    Self::qualify_module_statements(&mut for_loop.body, module_path, type_params);
+                }
+            },
+            Statement::While(while_loop, _) => {
+                Self::qualify_module_expr(&mut while_loop.condition, module_path, type_params);
+                Self::qualify_module_statements(&mut while_loop.body, module_path, type_params);
+            }
+            Statement::If(if_stmt, _) => {
+                Self::qualify_module_expr(&mut if_stmt.condition, module_path, type_params);
+                Self::qualify_module_statements(&mut if_stmt.then_body, module_path, type_params);
+                if let Some(else_body) = if_stmt.else_body.as_mut() {
+                    Self::qualify_module_statements(else_body, module_path, type_params);
+                }
+            }
+            Statement::Extend(extend, _) => {
+                let receiver_type_params =
+                    Self::collect_type_params_from_type_name(&extend.type_name);
+                for method in &mut extend.methods {
+                    let method_type_params = Self::qualify_module_method_signature(
+                        method,
+                        module_path,
+                        &receiver_type_params,
+                    );
+                    Self::qualify_module_statements(
+                        &mut method.body,
+                        module_path,
+                        &method_type_params,
+                    );
+                }
+            }
+            Statement::SetParamType {
+                type_annotation, ..
+            }
+            | Statement::SetReturnType {
+                type_annotation, ..
+            } => {
+                *type_annotation =
+                    Self::qualify_module_type_annotation(type_annotation, module_path, type_params);
+            }
+            Statement::ReplaceBody { body, .. } => {
+                Self::qualify_module_statements(body, module_path, type_params);
+            }
+            _ => {}
+        }
+    }
+
+    fn qualify_module_block_items(
+        items: &mut [shape_ast::ast::BlockItem],
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) {
+        for item in items {
+            match item {
+                shape_ast::ast::BlockItem::VariableDecl(decl) => {
+                    Self::qualify_module_variable_decl(decl, module_path, type_params);
+                }
+                shape_ast::ast::BlockItem::Assignment(assignment) => {
+                    Self::qualify_module_assignment(assignment, module_path, type_params);
+                }
+                shape_ast::ast::BlockItem::Statement(statement) => {
+                    Self::qualify_module_statement(statement, module_path, type_params);
+                }
+                shape_ast::ast::BlockItem::Expression(expr) => {
+                    Self::qualify_module_expr(expr, module_path, type_params);
+                }
+            }
+        }
+    }
+
+    fn qualify_module_expr(
+        expr: &mut Expr,
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) {
+        let should_qualify_name = |name: &str| {
+            !name.contains("::")
+                && name != module_path
+                && !Self::is_builtin_type_name(name)
+                && !type_params.contains(name)
+        };
+
+        match expr {
+            Expr::FunctionCall {
+                args, named_args, ..
+            }
+            | Expr::QualifiedFunctionCall {
+                args, named_args, ..
+            } => {
+                for arg in args {
+                    Self::qualify_module_expr(arg, module_path, type_params);
+                }
+                for (_, arg) in named_args {
+                    Self::qualify_module_expr(arg, module_path, type_params);
+                }
+            }
+            Expr::EnumConstructor {
+                enum_name,
+                payload,
+                ..
+            } => {
+                if should_qualify_name(enum_name.as_str()) {
+                    *enum_name =
+                        Self::qualify_module_symbol(module_path, enum_name.as_str()).into();
+                }
+                match payload {
+                    shape_ast::ast::EnumConstructorPayload::Unit => {}
+                    shape_ast::ast::EnumConstructorPayload::Tuple(values) => {
+                        for value in values {
+                            Self::qualify_module_expr(value, module_path, type_params);
+                        }
+                    }
+                    shape_ast::ast::EnumConstructorPayload::Struct(fields) => {
+                        for (_, value) in fields {
+                            Self::qualify_module_expr(value, module_path, type_params);
+                        }
+                    }
+                }
+            }
+            Expr::PropertyAccess { object, .. } => {
+                Self::qualify_module_expr(object, module_path, type_params);
+            }
+            Expr::IndexAccess {
+                object,
+                index,
+                end_index,
+                ..
+            } => {
+                Self::qualify_module_expr(object, module_path, type_params);
+                Self::qualify_module_expr(index, module_path, type_params);
+                if let Some(end_index) = end_index.as_mut() {
+                    Self::qualify_module_expr(end_index, module_path, type_params);
+                }
+            }
+            Expr::BinaryOp { left, right, .. }
+            | Expr::FuzzyComparison { left, right, .. } => {
+                Self::qualify_module_expr(left, module_path, type_params);
+                Self::qualify_module_expr(right, module_path, type_params);
+            }
+            Expr::UnaryOp { operand, .. } => {
+                Self::qualify_module_expr(operand, module_path, type_params);
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                Self::qualify_module_expr(condition, module_path, type_params);
+                Self::qualify_module_expr(then_expr, module_path, type_params);
+                if let Some(else_expr) = else_expr.as_mut() {
+                    Self::qualify_module_expr(else_expr, module_path, type_params);
+                }
+            }
+            Expr::Object(entries, _) => {
+                for entry in entries {
+                    match entry {
+                        ObjectEntry::Field {
+                            value,
+                            type_annotation,
+                            ..
+                        } => {
+                            if let Some(annotation) = type_annotation.as_mut() {
+                                *annotation = Self::qualify_module_type_annotation(
+                                    annotation,
+                                    module_path,
+                                    type_params,
+                                );
+                            }
+                            Self::qualify_module_expr(value, module_path, type_params);
+                        }
+                        ObjectEntry::Spread(spread) => {
+                            Self::qualify_module_expr(spread, module_path, type_params);
+                        }
+                    }
+                }
+            }
+            Expr::Array(items, _) => {
+                for item in items {
+                    Self::qualify_module_expr(item, module_path, type_params);
+                }
+            }
+            Expr::Block(block, _) => {
+                Self::qualify_module_block_items(&mut block.items, module_path, type_params);
+            }
+            Expr::TypeAssertion {
+                expr,
+                type_annotation,
+                meta_param_overrides,
+                ..
+            } => {
+                Self::qualify_module_expr(expr, module_path, type_params);
+                *type_annotation =
+                    Self::qualify_module_type_annotation(type_annotation, module_path, type_params);
+                if let Some(overrides) = meta_param_overrides.as_mut() {
+                    for value in overrides.values_mut() {
+                        Self::qualify_module_expr(value, module_path, type_params);
+                    }
+                }
+            }
+            Expr::InstanceOf {
+                expr,
+                type_annotation,
+                ..
+            } => {
+                Self::qualify_module_expr(expr, module_path, type_params);
+                *type_annotation =
+                    Self::qualify_module_type_annotation(type_annotation, module_path, type_params);
+            }
+            Expr::FunctionExpr {
+                params,
+                return_type,
+                body,
+                ..
+            } => {
+                Self::qualify_module_function_params(params, module_path, type_params);
+                if let Some(return_type) = return_type.as_mut() {
+                    *return_type =
+                        Self::qualify_module_type_annotation(return_type, module_path, type_params);
+                }
+                Self::qualify_module_statements(body, module_path, type_params);
+            }
+            Expr::Spread(inner, _)
+            | Expr::Await(inner, _)
+            | Expr::AsyncScope(inner, _)
+            | Expr::TryOperator(inner, _)
+            | Expr::UsingImpl { expr: inner, .. }
+            | Expr::Reference { expr: inner, .. }
+            | Expr::TimeframeContext { expr: inner, .. } => {
+                Self::qualify_module_expr(inner, module_path, type_params);
+            }
+            Expr::If(if_expr, _) => {
+                Self::qualify_module_expr(&mut if_expr.condition, module_path, type_params);
+                Self::qualify_module_expr(&mut if_expr.then_branch, module_path, type_params);
+                if let Some(else_branch) = if_expr.else_branch.as_mut() {
+                    Self::qualify_module_expr(else_branch, module_path, type_params);
+                }
+            }
+            Expr::While(while_expr, _) => {
+                Self::qualify_module_expr(&mut while_expr.condition, module_path, type_params);
+                Self::qualify_module_expr(&mut while_expr.body, module_path, type_params);
+            }
+            Expr::For(for_expr, _) => {
+                Self::qualify_module_expr(&mut for_expr.iterable, module_path, type_params);
+                Self::qualify_module_expr(&mut for_expr.body, module_path, type_params);
+            }
+            Expr::Loop(loop_expr, _) => {
+                Self::qualify_module_expr(&mut loop_expr.body, module_path, type_params);
+            }
+            Expr::Let(let_expr, _) => {
+                if let Some(annotation) = let_expr.type_annotation.as_mut() {
+                    *annotation =
+                        Self::qualify_module_type_annotation(annotation, module_path, type_params);
+                }
+                if let Some(value) = let_expr.value.as_mut() {
+                    Self::qualify_module_expr(value, module_path, type_params);
+                }
+                Self::qualify_module_expr(&mut let_expr.body, module_path, type_params);
+            }
+            Expr::Assign(assign_expr, _) => {
+                Self::qualify_module_expr(&mut assign_expr.target, module_path, type_params);
+                Self::qualify_module_expr(&mut assign_expr.value, module_path, type_params);
+            }
+            Expr::Return(Some(inner), _) | Expr::Break(Some(inner), _) => {
+                Self::qualify_module_expr(inner, module_path, type_params);
+            }
+            Expr::MethodCall {
+                receiver,
+                args,
+                named_args,
+                ..
+            } => {
+                Self::qualify_module_expr(receiver, module_path, type_params);
+                for arg in args {
+                    Self::qualify_module_expr(arg, module_path, type_params);
+                }
+                for (_, arg) in named_args {
+                    Self::qualify_module_expr(arg, module_path, type_params);
+                }
+            }
+            Expr::Match(match_expr, _) => {
+                Self::qualify_module_expr(&mut match_expr.scrutinee, module_path, type_params);
+                for arm in &mut match_expr.arms {
+                    if let Some(guard) = arm.guard.as_mut() {
+                        Self::qualify_module_expr(guard, module_path, type_params);
+                    }
+                    Self::qualify_module_expr(&mut arm.body, module_path, type_params);
+                }
+            }
+            Expr::Range { start, end, .. } => {
+                if let Some(start) = start.as_mut() {
+                    Self::qualify_module_expr(start, module_path, type_params);
+                }
+                if let Some(end) = end.as_mut() {
+                    Self::qualify_module_expr(end, module_path, type_params);
+                }
+            }
+            Expr::SimulationCall { params, .. } => {
+                for (_, value) in params {
+                    Self::qualify_module_expr(value, module_path, type_params);
+                }
+            }
+            Expr::StructLiteral {
+                type_name, fields, ..
+            } => {
+                if should_qualify_name(type_name.as_str()) {
+                    *type_name =
+                        Self::qualify_module_symbol(module_path, type_name.as_str()).into();
+                }
+                for (_, value) in fields {
+                    Self::qualify_module_expr(value, module_path, type_params);
+                }
+            }
+            Expr::Annotated {
+                annotation, target, ..
+            } => {
+                for arg in &mut annotation.args {
+                    Self::qualify_module_expr(arg, module_path, type_params);
+                }
+                Self::qualify_module_expr(target, module_path, type_params);
+            }
+            Expr::AsyncLet(async_let, _) => {
+                Self::qualify_module_expr(&mut async_let.expr, module_path, type_params);
+            }
+            Expr::Comptime(statements, _) => {
+                Self::qualify_module_statements(statements, module_path, type_params);
+            }
+            Expr::ComptimeFor(comptime_for, _) => {
+                Self::qualify_module_expr(&mut comptime_for.iterable, module_path, type_params);
+                Self::qualify_module_statements(&mut comptime_for.body, module_path, type_params);
+            }
+            Expr::TableRows(rows, _) => {
+                for row in rows {
+                    for value in row {
+                        Self::qualify_module_expr(value, module_path, type_params);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -4380,6 +4831,12 @@ impl BytecodeCompiler {
             Item::Function(func, span) => {
                 let mut qualified = func.clone();
                 qualified.name = Self::qualify_module_symbol(module_path, &func.name);
+                if qualified.declaring_module_path.is_none() {
+                    qualified.declaring_module_path = Some(module_path.to_string());
+                }
+                let type_params =
+                    Self::qualify_module_function_signature(&mut qualified, module_path);
+                Self::qualify_module_statements(&mut qualified.body, module_path, &type_params);
                 Ok(Item::Function(qualified, *span))
             }
             Item::Export(export, span) if export.source_decl.is_none() => {
@@ -4387,6 +4844,12 @@ impl BytecodeCompiler {
                 match &mut qualified.item {
                     ExportItem::Function(func) => {
                         func.name = Self::qualify_module_symbol(module_path, &func.name);
+                        if func.declaring_module_path.is_none() {
+                            func.declaring_module_path = Some(module_path.to_string());
+                        }
+                        let type_params =
+                            Self::qualify_module_function_signature(func, module_path);
+                        Self::qualify_module_statements(&mut func.body, module_path, &type_params);
                     }
                     ExportItem::BuiltinFunction(func) => {
                         func.name = Self::qualify_module_symbol(module_path, &func.name);
@@ -4400,12 +4863,31 @@ impl BytecodeCompiler {
                     }
                     ExportItem::Struct(def) => {
                         def.name = Self::qualify_module_symbol(module_path, &def.name);
+                        let type_params =
+                            Self::collect_type_params_from_type_params(&def.type_params);
+                        for field in &mut def.fields {
+                            field.type_annotation = Self::qualify_module_type_annotation(
+                                &field.type_annotation,
+                                module_path,
+                                &type_params,
+                            );
+                            if let Some(default_value) = field.default_value.as_mut() {
+                                Self::qualify_module_expr(default_value, module_path, &type_params);
+                            }
+                        }
                     }
                     ExportItem::Enum(def) => {
                         def.name = Self::qualify_module_symbol(module_path, &def.name);
                     }
                     ExportItem::TypeAlias(def) => {
                         def.name = Self::qualify_module_symbol(module_path, &def.name);
+                        let type_params =
+                            Self::collect_type_params_from_type_params(&def.type_params);
+                        def.type_annotation = Self::qualify_module_type_annotation(
+                            &def.type_annotation,
+                            module_path,
+                            &type_params,
+                        );
                     }
                     ExportItem::Trait(def) => {
                         def.name = Self::qualify_module_symbol(module_path, &def.name);
@@ -4514,6 +4996,17 @@ impl BytecodeCompiler {
             Item::StructType(def, span) => {
                 let mut q = def.clone();
                 q.name = Self::qualify_module_symbol(module_path, &def.name);
+                let type_params = Self::collect_type_params_from_type_params(&q.type_params);
+                for field in &mut q.fields {
+                    field.type_annotation = Self::qualify_module_type_annotation(
+                        &field.type_annotation,
+                        module_path,
+                        &type_params,
+                    );
+                    if let Some(default_value) = field.default_value.as_mut() {
+                        Self::qualify_module_expr(default_value, module_path, &type_params);
+                    }
+                }
                 Ok(Item::StructType(q, *span))
             }
             Item::Enum(def, span) => {
@@ -4524,6 +5017,12 @@ impl BytecodeCompiler {
             Item::TypeAlias(def, span) => {
                 let mut q = def.clone();
                 q.name = Self::qualify_module_symbol(module_path, &def.name);
+                let type_params = Self::collect_type_params_from_type_params(&q.type_params);
+                q.type_annotation = Self::qualify_module_type_annotation(
+                    &q.type_annotation,
+                    module_path,
+                    &type_params,
+                );
                 Ok(Item::TypeAlias(q, *span))
             }
             Item::Trait(def, span) => {
@@ -4540,10 +5039,15 @@ impl BytecodeCompiler {
                     if method.declaring_module_path.is_none() {
                         method.declaring_module_path = Some(module_path.to_string());
                     }
-                    Self::qualify_module_method_signature(
+                    let method_type_params = Self::qualify_module_method_signature(
                         method,
                         module_path,
                         &receiver_type_params,
+                    );
+                    Self::qualify_module_statements(
+                        &mut method.body,
+                        module_path,
+                        &method_type_params,
                     );
                 }
                 Ok(Item::Extend(q, *span))
@@ -4557,10 +5061,15 @@ impl BytecodeCompiler {
                     if method.declaring_module_path.is_none() {
                         method.declaring_module_path = Some(module_path.to_string());
                     }
-                    Self::qualify_module_method_signature(
+                    let method_type_params = Self::qualify_module_method_signature(
                         method,
                         module_path,
                         &receiver_type_params,
+                    );
+                    Self::qualify_module_statements(
+                        &mut method.body,
+                        module_path,
+                        &method_type_params,
                     );
                 }
                 // Do NOT qualify trait_name — traits may be imported from other scopes

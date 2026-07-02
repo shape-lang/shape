@@ -54,6 +54,27 @@ mod module_qualified_type_tests {
         let program = shape_ast::parser::parse_program(code).expect("parse failed");
         let compiler = BytecodeCompiler::new();
         let bytecode = compiler.compile(&program).expect("compile failed");
+        if let Some(content_addressed) = bytecode.content_addressed.as_ref() {
+            let entry_blob = content_addressed
+                .function_store
+                .get(&content_addressed.entry)
+                .expect("content-addressed entry blob");
+            return collect_call_shape(
+                &entry_blob.instructions,
+                &entry_blob.strings,
+                |function_id| {
+                    let index = function_id.0 as usize;
+                    entry_blob.callee_names.get(index).cloned().or_else(|| {
+                        entry_blob
+                            .dependencies
+                            .get(index)
+                            .and_then(|hash| content_addressed.function_store.get(hash))
+                            .map(|blob| blob.name.clone())
+                    })
+                },
+            );
+        }
+
         let main = bytecode
             .functions
             .iter()
@@ -61,17 +82,32 @@ mod module_qualified_type_tests {
             .expect("__main__ function");
         let main_instructions =
             &bytecode.instructions[main.entry_point..main.entry_point + main.body_length];
+        collect_call_shape(main_instructions, &bytecode.strings, |function_id| {
+            bytecode
+                .functions
+                .get(function_id.0 as usize)
+                .map(|function| function.name.clone())
+        })
+    }
 
+    fn collect_call_shape<F>(
+        instructions: &[crate::bytecode::Instruction],
+        strings: &[String],
+        mut resolve_function: F,
+    ) -> (Vec<String>, Vec<String>)
+    where
+        F: FnMut(shape_value::FunctionId) -> Option<String>,
+    {
         let mut static_call_targets = Vec::new();
         let mut fallback_method_names = Vec::new();
-        for instruction in main_instructions {
+        for instruction in instructions {
             match instruction.operand {
                 Some(Operand::Function(function_id)) if instruction.opcode == OpCode::Call => {
                     static_call_targets
-                        .push(bytecode.functions[function_id.0 as usize].name.clone());
+                        .push(resolve_function(function_id).expect("static call target"));
                 }
                 Some(Operand::TypedMethodCall { string_id, .. }) => {
-                    fallback_method_names.push(bytecode.strings[string_id as usize].clone());
+                    fallback_method_names.push(strings[string_id as usize].clone());
                 }
                 _ => {}
             }
