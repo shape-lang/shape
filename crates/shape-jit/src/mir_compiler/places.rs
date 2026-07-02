@@ -1028,10 +1028,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // `--mode vm` returns the right value). Same surface-and-stop
                 // shape as the `Place::Index` string-base deopt below + the
                 // STAGE-M1/F3 method-receiver deopts. The proven receiver
-                // `ConcreteType::String` is the fabrication-free signal
-                // (`index_base_is_string`, read from the threaded
-                // §2.7.5 `concrete_types`, not synthesized from bits). NO
-                // bit-reinterpret, NO carrier rename, NO Bool-default.
+                // `NativeKind::String` / `ConcreteType::String` is the
+                // fabrication-free signal (`index_base_is_string`, read from
+                // the threaded §2.7.5 static type tracks, not synthesized
+                // from bits). NO bit-reinterpret, NO carrier rename, NO
+                // Bool-default.
                 if self.index_base_is_string(base) {
                     return Err(format!(
                         "MirToIR: property read `.{}` on a proven `string` \

@@ -117,9 +117,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// principled response per CLAUDE.md "surface-and-stop, not force" is
     /// to fail JIT compilation here and fall through to the interpreter,
     /// whose String-arm path is correct (verified: `--mode vm` returns the
-    /// right result). Returns `true` ONLY for a `Place::Local` base whose
-    /// recorded `ConcreteType` is `String`.
+    /// right result). Returns `true` only when the base is statically stamped
+    /// as a string, either through the per-slot `NativeKind` track or the
+    /// older concrete-type side table.
     pub(crate) fn index_base_is_string(&self, place: &Place) -> bool {
+        if matches!(self.place_native_kind(place), Some(NativeKind::String)) {
+            return true;
+        }
         match place {
             Place::Local(s) => matches!(
                 self.concrete_types.get(s.0 as usize),

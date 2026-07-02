@@ -1244,6 +1244,18 @@ s.length
     );
 }
 
+#[test]
+fn string_length_property_unicode_binding_deopts_cleanly() {
+    jit_expect_int(
+        r#"
+let text = "Hello 世界 👋";
+let len = text.length;
+len
+"#,
+        10,
+    );
+}
+
 // ===========================================================================
 // 13. Nested closures (Phase 3)
 // ===========================================================================
