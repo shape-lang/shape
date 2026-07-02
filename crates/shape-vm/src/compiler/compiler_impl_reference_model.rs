@@ -2181,9 +2181,10 @@ impl BytecodeCompiler {
                 // table (`numeric_type_of`) rather than the deleted
                 // `last_expr_numeric_type` register.
                 let tail_expr = Self::top_level_item_tail_expr(item);
-                let kind = self
-                    .infer_top_level_return_kind(tail_expr)
-                    .or_else(|| self.infer_top_level_return_kind_from_item(item));
+                let kind = match self.infer_top_level_return_kind(tail_expr)? {
+                    Some(kind) => Some(kind),
+                    None => self.infer_top_level_return_kind_from_item(item)?,
+                };
                 self.top_level_program_return_kind = kind;
             }
             self.release_unused_module_reference_borrows_for_remaining_items(
@@ -2245,7 +2246,7 @@ impl BytecodeCompiler {
             program.items.iter().any(top_level_item_contains_comptime);
 
         // Persist storage hints for JIT width-aware lowering.
-        self.populate_program_storage_hints();
+        self.populate_program_storage_hints()?;
 
         // Transfer type schema registry for TypedObject field resolution
         self.program.type_schema_registry = self.type_tracker.schema_registry().clone();

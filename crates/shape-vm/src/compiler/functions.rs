@@ -2329,7 +2329,7 @@ impl BytecodeCompiler {
                             self.emit_drops_for_early_exit(total_scopes)?;
                         }
                         self.return_escape_drop_skip_local = None;
-                        self.emit_return_value_with_ownership(Some(return_expr));
+                        self.emit_return_value_with_ownership(Some(return_expr))?;
                         // Skip the fallback return below since we've already returned
                         // Update function locals count
                         self.program.functions[func_idx].locals_count = self.next_local;

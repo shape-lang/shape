@@ -5343,7 +5343,7 @@ impl BytecodeCompiler {
                     self.emit_drops_for_early_exit(total_scopes)?;
                 }
                 self.return_escape_drop_skip_local = None;
-                self.emit_return_value_with_ownership(expr_opt.as_ref());
+                self.emit_return_value_with_ownership(expr_opt.as_ref())?;
             }
 
             Statement::Break(_) => {

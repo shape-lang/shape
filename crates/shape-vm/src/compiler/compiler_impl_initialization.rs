@@ -1082,6 +1082,50 @@ mod char_boundary_tests {
     use super::*;
 
     #[test]
+    fn compiler_defaults_to_strict_type_diagnostics_and_fail_fast_compile() {
+        let compiler = BytecodeCompiler::new();
+        assert_eq!(compiler.type_diagnostic_mode, TypeDiagnosticMode::Strict);
+        assert_eq!(
+            compiler.compile_diagnostic_mode,
+            CompileDiagnosticMode::FailFast
+        );
+    }
+
+    #[test]
+    fn reliable_only_filter_is_fail_closed_for_hard_type_errors() {
+        assert!(BytecodeCompiler::should_emit_type_diagnostic(
+            &TypeError::TypeMismatch("int".to_string(), "string".to_string())
+        ));
+        assert!(BytecodeCompiler::should_emit_type_diagnostic(
+            &TypeError::UndefinedVariable("missing".to_string())
+        ));
+    }
+
+    #[test]
+    fn default_compiler_rejects_hard_type_errors() {
+        let source = "let x: int = \"not an int\"\nx\n";
+        let program = shape_ast::parse_program(source).expect("parse should succeed");
+        let result = BytecodeCompiler::new().compile_with_source(&program, source);
+        assert!(
+            result.is_err(),
+            "default compiler must reject hard type diagnostics"
+        );
+    }
+
+    #[test]
+    fn recover_all_collects_but_still_returns_type_diagnostics() {
+        let source = "let x: int = \"not an int\"\nx\n";
+        let program = shape_ast::parse_program(source).expect("parse should succeed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.set_type_diagnostic_mode(TypeDiagnosticMode::RecoverAll);
+        let result = compiler.compile_with_source(&program, source);
+        assert!(
+            result.is_err(),
+            "RecoverAll may collect additional diagnostics, but must not compile through hard type errors"
+        );
+    }
+
+    #[test]
     fn clamp_to_char_boundary_ascii_is_identity() {
         let s = "let x = foo();\nlet y = bar();";
         // Every ASCII offset is a char boundary -> returned unchanged.

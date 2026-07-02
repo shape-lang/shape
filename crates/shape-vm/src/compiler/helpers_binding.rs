@@ -461,7 +461,8 @@ impl BytecodeCompiler {
     /// same bits-through behavior), so this flip is behaviorally
     /// equivalent at the inner-function boundary — the encoded `<Kind>`
     /// is a static annotation for the JIT and downstream consumers.
-    /// Unproven types fall back to polymorphic `ReturnValue`.
+    /// Missing proof signals fall back to polymorphic `ReturnValue`; a
+    /// contradictory proof signal is a hard compile error.
     ///
     /// Strictly-typed contract: typed `ReturnValue<Kind>` handlers route
     /// raw native bits through unchanged. The typed opcode is emitted only
@@ -482,7 +483,7 @@ impl BytecodeCompiler {
         // `last_expr_numeric_type` register. `None` where the return value is
         // not a single expr (falls back to `last_expr_type_info`).
         return_expr: Option<&shape_ast::ast::Expr>,
-    ) {
+    ) -> shape_ast::error::Result<()> {
         use crate::bytecode::{Instruction, OpCode};
         if matches!(
             self.current_function_return_ownership_mode(),
@@ -490,14 +491,15 @@ impl BytecodeCompiler {
         ) {
             self.emit(Instruction::simple(OpCode::ReturnOwned));
         }
-        let gated_hint =
-            self.exact_scalar_return_kind_for_expr("emit_return_value_with_ownership", return_expr);
+        let gated_hint = self
+            .exact_scalar_return_kind_for_expr("emit_return_value_with_ownership", return_expr)?;
         match gated_hint {
             Some(h) => self.emit_return_value_for_hint(h),
             None => {
                 self.emit(Instruction::simple(OpCode::ReturnValue));
             }
         }
+        Ok(())
     }
 
     /// Wave E+4: derive a `StorageHint` from `last_expr_numeric_type` /
@@ -566,25 +568,44 @@ impl BytecodeCompiler {
             .and_then(|info| info.storage_hint)
     }
 
+    fn proof_gap_to_shape_error(
+        gap: crate::type_tracking::ProofGap,
+    ) -> shape_ast::error::ShapeError {
+        shape_ast::error::ShapeError::SemanticError {
+            message: gap.to_string(),
+            location: None,
+        }
+    }
+
     pub(in crate::compiler) fn prove_exact_scalar_return_kind(
         site: &'static str,
         proven: &shape_value::v2::ConcreteType,
         claimed_kind: crate::type_tracking::StorageHint,
-    ) -> Option<crate::type_tracking::StorageHint> {
-        let kind = crate::type_tracking::prove_native_kind(site, proven, claimed_kind).ok()?;
-        crate::compiler::helpers::typed_return_value_opcode(kind)?;
-        Some(kind)
+    ) -> shape_ast::error::Result<Option<crate::type_tracking::StorageHint>> {
+        let kind = crate::type_tracking::prove_native_kind(site, proven, claimed_kind)
+            .map_err(Self::proof_gap_to_shape_error)?;
+        if crate::compiler::helpers::typed_return_value_opcode(kind).is_none() {
+            return Ok(None);
+        }
+        Ok(Some(kind))
     }
 
     pub(in crate::compiler) fn exact_scalar_return_kind_for_expr(
         &self,
         site: &'static str,
         expr: Option<&shape_ast::ast::Expr>,
-    ) -> Option<crate::type_tracking::StorageHint> {
-        let proven = crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
-            self, expr?,
-        )?;
-        let claimed = self.last_emitted_native_kind()?;
+    ) -> shape_ast::error::Result<Option<crate::type_tracking::StorageHint>> {
+        let Some(expr) = expr else {
+            return Ok(None);
+        };
+        let Some(proven) =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, expr)
+        else {
+            return Ok(None);
+        };
+        let Some(claimed) = self.last_emitted_native_kind() else {
+            return Ok(None);
+        };
         Self::prove_exact_scalar_return_kind(site, &proven, claimed)
     }
 
@@ -1083,7 +1104,8 @@ mod u2_exact_native_kind_proof_tests {
                 "test_exact_i64",
                 &ConcreteType::I64,
                 StorageHint::Int64,
-            ),
+            )
+            .unwrap(),
             Some(StorageHint::Int64)
         );
         assert_eq!(
@@ -1091,7 +1113,8 @@ mod u2_exact_native_kind_proof_tests {
                 "test_exact_bool",
                 &ConcreteType::Bool,
                 StorageHint::Bool,
-            ),
+            )
+            .unwrap(),
             Some(StorageHint::Bool)
         );
         assert_eq!(
@@ -1099,55 +1122,56 @@ mod u2_exact_native_kind_proof_tests {
                 "test_exact_f64",
                 &ConcreteType::F64,
                 StorageHint::Float64,
-            ),
+            )
+            .unwrap(),
             Some(StorageHint::Float64)
         );
     }
 
     #[test]
-    fn width_narrowing_is_not_a_native_kind_proof() {
-        assert_eq!(
-            BytecodeCompiler::prove_exact_scalar_return_kind(
-                "test_no_width_narrow",
-                &ConcreteType::I8,
-                StorageHint::Int64,
-            ),
-            None
-        );
-        assert_eq!(
-            BytecodeCompiler::prove_exact_scalar_return_kind(
-                "test_no_unsigned_width_narrow",
-                &ConcreteType::U16,
-                StorageHint::Int64,
-            ),
-            None
-        );
+    fn width_narrowing_is_a_hard_native_kind_proof_error() {
+        let err = BytecodeCompiler::prove_exact_scalar_return_kind(
+            "test_no_width_narrow",
+            &ConcreteType::I8,
+            StorageHint::Int64,
+        )
+        .expect_err("width narrowing must not fall back silently");
+        assert!(err.to_string().contains("E_TYPED_OPCODE_WITHOUT_PROOF"));
+
+        let err = BytecodeCompiler::prove_exact_scalar_return_kind(
+            "test_no_unsigned_width_narrow",
+            &ConcreteType::U16,
+            StorageHint::Int64,
+        )
+        .expect_err("unsigned width narrowing must not fall back silently");
+        assert!(err.to_string().contains("E_TYPED_OPCODE_WITHOUT_PROOF"));
     }
 
     #[test]
-    fn option_result_carriers_are_not_proven_until_l5_matches_projection() {
-        assert_eq!(
-            BytecodeCompiler::prove_exact_scalar_return_kind(
-                "test_option_blocked",
-                &ConcreteType::Option(Box::new(ConcreteType::I64)),
-                StorageHint::Ptr(HeapKind::Option),
-            ),
-            None
-        );
-        assert_eq!(
-            BytecodeCompiler::prove_exact_scalar_return_kind(
-                "test_result_blocked",
-                &ConcreteType::Result(Box::new(ConcreteType::I64), Box::new(ConcreteType::String),),
-                StorageHint::Ptr(HeapKind::Result),
-            ),
-            None
-        );
+    fn option_result_wrong_carriers_are_hard_native_kind_proof_errors() {
+        let err = BytecodeCompiler::prove_exact_scalar_return_kind(
+            "test_option_blocked",
+            &ConcreteType::Option(Box::new(ConcreteType::I64)),
+            StorageHint::Ptr(HeapKind::Option),
+        )
+        .expect_err("old Option carrier must not fall back silently");
+        assert!(err.to_string().contains("E_TYPED_OPCODE_WITHOUT_PROOF"));
+
+        let err = BytecodeCompiler::prove_exact_scalar_return_kind(
+            "test_result_blocked",
+            &ConcreteType::Result(Box::new(ConcreteType::I64), Box::new(ConcreteType::String)),
+            StorageHint::Ptr(HeapKind::Result),
+        )
+        .expect_err("old Result carrier must not fall back silently");
+        assert!(err.to_string().contains("E_TYPED_OPCODE_WITHOUT_PROOF"));
+
         assert_eq!(
             BytecodeCompiler::prove_exact_scalar_return_kind(
                 "test_option_canonical_ptr_not_scalar",
                 &ConcreteType::Option(Box::new(ConcreteType::I64)),
                 StorageHint::Ptr(HeapKind::TypedObject),
-            ),
+            )
+            .unwrap(),
             None
         );
     }

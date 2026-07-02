@@ -3728,20 +3728,21 @@ impl BytecodeCompiler {
     pub(super) fn infer_top_level_return_kind_from_item(
         &self,
         item: &shape_ast::ast::Item,
-    ) -> Option<StorageHint> {
+    ) -> shape_ast::error::Result<Option<StorageHint>> {
         use shape_ast::ast::{Expr, Item, Statement};
 
         // Extract the trailing expression of a top-level item, if any.
         let expr: &Expr = match item {
             Item::Expression(expr, _) => expr,
             Item::Statement(Statement::Expression(expr, _), _) => expr,
-            _ => return None,
+            _ => return Ok(None),
         };
 
-        if let Some(kind) = self
-            .exact_scalar_return_kind_for_expr("infer_top_level_return_kind_from_item", Some(expr))
-        {
-            return Some(kind);
+        if let Some(kind) = self.exact_scalar_return_kind_for_expr(
+            "infer_top_level_return_kind_from_item",
+            Some(expr),
+        )? {
+            return Ok(Some(kind));
         }
 
         // Walk into a call-shape: function-call / qualified-namespace-call
@@ -3757,7 +3758,7 @@ impl BytecodeCompiler {
         // `ConcreteType` for the receiver-method expression, though, we do not
         // stamp a top-level scalar return kind.
         if let Expr::MethodCall { .. } = expr {
-            return None;
+            return Ok(None);
         }
 
         // Wave E+5.5 cluster R5: top-level match expressions where every
@@ -3776,7 +3777,7 @@ impl BytecodeCompiler {
         // wrongly promote to Int64 even though the matched arm could
         // be the polymorphic one.
         if let Expr::Match(match_expr, _) = expr {
-            return Self::match_arms_uniform_literal_kind(match_expr);
+            return Ok(Self::match_arms_uniform_literal_kind(match_expr));
         }
 
         let owned_qualified;
@@ -3793,7 +3794,7 @@ impl BytecodeCompiler {
                 owned_qualified = format!("{}::{}", namespace, function);
                 owned_qualified.as_str()
             }
-            _ => return None,
+            _ => return Ok(None),
         };
 
         // Resolve callee return annotation. Try regular function defs
@@ -3808,12 +3809,17 @@ impl BytecodeCompiler {
                     .get(call_name)
                     .and_then(|def| def.return_type.as_ref())
             });
-        let ann = return_ann?;
+        let Some(ann) = return_ann else {
+            return Ok(None);
+        };
 
-        let proven =
+        let Some(proven) =
             crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
                 self, ann,
-            )?;
+            )
+        else {
+            return Ok(None);
+        };
 
         // Producer/return-kind contract gate (Wave E+5 / task #98 fix).
         // Top-level `name()` calls compile to polymorphic `Call*` opcodes
@@ -3825,7 +3831,9 @@ impl BytecodeCompiler {
         // a producer kind is present, accept it only if the real U2 proof
         // gate confirms exact agreement between the proven static type and
         // the producer-declared `NativeKind`.
-        let native_kind = self.last_emitted_native_kind()?;
+        let Some(native_kind) = self.last_emitted_native_kind() else {
+            return Ok(None);
+        };
         Self::prove_exact_scalar_return_kind(
             "infer_top_level_return_kind_from_item",
             &proven,
@@ -3901,7 +3909,7 @@ impl BytecodeCompiler {
     pub(super) fn infer_top_level_return_kind(
         &mut self,
         tail_expr: Option<&shape_ast::ast::Expr>,
-    ) -> Option<StorageHint> {
+    ) -> shape_ast::error::Result<Option<StorageHint>> {
         // A typed top-level return kind now requires the final expression's
         // structural `ConcreteType` plus an exact producer-kind proof. Hints
         // from `numeric_type_of` / `last_expr_type_info` are not evidence.
@@ -3909,7 +3917,7 @@ impl BytecodeCompiler {
     }
 
     /// Populate program-level storage hints for top-level locals and module bindings.
-    pub(super) fn populate_program_storage_hints(&mut self) {
+    pub(super) fn populate_program_storage_hints(&mut self) -> shape_ast::error::Result<()> {
         // Per ADR-006 §2.7.5.1, the compiler-tier intermediate state is
         // `Option<StorageHint>`. The wire-format `top_level_local_storage_hints`
         // (and `FrameDescriptor.slots`) is `Vec<NativeKind>` — every slot
@@ -3942,9 +3950,10 @@ impl BytecodeCompiler {
         // threaded the program's tail expr through `infer_top_level_return_kind`.
         // This secondary fallback has no tail expr in hand → `None`; it relies
         // on `last_expr_type_info` + the producer-opcode kind gate.
-        let return_kind: Option<StorageHint> = self
-            .top_level_program_return_kind
-            .or_else(|| self.infer_top_level_return_kind(None));
+        let return_kind: Option<StorageHint> = match self.top_level_program_return_kind {
+            Some(kind) => Some(kind),
+            None => self.infer_top_level_return_kind(None)?,
+        };
         let has_trusted = self
             .program
             .instructions
@@ -3985,6 +3994,7 @@ impl BytecodeCompiler {
                 .function_local_storage_hints
                 .truncate(self.program.functions.len());
         }
+        Ok(())
     }
 
     /// Propagate the current expression's inferred type metadata to a target slot.
