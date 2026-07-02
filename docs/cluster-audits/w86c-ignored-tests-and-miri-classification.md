@@ -81,24 +81,26 @@ or errors instead of panicking across the non-unwinding ABI boundary.
 | `shape-value --lib provenance` | default Miri / Stacked Borrows; `-Zmiri-tree-borrows` |
 | `shape-vm --lib result_option_carrier` | default Miri / Stacked Borrows; `-Zmiri-tree-borrows`; `-Zmiri-strict-provenance` |
 | `shape-vm --lib get_prop_typed_object_int_field_reads_via_raw` | default Miri / Stacked Borrows; `-Zmiri-tree-borrows` |
+| `shape-vm --lib get_prop_typed_object_string_field_reads_via_raw` | default Miri / Stacked Borrows; `-Zmiri-tree-borrows` |
 
 Passing this gate is evidence for only those filters and modes. It is not a
 full UB-free proof for the VM, runtime, JIT, FFI, snapshots, arbitrary Shape
 program execution, all heap carriers, all raw pointer consumers, or ignored
 tests.
 
-## Next Miri Candidate
+## W87A Miri Expansion
 
-A narrow low-risk next probe would be the sibling property-access test:
+W87A ran the sibling string-field property-access probe before adding it to the
+gate:
 
 ```bash
-cargo miri test -p shape-vm --lib get_prop_typed_object_string_field_reads_via_raw
+systemd-run --user --wait --collect --pipe -p MemoryMax=16G -p MemorySwapMax=0 -p TasksMax=256 --setenv=PATH="$PATH" bash -c 'set -euo pipefail; cd /home/dev/dev/shape-lang/shape-strict-flip-w87a-miri-string-provenance; direnv exec "$PWD" env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/shape-w87a-miri-target /home/dev/.cargo/bin/rustup run nightly cargo miri test -p shape-vm --lib get_prop_typed_object_string_field_reads_via_raw'
+systemd-run --user --wait --collect --pipe -p MemoryMax=16G -p MemorySwapMax=0 -p TasksMax=256 --setenv=PATH="$PATH" bash -c 'set -euo pipefail; cd /home/dev/dev/shape-lang/shape-strict-flip-w87a-miri-string-provenance; direnv exec "$PWD" env MIRIFLAGS=-Zmiri-tree-borrows CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/shape-w87a-miri-target /home/dev/.cargo/bin/rustup run nightly cargo miri test -p shape-vm --lib get_prop_typed_object_string_field_reads_via_raw'
 ```
 
-Run it first in the serialized Miri lane under both default Miri and
-`MIRIFLAGS=-Zmiri-tree-borrows`. If it passes there, add it to
-`scripts/check-miri-provenance.sh`. This slice did not add it because an
-unrun Miri probe would make the gate aspirational rather than enforceable.
+Both modes passed with `1 passed; 0 failed; 2467 filtered out`. This is targeted
+evidence for that string-field raw-read path only, not a proof that every typed
+object string consumer, heap carrier, VM path, or ignored test is UB-free.
 
 ## Checker
 

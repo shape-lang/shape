@@ -64,6 +64,9 @@ Miri provenance gate coverage:
   - shape-vm --lib get_prop_typed_object_int_field_reads_via_raw
       default Miri / Stacked Borrows
       MIRIFLAGS=-Zmiri-tree-borrows
+  - shape-vm --lib get_prop_typed_object_string_field_reads_via_raw
+      default Miri / Stacked Borrows
+      MIRIFLAGS=-Zmiri-tree-borrows
 
 Boundary: passing this gate is evidence for the probes above only. It is not a
 full UB proof for the VM, runtime, JIT, FFI, snapshots, or arbitrary Shape
@@ -116,6 +119,11 @@ run_miri "shape-vm typed-object get_prop raw read, Stacked Borrows" "" \
   shape-vm get_prop_typed_object_int_field_reads_via_raw
 run_miri "shape-vm typed-object get_prop raw read, Tree Borrows" "-Zmiri-tree-borrows" \
   shape-vm get_prop_typed_object_int_field_reads_via_raw
+
+run_miri "shape-vm typed-object get_prop string raw read, Stacked Borrows" "" \
+  shape-vm get_prop_typed_object_string_field_reads_via_raw
+run_miri "shape-vm typed-object get_prop string raw read, Tree Borrows" "-Zmiri-tree-borrows" \
+  shape-vm get_prop_typed_object_string_field_reads_via_raw
 
 run_miri "shape-vm Result/Option carrier, Strict Provenance" "-Zmiri-strict-provenance" \
   shape-vm result_option_carrier
