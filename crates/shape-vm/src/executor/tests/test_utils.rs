@@ -13,11 +13,13 @@ use shape_value::{KindedSlot, VMError};
 
 /// Assertion extension for tests migrated from the deleted `ValueWordExt`
 /// surface. It decodes only from the explicit `KindedSlot.kind` label.
+#[cfg(feature = "deep-tests")]
 pub trait KindedSlotTestExt {
     fn as_test_number(&self) -> Option<f64>;
     fn as_test_int(&self) -> Option<i64>;
 }
 
+#[cfg(feature = "deep-tests")]
 impl KindedSlotTestExt for KindedSlot {
     fn as_test_number(&self) -> Option<f64> {
         self.as_f64().or_else(|| self.as_i64().map(|i| i as f64))

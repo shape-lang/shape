@@ -3442,22 +3442,6 @@ impl TypeInferenceEngine {
         Ok(())
     }
 
-    /// Bind pattern variables to the type environment
-    ///
-    /// This recursively processes all patterns, creating fresh type variables
-    /// for each bound identifier. Handles:
-    /// - Simple identifiers: `x` binds x to a fresh type var
-    /// - Array patterns: `[a, b]` binds a and b
-    /// - Object patterns: `{x, y}` binds x and y
-    /// - Constructor patterns: `Some(x)` binds x
-    /// - Wildcards: `_` binds nothing
-    pub(crate) fn bind_pattern_vars(
-        &mut self,
-        pattern: &shape_ast::ast::Pattern,
-    ) -> TypeResult<()> {
-        self.bind_pattern_vars_typed(pattern, None)
-    }
-
     /// Element type of an array-shaped scrutinee, in any of the three
     /// representations the inference engine produces (`Concrete(Array)`,
     /// `Concrete(Generic{"Array"|"Vec"})`, or `Generic{base: Array|Vec, args}`).
@@ -3487,7 +3471,7 @@ impl TypeInferenceEngine {
         }
     }
 
-    /// WS-4 4b: scrutinee-aware variant of [`bind_pattern_vars`]. When
+    /// WS-4 4b: scrutinee-aware pattern-variable binder. When
     /// `scrutinee` resolves to a registered struct, an `Object` or
     /// struct-`Constructor` pattern binds each field to that field's
     /// declared type instead of a fresh type var — keeping

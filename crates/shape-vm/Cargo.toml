@@ -68,6 +68,8 @@ target-lexicon = { version = "0.12", optional = true }
 [features]
 default = ["jit"]
 deep-tests = []
+# Enables preserved Phase-2c exception refcount regression tests.
+phase-2c-exception-rebuild = []
 # `jit-trace` enables the tracing macros at debug/trace levels for the two
 # `monomorphization/cache.rs` SHAPE_JIT_DEBUG sites. Without it,
 # `release_max_level_off` compiles away to no-ops. Co-feature with

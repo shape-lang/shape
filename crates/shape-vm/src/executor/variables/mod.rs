@@ -4226,7 +4226,7 @@ mod typedfield_ref_tests {
     /// 16-byte-misaligned address before erroring).
     #[test]
     fn typed_field_non_typed_object_base_errors_cleanly() {
-        let mut vm = VirtualMachine::new(VMConfig::default());
+        let vm = VirtualMachine::new(VMConfig::default());
         let bad_rt = RefTarget::ModuleBinding {
             binding_idx: 0,
             kind: NativeKind::Int64, // not a TypedObject

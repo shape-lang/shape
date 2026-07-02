@@ -28,7 +28,6 @@
 //! and is not weakened here). `int` and `number` never unify.
 
 use shape_ast::ast::{Expr, Literal, Spanned, TypeAnnotation};
-use shape_runtime::type_schema::FieldType;
 
 /// The f64 exact-integer lossless range `[-2^53, 2^53]`.
 fn fits_f64_lossless(v: i128) -> bool {
@@ -65,19 +64,6 @@ pub(crate) fn widen_int_literal_for_annotation(
 ) -> Option<Expr> {
     let name = annotation.as_simple_name()?;
     if !is_number_type_name(name) {
-        return None;
-    }
-    widen_int_literal_to_number(expr)
-}
-
-/// Rewrite a bare integer literal `expr` to a `Number` literal when the target
-/// `FieldType` is `F64` (the struct/object-field / array-element site shape).
-/// Returns `None` when no rewrite applies.
-pub(crate) fn widen_int_literal_for_field_type(
-    expr: &Expr,
-    field_type: &FieldType,
-) -> Option<Expr> {
-    if !matches!(field_type, FieldType::F64) {
         return None;
     }
     widen_int_literal_to_number(expr)
