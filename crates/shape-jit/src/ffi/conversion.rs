@@ -16,6 +16,41 @@
 use super::jit_kinds::*;
 use super::value_ffi::*;
 
+#[cold]
+#[track_caller]
+fn unsupported_legacy_heap_kind(func_name: &str, kind: Option<u16>) -> ! {
+    match kind {
+        Some(kind) => panic!(
+            "SURFACE: {func_name} received unsupported legacy JIT heap kind {kind}; \
+             ADR-006 section 2.7.5/2.7.10 requires a kinded JIT entry or an explicit HK arm."
+        ),
+        None => panic!(
+            "SURFACE: {func_name} received non-heap bits where a legacy JIT heap allocation \
+             was required; ADR-006 section 2.7.5 requires the caller to pass a NativeKind \
+             companion instead of probing raw bits."
+        ),
+    }
+}
+
+fn is_known_legacy_heap_kind(kind: u16) -> bool {
+    matches!(
+        kind,
+        HK_STRING
+            | HK_TYPED_OBJECT
+            | HK_CLOSURE
+            | HK_DECIMAL
+            | HK_BIG_INT
+            | HK_DATATABLE
+            | HK_HASHMAP
+            | HK_FUTURE
+            | HK_TASK_GROUP
+            | HK_FILTER_EXPR
+            | HK_JIT_FUNCTION
+            | HK_JIT_TABLE_REF
+            | HK_JIT_OBJECT
+    ) || (JIT_LEGACY_HK_BASE..=HK_FLOAT_ARRAY_SLICE).contains(&kind)
+}
+
 // ============================================================================
 // Type Checking
 // ============================================================================
@@ -33,7 +68,8 @@ pub extern "C" fn jit_typeof(value_bits: u64) -> u64 {
     } else if is_inline_function(value_bits) {
         "function"
     } else {
-        match heap_kind(value_bits) {
+        let kind = heap_kind(value_bits);
+        match kind {
             Some(HK_STRING) => "string",
             Some(HK_ARRAY) => "array",
             Some(HK_JIT_OBJECT) | Some(HK_TYPED_OBJECT) => "object",
@@ -44,7 +80,7 @@ pub extern "C" fn jit_typeof(value_bits: u64) -> u64 {
             Some(HK_DURATION) => "duration",
             Some(HK_TIME) => "time",
             Some(HK_TIMEFRAME) => "timeframe",
-            _ => "unknown",
+            other => unsupported_legacy_heap_kind("jit_typeof", other),
         }
     };
     jit_box(HK_STRING, type_str.to_string())
@@ -65,14 +101,15 @@ pub extern "C" fn jit_to_string(value_bits: u64) -> u64 {
     } else if value_bits == TAG_BOOL_FALSE {
         "false".to_string()
     } else {
-        match heap_kind(value_bits) {
+        let kind = heap_kind(value_bits);
+        match kind {
             Some(HK_STRING) => {
                 let s = unsafe { jit_unbox::<String>(value_bits) };
                 s.clone()
             }
             Some(HK_ARRAY) => "[array]".to_string(),
             Some(HK_JIT_OBJECT) | Some(HK_TYPED_OBJECT) => "[object]".to_string(),
-            _ => "[unknown]".to_string(),
+            other => unsupported_legacy_heap_kind("jit_to_string", other),
         }
     };
     jit_box(HK_STRING, s)
@@ -184,7 +221,8 @@ fn check_basic_type(value_bits: u64, type_name: &str) -> bool {
         return type_name == "result";
     }
 
-    match heap_kind(value_bits) {
+    let kind = heap_kind(value_bits);
+    match kind {
         Some(HK_STRING) => type_name == "string",
         Some(HK_ARRAY) => type_name == "array",
         Some(HK_JIT_OBJECT) | Some(HK_TYPED_OBJECT) => type_name == "object",
@@ -194,7 +232,7 @@ fn check_basic_type(value_bits: u64, type_name: &str) -> bool {
         Some(HK_DURATION) => type_name == "duration",
         Some(HK_TIMEFRAME) => type_name == "timeframe",
         Some(HK_RANGE) => type_name == "range",
-        _ => false,
+        other => unsupported_legacy_heap_kind("check_basic_type", other),
     }
 }
 
@@ -231,7 +269,8 @@ pub(crate) fn format_value_word(value_bits: u64) -> String {
     } else if value_bits == TAG_NULL {
         "null".to_string()
     } else {
-        match heap_kind(value_bits) {
+        let kind = heap_kind(value_bits);
+        match kind {
             Some(HK_STRING) => {
                 let s = unsafe { jit_unbox::<String>(value_bits) };
                 s.clone()
@@ -256,7 +295,8 @@ pub(crate) fn format_value_word(value_bits: u64) -> String {
                 let inner = unsafe { *jit_unbox::<u64>(value_bits) };
                 format!("Some({})", format_value_word(inner))
             }
-            _ => "[object]".to_string(),
+            Some(HK_JIT_OBJECT) | Some(HK_TYPED_OBJECT) => "[object]".to_string(),
+            other => unsupported_legacy_heap_kind("format_value_word", other),
         }
     }
 }
@@ -1094,12 +1134,14 @@ pub extern "C" fn jit_to_number(value_bits: u64) -> u64 {
         return box_number(0.0);
     }
 
-    let num = match heap_kind(value_bits) {
+    let kind = heap_kind(value_bits);
+    let num = match kind {
         Some(HK_STRING) => {
             let s = unsafe { jit_unbox::<String>(value_bits) };
             s.parse::<f64>().unwrap_or(f64::NAN)
         }
-        _ => f64::NAN,
+        Some(kind) if is_known_legacy_heap_kind(kind) => f64::NAN,
+        other => unsupported_legacy_heap_kind("jit_to_number", other),
     };
     box_number(num)
 }

@@ -147,18 +147,8 @@ heapkind-match-catchall	crates/shape-runtime/src/snapshot.rs:1198	match expected
 heapkind-match-catchall	crates/shape-runtime/src/wire_conversion.rs:1035	let node = match hk { | _ => None,
 heapkind-match-catchall	crates/shape-vm/src/compiler/comptime.rs:1379	NativeKind::Ptr(hk) => match hk { | _ => {
 heapkind-match-catchall	crates/shape-vm/src/executor/control_flow/foreign_marshal.rs:194	match heap_kind { | other => Err(VMError::NotImplemented(format!(
-jit-legacy-heap-kind-catchall	crates/shape-jit/src/ffi/conversion.rs:1097	let num = match heap_kind(value_bits) { | _ => f64::NAN,
-jit-legacy-heap-kind-catchall	crates/shape-jit/src/ffi/conversion.rs:187	match heap_kind(value_bits) { | _ => false,
-jit-legacy-heap-kind-catchall	crates/shape-jit/src/ffi/conversion.rs:234	match heap_kind(value_bits) { | _ => "[object]".to_string(),
-jit-legacy-heap-kind-catchall	crates/shape-jit/src/ffi/conversion.rs:36	match heap_kind(value_bits) { | _ => "unknown",
-jit-legacy-heap-kind-catchall	crates/shape-jit/src/ffi/conversion.rs:68	match heap_kind(value_bits) { | _ => "[unknown]".to_string(),
-jit-legacy-heap-kind-catchall	crates/shape-jit/src/ffi/iterator.rs:101	match heap_kind(iter_bits) { | _ => TAG_NULL,
-jit-legacy-heap-kind-catchall	crates/shape-jit/src/ffi/iterator.rs:38	let done = match heap_kind(iter_bits) { | _ => true, // Unknown type = done
-jit-legacy-heap-kind-catchall	crates/shape-jit/src/ffi/object/format.rs:108	match heap_kind(bits) { | _ => "[unknown]".to_string(),
-jit-legacy-heap-kind-catchall	crates/shape-jit/src/ffi/object/object_ops.rs:67	match heap_kind(obj_bits) { | _ => obj_bits,
-jit-legacy-heap-kind-catchall	crates/shape-jit/src/ffi/object/property_access.rs:304	let len = match heap_kind(value_bits) { | _ => {
-ptr-wildcard-arm	crates/shape-jit/src/ffi/call_method/mod.rs:701	NativeKind::Ptr(_) => false,
-ptr-wildcard-arm	crates/shape-jit/src/ffi/call_method/mod.rs:977	NativeKind::Ptr(_) => TAG_NULL,
+ptr-wildcard-arm	crates/shape-jit/src/ffi/call_method/mod.rs:722	NativeKind::Ptr(_) => false,
+ptr-wildcard-arm	crates/shape-jit/src/ffi/call_method/mod.rs:998	NativeKind::Ptr(_) => TAG_NULL,
 ptr-wildcard-arm	crates/shape-jit/src/mir_compiler/v2_array.rs:82	NativeKind::Ptr(_) => (types::I64, 8),
 ptr-wildcard-arm	crates/shape-jit/src/mir_compiler/v2_call_abi.rs:185	NativeKind::String | NativeKind::Ptr(_) => types::I64,
 ptr-wildcard-arm	crates/shape-jit/src/mir_compiler/v2_field.rs:100	NativeKind::String | NativeKind::Ptr(_) => types::I64,

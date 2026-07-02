@@ -20,6 +20,22 @@ use super::super::super::context::{JITDataReference, JITDuration};
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 
+#[cold]
+#[track_caller]
+fn unsupported_legacy_heap_kind(func_name: &str, kind: Option<u16>) -> ! {
+    match kind {
+        Some(kind) => panic!(
+            "SURFACE: {func_name} received unsupported legacy JIT heap kind {kind}; \
+             ADR-006 section 2.7.5/2.7.10 requires a kinded property entry or an explicit HK arm."
+        ),
+        None => panic!(
+            "SURFACE: {func_name} received non-heap bits where a legacy JIT property carrier \
+             was required; ADR-006 section 2.7.5 requires the caller to pass a NativeKind \
+             companion instead of probing raw bits."
+        ),
+    }
+}
+
 // ============================================================================
 // Property Access (multi-type)
 // ============================================================================
@@ -58,8 +74,9 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
                 "jit-get-prop",
             );
         }
-        if let Some(kind) = heap_kind(obj_bits) {
-            match kind {
+        let kind = heap_kind(obj_bits);
+        match kind {
+            Some(kind) => match kind {
                 HK_ARRAY | HK_FLOAT_ARRAY | HK_INT_ARRAY | HK_FLOAT_ARRAY_SLICE | HK_BOOL_ARRAY
                 | HK_I8_ARRAY | HK_I16_ARRAY | HK_I32_ARRAY | HK_U8_ARRAY | HK_U16_ARRAY
                 | HK_U32_ARRAY | HK_U64_ARRAY | HK_F32_ARRAY => {
@@ -233,10 +250,9 @@ pub extern "C" fn jit_get_prop(obj_bits: u64, key_bits: u64) -> u64 {
                     }
                     TAG_NULL
                 }
-                _ => TAG_NULL,
-            }
-        } else {
-            TAG_NULL
+                unsupported => unsupported_legacy_heap_kind("jit_get_prop", Some(unsupported)),
+            },
+            None => unsupported_legacy_heap_kind("jit_get_prop", None),
         }
     }
 }
@@ -301,7 +317,8 @@ pub extern "C" fn jit_hashmap_value_at(_obj_bits: u64, _slot_index: u64) -> u64 
 /// Get array/string/object/series length
 #[inline(always)]
 pub extern "C" fn jit_length(value_bits: u64) -> u64 {
-    let len = match heap_kind(value_bits) {
+    let kind = heap_kind(value_bits);
+    let len = match kind {
         Some(HK_ARRAY)
         | Some(HK_FLOAT_ARRAY)
         | Some(HK_INT_ARRAY)
@@ -332,17 +349,7 @@ pub extern "C" fn jit_length(value_bits: u64) -> u64 {
             obj.len()
         }
         Some(HK_COLUMN_REF) => 0,
-        _ => {
-            // Per ADR-006 §2.7.5, VM-format heap values reach the JIT through a
-            // kinded entry — the receiver's `NativeKind` companion is stamped
-            // by the JIT lowering at the call signature, not decoded from
-            // raw bits via the deleted `tag_bits::TAG_HEAP` /
-            // `ValueBits::is_unified_heap` discriminator.
-            // TODO(phase-2c §2.7.5/§2.7.10): kinded `jit_length` variant for
-            // VM-shaped receivers (HashMap, String) once op_length JIT
-            // lowering threads `NativeKind` through.
-            0
-        }
+        other => unsupported_legacy_heap_kind("jit_length", other),
     };
     box_number(len as f64)
 }

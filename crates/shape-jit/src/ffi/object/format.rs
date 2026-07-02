@@ -12,6 +12,22 @@ use super::super::super::context::JITContext;
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 
+#[cold]
+#[track_caller]
+fn unsupported_legacy_heap_kind(func_name: &str, kind: Option<u16>) -> ! {
+    match kind {
+        Some(kind) => panic!(
+            "SURFACE: {func_name} received unsupported legacy JIT heap kind {kind}; \
+             ADR-006 section 2.7.5/2.7.10 requires a kinded format entry or an explicit HK arm."
+        ),
+        None => panic!(
+            "SURFACE: {func_name} received non-heap bits where a legacy JIT heap allocation \
+             was required; ADR-006 section 2.7.5 requires the caller to pass a NativeKind \
+             companion instead of probing raw bits."
+        ),
+    }
+}
+
 // ============================================================================
 // String Formatting
 // ============================================================================
@@ -105,11 +121,12 @@ pub(crate) fn value_to_string(bits: u64) -> String {
     } else if bits == TAG_BOOL_FALSE {
         "false".to_string()
     } else {
-        match heap_kind(bits) {
+        let kind = heap_kind(bits);
+        match kind {
             Some(HK_STRING) => unsafe { unbox_string(bits) }.to_string(),
             Some(HK_ARRAY) => "[array]".to_string(),
             Some(HK_JIT_OBJECT) | Some(HK_TYPED_OBJECT) => "[object]".to_string(),
-            _ => "[unknown]".to_string(),
+            other => unsupported_legacy_heap_kind("value_to_string", other),
         }
     }
 }

@@ -3,8 +3,14 @@ set -euo pipefail
 
 # Narrow Miri provenance gate for the strict-flip provenance worker.
 #
-# Run through direnv so the repo's linker/devenv environment is active:
-#   direnv exec "$(git rev-parse --show-toplevel)" bash scripts/check-miri-provenance.sh
+# This is targeted evidence, not a whole-runtime "no UB" proof. It covers only
+# the test filters listed in print_coverage below.
+#
+# Supervisor run shape:
+#   systemd-run --user --wait --collect --pipe \
+#     -p MemoryMax=16G -p MemorySwapMax=0 -p TasksMax=256 \
+#     --setenv=PATH="$PATH" \
+#     bash -c 'set -euo pipefail; cd /path/to/shape; direnv exec "$PWD" env CARGO_BUILD_JOBS=2 bash scripts/check-miri-provenance.sh'
 #
 # The active devenv cargo is stable; use rustup-run nightly instead of
 # `cargo +nightly`.
@@ -19,6 +25,58 @@ if [[ ! -x "$RUSTUP" ]]; then
 fi
 
 export CARGO_TERM_COLOR=never
+if [[ -z "${CARGO_BUILD_JOBS:-}" ]]; then
+  export CARGO_BUILD_JOBS=2
+elif [[ "$CARGO_BUILD_JOBS" != "1" && "$CARGO_BUILD_JOBS" != "2" ]]; then
+  echo "invalid CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}; expected 1 or 2" >&2
+  echo "rerun under the supervisor cgroup policy with CARGO_BUILD_JOBS=2" >&2
+  exit 2
+fi
+export CARGO_BUILD_JOBS
+
+owned_target_dir=""
+if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
+  target_parent="${SHAPE_MIRI_TARGET_PARENT:-${XDG_CACHE_HOME:-$HOME/.cache}/shape-miri-targets}"
+  mkdir -p "$target_parent"
+  owned_target_dir="$(mktemp -d "${target_parent%/}/check-miri-provenance.XXXXXX")"
+  export CARGO_TARGET_DIR="$owned_target_dir"
+fi
+
+cleanup() {
+  if [[ -n "$owned_target_dir" && -d "$owned_target_dir" ]]; then
+    rm -rf -- "$owned_target_dir" || true
+  fi
+}
+trap cleanup EXIT
+
+print_coverage() {
+  cat <<'EOF'
+Miri provenance gate coverage:
+  - shape-value --lib provenance
+      default Miri / Stacked Borrows
+      MIRIFLAGS=-Zmiri-tree-borrows
+  - shape-vm --lib result_option_carrier
+      default Miri / Stacked Borrows
+      MIRIFLAGS=-Zmiri-tree-borrows
+      MIRIFLAGS=-Zmiri-strict-provenance
+  - shape-vm --lib get_prop_typed_object_int_field_reads_via_raw
+      default Miri / Stacked Borrows
+      MIRIFLAGS=-Zmiri-tree-borrows
+
+Boundary: passing this gate is evidence for the probes above only. It is not a
+full UB proof for the VM, runtime, JIT, FFI, snapshots, or arbitrary Shape
+program execution.
+EOF
+  echo
+  echo "Resource settings:"
+  echo "  CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}"
+  echo "  CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+  if [[ -n "$owned_target_dir" ]]; then
+    echo "  cleanup=enabled for private target dir"
+  else
+    echo "  cleanup=disabled; caller supplied CARGO_TARGET_DIR"
+  fi
+}
 
 run_miri() {
   local label="$1"
@@ -32,11 +90,15 @@ run_miri() {
   echo "    filter: ${filter}"
   if [[ -n "$flags" ]]; then
     echo "    MIRIFLAGS=${flags}"
+    echo "    command: MIRIFLAGS=${flags} ${RUSTUP} run nightly cargo miri test -p ${crate} --lib ${filter}"
     env MIRIFLAGS="$flags" "$RUSTUP" run nightly cargo miri test -p "$crate" --lib "$filter"
   else
+    echo "    command: ${RUSTUP} run nightly cargo miri test -p ${crate} --lib ${filter}"
     env -u MIRIFLAGS "$RUSTUP" run nightly cargo miri test -p "$crate" --lib "$filter"
   fi
 }
+
+print_coverage
 
 run_miri "shape-value provenance anchors, Stacked Borrows" "" \
   shape-value provenance
@@ -57,4 +119,4 @@ run_miri "shape-vm Result/Option carrier, Strict Provenance" "-Zmiri-strict-prov
   shape-vm result_option_carrier
 
 echo
-echo "Miri provenance gate complete."
+echo "Miri provenance gate complete for the targeted probes listed above."

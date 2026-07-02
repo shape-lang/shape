@@ -1,8 +1,10 @@
-# W83B HeapKind Wildcard Residuals
+# W83B / W84B HeapKind Wildcard Residuals
 
 Date: 2026-07-02
 
-Worker: W83B (`strict-flip-w83b-heapkind-exhaustive`)
+Initial guard worker: W83B (`strict-flip-w83b-heapkind-exhaustive`)
+
+Latest reducer: W84B (`strict-flip-w84b-heapkind-wildcards`)
 
 Guard landed:
 
@@ -19,16 +21,25 @@ It intentionally does not reject unrelated `_ =>` arms.
 
 ## Current Residual Catalog
 
+Current guard baseline after W84B: 29 residual patterns. The W83B starting
+baseline was 39.
+
 1. Direct `NativeKind::Ptr(_)` arms: 25 baseline sites.
    These are mostly generic pointer width, null/truthiness, method-delegation,
    or unsupported-container surfaces. They should not grow without review
    because a future HeapKind can inherit the wrong default behavior.
 
-2. Legacy JIT `heap_kind(...)` catch-alls: 10 baseline sites.
-   Concentrated in `crates/shape-jit/src/ffi/{conversion,iterator,object}/`.
-   These return `unknown`, `[unknown]`, `TAG_NULL`, `true`, object defaults,
-   or `NaN`. Wave 2 should either make the HK dispatch exhaustive or route
-   through `NativeKind::Ptr(HeapKind::*)` where available.
+2. Legacy JIT `heap_kind(...)` catch-alls: 0 baseline sites.
+   W84B removed the 10 direct legacy JIT residuals in:
+   `crates/shape-jit/src/ffi/conversion.rs`,
+   `crates/shape-jit/src/ffi/iterator.rs`,
+   `crates/shape-jit/src/ffi/object/format.rs`,
+   `crates/shape-jit/src/ffi/object/object_ops.rs`, and
+   `crates/shape-jit/src/ffi/object/property_access.rs`.
+   Supported legacy `HK_*` cases remain explicit. Unsupported or unstamped
+   heap labels now route to cold `SURFACE` panics instead of silently becoming
+   `unknown`, `[unknown]`, `TAG_NULL`, completed iterators, object defaults,
+   or `NaN`.
 
 3. Direct HeapKind catch-alls: 4 baseline sites.
    - `wire_conversion.rs::slot_extract_content`: non-content HeapKinds fall
@@ -43,6 +54,10 @@ It intentionally does not reject unrelated `_ =>` arms.
 
 ## Wave 2 Notes
 
+- W84B intentionally did not broaden the scanner to reject all local-variable
+  matches over raw `u16` JIT kind codes. The converted sites no longer use
+  silent defaults: their catch-all paths are explicit unsupported-kind surfaces
+  and preserve existing supported `HK_*` arms.
 - `wire_conversion.rs::heap_to_wire` still has a broader typed-Arc hazard:
   after special-casing `Char`, `Result`, `Option`, `TypedObject`, `TypedArray`,
   and `HashMap`, it falls back to treating remaining HeapKinds as
