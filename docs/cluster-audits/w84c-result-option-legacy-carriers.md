@@ -15,6 +15,33 @@ Scope:
   `result_option_carrier`.
 - No cargo/rustc/nextest/just/Shape binaries were run.
 
+## W87D Addendum: Post-W86B Containment Pass
+
+Date: 2026-07-02
+Branch: `strict-flip-w87d-result-option-legacy-containment`
+Base: `2997b11b`
+
+Cheap audit rerun after W86B confirms the old carriers still cannot be
+deleted locally. Normal VM execution remains schema-backed, while old carriers
+survive in compatibility and JIT-only surfaces:
+
+| Area | Current W87D classification |
+|---|---|
+| Normal VM execution | Canonical producers are `result_option_carrier::build_ok/build_err/build_some/build_none`, which create fixed-layout `__Result` / `__Option` `TypedObjectStorage`. Owned normal VM paths did not show live `ResultData::ok/err` or `OptionData::some/none` producers outside tests. |
+| Compatibility restore / wire decode | VM whole-snapshot restore without a kind track maps legacy `SerializableVMValue::ResultData/OptionData` to `Ptr(HeapKind::TypedObject)`. Runtime snapshot restore can still rebuild old `Arc<ResultData>` / `Arc<OptionData>` when explicitly called with expected `Ptr(HeapKind::Result/Option)`; that file is outside W87D write scope. Runtime wire projection still reads old `HeapKind::Result/Option` slots because JIT/snapshot compatibility producers remain. |
+| JIT FFI legacy surfaces | `jit_v2_make_result_ok`, `jit_v2_make_result_err`, `jit_v2_make_option_some`, and `jit_v2_make_option_none` still allocate `Arc<ResultData>` / `Arc<OptionData>`. JIT retain/release, predicate, payload, print, stack-kind-code, and ownership paths still consume those old kinds. This is read-only for W87D. |
+| Printing | Schema-backed `__Result` / `__Option` typed objects already format as `Ok` / `Err` / `Some` / `None`. Legacy `HeapKind::Result/Option` formatter arms remain compatibility consumers until old producers are gone. |
+| Trait objects | Schema-backed `__Result` / `__Option` rewrap is live. Legacy `HeapKind::Result/Option` returns surface and drop their owned share without inspecting `ResultData` / `OptionData`, which is the correct containment posture. |
+| Tests / storage tables | Old carrier tests and shape-value / VM stack clone-drop tables remain required while compatibility restore and JIT producers can still create old slots. |
+
+W87D patch decision: contain, do not delete. `heap_value_to_wire` now projects
+`HeapValue::Result(Arc<ResultData>)` and
+`HeapValue::Option(Arc<OptionData>)` through the carrier's embedded
+`KindedSlot` payload kind, matching the existing `HeapKind::Result/Option`
+slot projection. This removes the opaque `<result:phase-2c>` /
+`<option:phase-2c>` fallback from generic `HeapValue` wire projection without
+creating old carriers, probing tags, or inferring from payload bits.
+
 ## Executive Classification
 
 There is no safe W84C-local deletion of `HeapKind::Result`,
@@ -227,12 +254,20 @@ That surface is correct until schema-backed typed-object carriers are universal:
 
 ## Recommended Supervisor Guards
 
-For this W84C docs-only commit:
+For the W87D containment commit:
 
-- `git diff --check HEAD~1..HEAD`
-- `rg -n "W84C Result/Option Legacy Carrier Audit|Exact Safe Deletion Order" docs/cluster-audits/w84c-result-option-legacy-carriers.md`
-- No cargo/rustc/nextest/just/Shape binary lane is needed for this audit-only
-  change.
+- `rg -n "\bOptionData\b|\bResultData\b|HeapKind::Option|HeapKind::Result|HeapValue::Option|HeapValue::Result" crates/shape-vm/src crates/shape-runtime/src crates/shape-value/src crates/shape-jit/src`
+- `rustfmt --edition 2024 crates/shape-runtime/src/wire_conversion.rs`
+- `git diff --check`
+- No cargo/rustc/nextest/just/Shape binary lane was used in W87D; the global
+  lane remains supervisor-owned.
+
+Focused supervisor verification recommended for this containment patch:
+
+- `cargo test -p shape-runtime --lib wire_conversion --no-fail-fast`
+- `cargo test -p shape-vm --lib printing trait_object_ops snapshot --no-fail-fast`
+- A VM/JIT differential seed with top-level `Ok` / `Err` / `Some` / `None`
+  returns, because JIT FFI old producers remain outside W87D scope.
 
 For the future deletion wave, the minimum guards should be:
 

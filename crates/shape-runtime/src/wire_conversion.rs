@@ -27,7 +27,7 @@
 use crate::Context;
 use crate::marshal::MarshalError;
 use arrow_ipc::{reader::FileReader, writer::FileWriter};
-use shape_value::heap_value::HeapValue;
+use shape_value::heap_value::{HeapValue, OptionData, ResultData};
 use shape_value::{DataTable, HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot};
 use shape_wire::{DurationUnit as WireDurationUnit, ValueEnvelope, WireTable, WireValue};
 use std::collections::BTreeMap;
@@ -175,23 +175,14 @@ fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
     if hk == HeapKind::Result {
         // SAFETY: `KindedSlot::from_result` construction contract —
         // Result-kind bits are `Arc::into_raw(Arc<ResultData>)`.
-        let r: &shape_value::heap_value::ResultData =
-            unsafe { &*(bits as *const shape_value::heap_value::ResultData) };
-        let inner = slot_to_wire(r.payload.raw(), r.payload.kind(), ctx);
-        return WireValue::Result {
-            ok: r.is_ok,
-            value: Box::new(inner),
-        };
+        let r: &ResultData = unsafe { &*(bits as *const ResultData) };
+        return legacy_result_data_to_wire(r, ctx);
     }
     if hk == HeapKind::Option {
         // SAFETY: `KindedSlot::from_option` construction contract —
         // Option-kind bits are `Arc::into_raw(Arc<OptionData>)`.
-        let o: &shape_value::heap_value::OptionData =
-            unsafe { &*(bits as *const shape_value::heap_value::OptionData) };
-        if o.is_some {
-            return slot_to_wire(o.payload.raw(), o.payload.kind(), ctx);
-        }
-        return WireValue::Null;
+        let o: &OptionData = unsafe { &*(bits as *const OptionData) };
+        return legacy_option_data_to_wire(o, ctx);
     }
     // JOINT-FIX-1a (2026-05-28): `HeapKind::TypedObject` is a typed-Arc
     // dispatch label per ADR-006 §2.3 + Wave 2 D4 ckpt-2 v2-raw `_new`
@@ -285,6 +276,22 @@ fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
         hv.kind()
     );
     heap_value_to_wire(hv, ctx)
+}
+
+fn legacy_result_data_to_wire(r: &ResultData, ctx: &Context) -> WireValue {
+    let inner = slot_to_wire(r.payload.raw(), r.payload.kind(), ctx);
+    WireValue::Result {
+        ok: r.is_ok,
+        value: Box::new(inner),
+    }
+}
+
+fn legacy_option_data_to_wire(o: &OptionData, ctx: &Context) -> WireValue {
+    if o.is_some {
+        slot_to_wire(o.payload.raw(), o.payload.kind(), ctx)
+    } else {
+        WireValue::Null
+    }
 }
 
 fn hashmap_to_wire(bits: u64, ctx: &Context) -> WireValue {
@@ -750,14 +757,13 @@ pub fn heap_value_to_wire(hv: &HeapValue, ctx: &Context) -> WireValue {
             };
             WireValue::String(s)
         }
-        // Wave 14 W14-variant-codegen (ADR-006 §2.7.17 / Q18, 2026-05-10):
-        // Result/Option carriers are within-program control-flow values;
-        // wire serialisation goes through the AnyError schema for thrown
-        // errors and the unwrapped inner value for `Ok(_)` / `Some(_)`.
-        // Until those marshal paths land, surface as an opaque tag —
-        // same Phase-2c deferral shape as HashMap / HashSet / Iterator.
-        HeapValue::Result(_) => WireValue::String("<result:phase-2c>".to_string()),
-        HeapValue::Option(_) => WireValue::String("<option:phase-2c>".to_string()),
+        // Legacy carrier containment: these `HeapValue` arms are no
+        // longer normal VM producers, but heterogeneous containers and
+        // compatibility paths can still hand one to the generic
+        // HeapValue projector. Use the carrier's embedded `KindedSlot`
+        // stamp; do not probe or infer from payload bits.
+        HeapValue::Result(r) => legacy_result_data_to_wire(r.as_ref(), ctx),
+        HeapValue::Option(o) => legacy_option_data_to_wire(o.as_ref(), ctx),
         // W17-concurrency (ADR-006 §2.7.25, 2026-05-11): concurrency
         // primitives are runtime-tier handles with no wire shape.
         // Surface as opaque tags — same Phase-2c deferral shape as
@@ -1369,9 +1375,9 @@ mod ws3_f2b_result_option_wire_tests {
     //! The fix adds dedicated `HeapKind::Result` / `HeapKind::Option`
     //! arms that read the typed payload directly.
 
-    use super::slot_to_wire;
+    use super::{heap_value_to_wire, slot_to_wire};
     use crate::context::ExecutionContext;
-    use shape_value::heap_value::{OptionData, ResultData};
+    use shape_value::heap_value::{HeapValue, OptionData, ResultData};
     use shape_value::kinded_slot::KindedSlot;
     use shape_wire::WireValue;
     use std::sync::Arc;
@@ -1422,6 +1428,31 @@ mod ws3_f2b_result_option_wire_tests {
         let slot = KindedSlot::from_option(Arc::new(OptionData::none()));
         let wire = slot_to_wire(slot.raw(), slot.kind(), &ctx);
         assert_eq!(wire, WireValue::Null);
+    }
+
+    #[test]
+    fn heap_value_result_projects_via_embedded_payload_kind() {
+        let ctx = ExecutionContext::new_empty();
+        let payload = KindedSlot::from_string_arc(Arc::new("old-err".to_string()));
+        let value = HeapValue::Result(Arc::new(ResultData::err(payload)));
+        let wire = heap_value_to_wire(&value, &ctx);
+        match wire {
+            WireValue::Result { ok, value } => {
+                assert!(!ok, "Err payload must wire with ok=false");
+                assert_eq!(*value, WireValue::String("old-err".to_string()));
+            }
+            other => panic!("expected WireValue::Result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn heap_value_option_projects_via_embedded_payload_kind() {
+        let ctx = ExecutionContext::new_empty();
+        let some = HeapValue::Option(Arc::new(OptionData::some(KindedSlot::from_int(9))));
+        assert_eq!(heap_value_to_wire(&some, &ctx), WireValue::Integer(9));
+
+        let none = HeapValue::Option(Arc::new(OptionData::none()));
+        assert_eq!(heap_value_to_wire(&none, &ctx), WireValue::Null);
     }
 }
 
