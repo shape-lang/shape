@@ -4,7 +4,7 @@
 
 use super::TypeInferenceEngine;
 use crate::type_system::*;
-use shape_ast::ast::{Expr, Span, TypeAnnotation};
+use shape_ast::ast::{Expr, ObjectTypeField, Span, TypeAnnotation};
 use std::collections::HashMap;
 
 impl TypeInferenceEngine {
@@ -719,6 +719,96 @@ impl TypeInferenceEngine {
         }
     }
 
+    fn check_comptime_builtin_args(
+        &mut self,
+        arg_types: &[Type],
+        expected: &[Type],
+        call_span: Span,
+    ) -> TypeResult<()> {
+        if arg_types.len() != expected.len() {
+            return Err(TypeError::ArityMismatch(expected.len(), arg_types.len()));
+        }
+        for (arg_ty, expected_ty) in arg_types.iter().zip(expected.iter()) {
+            self.push_constraint_with_origin(arg_ty.clone(), expected_ty.clone(), call_span);
+        }
+        Ok(())
+    }
+
+    fn typed_object_field(name: &str, type_annotation: TypeAnnotation) -> ObjectTypeField {
+        ObjectTypeField {
+            name: name.to_string(),
+            optional: false,
+            type_annotation,
+            annotations: Vec::new(),
+        }
+    }
+
+    fn comptime_object_type(fields: Vec<(&str, TypeAnnotation)>) -> Type {
+        Type::Concrete(TypeAnnotation::Object(
+            fields
+                .into_iter()
+                .map(|(name, type_annotation)| Self::typed_object_field(name, type_annotation))
+                .collect(),
+        ))
+    }
+
+    fn infer_comptime_builtin_call(
+        &mut self,
+        name: &str,
+        arg_types: &[Type],
+        call_span: Span,
+    ) -> TypeResult<Option<Type>> {
+        if !crate::builtin_metadata::is_comptime_builtin_function(name) {
+            return Ok(None);
+        }
+        if !self.in_comptime_context() {
+            return Err(TypeError::ConstraintViolation(format!(
+                "'{}' is a comptime-only builtin and can only be called inside a `comptime {{ }}` block",
+                name
+            )));
+        }
+
+        let string = BuiltinTypes::string();
+        let result = match name {
+            "implements" => {
+                self.check_comptime_builtin_args(arg_types, &[string.clone(), string], call_span)?;
+                BuiltinTypes::boolean()
+            }
+            "warning" => {
+                self.check_comptime_builtin_args(arg_types, &[string], call_span)?;
+                BuiltinTypes::void()
+            }
+            "error" => {
+                self.check_comptime_builtin_args(arg_types, &[string], call_span)?;
+                Type::Concrete(TypeAnnotation::Never)
+            }
+            "build_config" => {
+                self.check_comptime_builtin_args(arg_types, &[], call_span)?;
+                Self::comptime_object_type(vec![
+                    ("debug", TypeAnnotation::Basic("bool".to_string())),
+                    ("target_arch", TypeAnnotation::Basic("string".to_string())),
+                    ("target_os", TypeAnnotation::Basic("string".to_string())),
+                    ("version", TypeAnnotation::Basic("string".to_string())),
+                ])
+            }
+            "type_info" => {
+                self.check_comptime_builtin_args(arg_types, &[string], call_span)?;
+                Self::comptime_object_type(vec![
+                    ("kind", TypeAnnotation::Basic("string".to_string())),
+                    ("name", TypeAnnotation::Basic("string".to_string())),
+                ])
+            }
+            _ => {
+                return Err(TypeError::ConstraintViolation(format!(
+                    "comptime builtin '{}' has no type-analysis signature",
+                    name
+                )));
+            }
+        };
+
+        Ok(Some(result))
+    }
+
     /// Infer type of function call
     pub(crate) fn infer_function_call(
         &mut self,
@@ -987,13 +1077,8 @@ impl TypeInferenceEngine {
 
         // Look up function type after argument inference so argument errors
         // (e.g. unknown property access) surface even when callee is undefined.
-        if crate::builtin_metadata::is_comptime_builtin_function(name)
-            && !self.in_comptime_context()
-        {
-            return Err(TypeError::ConstraintViolation(format!(
-                "'{}' is a comptime-only builtin and can only be called inside a `comptime {{ }}` block",
-                name
-            )));
+        if let Some(result) = self.infer_comptime_builtin_call(name, &arg_types, call_span)? {
+            return Ok(result);
         }
         let func_scheme = self
             .env
