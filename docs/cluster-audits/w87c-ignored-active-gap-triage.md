@@ -28,6 +28,27 @@ The source-level count deltas are:
 | `shape-jit` before W87C | 5 | 1 | 20 |
 | `shape-jit` after W87C | 5 | 0 | 21 |
 
+## W88D Addendum: Module-Qualified Method Gap Closure
+
+Date: 2026-07-02
+Branch: `strict-flip-w88d-active-gap-module-qualified`
+
+W88D removed two `active_feature_gap` ignores after implementing static
+module-qualified method resolution and proving the lowering with focused
+deep-tests:
+
+| Test | Before | After | Decision label |
+|---|---|---|---|
+| `crates/shape-vm/src/lib_tests_parts/module_qualified_type_tests.rs::test_module_extend_method` | `active_feature_gap` | active / passing | implemented static module-qualified extend-method receiver proof |
+| `crates/shape-vm/src/lib_tests_parts/module_qualified_type_tests.rs::test_module_struct_with_method_chaining` | `active_feature_gap` | active / passing | implemented static module-qualified method-chain return proof |
+
+The source-level count delta after W88D is:
+
+| Crate | Active gap | Stale expectation | Deleted v1 path |
+|---|---:|---:|---:|
+| `shape-vm` after W87C | 18 | 4 | 5 |
+| `shape-vm` after W88D | 16 | 4 | 5 |
+
 ## Active Gap Inventory
 
 These rows are precise missing-feature or implementation-gap issues. They
@@ -50,9 +71,7 @@ focused cargo test lane.
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_comptime_set_return_expr_via_module_export` | default | missing language feature | Const-specialization for imported module functions. |
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_comptime_handler_can_call_comptime_helper_fn` | default | missing language feature | Const-specialization for imported module functions. |
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_typed_callable_field_propagates_table_schema_for_filter_chain` | default | missing language feature | Imported-module annotation `set return` schema propagation across the comptime boundary. |
-| `shape-vm` | `crates/shape-vm/src/lib_tests_parts/module_qualified_type_tests.rs::test_module_extend_method` | default | missing language feature | Qualified type method resolution without treating the module as the receiver. |
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/module_qualified_type_tests.rs::test_module_impl_trait` | default | missing language feature | Qualified type trait-method resolution without treating the module as the receiver. |
-| `shape-vm` | `crates/shape-vm/src/lib_tests_parts/module_qualified_type_tests.rs::test_module_struct_with_method_chaining` | default | missing language feature | Chained qualified type method resolution. |
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/module_qualified_type_tests.rs::test_module_type_in_let_binding_annotation` | default | missing language feature | Module-qualified type annotations agreeing with strict solver module/type identity. |
 | `shape-jit` | `crates/shape-jit/src/compiler/c2_tests.rs::c2_owned_mut_bool_round_trip` | `deep-tests` | missing language feature | JIT capture-local declaration/param-store must preserve cell-pointer width for OwnedMutable captures. |
 | `shape-jit` | `crates/shape-jit/src/compiler/c2_tests.rs::c2_shared_f64_round_trip` | `deep-tests` | missing language feature | JIT shared-local declaration must preserve `*const SharedCell` pointer width. |

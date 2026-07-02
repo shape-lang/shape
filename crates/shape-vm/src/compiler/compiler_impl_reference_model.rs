@@ -982,10 +982,7 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    fn prepend_inline_module_analysis_items(
-        &self,
-        program: &mut Program,
-    ) -> Result<()> {
+    fn prepend_inline_module_analysis_items(&self, program: &mut Program) -> Result<()> {
         let mut qualified_module_items = Vec::new();
         self.collect_inline_module_analysis_items(
             &program.items,

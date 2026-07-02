@@ -23,14 +23,14 @@ The supervisor-observed broad lib-test gates currently report:
 
 | Crate | Reported ignored in `--lib` gate | Source `#[ignore]` attrs scanned here | Source-only gated attrs |
 |---|---:|---:|---:|
-| `shape-vm` | 57 | 121 | 39 behind `deep-tests` |
+| `shape-vm` | 57 | 119 | 39 behind `deep-tests` |
 | `shape-jit` | 26 | 29 | 2 behind `deep-tests`, 1 behind `cfg(any())` |
 
 This worker did not rerun cargo or nextest. The new checker is intentionally
 source-only and cheap; it guards the source ignore count and reason taxonomy
 without requiring a cargo test listing.
 
-For `shape-vm`, the 121 source attributes do not mechanically reduce to the
+For `shape-vm`, the 119 source attributes do not mechanically reduce to the
 reported 57 ignored lib tests from source-level module gates alone. Resolving
 that exact active-harness projection requires a cargo test listing, which this
 slice intentionally did not run. The enforceable invariant added here is the
@@ -48,9 +48,9 @@ source-level baseline:
 | `deleted_v1_path` | 5 | 21 | Tests still describe removed carriers or paths such as BytecodeToIR, JitArray, deleted NaN-box roundtrips, deleted native-pointer helpers, deleted TypedArrayData enum paths, v1 VMArray aliasing, or retired Tier 1 whole-function JIT. |
 | `process_aborting_extern_c_todo` | 0 | 3 | `extern "C"` functions currently hit `todo!()`/SURFACE bodies; attempting `#[should_panic]` would abort the test process. |
 | `stale_semantic_expectation` | 4 | 0 | Assertions tied to stale strict-solver diagnostics, stale extern-C sugar, or stale Numeric trait shape. |
-| `active_feature_gap` | 18 | 5 | Real feature gaps or known bugs: generic/module/method resolution, const-specialization, turbofish grammar, MIR reference escape, JIT kernel stubs, and JIT closure-cell bugs. |
+| `active_feature_gap` | 16 | 5 | Real feature gaps or known bugs: generic/module/method resolution, const-specialization, turbofish grammar, MIR reference escape, JIT kernel stubs, and JIT closure-cell bugs. |
 | `diagnostic_only` | 1 | 0 | A local debug-only opcode tracing test. |
-| Total | 121 | 29 | Source inventory, not a cargo-run proof. |
+| Total | 119 | 29 | Source inventory, not a cargo-run proof. |
 
 The source-only gated subset is also classified:
 

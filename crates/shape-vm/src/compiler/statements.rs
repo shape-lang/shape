@@ -4231,7 +4231,10 @@ impl BytecodeCompiler {
                 };
                 if !name.contains("::")
                     && name.len() <= 2
-                    && name.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+                    && name
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_uppercase())
                 {
                     params.insert(name.to_string());
                 }
@@ -4581,9 +4584,7 @@ impl BytecodeCompiler {
                 }
             }
             Expr::EnumConstructor {
-                enum_name,
-                payload,
-                ..
+                enum_name, payload, ..
             } => {
                 if should_qualify_name(enum_name.as_str()) {
                     *enum_name =
@@ -4618,8 +4619,7 @@ impl BytecodeCompiler {
                     Self::qualify_module_expr(end_index, module_path, type_params);
                 }
             }
-            Expr::BinaryOp { left, right, .. }
-            | Expr::FuzzyComparison { left, right, .. } => {
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
                 Self::qualify_module_expr(left, module_path, type_params);
                 Self::qualify_module_expr(right, module_path, type_params);
             }
