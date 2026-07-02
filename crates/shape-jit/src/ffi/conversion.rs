@@ -538,9 +538,9 @@ pub extern "C" fn jit_print_typed_object(ctx_ptr: *const crate::context::JITCont
 /// pass dispatches on that kind without any tag-bit decode.
 ///
 /// SAFETY: `bits` must be `Arc::into_raw(Arc<OptionData>) as u64` per
-/// the producer-site contract on every `KindedSlot::from_option`-shaped
-/// producer (VM-side `BuiltinFunction::SomeCtor` / `NoneCtor`, JIT-side
-/// `jit_v2_make_option_some` / `_none`).
+/// the legacy compatibility carrier contract. Active VM producers use
+/// schema-backed `__Option`; W88A makes the old JIT producer imports
+/// fail-closed before allocation.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_print_option(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
@@ -557,9 +557,9 @@ pub extern "C" fn jit_print_option(ctx_ptr: *const crate::context::JITContext, b
 /// inner payload kind comes from `ResultData.payload.kind`.
 ///
 /// SAFETY: `bits` must be `Arc::into_raw(Arc<ResultData>) as u64` per
-/// the producer-site contract on every `KindedSlot::from_result`-shaped
-/// producer (VM-side `BuiltinFunction::OkCtor` / `ErrCtor`, JIT-side
-/// `jit_v2_make_result_ok` / `_err`).
+/// the legacy compatibility carrier contract. Active VM producers use
+/// schema-backed `__Result`; W88A makes the old JIT producer imports
+/// fail-closed before allocation.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_print_result(ctx_ptr: *const crate::context::JITContext, bits: u64) {
     use shape_value::heap_value::HeapKind;
@@ -945,8 +945,9 @@ pub extern "C" fn jit_print_typed_array(ctx_ptr: *const crate::context::JITConte
 ///   parallel-track encoding at `super::stack_kind_code` per ADR-006
 ///   §2.7.7/Q9. Kind codes are stamped at JIT-compile time from the
 ///   producer-side `operand_slot_kind` result in `compile_string_concat`
-///   — same kind-source discipline as `jit_v2_make_result_ok`'s
-///   `payload_kind_code`.
+///   — the same compile-time kind-source discipline the retired
+///   Result/Option producer ABI attempted to use, without allocating an old
+///   carrier.
 /// - Each operand decodes per its kind: `String` → adopt the raw Arc
 ///   pointer via `Arc::from_raw` and read `&str`; scalar arms format
 ///   directly from the raw native value. No tag-bit dispatch, no
@@ -1230,8 +1231,9 @@ mod heap_arm_print_tests {
 
     #[test]
     fn print_option_some_int_payload_matches_vm() {
-        // Producer mirrors VM-side `BuiltinFunction::SomeCtor` and JIT-side
-        // `jit_v2_make_option_some` — `Arc::into_raw(Arc<OptionData>)`.
+        // Legacy compatibility carrier used to exercise the print consumer;
+        // active VM producers now build schema-backed `__Option`, and W88A
+        // retires the JIT old-carrier producer imports.
         let payload = KindedSlot::new(ValueSlot::from_int(7), NativeKind::Int64);
         let arc = Arc::new(OptionData::some(payload));
         let bits = Arc::into_raw(arc) as u64;

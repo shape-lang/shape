@@ -58,16 +58,15 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_to_number", jit_to_number as *const u8);
     // F5.a/F5.b: string `+` for `"a" + "b"` and `f"..."`-desugared concat chains.
     builder.symbol("jit_string_concat", jit_string_concat as *const u8);
-    // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers + accessors
-    // (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A, 2026-05-12).
-    // Match the VM-side `BuiltinFunction::OkCtor` / `ErrCtor` / `SomeCtor` /
-    // `NoneCtor` output shape — `Arc::into_raw(Arc<ResultData>) as u64` /
-    // `Arc::into_raw(Arc<OptionData>) as u64` with kind labels
-    // `NativeKind::Ptr(HeapKind::Result)` / `NativeKind::Ptr(HeapKind::Option)`.
+    // W88A containment: these four producer symbols stay registered only as
+    // fail-closed backstops for stale FFIFuncRefs. Normal MIR EnumStore
+    // lowering deopts before emitting them because the old bodies would
+    // allocate `Arc<ResultData>` / `Arc<OptionData>` instead of schema-backed
+    // `__Result` / `__Option` TypedObjectStorage.
     // The legacy `jit_make_ok` / `_err` / `_some` UnifiedValue<u64> producer
     // family is intentionally NOT registered with Cranelift. Keeping those
     // symbols importable would allow new native code to produce retired
-    // HK_OK/HK_ERR/HK_SOME carriers instead of the strict Arc carriers below.
+    // HK_OK/HK_ERR/HK_SOME carriers.
     builder.symbol(
         "jit_v2_make_result_ok",
         super::super::ffi::result::jit_v2_make_result_ok as *const u8,
@@ -624,16 +623,12 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
         ffi_funcs.insert("jit_string_concat".to_string(), func_id);
     }
 
-    // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers
-    // (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A,
-    // 2026-05-12). Signature:
+    // W88A fail-closed Result/Option producer ABI backstops. Signature:
     // `(payload_bits: u64, payload_kind_code: i8) -> u64`.
-    // The payload_kind_code is the §2.7.7 / Q9 parallel-track byte encoding
-    // (`crates/shape-jit/src/ffi/stack_kind_code.rs`) stamped at JIT-compile
-    // time from the EnumStore operand's MIR-inferred kind per §2.7.5.
-    // Return is `Arc::into_raw(Arc<ResultData>) as u64` /
-    // `Arc::into_raw(Arc<OptionData>) as u64` with kind labels
-    // `Ptr(HeapKind::Result)` / `Ptr(HeapKind::Option)`.
+    // These imports intentionally no longer allocate; `ffi/result.rs` panics
+    // before constructing old `Arc<ResultData>` / `Arc<OptionData>` carriers.
+    // Normal JIT lowering should not call them: `EnumStore` deopts until a
+    // schema-backed `__Result` / `__Option` TypedObject ABI exists.
     for name in [
         "jit_v2_make_result_ok",
         "jit_v2_make_result_err",
@@ -648,7 +643,8 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
         ffi_funcs.insert(name.to_string(), func_id);
     }
-    // jit_v2_make_option_none takes no payload (None has no payload).
+    // jit_v2_make_option_none takes no payload and is the same fail-closed
+    // backstop as the payload-bearing producer imports above.
     {
         let mut sig = module.make_signature();
         sig.returns.push(AbiParam::new(types::I64));

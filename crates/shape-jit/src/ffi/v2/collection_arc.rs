@@ -24,11 +24,12 @@
 //!
 //! ## Round 7A precedent
 //!
-//! The Result/Option Arc carriers in `ffi/result.rs::jit_v2_make_result_ok`
-//! / `_err` / `jit_v2_make_option_some` / `_none` and the kinded
-//! retain/release `jit_arc_result_retain` / `_release` /
-//! `jit_arc_option_retain` / `_release` are the bound precedent for the
-//! shape of every body in this module.
+//! The legacy Result/Option typed-Arc retain/release entries
+//! `jit_arc_result_retain` / `_release` / `jit_arc_option_retain` /
+//! `_release` are the layout precedent for the Arc refcount operations in this
+//! module. W88A retires the old Result/Option producer imports themselves;
+//! collection constructors here remain active because their carriers have no
+//! schema-backed replacement mandate.
 //!
 //! ## Inertness
 //!

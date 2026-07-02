@@ -288,13 +288,12 @@ impl JITCompiler {
             exp_f64: r!("jit_exp_f64"),
             ln_f64: r!("jit_ln_f64"),
 
-            // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers +
-            // accessors (W12-jit-result-option-trinity, Phase 3 cluster-0
-            // Round 7A, 2026-05-12). These are the trinity's strict-typed
-            // EnumStore producers + match-codegen consumers. The legacy
-            // `make_ok` / `make_err` / `make_some` NaN-box family is not
-            // imported into `FFIFuncRefs`; generated code must not produce
-            // retired HK_OK/HK_ERR/HK_SOME carriers.
+            // W88A: Result/Option producer refs remain as fail-closed
+            // backstops only; MIR EnumStore deopts before emitting them until
+            // a schema-backed `__Result` / `__Option` TypedObject ABI exists.
+            // The match-codegen consumers below still read legacy carriers
+            // for compatibility. The legacy `make_ok` / `make_err` /
+            // `make_some` NaN-box family is not imported into `FFIFuncRefs`.
             v2_make_result_ok: r!("jit_v2_make_result_ok"),
             v2_make_result_err: r!("jit_v2_make_result_err"),
             v2_make_option_some: r!("jit_v2_make_option_some"),

@@ -10,23 +10,21 @@
 //!
 //! Functions for creating and manipulating Result types (Ok/Err) in JIT-compiled code.
 //!
-//! ## Arc-shape producers & consumers (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A, 2026-05-12)
+//! ## Retired Arc-shape producers & remaining legacy consumers
 //!
-//! ADR-006 §2.7.17 / Q18 (Wave 14 W14-variant-codegen) defines the strict-typed
-//! `Arc<ResultData>` / `Arc<OptionData>` carriers as the canonical runtime shape
-//! for Result<T,E> and Option<T> values. Slot bits at the §2.7.7 stack tier are
-//! `Arc::into_raw(Arc<ResultData>) as u64` / `Arc::into_raw(Arc<OptionData>) as u64`
-//! with kind labels `NativeKind::Ptr(HeapKind::Result)` /
-//! `NativeKind::Ptr(HeapKind::Option)`. The VM-side `BuiltinFunction::OkCtor` /
-//! `ErrCtor` / `SomeCtor` / `NoneCtor` (`crates/shape-vm/src/executor/vm_impl/
-//! builtins.rs:551-586`) produces this shape via `KindedSlot::from_result` /
-//! `from_option`.
+//! W88A retires the JIT-side `jit_v2_make_result_ok` / `_err` /
+//! `jit_v2_make_option_some` / `_none` producers as active allocation paths.
+//! Normal VM execution now uses schema-backed `__Result` / `__Option`
+//! `TypedObjectStorage` via `result_option_carrier`; the JIT has no helper ABI
+//! yet that can build those typed objects from a statically stamped schema id.
+//! Until that ABI lands, the MIR `EnumStore` consumer deopts before emitting
+//! these imports, and these FFI bodies fail closed before allocating
+//! `Arc<ResultData>` / `Arc<OptionData>`.
 //!
-//! The JIT-side `jit_v2_make_result_ok` / `_err` / `jit_v2_make_option_some` /
-//! `_none` producers below match that output shape — `Arc::into_raw(Arc::new(
-//! ResultData::ok(payload))) as u64`. Predicate + extraction helpers
-//! `jit_arc_result_is_ok` / `_is_err` / `jit_arc_result_payload` /
-//! `jit_arc_option_is_some` / `_is_none` / `jit_arc_option_payload` read from
+//! The predicate + extraction helpers `jit_arc_result_is_ok` / `_is_err` /
+//! `jit_arc_result_payload` / `jit_arc_option_is_some` / `_is_none` /
+//! `jit_arc_option_payload` remain legacy consumers for compatibility slots
+//! that can still arrive from snapshot/wire policy or old tests. They read from
 //! the `*const ResultData` / `*const OptionData` borrow directly — no NaN-box
 //! tag decode, no `is_heap_kind` probe (§2.7.7 #4 / #7 forbidden per CLAUDE.md
 //! "Forbidden code" — runtime tag_bits dispatch deleted with the W-series).
@@ -40,7 +38,6 @@
 use super::jit_kinds::*;
 use super::value_ffi::*;
 use shape_value::heap_value::{OptionData, ResultData};
-use shape_value::kinded_slot::KindedSlot;
 use std::sync::Arc;
 
 // ============================================================================
@@ -212,107 +209,51 @@ pub extern "C" fn jit_unwrap_some(bits: u64) -> u64 {
 }
 
 // ============================================================================
-// Arc-shape Result/Option producers & accessors
-// (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A, 2026-05-12)
-// ADR-006 §2.7.17 / Q18.
+// Legacy Result/Option accessors plus retired producer ABI backstops.
+// ADR-006 §2.7.17 / Q18; W88A old-producer containment.
 // ============================================================================
 //
-// These functions implement the strict-typed `Arc<ResultData>` /
-// `Arc<OptionData>` carrier per ADR-006 §2.7.17 — the same shape the VM-side
-// `BuiltinFunction::OkCtor` / `ErrCtor` / `SomeCtor` / `NoneCtor` produces via
-// `KindedSlot::from_result` / `from_option`. The MIR-emitted EnumStore consumer
-// for `Ok(v)` / `Err(e)` / `Some(x)` / `None` dispatches to these producers
-// (not to the legacy `jit_make_ok` / `_err` / `_some` NaN-box family).
-//
-// The `payload_kind_code` parameter on the producers is the §2.7.7 / Q9
-// parallel-track encoding (`crates/shape-jit/src/ffi/stack_kind_code.rs`).
-// Stamped at JIT-compile time from the EnumStore operand's MIR kind. Decoded
-// inside the FFI via `stack_kind_code::decode` — no Bool-default fallback;
-// a sentinel/unknown byte causes the function to leak the payload (no inner
-// share) and return a poisoned None/Err per the surface-and-stop discipline.
-// In practice the consumer-side dispatch generates the byte from the
-// `operand_slot_kind` result which is `Some(kind)` by construction (the
-// producer-site MIR-emission classifies the operand kind).
+// The four producer symbols remain registered so stale `FFIFuncRefs` resolve to
+// this explicit surface instead of a missing-symbol crash. Normal JIT lowering
+// must not reach them; `mir_compiler/statements.rs` deopts Result/Option
+// `EnumStore` before emitting the call. The replacement ABI must build
+// schema-backed `__Result` / `__Option` typed objects with a statically known
+// schema id; this FFI signature lacks that context.
 
-/// Decode the payload kind code, returning a sentinel `NativeKind::Bool` for
-/// `None` to keep the surface visible at the FFI body — the caller's
-/// `KindedSlot::Drop` will be a no-op on a Bool kind with zero bits, which
-/// matches the §2.7.17 `OptionData::none()` placeholder shape. Any genuine
-/// kind-source gap should be detected at the call site before reaching the
-/// FFI; this fallback is the "FFI-body surface-and-stop" path (audible via
-/// `SHAPE_JIT_DEBUG=1` in the caller's own diagnostic, NOT a Bool-default
-/// rationalization per §2.7.7 #9).
-#[inline]
-fn decode_payload_kind_or_surface(code: u8, func_name: &str) -> shape_value::NativeKind {
-    match super::stack_kind_code::decode(code) {
-        Some(k) => k,
-        None => {
-            tracing::debug!(
-                target: "shape_jit",
-                func_name,
-                code,
-                "SURFACE: payload kind code is sentinel/unknown. \
-                 ADR-006 \u{a7}2.7.7 #9 \u{2014} producer-site MIR kind \
-                 classification gap. Falling back to Bool placeholder; \
-                 downstream consumer will surface on slot-kind mismatch.",
-            );
-            shape_value::NativeKind::Bool
-        }
-    }
+#[cold]
+#[track_caller]
+fn retired_result_option_producer_surface(func_name: &str) -> ! {
+    panic!(
+        "SURFACE: {func_name} is retired by W88A. JIT Result/Option construction \
+         must deopt before allocation or use a future schema-backed \
+         __Result/__Option TypedObject ABI with statically known schema ids; \
+         refusing to allocate old Arc<ResultData>/Arc<OptionData> carriers."
+    );
 }
 
-/// Allocate an `Arc<ResultData>` carrying `Ok(payload)` with the payload's
-/// kind stamped at the call site. Returns `Arc::into_raw(arc) as u64` — the
-/// slot bits the caller installs with kind `NativeKind::Ptr(HeapKind::Result)`.
-///
-/// **Strong-count contract:** the caller transfers exactly one strong-count
-/// share of the inner payload to this function (via `KindedSlot::new(...)`,
-/// which adopts the bits without bumping any refcount — the bits are the
-/// caller's already-owned share). The returned `Arc<ResultData>` carries one
-/// new strong-count share of the wrapper Arc, owned by the caller via the
-/// returned raw bits. Subsequent `KindedSlot::Drop` of the wrapper slot (kind
-/// `Ptr(HeapKind::Result)`) retires both the wrapper share AND the inner
-/// payload share via `ResultData::drop` → `KindedSlot::Drop` per ADR-006
-/// §2.7.17.
+/// Retired producer backstop. Reaching this function means the MIR `EnumStore`
+/// deopt gate failed or a stale direct FFI reference was invoked.
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_make_result_ok(payload_bits: u64, payload_kind_code: u8) -> u64 {
-    let kind = decode_payload_kind_or_surface(payload_kind_code, "jit_v2_make_result_ok");
-    let payload_slot = shape_value::ValueSlot::from_raw(payload_bits);
-    let payload = KindedSlot::new(payload_slot, kind);
-    let arc = Arc::new(ResultData::ok(payload));
-    Arc::into_raw(arc) as u64
+pub extern "C" fn jit_v2_make_result_ok(_payload_bits: u64, _payload_kind_code: u8) -> u64 {
+    retired_result_option_producer_surface("jit_v2_make_result_ok")
 }
 
-/// Allocate an `Arc<ResultData>` carrying `Err(payload)`. Same contract as
-/// `jit_v2_make_result_ok`; the discriminator differs.
+/// Retired producer backstop. See `jit_v2_make_result_ok`.
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_make_result_err(payload_bits: u64, payload_kind_code: u8) -> u64 {
-    let kind = decode_payload_kind_or_surface(payload_kind_code, "jit_v2_make_result_err");
-    let payload_slot = shape_value::ValueSlot::from_raw(payload_bits);
-    let payload = KindedSlot::new(payload_slot, kind);
-    let arc = Arc::new(ResultData::err(payload));
-    Arc::into_raw(arc) as u64
+pub extern "C" fn jit_v2_make_result_err(_payload_bits: u64, _payload_kind_code: u8) -> u64 {
+    retired_result_option_producer_surface("jit_v2_make_result_err")
 }
 
-/// Allocate an `Arc<OptionData>` carrying `Some(payload)`. Mirror of the
-/// `jit_v2_make_result_*` shape.
+/// Retired producer backstop. See `jit_v2_make_result_ok`.
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_make_option_some(payload_bits: u64, payload_kind_code: u8) -> u64 {
-    let kind = decode_payload_kind_or_surface(payload_kind_code, "jit_v2_make_option_some");
-    let payload_slot = shape_value::ValueSlot::from_raw(payload_bits);
-    let payload = KindedSlot::new(payload_slot, kind);
-    let arc = Arc::new(OptionData::some(payload));
-    Arc::into_raw(arc) as u64
+pub extern "C" fn jit_v2_make_option_some(_payload_bits: u64, _payload_kind_code: u8) -> u64 {
+    retired_result_option_producer_surface("jit_v2_make_option_some")
 }
 
-/// Allocate an `Arc<OptionData>` carrying `None`. No payload — the inner
-/// payload slot is a zero-bits Bool placeholder per §2.7.17 `OptionData::
-/// none()` so the inner `KindedSlot::Drop` is a no-op when the wrapper
-/// Arc reaches refcount zero.
+/// Retired producer backstop. See `jit_v2_make_result_ok`.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_v2_make_option_none() -> u64 {
-    let arc = Arc::new(OptionData::none());
-    Arc::into_raw(arc) as u64
+    retired_result_option_producer_surface("jit_v2_make_option_none")
 }
 
 /// Read `is_ok` from an `Arc<ResultData>` pointer. Returns `1` for Ok, `0`
@@ -321,9 +262,8 @@ pub extern "C" fn jit_v2_make_option_none() -> u64 {
 /// to own the Arc share.
 ///
 /// SAFETY: `bits` must be `Arc::into_raw(Arc<ResultData>) as u64` per the
-/// §2.7.7 stack kind label `Ptr(HeapKind::Result)`. The producer side
-/// (VM-side `BuiltinFunction::OkCtor`, JIT-side `jit_v2_make_result_ok`,
-/// etc.) is the source.
+/// §2.7.7 stack kind label `Ptr(HeapKind::Result)`. After W88A this is a
+/// legacy compatibility consumer only; active JIT producers are fail-closed.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_arc_result_is_ok(bits: u64) -> u8 {
     if bits == 0 {
@@ -351,9 +291,9 @@ pub extern "C" fn jit_arc_result_is_err(bits: u64) -> u8 {
 /// independent (the §2.7.17 receiver-recovery soundness rule: clone the
 /// inner share, transfer it via `mem::forget`).
 ///
-/// Caller's slot must carry the payload's kind label per the EnumStore
-/// producer's compile-time classification (threaded into the parallel-kind
-/// track via the codegen consumer; that kind matches `r.payload.kind`).
+/// Caller's slot must carry the payload's kind label from the legacy carrier's
+/// embedded `KindedSlot`; new JIT construction must deopt until the
+/// schema-backed typed-object ABI can provide this without old carriers.
 ///
 /// SAFETY: same construction-side contract as `jit_arc_result_is_ok`.
 #[unsafe(no_mangle)]
@@ -419,16 +359,16 @@ pub extern "C" fn jit_arc_option_payload(bits: u64) -> u64 {
 /// via `Arc::increment_strong_count::<ResultData>` — NOT the W-series
 /// `UnifiedValue<T>` refcount at offset 4 (`jit_arc_retain`'s shape).
 ///
-/// W12-jit-result-option-trinity (Phase 3 cluster-0 Round 7A, 2026-05-12).
-/// The legacy `jit_arc_retain` would write a U32 fetch_add at the wrong
+/// W12-jit-result-option-trinity (Phase 3 cluster-0 Round 7A, 2026-05-12),
+/// retained as a legacy consumer after W88A. The legacy `jit_arc_retain`
+/// would write a U32 fetch_add at the wrong
 /// offset of `Arc<ResultData>` — corrupting `payload.slot.0`'s high 32
 /// bits with the spurious "refcount". The kinded retain operates on the
 /// correct refcount location via `Arc::increment_strong_count::<T>` per
 /// the Rust standard library Arc contract.
 ///
-/// SAFETY: `bits` must be `Arc::into_raw(Arc<ResultData>) as u64` from
-/// `jit_v2_make_result_ok` / `jit_v2_make_result_err` or the VM-side
-/// `KindedSlot::from_result` producer. Null is silently no-op'd.
+/// SAFETY: `bits` must be legacy `Arc::into_raw(Arc<ResultData>) as u64`.
+/// Null is silently no-op'd.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_arc_result_retain(bits: u64) {
     if bits == 0 {
@@ -507,16 +447,15 @@ mod tests {
     // the producing call placed there"). NOT a deleted ValueWord-shape
     // assertion the test got wrong.
     //
-    // Strict-typed analog at the VM tier:
+    // Legacy typed-Arc analog kept only for compatibility surfaces:
     // `KindedSlot::from_result(Arc<ResultData>)` /
     // `KindedSlot::from_option(Arc<OptionData>)` per ADR-006 §2.7.17 /
     // Q18 (Wave 14 W14-variant-codegen). The carrier shape is
     // `Arc<ResultData>` / `Arc<OptionData>` with an inner `payload:
     // KindedSlot`, NOT the JIT-internal `UnifiedValue<u64>` shape these
-    // tests exercise. Coverage of the Result/Option kinded carriers
-    // lives in `crates/shape-value/src/heap_value.rs::tests` (search for
-    // `ResultData` / `OptionData`) and in the VM-tier match / ok / err
-    // execution tests in `shape-vm`. The two surviving green tests in
+    // tests exercise. Canonical VM execution now uses schema-backed
+    // `__Result` / `__Option` via `result_option_carrier`; old carrier
+    // coverage lives in compatibility tests. The two surviving green tests in
     // this module (`test_unwrap_or_with_err`, `test_option_none`,
     // `test_non_result_values`) cover the early-return branches that
     // don't require producer→consumer round-trip.
@@ -559,83 +498,23 @@ mod tests {
     // pointers, returning the bits unchanged instead of the unwrapped
     // inner).
 
-    // ── Arc-shape Result/Option FFI round-trip tests ────────────────────
-    // (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A, 2026-05-12)
+    // ── Legacy Result/Option carrier consumer tests ─────────────────────
+    //
+    // W88A retires the four `jit_v2_make_result_*` / `jit_v2_make_option_*`
+    // producers. Do not add producer round-trip tests here; they would
+    // reintroduce the old `Arc<ResultData>` / `Arc<OptionData>` allocation
+    // path this patch deliberately fails closed.
 
     use super::super::stack_kind_code;
-    use shape_value::ValueSlot;
     use shape_value::heap_value::HeapKind;
 
-    /// Recover and free the Arc carriers without leaking, matching the
-    /// §2.7.17 stack-tier drop dispatch.
-    unsafe fn drop_arc_result(bits: u64) {
-        if bits != 0 {
-            // SAFETY: test callers pass bits returned by `jit_v2_make_result_*`
-            // and call this helper exactly once to retire that Arc share.
-            let _ = unsafe { Arc::<ResultData>::from_raw(bits as *const ResultData) };
-        }
-    }
-
-    unsafe fn drop_arc_option(bits: u64) {
-        if bits != 0 {
-            // SAFETY: test callers pass bits returned by `jit_v2_make_option_*`
-            // and call this helper exactly once to retire that Arc share.
-            let _ = unsafe { Arc::<OptionData>::from_raw(bits as *const OptionData) };
-        }
-    }
-
     #[test]
-    fn arc_result_ok_roundtrip_int_payload() {
-        let inner_bits = ValueSlot::from_int(42).raw();
-        let arc_bits = jit_v2_make_result_ok(inner_bits, stack_kind_code::C_INT64);
-        assert_ne!(arc_bits, 0);
-
-        assert_eq!(jit_arc_result_is_ok(arc_bits), 1);
-        assert_eq!(jit_arc_result_is_err(arc_bits), 0);
-
-        let payload_bits = jit_arc_result_payload(arc_bits);
-        // Int64 payload: KindedSlot::Clone is a copy; raw bits match.
-        assert_eq!(payload_bits, inner_bits);
-        assert_eq!(ValueSlot::from_raw(payload_bits).as_i64(), 42);
-        unsafe { drop_arc_result(arc_bits) };
-    }
-
-    #[test]
-    fn arc_result_err_roundtrip_int_payload() {
-        let inner_bits = ValueSlot::from_int(-1).raw();
-        let arc_bits = jit_v2_make_result_err(inner_bits, stack_kind_code::C_INT64);
-        assert_ne!(arc_bits, 0);
-
-        assert_eq!(jit_arc_result_is_ok(arc_bits), 0);
-        assert_eq!(jit_arc_result_is_err(arc_bits), 1);
-
-        let payload_bits = jit_arc_result_payload(arc_bits);
-        assert_eq!(payload_bits, inner_bits);
-        unsafe { drop_arc_result(arc_bits) };
-    }
-
-    #[test]
-    fn arc_option_some_roundtrip_int_payload() {
-        let inner_bits = ValueSlot::from_int(7).raw();
-        let arc_bits = jit_v2_make_option_some(inner_bits, stack_kind_code::C_INT64);
-        assert_ne!(arc_bits, 0);
-
-        assert_eq!(jit_arc_option_is_some(arc_bits), 1);
-        assert_eq!(jit_arc_option_is_none(arc_bits), 0);
-
-        let payload_bits = jit_arc_option_payload(arc_bits);
-        assert_eq!(payload_bits, inner_bits);
-        unsafe { drop_arc_option(arc_bits) };
-    }
-
-    #[test]
-    fn arc_option_none_roundtrip() {
-        let arc_bits = jit_v2_make_option_none();
-        assert_ne!(arc_bits, 0);
-
-        assert_eq!(jit_arc_option_is_some(arc_bits), 0);
-        assert_eq!(jit_arc_option_is_none(arc_bits), 1);
-        unsafe { drop_arc_option(arc_bits) };
+    #[should_panic(expected = "jit_v2_make_result_ok is retired by W88A")]
+    fn retired_result_option_producer_surface_is_a_hard_stop() {
+        // Call the private helper, not the extern "C" wrapper: unwinding out
+        // of an extern "C" function aborts the test process. The wrapper's
+        // body is a direct tail call to this helper.
+        retired_result_option_producer_surface("jit_v2_make_result_ok");
     }
 
     #[test]

@@ -304,6 +304,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     if is_collection_ctor_name(name) {
                         return self.emit_collection_ctor(name, *container_slot, operands);
                     }
+                    if is_result_option_variant_name(name) {
+                        return Err(format!(
+                            "EnumStore: SURFACE — JIT Result/Option variant '{}' \
+                             construction is disabled by W88A before FFI allocation. \
+                             The old jit_v2_make_result_* / jit_v2_make_option_* \
+                             imports would allocate Arc<ResultData>/Arc<OptionData>; \
+                             the replacement must build schema-backed __Result / \
+                             __Option TypedObjectStorage from a statically known \
+                             helper ABI. Whole-function deopt to the interpreter \
+                             preserves correctness until that ABI exists. \
+                             ADR-006 §2.7.5 / W84C deletion step 1.",
+                            name
+                        ));
+                    }
                 }
                 // For unit variants (empty operands), the preceding
                 // `Assign(Aggregate)` short-circuit already left the slot
@@ -312,22 +326,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(());
                 }
 
-                // W12-jit-result-option-trinity (Phase 3 cluster-0
-                // Round 7A, 2026-05-12). EnumStore non-empty payload
-                // consumer per item (iii) of the trinity. The
-                // `variant_name` was producer-stamped at MIR-emission
-                // time (§2.7.5) by the bare-form enum-variant intercept
-                // in `mir/lowering/expr.rs:1556-1577` + the qualified
-                // `Expr::EnumConstructor` arm at `expr.rs:1669-1693`.
-                //
-                // Dispatches to the Arc-shape producers at
-                // `crates/shape-jit/src/ffi/result.rs::jit_v2_make_*`
-                // (committed as item (ii) of the trinity), which return
-                // `Arc::into_raw(Arc<ResultData>) as u64` /
-                // `Arc::into_raw(Arc<OptionData>) as u64` matching the
-                // VM-side `BuiltinFunction::OkCtor` / `ErrCtor` /
-                // `SomeCtor` / `NoneCtor` output shape per ADR-006
-                // §2.7.17.
+                // Pre-W88A this Round 7A branch dispatched Result/Option
+                // variants to Arc-shape producers in `ffi/result.rs`.
+                // The W88A guard above now surfaces Ok / Err / Some / None
+                // before this point, because those imports would allocate old
+                // `Arc<ResultData>` / `Arc<OptionData>` carriers. The code
+                // below is retained only as a stale-structure backstop until
+                // the broader schema-backed `__Result` / `__Option` JIT ABI
+                // replaces it and the old FuncRefs can be deleted.
                 //
                 // Payload kind is stamped from the operand's MIR-inferred
                 // kind via `operand_slot_kind(op)` → `stack_kind_code::
@@ -376,10 +382,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // to `MirConstant::None` operand which still gets here
                 // with operands.len()==1 in some paths). For safety:
                 if matches!(variant_tag, shape_vm::mir::types::VariantTag::None_) {
-                    // None construction via the Arc-shape producer —
-                    // no payload, no kind code. The producer always
-                    // builds the same `Arc<OptionData>` with
-                    // `is_some=false` + the §2.7.17 placeholder.
+                    // Unreachable under W88A's `is_result_option_variant_name`
+                    // guard above. If reached, this stale path calls the
+                    // fail-closed FFI backstop rather than allocating
+                    // `Arc<OptionData>`.
                     let inst = self.builder.ins().call(self.ffi.v2_make_option_none, &[]);
                     let arc_bits = self.builder.inst_results(inst)[0];
                     let place = Place::Local(*container_slot);
@@ -388,11 +394,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(());
                 }
 
-                // Ok / Err / Some — single-payload producers. The MIR
-                // enforces exactly one operand for these via the producer-
-                // side intercepts (`is_bare_enum_variant_ctor` + the
-                // `Expr::EnumConstructor` tuple-payload arm). If we ever
-                // see operands.len() != 1, that's a producer-site bug.
+                // Stale Ok / Err / Some single-payload branch. W88A should
+                // surface before this point; if a future edit bypasses the
+                // guard, the FFI backstop still fails closed before old
+                // carrier allocation.
                 if operands.len() != 1 {
                     return Err(format!(
                         "EnumStore: SURFACE — variant '{}' expects 1 \
@@ -1157,6 +1162,10 @@ fn is_collection_ctor_name(name: &str) -> bool {
     )
 }
 
+fn is_result_option_variant_name(name: &str) -> bool {
+    matches!(name, "Ok" | "Err" | "Some" | "None")
+}
+
 impl<'a, 'b> super::MirToIR<'a, 'b> {
     /// W12-jit-call-method-shell-rebuild Part 3 (Phase 3 cluster-0 Round
     /// 10 / 8B.2, 2026-05-13): dispatch an `EnumStore` collection-ctor
@@ -1396,6 +1405,27 @@ fn phase_e_layout(capture_types: &[Type]) -> (Vec<i32>, usize, usize) {
     let total = (cur + max_align - 1) & !(max_align - 1);
     let total = total.max(8);
     (offsets, total, max_align)
+}
+
+#[cfg(test)]
+mod enumstore_containment_tests {
+    use super::*;
+
+    #[test]
+    fn result_option_variants_are_caught_before_ffi_producers() {
+        for name in ["Ok", "Err", "Some", "None"] {
+            assert!(
+                is_result_option_variant_name(name),
+                "{name} must deopt before jit_v2_make_result/option_*"
+            );
+        }
+        for name in ["HashMap", "Set", "UserVariant"] {
+            assert!(
+                !is_result_option_variant_name(name),
+                "{name} must keep its existing EnumStore path"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

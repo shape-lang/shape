@@ -359,18 +359,12 @@ pub struct FFIFuncRefs {
     pub(crate) exp_f64: FuncRef,
     pub(crate) ln_f64: FuncRef,
 
-    // ADR-006 §2.7.17 / Q18 — Arc-shape Result/Option producers
-    // (W12-jit-result-option-trinity, Phase 3 cluster-0 Round 7A,
-    // 2026-05-12). These produce `Arc::into_raw(Arc<ResultData>) as u64`
-    // / `Arc::into_raw(Arc<OptionData>) as u64` directly per the strict-
-    // typed §2.7.17 carrier — matching the VM-side `BuiltinFunction::
-    // OkCtor` / `ErrCtor` / `SomeCtor` / `NoneCtor` output. The producer
-    // signature is `(payload_bits: u64, payload_kind_code: u8) -> u64`
-    // where the kind code is the §2.7.7 / Q9 parallel-track byte
-    // (`stack_kind_code::encode(payload_kind)`) stamped at JIT-compile
-    // time from the EnumStore operand's MIR-inferred kind. The legacy
-    // `make_ok` / `make_err` / `make_some` NaN-box family is not present in
-    // `FFIFuncRefs`; generated code must use these strict carriers.
+    // W88A fail-closed Result/Option producer ABI backstops. These FuncRefs
+    // are retained so stale imports resolve to the explicit `ffi/result.rs`
+    // surface, but normal MIR EnumStore lowering must deopt before emitting
+    // them. They no longer allocate old `Arc<ResultData>` / `Arc<OptionData>`
+    // carriers; the replacement must be a schema-backed `__Result` /
+    // `__Option` TypedObject ABI with statically known schema ids.
     pub(crate) v2_make_result_ok: FuncRef,
     pub(crate) v2_make_result_err: FuncRef,
     pub(crate) v2_make_option_some: FuncRef,
