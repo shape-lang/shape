@@ -1,9 +1,11 @@
-//! Parity test runner for comparing backend execution results
+//! Parity test runner for comparing legacy feature-test execution results
 //!
-//! Runs feature tests across all backends and collects parity results.
+//! This runner does not execute the real JIT. The JIT slot is retained only as
+//! an explicit skipped marker; real VM-vs-JIT parity is the subprocess gate in
+//! `scripts/differential-gate.sh`.
 
 use super::FeatureTest;
-use super::backends::BackendExecutor;
+use super::backends::{BackendExecutor, REAL_JIT_PARITY_CI, REAL_JIT_PARITY_GATE};
 use super::parity::{ExecutionResult, ParityResult, ParityStatus};
 
 /// Runner that executes tests across multiple backends
@@ -53,7 +55,7 @@ impl ParityRunner {
 
         let jit = match &self.jit {
             Some(jit_backend) if jit_backend.is_available() => jit_backend.execute(test),
-            Some(_) => ExecutionResult::Skipped("JIT not available"),
+            Some(jit_backend) => ExecutionResult::Skipped(jit_backend.unavailable_reason()),
             None => ExecutionResult::Skipped("JIT backend not configured"),
         };
 
@@ -130,6 +132,13 @@ impl ParityReport {
         output.push_str("═══════════════════════════════════════════════════════════════\n");
         output.push_str("                    PARITY TEST REPORT\n");
         output.push_str("═══════════════════════════════════════════════════════════════\n\n");
+        output.push_str(
+            "Scope: legacy in-process feature matrix. The JIT lane is intentionally skipped;\n",
+        );
+        output.push_str(&format!(
+            "real VM-vs-JIT parity is enforced by {} via {}.\n\n",
+            REAL_JIT_PARITY_GATE, REAL_JIT_PARITY_CI
+        ));
 
         output.push_str(&format!("Total tests: {}\n", self.total));
         output.push_str(&format!("  ✓ Passed (all match): {}\n", self.passed));
@@ -150,8 +159,10 @@ impl ParityReport {
 
         output.push_str("═══════════════════════════════════════════════════════════════\n");
 
-        if self.all_passed() {
+        if self.all_passed() && self.partial == 0 {
             output.push_str("                    ALL TESTS PASSED\n");
+        } else if self.all_passed() {
+            output.push_str("             NO MISMATCHES (PARTIAL COVERAGE)\n");
         } else {
             output.push_str(&format!("                    {} FAILURES\n", self.failed));
         }
@@ -164,6 +175,9 @@ impl ParityReport {
     /// Format as JSON
     pub fn format_json(&self) -> String {
         let json = serde_json::json!({
+            "scope": "legacy in-process feature matrix; JIT parity is enforced by the external differential gate",
+            "jit_differential_gate": REAL_JIT_PARITY_GATE,
+            "jit_differential_ci": REAL_JIT_PARITY_CI,
             "total": self.total,
             "passed": self.passed,
             "partial": self.partial,

@@ -1,10 +1,14 @@
-//! Automatic feature coverage tracking for Interpreter/VM/JIT parity
+//! Automatic feature coverage tracking for legacy in-process execution
 //!
 //! This module provides:
 //! 1. Grammar feature definitions extracted from pest (via build.rs)
 //! 2. Feature test case definitions
 //! 3. Coverage gap detection
-//! 4. Three-way parity testing (Interpreter vs VM vs JIT)
+//! 4. Legacy feature-test parity reporting.
+//!
+//! Real VM-vs-JIT parity is a subprocess-level concern enforced by
+//! `scripts/differential-gate.sh`; this crate cannot link the real JIT executor
+//! without creating a dependency cycle.
 
 // Include auto-generated grammar rules from build.rs
 include!(concat!(env!("OUT_DIR"), "/grammar_features.rs"));
@@ -96,7 +100,10 @@ pub fn all_feature_tests() -> Vec<&'static FeatureTest> {
 // Re-exports
 // ============================================================================
 
-pub use backends::{BackendExecutor, InterpreterBackend, JITBackend, VMBackend};
+pub use backends::{
+    BackendExecutor, InterpreterBackend, JITBackend, REAL_JIT_PARITY_CI, REAL_JIT_PARITY_GATE,
+    VMBackend,
+};
 pub use coverage::{CoverageReport, analyze_coverage};
 pub use definitions::FEATURE_TESTS as MANUAL_FEATURE_TESTS;
 pub use jit_analysis::{JitAnalysis, analyze_jit_support};
