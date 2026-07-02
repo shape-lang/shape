@@ -1234,15 +1234,13 @@ fn slot_heap_to_serializable(
             let arc = Arc::<HashSetData>::from_raw(bits as *const HashSetData);
             let serializable = match arc.element_kind() {
                 HashSetElementKind::String => {
-                    let keys: Vec<String> = arc
-                        .string_keys()
-                        .iter()
-                        .map(|k| (**k).clone())
-                        .collect();
+                    let keys: Vec<String> =
+                        arc.string_keys().iter().map(|k| (**k).clone()).collect();
                     Ok(SV::HashSet { keys })
                 }
                 HashSetElementKind::I64 => Err(
-                    "slot_to_serializable: HashSet<int> snapshot is not yet represented".to_string(),
+                    "slot_to_serializable: HashSet<int> snapshot is not yet represented"
+                        .to_string(),
                 ),
             };
             let _ = Arc::into_raw(arc);

@@ -2510,10 +2510,7 @@ impl HashSetData {
         }
         let new_idx = self.i64_keys.len();
         Arc::make_mut(&mut self.i64_keys).push(key);
-        self.i64_index
-            .entry(hash)
-            .or_default()
-            .push(new_idx as u32);
+        self.i64_index.entry(hash).or_default().push(new_idx as u32);
         Ok(true)
     }
 

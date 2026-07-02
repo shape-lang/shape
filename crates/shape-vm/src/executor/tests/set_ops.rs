@@ -1,7 +1,7 @@
 //! Set method tests through the kinded host/test carrier boundary.
 
 use crate::bytecode::{BuiltinFunction, Constant, Instruction, KindedConstant, OpCode, Operand};
-use crate::executor::v2_handlers::v2_array_detect::{as_v2_typed_array, V2ElemType};
+use crate::executor::v2_handlers::v2_array_detect::{V2ElemType, as_v2_typed_array};
 use crate::type_tracking::NativeKind;
 use shape_value::heap_value::{HashSetData, HashSetElementKind, HeapKind};
 use shape_value::v2::string_obj::StringObj;
@@ -114,7 +114,9 @@ fn runtime_error_message(err: VMError) -> String {
     }
 }
 
-fn typed_array_view(slot: &KindedSlot) -> crate::executor::v2_handlers::v2_array_detect::V2TypedArrayView {
+fn typed_array_view(
+    slot: &KindedSlot,
+) -> crate::executor::v2_handlers::v2_array_detect::V2TypedArrayView {
     assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedArray));
     as_v2_typed_array(slot.raw(), slot.kind()).expect("typed array result")
 }

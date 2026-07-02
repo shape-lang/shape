@@ -158,8 +158,7 @@ fn set_key_from_slot(slot: &KindedSlot) -> Result<SetKey, VMError> {
 fn ensure_accepts_key(set: &HashSetData, key: &SetKey, op: &str) -> Result<(), VMError> {
     let ok = matches!(
         (set.element_kind(), key),
-        (HashSetElementKind::String, SetKey::String(_))
-            | (HashSetElementKind::I64, SetKey::I64(_))
+        (HashSetElementKind::String, SetKey::String(_)) | (HashSetElementKind::I64, SetKey::I64(_))
     );
     if ok {
         Ok(())
@@ -565,7 +564,8 @@ pub fn v2_filter(
         HashSetElementKind::String => {
             for key_arc in set.string_keys().iter() {
                 let key_slot = KindedSlot::from_string_arc(Arc::clone(key_arc));
-                let result = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
+                let result =
+                    vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
                 let keep = result.as_bool().ok_or_else(|| {
                     type_error(format!(
                         "Set.filter(): predicate must return bool (got kind {:?})",
@@ -573,16 +573,15 @@ pub fn v2_filter(
                     ))
                 })?;
                 if keep {
-                    result_set
-                        .insert(Arc::clone(key_arc))
-                        .map_err(type_error)?;
+                    result_set.insert(Arc::clone(key_arc)).map_err(type_error)?;
                 }
             }
         }
         HashSetElementKind::I64 => {
             for &key in set.i64_keys().iter() {
                 let key_slot = KindedSlot::from_int(key);
-                let result = vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
+                let result =
+                    vm.call_value_immediate_nb(closure, &[key_slot], ctx.as_deref_mut())?;
                 let keep = result.as_bool().ok_or_else(|| {
                     type_error(format!(
                         "Set.filter(): predicate must return bool (got kind {:?})",

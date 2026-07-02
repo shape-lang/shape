@@ -5954,10 +5954,9 @@ impl BytecodeCompiler {
         self.pending_expected_call_return_type = saved_expected_call_return_type;
         match specialization_result {
             Ok(specialized_idx) => {
-                self.program.monomorphized_method_call_sites.insert(
-                    (call_site_span, caller_function),
-                    specialized_idx as usize,
-                );
+                self.program
+                    .monomorphized_method_call_sites
+                    .insert((call_site_span, caller_function), specialized_idx as usize);
                 // A recursive call inside a generic body that re-resolves to
                 // the specialization currently being compiled MUST still
                 // redirect to that specialization's index — `Call`-ing the

@@ -945,12 +945,7 @@ pub fn resolve_call_site_type_args_from_expected_return(
 
     let generics: Vec<&str> = generic_params.iter().map(|s| s.as_str()).collect();
     let mut bindings: HashMap<String, ConcreteType> = HashMap::new();
-    if !unify_annotation_with_concrete(
-        return_annotation,
-        &expected_ct,
-        &generics,
-        &mut bindings,
-    ) {
+    if !unify_annotation_with_concrete(return_annotation, &expected_ct, &generics, &mut bindings) {
         return None;
     }
 

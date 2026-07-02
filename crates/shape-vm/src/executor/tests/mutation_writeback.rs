@@ -38,11 +38,7 @@ fn top_level_builtin_calls(source: &str) -> Vec<BuiltinFunction> {
         .collect()
 }
 
-fn assert_set_ctor_stamped(
-    source: &str,
-    expected: BuiltinFunction,
-    context: &str,
-) {
+fn assert_set_ctor_stamped(source: &str, expected: BuiltinFunction, context: &str) {
     let calls = top_level_builtin_calls(source);
     assert!(
         calls.contains(&expected),
