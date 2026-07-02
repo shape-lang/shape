@@ -268,7 +268,9 @@ print(usd.symbol)
 print(usd.decimals)
 print(usd.amount)
 "#;
-    ShapeTest::new(code).expect_run_err_contains("Undefined property: symbol");
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("$\n2\n42.5");
 }
 
 #[test]
@@ -285,7 +287,9 @@ print(usd.symbol)
 print(usd.decimals)
 print(usd.amount)
 "#;
-    ShapeTest::new(code).expect_run_err_contains("Undefined property: symbol");
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("$\n2.0\n42.5");
 }
 
 #[test]
@@ -300,7 +304,7 @@ type Currency {
 // Access comptime field directly on construction expression
 print(Currency { amount: 42.5 }.symbol)
 "#;
-    ShapeTest::new(code).expect_run_err_contains("Undefined property: symbol");
+    ShapeTest::new(code).expect_run_ok().expect_output("$");
 }
 
 #[test]
@@ -362,14 +366,12 @@ print("should not reach here")
 }
 
 // ============================================================================
-// FAILING tests (TDD) -- document expected behavior for unimplemented features
+// COMPTIME FIELD tests
 // ============================================================================
 
-/// SURFACE: Static comptime-field projection is dormant pending the phase-2c
-/// KindedSlot-to-Constant rebuild. Today the parser accepts the no-comma field
-/// list, but `Type::field` still routes through enum-variant resolution.
+/// Static `Type::field` comptime-field access folds to the declared literal
+/// default without materializing a runtime field.
 #[test]
-
 fn ct_06_comptime_fields() {
     let code = r#"
 type Currency {
@@ -380,13 +382,11 @@ type Currency {
 print(Currency::symbol)
 print(Currency::decimals)
 "#;
-    ShapeTest::new(code).expect_run_err_contains("Type 'Currency' is not an enum");
+    ShapeTest::new(code).expect_run_ok().expect_output("$\n2");
 }
 
-/// SURFACE: `Type::field` comptime-field access is still parsed as enum-variant
-/// access until the phase-2c static projection path is wired.
+/// Single static comptime-field access uses the same constant-folding path.
 #[test]
-
 fn ct_40_comptime_field_single() {
     let code = r#"
 type Config {
@@ -395,13 +395,12 @@ type Config {
 
 print(Config::version)
 "#;
-    ShapeTest::new(code).expect_run_err_contains("Type 'Config' is not an enum");
+    ShapeTest::new(code).expect_run_ok().expect_output("1.0");
 }
 
-/// SURFACE: Instance comptime-field projection is dormant with the same
-/// phase-2c boundary as the untyped instance forms above.
+/// Instance comptime-field access folds to the comptime constant and leaves
+/// normal runtime fields available on the same receiver type.
 #[test]
-
 fn ct_40c_comptime_field_typed() {
     let code = r#"
 type Currency {
@@ -415,7 +414,9 @@ print(usd.symbol)
 print(usd.decimals)
 print(usd.amount)
 "#;
-    ShapeTest::new(code).expect_run_err_contains("Undefined property: symbol");
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("$\n2\n42.5");
 }
 
 /// BUG: `build_config()` individual field dot-access returns None.
