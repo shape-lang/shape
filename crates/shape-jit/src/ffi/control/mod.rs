@@ -802,25 +802,33 @@ pub(crate) unsafe fn call_jit_fn_with_args(
     type F7 = unsafe extern "C" fn(*mut JITContext, u64, u64, u64, u64, u64, u64, u64) -> i32;
     type F8 = unsafe extern "C" fn(*mut JITContext, u64, u64, u64, u64, u64, u64, u64, u64) -> i32;
 
-    let result = match args.len() {
-        0 => std::mem::transmute::<_, F0>(fn_ptr)(ctx),
-        1 => std::mem::transmute::<_, F1>(fn_ptr)(ctx, args[0]),
-        2 => std::mem::transmute::<_, F2>(fn_ptr)(ctx, args[0], args[1]),
-        3 => std::mem::transmute::<_, F3>(fn_ptr)(ctx, args[0], args[1], args[2]),
-        4 => std::mem::transmute::<_, F4>(fn_ptr)(ctx, args[0], args[1], args[2], args[3]),
-        5 => std::mem::transmute::<_, F5>(fn_ptr)(ctx, args[0], args[1], args[2], args[3], args[4]),
-        6 => std::mem::transmute::<_, F6>(fn_ptr)(
-            ctx, args[0], args[1], args[2], args[3], args[4], args[5],
-        ),
-        7 => std::mem::transmute::<_, F7>(fn_ptr)(
-            ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-        ),
-        8 => std::mem::transmute::<_, F8>(fn_ptr)(
-            ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
-        ),
-        _ => {
-            // Too many args for direct dispatch — fall back to trampoline
-            -1
+    // SAFETY: callers pass a non-null JIT function-table entry compiled with
+    // the Cranelift ABI shape selected by `args.len()`: `ctx` plus exactly
+    // that many `u64` native arguments. Unsupported arities do not call
+    // through the pointer.
+    let result = unsafe {
+        match args.len() {
+            0 => std::mem::transmute::<_, F0>(fn_ptr)(ctx),
+            1 => std::mem::transmute::<_, F1>(fn_ptr)(ctx, args[0]),
+            2 => std::mem::transmute::<_, F2>(fn_ptr)(ctx, args[0], args[1]),
+            3 => std::mem::transmute::<_, F3>(fn_ptr)(ctx, args[0], args[1], args[2]),
+            4 => std::mem::transmute::<_, F4>(fn_ptr)(ctx, args[0], args[1], args[2], args[3]),
+            5 => std::mem::transmute::<_, F5>(fn_ptr)(
+                ctx, args[0], args[1], args[2], args[3], args[4],
+            ),
+            6 => std::mem::transmute::<_, F6>(fn_ptr)(
+                ctx, args[0], args[1], args[2], args[3], args[4], args[5],
+            ),
+            7 => std::mem::transmute::<_, F7>(fn_ptr)(
+                ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+            ),
+            8 => std::mem::transmute::<_, F8>(fn_ptr)(
+                ctx, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+            ),
+            _ => {
+                // Too many args for direct dispatch — fall back to trampoline
+                -1
+            }
         }
     };
     result

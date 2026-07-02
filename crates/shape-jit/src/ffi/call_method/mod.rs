@@ -199,7 +199,12 @@ unsafe fn receiver_type_name(
             if receiver_bits == 0 || receiver_bits == TAG_NULL || receiver_bits == TAG_NONE {
                 return None;
             }
-            match read_heap_kind(receiver_bits) {
+            // SAFETY: the `NativeKind::UInt64` arm is the documented
+            // JIT-format opaque-bits carrier. Callers of this unsafe helper
+            // must only reach this branch with `receiver_bits` pointing at a
+            // live JitAlloc / UnifiedValue allocation whose first field is
+            // the heap-kind prefix.
+            match unsafe { read_heap_kind(receiver_bits) } {
                 HK_STRING => Some("string".to_string()),
                 HK_ARRAY => Some("Array".to_string()),
                 HK_TYPED_OBJECT => {
@@ -236,6 +241,8 @@ unsafe fn find_function_by_name(ctx_ref: &JITContext, ufcs_name: &str) -> Option
     if ctx_ref.function_names_ptr.is_null() || ctx_ref.function_names_len == 0 {
         return None;
     }
+    // SAFETY: the caller provides a live JITContext; the null/len guard above
+    // ensures the raw names table is present before constructing the slice.
     let names = unsafe {
         std::slice::from_raw_parts(ctx_ref.function_names_ptr, ctx_ref.function_names_len)
     };
@@ -276,21 +283,29 @@ unsafe fn try_call_user_method(
 ) -> Option<u64> {
     use crate::ffi::stack_kind_code;
 
+    // SAFETY: callers only invoke this from the live `jit_call_method`
+    // dispatch frame after checking the JITContext pointer for null.
     let ctx_ref = unsafe { &*ctx };
 
     // Need execution context to access the type schema registry
     if ctx_ref.exec_context_ptr.is_null() {
         return None;
     }
+    // SAFETY: the null guard above proves `exec_context_ptr` is present for
+    // the duration of this dispatch.
     let exec_ctx = unsafe { &*(ctx_ref.exec_context_ptr as *const ExecutionContext) };
 
     // Determine the receiver's type name
+    // SAFETY: `receiver_bits` and `receiver_kind` are the pair popped from the
+    // JIT stack's lockstep kind track by `jit_call_method`.
     let type_name = unsafe { receiver_type_name(receiver_bits, receiver_kind, exec_ctx) }?;
 
     // Construct UFCS function name: "TypeName::method_name"
     let ufcs_name = format!("{}::{}", type_name, method_name);
 
     // Look up the function index in the JIT function table
+    // SAFETY: `ctx_ref` is the live context borrowed above; the helper
+    // validates the raw names table before reading it.
     let func_idx = unsafe { find_function_by_name(ctx_ref, &ufcs_name) }?;
 
     // Check that we have a valid function table entry
@@ -300,6 +315,8 @@ unsafe fn try_call_user_method(
 
     // Read the raw pointer from the function table. A null entry means the
     // function was not JIT-compiled (interpreted only).
+    // SAFETY: `function_table` is non-null and `func_idx` is proven in-bounds
+    // by the guard above.
     let raw_fn_ptr = unsafe { *(ctx_ref.function_table as *const *const u8).add(func_idx) };
     if raw_fn_ptr.is_null() {
         return None;
@@ -347,6 +364,8 @@ unsafe fn try_call_user_method(
     // to 1 (see `mir_compiler/terminators.rs::TerminatorKind::Return` at
     // line 1714-1718). Matches the §2.7.11/Q12 bare-function dispatch
     // contract at `ffi/control/mod.rs:716`.
+    // SAFETY: this dispatch owns the active JIT frame; no other mutable access
+    // to the context is live while resetting the callee stack frame.
     let ctx_mut = unsafe { &mut *(ctx as *mut JITContext) };
     let _ = stack_kind_code::SENTINEL; // silence unused-import warning in this fn
     ctx_mut.stack_ptr = 0;
@@ -369,6 +388,8 @@ unsafe fn try_call_user_method(
     // helper. The signal value is ignored — error-path deopt is not yet
     // routed through this trait-method surface (the bare-function path
     // ignores it identically at `ffi/control/mod.rs:535,:717`).
+    // SAFETY: `raw_fn_ptr` came from the validated JIT function table entry
+    // above, and `native_args` matches the UFCS receiver-plus-args ABI.
     let _result_code =
         unsafe { crate::ffi::control::call_jit_fn_with_args(raw_fn_ptr, ctx_mut, &native_args) };
 

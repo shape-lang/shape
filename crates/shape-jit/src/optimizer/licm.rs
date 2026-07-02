@@ -144,20 +144,6 @@ fn analyze_loop_calls(program: &BytecodeProgram, info: &LoopInfo) -> Vec<Hoistab
         // Check for CallMethod with a pure method name.
         if instr.opcode == OpCode::CallMethod {
             match &instr.operand {
-                Some(Operand::TypedMethodCall {
-                    string_id,
-                    arg_count: _,
-                    ..
-                }) => {
-                    let str_idx = *string_id as usize;
-                    if let Some(method_name) = program.strings.get(str_idx) {
-                        if is_pure_method_name(method_name) {
-                            if let Some(call) = try_hoist_method_call(program, info, i) {
-                                hoistable.push(call);
-                            }
-                        }
-                    }
-                }
                 Some(Operand::TypedMethodCall { string_id, .. }) => {
                     let str_idx = *string_id as usize;
                     if let Some(method_name) = program.strings.get(str_idx) {
@@ -238,7 +224,6 @@ fn try_hoist_method_call(
 ) -> Option<HoistableCall> {
     // Get arg_count from the operand directly.
     let operand_arg_count = match &program.instructions[call_idx].operand {
-        Some(Operand::TypedMethodCall { arg_count, .. }) => *arg_count as usize,
         Some(Operand::TypedMethodCall { arg_count, .. }) => *arg_count as usize,
         _ => return None,
     };
