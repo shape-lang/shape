@@ -544,11 +544,11 @@ impl VirtualMachine {
         use shape_value::heap_value::HeapValue;
         use shape_value::v2::closure_layout::CaptureKind;
         use shape_value::v2::closure_raw::{
-            alloc_owned_mutable_bool, alloc_owned_mutable_f64, alloc_owned_mutable_i16,
-            alloc_owned_mutable_i32, alloc_owned_mutable_i64, alloc_owned_mutable_i8,
-            alloc_owned_mutable_ptr, alloc_owned_mutable_u16, alloc_owned_mutable_u32,
-            alloc_owned_mutable_u64, alloc_owned_mutable_u8, alloc_typed_closure,
-            write_capture_raw_u64, OwnedClosureBlock,
+            OwnedClosureBlock, alloc_owned_mutable_bool, alloc_owned_mutable_f64,
+            alloc_owned_mutable_i8, alloc_owned_mutable_i16, alloc_owned_mutable_i32,
+            alloc_owned_mutable_i64, alloc_owned_mutable_ptr, alloc_owned_mutable_u8,
+            alloc_owned_mutable_u16, alloc_owned_mutable_u32, alloc_owned_mutable_u64,
+            alloc_typed_closure, write_capture_raw_u64,
         };
         use shape_value::v2::struct_layout::FieldKind;
         use std::sync::Arc;

@@ -26,14 +26,14 @@
 //! | Int8/Bool | I8            | 1            |
 
 use cranelift::prelude::*;
-use shape_value::v2::ConcreteType;
 use shape_value::HeapKind;
+use shape_value::v2::ConcreteType;
 use shape_vm::mir::types::{Operand, Place, SlotId};
 use shape_vm::type_tracking::NativeKind;
 use std::collections::HashMap;
 
-use super::types::is_v2_typed_array_slot;
 use super::MirToIR;
+use super::types::is_v2_typed_array_slot;
 
 // ── TypedArrayHeader field offsets ───────────────────────────────────────────
 

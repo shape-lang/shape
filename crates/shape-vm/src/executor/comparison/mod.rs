@@ -15,12 +15,12 @@
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::{
     bytecode::{Instruction, OpCode},
-    executor::vm_impl::stack::drop_with_kind,
     executor::VirtualMachine,
+    executor::vm_impl::stack::drop_with_kind,
 };
 use shape_value::{
-    heap_value::{HeapKind, HeapValue, TypedObjectStorage},
     NativeKind, VMError, ValueSlot,
+    heap_value::{HeapKind, HeapValue, TypedObjectStorage},
 };
 use std::cmp::Ordering;
 use std::sync::Arc;

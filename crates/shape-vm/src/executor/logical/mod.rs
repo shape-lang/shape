@@ -22,10 +22,10 @@
 use crate::executor::objects::raw_helpers;
 use crate::{
     bytecode::{Instruction, OpCode},
-    executor::vm_impl::stack::drop_with_kind,
     executor::VirtualMachine,
+    executor::vm_impl::stack::drop_with_kind,
 };
-use shape_value::{heap_value::HeapKind, FilterNode, NativeKind, VMError};
+use shape_value::{FilterNode, NativeKind, VMError, heap_value::HeapKind};
 use std::sync::Arc;
 
 /// Wave 6: heuristic helper. A pushed slot is a runtime-heap-bearing

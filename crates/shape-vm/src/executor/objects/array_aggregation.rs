@@ -26,10 +26,10 @@
 //! interpret a non-Bool closure return — same shape as `kinded_truthy` in
 //! `executor/logical/mod.rs:43`.
 
-use crate::executor::v2_handlers::v2_array_detect::{
-    as_v2_typed_array, read_element, V2TypedArrayView,
-};
 use crate::executor::VirtualMachine;
+use crate::executor::v2_handlers::v2_array_detect::{
+    V2TypedArrayView, as_v2_typed_array, read_element,
+};
 use shape_runtime::context::ExecutionContext;
 use shape_value::{HeapKind, KindedSlot, NativeKind, VMError, ValueSlot};
 
