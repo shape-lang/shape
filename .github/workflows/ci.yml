@@ -27,3 +27,11 @@ jobs:
 
       - name: Workspace smoke
         run: cargo run -p xtask -- workspace-smoke
+
+      - name: Build differential gate binaries
+        run: |
+          cargo build -p shape-cli --bin shape
+          cargo build -p shape-fuzz --bin shape-fuzz
+
+      - name: VM vs JIT differential gate
+        run: bash scripts/differential-gate.sh

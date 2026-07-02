@@ -43,13 +43,29 @@ must classify `Convergent`; each `(n)`-class entry is named after its
 `docs/v0.3-close-summary.md` §5.1 residual class and is the harness's own
 regression sentinel against unintended convergence flips.
 
-## CI cadence (W13.4 — nightly fuzz workflow landed)
+## Per-commit curated gate
 
-The harness runs **NIGHTLY ONLY** per the Phase 4 test execution policy
-in `docs/cluster-audits/phase-3-team-lead-handover.md:42-47`. It is not
-a per-commit gate, not a merge-ceremony gate (except at audit-day batch
-merges per the coverage-gate convention), and not the v0.3.0 release
-gate.
+`scripts/differential-gate.sh` runs the existing `shape-fuzz run`
+subprocess harness against a small golden subset from
+`tools/shape-fuzz/tests/corpus`. It invokes `shape run --mode vm` and
+`shape run --mode jit` through the built `shape-fuzz` binary; it does not
+use the disabled in-process Rust differential test.
+
+```bash
+cargo build -p shape-cli --bin shape
+cargo build -p shape-fuzz --bin shape-fuzz
+bash scripts/differential-gate.sh
+```
+
+`just differential-gate` wraps the same sequence. CI runs this curated
+gate on pull requests and pushes to `main`.
+
+## Full-corpus nightly cadence (W13.4)
+
+The full corpus runs **NIGHTLY ONLY** per the Phase 4 test execution
+policy in `docs/cluster-audits/phase-3-team-lead-handover.md:42-47`.
+It is separate from the per-commit curated gate because it includes known
+negative-class seeds.
 
 `.github/workflows/nightly-fuzz.yml` runs the harness on schedule
 (`0 4 * * *` UTC) and on-demand via `workflow_dispatch`. Each run:

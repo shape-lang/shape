@@ -100,6 +100,15 @@ ci-test:
 	ulimit -v {{test-mem-cap-kib}} && cargo test --workspace --lib --bins --tests --examples --features shape-vm/deep-tests --features shape-runtime/deep-tests --features shape-ast/deep-tests -- --include-ignored
 	ulimit -v {{test-mem-cap-kib}} && cargo run -p xtask -- workspace-smoke
 
+# Lightweight VM-vs-JIT differential gate. This uses the subprocess
+# shape-fuzz harness against a curated golden subset; the full corpus stays
+# in .github/workflows/nightly-fuzz.yml because it contains known negative
+# divergence seeds.
+differential-gate:
+	ulimit -v {{test-mem-cap-kib}} && cargo build -p shape-cli --bin shape
+	ulimit -v {{test-mem-cap-kib}} && cargo build -p shape-fuzz --bin shape-fuzz
+	ulimit -v {{test-mem-cap-kib}} && bash scripts/differential-gate.sh
+
 # --- Canonical clean-check gate ---
 
 # Canonical "workspace clean" verifier. `just check-clean` exit 0 means the
