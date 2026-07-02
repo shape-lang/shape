@@ -247,13 +247,13 @@ fn chain_field_access_on_nested_struct_return() {
 fn typed_merge_decomposition() {
     ShapeTest::new(
         r#"
-        type TypeA { x: number, y: number }
-        type TypeB { z: number }
+        type TypeA { x: int, y: int }
+        type TypeB { z: int }
         let mut a = { x: 1 }
         a.y = 2
         let b = { z: 3 }
         let c = a + b
-        let (f: TypeA, g: TypeB) = c as (TypeA + TypeB)
+        var (f: TypeA, g: TypeB) = c
         f.x + f.y + g.z
     "#,
     )

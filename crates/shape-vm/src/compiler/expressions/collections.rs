@@ -1563,7 +1563,25 @@ impl BytecodeCompiler {
                         .find(|(name, _)| name == expected_name)
                         .expect("field existence validated above");
                     self.plan_flexible_binding_escape_from_expr(value);
-                    self.compile_expr_as_value_or_placeholder(value)?;
+                    let empty_array_field_annotation = match value {
+                        Expr::Array(elements, _) if elements.is_empty() => self
+                            .struct_generic_info
+                            .get(type_name)
+                            .and_then(|info| info.runtime_field_types.get(expected_name))
+                            .cloned(),
+                        _ => None,
+                    };
+                    let saved_pending_typed_array_kind = self.pending_variable_typed_array_kind;
+                    let saved_pending_trait_object_array_trait =
+                        self.pending_trait_object_array_trait.clone();
+                    if let Some(annotation) = empty_array_field_annotation.as_ref() {
+                        self.pending_variable_typed_array_kind =
+                            self.resolve_typed_array_kind_and_record_trait(annotation);
+                    }
+                    let compile_result = self.compile_expr_as_value_or_placeholder(value);
+                    self.pending_variable_typed_array_kind = saved_pending_typed_array_kind;
+                    self.pending_trait_object_array_trait = saved_pending_trait_object_array_trait;
+                    compile_result?;
                 }
 
                 // Emit NewTypedObject — no WrapTypeAnnotation needed,

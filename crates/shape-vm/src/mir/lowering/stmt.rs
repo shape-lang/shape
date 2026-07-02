@@ -358,6 +358,13 @@ pub(super) fn lower_var_decl(builder: &mut MirBuilder, decl: &ast::VariableDecl,
         span,
         binding_metadata,
     );
+    if matches!(decl.kind, ast::VarKind::Var) {
+        for (binding_name, _) in decl.pattern.get_bindings() {
+            if let Some(slot) = builder.lookup_local(&binding_name) {
+                builder.record_var_binding_slot(slot);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
