@@ -4,7 +4,9 @@ set -euo pipefail
 # Narrow Miri provenance gate for the strict-flip provenance worker.
 #
 # This is targeted evidence, not a whole-runtime "no UB" proof. It covers only
-# the test filters listed in print_coverage below.
+# the test filters listed in print_coverage below. It deliberately does not run
+# all crate tests, ignored tests, the full VM/JIT/FFI surface, or arbitrary
+# Shape program execution. Do not summarize a passing run as "UB-free".
 #
 # Supervisor run shape:
 #   systemd-run --user --wait --collect --pipe \
@@ -65,7 +67,7 @@ Miri provenance gate coverage:
 
 Boundary: passing this gate is evidence for the probes above only. It is not a
 full UB proof for the VM, runtime, JIT, FFI, snapshots, or arbitrary Shape
-program execution.
+program execution, and it does not classify or execute ignored tests.
 EOF
   echo
   echo "Resource settings:"
