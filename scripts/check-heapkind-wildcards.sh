@@ -143,35 +143,17 @@ scan_heapkind_match_catchalls() {
 } | LC_ALL=C sort > "$tmp_found"
 
 cat > "$tmp_known" <<'EOF'
-heapkind-match-catchall	crates/shape-runtime/src/snapshot.rs:1198	match expected_kind { | other => Err(format!(
-heapkind-match-catchall	crates/shape-runtime/src/wire_conversion.rs:1035	let node = match hk { | _ => None,
-heapkind-match-catchall	crates/shape-vm/src/compiler/comptime.rs:1379	NativeKind::Ptr(hk) => match hk { | _ => {
-heapkind-match-catchall	crates/shape-vm/src/executor/control_flow/foreign_marshal.rs:194	match heap_kind { | other => Err(VMError::NotImplemented(format!(
-ptr-wildcard-arm	crates/shape-jit/src/ffi/call_method/mod.rs:722	NativeKind::Ptr(_) => false,
-ptr-wildcard-arm	crates/shape-jit/src/ffi/call_method/mod.rs:998	NativeKind::Ptr(_) => TAG_NULL,
 ptr-wildcard-arm	crates/shape-jit/src/mir_compiler/v2_array.rs:82	NativeKind::Ptr(_) => (types::I64, 8),
 ptr-wildcard-arm	crates/shape-jit/src/mir_compiler/v2_call_abi.rs:185	NativeKind::String | NativeKind::Ptr(_) => types::I64,
 ptr-wildcard-arm	crates/shape-jit/src/mir_compiler/v2_field.rs:100	NativeKind::String | NativeKind::Ptr(_) => types::I64,
 ptr-wildcard-arm	crates/shape-jit/src/mir_compiler/v2_field.rs:140	NativeKind::String | NativeKind::Ptr(_) => 8,
-ptr-wildcard-arm	crates/shape-runtime/src/type_schema/mod.rs:266	NativeKind::String | NativeKind::Ptr(_) => true,
-ptr-wildcard-arm	crates/shape-vm/src/executor/builtins/array_ops.rs:153	NativeKind::Ptr(_) => {
-ptr-wildcard-arm	crates/shape-vm/src/executor/comparison/mod.rs:425	NativeKind::Ptr(_) => a_bits == b_bits,
-ptr-wildcard-arm	crates/shape-vm/src/executor/comparison/mod.rs:604	NativeKind::String | NativeKind::Ptr(_) => bits == 0,
+ptr-wildcard-arm	crates/shape-vm/src/executor/comparison/mod.rs:638	NativeKind::String | NativeKind::Ptr(_) => bits == 0,
 ptr-wildcard-arm	crates/shape-vm/src/executor/control_flow/mod.rs:67	NativeKind::String | NativeKind::Ptr(_) => bits != 0,
 ptr-wildcard-arm	crates/shape-vm/src/executor/exceptions/mod.rs:1188	NativeKind::String | NativeKind::Ptr(_) => bits == 0,
 ptr-wildcard-arm	crates/shape-vm/src/executor/logical/mod.rs:209	NativeKind::String | NativeKind::Ptr(_) => bits == 0,
 ptr-wildcard-arm	crates/shape-vm/src/executor/logical/mod.rs:79	NativeKind::String | NativeKind::Ptr(_) => bits != 0,
-ptr-wildcard-arm	crates/shape-vm/src/executor/loops/mod.rs:345	NativeKind::Ptr(_) => Err(VMError::NotImplemented(format!(
 ptr-wildcard-arm	crates/shape-vm/src/executor/objects/array_aggregation.rs:106	NativeKind::String | NativeKind::Ptr(_) => bits != 0,
 ptr-wildcard-arm	crates/shape-vm/src/executor/objects/array_query.rs:129	NativeKind::String | NativeKind::Ptr(_) => bits != 0,
-ptr-wildcard-arm	crates/shape-vm/src/executor/objects/array_transform.rs:845	| NativeKind::Ptr(_) => Err(VMError::RuntimeError(format!(
-ptr-wildcard-arm	crates/shape-vm/src/executor/objects/deque_methods.rs:121	NativeKind::Ptr(_) => {
-ptr-wildcard-arm	crates/shape-vm/src/executor/objects/hashmap_methods.rs:2131	NativeKind::Ptr(_) => {
-ptr-wildcard-arm	crates/shape-vm/src/executor/objects/mod.rs:750	NativeKind::Ptr(_) => None,
-ptr-wildcard-arm	crates/shape-vm/src/executor/objects/property_access.rs:281	NativeKind::Ptr(_) => Err(VMError::NotImplemented(format!(
-ptr-wildcard-arm	crates/shape-vm/src/executor/objects/property_access.rs:795	NativeKind::Ptr(_) => Err(VMError::TypeError {
-ptr-wildcard-arm	crates/shape-vm/src/executor/result_option_carrier.rs:224	NativeKind::Ptr(_) => true,
-ptr-wildcard-arm	crates/shape-vm/src/executor/vm_impl/modules.rs:86	NativeKind::Ptr(_) => true,
 EOF
 
 LC_ALL=C sort -o "$tmp_known" "$tmp_known"

@@ -64,6 +64,93 @@ fn type_error(msg: impl Into<String>) -> VMError {
     VMError::RuntimeError(msg.into())
 }
 
+pub(in crate::executor) fn ptr_slot_to_heap_arc(
+    slot: &KindedSlot,
+    hk: HeapKind,
+    context: &str,
+) -> Result<Arc<HeapValue>, VMError> {
+    let bits = slot.slot.raw();
+    match hk {
+        HeapKind::String => {
+            if bits == 0 {
+                return Err(type_error(format!("{context}: String slot bits null")));
+            }
+            let arc = unsafe {
+                Arc::increment_strong_count(bits as *const String);
+                Arc::from_raw(bits as *const String)
+            };
+            Ok(Arc::new(HeapValue::String(arc)))
+        }
+        HeapKind::Decimal => {
+            if bits == 0 {
+                return Err(type_error(format!("{context}: Decimal slot bits null")));
+            }
+            let arc = unsafe {
+                Arc::increment_strong_count(bits as *const rust_decimal::Decimal);
+                Arc::from_raw(bits as *const rust_decimal::Decimal)
+            };
+            Ok(Arc::new(HeapValue::Decimal(arc)))
+        }
+        HeapKind::BigInt => {
+            if bits == 0 {
+                return Err(type_error(format!("{context}: BigInt slot bits null")));
+            }
+            let arc = unsafe {
+                Arc::increment_strong_count(bits as *const i64);
+                Arc::from_raw(bits as *const i64)
+            };
+            Ok(Arc::new(HeapValue::BigInt(arc)))
+        }
+        HeapKind::Char => match char::from_u32(bits as u32) {
+            Some(c) => Ok(Arc::new(HeapValue::Char(c))),
+            None => Err(type_error(format!(
+                "{context}: Char slot bits are not a valid codepoint: {bits:#x}"
+            ))),
+        },
+        HeapKind::Future => Ok(Arc::new(HeapValue::Future(bits))),
+        HeapKind::ModuleFn => Ok(Arc::new(HeapValue::ModuleFn(bits))),
+        HeapKind::Closure => {
+            if bits == 0 {
+                return Err(type_error(format!("{context}: Closure slot bits null")));
+            }
+            let hv: &HeapValue = slot.slot.as_heap_value();
+            Ok(Arc::new(hv.clone()))
+        }
+        unsupported @ (HeapKind::TypedObject
+        | HeapKind::DataTable
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice) => Err(type_error(format!(
+            "{context}: Ptr({unsupported:?}) cannot be stored through the \
+             generic HeapValue wrapper without a carrier-specific projection"
+        ))),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // V3-S5 ckpt-3 surface-and-stop builder
 // ═══════════════════════════════════════════════════════════════════════════
@@ -146,17 +233,18 @@ pub(in crate::executor) fn slot_to_heap_arc(slot: &KindedSlot) -> Result<Arc<Hea
         NativeKind::Bool => Err(type_error(
             "array element of kind Bool cannot be heap-wrapped (use v2-raw TypedArray<u8> instead)",
         )),
-        NativeKind::String => match slot.slot.as_heap_value() {
-            HeapValue::String(s) => Ok(Arc::new(HeapValue::String(Arc::clone(s)))),
-            _ => Err(type_error("KindedSlot kind=String but heap arm mismatched")),
-        },
-        NativeKind::Ptr(_) => {
-            // Heap pointer: clone the Arc<HeapValue> by re-projecting through
-            // as_heap_value(). The slot owns one strong-count share; we
-            // clone to bump it.
-            let hv: &HeapValue = slot.slot.as_heap_value();
-            Ok(Arc::new(hv.clone()))
+        NativeKind::String => {
+            let bits = slot.slot.raw();
+            if bits == 0 {
+                return Err(type_error("array element of kind String has null bits"));
+            }
+            let arc = unsafe {
+                Arc::increment_strong_count(bits as *const String);
+                Arc::from_raw(bits as *const String)
+            };
+            Ok(Arc::new(HeapValue::String(arc)))
         }
+        NativeKind::Ptr(hk) => ptr_slot_to_heap_arc(slot, hk, "array element"),
         _ => Err(type_error(format!(
             "array element of kind {:?} cannot be stored in heterogeneous array",
             slot.kind

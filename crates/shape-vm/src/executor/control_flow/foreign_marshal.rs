@@ -243,11 +243,42 @@ fn heap_slot_to_msgpack(
         // common shapes (String, Decimal, TypedObject, scalar) ship
         // here; rarer heap kinds (HashMap, HashSet, Deque, Range,
         // Channel, …) surface for the next round per FFI demand.
-        other => Err(VMError::NotImplemented(format!(
+        unsupported @ (HeapKind::TypedArray
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice
+        | HeapKind::Closure) => Err(VMError::NotImplemented(format!(
             "foreign_marshal: HeapKind::{other:?} has no FFI wire \
              projection yet (W17-foreign-ffi follow-up). The audit \
              §2.3 bounds the W17 round to typed-Arc payloads; rarer \
-             heap kinds (HashMap, HashSet, …) land per FFI demand."
+             heap kinds (HashMap, HashSet, …) land per FFI demand.",
+            other = unsupported
         ))),
     }
 }

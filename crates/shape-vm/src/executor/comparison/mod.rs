@@ -422,7 +422,41 @@ fn typed_object_field_eq(a_bits: u64, b_bits: u64, kind: NativeKind) -> bool {
             b_bits as *const TypedObjectStorage,
         ),
         NativeKind::Ptr(HeapKind::Char) => a_bits == b_bits,
-        NativeKind::Ptr(_) => a_bits == b_bits,
+        NativeKind::Ptr(
+            HeapKind::String
+            | HeapKind::Closure
+            | HeapKind::BigInt
+            | HeapKind::DataTable
+            | HeapKind::Future
+            | HeapKind::TaskGroup
+            | HeapKind::TypedArray
+            | HeapKind::Temporal
+            | HeapKind::TableView
+            | HeapKind::Content
+            | HeapKind::Instant
+            | HeapKind::IoHandle
+            | HeapKind::NativeScalar
+            | HeapKind::NativeView
+            | HeapKind::HashMap
+            | HeapKind::FilterExpr
+            | HeapKind::Reference
+            | HeapKind::SharedCell
+            | HeapKind::HashSet
+            | HeapKind::Iterator
+            | HeapKind::Deque
+            | HeapKind::Channel
+            | HeapKind::PriorityQueue
+            | HeapKind::Range
+            | HeapKind::Result
+            | HeapKind::Option
+            | HeapKind::TraitObject
+            | HeapKind::Mutex
+            | HeapKind::Atomic
+            | HeapKind::Lazy
+            | HeapKind::ModuleFn
+            | HeapKind::Matrix
+            | HeapKind::MatrixSlice,
+        ) => a_bits == b_bits,
         NativeKind::Float64
         | NativeKind::NullableFloat64
         | NativeKind::Float32

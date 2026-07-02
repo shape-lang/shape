@@ -19,7 +19,7 @@
 //! Supports merging multiple schemas for intersection types (`A + B`).
 //! Field collisions are detected at compile time and result in errors.
 
-use shape_value::heap_value::HeapValue;
+use shape_value::heap_value::{HeapKind, HeapValue};
 use shape_value::{KindedSlot, NativeKind, ValueSlot};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -263,7 +263,44 @@ pub fn typed_object_from_pairs(fields: &[(&str, KindedSlot)]) -> KindedSlot {
         #[cfg(miri)]
         let provenance = cloned.miri_provenance();
         let is_heap = match kind {
-            NativeKind::String | NativeKind::Ptr(_) => true,
+            NativeKind::String | NativeKind::StringV2 | NativeKind::DecimalV2 => true,
+            NativeKind::Ptr(hk) => match hk {
+                HeapKind::Future | HeapKind::ModuleFn | HeapKind::Char | HeapKind::NativeScalar => {
+                    false
+                }
+                HeapKind::String
+                | HeapKind::TypedObject
+                | HeapKind::Closure
+                | HeapKind::Decimal
+                | HeapKind::BigInt
+                | HeapKind::DataTable
+                | HeapKind::TaskGroup
+                | HeapKind::TypedArray
+                | HeapKind::Temporal
+                | HeapKind::TableView
+                | HeapKind::Content
+                | HeapKind::Instant
+                | HeapKind::IoHandle
+                | HeapKind::NativeView
+                | HeapKind::HashMap
+                | HeapKind::FilterExpr
+                | HeapKind::Reference
+                | HeapKind::SharedCell
+                | HeapKind::HashSet
+                | HeapKind::Iterator
+                | HeapKind::Deque
+                | HeapKind::Channel
+                | HeapKind::PriorityQueue
+                | HeapKind::Range
+                | HeapKind::Result
+                | HeapKind::Option
+                | HeapKind::TraitObject
+                | HeapKind::Mutex
+                | HeapKind::Atomic
+                | HeapKind::Lazy
+                | HeapKind::Matrix
+                | HeapKind::MatrixSlice => true,
+            },
             _ => false,
         };
         // Forget the cloned `KindedSlot` so its `Drop` does not

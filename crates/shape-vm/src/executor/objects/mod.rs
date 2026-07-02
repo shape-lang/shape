@@ -747,7 +747,43 @@ impl VirtualMachine {
                 // Genuine scalar `u64` — numeric method surface only.
                 method_registry::NUMBER_METHODS.get(method_name).copied()
             }
-            NativeKind::Ptr(_) => None,
+            NativeKind::Ptr(
+                HeapKind::String
+                | HeapKind::TypedObject
+                | HeapKind::Closure
+                | HeapKind::Decimal
+                | HeapKind::BigInt
+                | HeapKind::DataTable
+                | HeapKind::Future
+                | HeapKind::TaskGroup
+                | HeapKind::Temporal
+                | HeapKind::TableView
+                | HeapKind::Content
+                | HeapKind::Instant
+                | HeapKind::IoHandle
+                | HeapKind::NativeScalar
+                | HeapKind::NativeView
+                | HeapKind::Char
+                | HeapKind::HashMap
+                | HeapKind::FilterExpr
+                | HeapKind::Reference
+                | HeapKind::SharedCell
+                | HeapKind::HashSet
+                | HeapKind::Iterator
+                | HeapKind::Deque
+                | HeapKind::Channel
+                | HeapKind::PriorityQueue
+                | HeapKind::Range
+                | HeapKind::Result
+                | HeapKind::Option
+                | HeapKind::TraitObject
+                | HeapKind::Mutex
+                | HeapKind::Atomic
+                | HeapKind::Lazy
+                | HeapKind::ModuleFn
+                | HeapKind::Matrix
+                | HeapKind::MatrixSlice,
+            ) => None,
             // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
             // §2.7.7/Q9, 2026-05-19): `NativeKind::Null` receivers have
             // no method dispatch surface — null has no methods.

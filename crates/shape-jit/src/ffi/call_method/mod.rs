@@ -37,6 +37,52 @@ pub use object::call_object_method;
 pub use string::call_string_method;
 pub use time::call_time_method;
 
+/// Kinded `NativeKind::Ptr(HeapKind::*)` receivers are not JIT-format
+/// NaN-boxed heap objects. Current JIT method dispatch keeps every such
+/// label on the legacy fallback/surface path; this exhaustive classifier
+/// prevents new HeapKind labels from inheriting that policy silently.
+#[inline]
+fn classify_kinded_ptr_receiver_for_jit_format_surface(hk: HeapKind) {
+    match hk {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => {}
+    }
+}
+
 // ============================================================================
 // User-Defined Method Support
 // ============================================================================
@@ -719,7 +765,10 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             // (heap), Closure, TraitObject, etc. — fall through to
             // legacy JIT-format dispatch. The kinded path for these
             // is W10 jit-playbook §5 / §2.7.4 territory.
-            NativeKind::Ptr(_) => false,
+            NativeKind::Ptr(hk) => {
+                classify_kinded_ptr_receiver_for_jit_format_surface(hk);
+                false
+            }
             // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 +
             // §2.7.7/Q9, 2026-05-19): null receivers delegate to VM
             // which surfaces a TypeError uniformly.
@@ -995,7 +1044,10 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
             // registries for these kinds. The W10 jit-playbook §5
             // kinded-array migration will fill this surface in a
             // future cluster.
-            NativeKind::Ptr(_) => TAG_NULL,
+            NativeKind::Ptr(hk) => {
+                classify_kinded_ptr_receiver_for_jit_format_surface(hk);
+                TAG_NULL
+            }
             // UInt64 carrier — discriminate via the heap-prefix
             // `kind: u16` field-load. This is the canonical path for
             // legacy JIT-format kinds (HK_ARRAY / HK_JIT_OBJECT /

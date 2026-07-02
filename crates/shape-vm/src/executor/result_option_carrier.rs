@@ -219,9 +219,43 @@ fn payload_field_owns_heap_share(bits: u64, kind: NativeKind) -> bool {
     }
     match kind {
         NativeKind::String | NativeKind::StringV2 | NativeKind::DecimalV2 => true,
-        NativeKind::Ptr(HeapKind::Future | HeapKind::ModuleFn | HeapKind::Char) => false,
-        NativeKind::Ptr(HeapKind::NativeScalar) => false,
-        NativeKind::Ptr(_) => true,
+        NativeKind::Ptr(hk) => match hk {
+            HeapKind::Future | HeapKind::ModuleFn | HeapKind::Char | HeapKind::NativeScalar => {
+                false
+            }
+            HeapKind::String
+            | HeapKind::TypedObject
+            | HeapKind::Closure
+            | HeapKind::Decimal
+            | HeapKind::BigInt
+            | HeapKind::DataTable
+            | HeapKind::TaskGroup
+            | HeapKind::TypedArray
+            | HeapKind::Temporal
+            | HeapKind::TableView
+            | HeapKind::Content
+            | HeapKind::Instant
+            | HeapKind::IoHandle
+            | HeapKind::NativeView
+            | HeapKind::HashMap
+            | HeapKind::FilterExpr
+            | HeapKind::Reference
+            | HeapKind::SharedCell
+            | HeapKind::HashSet
+            | HeapKind::Iterator
+            | HeapKind::Deque
+            | HeapKind::Channel
+            | HeapKind::PriorityQueue
+            | HeapKind::Range
+            | HeapKind::Result
+            | HeapKind::Option
+            | HeapKind::TraitObject
+            | HeapKind::Mutex
+            | HeapKind::Atomic
+            | HeapKind::Lazy
+            | HeapKind::Matrix
+            | HeapKind::MatrixSlice => true,
+        },
         _ => false,
     }
 }

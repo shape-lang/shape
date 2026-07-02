@@ -1526,12 +1526,26 @@ fn slot_heap_to_serializable(
         // TableView / Temporal / TaskGroup / IoHandle / NativeView /
         // NativeScalar / Content / ClosureRaw each have their own
         // multi-step landing path).
-        other => Err(format!(
+        unsupported @ (HeapKind::Closure
+        | HeapKind::DataTable
+        | HeapKind::TaskGroup
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::TraitObject
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice) => Err(format!(
             "slot_to_serializable: W17-snapshot-roundtrip surface — \
-             HeapKind::{other:?} arm has no in-session SerializableVMValue \
+             HeapKind::{unsupported:?} arm has no in-session SerializableVMValue \
              projection. Tracked as W17-snapshot-{other:?} follow-up per \
              docs/cluster-audits/phase-2d-playbook.md §3. \
              ADR-006 §2.7.5.1.",
+            other = unsupported,
         )),
     }
 }

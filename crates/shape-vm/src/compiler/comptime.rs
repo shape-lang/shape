@@ -1410,7 +1410,37 @@ fn read_typed_object_field(
                 HeapKind::BigInt => {
                     Arc::increment_strong_count(bits as *const i64);
                 }
-                _ => {
+                HeapKind::Closure
+                | HeapKind::DataTable
+                | HeapKind::Future
+                | HeapKind::TaskGroup
+                | HeapKind::Temporal
+                | HeapKind::TableView
+                | HeapKind::Content
+                | HeapKind::Instant
+                | HeapKind::IoHandle
+                | HeapKind::NativeScalar
+                | HeapKind::NativeView
+                | HeapKind::Char
+                | HeapKind::HashMap
+                | HeapKind::FilterExpr
+                | HeapKind::Reference
+                | HeapKind::SharedCell
+                | HeapKind::HashSet
+                | HeapKind::Iterator
+                | HeapKind::Deque
+                | HeapKind::Channel
+                | HeapKind::PriorityQueue
+                | HeapKind::Range
+                | HeapKind::Result
+                | HeapKind::Option
+                | HeapKind::TraitObject
+                | HeapKind::Mutex
+                | HeapKind::Atomic
+                | HeapKind::Lazy
+                | HeapKind::ModuleFn
+                | HeapKind::Matrix
+                | HeapKind::MatrixSlice => {
                     // Other heap kinds aren't produced by the comptime
                     // predeclared schemas at landing; surface rather
                     // than fabricate a refcount bump.

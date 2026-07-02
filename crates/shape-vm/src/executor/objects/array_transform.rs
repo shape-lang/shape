@@ -841,8 +841,48 @@ fn element_to_string(slot: &KindedSlot) -> Result<String, VMError> {
         | NativeKind::NullableUInt16
         | NativeKind::NullableUInt32
         | NativeKind::NullableUInt64
-        | NativeKind::NullableUIntSize
-        | NativeKind::Ptr(_) => Err(VMError::RuntimeError(format!(
+        | NativeKind::NullableUIntSize => Err(VMError::RuntimeError(format!(
+            "Array.join: element kind {:?} does not have native join stringification",
+            slot.kind
+        ))),
+        NativeKind::Ptr(
+            HeapKind::String
+            | HeapKind::TypedObject
+            | HeapKind::Closure
+            | HeapKind::Decimal
+            | HeapKind::BigInt
+            | HeapKind::DataTable
+            | HeapKind::Future
+            | HeapKind::TaskGroup
+            | HeapKind::TypedArray
+            | HeapKind::Temporal
+            | HeapKind::TableView
+            | HeapKind::Content
+            | HeapKind::Instant
+            | HeapKind::IoHandle
+            | HeapKind::NativeScalar
+            | HeapKind::NativeView
+            | HeapKind::Char
+            | HeapKind::HashMap
+            | HeapKind::FilterExpr
+            | HeapKind::Reference
+            | HeapKind::SharedCell
+            | HeapKind::HashSet
+            | HeapKind::Iterator
+            | HeapKind::Deque
+            | HeapKind::Channel
+            | HeapKind::PriorityQueue
+            | HeapKind::Range
+            | HeapKind::Result
+            | HeapKind::Option
+            | HeapKind::TraitObject
+            | HeapKind::Mutex
+            | HeapKind::Atomic
+            | HeapKind::Lazy
+            | HeapKind::ModuleFn
+            | HeapKind::Matrix
+            | HeapKind::MatrixSlice,
+        ) => Err(VMError::RuntimeError(format!(
             "Array.join: element kind {:?} does not have native join stringification",
             slot.kind
         ))),

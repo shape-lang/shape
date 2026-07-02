@@ -2128,14 +2128,11 @@ fn result_slot_to_heap_value_arc(result: &KindedSlot) -> Result<Arc<HeapValue>, 
             };
             Ok(Arc::new(HeapValue::String(arc)))
         }
-        NativeKind::Ptr(_) => {
-            // True heap pointer: bits point at a `Box<HeapValue>`-style
-            // payload via `Arc<T>` per the per-FieldType slot constructors.
-            // Clone the underlying HeapValue. The result slot already owns
-            // one strong-count share; the clone bumps it.
-            let hv: &HeapValue = result.slot.as_heap_value();
-            Ok(Arc::new(hv.clone()))
-        }
+        NativeKind::Ptr(hk) => crate::executor::builtins::array_ops::ptr_slot_to_heap_arc(
+            result,
+            hk,
+            "HashMap.map() result",
+        ),
         other => Err(type_error(format!(
             "HashMap.map(): result kind {:?} cannot be stored in a HashMap value",
             other
