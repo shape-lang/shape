@@ -4379,11 +4379,21 @@ impl BytecodeCompiler {
             Item::Extend(extend, span) => {
                 let mut q = extend.clone();
                 q.type_name = Self::qualify_type_name(&extend.type_name, module_path);
+                for method in &mut q.methods {
+                    if method.declaring_module_path.is_none() {
+                        method.declaring_module_path = Some(module_path.to_string());
+                    }
+                }
                 Ok(Item::Extend(q, *span))
             }
             Item::Impl(impl_block, span) => {
                 let mut q = impl_block.clone();
                 q.target_type = Self::qualify_type_name(&impl_block.target_type, module_path);
+                for method in &mut q.methods {
+                    if method.declaring_module_path.is_none() {
+                        method.declaring_module_path = Some(module_path.to_string());
+                    }
+                }
                 // Do NOT qualify trait_name — traits may be imported from other scopes
                 Ok(Item::Impl(q, *span))
             }

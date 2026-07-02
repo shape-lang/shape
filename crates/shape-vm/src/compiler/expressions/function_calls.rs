@@ -6919,14 +6919,28 @@ impl BytecodeCompiler {
     }
 
     fn stamp_last_expr_from_function_return_annotation(&mut self, func_name: &str) -> bool {
-        let Some(return_type) = self
-            .function_defs
-            .get(func_name)
-            .and_then(|def| def.return_type.clone())
-        else {
+        let Some(def) = self.function_defs.get(func_name) else {
             return false;
         };
-        let Some(type_info) = self.type_info_from_annotation(&return_type) else {
+        let Some(return_type) = def.return_type.clone() else {
+            return false;
+        };
+        let declaring_module_path = def.declaring_module_path.clone();
+        let direct = self.type_info_from_annotation(&return_type);
+        let namespaced = || {
+            let symbol_namespace = if let Some((receiver_type, _)) = func_name.rsplit_once('.') {
+                receiver_type.rsplit_once("::").map(|(ns, _)| ns)
+            } else {
+                func_name
+                    .rsplit_once("::")
+                    .and_then(|(receiver_type, _)| receiver_type.rsplit_once("::"))
+                    .map(|(ns, _)| ns)
+            };
+            let namespace = declaring_module_path.as_deref().or(symbol_namespace)?;
+            let qualified = qualify_type_annotation_with_namespace(&return_type, namespace)?;
+            self.type_info_from_annotation(&qualified)
+        };
+        let Some(type_info) = direct.or_else(namespaced) else {
             return false;
         };
         self.last_expr_type_info = Some(type_info);

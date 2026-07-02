@@ -4,6 +4,7 @@
 // migration to the kinded `KindedSlot` API per ADR-006 §2.7.4 Phase-2c.
 #[cfg(all(test, feature = "deep-tests"))]
 mod module_qualified_type_tests {
+    use crate::bytecode::{OpCode, Operand};
     use crate::compiler::BytecodeCompiler;
     use crate::executor::{VMConfig, VirtualMachine};
     use shape_value::{KindedSlot, ValueSlot};
@@ -47,6 +48,36 @@ mod module_qualified_type_tests {
             return KindedSlot::new(ValueSlot::from_raw(raw), k);
         }
         vm.execute(None).expect("execution failed")
+    }
+
+    fn compile_main_call_shape(code: &str) -> (Vec<String>, Vec<String>) {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let compiler = BytecodeCompiler::new();
+        let bytecode = compiler.compile(&program).expect("compile failed");
+        let main = bytecode
+            .functions
+            .iter()
+            .find(|function| function.name == "__main__")
+            .expect("__main__ function");
+        let main_instructions =
+            &bytecode.instructions[main.entry_point..main.entry_point + main.body_length];
+
+        let mut static_call_targets = Vec::new();
+        let mut fallback_method_names = Vec::new();
+        for instruction in main_instructions {
+            match instruction.operand {
+                Some(Operand::Function(function_id)) if instruction.opcode == OpCode::Call => {
+                    static_call_targets
+                        .push(bytecode.functions[function_id.0 as usize].name.clone());
+                }
+                Some(Operand::TypedMethodCall { string_id, .. }) => {
+                    fallback_method_names.push(bytecode.strings[string_id as usize].clone());
+                }
+                _ => {}
+            }
+        }
+
+        (static_call_targets, fallback_method_names)
     }
 
     // ===== Parser tests for qualified types =====
@@ -192,7 +223,6 @@ mod module_qualified_type_tests {
     }
 
     #[test]
-    #[ignore = "Phase-2c module method resolution: qualified type methods are currently resolved as module receivers"]
     fn test_module_extend_method() {
         let result = eval(
             r#"
@@ -206,6 +236,26 @@ mod module_qualified_type_tests {
         "#,
         );
         assert_eq!(result.as_i64(), Some(10));
+    }
+
+    #[test]
+    fn test_module_extend_method_emits_static_qualified_call() {
+        let source = r#"
+            mod m {
+                type P { x: int }
+                extend P {
+                    method dbl() -> int { self.x * 2 }
+                }
+            }
+            m::P { x: 5 }.dbl()
+        "#;
+
+        let (static_call_targets, fallback_method_names) = compile_main_call_shape(source);
+        assert_eq!(static_call_targets, vec!["m::P.dbl"]);
+        assert!(
+            !fallback_method_names.iter().any(|name| name == "dbl"),
+            "module-qualified extend method call must not lower to CallMethod fallback"
+        );
     }
 
     #[test]
@@ -323,7 +373,6 @@ mod module_qualified_type_tests {
     }
 
     #[test]
-    #[ignore = "Phase-2c module method chaining: qualified type methods are currently resolved as module receivers"]
     fn test_module_struct_with_method_chaining() {
         // Extend method chaining on module-qualified types
         let result = eval_with_kind(
@@ -340,6 +389,37 @@ mod module_qualified_type_tests {
             crate::type_tracking::NativeKind::Int64,
         );
         assert_eq!(result.as_i64(), Some(3));
+    }
+
+    #[test]
+    fn test_module_struct_method_chaining_emits_static_qualified_calls() {
+        let source = r#"
+            mod m {
+                type Counter { n: int }
+                extend Counter {
+                    method inc() -> Counter { Counter { n: self.n + 1 } }
+                    method value() -> int { self.n }
+                }
+            }
+            m::Counter { n: 0 }.inc().inc().inc().value()
+        "#;
+
+        let (static_call_targets, fallback_method_names) = compile_main_call_shape(source);
+        assert_eq!(
+            static_call_targets,
+            vec![
+                "m::Counter.inc",
+                "m::Counter.inc",
+                "m::Counter.inc",
+                "m::Counter.value"
+            ]
+        );
+        assert!(
+            !fallback_method_names
+                .iter()
+                .any(|name| name == "inc" || name == "value"),
+            "module-qualified method chain must not lower to CallMethod fallback"
+        );
     }
 
     #[test]
