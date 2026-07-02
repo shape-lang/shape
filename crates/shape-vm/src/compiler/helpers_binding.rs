@@ -631,11 +631,10 @@ impl BytecodeCompiler {
         site: &'static str,
         expr: Option<&shape_ast::ast::Expr>,
     ) -> Option<crate::type_tracking::StorageHint> {
-        let expr = expr?;
-        let proven =
-            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, expr)?;
-        let claimed = self.last_emitted_native_kind()?;
-        Self::top_level_metadata_return_kind_from_proof(site, &proven, claimed)
+        match self.exact_scalar_return_kind_for_expr(site, expr) {
+            Ok(kind) => kind,
+            Err(_) => None,
+        }
     }
 
     /// Phase 5.B: If the initializer is a simple (non-qualified) call to a
