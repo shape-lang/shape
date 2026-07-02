@@ -265,33 +265,18 @@ impl BytecodeCompiler {
         // The type name is not a variable, so we resolve the comptime field directly
         // without compiling the object expression.
         if let Expr::Identifier(type_name, _) = object {
-            if self
+            if let Some(slot) = self
                 .comptime_fields
                 .get(type_name.as_str())
                 .and_then(|m| m.get(property))
-                .is_some()
+                .cloned()
             {
-                // SURFACE: the kinded `KindedSlot → Constant` projection
-                // for comptime field reads lives in phase-2c (ADR-006
-                // §2.4). The carrier-tier `comptime_fields` registry is
-                // already `HashMap<String, HashMap<String, KindedSlot>>`,
-                // but the producer side that bakes comptime defaults into
-                // it is dormant (see `statements.rs:2450-2512` —
-                // recognised-literal arms are validated but never stored),
-                // so this branch is currently unreachable in real
-                // programs. Returning a structured semantic error rather
-                // than a panic keeps the surface honest when a future
-                // phase-2c commit wires the producer side but lands ahead
-                // of the projector. Tracked as `c3-expr-lowering-misc`
-                // per playbook §3 (Wave 2.5).
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "comptime field access '{}.{}' is dormant pending the phase-2c \
-                         KindedSlot-to-Constant projection rebuild (ADR-006 §2.4 / §2.7.4)",
-                        type_name, property
-                    ),
-                    location: Some(self.span_to_source_location(object.span())),
-                });
+                return self.emit_comptime_field_constant(
+                    type_name,
+                    property,
+                    &slot,
+                    object.span(),
+                );
             }
         }
 
@@ -439,23 +424,14 @@ impl BytecodeCompiler {
                     .and_then(|m| m.get(property))
                     .cloned();
 
-                if comptime_value.is_some() {
-                    // SURFACE: same boundary as the static-path branch
-                    // above. The kinded `KindedSlot → Constant`
-                    // projection for comptime field reads lives in
-                    // phase-2c (ADR-006 §2.4 / §2.7.4); the producer side
-                    // (`statements.rs:2450-2512`) is dormant so this
-                    // branch is currently unreachable. Tracked as
-                    // `c3-expr-lowering-misc` per playbook §3.
-                    return Err(ShapeError::SemanticError {
-                        message: format!(
-                            "comptime field access '{}.{}' (via schema lookup) is dormant \
-                             pending the phase-2c KindedSlot-to-Constant projection rebuild \
-                             (ADR-006 §2.4 / §2.7.4)",
-                            type_name, property
-                        ),
-                        location: Some(self.span_to_source_location(object.span())),
-                    });
+                if let Some(slot) = comptime_value {
+                    self.emit(Instruction::simple(OpCode::Pop));
+                    return self.emit_comptime_field_constant(
+                        &type_name,
+                        property,
+                        &slot,
+                        object.span(),
+                    );
                 }
             }
         }

@@ -1923,6 +1923,80 @@ impl BytecodeCompiler {
         }
     }
 
+    pub(super) fn emit_comptime_field_constant(
+        &mut self,
+        type_name: &str,
+        field_name: &str,
+        slot: &shape_value::KindedSlot,
+        span: shape_ast::ast::Span,
+    ) -> Result<()> {
+        use shape_value::NativeKind;
+
+        let constant = match slot.kind() {
+            NativeKind::Int64 => Some(Constant::Int(slot.raw() as i64)),
+            NativeKind::UInt64 => Some(Constant::UInt(slot.raw())),
+            NativeKind::Float64 => Some(Constant::Number(f64::from_bits(slot.raw()))),
+            NativeKind::Bool => Some(Constant::Bool(slot.raw() != 0)),
+            NativeKind::String => {
+                let value = slot.as_str().ok_or_else(|| ShapeError::SemanticError {
+                    message: format!(
+                        "comptime field '{}.{}' has a null string payload",
+                        type_name, field_name
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                })?;
+                let value = value.to_string();
+                Some(Constant::String(value))
+            }
+            NativeKind::Null => None,
+            other => {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "comptime field '{}.{}' has unsupported constant kind {:?}",
+                        type_name, field_name, other
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            }
+        };
+
+        if let Some(constant) = constant {
+            let idx = self.program.add_constant(constant);
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(idx)),
+            ));
+        } else {
+            self.emit(Instruction::simple(OpCode::PushNull));
+        }
+
+        self.last_expr_schema = None;
+        self.last_expr_type_info = match slot.kind() {
+            NativeKind::Int64 => Some(VariableTypeInfo::with_storage(
+                "int".to_string(),
+                NativeKind::Int64,
+            )),
+            NativeKind::UInt64 => Some(VariableTypeInfo::with_storage(
+                "int".to_string(),
+                NativeKind::UInt64,
+            )),
+            NativeKind::Float64 => Some(VariableTypeInfo::with_storage(
+                "number".to_string(),
+                NativeKind::Float64,
+            )),
+            NativeKind::Bool => Some(VariableTypeInfo::with_storage(
+                "bool".to_string(),
+                NativeKind::Bool,
+            )),
+            NativeKind::String => Some(VariableTypeInfo::with_storage(
+                "string".to_string(),
+                NativeKind::String,
+            )),
+            _ => None,
+        };
+        Ok(())
+    }
+
     /// Resolve a type name through the module scope stack and imports.
     ///
     /// If the name is already directly known (in struct_types, type_aliases, etc.),

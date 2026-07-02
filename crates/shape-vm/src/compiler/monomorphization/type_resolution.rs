@@ -1467,7 +1467,11 @@ fn named_user_type_concrete(
     struct_layout: shape_value::v2::concrete_type::StructLayoutId,
     enum_layout: shape_value::v2::concrete_type::EnumLayoutId,
 ) -> Option<ConcreteType> {
-    if compiler.struct_types.contains_key(name) {
+    let monomorphized_struct_base = name
+        .split_once('<')
+        .map(|(base, _)| base)
+        .filter(|base| compiler.struct_types.contains_key(*base));
+    if compiler.struct_types.contains_key(name) || monomorphized_struct_base.is_some() {
         return Some(ConcreteType::named_struct(name, struct_layout));
     }
     if compiler
@@ -2495,9 +2499,9 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
         // carries a `StructLayoutId` placeholder; the load-bearing type
         // identity for monomorphization is the struct *name*, threaded via
         // `struct_concrete_type` into the resolver's name-aware path.
-        Expr::StructLiteral { type_name, .. } => {
-            struct_or_enum_concrete_type(compiler, type_name.name())
-        }
+        Expr::StructLiteral {
+            type_name, fields, ..
+        } => struct_literal_concrete_type(compiler, type_name.name(), fields),
 
         // v0.3 WS-6 generic-arg-fix: an enum constructor `Color::Red` /
         // `Shape::Circle(2.0)` is a fully type-known argument. Resolve it to
@@ -2589,6 +2593,115 @@ pub fn concrete_type_for_expr(compiler: &BytecodeCompiler, expr: &Expr) -> Optio
 fn struct_or_enum_concrete_type(compiler: &BytecodeCompiler, name: &str) -> Option<ConcreteType> {
     use shape_value::v2::concrete_type::{EnumLayoutId, StructLayoutId};
     named_user_type_concrete(compiler, name, StructLayoutId(0), EnumLayoutId(0))
+}
+
+fn struct_literal_concrete_type(
+    compiler: &BytecodeCompiler,
+    type_name: &str,
+    fields: &[(String, Expr)],
+) -> Option<ConcreteType> {
+    let runtime_name = struct_literal_runtime_type_name(compiler, type_name, fields)
+        .unwrap_or_else(|| type_name.to_string());
+    struct_or_enum_concrete_type(compiler, &runtime_name)
+        .or_else(|| struct_or_enum_concrete_type(compiler, type_name))
+}
+
+/// Mirror `compile_struct_literal`'s generic/default-param runtime-name
+/// resolution for structural `ConcreteType` facts. This keeps inferred
+/// bindings like `let b = Box { value: 42 }` stamped as `Box<int>` rather than
+/// the base `Box`, so downstream field-place producers resolve the specialized
+/// schema whose `value` field is `I64`.
+fn struct_literal_runtime_type_name(
+    compiler: &BytecodeCompiler,
+    type_name: &str,
+    fields: &[(String, Expr)],
+) -> Option<String> {
+    let info = compiler.struct_generic_info.get(type_name)?;
+    if info.type_params.is_empty() {
+        return None;
+    }
+
+    let mut inferred_args: HashMap<String, TypeAnnotation> = HashMap::new();
+    for (field_name, value_expr) in fields {
+        let Some(expected_ann) = info.runtime_field_types.get(field_name) else {
+            continue;
+        };
+        let Some(param_name) = expected_ann.as_type_name_str() else {
+            continue;
+        };
+        if !info.type_params.iter().any(|tp| tp.name() == param_name) {
+            continue;
+        }
+        let Some(inferred_ann) = literal_type_annotation_for_struct_generic_field(value_expr)
+        else {
+            continue;
+        };
+        inferred_args
+            .entry(param_name.to_string())
+            .or_insert(inferred_ann);
+    }
+
+    let mut resolved_args = Vec::with_capacity(info.type_params.len());
+    for tp in &info.type_params {
+        if let Some(inferred) = inferred_args.get(tp.name()) {
+            resolved_args.push(inferred.clone());
+            continue;
+        }
+        if let Some(default) = tp.default_type() {
+            resolved_args.push(default.clone());
+            continue;
+        }
+        return None;
+    }
+
+    let rendered_args = resolved_args
+        .iter()
+        .map(type_annotation_to_compact_type_name)
+        .collect::<Vec<_>>();
+    Some(format!("{}<{}>", type_name, rendered_args.join(", ")))
+}
+
+fn literal_type_annotation_for_struct_generic_field(expr: &Expr) -> Option<TypeAnnotation> {
+    match expr {
+        Expr::Literal(lit, _) => match lit {
+            shape_ast::ast::Literal::Int(_) => Some(TypeAnnotation::Basic("int".to_string())),
+            shape_ast::ast::Literal::Number(_) => Some(TypeAnnotation::Basic("number".to_string())),
+            shape_ast::ast::Literal::Decimal(_) => {
+                Some(TypeAnnotation::Basic("decimal".to_string()))
+            }
+            shape_ast::ast::Literal::Bool(_) => Some(TypeAnnotation::Basic("bool".to_string())),
+            shape_ast::ast::Literal::String(_) => Some(TypeAnnotation::Basic("string".to_string())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn type_annotation_to_compact_type_name(annotation: &TypeAnnotation) -> String {
+    match annotation {
+        TypeAnnotation::Basic(name) => name.clone(),
+        TypeAnnotation::Reference(name) => name.to_string(),
+        TypeAnnotation::Array(inner) => {
+            format!("Vec<{}>", type_annotation_to_compact_type_name(inner))
+        }
+        TypeAnnotation::Generic { name, args } => {
+            if args.is_empty() {
+                name.to_string()
+            } else {
+                let rendered = args
+                    .iter()
+                    .map(type_annotation_to_compact_type_name)
+                    .collect::<Vec<_>>();
+                format!("{}<{}>", name, rendered.join(", "))
+            }
+        }
+        TypeAnnotation::Union(variants) => variants
+            .iter()
+            .map(type_annotation_to_compact_type_name)
+            .collect::<Vec<_>>()
+            .join(" | "),
+        _ => "unknown".to_string(),
+    }
 }
 
 /// v0.3 WS-6 — best-effort `ConcreteType` for an `Expr::EnumConstructor`.

@@ -3895,6 +3895,66 @@ impl BytecodeCompiler {
         Ok(())
     }
 
+    /// Compile `expr.type().to_string()` when the `type()` receiver is fully
+    /// known at compile time.
+    ///
+    /// `Constant::TypeAnnotation` is compile-time metadata, not a runtime
+    /// `PushConst` carrier in the strict stack ABI. The user-visible result of
+    /// the chained call is a string, so lower directly to the already-known
+    /// rendered type name and preserve the same receiver side effects that
+    /// static `type()` lowering would have preserved before popping the value.
+    fn try_compile_static_type_to_string(&mut self, receiver: &Expr) -> Result<bool> {
+        let Expr::MethodCall {
+            receiver: type_receiver,
+            method: type_method,
+            args: type_args,
+            named_args: type_named_args,
+            optional,
+            ..
+        } = receiver
+        else {
+            return Ok(false);
+        };
+
+        if type_method != "type"
+            || *optional
+            || !type_args.is_empty()
+            || !type_named_args.is_empty()
+        {
+            return Ok(false);
+        }
+
+        let is_type_symbol = self.expr_is_type_symbol(type_receiver);
+        match self.static_type_annotation_for_expr(type_receiver) {
+            Ok(type_ann) if !self.should_runtime_type_query(&type_ann) => {
+                if !is_type_symbol {
+                    self.compile_expr(type_receiver)?;
+                    self.emit(Instruction::simple(OpCode::Pop));
+                }
+
+                let idx = self
+                    .program
+                    .add_constant(Constant::String(type_ann.to_type_string()));
+                self.emit(Instruction::new(
+                    OpCode::PushConst,
+                    Some(Operand::Const(idx)),
+                ));
+                self.last_expr_schema = None;
+                self.last_expr_type_info = Some(VariableTypeInfo::named("string".to_string()));
+                self.clear_last_expr_reference_result();
+                Ok(true)
+            }
+            Ok(_) => Ok(false),
+            Err(err) => {
+                if is_type_symbol {
+                    Err(err)
+                } else {
+                    Ok(false)
+                }
+            }
+        }
+    }
+
     /// Compile a method call expression
     pub(super) fn compile_expr_method_call(
         &mut self,
@@ -4345,6 +4405,10 @@ impl BytecodeCompiler {
                     message: "to_string() does not take any arguments".to_string(),
                     location: Some(self.span_to_source_location(receiver.span())),
                 });
+            }
+
+            if self.try_compile_static_type_to_string(receiver)? {
+                return Ok(());
             }
 
             self.compile_expr(receiver)?;
