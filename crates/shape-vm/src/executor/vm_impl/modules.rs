@@ -130,7 +130,7 @@ fn build_json_enum_slot(
     KindedSlot::from_typed_object_raw(ptr)
 }
 
-fn take_json_typed_object_slot(
+fn take_typed_object_slot(
     slot: shape_value::KindedSlot,
 ) -> *const shape_value::heap_value::TypedObjectStorage {
     use shape_value::{HeapKind, NativeKind};
@@ -140,7 +140,7 @@ fn take_json_typed_object_slot(
     let ptr = match slot.miri_provenance() {
         shape_value::heap_value::MiriSlotProvenance::TypedObject(ptr) if !ptr.is_null() => ptr,
         other => panic!(
-            "project_json_value_to_slot: Json child TypedObject missing Miri provenance: {:?}",
+            "take_typed_object_slot: TypedObject slot missing Miri provenance: {:?}",
             other
         ),
     };
@@ -201,7 +201,7 @@ fn project_json_value_to_slot(
                 // Transfer the slot's typed-object share into the array
                 // element. The stamped typed-object array releases each
                 // element with TypedObjectStorage::release_elem.
-                let ptr = take_json_typed_object_slot(slot);
+                let ptr = take_typed_object_slot(slot);
                 element_ptrs.push(ptr);
             }
             let arr = TypedArray::<*const TypedObjectStorage>::from_slice(&element_ptrs);
@@ -221,7 +221,7 @@ fn project_json_value_to_slot(
                 let slot = project_json_value_to_slot(value, json_schema_id);
                 // Transfer the slot share into the HashMap value wrapper;
                 // HashMapData owns and later drops the TypedObjectPtr.
-                let ptr = take_json_typed_object_slot(slot);
+                let ptr = take_typed_object_slot(slot);
                 unsafe {
                     data.insert(key.as_str(), TypedObjectPtr::new(ptr));
                 }
@@ -442,9 +442,9 @@ fn project_concrete_return(
 /// typed-object arms build a `TypedObjectStorage` via
 /// [`shape_runtime::type_schema::typed_object_from_pairs`]. Each arm picks
 /// its `NativeKind` from the discriminator without value synthesis per
-/// ADR-006 §2.7.4. `ArrayObjectPairs` (array of typed objects) needs the
-/// typed-object-array element-construction path that pairs with the K2
-/// array-of-heap-value producer and surfaces clean pending that landing.
+/// ADR-006 §2.7.4. `ArrayObjectPairs` (array of typed objects) builds the
+/// same v2-raw `TypedArray<*const TypedObjectStorage>` carrier used by
+/// Json arrays and K2 typed-object arrays.
 fn project_typed_return(
     schemas: &shape_runtime::type_schema::BuiltinSchemaIds,
     registry: &shape_runtime::type_schema::TypeSchemaRegistry,
@@ -452,7 +452,8 @@ fn project_typed_return(
 ) -> Result<shape_value::KindedSlot, VMError> {
     use shape_runtime::type_schema::typed_object_from_pairs;
     use shape_runtime::typed_module_exports::{ConcreteReturn, TypedReturn};
-    use shape_value::KindedSlot;
+    use shape_value::v2::typed_array::{ELEM_TYPE_TYPED_OBJECT, TypedArray, stamp_elem_type};
+    use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
 
     // Build a `TypedObjectStorage`-backed KindedSlot from string→leaf
     // pairs. Each leaf projects through `project_concrete_return`; the
@@ -519,19 +520,30 @@ fn project_typed_return(
             Ok(result_option_carrier::build_err(schemas, payload))
         }
 
-        // ── ArrayObjectPairs: SURFACE pending typed-object-array prod ──
-        //
-        // An array whose elements are themselves typed objects needs a
-        // `TypedArray<*const TypedObjectStorage>` built from per-row
-        // `TypedObjectStorage` allocations — the array-element-construction
-        // path that pairs with the K2 `Vec<Arc<HeapValue>>` producer but
-        // is not in K1 scope. Surface clean rather than shim.
-        other_tr @ TypedReturn::ArrayObjectPairs(_) => Err(VMError::NotImplemented(format!(
-            "project_typed_return: TypedReturn::{:?} (array of typed \
-                 objects) needs the typed-object-array element-construction \
-                 path. SURFACED per ADR-006 §2.7.4 — no shim.",
-            std::mem::discriminant(&other_tr)
-        ))),
+        TypedReturn::ArrayObjectPairs(rows) => {
+            let mut row_slots: Vec<KindedSlot> = Vec::with_capacity(rows.len());
+            for pairs in rows {
+                row_slots.push(typed_object_from_concrete_pairs(registry, pairs)?);
+            }
+
+            let mut element_ptrs: Vec<*const shape_value::heap_value::TypedObjectStorage> =
+                Vec::with_capacity(row_slots.len());
+            for slot in row_slots {
+                // Transfer the row object's owned v2-raw share into the
+                // typed-object array. The stamped array releases each element
+                // with `TypedObjectStorage::release_elem`.
+                let ptr = take_typed_object_slot(slot);
+                element_ptrs.push(ptr);
+            }
+            let arr = TypedArray::<*const shape_value::heap_value::TypedObjectStorage>::from_slice(
+                &element_ptrs,
+            );
+            unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_TYPED_OBJECT) };
+            Ok(KindedSlot::new(
+                ValueSlot::from_raw(arr as usize as u64),
+                NativeKind::Ptr(HeapKind::TypedArray),
+            ))
+        }
     }
 }
 
@@ -1180,6 +1192,25 @@ mod stage_k1_tests {
         let obj = slot.raw() as *const TypedObjectStorage;
         let storage = unsafe { &*obj };
         assert_eq!(storage.slots().len(), 2);
+    }
+
+    #[test]
+    fn object_pairs_string_field_clone_preserves_field_provenance() {
+        let slot = roundtrip(TypedReturn::ObjectPairs(vec![(
+            "name".to_string(),
+            ConcreteReturn::String("Ada".to_string()),
+        )]));
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        let storage = slot.as_typed_object_storage().unwrap();
+        assert_eq!(storage.field_kinds[0], NativeKind::String);
+
+        let cloned = storage
+            .clone_field_kinded(0)
+            .expect("string field should clone from typed object storage");
+        assert_eq!(cloned.kind(), NativeKind::String);
+        assert_eq!(cloned.as_str(), Some("Ada"));
+        drop(cloned);
+        drop(slot);
     }
 
     #[test]

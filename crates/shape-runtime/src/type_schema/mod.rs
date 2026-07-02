@@ -20,7 +20,7 @@
 //! Field collisions are detected at compile time and result in errors.
 
 use shape_value::heap_value::HeapValue;
-use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
+use shape_value::{KindedSlot, NativeKind, ValueSlot};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -240,6 +240,9 @@ pub fn typed_object_from_pairs(fields: &[(&str, KindedSlot)]) -> KindedSlot {
     // Heap arms set the heap_mask bit; inline-scalar arms do not.
     let mut slots = Vec::with_capacity(schema.fields.len());
     let mut field_kinds: Vec<NativeKind> = Vec::with_capacity(schema.fields.len());
+    #[cfg(miri)]
+    let mut field_provenance: Vec<shape_value::heap_value::MiriSlotProvenance> =
+        Vec::with_capacity(schema.fields.len());
     let mut heap_mask: u64 = 0;
     for (i, field_def) in schema.fields.iter().enumerate() {
         let value = value_by_name
@@ -257,6 +260,8 @@ pub fn typed_object_from_pairs(fields: &[(&str, KindedSlot)]) -> KindedSlot {
         let cloned = (*value).clone();
         let bits = cloned.slot().raw();
         let kind = cloned.kind();
+        #[cfg(miri)]
+        let provenance = cloned.miri_provenance();
         let is_heap = match kind {
             NativeKind::String | NativeKind::Ptr(_) => true,
             _ => false,
@@ -267,6 +272,8 @@ pub fn typed_object_from_pairs(fields: &[(&str, KindedSlot)]) -> KindedSlot {
         let slot = ValueSlot::from_raw(bits);
         slots.push(slot);
         field_kinds.push(kind);
+        #[cfg(miri)]
+        field_provenance.push(provenance);
         if is_heap {
             heap_mask |= 1u64 << i;
         }
@@ -281,16 +288,23 @@ pub fn typed_object_from_pairs(fields: &[(&str, KindedSlot)]) -> KindedSlot {
     // intermediate type-witness check is dropped because `_new` returns
     // a raw pointer rather than an `Arc` (cargo check expected broken
     // here until the variant signature flips in ckpt-final lockstep).
+    let field_kinds = Arc::from(field_kinds.into_boxed_slice());
+    #[cfg(miri)]
+    let ptr = shape_value::TypedObjectStorage::_new_with_miri_field_provenance(
+        schema.id as u64,
+        slots.into_boxed_slice(),
+        heap_mask,
+        field_kinds,
+        field_provenance.into_boxed_slice(),
+    );
+    #[cfg(not(miri))]
     let ptr = shape_value::TypedObjectStorage::_new(
         schema.id as u64,
         slots.into_boxed_slice(),
         heap_mask,
-        Arc::from(field_kinds.into_boxed_slice()),
+        field_kinds,
     );
-    KindedSlot::new(
-        ValueSlot::from_typed_object_raw(ptr),
-        NativeKind::Ptr(HeapKind::TypedObject),
-    )
+    KindedSlot::from_typed_object_raw(ptr)
 }
 
 #[cfg(test)]
