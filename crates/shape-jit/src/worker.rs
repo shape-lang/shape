@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "v2: Tier 1 whole-function JIT deprecated; test asserts on error message that no longer matches"]
+    #[ignore = "v2: deleted Tier 1 whole-function JIT (compile_single_function) deprecated; invalid-id validation belonged to the dead whole-function path, and the current selective JIT path does not expose this request shape"]
     fn test_backend_whole_function_invalid_id() {
         let mut backend = JitCompilationBackend::new().unwrap();
         let program = BytecodeProgram {

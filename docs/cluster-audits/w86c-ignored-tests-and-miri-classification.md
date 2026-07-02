@@ -9,6 +9,10 @@ Base: `6ad7dd1a`
 This slice answers the reviewer concern that "ignored tests and Miri are not a
 full proof" by making both boundaries explicit and checkable.
 
+W87C follow-up: `docs/cluster-audits/w87c-ignored-active-gap-triage.md`
+contains the per-test active-gap/stale inventory and reclassifies two stale
+rows as deleted v1 paths.
+
 No ignored tests were unignored. In particular, process-aborting `extern "C"`
 SURFACE tests stay ignored until their underlying todo bodies are replaced by
 non-aborting result paths.
@@ -41,9 +45,9 @@ source-level baseline:
 | Cause | `shape-vm` | `shape-jit` | Meaning |
 |---|---:|---:|---|
 | `phase_2c_surface` | 93 | 0 | Deferred strict-flip surfaces such as state snapshots, comptime host conversion, typed annotations, iterator materialization, and host-tier eval/marshal rebuilds. |
-| `deleted_v1_path` | 4 | 20 | Tests still describe removed carriers or paths such as BytecodeToIR, JitArray, deleted NaN-box roundtrips, deleted native-pointer helpers, or deleted TypedArrayData enum paths. |
+| `deleted_v1_path` | 5 | 21 | Tests still describe removed carriers or paths such as BytecodeToIR, JitArray, deleted NaN-box roundtrips, deleted native-pointer helpers, deleted TypedArrayData enum paths, v1 VMArray aliasing, or retired Tier 1 whole-function JIT. |
 | `process_aborting_extern_c_todo` | 0 | 3 | `extern "C"` functions currently hit `todo!()`/SURFACE bodies; attempting `#[should_panic]` would abort the test process. |
-| `stale_semantic_expectation` | 5 | 1 | Assertions tied to stale v1 copy-on-write behavior, stale strict-solver diagnostics, stale extern-C sugar, stale Numeric trait shape, or a deprecated error message. |
+| `stale_semantic_expectation` | 4 | 0 | Assertions tied to stale strict-solver diagnostics, stale extern-C sugar, or stale Numeric trait shape. |
 | `active_feature_gap` | 18 | 5 | Real feature gaps or known bugs: generic/module/method resolution, const-specialization, turbofish grammar, MIR reference escape, JIT kernel stubs, and JIT closure-cell bugs. |
 | `diagnostic_only` | 1 | 0 | A local debug-only opcode tracing test. |
 | Total | 121 | 29 | Source inventory, not a cargo-run proof. |

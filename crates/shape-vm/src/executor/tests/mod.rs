@@ -2045,7 +2045,7 @@ fn test_array_index_assignment_accepts_int_keys() {
 }
 
 #[test]
-#[ignore = "Wave B made array literals emit v2 typed opcodes unconditionally; v2 TypedArray uses refcounting (no Arc) so copy-on-write aliasing semantics differ from v1 VMArray. Test exercises v1 semantics; needs rewrite for v2 semantics."]
+#[ignore = "deleted v1 VMArray alias-preservation path: v2 TypedArray uses refcounting (no Arc), and this placeholder still depends on deleted host-tier ValueWord helpers. Rewrite as a v2 mutation/share test before unignoring."]
 fn test_array_index_assignment_preserves_copy_on_write_aliasing() {
     todo!("phase-2c — see ADR-006 §2.7.4 (host-tier eval/marshal API rebuild — deleted helper)")
 }

@@ -29,15 +29,15 @@ EXPECTED_COUNTS = {
     "shape-vm": {
         "phase_2c_surface": 93,
         "active_feature_gap": 18,
-        "stale_semantic_expectation": 5,
-        "deleted_v1_path": 4,
+        "stale_semantic_expectation": 4,
+        "deleted_v1_path": 5,
         "diagnostic_only": 1,
     },
     "shape-jit": {
-        "deleted_v1_path": 20,
+        "deleted_v1_path": 21,
         "active_feature_gap": 5,
         "process_aborting_extern_c_todo": 3,
-        "stale_semantic_expectation": 1,
+        "stale_semantic_expectation": 0,
     },
 }
 
@@ -189,6 +189,7 @@ def classify(entry: dict[str, object]) -> str:
             "deleted nan-box",
             "deleted __native_ptr",
             "deleted `typedarraydata` enum",
+            "deleted v1 vmarray",
             "tier 1 whole-function jit (compile_single_function) deprecated",
             "deleted host-tier iterator carrier",
         )
