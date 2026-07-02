@@ -75,6 +75,40 @@ pub fn mask_token(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static SHAPE_CONFIG_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ShapeConfigDirOverride {
+        _lock: MutexGuard<'static, ()>,
+        saved: Option<String>,
+    }
+
+    impl ShapeConfigDirOverride {
+        fn set(value: &str) -> Self {
+            let lock = SHAPE_CONFIG_DIR_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved = std::env::var("SHAPE_CONFIG_DIR").ok();
+            unsafe {
+                std::env::set_var("SHAPE_CONFIG_DIR", value);
+            }
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for ShapeConfigDirOverride {
+        fn drop(&mut self) {
+            match &self.saved {
+                Some(val) => unsafe {
+                    std::env::set_var("SHAPE_CONFIG_DIR", val);
+                },
+                None => unsafe {
+                    std::env::remove_var("SHAPE_CONFIG_DIR");
+                },
+            }
+        }
+    }
 
     #[test]
     fn test_default_registry_constant() {
@@ -83,38 +117,16 @@ mod tests {
 
     #[test]
     fn test_shape_config_dir_uses_env_var() {
-        let saved = std::env::var("SHAPE_CONFIG_DIR").ok();
-        unsafe {
-            std::env::set_var("SHAPE_CONFIG_DIR", "/tmp/shape-test-config");
-        }
+        let _env = ShapeConfigDirOverride::set("/tmp/shape-test-config");
         let result = shape_config_dir();
         assert_eq!(result, Some(PathBuf::from("/tmp/shape-test-config")));
-        match saved {
-            Some(val) => unsafe {
-                std::env::set_var("SHAPE_CONFIG_DIR", val);
-            },
-            None => unsafe {
-                std::env::remove_var("SHAPE_CONFIG_DIR");
-            },
-        }
     }
 
     #[test]
     fn test_shape_config_dir_ignores_empty_env() {
-        let saved = std::env::var("SHAPE_CONFIG_DIR").ok();
-        unsafe {
-            std::env::set_var("SHAPE_CONFIG_DIR", "");
-        }
+        let _env = ShapeConfigDirOverride::set("");
         let result = shape_config_dir();
         assert_ne!(result, Some(PathBuf::from("")));
-        match saved {
-            Some(val) => unsafe {
-                std::env::set_var("SHAPE_CONFIG_DIR", val);
-            },
-            None => unsafe {
-                std::env::remove_var("SHAPE_CONFIG_DIR");
-            },
-        }
     }
 
     #[test]
