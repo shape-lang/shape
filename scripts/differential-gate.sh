@@ -17,6 +17,12 @@ seeds=(
   "tools/shape-fuzz/tests/corpus/collections/c01_typed_map_sum.shape"
   "tools/shape-fuzz/tests/corpus/closures/f01_map_inline.shape"
   "tools/shape-fuzz/tests/corpus/patterns/m03_option_some.shape"
+  "tools/shape-fuzz/tests/corpus/patterns/m04_option_none.shape"
+  "tools/shape-fuzz/tests/corpus/patterns/m05_result_ok.shape"
+  "tools/shape-fuzz/tests/corpus/patterns/m09_result_err.shape"
+  "tools/shape-fuzz/tests/corpus/patterns/m10_option_question.shape"
+  "tools/shape-fuzz/tests/corpus/patterns/m11_result_question.shape"
+  "tools/shape-fuzz/tests/corpus/patterns/m12_result_context_bangbang.shape"
   "tools/shape-fuzz/tests/corpus/generics/g01_id_int.shape"
   "tools/shape-fuzz/tests/corpus/fallthrough/w01_module_read.shape"
 )

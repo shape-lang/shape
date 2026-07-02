@@ -1,0 +1,15 @@
+// W88C patterns seed m11 - narrow Result ? propagation for Ok and Err.
+fn checked_inc(x: int) -> Result<int> {
+  if x == 0 { return Err("zero") }
+  return Ok(x + 1)
+}
+
+fn checked_sum(a: int, b: int) -> Result<int> {
+  let left: int = checked_inc(a)?
+  let right: int = checked_inc(b)?
+  return Ok(left + right)
+}
+
+let ok = match checked_sum(1, 2) { Ok(v) => v, Err(_) => -1 }
+let err = match checked_sum(1, 0) { Ok(_) => 0, Err(_) => 7 }
+print(ok + err)

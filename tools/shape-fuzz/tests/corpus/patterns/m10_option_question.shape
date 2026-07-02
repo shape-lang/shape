@@ -1,0 +1,9 @@
+// W88C patterns seed m10 - narrow Option ? propagation for Some and None.
+fn maybe_double(o: Option<int>) -> Option<int> {
+  let v: int = o?
+  return Some(v * 2)
+}
+
+let a = match maybe_double(Some(21)) { Some(v) => v, None => -1 }
+let b = match maybe_double(None) { Some(v) => v, None => 1 }
+print(a + b)

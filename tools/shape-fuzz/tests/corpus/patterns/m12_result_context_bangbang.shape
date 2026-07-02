@@ -1,0 +1,14 @@
+// W88C patterns seed m12 - narrow !! context plus ? propagation.
+fn find_user(id: int) -> Result<int> {
+  if id == 0 { return Err("no such user") }
+  return Ok(id * 10)
+}
+
+fn lookup_annot(id: int) -> Result<int> {
+  let user_id: int = (find_user(id) !! "User not found")?
+  return Ok(user_id + 1)
+}
+
+let ok = match lookup_annot(5) { Ok(v) => v, Err(_) => -1 }
+let err = match lookup_annot(0) { Ok(_) => 0, Err(_) => 2 }
+print(ok + err)
