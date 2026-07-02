@@ -420,6 +420,18 @@ impl BytecodeCompiler {
         }
     }
 
+    pub(super) fn compile_expr_for_reference_binding_with_expected_return(
+        &mut self,
+        expr: &shape_ast::ast::Expr,
+        expected_return: Option<&shape_ast::ast::TypeAnnotation>,
+    ) -> Result<Option<(u32, bool)>> {
+        let saved = self.pending_expected_call_return_type.clone();
+        self.pending_expected_call_return_type = expected_return.cloned();
+        let result = self.compile_expr_for_reference_binding(expr);
+        self.pending_expected_call_return_type = saved;
+        result
+    }
+
     fn binding_target_requires_reference_value(&self) -> bool {
         let Some(name) = self.pending_variable_name.as_deref() else {
             return false;

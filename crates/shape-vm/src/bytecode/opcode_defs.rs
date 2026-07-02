@@ -2760,6 +2760,11 @@ pub enum BuiltinFunction {
     CodeBuilderNew,
     /// KeyValue::new() — return an empty `ContentNode::KeyValue` builder seed
     KeyValueBuilderNew,
+
+    /// Statically stamped `Set<string>` constructor.
+    SetCtorString,
+    /// Statically stamped `Set<int>` constructor.
+    SetCtorI64,
 }
 
 impl BuiltinFunction {
@@ -2999,6 +3004,9 @@ impl BuiltinFunction {
             BuiltinFunction::TableBuilderNew,
             BuiltinFunction::CodeBuilderNew,
             BuiltinFunction::KeyValueBuilderNew,
+            // W74B statically stamped Set<T> ctors (2)
+            BuiltinFunction::SetCtorString,
+            BuiltinFunction::SetCtorI64,
         ];
         VARIANTS.get(id as usize).copied()
     }

@@ -17,10 +17,79 @@
 //! - r-value receiver silent-drop (post-`compute_set().add(x)` shape)
 //! - Compound-assignment operator sugar (`s += x`) for primitives
 
+use crate::bytecode::{BuiltinFunction, OpCode, Operand};
 use crate::test_utils::{compile, eval, eval_with_kind};
 use shape_value::NativeKind;
 
 // ─── HashSet ─────────────────────────────────────────────────────────────
+
+fn top_level_builtin_calls(source: &str) -> Vec<BuiltinFunction> {
+    compile(source)
+        .instructions
+        .iter()
+        .filter_map(|instruction| {
+            if instruction.opcode == OpCode::BuiltinCall
+                && let Some(Operand::Builtin(builtin)) = instruction.operand
+            {
+                return Some(builtin);
+            }
+            None
+        })
+        .collect()
+}
+
+fn assert_set_ctor_stamped(
+    source: &str,
+    expected: BuiltinFunction,
+    context: &str,
+) {
+    let calls = top_level_builtin_calls(source);
+    assert!(
+        calls.contains(&expected),
+        "{context}: expected {expected:?}, got {calls:?}"
+    );
+    assert!(
+        !calls.contains(&BuiltinFunction::SetCtor),
+        "{context}: valid source must not emit raw SetCtor, got {calls:?}"
+    );
+}
+
+#[test]
+fn set_ctor_explicit_annotation_emits_i64_ctor() {
+    assert_set_ctor_stamped(
+        r#"
+        let s: Set<int> = Set()
+        s.len()
+        "#,
+        BuiltinFunction::SetCtorI64,
+        "explicit Set<int> annotation",
+    );
+}
+
+#[test]
+fn set_ctor_usage_pinned_mut_receiver_emits_string_ctor() {
+    assert_set_ctor_stamped(
+        r#"
+        let mut s = Set()
+        s.add("a")
+        s.len()
+        "#,
+        BuiltinFunction::SetCtorString,
+        "let mut usage-pinned Set()",
+    );
+}
+
+#[test]
+fn set_ctor_usage_pinned_rvalue_receiver_emits_string_ctor() {
+    assert_set_ctor_stamped(
+        r#"
+        Set().add("x")
+        42
+        "#,
+        BuiltinFunction::SetCtorString,
+        "rvalue receiver usage-pinned Set()",
+    );
+}
 
 #[test]
 fn writeback_hashset_add_len() {

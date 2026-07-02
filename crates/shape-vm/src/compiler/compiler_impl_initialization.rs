@@ -78,6 +78,7 @@ impl BytecodeCompiler {
             current_function_return_reference_summary: None,
             current_function_returns_borrow: false,
             current_function_return_type: None,
+            pending_expected_call_return_type: None,
             return_escape_drop_skip_local: None,
             type_inference: shape_runtime::type_system::inference::TypeInferenceEngine::new(),
             inference_facts: shape_runtime::type_system::InferenceFacts::default(),

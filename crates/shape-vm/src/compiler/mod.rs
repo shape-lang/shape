@@ -882,6 +882,13 @@ pub struct BytecodeCompiler {
     /// tail-return site reads `func_def.return_type` directly.
     pub(crate) current_function_return_type: Option<shape_ast::ast::TypeAnnotation>,
 
+    /// Expected result annotation for the expression currently being compiled
+    /// in an annotated assignment/return context. Used narrowly by generic
+    /// zero-arg calls whose type parameter appears only in the return type
+    /// (for example `set::new<T>() -> Set<T>`). Argument-bearing calls still
+    /// bind from their arguments; this is not a runtime fallback.
+    pub(crate) pending_expected_call_return_type: Option<shape_ast::ast::TypeAnnotation>,
+
     /// ADR-006 §2.7.30 (escape-Drop-deferral): the local slot index of a
     /// Drop-bearing value that is being RETURNED by-value from the current
     /// function (`fn make() -> R { let r = R{..}; return r }`). When set,

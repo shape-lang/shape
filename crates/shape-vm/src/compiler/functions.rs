@@ -2293,14 +2293,22 @@ impl BytecodeCompiler {
                             self.pending_callable_hint_name.clone();
                         self.pending_callable_hint_name =
                             self.callable_return_hint_name_for_expr(return_expr);
+                        let saved_expected_call_return_type =
+                            self.pending_expected_call_return_type.clone();
+                        self.pending_expected_call_return_type = func_def.return_type.clone();
                         let compile_result =
                             if self.current_function_return_reference_summary.is_some() {
                                 self.compile_expr_preserving_refs(return_expr)
                             } else {
                                 self.compile_expr(return_expr)
                             };
+                        self.pending_expected_call_return_type = saved_expected_call_return_type;
                         self.pending_callable_hint_name = saved_pending_callable_hint_name;
                         compile_result?;
+                        self.patch_static_set_ctor_from_annotation(
+                            Some(return_expr),
+                            func_def.return_type.as_ref(),
+                        );
                         // ADR-006 §2.7.30 (escape-Drop-deferral): an implicit
                         // tail-return of a bare Drop-bearing local (`fn f() ->
                         // R { let r = R{..}; r }`) moves the value to the

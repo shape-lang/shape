@@ -4,7 +4,7 @@ use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
 use crate::compiler::monomorphization::cache::ClosureDefPeek;
 use crate::compiler::monomorphization::type_resolution::{
     concrete_type_for_expr, extract_arg_concrete_types, resolve_call_site_type_args,
-    resolve_call_site_type_args_with_closures,
+    resolve_call_site_type_args_from_expected_return, resolve_call_site_type_args_with_closures,
 };
 use crate::compiler::string_interpolation::has_interpolation;
 use crate::compiler::v2_typed_emission::{TypedArrayKind, should_use_typed_array};
@@ -2250,7 +2250,7 @@ impl BytecodeCompiler {
             // up so the user sees a precise diagnostic instead of a
             // recursion / stack-overflow at runtime.
             if let Some(specialized_idx) =
-                self.try_monomorphize_free_function_call(&call_name, args)?
+                self.try_monomorphize_free_function_call(&call_name, args, span)?
             {
                 call_func_idx = specialized_idx;
                 call_name = self.program.functions[call_func_idx].name.clone();
@@ -2587,6 +2587,22 @@ impl BytecodeCompiler {
                         location: Some(self.span_to_source_location(span)),
                     });
                 }
+            };
+
+            let builtin = if builtin == BuiltinFunction::SetCtor {
+                if !args.is_empty() {
+                    builtin
+                } else {
+                    self.typed_set_ctor_for_call_span(span).ok_or_else(|| {
+                        ShapeError::SemanticError {
+                            message: "cannot construct `Set()` without a statically proven element type; annotate it as `Set<T>` or use it where the checker pins `T`"
+                                .to_string(),
+                            location: Some(self.span_to_source_location(span)),
+                        }
+                    })?
+                }
+            } else {
+                builtin
             };
 
             // Special handling for print with string interpolation
@@ -5847,6 +5863,7 @@ impl BytecodeCompiler {
         &mut self,
         func_name: &str,
         args: &[Expr],
+        call_site_span: Span,
     ) -> Result<Option<usize>> {
         // 1. Only generic, non-const type-param functions participate.
         let type_params: Vec<String> = {
@@ -5874,13 +5891,29 @@ impl BytecodeCompiler {
 
         // 3. Unify call-site arg types against the declared param annotations
         //    to bind each type param to a concrete type.
-        let Some(resolution) = crate::compiler::monomorphization::type_resolution::resolve_call_site_type_args_from_exprs(
-            self,
-            func_name,
-            args,
-            &arg_types,
-            &type_params,
-        ) else {
+        let resolution = if let Some(resolution) =
+            crate::compiler::monomorphization::type_resolution::resolve_call_site_type_args_from_exprs(
+                self,
+                func_name,
+                args,
+                &arg_types,
+                &type_params,
+            ) {
+            resolution
+        } else if args.is_empty() {
+            let Some(expected_return) = self.pending_expected_call_return_type.as_ref() else {
+                return Ok(None);
+            };
+            let Some(resolution) = resolve_call_site_type_args_from_expected_return(
+                self,
+                func_name,
+                expected_return,
+                &type_params,
+            ) else {
+                return Ok(None);
+            };
+            resolution
+        } else {
             return Ok(None);
         };
 
@@ -5914,8 +5947,17 @@ impl BytecodeCompiler {
         // 5. Produce / reuse the specialization. On cycle or compile error,
         //    the cache returns Err and we fall back to the unspecialized
         //    template.
-        match self.ensure_monomorphic_function(func_name, &resolution.type_args) {
+        let caller_function = self.current_function;
+        let saved_expected_call_return_type = self.pending_expected_call_return_type.take();
+        let specialization_result =
+            self.ensure_monomorphic_function(func_name, &resolution.type_args);
+        self.pending_expected_call_return_type = saved_expected_call_return_type;
+        match specialization_result {
             Ok(specialized_idx) => {
+                self.program.monomorphized_method_call_sites.insert(
+                    (call_site_span, caller_function),
+                    specialized_idx as usize,
+                );
                 // A recursive call inside a generic body that re-resolves to
                 // the specialization currently being compiled MUST still
                 // redirect to that specialization's index — `Call`-ing the
