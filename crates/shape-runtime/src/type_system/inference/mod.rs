@@ -385,7 +385,8 @@ pub struct TypeInferenceEngine {
     /// J-CT.1: depth of the current `comptime { ... }` nesting.
     ///
     /// Incremented on entering `Expr::Comptime` / `Expr::ComptimeFor` /
-    /// `Item::Comptime` during inference; decremented on exit. The
+    /// `Item::Comptime` / `comptime fn` bodies during inference;
+    /// decremented on exit. The
     /// method-call type-checker (`expressions.rs::Expr::MethodCall`)
     /// rejects calls to `comptime impl`-registered methods when this
     /// counter is zero. A counter (not a bool) keeps nested comptime

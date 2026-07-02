@@ -3185,4 +3185,44 @@ mod tests_deferred {
             err_msg
         );
     }
+
+    #[test]
+    fn w83e_const_accepts_comptime_block_initializer() {
+        let code = r#"
+            const BUILD_TAG = comptime {
+                "dev"
+            }
+
+            BUILD_TAG
+        "#;
+        let program = shape_ast::parser::parse_program(code).expect("parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_ok(),
+            "`const` initialized by a comptime block should compile: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn w83e_comptime_fn_body_allows_comptime_only_builtin_calls() {
+        let code = r#"
+            comptime fn require_const_host() {
+                if false {
+                    error("not executed")
+                }
+            }
+
+            comptime {
+                require_const_host()
+            }
+        "#;
+        let program = shape_ast::parser::parse_program(code).expect("parse");
+        let result = BytecodeCompiler::new().compile(&program);
+        assert!(
+            result.is_ok(),
+            "comptime fn bodies should allow comptime-only builtins: {:?}",
+            result.err()
+        );
+    }
 }

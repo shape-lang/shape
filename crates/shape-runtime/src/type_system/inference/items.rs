@@ -850,7 +850,13 @@ impl TypeInferenceEngine {
         let local_constraint_start = self.constraints.len();
         self.empty_grow_return_carrier_scopes
             .push(empty_grow_return_carriers);
+        if func.is_comptime {
+            self.enter_comptime();
+        }
         let inferred_result = self.infer_callable_return_type(&func.body, allow_unresolved_return);
+        if func.is_comptime {
+            self.exit_comptime();
+        }
         self.empty_grow_return_carrier_scopes.pop();
 
         self.expected_return_types.pop();
@@ -1098,7 +1104,13 @@ impl TypeInferenceEngine {
         self.empty_grow_return_carrier_scopes
             .push(empty_grow_return_carriers);
         let constraint_start = self.constraints.len();
+        if func.is_comptime {
+            self.enter_comptime();
+        }
         let replayed_return = self.infer_callable_return_type(&func.body, true);
+        if func.is_comptime {
+            self.exit_comptime();
+        }
         self.empty_grow_return_carrier_scopes.pop();
         self.expected_return_types.pop();
 
@@ -3123,7 +3135,15 @@ impl TypeInferenceEngine {
                 // When no annotation is provided, keep the inferred initializer
                 // type so subsequent expressions can immediately use structural
                 // info.
-                self.infer_expr(init_expr)?
+                if decl.kind == VarKind::Const {
+                    if let Expr::Comptime(stmts, _) = init_expr {
+                        self.infer_comptime_const_initializer_type(stmts)?
+                    } else {
+                        self.infer_expr(init_expr)?
+                    }
+                } else {
+                    self.infer_expr(init_expr)?
+                }
             }
         } else {
             self.fresh_type_var()
@@ -3169,6 +3189,13 @@ impl TypeInferenceEngine {
         self.record_binding_facts_for_decl(decl, &declared_type);
 
         Ok(declared_type)
+    }
+
+    fn infer_comptime_const_initializer_type(&mut self, stmts: &[Statement]) -> TypeResult<Type> {
+        self.enter_comptime();
+        let result = self.infer_callable_return_type(stmts, false);
+        self.exit_comptime();
+        result
     }
 
     fn bind_decl_pattern(&mut self, pattern: &DestructurePattern, fallback_type: Type) {

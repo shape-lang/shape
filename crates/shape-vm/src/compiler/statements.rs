@@ -1233,7 +1233,7 @@ impl BytecodeCompiler {
                             return Err(ShapeError::SemanticError {
                                 message: format!(
                                     "module-level `const` initializer must be comptime-evaluable \
-                                     (literal, or unary `-`/`!` on a literal). \
+                                     (literal, comptime block, or unary `-`/`!` on a literal). \
                                      Function calls and other runtime-dependent expressions are \
                                      rejected per R8 W8 Cluster A (2026-05-24). \
                                      Extending the comptime evaluator is v0.4-concurrency-design-pass \
@@ -1465,7 +1465,7 @@ impl BytecodeCompiler {
                                 return Err(ShapeError::SemanticError {
                                     message: format!(
                                         "`const` initializer must be comptime-evaluable \
-                                         (literal, or unary `-`/`!` on a literal). \
+                                         (literal, comptime block, or unary `-`/`!` on a literal). \
                                          Function calls and other runtime-dependent expressions \
                                          are rejected per R8 W8 Cluster A (2026-05-24). \
                                          Extending the comptime evaluator is v0.4-concurrency-\
@@ -4153,19 +4153,20 @@ impl BytecodeCompiler {
 
     /// R8 W8 Cluster A (2026-05-24): predicate for the module-level
     /// `const` reject-runtime-init validation. Returns `true` when the
-    /// initializer expression can be evaluated entirely at compile time
-    /// without invoking the VM:
+    /// initializer expression can be resolved entirely before runtime:
     ///   - literals (any kind)
+    ///   - `comptime { ... }` expressions, which the expression compiler
+    ///     evaluates immediately and lowers to a constant value
     ///   - unary `-` / `!` / `~` applied to a comptime-evaluable operand
     /// Function calls, identifiers, binary ops, etc. return `false` and
     /// surface a clean compile error per the dispatch's reject test.
-    /// ADR-006 §2.7.5 stamp-at-compile-time alignment: the predicate
-    /// matches the loader-side `comptime_eval_const_initializer` shape
-    /// in `crates/shape-runtime/src/module_loader/loading.rs`.
+    /// ADR-006 §2.7.5 stamp-at-compile-time alignment: accepted forms must
+    /// be resolved before runtime bytecode observes the binding.
     fn const_initializer_is_comptime_evaluable(expr: &shape_ast::ast::Expr) -> bool {
         use shape_ast::ast::Expr;
         match expr {
             Expr::Literal(_, _) => true,
+            Expr::Comptime(_, _) => true,
             Expr::UnaryOp { operand, .. } => Self::const_initializer_is_comptime_evaluable(operand),
             _ => false,
         }

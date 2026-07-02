@@ -778,6 +778,35 @@ mod tests {
     }
 
     #[test]
+    fn w83e_comptime_fn_body_allows_comptime_only_builtin_gate() {
+        let source = r#"
+            comptime fn require_const_host() {
+                if false {
+                    error("not executed")
+                }
+            }
+
+            comptime {
+                require_const_host()
+            }
+        "#;
+        let program = shape_ast::parser::parse_program(source).expect("parse");
+
+        let result = analyze_program_with_mode(
+            &program,
+            Some(source),
+            None,
+            None,
+            TypeAnalysisMode::FailFast,
+        );
+        assert!(
+            result.is_ok(),
+            "comptime fn bodies are comptime contexts; got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
     fn test_exhaustiveness_integration_non_exhaustive_match_produces_error() {
         // This test proves exhaustiveness checking is connected to the compiler pipeline.
         // A match on an enum that doesn't cover all variants should produce an error.
