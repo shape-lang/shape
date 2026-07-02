@@ -1026,15 +1026,22 @@ mod tests {
         assert!(matches!(restored_snap.stack[2], SV::Bool(true)));
     }
 
-    /// W17 supported-kind round-trip: Result/Option carry inner
-    /// scalar payloads end-to-end.
+    /// W88B compatibility round-trip: old Result/Option carriers can still
+    /// be serialized, but restore normalizes them to schema-backed
+    /// `__Result` / `__Option` typed objects, even when the snapshot carries
+    /// the old persisted stack kind.
     #[test]
-    fn test_w17_snapshot_result_option_roundtrip() {
+    fn test_w17_snapshot_result_option_roundtrip_normalizes_legacy_carriers() {
         use crate::bytecode::BytecodeProgram;
+        use shape_runtime::type_schema::TypeSchemaRegistry;
+        use shape_runtime::type_schema::builtin_schemas::{
+            OPTION_VARIANT_NONE, OPTION_VARIANT_SOME, RESULT_VARIANT_OK,
+        };
         use shape_value::heap_value::{OptionData, ResultData};
         use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
         use std::sync::Arc;
 
+        let (_registry, schemas) = TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
         let mut vm = VirtualMachine::new(VMConfig::default());
 
         // Ok(42)
@@ -1091,18 +1098,51 @@ mod tests {
             other => panic!("expected None, got {other:?}"),
         }
 
-        // Restore via from_snapshot.
+        assert_eq!(
+            snap.stack_kinds,
+            vec![
+                NativeKind::Ptr(HeapKind::Result),
+                NativeKind::Ptr(HeapKind::Option),
+                NativeKind::Ptr(HeapKind::Option)
+            ]
+        );
+
+        // Restore via from_snapshot. The old stack kinds are compatibility
+        // inputs only; they must not cause fresh Arc<ResultData> /
+        // Arc<OptionData> allocation.
         let restored = VirtualMachine::from_snapshot(BytecodeProgram::default(), &snap, &store)
             .expect("restore result+option");
         let restored_snap = restored.snapshot(&store).expect("re-snapshot");
         assert_eq!(restored_snap.stack.len(), 3);
-        // Round-trip preserves discriminator+payload.
         assert!(matches!(
             &restored_snap.stack[0],
-            SV::ResultData {
-                is_ok: true,
-                payload,
-            } if matches!(payload.as_ref(), SV::Int(42))
+            SV::TypedObject {
+                schema_id,
+                slot_data,
+                ..
+            } if *schema_id == schemas.result as u64
+                && matches!(slot_data.first(), Some(SV::Int(RESULT_VARIANT_OK)))
+                && matches!(slot_data.get(1), Some(SV::Int(42)))
+        ));
+        assert!(matches!(
+            &restored_snap.stack[1],
+            SV::TypedObject {
+                schema_id,
+                slot_data,
+                ..
+            } if *schema_id == schemas.option as u64
+                && matches!(slot_data.first(), Some(SV::Int(OPTION_VARIANT_SOME)))
+                && matches!(slot_data.get(1), Some(SV::String(s)) if s == "hello")
+        ));
+        assert!(matches!(
+            &restored_snap.stack[2],
+            SV::TypedObject {
+                schema_id,
+                slot_data,
+                ..
+            } if *schema_id == schemas.option as u64
+                && matches!(slot_data.first(), Some(SV::Int(OPTION_VARIANT_NONE)))
+                && matches!(slot_data.get(1), Some(SV::None))
         ));
     }
 

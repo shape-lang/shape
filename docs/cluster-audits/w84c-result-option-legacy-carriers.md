@@ -28,7 +28,7 @@ survive in compatibility and JIT-only surfaces:
 | Area | Current W87D classification |
 |---|---|
 | Normal VM execution | Canonical producers are `result_option_carrier::build_ok/build_err/build_some/build_none`, which create fixed-layout `__Result` / `__Option` `TypedObjectStorage`. Owned normal VM paths did not show live `ResultData::ok/err` or `OptionData::some/none` producers outside tests. |
-| Compatibility restore / wire decode | VM whole-snapshot restore without a kind track maps legacy `SerializableVMValue::ResultData/OptionData` to `Ptr(HeapKind::TypedObject)`. Runtime snapshot restore can still rebuild old `Arc<ResultData>` / `Arc<OptionData>` when explicitly called with expected `Ptr(HeapKind::Result/Option)`; that file is outside W87D write scope. Runtime wire projection still reads old `HeapKind::Result/Option` slots because JIT/snapshot compatibility producers remain. |
+| Compatibility restore / wire decode | VM whole-snapshot restore without a kind track maps legacy `SerializableVMValue::ResultData/OptionData` to `Ptr(HeapKind::TypedObject)`. W88B extends that policy to explicit old expected `Ptr(HeapKind::Result/Option)` restore, so runtime snapshot restore no longer rebuilds old `Arc<ResultData>` / `Arc<OptionData>` carriers. Runtime wire projection still reads old `HeapKind::Result/Option` slots because JIT compatibility producers remain. |
 | JIT FFI legacy surfaces | `jit_v2_make_result_ok`, `jit_v2_make_result_err`, `jit_v2_make_option_some`, and `jit_v2_make_option_none` still allocate `Arc<ResultData>` / `Arc<OptionData>`. JIT retain/release, predicate, payload, print, stack-kind-code, and ownership paths still consume those old kinds. This is read-only for W87D. |
 | Printing | Schema-backed `__Result` / `__Option` typed objects already format as `Ok` / `Err` / `Some` / `None`. Legacy `HeapKind::Result/Option` formatter arms remain compatibility consumers until old producers are gone. |
 | Trait objects | Schema-backed `__Result` / `__Option` rewrap is live. Legacy `HeapKind::Result/Option` returns surface and drop their owned share without inspecting `ResultData` / `OptionData`, which is the correct containment posture. |
@@ -41,6 +41,31 @@ W87D patch decision: contain, do not delete. `heap_value_to_wire` now projects
 slot projection. This removes the opaque `<result:phase-2c>` /
 `<option:phase-2c>` fallback from generic `HeapValue` wire projection without
 creating old carriers, probing tags, or inferring from payload bits.
+
+## W88B Addendum: Snapshot Restore Policy
+
+Date: 2026-07-02
+Branch: `strict-flip-w88b-snapshot-result-option-policy`
+Base: `46608080`
+
+W88B closes the runtime snapshot-restore producer described in W87D. Legacy
+`SerializableVMValue::ResultData` / `SerializableVMValue::OptionData` are still
+accepted as wire-format compatibility arms, but restore is typed-object-only:
+
+- `serializable_to_slot(..., Ptr(HeapKind::TypedObject))` builds the existing
+  schema-backed `__Result` / `__Option` `TypedObjectStorage` carriers.
+- `serializable_to_slot(..., Ptr(HeapKind::Result/Option))` is treated as an
+  old persisted kind-track compatibility input and also returns
+  `Ptr(HeapKind::TypedObject)`. It does not allocate `Arc<ResultData>` or
+  `Arc<OptionData>`.
+- Nested `TypedObject` field restore now maps legacy `ResultData` /
+  `OptionData` arms to `Ptr(HeapKind::TypedObject)`, so snapshot bytes cannot
+  recreate old carriers through `expected_heap_field_kind`.
+
+No runtime inference, tag probing, or kind-from-bits was added. The only
+remaining old-carrier producers are outside W88B's write scope (JIT FFI, owned
+by W88A). Snapshot serialization and wire projection remain compatibility
+consumers while those producers exist.
 
 ## Executive Classification
 
@@ -61,7 +86,7 @@ Remaining old-carrier uses fall into four classes:
 
 | Class | Sites | W84C classification |
 |---|---|---|
-| Live old producers | JIT FFI still allocates `Arc<ResultData>` / `Arc<OptionData>` in `jit_v2_make_result_ok`, `jit_v2_make_result_err`, `jit_v2_make_option_some`, and `jit_v2_make_option_none` (`crates/shape-jit/src/ffi/result.rs:278-315`). Runtime snapshot restore can also rebuild old carriers when explicitly called with expected kind `Ptr(HeapKind::Result/Option)` (`crates/shape-runtime/src/snapshot.rs:2053-2088`). | Not W84C writable. Active JIT producer and legacy snapshot compatibility producer. |
+| Live old producers | JIT FFI still allocates `Arc<ResultData>` / `Arc<OptionData>` in `jit_v2_make_result_ok`, `jit_v2_make_result_err`, `jit_v2_make_option_some`, and `jit_v2_make_option_none` (`crates/shape-jit/src/ffi/result.rs:278-315`). Runtime snapshot restore no longer rebuilds old carriers as of W88B; old expected `Ptr(HeapKind::Result/Option)` inputs normalize to `Ptr(HeapKind::TypedObject)`. | JIT producer is not W88B writable. Snapshot restore producer closed. |
 | Live old consumers | VM stack clone/drop, shape-value `KindedSlot` clone/drop, closure-layout capture clone/drop, VM printing, runtime wire projection, runtime snapshot serialization, JIT `arc_*` predicates/payload/retain/release/print/ownership, trait-object old-kind surface/drop. | Must remain until producers are gone. |
 | Tests / compatibility | Type-tracking legacy descriptor tests (`type_tracking.rs:1483-1520`), VM snapshot legacy tests (`executor/snapshot.rs:1029-1134`), wire/printing/trait old-carrier tests, shape-value storage tests. | Keep until compatibility policy changes and producers are migrated. |
 | Docs / comments / diagnostics | Compiler comments, exceptions module header comments, resume comments, method dispatch exclusions, diagnostic labels in arithmetic/comparison/typed access. | Remove only after code paths are gone. |
@@ -85,13 +110,13 @@ Remaining live old producers are outside W84C write scope:
   `jit_v2_make_option_some`, and `jit_v2_make_option_none` allocate
   `Arc<ResultData>` / `Arc<OptionData>` and return raw bits stamped by callers
   as `Ptr(HeapKind::Result/Option)` (`crates/shape-jit/src/ffi/result.rs:278-315`).
-- Runtime snapshot restore can rebuild old carriers when the caller requests
-  expected `HeapKind::Result` or `HeapKind::Option`
-  (`crates/shape-runtime/src/snapshot.rs:2053-2088`). In the VM whole-snapshot
-  restore path, old `SerializableVMValue::ResultData/OptionData` without a kind
-  track are mapped to `Ptr(HeapKind::TypedObject)` instead
-  (`crates/shape-vm/src/executor/snapshot.rs:670-682`), so this is a legacy
-  compatibility producer rather than the active VM restore path.
+- Runtime snapshot restore was a producer before W88B. It now treats expected
+  `HeapKind::Result` / `HeapKind::Option` as old persisted kind-track
+  compatibility inputs and returns schema-backed `Ptr(HeapKind::TypedObject)`
+  carriers instead. In the VM whole-snapshot restore path, old
+  `SerializableVMValue::ResultData/OptionData` without a kind track were
+  already mapped to `Ptr(HeapKind::TypedObject)`; W88B extends the same policy
+  to snapshots that do carry old stack/module kind tracks.
 
 ### Live Consumers
 
@@ -164,23 +189,24 @@ and serialized-descriptor compatibility policy change outside W84C.
 
 ## Question 3: Snapshot / Restore / Wire Conversion
 
-Snapshot/restore still reads and can create old carriers in compatibility
-paths:
+Snapshot/restore still reads old carriers in compatibility paths, but W88B
+removed the runtime restore path that recreated them:
 
 - Runtime snapshot defines `SerializableVMValue::ResultData` and
   `SerializableVMValue::OptionData` (`crates/shape-runtime/src/snapshot.rs:481-497`).
 - Serialization reads old `Ptr(HeapKind::Result/Option)` slots into those
   serializable arms (`snapshot.rs:1294-1320`).
-- Generic runtime restore can recreate old `Arc<ResultData>` /
-  `Arc<OptionData>` if expected kind is `HeapKind::Result/Option`
-  (`snapshot.rs:2053-2088`).
-- Generic runtime restore can also translate those same serializable arms into
-  schema-backed typed objects when expected kind is `HeapKind::TypedObject`
-  (`snapshot.rs:2125-2145`).
-- VM whole-snapshot restore without an explicit kind track maps old
-  `ResultData` / `OptionData` serializable arms to `Ptr(HeapKind::TypedObject)`
-  (`crates/shape-vm/src/executor/snapshot.rs:670-682`). The L5 test asserts
-  that old snapshots restore as typed objects (`executor/snapshot.rs:1109-1134`).
+- Generic runtime restore translates those same serializable arms into
+  schema-backed typed objects when expected kind is `HeapKind::TypedObject`,
+  `HeapKind::Result`, or `HeapKind::Option`. The old expected kinds are
+  compatibility inputs only; restore returns `Ptr(HeapKind::TypedObject)`.
+- Nested `TypedObject` field restore now maps old `ResultData` / `OptionData`
+  serializable arms to `Ptr(HeapKind::TypedObject)`, closing the old-carrier
+  recreation path through `expected_heap_field_kind`.
+- VM whole-snapshot restore with or without an explicit old stack/module kind
+  track restores old `ResultData` / `OptionData` serializable arms as
+  `Ptr(HeapKind::TypedObject)`. Focused W88B tests assert that old stack kinds
+  do not recreate `Arc<ResultData>` / `Arc<OptionData>`.
 
 Wire conversion:
 
@@ -215,17 +241,14 @@ That surface is correct until schema-backed typed-object carriers are universal:
    Migrate read-only JIT `jit_v2_make_result_*` / `jit_v2_make_option_*` and
    their MIR lowering sites to schema-backed `__Result` / `__Option`
    `TypedObjectStorage`, or make old-carrier-producing JIT paths explicit
-   deopt/surface. In parallel, decide whether runtime snapshot
-   `serializable_to_slot(..., Ptr(HeapKind::Result/Option))` remains a public
-   compatibility API or should restore typed objects / refuse old expected
-   kinds.
+   deopt/surface. Runtime snapshot restore is no longer an active old producer
+   as of W88B.
 
-2. **Move snapshot compatibility to typed-object-only restore.**
-   Keep reading `SerializableVMValue::ResultData/OptionData`, but make every
-   restore path produce `Ptr(HeapKind::TypedObject)` or a structured
-   compatibility error. This includes nested typed-object field restore, where
-   `expected_heap_field_kind` currently maps `ResultData` / `OptionData` back
-   to old heap kinds.
+2. **Keep snapshot compatibility typed-object-only.**
+   W88B completed the runtime restore side: `SerializableVMValue::ResultData`
+   / `OptionData` restore to `Ptr(HeapKind::TypedObject)` for typed-object,
+   old Result, old Option, and nested field cases. Future compatibility work
+   must preserve that invariant until the serializable arms can be deleted.
 
 3. **Delete old JIT consumers.**
    Remove `jit_arc_result_*`, `jit_arc_option_*`, old Result/Option stack kind
@@ -268,6 +291,14 @@ Focused supervisor verification recommended for this containment patch:
 - `cargo test -p shape-vm --lib printing trait_object_ops snapshot --no-fail-fast`
 - A VM/JIT differential seed with top-level `Ok` / `Err` / `Some` / `None`
   returns, because JIT FFI old producers remain outside W87D scope.
+
+For the W88B snapshot-restore policy commit:
+
+- `rustfmt --edition 2024 crates/shape-runtime/src/snapshot.rs crates/shape-vm/src/executor/snapshot.rs`
+- `git diff --check`
+- `cargo test -p shape-runtime --lib --no-fail-fast l5_typed_object_result_option_snapshot_tests`
+- `cargo test -p shape-vm --lib --no-fail-fast test_w17_snapshot_result_option_roundtrip_normalizes_legacy_carriers`
+- `cargo test -p shape-vm --lib --no-fail-fast test_l5_legacy_result_option_snapshot_restore_uses_typed_objects_without_kind_track`
 
 For the future deletion wave, the minimum guards should be:
 

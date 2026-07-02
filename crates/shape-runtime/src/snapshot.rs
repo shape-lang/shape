@@ -478,19 +478,19 @@ pub enum SerializableVMValue {
     /// citing the W17-snapshot-iterator follow-up.
     IteratorOpaque,
 
-    /// `HeapKind::Result` — typed-Arc Result<T,E> carrier (Wave 14 §2.7.17).
-    /// `Ok` / `Err` arms already exist for the pre-bulldozer
-    /// scalar-payload form; this arm wraps a `KindedSlot`-payloaded
-    /// `ResultData` per the post-§2.7.17 typed-Arc shape: the
-    /// discriminator (is_ok) plus the inner serializable payload.
+    /// Legacy snapshot arm for the old typed-Arc `ResultData` carrier.
+    /// Restore normalizes this arm to the schema-backed `__Result`
+    /// `TypedObjectStorage` carrier; snapshot bytes must not recreate a
+    /// live `Arc<ResultData>` path.
     ResultData {
         is_ok: bool,
         payload: Box<SerializableVMValue>,
     },
 
-    /// `HeapKind::Option` — typed-Arc Option<T> carrier (Wave 14 §2.7.17).
-    /// Mirror of `ResultData`: the discriminator (is_some) plus the
-    /// inner payload (or `None` sentinel when is_some == false).
+    /// Legacy snapshot arm for the old typed-Arc `OptionData` carrier.
+    /// Restore normalizes this arm to the schema-backed `__Option`
+    /// `TypedObjectStorage` carrier; snapshot bytes must not recreate a
+    /// live `Arc<OptionData>` path.
     OptionData {
         is_some: bool,
         payload: Option<Box<SerializableVMValue>>,
@@ -1994,8 +1994,11 @@ fn expected_heap_field_kind(sv: &SerializableVMValue) -> NativeKind {
         SV::HashMap { .. } => NativeKind::Ptr(HeapKind::HashMap),
         SV::Array(_) => NativeKind::Ptr(HeapKind::TypedArray),
         SV::HashSet { .. } => NativeKind::Ptr(HeapKind::HashSet),
-        SV::ResultData { .. } => NativeKind::Ptr(HeapKind::Result),
-        SV::OptionData { .. } => NativeKind::Ptr(HeapKind::Option),
+        // Legacy ResultData/OptionData snapshot arms normalize to the
+        // canonical schema-backed `__Result` / `__Option` typed objects.
+        // Nested typed-object fields must not silently restore old
+        // Arc<ResultData> / Arc<OptionData> carriers.
+        SV::ResultData { .. } | SV::OptionData { .. } => NativeKind::Ptr(HeapKind::TypedObject),
         // Pre-existing complex arms — surface clean rather than guess.
         _ => NativeKind::Bool,
     }
@@ -2011,9 +2014,7 @@ fn serializable_to_heap_slot(
     store: &SnapshotStore,
 ) -> std::result::Result<(u64, NativeKind), String> {
     use SerializableVMValue as SV;
-    use shape_value::heap_value::{
-        AtomicData, HashSetData, OptionData, PriorityQueueData, ResultData,
-    };
+    use shape_value::heap_value::{AtomicData, HashSetData, PriorityQueueData};
     match (sv, heap_kind) {
         (SV::String(s), HeapKind::String) => {
             // String can flow via either the dedicated NativeKind::String
@@ -2065,26 +2066,23 @@ fn serializable_to_heap_slot(
             Ok((raw, NativeKind::Ptr(HeapKind::Atomic)))
         }
         (SV::ResultData { is_ok, payload }, HeapKind::Result) => {
-            // Inner payload kind: we need the expected kind for the
-            // inner slot to dispatch. The §2.7.17 typed-Arc Result
-            // carrier doesn't statically pin the inner kind; the
-            // serialized discriminator is used to pick the inner kind
-            // (Int→Int64, String→String, Bool→Bool, Number→Float64,
-            // Unit/None→Null placeholder).
+            // W88B compatibility normalization: a persisted old kind track
+            // can still ask for HeapKind::Result, but restore must not
+            // allocate a fresh Arc<ResultData>. Build the canonical
+            // schema-backed `__Result` typed object and return its real
+            // kind to the caller.
             let inner_slot = inner_kinded_from_serializable(payload)?;
-            let data = if *is_ok {
-                ResultData::ok(inner_slot)
-            } else {
-                ResultData::err(inner_slot)
-            };
-            let arc = Arc::new(data);
-            let raw = Arc::into_raw(arc) as u64;
-            Ok((raw, NativeKind::Ptr(HeapKind::Result)))
+            Ok(build_builtin_result_typed_object_slot(*is_ok, inner_slot))
         }
         (SV::OptionData { is_some, payload }, HeapKind::Option) => {
-            let data = if *is_some {
+            // W88B compatibility normalization: a persisted old kind track
+            // can still ask for HeapKind::Option, but restore must not
+            // allocate a fresh Arc<OptionData>. Build the canonical
+            // schema-backed `__Option` typed object and return its real
+            // kind to the caller.
+            let inner_slot = if *is_some {
                 match payload {
-                    Some(p) => OptionData::some(inner_kinded_from_serializable(p)?),
+                    Some(p) => inner_kinded_from_serializable(p)?,
                     None => {
                         return Err(
                             "serializable_to_slot: OptionData is_some=true but payload=None — \
@@ -2095,11 +2093,9 @@ fn serializable_to_heap_slot(
                     }
                 }
             } else {
-                OptionData::none()
+                KindedSlot::none()
             };
-            let arc = Arc::new(data);
-            let raw = Arc::into_raw(arc) as u64;
-            Ok((raw, NativeKind::Ptr(HeapKind::Option)))
+            Ok(build_builtin_option_typed_object_slot(*is_some, inner_slot))
         }
 
         // ── W17-snapshot-roundtrip container restore arms (2026-06-02) ──
@@ -2730,6 +2726,73 @@ mod l5_typed_object_result_option_snapshot_tests {
             restored_storage.field_kinds[RESULT_PAYLOAD],
             NativeKind::String
         );
+    }
+
+    #[test]
+    fn legacy_result_option_old_expected_kind_normalizes_to_typed_object() {
+        let (_registry, schemas) = TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let result_sv = SV::ResultData {
+            is_ok: true,
+            payload: Box::new(SV::Int(42)),
+        };
+        let option_sv = SV::OptionData {
+            is_some: false,
+            payload: None,
+        };
+
+        let (result_bits, result_kind) =
+            serializable_to_slot(&result_sv, NativeKind::Ptr(HeapKind::Result), &store)
+                .expect("restore legacy result with old expected kind");
+        let result = restored_storage(result_bits, result_kind);
+        let result_storage = storage(&result);
+        assert_eq!(result_storage.schema_id, schemas.result as u64);
+        assert_eq!(result_storage.slots()[0].as_i64(), RESULT_VARIANT_OK);
+        assert_eq!(
+            result_storage.field_kinds[RESULT_PAYLOAD],
+            NativeKind::Int64
+        );
+
+        let (option_bits, option_kind) =
+            serializable_to_slot(&option_sv, NativeKind::Ptr(HeapKind::Option), &store)
+                .expect("restore legacy option with old expected kind");
+        let option = restored_storage(option_bits, option_kind);
+        let option_storage = storage(&option);
+        assert_eq!(option_storage.schema_id, schemas.option as u64);
+        assert_eq!(option_storage.slots()[0].as_i64(), OPTION_VARIANT_NONE);
+        assert_eq!(option_storage.field_kinds[OPTION_PAYLOAD], NativeKind::Null);
+    }
+
+    #[test]
+    fn typed_object_field_legacy_result_data_restores_field_as_typed_object() {
+        let (_registry, schemas) = TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let sv = SV::TypedObject {
+            schema_id: 9_999,
+            slot_data: vec![SV::ResultData {
+                is_ok: true,
+                payload: Box::new(SV::Int(7)),
+            }],
+            heap_mask: 1,
+        };
+
+        let (bits, kind) =
+            serializable_to_slot(&sv, NativeKind::Ptr(HeapKind::TypedObject), &store)
+                .expect("restore typed object with legacy result field");
+        let outer = restored_storage(bits, kind);
+        let outer_storage = storage(&outer);
+        assert_eq!(
+            outer_storage.field_kinds[0],
+            NativeKind::Ptr(HeapKind::TypedObject)
+        );
+
+        let inner_slot = KindedSlot::new(outer_storage.slots()[0], outer_storage.field_kinds[0]);
+        let inner_storage = storage(&inner_slot);
+        assert_eq!(inner_storage.schema_id, schemas.result as u64);
+        assert_eq!(inner_storage.slots()[0].as_i64(), RESULT_VARIANT_OK);
+        std::mem::forget(inner_slot);
     }
 
     #[test]
