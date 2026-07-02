@@ -2,9 +2,9 @@
 # Guard against HeapKind wildcard dispatch surfaces growing silently.
 #
 # This is intentionally non-cargo: it is safe to run in merge-verifier fast
-# lanes and in parallel-agent worktrees. The current residual list is an
-# audited baseline; any new hit must either be made exhaustive or consciously
-# added here with a Wave-2 note.
+# lanes and in parallel-agent worktrees. The current residual baseline is zero;
+# any new hit must either be made exhaustive or consciously added here with a
+# wave note that proves why it is non-dispatch.
 
 set -euo pipefail
 
@@ -142,19 +142,7 @@ scan_heapkind_match_catchalls() {
   scan_heapkind_match_catchalls
 } | LC_ALL=C sort > "$tmp_found"
 
-cat > "$tmp_known" <<'EOF'
-ptr-wildcard-arm	crates/shape-jit/src/mir_compiler/v2_array.rs:82	NativeKind::Ptr(_) => (types::I64, 8),
-ptr-wildcard-arm	crates/shape-jit/src/mir_compiler/v2_call_abi.rs:185	NativeKind::String | NativeKind::Ptr(_) => types::I64,
-ptr-wildcard-arm	crates/shape-jit/src/mir_compiler/v2_field.rs:100	NativeKind::String | NativeKind::Ptr(_) => types::I64,
-ptr-wildcard-arm	crates/shape-jit/src/mir_compiler/v2_field.rs:140	NativeKind::String | NativeKind::Ptr(_) => 8,
-ptr-wildcard-arm	crates/shape-vm/src/executor/comparison/mod.rs:638	NativeKind::String | NativeKind::Ptr(_) => bits == 0,
-ptr-wildcard-arm	crates/shape-vm/src/executor/control_flow/mod.rs:67	NativeKind::String | NativeKind::Ptr(_) => bits != 0,
-ptr-wildcard-arm	crates/shape-vm/src/executor/exceptions/mod.rs:1188	NativeKind::String | NativeKind::Ptr(_) => bits == 0,
-ptr-wildcard-arm	crates/shape-vm/src/executor/logical/mod.rs:209	NativeKind::String | NativeKind::Ptr(_) => bits == 0,
-ptr-wildcard-arm	crates/shape-vm/src/executor/logical/mod.rs:79	NativeKind::String | NativeKind::Ptr(_) => bits != 0,
-ptr-wildcard-arm	crates/shape-vm/src/executor/objects/array_aggregation.rs:106	NativeKind::String | NativeKind::Ptr(_) => bits != 0,
-ptr-wildcard-arm	crates/shape-vm/src/executor/objects/array_query.rs:129	NativeKind::String | NativeKind::Ptr(_) => bits != 0,
-EOF
+: > "$tmp_known"
 
 LC_ALL=C sort -o "$tmp_known" "$tmp_known"
 LC_ALL=C comm -23 "$tmp_found" "$tmp_known" > "$tmp_new"

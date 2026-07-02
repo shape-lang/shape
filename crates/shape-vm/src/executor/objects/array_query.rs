@@ -59,11 +59,11 @@
 //!   `read_element` `None` surfaces a structured `RuntimeError`.
 //! - ADR-005 §1 single-discriminator preserved.
 
-use crate::executor::VirtualMachine;
 use crate::executor::v2_handlers::v2_array_detect::{
-    V2ElemType, V2TypedArrayView, allocate_empty_typed_array, as_v2_typed_array, contains_element,
-    native_kind_to_v2_elem_type, position_of, push_element, read_element,
+    allocate_empty_typed_array, as_v2_typed_array, contains_element, native_kind_to_v2_elem_type,
+    position_of, push_element, read_element, V2ElemType, V2TypedArrayView,
 };
+use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::heap_value::HeapKind;
 use shape_value::v2::typed_array::release_v2_typed_array;
@@ -91,6 +91,49 @@ fn extract_view(op: &'static str, slot: &KindedSlot) -> Result<V2TypedArrayView,
             slot.kind
         ))
     })
+}
+
+/// Exhaustive HeapKind sink for pointer-truthiness checks.
+#[inline]
+fn heap_ptr_is_truthy(bits: u64, heap_kind: HeapKind) -> bool {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => bits != 0,
+    }
 }
 
 /// Test a `KindedSlot` for truthiness — mirrors
@@ -126,7 +169,8 @@ fn slot_truthy(slot: &KindedSlot) -> bool {
         NativeKind::Float32 => f32::from_bits(bits as u32) != 0.0,
         NativeKind::Char => bits != 0,
         NativeKind::StringV2 | NativeKind::DecimalV2 => bits != 0,
-        NativeKind::String | NativeKind::Ptr(_) => bits != 0,
+        NativeKind::String => bits != 0,
+        NativeKind::Ptr(heap_kind) => heap_ptr_is_truthy(bits, heap_kind),
         // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9):
         // Null is the absence-of-value sentinel; falsy by definition.
         NativeKind::Null => false,

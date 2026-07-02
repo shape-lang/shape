@@ -22,10 +22,10 @@
 use crate::executor::objects::raw_helpers;
 use crate::{
     bytecode::{Instruction, OpCode},
-    executor::VirtualMachine,
     executor::vm_impl::stack::drop_with_kind,
+    executor::VirtualMachine,
 };
-use shape_value::{FilterNode, NativeKind, VMError, heap_value::HeapKind};
+use shape_value::{heap_value::HeapKind, FilterNode, NativeKind, VMError};
 use std::sync::Arc;
 
 /// Wave 6: heuristic helper. A pushed slot is a runtime-heap-bearing
@@ -34,6 +34,90 @@ use std::sync::Arc;
 #[inline]
 fn kind_is_heap(k: NativeKind) -> bool {
     matches!(k, NativeKind::String | NativeKind::Ptr(_))
+}
+
+#[inline]
+fn heap_ptr_is_truthy(bits: u64, heap_kind: HeapKind) -> bool {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => bits != 0,
+    }
+}
+
+#[inline]
+fn heap_ptr_is_null(bits: u64, heap_kind: HeapKind) -> bool {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => bits == 0,
+    }
 }
 
 /// Wave 6: bool truthiness from raw bits + kind. Inline-scalar arms read
@@ -73,10 +157,11 @@ fn kinded_truthy(bits: u64, kind: NativeKind) -> bool {
         NativeKind::Char => bits != 0,
         // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
         // (2026-05-14): same non-null pointer → truthy rule as
-        // String / Ptr(_) below.
+        // String / Ptr(HeapKind::*) below.
         NativeKind::StringV2 | NativeKind::DecimalV2 => bits != 0,
         // Heap-bearing kinds: non-null pointer → truthy.
-        NativeKind::String | NativeKind::Ptr(_) => bits != 0,
+        NativeKind::String => bits != 0,
+        NativeKind::Ptr(heap_kind) => heap_ptr_is_truthy(bits, heap_kind),
         // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
         // 2026-05-19): `NativeKind::Null` is the absence-of-value
         // sentinel; falsy by definition.
@@ -206,7 +291,8 @@ fn is_null_kinded(bits: u64, kind: NativeKind) -> bool {
     match kind {
         // R5b-2 disposition: Null IS the absence-of-value discriminator.
         NativeKind::Null => true,
-        NativeKind::String | NativeKind::Ptr(_) => bits == 0,
+        NativeKind::String => bits == 0,
+        NativeKind::Ptr(heap_kind) => heap_ptr_is_null(bits, heap_kind),
         NativeKind::NullableFloat64 => f64::from_bits(bits).is_nan(),
         NativeKind::NullableInt8
         | NativeKind::NullableInt16

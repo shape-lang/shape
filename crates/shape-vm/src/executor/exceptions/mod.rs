@@ -1157,6 +1157,49 @@ fn read_option<'a>(
     result_option_carrier::read_option(&vm.builtin_schemas, slot)
 }
 
+/// Exhaustive HeapKind sink for pointer-null checks.
+#[inline]
+fn heap_ptr_is_null(bits: u64, heap_kind: HeapKind) -> bool {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => bits == 0,
+    }
+}
+
 /// Whether a kinded carrier represents the `null` sentinel — used by
 /// `op_unwrap_option`, `op_try_unwrap`, and `op_error_context` to
 /// recognise the legacy null-coded Option half
@@ -1185,7 +1228,8 @@ fn is_null_sentinel(slot: &KindedSlot) -> bool {
         // R5b-2 disposition: Null IS the absence-of-value discriminator;
         // kind alone is decisive, bits unused.
         NativeKind::Null => true,
-        NativeKind::String | NativeKind::Ptr(_) => bits == 0,
+        NativeKind::String => bits == 0,
+        NativeKind::Ptr(heap_kind) => heap_ptr_is_null(bits, heap_kind),
         NativeKind::NullableFloat64 => f64::from_bits(bits).is_nan(),
         NativeKind::NullableInt8
         | NativeKind::NullableInt16

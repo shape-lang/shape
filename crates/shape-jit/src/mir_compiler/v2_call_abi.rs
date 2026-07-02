@@ -31,6 +31,7 @@
 //! uniform `AbiParam::new(types::I64)` loop.
 
 use cranelift::prelude::*;
+use shape_value::HeapKind;
 use shape_vm::bytecode::Function;
 use shape_vm::type_tracking::NativeKind;
 
@@ -125,6 +126,48 @@ fn is_untyped_slot(kind: NativeKind) -> bool {
 // NativeKind -> Cranelift type mapping
 // ---------------------------------------------------------------------------
 
+#[inline]
+fn heap_ptr_slot_to_clif_type(heap_kind: HeapKind) -> types::Type {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => types::I64,
+    }
+}
+
 /// Map a single `NativeKind` to the Cranelift IR type that should be used in
 /// the function signature.
 ///
@@ -182,7 +225,8 @@ pub fn slot_kind_to_clif_type(kind: NativeKind) -> types::Type {
         NativeKind::StringV2 | NativeKind::DecimalV2 => types::I64,
 
         // --- pointer-sized typed slots (heap arms + String) ---
-        NativeKind::String | NativeKind::Ptr(_) => types::I64,
+        NativeKind::String => types::I64,
+        NativeKind::Ptr(heap_kind) => heap_ptr_slot_to_clif_type(heap_kind),
 
         // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
         // 2026-05-19): `NativeKind::Null` is a non-parametric

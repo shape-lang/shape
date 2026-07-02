@@ -27,12 +27,13 @@
 
 use cranelift::prelude::*;
 use shape_value::v2::ConcreteType;
+use shape_value::HeapKind;
 use shape_vm::mir::types::{Operand, Place, SlotId};
-use std::collections::HashMap;
 use shape_vm::type_tracking::NativeKind;
+use std::collections::HashMap;
 
-use super::MirToIR;
 use super::types::is_v2_typed_array_slot;
+use super::MirToIR;
 
 // ── TypedArrayHeader field offsets ───────────────────────────────────────────
 
@@ -43,6 +44,49 @@ const DATA_PTR_OFFSET: i32 = 8;
 const LEN_OFFSET: i32 = 16;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Exhaustive HeapKind sink for pointer-width typed-array element storage.
+#[inline]
+fn heap_ptr_element_type_info(heap_kind: HeapKind) -> (types::Type, i64) {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => (types::I64, 8),
+    }
+}
 
 /// Return the (Cranelift IR type, element byte size) for a given `NativeKind`.
 ///
@@ -79,7 +123,7 @@ fn elem_type_info(kind: NativeKind) -> (types::Type, i64) {
         // 8-byte raw pointer carrier (`*const TypedObjectStorage`). Same shape as
         // NativeKind::StringV2 / DecimalV2 heap-pointer carriers.
         NativeKind::StringV2 | NativeKind::DecimalV2 => (types::I64, 8),
-        NativeKind::Ptr(_) => (types::I64, 8),
+        NativeKind::Ptr(heap_kind) => heap_ptr_element_type_info(heap_kind),
         other => panic!("v2_array: unsupported element NativeKind: {:?}", other),
     }
 }
@@ -211,9 +255,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             match rv {
                 Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => matches_slot(op),
                 Rvalue::BinaryOp(_, lhs, rhs) => matches_slot(lhs) || matches_slot(rhs),
-                Rvalue::FuzzyComparison { lhs, rhs, .. } => {
-                    matches_slot(lhs) || matches_slot(rhs)
-                }
+                Rvalue::FuzzyComparison { lhs, rhs, .. } => matches_slot(lhs) || matches_slot(rhs),
                 Rvalue::Aggregate(ops) => ops.iter().any(&matches_slot),
                 Rvalue::Borrow(_, _) => false,
                 Rvalue::EnumTest { operand, .. }
@@ -311,74 +353,76 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // moved state for that slot.
         let mut reinits: HashMap<SlotId, Vec<usize>> = HashMap::new();
 
-        let record_operand = |op: &Operand,
-                              bi: usize,
-                              si: usize,
-                              moves: &mut HashMap<SlotId, Vec<(usize, usize)>>,
-                              reads: &mut HashMap<SlotId, Vec<(usize, usize)>>| {
-            // v0.3.3 move-then-read divergence: a `let q = p` whole-value
-            // bind lowers as `Use(Move(Local(p)))`, which `compile_operand`
-            // nulls. A SUBSEQUENT read of `p` — including a field/element
-            // projection such as `print(p.x)` lowered as
-            // `Copy(Field(Local(p), 0))` — then reads the nulled slot and
-            // (for a struct) dereferences a null/corrupted pointer → SIGSEGV
-            // under JIT (VM keeps `p` live and prints correctly). The read
-            // tracking MUST therefore key on the place's ROOT local, not
-            // only on a bare `Place::Local`, or a projected later read is
-            // missed and the whole-function deopt never fires. (Pre-fix this
-            // arm only matched `Place::Local`, so `let q = p; print(p.x)`
-            // segfaulted instead of deopting.)
-            match op {
-                Operand::Move(place) | Operand::MoveExplicit(place) => {
-                    if let Place::Local(s) = place {
-                        moves.entry(*s).or_default().push((bi, si));
+        let record_operand =
+            |op: &Operand,
+             bi: usize,
+             si: usize,
+             moves: &mut HashMap<SlotId, Vec<(usize, usize)>>,
+             reads: &mut HashMap<SlotId, Vec<(usize, usize)>>| {
+                // v0.3.3 move-then-read divergence: a `let q = p` whole-value
+                // bind lowers as `Use(Move(Local(p)))`, which `compile_operand`
+                // nulls. A SUBSEQUENT read of `p` — including a field/element
+                // projection such as `print(p.x)` lowered as
+                // `Copy(Field(Local(p), 0))` — then reads the nulled slot and
+                // (for a struct) dereferences a null/corrupted pointer → SIGSEGV
+                // under JIT (VM keeps `p` live and prints correctly). The read
+                // tracking MUST therefore key on the place's ROOT local, not
+                // only on a bare `Place::Local`, or a projected later read is
+                // missed and the whole-function deopt never fires. (Pre-fix this
+                // arm only matched `Place::Local`, so `let q = p; print(p.x)`
+                // segfaulted instead of deopting.)
+                match op {
+                    Operand::Move(place) | Operand::MoveExplicit(place) => {
+                        if let Place::Local(s) = place {
+                            moves.entry(*s).or_default().push((bi, si));
+                        }
+                        reads.entry(place.root_local()).or_default().push((bi, si));
                     }
-                    reads.entry(place.root_local()).or_default().push((bi, si));
+                    Operand::Copy(place) => {
+                        reads.entry(place.root_local()).or_default().push((bi, si));
+                    }
+                    _ => {}
                 }
-                Operand::Copy(place) => {
-                    reads.entry(place.root_local()).or_default().push((bi, si));
-                }
-                _ => {}
-            }
-        };
+            };
 
-        let record_rvalue_reads = |rv: &Rvalue,
-                                   bi: usize,
-                                   si: usize,
-                                   moves: &mut HashMap<SlotId, Vec<(usize, usize)>>,
-                                   reads: &mut HashMap<SlotId, Vec<(usize, usize)>>| {
-            match rv {
-                Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => {
-                    record_operand(op, bi, si, moves, reads);
-                }
-                Rvalue::BinaryOp(_, lhs, rhs) => {
-                    record_operand(lhs, bi, si, moves, reads);
-                    record_operand(rhs, bi, si, moves, reads);
-                }
-                Rvalue::FuzzyComparison { lhs, rhs, .. } => {
-                    record_operand(lhs, bi, si, moves, reads);
-                    record_operand(rhs, bi, si, moves, reads);
-                }
-                Rvalue::Aggregate(ops) => {
-                    for op in ops {
+        let record_rvalue_reads =
+            |rv: &Rvalue,
+             bi: usize,
+             si: usize,
+             moves: &mut HashMap<SlotId, Vec<(usize, usize)>>,
+             reads: &mut HashMap<SlotId, Vec<(usize, usize)>>| {
+                match rv {
+                    Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => {
                         record_operand(op, bi, si, moves, reads);
                     }
+                    Rvalue::BinaryOp(_, lhs, rhs) => {
+                        record_operand(lhs, bi, si, moves, reads);
+                        record_operand(rhs, bi, si, moves, reads);
+                    }
+                    Rvalue::FuzzyComparison { lhs, rhs, .. } => {
+                        record_operand(lhs, bi, si, moves, reads);
+                        record_operand(rhs, bi, si, moves, reads);
+                    }
+                    Rvalue::Aggregate(ops) => {
+                        for op in ops {
+                            record_operand(op, bi, si, moves, reads);
+                        }
+                    }
+                    // A borrow reads the slot's value (the JIT loads it). Key on
+                    // the root local so a projected borrow (`&p.x`) still counts
+                    // as a later read of `p`.
+                    Rvalue::Borrow(_, place) => {
+                        reads.entry(place.root_local()).or_default().push((bi, si));
+                    }
+                    Rvalue::EnumTest { operand, .. }
+                    | Rvalue::EnumPayload { operand, .. }
+                    | Rvalue::TypePatternTest { operand, .. }
+                    | Rvalue::EnumDiscriminantTest { operand, .. }
+                    | Rvalue::PrimitiveCast { operand, .. } => {
+                        record_operand(operand, bi, si, moves, reads);
+                    }
                 }
-                // A borrow reads the slot's value (the JIT loads it). Key on
-                // the root local so a projected borrow (`&p.x`) still counts
-                // as a later read of `p`.
-                Rvalue::Borrow(_, place) => {
-                    reads.entry(place.root_local()).or_default().push((bi, si));
-                }
-                Rvalue::EnumTest { operand, .. }
-                | Rvalue::EnumPayload { operand, .. }
-                | Rvalue::TypePatternTest { operand, .. }
-                | Rvalue::EnumDiscriminantTest { operand, .. }
-                | Rvalue::PrimitiveCast { operand, .. } => {
-                    record_operand(operand, bi, si, moves, reads);
-                }
-            }
-        };
+            };
 
         for (bi, block) in self.mir.blocks.iter().enumerate() {
             for (si, stmt) in block.statements.iter().enumerate() {
@@ -414,9 +458,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 TerminatorKind::SwitchBool { operand, .. } => {
                     record_operand(operand, bi, usize::MAX, &mut moves, &mut reads);
                 }
-                TerminatorKind::Goto(_)
-                | TerminatorKind::Return
-                | TerminatorKind::Unreachable => {}
+                TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => {}
             }
         }
 

@@ -11,7 +11,7 @@ use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
 };
-use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
+use shape_value::{HeapKind, KindedSlot, NativeKind, VMError, ValueSlot};
 
 /// ADR-006 §2.7.4 / §2.7.7 surface marker for the closure-call /
 /// extern-FFI / JIT-dispatch paths in this module that still depended on
@@ -24,6 +24,49 @@ use shape_value::{KindedSlot, NativeKind, VMError, ValueSlot};
 /// are deferred to phase-2c per §2.7.4.
 const PHASE_2C_CALL_REBUILD_SURFACE: &str =
     "phase-2c — closure / call / extern-FFI rebuild (ADR-006 §2.7.4 / §2.7.5)";
+
+/// Exhaustive HeapKind sink for pointer-truthiness checks.
+#[inline]
+fn heap_ptr_is_truthy(bits: u64, heap_kind: HeapKind) -> bool {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => bits != 0,
+    }
+}
 
 /// ADR-006 §2.7.7: bool truthiness from raw bits + kind. Mirrors the
 /// helper in `executor/logical/mod.rs` (kept module-local; no cross-
@@ -61,10 +104,11 @@ fn kinded_truthy(bits: u64, kind: NativeKind) -> bool {
         NativeKind::Char => bits != 0,
         // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
         // (2026-05-14): truthy iff `bits != 0` — the v2-raw carrier ptr is
-        // non-null when live (same shape as the String / Ptr(_) heap-arm
-        // truthy rule below).
+        // non-null when live (same shape as the String / Ptr(HeapKind::*)
+        // heap-arm truthy rule below).
         NativeKind::StringV2 | NativeKind::DecimalV2 => bits != 0,
-        NativeKind::String | NativeKind::Ptr(_) => bits != 0,
+        NativeKind::String => bits != 0,
+        NativeKind::Ptr(heap_kind) => heap_ptr_is_truthy(bits, heap_kind),
         // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
         // 2026-05-19): `NativeKind::Null` is the absence-of-value
         // sentinel; falsy by definition.
@@ -497,15 +541,14 @@ impl VirtualMachine {
         //   - `Operand::ClosureAlloc { fid, .. }` — compiler-tagged with
         //     escape status (the VM path is identical; the JIT's MIR
         //     lowering reads `escapes` to pick stack vs. heap codegen).
-        use shape_value::HeapKind;
         use shape_value::heap_value::HeapValue;
         use shape_value::v2::closure_layout::CaptureKind;
         use shape_value::v2::closure_raw::{
-            OwnedClosureBlock, alloc_owned_mutable_bool, alloc_owned_mutable_f64,
-            alloc_owned_mutable_i8, alloc_owned_mutable_i16, alloc_owned_mutable_i32,
-            alloc_owned_mutable_i64, alloc_owned_mutable_ptr, alloc_owned_mutable_u8,
-            alloc_owned_mutable_u16, alloc_owned_mutable_u32, alloc_owned_mutable_u64,
-            alloc_typed_closure, write_capture_raw_u64,
+            alloc_owned_mutable_bool, alloc_owned_mutable_f64, alloc_owned_mutable_i16,
+            alloc_owned_mutable_i32, alloc_owned_mutable_i64, alloc_owned_mutable_i8,
+            alloc_owned_mutable_ptr, alloc_owned_mutable_u16, alloc_owned_mutable_u32,
+            alloc_owned_mutable_u64, alloc_owned_mutable_u8, alloc_typed_closure,
+            write_capture_raw_u64, OwnedClosureBlock,
         };
         use shape_value::v2::struct_layout::FieldKind;
         use std::sync::Arc;

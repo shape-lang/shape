@@ -26,10 +26,10 @@
 //! interpret a non-Bool closure return — same shape as `kinded_truthy` in
 //! `executor/logical/mod.rs:43`.
 
-use crate::executor::VirtualMachine;
 use crate::executor::v2_handlers::v2_array_detect::{
-    V2TypedArrayView, as_v2_typed_array, read_element,
+    as_v2_typed_array, read_element, V2TypedArrayView,
 };
+use crate::executor::VirtualMachine;
 use shape_runtime::context::ExecutionContext;
 use shape_value::{HeapKind, KindedSlot, NativeKind, VMError, ValueSlot};
 
@@ -69,6 +69,49 @@ fn pair_to_slot((bits, kind): (u64, NativeKind)) -> KindedSlot {
 // Truthiness helper — preserved (no TypedArrayData dependency)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Exhaustive HeapKind sink for pointer-truthiness checks.
+#[inline]
+fn heap_ptr_is_truthy(bits: u64, heap_kind: HeapKind) -> bool {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => bits != 0,
+    }
+}
+
 /// Test a `KindedSlot` for truthiness — Bool/numeric arms read bits,
 /// heap arms are non-null → truthy. Mirrors the `kinded_truthy` helper in
 /// `executor/logical/mod.rs:43` (private there). Used by `count(predicate)`
@@ -103,7 +146,8 @@ fn slot_truthy(slot: &KindedSlot) -> bool {
         NativeKind::Float32 => f32::from_bits(bits as u32) != 0.0,
         NativeKind::Char => bits != 0,
         NativeKind::StringV2 | NativeKind::DecimalV2 => bits != 0,
-        NativeKind::String | NativeKind::Ptr(_) => bits != 0,
+        NativeKind::String => bits != 0,
+        NativeKind::Ptr(heap_kind) => heap_ptr_is_truthy(bits, heap_kind),
         // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
         // 2026-05-19): `NativeKind::Null` is the absence-of-value
         // sentinel; falsy by definition.

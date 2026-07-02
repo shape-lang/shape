@@ -23,6 +23,7 @@
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use cranelift::codegen::ir::FuncRef;
 use cranelift::prelude::*;
+use shape_value::HeapKind;
 use shape_vm::type_tracking::NativeKind;
 
 // ---------------------------------------------------------------------------
@@ -46,6 +47,90 @@ pub const V2_HEADER_FLAGS_OFFSET: u32 = 6;
 // ---------------------------------------------------------------------------
 // NativeKind -> Cranelift type mapping
 // ---------------------------------------------------------------------------
+
+#[inline]
+fn heap_ptr_slot_to_clif_type(heap_kind: HeapKind) -> types::Type {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => types::I64,
+    }
+}
+
+#[inline]
+fn heap_ptr_slot_byte_width(heap_kind: HeapKind) -> u32 {
+    match heap_kind {
+        HeapKind::String
+        | HeapKind::TypedObject
+        | HeapKind::Closure
+        | HeapKind::Decimal
+        | HeapKind::BigInt
+        | HeapKind::DataTable
+        | HeapKind::Future
+        | HeapKind::TaskGroup
+        | HeapKind::TypedArray
+        | HeapKind::Temporal
+        | HeapKind::TableView
+        | HeapKind::Content
+        | HeapKind::Instant
+        | HeapKind::IoHandle
+        | HeapKind::NativeScalar
+        | HeapKind::NativeView
+        | HeapKind::Char
+        | HeapKind::HashMap
+        | HeapKind::FilterExpr
+        | HeapKind::Reference
+        | HeapKind::SharedCell
+        | HeapKind::HashSet
+        | HeapKind::Iterator
+        | HeapKind::Deque
+        | HeapKind::Channel
+        | HeapKind::PriorityQueue
+        | HeapKind::Range
+        | HeapKind::Result
+        | HeapKind::Option
+        | HeapKind::TraitObject
+        | HeapKind::Mutex
+        | HeapKind::Atomic
+        | HeapKind::Lazy
+        | HeapKind::ModuleFn
+        | HeapKind::Matrix
+        | HeapKind::MatrixSlice => 8,
+    }
+}
 
 /// Map a `NativeKind` to the corresponding Cranelift IR type.
 ///
@@ -96,8 +181,9 @@ pub fn cranelift_type_for_slot(kind: NativeKind) -> types::Type {
         NativeKind::StringV2 | NativeKind::DecimalV2 => types::I64,
 
         // Boxed/pointer-sized values: String (Arc<String> raw ptr) and
-        // every `Ptr(_)` heap arm.
-        NativeKind::String | NativeKind::Ptr(_) => types::I64,
+        // every `Ptr(HeapKind::*)` heap arm.
+        NativeKind::String => types::I64,
+        NativeKind::Ptr(heap_kind) => heap_ptr_slot_to_clif_type(heap_kind),
 
         // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
         // 2026-05-19): `NativeKind::Null` is the absence-of-value
@@ -137,7 +223,8 @@ pub fn slot_byte_width(kind: NativeKind) -> u32 {
         // Wave 2 Agent B W12-StringV2-DecimalV2-NativeKind-additions
         // (2026-05-14): v2-raw heap-pointer carriers — pointer-width 8 bytes.
         NativeKind::StringV2 | NativeKind::DecimalV2 => 8,
-        NativeKind::String | NativeKind::Ptr(_) => 8,
+        NativeKind::String => 8,
+        NativeKind::Ptr(heap_kind) => heap_ptr_slot_byte_width(heap_kind),
         // R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
         // 2026-05-19): `NativeKind::Null` is 1-byte storage (mirror
         // of Bool); kind alone is load-bearing.

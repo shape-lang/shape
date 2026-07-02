@@ -4,7 +4,7 @@ Date: 2026-07-02
 
 Initial guard worker: W83B (`strict-flip-w83b-heapkind-exhaustive`)
 
-Latest reducer: W86B (`strict-flip-w86b-heapkind-wildcard-elimination`)
+Latest reducer: W87B (`strict-flip-w87b-heapkind-residual-hardening`)
 
 Guard landed:
 
@@ -21,22 +21,21 @@ It intentionally does not reject unrelated `_ =>` arms.
 
 ## Current Residual Catalog
 
-Current guard baseline after W86B: 11 residual patterns. The W83B starting
-baseline was 39; the W84B baseline was 29.
+Current guard baseline after W87B: 0 residual patterns. The W83B starting
+baseline was 39; the W84B baseline was 29; the W86B baseline was 11.
 
-1. Direct `NativeKind::Ptr(_)` arms: 11 baseline sites.
-   These are deliberately non-dispatch:
-   - JIT ABI/layout width-only rows:
-     `crates/shape-jit/src/mir_compiler/v2_array.rs`,
-     `v2_call_abi.rs`, and `v2_field.rs`.
-   - Null-sentinel checks:
-     `comparison/mod.rs`, `exceptions/mod.rs`, and `logical/mod.rs`.
-   - Truthiness checks:
-     `control_flow/mod.rs`, `logical/mod.rs`,
-     `objects/array_aggregation.rs`, and `objects/array_query.rs`.
-   All 11 ignore the specific `HeapKind` by design: every `Ptr(HeapKind::*)`
-   carrier has pointer-width ABI storage, is null iff the pointer bits are
-   zero, and is truthy iff non-null.
+1. Direct `NativeKind::Ptr(_)` arms: 0 baseline sites.
+   W87B eliminated the remaining 11 direct anonymous arms. Each former
+   width/null/truthiness residual now binds `NativeKind::Ptr(heap_kind)` and
+   routes through a local exhaustive helper whose `HeapKind` arms all return
+   the same result:
+   - JIT ABI/layout width-only rows map every current `HeapKind` to pointer
+     width (`I64` / 8 bytes).
+   - Null-sentinel helpers map every current `HeapKind` to `bits == 0`.
+   - Truthiness helpers map every current `HeapKind` to `bits != 0`.
+   The helpers do not inspect payload bits, call tag readers, or infer heap
+   kind at runtime; the `HeapKind` label is only matched exhaustively so a
+   future enum variant must update these non-dispatch helpers intentionally.
 
 2. Legacy JIT `heap_kind(...)` catch-alls: 0 baseline sites.
    W84B removed the 10 direct legacy JIT residuals in:
@@ -79,6 +78,23 @@ W86B removed 18 residuals from the guard baseline:
 - Unsupported dispatch/conversion surfaces in loops, property access,
   method registry fallback, `Array.join`, and typed-object field comparison:
   6 -> 0, via exhaustive `HeapKind` groups.
+
+## W87B Reductions
+
+W87B removed the final 11 residuals from the guard baseline:
+
+- JIT width/layout residuals: 4 -> 0, via bound `Ptr(heap_kind)` arms and
+  exhaustive same-result helpers in `v2_array.rs`, `v2_call_abi.rs`, and
+  `v2_field.rs`.
+- VM null-sentinel residuals: 3 -> 0, via exhaustive same-result helpers in
+  `comparison/mod.rs`, `exceptions/mod.rs`, and `logical/mod.rs`.
+- VM truthiness residuals: 4 -> 0, via exhaustive same-result helpers in
+  `control_flow/mod.rs`, `logical/mod.rs`, `array_aggregation.rs`, and
+  `array_query.rs`.
+
+The checker's known baseline is intentionally empty after W87B. Any new
+anonymous direct `NativeKind::Ptr(_) =>` arm, legacy JIT `heap_kind(...)`
+catch-all, or direct `HeapKind` match catch-all fails the guard.
 
 ## Wave 2 Notes
 
