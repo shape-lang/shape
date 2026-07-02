@@ -390,8 +390,8 @@ fn test_hashmap_is_empty_false() {
 fn test_hashmap_in_function() {
     ShapeTest::new(
         r#"
-        fn make_config() {
-            HashMap().set("host", "localhost").set("port", "8080")
+        fn make_config() -> HashMap<string, string> {
+            return HashMap().set("host", "localhost").set("port", "8080")
         }
         let cfg = make_config()
         cfg.get("host")
