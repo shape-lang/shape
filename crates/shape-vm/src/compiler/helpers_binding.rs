@@ -609,6 +609,35 @@ impl BytecodeCompiler {
         Self::prove_exact_scalar_return_kind(site, &proven, claimed)
     }
 
+    pub(in crate::compiler) fn top_level_metadata_return_kind_from_proof(
+        site: &'static str,
+        proven: &shape_value::v2::ConcreteType,
+        claimed_kind: crate::type_tracking::StorageHint,
+    ) -> Option<crate::type_tracking::StorageHint> {
+        // Top-level return metadata is a host-boundary annotation, not a
+        // typed-opcode emission site. A proof gap here means the walkback
+        // producer evidence is stale or non-authoritative for metadata, so the
+        // caller must leave `top_level_frame.return_kind` unset. The strict
+        // `prove_exact_scalar_return_kind` helper still propagates this same
+        // gap as a hard error for real typed `ReturnValue<Kind>` emission.
+        match Self::prove_exact_scalar_return_kind(site, proven, claimed_kind) {
+            Ok(kind) => kind,
+            Err(_) => None,
+        }
+    }
+
+    pub(in crate::compiler) fn exact_top_level_metadata_return_kind_for_expr(
+        &self,
+        site: &'static str,
+        expr: Option<&shape_ast::ast::Expr>,
+    ) -> Option<crate::type_tracking::StorageHint> {
+        let expr = expr?;
+        let proven =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, expr)?;
+        let claimed = self.last_emitted_native_kind()?;
+        Self::top_level_metadata_return_kind_from_proof(site, &proven, claimed)
+    }
+
     /// Phase 5.B: If the initializer is a simple (non-qualified) call to a
     /// function whose return-ownership mode has been inferred, return that
     /// mode. Callers use it to populate `BindingSemantics::return_ownership_hint`.
@@ -1145,6 +1174,36 @@ mod u2_exact_native_kind_proof_tests {
         )
         .expect_err("unsigned width narrowing must not fall back silently");
         assert!(err.to_string().contains("E_TYPED_OPCODE_WITHOUT_PROOF"));
+    }
+
+    #[test]
+    fn top_level_metadata_drops_non_authoritative_proof_gaps() {
+        assert_eq!(
+            BytecodeCompiler::top_level_metadata_return_kind_from_proof(
+                "test_top_level_exact_i64",
+                &ConcreteType::I64,
+                StorageHint::Int64,
+            ),
+            Some(StorageHint::Int64)
+        );
+
+        assert_eq!(
+            BytecodeCompiler::top_level_metadata_return_kind_from_proof(
+                "test_top_level_width_walkback_gap",
+                &ConcreteType::I32,
+                StorageHint::Int64,
+            ),
+            None
+        );
+
+        assert_eq!(
+            BytecodeCompiler::top_level_metadata_return_kind_from_proof(
+                "test_top_level_stale_bool_walkback_gap",
+                &ConcreteType::I64,
+                StorageHint::Bool,
+            ),
+            None
+        );
     }
 
     #[test]

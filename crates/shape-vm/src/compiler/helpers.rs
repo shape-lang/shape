@@ -3738,10 +3738,10 @@ impl BytecodeCompiler {
             _ => return Ok(None),
         };
 
-        if let Some(kind) = self.exact_scalar_return_kind_for_expr(
+        if let Some(kind) = self.exact_top_level_metadata_return_kind_for_expr(
             "infer_top_level_return_kind_from_item",
             Some(expr),
-        )? {
+        ) {
             return Ok(Some(kind));
         }
 
@@ -3821,24 +3821,30 @@ impl BytecodeCompiler {
             return Ok(None);
         };
 
-        // Producer/return-kind contract gate (Wave E+5 / task #98 fix).
+        // Producer/return-kind metadata gate (Wave E+5 / task #98 fix,
+        // refined by W83A return-kind repair). Top-level metadata is not a
+        // typed-opcode emission site: a stale walkback kind that contradicts
+        // the structural return annotation means "do not stamp metadata", not
+        // "reject compilation". Real typed `ReturnValue<Kind>` emission still
+        // routes through the strict helper and surfaces proof gaps.
+        //
         // Top-level `name()` calls compile to polymorphic `Call*` opcodes
         // whose pushed kind is the callee's `FrameDescriptor.return_kind`
         // (read off the parallel-kind track at the call site per
         // ADR-006 §2.7.7); `last_emitted_native_kind` returns `None` for
         // these, which correctly steers the program return kind to
         // `None` rather than overriding the call-site declaration. When
-        // a producer kind is present, accept it only if the real U2 proof
+        // a producer kind is present, stamp metadata only if the U2 proof
         // gate confirms exact agreement between the proven static type and
         // the producer-declared `NativeKind`.
         let Some(native_kind) = self.last_emitted_native_kind() else {
             return Ok(None);
         };
-        Self::prove_exact_scalar_return_kind(
+        Ok(Self::top_level_metadata_return_kind_from_proof(
             "infer_top_level_return_kind_from_item",
             &proven,
             native_kind,
-        )
+        ))
     }
 
     /// Wave E+5.5 cluster R5: examine each arm of a top-level match
@@ -3910,10 +3916,16 @@ impl BytecodeCompiler {
         &mut self,
         tail_expr: Option<&shape_ast::ast::Expr>,
     ) -> shape_ast::error::Result<Option<StorageHint>> {
-        // A typed top-level return kind now requires the final expression's
-        // structural `ConcreteType` plus an exact producer-kind proof. Hints
-        // from `numeric_type_of` / `last_expr_type_info` are not evidence.
-        self.exact_scalar_return_kind_for_expr("infer_top_level_return_kind", tail_expr)
+        // A stamped top-level return kind requires the final expression's
+        // structural `ConcreteType` plus an exact producer-kind proof. When the
+        // producer walkback is stale or non-authoritative, proof gaps collapse
+        // to `None` so the host boundary uses the stack's parallel-kind track
+        // instead of rejecting compilation. Typed `ReturnValue<Kind>` emission
+        // keeps the strict hard-error policy via `exact_scalar_return_kind_for_expr`.
+        Ok(self.exact_top_level_metadata_return_kind_for_expr(
+            "infer_top_level_return_kind",
+            tail_expr,
+        ))
     }
 
     /// Populate program-level storage hints for top-level locals and module bindings.
