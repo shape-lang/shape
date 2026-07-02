@@ -948,6 +948,58 @@ impl BytecodeCompiler {
 }
 
 impl BytecodeCompiler {
+    fn collect_inline_module_analysis_items(
+        &self,
+        items: &[shape_ast::ast::Item],
+        parent_module_path: Option<&str>,
+        out: &mut Vec<shape_ast::ast::Item>,
+    ) -> Result<()> {
+        for item in items {
+            let shape_ast::ast::Item::Module(module, _) = item else {
+                continue;
+            };
+            let module_path = if let Some(parent) = parent_module_path {
+                Self::qualify_module_symbol(parent, &module.name)
+            } else {
+                module.name.clone()
+            };
+
+            for nested in &module.items {
+                if matches!(nested, shape_ast::ast::Item::Import(..)) {
+                    continue;
+                }
+                if matches!(nested, shape_ast::ast::Item::Module(..)) {
+                    self.collect_inline_module_analysis_items(
+                        std::slice::from_ref(nested),
+                        Some(&module_path),
+                        out,
+                    )?;
+                } else {
+                    out.push(self.qualify_module_item(nested, &module_path)?);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn prepend_inline_module_analysis_items(
+        &self,
+        program: &mut Program,
+    ) -> Result<()> {
+        let mut qualified_module_items = Vec::new();
+        self.collect_inline_module_analysis_items(
+            &program.items,
+            None,
+            &mut qualified_module_items,
+        )?;
+        if qualified_module_items.is_empty() {
+            return Ok(());
+        }
+        qualified_module_items.extend(program.items.drain(..));
+        program.items = qualified_module_items;
+        Ok(())
+    }
+
     pub(super) fn infer_reference_model(
         program: &Program,
     ) -> (
@@ -1911,6 +1963,7 @@ impl BytecodeCompiler {
             merged.extend(analysis_program.items.drain(..));
             analysis_program.items = merged;
         }
+        self.prepend_inline_module_analysis_items(&mut analysis_program)?;
 
         // Run the shared analyzer and surface diagnostics that are currently
         // proven reliable in the compiler execution path.
@@ -2007,7 +2060,10 @@ impl BytecodeCompiler {
             inferred_ref_mutates,
             inferred_return_annotations,
             inference_facts,
-        ) = Self::infer_reference_model_with_comptime_context(&program, self.comptime_mode);
+        ) = Self::infer_reference_model_with_comptime_context(
+            &analysis_program,
+            self.comptime_mode,
+        );
         // T1 KEYSTONE: store the post-solve per-expression type table so
         // `infer_expr_type` can consult it first (root fix for static
         // type-erasure of function-body collection-dispatch / match-arm locals).

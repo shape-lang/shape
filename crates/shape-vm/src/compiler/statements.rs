@@ -4220,6 +4220,161 @@ impl BytecodeCompiler {
         }
     }
 
+    fn collect_type_params_from_type_name(
+        type_name: &shape_ast::ast::TypeName,
+    ) -> std::collections::HashSet<String> {
+        let mut params = std::collections::HashSet::new();
+        if let shape_ast::ast::TypeName::Generic { type_args, .. } = type_name {
+            for arg in type_args {
+                let Some(name) = arg.as_type_name_str() else {
+                    continue;
+                };
+                if !name.contains("::")
+                    && name.len() <= 2
+                    && name.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+                {
+                    params.insert(name.to_string());
+                }
+            }
+        }
+        params
+    }
+
+    fn qualify_module_type_annotation(
+        annotation: &shape_ast::ast::TypeAnnotation,
+        module_path: &str,
+        type_params: &std::collections::HashSet<String>,
+    ) -> shape_ast::ast::TypeAnnotation {
+        use shape_ast::ast::TypeAnnotation;
+
+        let qualify_name = |name: &str| -> String {
+            if name.contains("::")
+                || Self::is_builtin_type_name(name)
+                || name == "Self"
+                || type_params.contains(name)
+            {
+                name.to_string()
+            } else {
+                Self::qualify_module_symbol(module_path, name)
+            }
+        };
+
+        match annotation {
+            TypeAnnotation::Basic(name) => TypeAnnotation::Basic(qualify_name(name)),
+            TypeAnnotation::Reference(path) => {
+                TypeAnnotation::Reference(qualify_name(path.as_str()).into())
+            }
+            TypeAnnotation::Generic { name, args } => TypeAnnotation::Generic {
+                name: qualify_name(name.as_str()).into(),
+                args: args
+                    .iter()
+                    .map(|arg| Self::qualify_module_type_annotation(arg, module_path, type_params))
+                    .collect(),
+            },
+            TypeAnnotation::Array(inner) => TypeAnnotation::Array(Box::new(
+                Self::qualify_module_type_annotation(inner, module_path, type_params),
+            )),
+            TypeAnnotation::Tuple(items) => TypeAnnotation::Tuple(
+                items
+                    .iter()
+                    .map(|item| {
+                        Self::qualify_module_type_annotation(item, module_path, type_params)
+                    })
+                    .collect(),
+            ),
+            TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+                params: params
+                    .iter()
+                    .cloned()
+                    .map(|mut param| {
+                        param.type_annotation = Self::qualify_module_type_annotation(
+                            &param.type_annotation,
+                            module_path,
+                            type_params,
+                        );
+                        param
+                    })
+                    .collect(),
+                returns: Box::new(Self::qualify_module_type_annotation(
+                    returns,
+                    module_path,
+                    type_params,
+                )),
+            },
+            TypeAnnotation::Union(items) => TypeAnnotation::Union(
+                items
+                    .iter()
+                    .map(|item| {
+                        Self::qualify_module_type_annotation(item, module_path, type_params)
+                    })
+                    .collect(),
+            ),
+            TypeAnnotation::Intersection(items) => TypeAnnotation::Intersection(
+                items
+                    .iter()
+                    .map(|item| {
+                        Self::qualify_module_type_annotation(item, module_path, type_params)
+                    })
+                    .collect(),
+            ),
+            TypeAnnotation::Object(fields) => TypeAnnotation::Object(
+                fields
+                    .iter()
+                    .cloned()
+                    .map(|mut field| {
+                        field.type_annotation = Self::qualify_module_type_annotation(
+                            &field.type_annotation,
+                            module_path,
+                            type_params,
+                        );
+                        field
+                    })
+                    .collect(),
+            ),
+            TypeAnnotation::Borrow { mutable, inner } => TypeAnnotation::Borrow {
+                mutable: *mutable,
+                inner: Box::new(Self::qualify_module_type_annotation(
+                    inner,
+                    module_path,
+                    type_params,
+                )),
+            },
+            TypeAnnotation::Dyn(traits) => TypeAnnotation::Dyn(
+                traits
+                    .iter()
+                    .map(|trait_path| qualify_name(trait_path.as_str()).into())
+                    .collect(),
+            ),
+            TypeAnnotation::Void
+            | TypeAnnotation::Never
+            | TypeAnnotation::Null
+            | TypeAnnotation::Undefined => annotation.clone(),
+        }
+    }
+
+    fn qualify_module_method_signature(
+        method: &mut shape_ast::ast::types::MethodDef,
+        module_path: &str,
+        receiver_type_params: &std::collections::HashSet<String>,
+    ) {
+        let mut type_params = receiver_type_params.clone();
+        if let Some(method_type_params) = &method.type_params {
+            for param in method_type_params {
+                type_params.insert(param.name().to_string());
+            }
+        }
+        for param in &mut method.params {
+            if let Some(annotation) = param.type_annotation.as_mut() {
+                *annotation =
+                    Self::qualify_module_type_annotation(annotation, module_path, &type_params);
+            }
+        }
+        if let Some(return_type) = method.return_type.as_mut() {
+            *return_type =
+                Self::qualify_module_type_annotation(return_type, module_path, &type_params);
+        }
+    }
+
     pub(super) fn qualify_module_item(&self, item: &Item, module_path: &str) -> Result<Item> {
         match item {
             Item::Function(func, span) => {
@@ -4379,20 +4534,34 @@ impl BytecodeCompiler {
             Item::Extend(extend, span) => {
                 let mut q = extend.clone();
                 q.type_name = Self::qualify_type_name(&extend.type_name, module_path);
+                let receiver_type_params =
+                    Self::collect_type_params_from_type_name(&extend.type_name);
                 for method in &mut q.methods {
                     if method.declaring_module_path.is_none() {
                         method.declaring_module_path = Some(module_path.to_string());
                     }
+                    Self::qualify_module_method_signature(
+                        method,
+                        module_path,
+                        &receiver_type_params,
+                    );
                 }
                 Ok(Item::Extend(q, *span))
             }
             Item::Impl(impl_block, span) => {
                 let mut q = impl_block.clone();
                 q.target_type = Self::qualify_type_name(&impl_block.target_type, module_path);
+                let receiver_type_params =
+                    Self::collect_type_params_from_type_name(&impl_block.target_type);
                 for method in &mut q.methods {
                     if method.declaring_module_path.is_none() {
                         method.declaring_module_path = Some(module_path.to_string());
                     }
+                    Self::qualify_module_method_signature(
+                        method,
+                        module_path,
+                        &receiver_type_params,
+                    );
                 }
                 // Do NOT qualify trait_name — traits may be imported from other scopes
                 Ok(Item::Impl(q, *span))

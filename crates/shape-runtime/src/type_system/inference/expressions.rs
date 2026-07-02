@@ -841,7 +841,25 @@ impl TypeInferenceEngine {
                 }
             }
 
-            Expr::EnumConstructor { enum_name, .. } => {
+            Expr::EnumConstructor {
+                enum_name,
+                variant,
+                payload,
+                ..
+            } => {
+                if let shape_ast::ast::EnumConstructorPayload::Struct(fields) = payload {
+                    let qualified_struct_name = format!("{}::{}", enum_name.as_str(), variant);
+                    if self.struct_type_defs.contains_key(&qualified_struct_name)
+                        || self.env.lookup_type_alias(&qualified_struct_name).is_some()
+                    {
+                        for (_, value) in fields {
+                            self.infer_expr(value)?;
+                        }
+                        return Ok(Type::Concrete(TypeAnnotation::Reference(
+                            qualified_struct_name.into(),
+                        )));
+                    }
+                }
                 Ok(Type::Concrete(TypeAnnotation::Reference(enum_name.clone())))
             }
 
