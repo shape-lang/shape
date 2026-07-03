@@ -4539,7 +4539,39 @@ impl BytecodeCompiler {
             );
         }
 
-        // 2. TypedObject type name (user-defined types like Point, Candle)
+        // 2. Static concrete return proof for nested method-call receivers.
+        // A successful extend-method specialization records its substituted
+        // return annotation at the call site; consume that compile-time proof
+        // here so chained calls like `x.add(1).multiply(2)` keep resolving via
+        // direct UFCS instead of falling through to runtime method dispatch.
+        if let Some(concrete) =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(
+                self, receiver,
+            )
+        {
+            use shape_value::v2::ConcreteType;
+            let receiver_name = match concrete {
+                ConcreteType::F64 | ConcreteType::F32 => Some("Number"),
+                ConcreteType::I64
+                | ConcreteType::I32
+                | ConcreteType::I16
+                | ConcreteType::I8
+                | ConcreteType::U64
+                | ConcreteType::U32
+                | ConcreteType::U16
+                | ConcreteType::U8 => Some("Int"),
+                ConcreteType::Bool => Some("Bool"),
+                ConcreteType::String => Some("String"),
+                ConcreteType::Decimal => Some("Decimal"),
+                ConcreteType::Array(_) => Some("Vec"),
+                _ => None,
+            };
+            if let Some(receiver_name) = receiver_name {
+                return Some(receiver_name.to_string());
+            }
+        }
+
+        // 3. TypedObject type name (user-defined types like Point, Candle)
         if let Some(info) = receiver_type_info {
             if let Some(type_name) = &info.type_name {
                 // Strip generic params: "Vec<int>" → "Vec"
@@ -4548,7 +4580,7 @@ impl BytecodeCompiler {
             }
         }
 
-        // 3. Infer from receiver expression shape
+        // 4. Infer from receiver expression shape
         match receiver {
             shape_ast::ast::Expr::Literal(lit, _) => match lit {
                 shape_ast::ast::Literal::String(_)
