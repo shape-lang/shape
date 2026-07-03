@@ -28,8 +28,8 @@ CRATE_ROOTS = {
 EXPECTED_COUNTS = {
     "shape-vm": {
         "phase_2c_surface": 93,
-        "active_feature_gap": 16,
-        "stale_semantic_expectation": 4,
+        "active_feature_gap": 20,
+        "stale_semantic_expectation": 0,
         "deleted_v1_path": 5,
         "diagnostic_only": 1,
     },
@@ -43,7 +43,7 @@ EXPECTED_COUNTS = {
 
 EXPECTED_SOURCE_ONLY_STATUS = {
     "shape-vm": {
-        "deep-tests": 39,
+        "deep-tests": 62,
     },
     "shape-jit": {
         "deep-tests": 2,
@@ -75,6 +75,8 @@ ALLOWED_UNREASONED = {
     "debug_decimal_opcodes",
     "test_nested_generic_call",
 }
+
+DEEP_TEST_RANGE_CACHE: dict[Path, list[tuple[int, int]]] = {}
 
 
 def normalize_reason(attr: str) -> str:
@@ -135,6 +137,64 @@ def parse_ignored_tests(crate: str, root: Path) -> list[dict[str, object]]:
     return entries
 
 
+def collect_multiline_attr(lines: list[str], start: int) -> tuple[str, int]:
+    attr_parts = [lines[start].strip()]
+    i = start
+    while not re.search(r"\]\s*(?://.*)?$", attr_parts[-1]) and i + 1 < len(lines):
+        i += 1
+        attr_parts.append(lines[i].strip())
+    return " ".join(attr_parts), i
+
+
+def deep_test_cfg_ranges(path: Path) -> list[tuple[int, int]]:
+    cached = DEEP_TEST_RANGE_CACHE.get(path)
+    if cached is not None:
+        return cached
+
+    lines = path.read_text(errors="replace").splitlines()
+    ranges: list[tuple[int, int]] = []
+    i = 0
+    while i < len(lines):
+        if not re.match(r"\s*#\s*\[\s*cfg\b", lines[i]):
+            i += 1
+            continue
+
+        attr, attr_end = collect_multiline_attr(lines, i)
+        if "deep-tests" not in attr:
+            i = attr_end + 1
+            continue
+
+        lookahead = attr_end + 1
+        while lookahead < len(lines):
+            stripped = lines[lookahead].strip()
+            if not stripped or stripped.startswith("#"):
+                lookahead += 1
+                continue
+            break
+
+        opener = lookahead
+        while opener < len(lines) and "{" not in lines[opener]:
+            opener += 1
+        if opener >= len(lines):
+            i = attr_end + 1
+            continue
+
+        opener_indent = len(lines[opener]) - len(lines[opener].lstrip())
+        end_line = len(lines)
+        for closing in range(opener + 1, len(lines)):
+            stripped = lines[closing].strip()
+            indent = len(lines[closing]) - len(lines[closing].lstrip())
+            if stripped.startswith("}") and indent == opener_indent:
+                end_line = closing + 1
+                break
+
+        ranges.append((i + 1, end_line))
+        i = attr_end + 1
+
+    DEEP_TEST_RANGE_CACHE[path] = ranges
+    return ranges
+
+
 def has_test_attr(entry: dict[str, object]) -> bool:
     return any(re.match(r"#\s*\[\s*test\b", attr) for attr in entry["attrs"])  # type: ignore[index]
 
@@ -143,6 +203,11 @@ def source_only_status(entry: dict[str, object]) -> str | None:
     path = entry["path"]
     attrs = entry["attrs"]
     if path in DEEP_TEST_FILES:
+        return "deep-tests"
+    if any("cfg" in attr and "deep-tests" in attr for attr in attrs):  # type: ignore[operator]
+        return "deep-tests"
+    line = int(entry["line"])
+    if any(start <= line <= end for start, end in deep_test_cfg_ranges(path)):  # type: ignore[arg-type]
         return "deep-tests"
     if any("cfg(any())" in attr for attr in attrs):  # type: ignore[operator]
         return "cfg-any"
@@ -216,8 +281,11 @@ def classify(entry: dict[str, object]) -> str:
             "module-qualified type annotations",
             "temporal arithmetic retarget",
             "matrix runtime carrier retarget",
+            "matrix/vector arithmetic retarget",
             "mir reference-escape",
             "destructuring",
+            "extern-c out-param caller-visible arity",
+            "internal intrinsic diagnostic ordering",
         )
     ):
         return "active_feature_gap"

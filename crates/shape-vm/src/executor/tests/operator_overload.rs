@@ -459,14 +459,13 @@ fn has_builtin_call(program: &crate::bytecode::BytecodeProgram, builtin: Builtin
 
 /// R5.4E retarget-pin test for the v2 residuals closeout plan.
 ///
-/// This is the flipped successor of R5.4A's baseline. After R5.4E, the
-/// compiler retargets `Matrix`/`Vec` arithmetic at compile time to the
-/// `IntrinsicMat*` / `IntrinsicVec*` builtins added in R5.4D
-/// (`IntrinsicMatAdd`, `IntrinsicMatSub`, `IntrinsicVecAddI64`) and
-/// wired in R5.4C (`IntrinsicVecAdd/Sub/Mul/Div`). Each of the seven
-/// operand shapes the R5.4A baseline pinned to `*Dynamic` now compiles
-/// to a `BuiltinCall(BuiltinFunction::Intrinsic*)` and the `*Dynamic`
-/// opcode is absent from the emitted stream.
+/// This is the intended flipped successor of R5.4A's baseline. Once the
+/// active retarget gap is closed, the compiler should retarget `Matrix`/`Vec`
+/// arithmetic at compile time: Mat add/sub and Vec number sub/mul/div lower
+/// to `IntrinsicMat*` / `IntrinsicVec*` builtins, while numeric-array `+`
+/// follows the 2026-06-17 user ruling and lowers to `ArrayConcat`. Each
+/// operand shape the R5.4A baseline pinned to `*Dynamic` should compile to a
+/// static opcode path instead of dynamic arithmetic fallback.
 ///
 /// The two retarget helpers —
 /// `try_compile_typed_vec_arithmetic` and
@@ -482,7 +481,7 @@ fn has_builtin_call(program: &crate::bytecode::BytecodeProgram, builtin: Builtin
 ///
 /// Reference: /home/dev/.claude/plans/v2-residuals-closeout.md §R5.4.
 #[test]
-#[ignore = "Phase-2c matrix/vector retarget: Mat operands no longer satisfy the stale Numeric trait test shape"]
+#[ignore = "active feature gap: matrix/vector arithmetic retarget is preempted by strict Numeric trait solving"]
 fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
     // Case 1: `Mat<number> + Mat<number>` → IntrinsicMatAdd.
     {

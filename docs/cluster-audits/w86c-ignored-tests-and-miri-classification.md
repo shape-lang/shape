@@ -13,9 +13,12 @@ W87C follow-up: `docs/cluster-audits/w87c-ignored-active-gap-triage.md`
 contains the per-test active-gap/stale inventory and reclassifies two stale
 rows as deleted v1 paths.
 
-No ignored tests were unignored. In particular, process-aborting `extern "C"`
-SURFACE tests stay ignored until their underlying todo bodies are replaced by
-non-aborting result paths.
+W91B follow-up: the remaining four `stale_semantic_expectation` ignores were
+redriven with real focused execution and reclassified as `active_feature_gap`.
+They remain ignored; the checker now accepts zero stale expectations.
+
+The process-aborting `extern "C"` SURFACE tests stay ignored until their
+underlying todo bodies are replaced by non-aborting result paths.
 
 ## Count Baseline
 
@@ -23,7 +26,7 @@ The supervisor-observed broad lib-test gates currently report:
 
 | Crate | Reported ignored in `--lib` gate | Source `#[ignore]` attrs scanned here | Source-only gated attrs |
 |---|---:|---:|---:|
-| `shape-vm` | 57 | 119 | 39 behind `deep-tests` |
+| `shape-vm` | 57 | 119 | 62 behind `deep-tests` |
 | `shape-jit` | 26 | 29 | 2 behind `deep-tests`, 1 behind `cfg(any())` |
 
 This worker did not rerun cargo or nextest. The new checker is intentionally
@@ -47,8 +50,8 @@ source-level baseline:
 | `phase_2c_surface` | 93 | 0 | Deferred strict-flip surfaces such as state snapshots, comptime host conversion, typed annotations, iterator materialization, and host-tier eval/marshal rebuilds. |
 | `deleted_v1_path` | 5 | 21 | Tests still describe removed carriers or paths such as BytecodeToIR, JitArray, deleted NaN-box roundtrips, deleted native-pointer helpers, deleted TypedArrayData enum paths, v1 VMArray aliasing, or retired Tier 1 whole-function JIT. |
 | `process_aborting_extern_c_todo` | 0 | 3 | `extern "C"` functions currently hit `todo!()`/SURFACE bodies; attempting `#[should_panic]` would abort the test process. |
-| `stale_semantic_expectation` | 4 | 0 | Assertions tied to stale strict-solver diagnostics, stale extern-C sugar, or stale Numeric trait shape. |
-| `active_feature_gap` | 16 | 5 | Real feature gaps or known bugs: generic/module/method resolution, const-specialization, turbofish grammar, MIR reference escape, JIT kernel stubs, and JIT closure-cell bugs. |
+| `stale_semantic_expectation` | 0 | 0 | No accepted stale expectations remain; future rows are new drift. |
+| `active_feature_gap` | 20 | 5 | Real feature gaps or known bugs: generic/module/method resolution, extern-C out-param caller-visible arity, internal-intrinsic diagnostic ordering, matrix/vector retargeting, const-specialization, turbofish grammar, MIR reference escape, JIT kernel stubs, and JIT closure-cell bugs. |
 | `diagnostic_only` | 1 | 0 | A local debug-only opcode tracing test. |
 | Total | 119 | 29 | Source inventory, not a cargo-run proof. |
 
@@ -56,7 +59,7 @@ The source-only gated subset is also classified:
 
 | Crate | Gated category contribution |
 |---|---|
-| `shape-vm` | 30 `phase_2c_surface`, 7 `active_feature_gap`, 1 `deleted_v1_path`, 1 `stale_semantic_expectation` behind `deep-tests`. |
+| `shape-vm` | 45 `phase_2c_surface`, 15 `active_feature_gap`, 2 `deleted_v1_path` behind `deep-tests`. |
 | `shape-jit` | 2 `active_feature_gap` behind `deep-tests`; 1 `deleted_v1_path` behind `cfg(any())`. |
 
 ## Process-Aborting Ignores

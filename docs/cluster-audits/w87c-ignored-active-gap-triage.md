@@ -49,6 +49,31 @@ The source-level count delta after W88D is:
 | `shape-vm` after W87C | 18 | 4 | 5 |
 | `shape-vm` after W88D | 16 | 4 | 5 |
 
+## W91B Addendum: Stale Expectation Cleanup
+
+Date: 2026-07-03
+Branch: `strict-flip-w91b-stale-ignored-cleanup`
+
+W91B redrive reclassified the remaining four `stale_semantic_expectation`
+ignores as `active_feature_gap` after supervisor focused execution proved the
+tests still fail under current strict behavior. No production semantics changed.
+The three `functions.rs` rows are also `deep-tests`-gated because they are
+inside `#[cfg(all(test, feature = "deep-tests"))] mod tests`.
+
+| Test | Before | After | Disposition |
+|---|---|---|---|
+| `crates/shape-vm/src/compiler/functions.rs::test_out_param_extern_c_compiles` | `stale_semantic_expectation` | `active_feature_gap` | Real run fails: `Function 'duckdb_open' expects between 2 and 2 arguments, got 1`; extern-C out-param sugar needs caller-visible arity/stub alignment. |
+| `crates/shape-vm/src/compiler/functions.rs::test_out_param_void_return_single_out` | `stale_semantic_expectation` | `active_feature_gap` | Real run fails: `Function 'duckdb_close' expects between 1 and 1 arguments, got 0`; single-out void sugar needs the same caller-visible arity/stub alignment. |
+| `crates/shape-vm/src/compiler/functions.rs::test_intrinsic_builtin_blocked_from_user_code` | `stale_semantic_expectation` | `active_feature_gap` | Real run rejects before scope-gating with `(Vec<number>) -> number is not compatible with (Vec<int>) -> number`; internal-intrinsic diagnostics need ordering ahead of strict type solving. |
+| `crates/shape-vm/src/executor/tests/operator_overload.rs::test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics` | `stale_semantic_expectation` | `active_feature_gap` | Real run fails: `Type 'Mat' does not implement trait 'Numeric'`; matrix/vector static retargeting is preempted by strict Numeric trait solving. |
+
+The source-level count delta after W91B is:
+
+| Crate | Active gap | Stale expectation | Deleted v1 path |
+|---|---:|---:|---:|
+| `shape-vm` after W88D | 16 | 4 | 5 |
+| `shape-vm` after W91B | 20 | 0 | 5 |
+
 ## Active Gap Inventory
 
 These rows are precise missing-feature or implementation-gap issues. They
@@ -59,6 +84,9 @@ focused cargo test lane.
 |---|---|---|---|---|
 | `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_block_expr_destructured_binding_still_runs` | default | missing language feature | v2 typed-array element handling for destructuring `let [a, b] = [1, 2]`. |
 | `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_compile_function_records_mir_reference_escape` | default | missing language feature | MIR reference-escape enforcement for local-return shapes. |
+| `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_out_param_extern_c_compiles` | `deep-tests` | missing language feature | Extern-C out-param sugar caller-visible arity/stub alignment for omitted `out` arguments. |
+| `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_out_param_void_return_single_out` | `deep-tests` | missing language feature | Extern-C single-out/void sugar caller-visible arity/stub alignment for omitted `out` arguments. |
+| `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_intrinsic_builtin_blocked_from_user_code` | `deep-tests` | missing diagnostic feature | Direct internal-intrinsic names should surface scope-gating diagnostics before strict argument type solving. |
 | `shape-vm` | `crates/shape-vm/src/compiler/monomorphization/integration_tests.rs::test_nested_generic_call` | default | missing language feature | Flatten monomorphization-cache population for nested generic calls. |
 | `shape-vm` | `crates/shape-vm/src/compiler/monomorphization/type_resolution.rs::const_generic_repeat_n_3_end_to_end` | default | missing language feature | Call-site turbofish grammar for const generics (`::<N>`). |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/extend_blocks.rs::test_extend_array_basic` | `deep-tests` | missing language feature | Typed receiver-specific method resolution for generic Vec extensions. |
@@ -67,6 +95,7 @@ focused cargo test lane.
 | `shape-vm` | `crates/shape-vm/src/executor/tests/module_deep_tests.rs::test_module_exec_module_function_recursion` | `deep-tests` | missing language feature | Unqualified recursive calls inside modules resolving to the module function. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/module_deep_tests.rs::test_module_exec_module_with_match_expression` | `deep-tests` | missing language feature | Module-scoped match lowering preserving per-arm numeric shape. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/operator_overload.rs::test_r5_3b_datetime_arithmetic_retargets_to_call_method` | `deep-tests` | missing language feature | DateTime/Duration type-alias agreement under strict kind solving. |
+| `shape-vm` | `crates/shape-vm/src/executor/tests/operator_overload.rs::test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics` | `deep-tests` | missing language feature | Matrix/vector arithmetic static retargeting before strict Numeric trait solving for Mat operands. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/operator_overload.rs::test_r5_4e_mat_add_runtime_returns_correct_values` | `deep-tests` | missing language feature | Matrix runtime carrier retarget so `Mat+Mat` returns a nested-indexable matrix carrier. |
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_comptime_set_return_expr_via_module_export` | default | missing language feature | Const-specialization for imported module functions. |
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_comptime_handler_can_call_comptime_helper_fn` | default | missing language feature | Const-specialization for imported module functions. |
@@ -81,16 +110,10 @@ focused cargo test lane.
 
 ## Stale Expectation Inventory
 
-These are not safe unignore candidates in a cheap-check-only slice. They need a
-language/book or diagnostic-policy decision before someone either rewrites the
-test or removes the stale expectation.
-
-| Crate | Test | Gate | Decision label | Stale expectation |
-|---|---|---|---|---|
-| `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_out_param_extern_c_compiles` | default | stale test expectation | Extern-C out-param sugar no longer matches current strict call arity checking. |
-| `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_out_param_void_return_single_out` | default | stale test expectation | Extern-C single-out/void sugar no longer matches current strict call arity checking. |
-| `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_intrinsic_builtin_blocked_from_user_code` | default | stale test expectation | Old intrinsic scope-gating diagnostic is now preempted by strict type solving. |
-| `shape-vm` | `crates/shape-vm/src/executor/tests/operator_overload.rs::test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics` | `deep-tests` | stale test expectation | Mat operands no longer satisfy the old Numeric trait test shape. |
+No current `stale_semantic_expectation` ignores remain after W91B. Future stale
+rows should be treated as new drift and either rewritten to current semantics,
+deleted if they describe retired paths, or reclassified as active feature gaps
+with a concrete missing feature.
 
 ## Deleted Path Reclassifications
 
