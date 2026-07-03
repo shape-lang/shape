@@ -1964,6 +1964,9 @@ impl BytecodeCompiler {
                     // formats as "Array", and a legacy `T[]` formats as "T[]".
                     let is_arrayish = |n: &Option<String>| match n.as_deref() {
                         Some("Array") => true,
+                        Some("Vec") => true,
+                        Some(s) if s.starts_with("Array<") => true,
+                        Some(s) if s.starts_with("Vec<") => true,
                         Some(s) if s.ends_with("[]") => true,
                         _ => false,
                     };

@@ -7,11 +7,10 @@
 //! R5.4E extends this to element-wise matrix and vector arithmetic:
 //! - `Mat<number> + Mat<number>`   -> `IntrinsicMatAdd`
 //! - `Mat<number> - Mat<number>`   -> `IntrinsicMatSub`
-//! - `Vec<number> + Vec<number>`   -> `IntrinsicVecAdd`
 //! - `Vec<number> - Vec<number>`   -> `IntrinsicVecSub`
 //! - `Vec<number> * Vec<number>`   -> `IntrinsicVecMul`
 //! - `Vec<number> / Vec<number>`   -> `IntrinsicVecDiv`
-//! - `Vec<int>    + Vec<int>`      -> `IntrinsicVecAddI64`
+//! Numeric-array `+` is concatenation and routes through `ArrayConcat`.
 //!
 //! These retargets bypass the dynamic arithmetic fallback for the seven
 //! operand shapes pinned by the R5.4A baseline test.
@@ -60,7 +59,19 @@ fn parse_single_arg_generic<'a>(name: &'a str, base: &str) -> Option<&'a str> {
 }
 
 fn is_vec_number_type_name(type_name: &str) -> bool {
-    parse_single_arg_generic(type_name, "Vec").is_some_and(is_number_name)
+    let type_name = type_name.trim();
+    if parse_single_arg_generic(type_name, "Vec").is_some_and(is_number_name)
+        || parse_single_arg_generic(type_name, "Array").is_some_and(is_number_name)
+        || type_name.strip_suffix("[]").is_some_and(is_number_name)
+    {
+        return true;
+    }
+
+    // Function parameter tracking can display a statically proven Vec<number>
+    // operand as the canonical collection base only. This classifier runs after
+    // semantic operator inference has accepted `-`/`*`/`/` for numeric vectors;
+    // it is not a Numeric fallback for arbitrary arrays.
+    matches!(type_name, "Vec" | "Array")
 }
 
 fn is_mat_number_type_name(type_name: &str) -> bool {
@@ -254,9 +265,8 @@ impl BytecodeCompiler {
     /// matching `IntrinsicVec*` builtin. Returns `Ok(true)` when emission
     /// happened, `Ok(false)` otherwise.
     ///
-    /// The result type hint is `Vec<number>` for the number kernels and
-    /// `Vec<int>` for `IntrinsicVecAddI64` — both match the HeapKind of
-    /// the value the runtime intrinsic returns.
+    /// The result type hint is `Vec<number>`, matching the HeapKind of the
+    /// value the runtime intrinsic returns.
     pub(super) fn try_compile_typed_vec_arithmetic(
         &mut self,
         op: &BinaryOp,

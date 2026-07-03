@@ -361,27 +361,27 @@ impl TypeInferenceEngine {
     }
 
     fn is_vec_number(ty: &Type) -> bool {
-        match ty {
-            Type::Concrete(TypeAnnotation::Array(inner)) => inner
-                .as_type_name_str()
-                .is_some_and(|n| BuiltinTypes::is_numeric_type_name(n)),
-            Type::Concrete(TypeAnnotation::Generic { name, args }) if name == "Vec" => {
-                args.first().is_some_and(|arg| {
-                    arg.as_type_name_str()
+        Self::array_or_vec_element_type(ty).is_some_and(|elem| {
+            matches!(
+                elem,
+                Type::Concrete(ann)
+                    if ann
+                        .as_type_name_str()
                         .is_some_and(|n| BuiltinTypes::is_numeric_type_name(n))
-                })
-            }
-            Type::Generic { base, args } if args.len() == 1 => {
-                matches!(
-                    base.as_ref(),
-                    Type::Concrete(ann) if ann.as_type_name_str() == Some("Vec")
-                ) && matches!(
-                    &args[0],
-                    Type::Concrete(ann) if ann.as_type_name_str().is_some_and(|n| BuiltinTypes::is_numeric_type_name(n))
-                )
-            }
-            _ => false,
-        }
+            )
+        })
+    }
+
+    fn is_vec_float64(ty: &Type) -> bool {
+        Self::array_or_vec_element_type(ty).is_some_and(|elem| {
+            matches!(
+                elem,
+                Type::Concrete(ann)
+                    if ann
+                        .as_type_name_str()
+                        .is_some_and(|n| BuiltinTypes::is_number_type_name(n))
+            )
+        })
     }
 
     fn is_mat_number(ty: &Type) -> bool {
@@ -399,6 +399,27 @@ impl TypeInferenceEngine {
                 ) && matches!(
                     &args[0],
                     Type::Concrete(ann) if ann.as_type_name_str().is_some_and(|n| BuiltinTypes::is_numeric_type_name(n))
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn is_mat_float64(ty: &Type) -> bool {
+        match ty {
+            Type::Concrete(TypeAnnotation::Generic { name, args }) if name == "Mat" => {
+                args.first().is_some_and(|arg| {
+                    arg.as_type_name_str()
+                        .is_some_and(|n| BuiltinTypes::is_number_type_name(n))
+                })
+            }
+            Type::Generic { base, args } if args.len() == 1 => {
+                matches!(
+                    base.as_ref(),
+                    Type::Concrete(ann) if ann.as_type_name_str() == Some("Mat")
+                ) && matches!(
+                    &args[0],
+                    Type::Concrete(ann) if ann.as_type_name_str().is_some_and(|n| BuiltinTypes::is_number_type_name(n))
                 )
             }
             _ => false,
@@ -452,29 +473,48 @@ impl TypeInferenceEngine {
     }
 
     /// Extract the single element `Type` from an array/Vec-shaped `Type`, in any
-    /// of the three representations the inference engine produces
-    /// (`Concrete(Array)`, `Concrete(Generic{"Array"|"Vec"})`, or
-    /// `Generic{base: Array|Vec, args}`). Returns `None` for non-array shapes.
-    fn array_element_type(ty: &Type) -> Option<Type> {
-        match ty {
-            Type::Concrete(TypeAnnotation::Array(inner)) => Some(Type::Concrete((**inner).clone())),
-            Type::Concrete(TypeAnnotation::Generic { name, args })
-                if (name == "Array" || name == "Vec") && args.len() == 1 =>
+    /// of the representations the inference engine produces. Returns `None`
+    /// for non-array shapes.
+    fn array_element_type(&mut self, ty: &Type) -> Option<Type> {
+        let canonical = ty.canonicalize();
+        match &canonical {
+            Type::Generic { base, args } if Self::is_array_or_vec_base(base) => match args.len() {
+                1 => Some(args[0].clone()),
+                0 => Some(self.fresh_type_var()),
+                _ => None,
+            },
+            Type::Concrete(ann)
+                if matches!(ann.as_type_name_str(), Some("Array") | Some("Vec")) =>
             {
-                Some(Type::Concrete(args[0].clone()))
-            }
-            Type::Generic { base, args }
-                if args.len() == 1
-                    && matches!(
-                        base.as_ref(),
-                        Type::Concrete(ann)
-                            if matches!(ann.as_type_name_str(), Some("Array") | Some("Vec"))
-                    ) =>
-            {
-                Some(args[0].clone())
+                Some(self.fresh_type_var())
             }
             _ => None,
         }
+    }
+
+    /// Pure extractor for statically typed vector arithmetic. Unlike
+    /// `array_element_type`, this deliberately rejects bare `Array`/`Vec`
+    /// collection bases with no element argument so unknown arrays never become
+    /// Numeric by fallback. `Type::canonicalize()` folds annotated `Vec<T>` into
+    /// the canonical `Array<T>` inference shape, which is the form seen for
+    /// typed function parameters.
+    fn array_or_vec_element_type(ty: &Type) -> Option<Type> {
+        let canonical = ty.canonicalize();
+        match canonical {
+            Type::Generic { base, mut args }
+                if Self::is_array_or_vec_base(&base) && args.len() == 1 =>
+            {
+                args.pop()
+            }
+            _ => None,
+        }
+    }
+
+    fn is_array_or_vec_base(base: &Type) -> bool {
+        matches!(
+            base,
+            Type::Concrete(ann) if matches!(ann.as_type_name_str(), Some("Array") | Some("Vec"))
+        )
     }
 
     /// `Array<T> + Array<T> -> Array<T>` concatenation (the book idiom
@@ -487,8 +527,8 @@ impl TypeInferenceEngine {
     /// when either operand is not an array shape, so genuine numeric/string add
     /// is unaffected.
     fn infer_array_add_type(&mut self, left: &Type, right: &Type, span: Span) -> Option<Type> {
-        let left_elem = Self::array_element_type(left)?;
-        let right_elem = Self::array_element_type(right)?;
+        let left_elem = self.array_element_type(left)?;
+        let right_elem = self.array_element_type(right)?;
 
         // Element-type resolution. One side may carry an *unresolved* element —
         // either a live type var or the `"unknown"` sentinel that
@@ -657,7 +697,7 @@ impl TypeInferenceEngine {
         let lk = Self::temporal_operand_kind(left)?;
         let rk = Self::temporal_operand_kind(right)?;
         let datetime = || Type::Concrete(TypeAnnotation::Reference("DateTime".into()));
-        let duration = || Type::Concrete(TypeAnnotation::Basic("duration".into()));
+        let duration = || Type::Concrete(TypeAnnotation::Basic("Duration".into()));
         match (op, lk, rk) {
             // DateTime + Duration / Duration + DateTime -> DateTime
             (BinaryOp::Add, TemporalKind::DateTime, TemporalKind::Duration)
@@ -713,6 +753,15 @@ impl TypeInferenceEngine {
         let right = &Self::deref_operand_for_operator(right);
         match op {
             BinaryOp::Add => {
+                // Array/Vec `+` is builtin concatenation, including the
+                // degraded generic-base shape (`Array` with no visible element
+                // arg) used by annotated function params in some body passes.
+                // Run this before operator-trait probing so collection bases
+                // never acquire a spurious Numeric requirement. Named
+                // non-array `impl Add` dispatch remains below.
+                if let Some(concatenated) = self.infer_array_add_type(left, right, span) {
+                    return Ok(concatenated);
+                }
                 // Operator-trait dispatch PRECEDES object-literal merge for a
                 // NAMED type that implements `Add`. A struct `Money` with
                 // `impl Add for Money` must dispatch to its impl, NOT be
@@ -729,13 +778,6 @@ impl TypeInferenceEngine {
                 if let Some(merged) = Self::infer_object_add_type(left, right) {
                     return Ok(merged);
                 }
-                // `Array<T> + Array<T>` is concatenation (book idiom
-                // `weekdays = weekdays + [elem]`). Must be handled before the
-                // numeric fallback below, which would reject `Array<int>` as
-                // non-Numeric.
-                if let Some(concatenated) = self.infer_array_add_type(left, right, span) {
-                    return Ok(concatenated);
-                }
                 // String concatenation is allowed in Shape and should not force
                 // numeric constraints on the opposite operand.
                 if Self::is_string_like(left) || Self::is_string_like(right) {
@@ -750,6 +792,11 @@ impl TypeInferenceEngine {
                 if let Some(result) = Self::temporal_arithmetic_result(&BinaryOp::Add, left, right)
                 {
                     return Ok(result);
+                }
+                // R5.4E: `Mat<number> + Mat<number>` is a statically
+                // retargeted matrix intrinsic, not scalar Numeric arithmetic.
+                if Self::is_mat_float64(left) && Self::is_mat_float64(right) {
+                    return Ok(Self::mat_number_type());
                 }
                 // `+` is overloaded (numeric add OR string concat). When BOTH
                 // operands are still unresolved type variables there is nothing
@@ -779,6 +826,9 @@ impl TypeInferenceEngine {
                     {
                         return Ok(result);
                     }
+                    if Self::is_mat_float64(left) && Self::is_mat_float64(right) {
+                        return Ok(Self::mat_number_type());
+                    }
                 }
                 if matches!(op, BinaryOp::Mul) {
                     if Self::is_mat_number(left) && Self::is_vec_number(right) {
@@ -787,6 +837,12 @@ impl TypeInferenceEngine {
                     if Self::is_mat_number(left) && Self::is_mat_number(right) {
                         return Ok(Self::mat_number_type());
                     }
+                }
+                if matches!(op, BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div)
+                    && Self::is_vec_float64(left)
+                    && Self::is_vec_float64(right)
+                {
+                    return Ok(Self::vec_number_type());
                 }
                 // Operator trait fallback
                 let trait_name = match op {

@@ -500,10 +500,14 @@ impl VirtualMachine {
                         builtin
                     )));
                 }
-                BuiltinFunction::IntrinsicMatMulVec
-                | BuiltinFunction::IntrinsicMatMulMat
-                | BuiltinFunction::IntrinsicMatAdd
-                | BuiltinFunction::IntrinsicMatSub => {
+                BuiltinFunction::IntrinsicMatAdd | BuiltinFunction::IntrinsicMatSub => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::matrix_intrinsics::builtin_matrix_arithmetic(
+                        builtin, &args,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicMatMulVec | BuiltinFunction::IntrinsicMatMulMat => {
                     // SURFACE per ADR-006 §2.7.14: phase-1b-vm wave 5d —
                     // matrix intrinsic body migration
                     // (`handle_matrix_intrinsic`) deferred. See sibling

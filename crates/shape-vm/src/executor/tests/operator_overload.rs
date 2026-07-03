@@ -357,7 +357,6 @@ fn test_r5_2b_user_add_retargets_single_schema_fallback() {
 /// Reference: `/home/dev/.claude/plans/v2-residuals-closeout.md` §R5.3.
 
 #[test]
-#[ignore = "Phase-2c temporal arithmetic retarget: DateTime/Duration type aliases still disagree under strict kind solving"]
 fn test_r5_3b_datetime_arithmetic_retargets_to_call_method() {
     // Case 1: DateTime + Duration via let-locals. After R5.3B the
     // temporal-literal initializers populate the local tracker with
@@ -481,7 +480,6 @@ fn has_builtin_call(program: &crate::bytecode::BytecodeProgram, builtin: Builtin
 ///
 /// Reference: /home/dev/.claude/plans/v2-residuals-closeout.md §R5.4.
 #[test]
-#[ignore = "active feature gap: matrix/vector arithmetic retarget is preempted by strict Numeric trait solving"]
 fn test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics() {
     // Case 1: `Mat<number> + Mat<number>` → IntrinsicMatAdd.
     {
@@ -689,10 +687,9 @@ fn test_numeric_array_plus_concatenates_user_ruling_2026_06_17() {
 /// R5.4E runtime: verify that the retargeted `Mat<number> + Mat<number>`
 /// path returns the expected element-wise sum. Uses the `let`-binding
 /// form with an explicit `Mat<number>` annotation so R5.4B's nested-array
-/// typed-inference rule applies (produces `HeapValue::Array` of
-/// `HeapValue::Array`, which `extract_matrix_f64` in the kernel expects).
+/// typed-array rule applies for the operands; the intrinsic projects that
+/// proven nested carrier to `MatrixData` and returns the direct Matrix carrier.
 #[test]
-#[ignore = "Phase-2c matrix runtime carrier retarget: Mat+Mat currently returns a scalar-shaped carrier before nested indexing"]
 fn test_r5_4e_mat_add_runtime_returns_correct_values() {
     // (a + b)[0][0] = 1 + 10 = 11, (a + b)[1][1] = 4 + 40 = 44, sum = 55.
     let result = eval(
@@ -736,5 +733,5 @@ fn test_r5_4e_mat_add_runtime_returns_correct_values() {
 // `test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics` above.
 // The Mat+Mat runtime path is exercised by
 // `test_r5_4e_mat_add_runtime_returns_correct_values` above, where
-// R5.4B's nested-array typed-inference rule produces operands in the
-// `HeapValue::Array` shape that `extract_matrix_f64` accepts.
+// R5.4B's nested-array typed-inference rule produces operands as nested
+// typed arrays and the intrinsic returns a direct Matrix carrier for indexing.

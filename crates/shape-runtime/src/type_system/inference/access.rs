@@ -584,6 +584,21 @@ impl TypeInferenceEngine {
                 self.push_numeric_index_constraint(index_type);
                 Ok(Type::Concrete(*elem_type.clone()))
             }
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if (name == "Vec" || name == "Array") && args.len() == 1 =>
+            {
+                self.push_numeric_index_constraint(index_type);
+                Ok(Type::Concrete(args[0].clone()))
+            }
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if name == "Mat" && args.len() == 1 =>
+            {
+                self.push_numeric_index_constraint(index_type);
+                Ok(Type::Concrete(TypeAnnotation::Generic {
+                    name: "Vec".into(),
+                    args: args.clone(),
+                }))
+            }
             // STRICT-FLIP (v0.3.3 map/collect OUTPUT element stamp): the canonical
             // `Type::Generic { base: Vec/Array, args: [elem] }` form. A `.map()`
             // result resolves through `resolve_type_param_expr`'s

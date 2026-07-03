@@ -2733,9 +2733,11 @@ impl TypeInferenceEngine {
                 Ok(Type::Concrete(TypeAnnotation::Reference("DateTime".into())))
             }
 
-            // Duration
+            // Duration. Keep the PascalCase spelling canonical so annotated
+            // `Duration` params and duration literals agree in function-call
+            // solving; operator inference still accepts legacy lowercase names.
             Expr::Duration(_, _) => Ok(Type::Concrete(TypeAnnotation::Basic(
-                "duration".to_string(),
+                "Duration".to_string(),
             ))),
 
             // Pattern reference
