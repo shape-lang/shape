@@ -486,22 +486,24 @@ impl JITCompiler {
         Ok(unsafe { std::mem::transmute(code_ptr) })
     }
 
-    /// Build kernel IR using BytecodeToIR in kernel mode.
-    ///
-    /// This compiles bytecode to kernel ABI IR with direct memory access:
-    /// - GetFieldTyped → state_ptr + offset
-    /// - GetDataField → series_ptrs[col][cursor]
-    /// - All locals as Cranelift variables
+    /// Build kernel ABI IR for the statically supported v2 subset.
     fn build_kernel_ir(
         &mut self,
-        _builder: &mut FunctionBuilder,
-        _program: &BytecodeProgram,
-        _config: &SimulationKernelConfig,
-        _cursor_index: Value,
-        _series_ptrs: Value,
-        _state_ptr: Value,
+        builder: &mut FunctionBuilder,
+        program: &BytecodeProgram,
+        config: &SimulationKernelConfig,
+        cursor_index: Value,
+        series_ptrs: Value,
+        state_ptr: Value,
     ) -> Result<Value, String> {
-        Err("Simulation kernel compilation requires v2 runtime migration".to_string())
+        super::kernel_ir::build_simulation_kernel_ir(
+            builder,
+            program,
+            config,
+            cursor_index,
+            series_ptrs,
+            state_ptr,
+        )
     }
 
     // ========================================================================
@@ -632,9 +634,6 @@ impl JITCompiler {
     /// Handles series access via compile-time resolved indices:
     /// - `context.spy` → `series_ptrs[0][cursor_idx]` (if spy mapped to index 0)
     /// - `context.vix` → `series_ptrs[1][cursor_idx]` (if vix mapped to index 1)
-    // Stub pending v2 runtime migration; params are the documented future
-    // implementation surface and are intentionally unused until then.
-    #[allow(unused_variables)]
     fn build_correlated_kernel_ir(
         &mut self,
         builder: &mut FunctionBuilder,
@@ -644,6 +643,13 @@ impl JITCompiler {
         series_ptrs: Value,
         state_ptr: Value,
     ) -> Result<Value, String> {
-        Err("Correlated kernel compilation requires v2 runtime migration".to_string())
+        super::kernel_ir::build_correlated_kernel_ir(
+            builder,
+            program,
+            config,
+            cursor_index,
+            series_ptrs,
+            state_ptr,
+        )
     }
 }

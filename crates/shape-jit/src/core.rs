@@ -228,7 +228,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "v2: build_kernel_ir is stubbed out pending v2 runtime migration (strategy.rs:374)"]
     fn test_simulation_kernel_compilation() {
         use crate::context::SimulationKernelConfig;
 
@@ -298,7 +297,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "v2: build_kernel_ir is stubbed out pending v2 runtime migration (strategy.rs:374)"]
     fn test_kernel_mode_throughput() {
         use crate::context::SimulationKernelConfig;
         use std::time::Instant;
@@ -389,7 +387,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "v2: build_correlated_kernel_ir is stubbed out pending v2 runtime migration (strategy.rs:514)"]
     fn test_correlated_kernel_compilation() {
         use crate::context::SimulationKernelConfig;
 

@@ -35,7 +35,7 @@ EXPECTED_COUNTS = {
     },
     "shape-jit": {
         "deleted_v1_path": 21,
-        "active_feature_gap": 3,
+        "active_feature_gap": 0,
         "process_aborting_extern_c_todo": 3,
         "stale_semantic_expectation": 0,
     },
@@ -52,7 +52,7 @@ EXPECTED_SOURCE_ONLY_STATUS = {
 
 REPORTED_LIB_IGNORED_BASELINE = {
     "shape-vm": 56,
-    "shape-jit": 26,
+    "shape-jit": 23,
 }
 
 # These are source files whose module declarations are feature-gated behind

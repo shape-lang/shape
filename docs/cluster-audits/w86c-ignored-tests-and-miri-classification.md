@@ -43,6 +43,11 @@ after local storage width was split from semantic inner value kind for
 OwnedMutable, Shared capture, and SharedCow cell-pointer slots. The three
 remaining `shape-jit` active gaps are the kernel-mode v2 migration stubs.
 
+W95C follow-up: the three remaining `shape-jit` kernel-mode active gaps were
+unignored after the stubs gained a narrow v2-safe static return-code lowering
+path for explicit integer-valued `PushConst` kernels. General data/state kernel
+lowering remains unsupported and returns compile-time errors.
+
 The process-aborting `extern "C"` SURFACE tests stay ignored until their
 underlying todo bodies are replaced by non-aborting result paths.
 
@@ -53,7 +58,7 @@ The supervisor-observed broad lib-test gates currently report:
 | Crate | Reported ignored in `--lib` gate | Source `#[ignore]` attrs scanned here | Source-only gated attrs |
 |---|---:|---:|---:|
 | `shape-vm` | 56 | 111 | 56 behind `deep-tests` |
-| `shape-jit` | 26 | 27 | 1 behind `cfg(any())` |
+| `shape-jit` | 23 | 24 | 1 behind `cfg(any())` |
 
 This worker did not rerun cargo or nextest. The new checker is intentionally
 source-only and cheap; it guards the source ignore count and reason taxonomy
@@ -63,7 +68,7 @@ For `shape-vm`, the 111 source attributes do not mechanically reduce to the
 reported 56 ignored lib tests from source-level module gates alone. Resolving
 that exact active-harness projection requires a cargo test listing, which this
 slice intentionally did not run. The enforceable invariant added here is the
-source-level taxonomy; the 56/26 counts remain the supervisor-observed lib gate
+source-level taxonomy; the 56/23 counts remain the supervisor-observed lib gate
 baseline.
 
 W92 supervisor verification additionally ran the deep-test VM gate after the
@@ -83,9 +88,9 @@ source-level baseline:
 | `deleted_v1_path` | 5 | 21 | Tests still describe removed carriers or paths such as BytecodeToIR, JitArray, deleted NaN-box roundtrips, deleted native-pointer helpers, deleted TypedArrayData enum paths, v1 VMArray aliasing, or retired Tier 1 whole-function JIT. |
 | `process_aborting_extern_c_todo` | 0 | 3 | `extern "C"` functions currently hit `todo!()`/SURFACE bodies; attempting `#[should_panic]` would abort the test process. |
 | `stale_semantic_expectation` | 0 | 0 | No accepted stale expectations remain; future rows are new drift. |
-| `active_feature_gap` | 12 | 3 | Real feature gaps or known bugs: generic/method resolution, matrix/vector retargeting, imported-module const-specialization/schema propagation, MIR reference escape, and JIT kernel stubs. |
+| `active_feature_gap` | 12 | 0 | Real feature gaps or known bugs: generic/method resolution, matrix/vector retargeting, imported-module const-specialization/schema propagation, and MIR reference escape. |
 | `diagnostic_only` | 1 | 0 | A local debug-only opcode tracing test. |
-| Total | 111 | 27 | Source inventory, not a cargo-run proof. |
+| Total | 111 | 24 | Source inventory, not a cargo-run proof. |
 
 The source-only gated subset is also classified:
 

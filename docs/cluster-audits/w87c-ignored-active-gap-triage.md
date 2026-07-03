@@ -198,11 +198,12 @@ truncating the cell pointer to `I8`, F64 shared locals from defining an `I64`
 cell pointer into an `F64` local, and F64 Shared reads from missing the native
 F64 binop path.
 
-The three kernel-mode rows remain ignored active gaps. Both kernel builders are
-intentional v2 surfaces: `build_kernel_ir` returns
-`"Simulation kernel compilation requires v2 runtime migration"` and
-`build_correlated_kernel_ir` returns
-`"Correlated kernel compilation requires v2 runtime migration"`.
+W95C supersedes the three kernel-mode rows. The kernel builders now have a
+narrow v2-safe static lowering path for explicit integer-valued return-code
+literals. This covers the existing smoke and throughput tests without
+reintroducing the deleted general BytecodeToIR translator. Data-field reads,
+state mutation, and arbitrary bytecode kernels remain unsupported and return
+precise compile-time errors from `compiler/kernel_ir.rs`.
 
 | Test | Before | After | Disposition |
 |---|---|---|---|
@@ -215,6 +216,34 @@ The source-level count delta after W94C is:
 |---|---:|---:|---:|
 | `shape-jit` before W94C | 5 | 0 | 21 |
 | `shape-jit` after W94C | 3 | 0 | 21 |
+
+## W95C Addendum: JIT Kernel Return-Code Builder Closure
+
+Date: 2026-07-03
+Branch: `strict-flip-w95c-jit-kernel-builders`
+
+W95C removes the remaining three `shape-jit` `active_feature_gap` ignores in
+`core.rs` by replacing the v2 kernel-builder stubs with a small
+`compiler/kernel_ir.rs` lowering module. The implementation is intentionally
+bounded: it validates the single-series or correlated kernel config, then
+lowers only an explicit `PushConst` integer-valued return code to the kernel
+ABI's `i32` result. Unsupported bytecode shapes, missing constants, non-integer
+constants, out-of-range return codes, and invalid config mappings fail at JIT
+compile time with an explicit error. This is not a resurrection of the deleted
+general BytecodeToIR path, and it does not claim field/state kernel coverage.
+
+| Test | Before | After | Disposition |
+|---|---|---|---|
+| `crates/shape-jit/src/core.rs::test_simulation_kernel_compilation` | `active_feature_gap` | active / verified | Constant return-code kernel compiles and returns 0 through the simulation ABI. |
+| `crates/shape-jit/src/core.rs::test_kernel_mode_throughput` | `active_feature_gap` | active / verified | Same static return-code kernel exercises the hot ABI call overhead. |
+| `crates/shape-jit/src/core.rs::test_correlated_kernel_compilation` | `active_feature_gap` | active / verified | Constant return-code kernel compiles and returns 0 through the correlated ABI. |
+
+The source-level count delta after W95C is:
+
+| Crate | Active gap | Stale expectation | Deleted v1 path |
+|---|---:|---:|---:|
+| `shape-jit` before W95C | 3 | 0 | 21 |
+| `shape-jit` after W95C | 0 | 0 | 21 |
 
 ## Active Gap Inventory
 
@@ -236,9 +265,6 @@ focused cargo test lane.
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_comptime_set_return_expr_via_module_export` | default | missing language feature | Const-specialization for imported module functions. |
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_comptime_handler_can_call_comptime_helper_fn` | default | missing language feature | Const-specialization for imported module functions. |
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_typed_callable_field_propagates_table_schema_for_filter_chain` | default | missing language feature | Imported-module annotation `set return` schema propagation across the comptime boundary. |
-| `shape-jit` | `crates/shape-jit/src/core.rs::test_simulation_kernel_compilation` | default | missing language feature | `build_kernel_ir` v2 runtime migration. |
-| `shape-jit` | `crates/shape-jit/src/core.rs::test_kernel_mode_throughput` | default | missing language feature | `build_kernel_ir` v2 runtime migration. |
-| `shape-jit` | `crates/shape-jit/src/core.rs::test_correlated_kernel_compilation` | default | missing language feature | `build_correlated_kernel_ir` v2 runtime migration. |
 
 ## Stale Expectation Inventory
 
