@@ -4178,7 +4178,7 @@ impl BytecodeCompiler {
         matches!(
             name,
             "int" | "number" | "string" | "bool" | "decimal" | "bigint"
-                | "Array" | "HashMap" | "Option" | "Result" | "DateTime"
+                | "Array" | "HashMap" | "Set" | "Option" | "Result" | "DateTime"
                 | "Content" | "Table" | "DataTable" | "Mat"
                 // W18.5 per-type content builders (supervisor D4,
                 // R8 W3 2026-05-24): `Code::new()` / `KeyValue::new()`
@@ -7561,7 +7561,7 @@ impl BytecodeCompiler {
 #[cfg(test)]
 mod tests {
     use crate::compiler::BytecodeCompiler;
-    use shape_ast::ast::{Item, Span, Statement};
+    use shape_ast::ast::{Item, Span, Statement, TypeAnnotation};
     use shape_ast::parser::parse_program;
 
     // The four `test_module_*` / `test_module_inline_comptime_*` tests
@@ -7576,6 +7576,38 @@ mod tests {
     // `vm.execute_raw -> (bits, kind)` boundary lands and the tests can
     // read `f64::from_bits(bits)` directly. Phase-2c rebuild surface —
     // see ADR-006 §2.4.
+    #[test]
+    fn module_qualification_preserves_builtin_set_generic() {
+        let mut type_params = std::collections::HashSet::new();
+        type_params.insert("T".to_string());
+
+        let set_ann = TypeAnnotation::Generic {
+            name: "Set".into(),
+            args: vec![TypeAnnotation::Basic("T".to_string())],
+        };
+        let qualified = BytecodeCompiler::qualify_module_type_annotation(
+            &set_ann,
+            "std::core::set",
+            &type_params,
+        );
+
+        assert_eq!(qualified, set_ann);
+
+        let local_ann = TypeAnnotation::Generic {
+            name: "LocalBox".into(),
+            args: vec![TypeAnnotation::Basic("T".to_string())],
+        };
+        let qualified_local = BytecodeCompiler::qualify_module_type_annotation(
+            &local_ann,
+            "std::core::set",
+            &type_params,
+        );
+        assert!(matches!(
+            qualified_local,
+            TypeAnnotation::Generic { ref name, .. } if name.as_str() == "std::core::set::LocalBox"
+        ));
+    }
+
     #[cfg(any())]
     #[test]
     fn test_module_decl_function_resolves_module_const() {
