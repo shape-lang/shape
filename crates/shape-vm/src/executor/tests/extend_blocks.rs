@@ -169,7 +169,6 @@ fn test_extend_string_basic() {
 }
 
 #[test]
-#[ignore = "Phase-2c generic Vec extension: self[index] element type remains unknown without a typed receiver-specific method"]
 fn test_extend_array_basic() {
     // Test extending Vec type
     let source = r#"
@@ -371,7 +370,6 @@ fn test_extend_method_with_default_param() {
 }
 
 #[test]
-#[ignore = "Phase-2c multi-extend resolver: String method registration is lost when mixed with Number and Vec extensions"]
 fn test_extend_multiple_types() {
     // Test that we can extend multiple types in the same program
     let source = r#"

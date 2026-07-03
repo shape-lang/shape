@@ -1781,26 +1781,50 @@ impl TypeInferenceEngine {
         })
     }
 
-    /// Type-check concrete user-struct extend method bodies with `self` in scope.
+    /// Type-check extend method bodies with `self` in scope where the receiver
+    /// type is statically knowable before a runtime value exists.
     ///
     /// `register_extend` publishes the callable surface, but strict expression
     /// proof also needs the body walk so field reads like `self.name` resolve
-    /// from the target struct schema before overloaded `+` is checked. Builtin
-    /// and generic collection extends are intentionally left to the existing
-    /// specialized paths; this helper only handles registered user structs.
+    /// from the target struct schema before overloaded `+` is checked.
+    ///
+    /// Bare `extend Vec` / `extend Array` methods are also checked as
+    /// receiver-parametric `self: Vec<T>` / `Array<T>` templates. That lets
+    /// `self[index]` carry the receiver element type through the existing
+    /// index-access rules instead of falling to a disconnected fresh variable.
+    /// The actual `T` remains a compile-time call-site proof supplied by the
+    /// generic method resolver/monomorphizer; no runtime probing is involved.
     fn infer_extend_method_bodies(
         &mut self,
         extend: &shape_ast::ast::ExtendStatement,
     ) -> TypeResult<()> {
         let type_name = Self::type_name_str(&extend.type_name);
-        if !self.struct_type_defs.contains_key(type_name.as_str()) {
+        let should_infer_body = self.struct_type_defs.contains_key(type_name.as_str())
+            || Self::bare_single_param_collection_extend(&extend.type_name).is_some();
+        if !should_infer_body {
             return Ok(());
         }
 
-        let self_ann = Self::type_name_to_annotation_for_impl(&extend.type_name);
+        let self_ann = Self::type_name_to_annotation_for_extend_body(&extend.type_name);
+        let receiver_type_params = Self::implicit_extend_type_params(&extend.type_name);
+        let receiver_param_names =
+            Self::implicit_extend_receiver_type_params(&extend.type_name);
         for method in &extend.methods {
-            let func = Self::inference_function_for_extend_method(method, &type_name, &self_ann);
-            let _ = self.infer_function(&func)?;
+            let func = Self::inference_function_for_extend_method(
+                method,
+                &type_name,
+                &self_ann,
+                &receiver_type_params,
+            );
+            let func_type = self.infer_function(&func)?;
+            if method.return_type.is_none() && !receiver_param_names.is_empty() {
+                self.refresh_extend_method_return_from_body(
+                    &type_name,
+                    method,
+                    &receiver_param_names,
+                    &func_type,
+                );
+            }
         }
 
         Ok(())
@@ -1810,6 +1834,7 @@ impl TypeInferenceEngine {
         method: &shape_ast::ast::MethodDef,
         type_name: &str,
         self_ann: &TypeAnnotation,
+        receiver_type_params: &[shape_ast::ast::TypeParam],
     ) -> FunctionDef {
         let mut params = Vec::with_capacity(method.params.len() + 1);
         params.push(shape_ast::ast::FunctionParameter {
@@ -1823,6 +1848,16 @@ impl TypeInferenceEngine {
         });
         params.extend(method.params.clone());
 
+        let mut type_params = receiver_type_params.to_vec();
+        if let Some(method_tps) = method.type_params.as_ref() {
+            for tp in method_tps {
+                let name = tp.name();
+                if !type_params.iter().any(|existing| existing.name() == name) {
+                    type_params.push(tp.clone());
+                }
+            }
+        }
+
         FunctionDef {
             name: format!("{}.{}", type_name, method.name),
             name_span: method.span,
@@ -1831,7 +1866,11 @@ impl TypeInferenceEngine {
             params,
             return_type: method.return_type.clone(),
             body: method.body.clone(),
-            type_params: method.type_params.clone(),
+            type_params: if type_params.is_empty() {
+                None
+            } else {
+                Some(type_params)
+            },
             annotations: method.annotations.clone(),
             is_async: method.is_async,
             is_comptime: false,
@@ -2024,6 +2063,158 @@ impl TypeInferenceEngine {
         }
     }
 
+    fn type_name_to_annotation_for_extend_body(type_name: &TypeName) -> TypeAnnotation {
+        if let Some(base) = Self::bare_single_param_collection_extend(type_name) {
+            return TypeAnnotation::Generic {
+                name: shape_ast::ast::type_path::TypePath::simple(base),
+                args: vec![TypeAnnotation::Basic("T".to_string())],
+            };
+        }
+        Self::type_name_to_annotation_for_impl(type_name)
+    }
+
+    fn bare_single_param_collection_extend(type_name: &TypeName) -> Option<&str> {
+        match type_name {
+            TypeName::Simple(name) if matches!(name.as_str(), "Array" | "Vec") => {
+                Some(name.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    fn implicit_extend_receiver_type_params(type_name: &TypeName) -> Vec<String> {
+        if Self::bare_single_param_collection_extend(type_name).is_some() {
+            vec!["T".to_string()]
+        } else {
+            vec![]
+        }
+    }
+
+    fn implicit_extend_type_params(type_name: &TypeName) -> Vec<shape_ast::ast::TypeParam> {
+        Self::implicit_extend_receiver_type_params(type_name)
+            .into_iter()
+            .map(|name| shape_ast::ast::TypeParam::Type {
+                name,
+                span: Span::DUMMY,
+                doc_comment: None,
+                default_type: None,
+                trait_bounds: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn refresh_extend_method_return_from_body(
+        &mut self,
+        type_name: &str,
+        method: &shape_ast::ast::MethodDef,
+        receiver_type_params: &[String],
+        func_type: &Type,
+    ) {
+        use crate::type_system::checking::method_table::TypeParamExpr;
+
+        let Type::Function { returns, .. } = func_type else {
+            return;
+        };
+        let method_type_params: Vec<String> = method
+            .type_params
+            .as_ref()
+            .map(|tps| tps.iter().map(|tp| tp.name().to_string()).collect())
+            .unwrap_or_default();
+        let Some(return_expr) = Self::type_to_extend_type_param_expr(
+            returns,
+            receiver_type_params,
+            &method_type_params,
+        ) else {
+            return;
+        };
+        let param_exprs: Vec<TypeParamExpr> = method
+            .params
+            .iter()
+            .map(|p| match &p.type_annotation {
+                Some(ann) => Self::annotation_to_type_param_expr(
+                    ann,
+                    receiver_type_params,
+                    &method_type_params,
+                ),
+                None => TypeParamExpr::Concrete(self.fresh_type_var()),
+            })
+            .collect();
+
+        for target in Self::extend_target_names(type_name) {
+            self.method_table.register_user_generic_method(
+                &target,
+                &method.name,
+                method_type_params.len(),
+                param_exprs.clone(),
+                return_expr.clone(),
+                vec![],
+            );
+        }
+    }
+
+    fn type_to_extend_type_param_expr(
+        ty: &Type,
+        receiver_params: &[String],
+        method_params: &[String],
+    ) -> Option<crate::type_system::checking::method_table::TypeParamExpr> {
+        use crate::type_system::checking::method_table::TypeParamExpr;
+
+        match ty {
+            Type::Variable(var) | Type::Constrained { var, .. } => {
+                if let Some(idx) = receiver_params.iter().position(|name| name == &var.0) {
+                    Some(TypeParamExpr::ReceiverParam(idx))
+                } else {
+                    method_params
+                        .iter()
+                        .position(|name| name == &var.0)
+                        .map(TypeParamExpr::MethodParam)
+                }
+            }
+            Type::Concrete(ann) => Some(Self::annotation_to_type_param_expr(
+                ann,
+                receiver_params,
+                method_params,
+            )),
+            Type::Generic { base, args } => {
+                let name = match base.as_ref() {
+                    Type::Concrete(TypeAnnotation::Reference(path)) => path.to_string(),
+                    Type::Concrete(TypeAnnotation::Basic(name)) => name.clone(),
+                    _ => return Some(TypeParamExpr::Concrete(ty.clone())),
+                };
+                Some(TypeParamExpr::GenericContainer {
+                    name,
+                    args: args
+                        .iter()
+                        .map(|arg| {
+                            Self::type_to_extend_type_param_expr(
+                                arg,
+                                receiver_params,
+                                method_params,
+                            )
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                })
+            }
+            Type::Function { params, returns } => Some(TypeParamExpr::Function {
+                params: params
+                    .iter()
+                    .map(|param| {
+                        Self::type_to_extend_type_param_expr(
+                            param,
+                            receiver_params,
+                            method_params,
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+                returns: Box::new(Self::type_to_extend_type_param_expr(
+                    returns,
+                    receiver_params,
+                    method_params,
+                )?),
+            }),
+        }
+    }
+
     fn impl_target_is_concrete(type_name: &TypeName) -> bool {
         match type_name {
             TypeName::Simple(name) => !matches!(
@@ -2150,7 +2341,9 @@ impl TypeInferenceEngine {
         // Extract receiver type param names from generic extend blocks.
         // e.g., `extend Vec<T>` → receiver_type_params = ["T"]
         // e.g., `extend HashMap<K, V>` → receiver_type_params = ["K", "V"]
-        let receiver_type_params: Vec<String> = match &extend.type_name {
+        let mut receiver_type_params =
+            Self::implicit_extend_receiver_type_params(&extend.type_name);
+        let explicit_receiver_type_params: Vec<String> = match &extend.type_name {
             TypeName::Generic { type_args, .. } => type_args
                 .iter()
                 .filter_map(|arg| {
@@ -2170,6 +2363,11 @@ impl TypeInferenceEngine {
                 .collect(),
             _ => vec![],
         };
+        for param in explicit_receiver_type_params {
+            if !receiver_type_params.contains(&param) {
+                receiver_type_params.push(param);
+            }
+        }
 
         let has_receiver_params = !receiver_type_params.is_empty();
 

@@ -2377,7 +2377,8 @@ impl BytecodeCompiler {
         method: &shape_ast::ast::types::MethodDef,
         target_type: &shape_ast::ast::TypeName,
     ) -> Result<FunctionDef> {
-        let receiver_type = Some(Self::type_name_to_annotation(target_type));
+        let (implicit_extend_type_params, receiver_type) =
+            Self::synthesize_extend_type_params(target_type);
         let (params, body) = self.desugar_method_signature_and_body(method, receiver_type)?;
 
         // Extend methods use qualified "Type.method" names to avoid collisions
@@ -2395,7 +2396,7 @@ impl BytecodeCompiler {
         // Heuristic: a type arg is a type PARAMETER (not a concrete type) if
         // it's a Basic annotation whose name is a single uppercase letter
         // (the standard convention for type variables: T, U, K, V).
-        let extend_type_params: Vec<shape_ast::ast::TypeParam> = match target_type {
+        let explicit_extend_type_params: Vec<shape_ast::ast::TypeParam> = match target_type {
             shape_ast::ast::TypeName::Generic { type_args, .. } => type_args
                 .iter()
                 .filter_map(|ta| match ta {
@@ -2434,7 +2435,14 @@ impl BytecodeCompiler {
         // bindings by name, so positional order matters only for the
         // `mono_key`'s stable ordering — extend-first matches the
         // user-visible declaration order `Vec<T>.map<U>`.
-        let mut merged_type_params: Vec<shape_ast::ast::TypeParam> = extend_type_params;
+        let mut merged_type_params: Vec<shape_ast::ast::TypeParam> =
+            implicit_extend_type_params;
+        for tp in explicit_extend_type_params {
+            let name = tp.name();
+            if !merged_type_params.iter().any(|m| m.name() == name) {
+                merged_type_params.push(tp);
+            }
+        }
         if let Some(method_tps) = method.type_params.as_ref() {
             for tp in method_tps {
                 // Skip duplicates (defensive — if a method redeclares a
@@ -2602,6 +2610,42 @@ impl BytecodeCompiler {
             is_comptime: false,
             where_clause: None,
         })
+    }
+
+    /// Synthesize receiver generics for bare collection extend blocks.
+    ///
+    /// `extend Vec { method sum() { self[0] + self[1] } }` is receiver
+    /// parametric even without spelling `Vec<T>`: the element type is proven by
+    /// each call site's receiver (`Vec<int>`, `Vec<number>`, ...). Give the
+    /// desugared UFCS function the same `self: Vec<T>` shape used by explicit
+    /// `extend Vec<T>` blocks so the existing monomorphization pipeline
+    /// specializes the body before bytecode emission. Concrete/generic targets
+    /// such as `extend Vec<number>` keep their source annotation unchanged.
+    fn synthesize_extend_type_params(
+        target_type: &shape_ast::ast::TypeName,
+    ) -> (
+        Vec<shape_ast::ast::TypeParam>,
+        Option<shape_ast::ast::TypeAnnotation>,
+    ) {
+        match target_type {
+            shape_ast::ast::TypeName::Simple(name)
+                if matches!(name.as_str(), "Array" | "Vec") =>
+            {
+                let type_params = vec![shape_ast::ast::TypeParam::Type {
+                    name: "T".to_string(),
+                    span: Span::DUMMY,
+                    doc_comment: None,
+                    default_type: None,
+                    trait_bounds: Vec::new(),
+                }];
+                let receiver_ann = shape_ast::ast::TypeAnnotation::Generic {
+                    name: shape_ast::ast::type_path::TypePath::simple(name.as_str()),
+                    args: vec![shape_ast::ast::TypeAnnotation::Basic("T".to_string())],
+                };
+                (type_params, Some(receiver_ann))
+            }
+            _ => (Vec::new(), Some(Self::type_name_to_annotation(target_type))),
+        }
     }
 
     /// Synthesize type parameters and a receiver annotation for impl methods
