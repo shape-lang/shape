@@ -1472,6 +1472,7 @@ let total = xs.map(|x| x * 2).sum()
             Box::new(Expr::FunctionCall {
                 name: "some_func".to_string(),
                 args: vec![],
+                const_args: Vec::new(),
                 named_args: vec![],
                 span: Span::DUMMY,
             }),
