@@ -598,15 +598,50 @@ impl BytecodeCompiler {
         let Some(expr) = expr else {
             return Ok(None);
         };
-        let Some(proven) =
+        let Some(proven) = self.return_identifier_slot_concrete_fact(expr).or_else(|| {
             crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, expr)
-        else {
+        }) else {
             return Ok(None);
         };
         let Some(claimed) = self.last_emitted_native_kind() else {
             return Ok(None);
         };
         Self::prove_exact_scalar_return_kind(site, &proven, claimed)
+    }
+
+    fn return_identifier_slot_concrete_fact(
+        &self,
+        expr: &shape_ast::ast::Expr,
+    ) -> Option<shape_value::v2::ConcreteType> {
+        let shape_ast::ast::Expr::Identifier(name, _) = expr else {
+            return None;
+        };
+        if let Some(local_idx) = self.resolve_local(name) {
+            return self
+                .current_function_local_concrete_facts
+                .get(&local_idx)
+                .filter(|fact| {
+                    !matches!(
+                        fact.source,
+                        crate::compiler::BindingConcreteFactSource::EmptyArrayAccumulator
+                    )
+                })
+                .map(|fact| fact.concrete_type.clone());
+        }
+
+        let scoped_name = self
+            .resolve_scoped_module_binding_name(name)
+            .unwrap_or_else(|| name.to_string());
+        let binding_idx = self.module_bindings.get(&scoped_name)?;
+        self.module_binding_concrete_facts
+            .get(binding_idx)
+            .filter(|fact| {
+                !matches!(
+                    fact.source,
+                    crate::compiler::BindingConcreteFactSource::EmptyArrayAccumulator
+                )
+            })
+            .map(|fact| fact.concrete_type.clone())
     }
 
     pub(in crate::compiler) fn top_level_metadata_return_kind_from_proof(
@@ -1121,9 +1156,14 @@ impl BytecodeCompiler {
 #[cfg(test)]
 mod u2_exact_native_kind_proof_tests {
     use super::BytecodeCompiler;
+    use crate::bytecode::{Instruction, OpCode, Operand};
+    use crate::compiler::{BindingConcreteFact, BindingConcreteFactSource};
     use crate::type_tracking::StorageHint;
+    use shape_ast::ast::{Expr, Span, TypeAnnotation, TypePath};
+    use shape_runtime::type_system::Type;
     use shape_value::HeapKind;
     use shape_value::v2::ConcreteType;
+    use std::collections::HashMap;
 
     #[test]
     fn exact_scalar_native_kind_proof_passes() {
@@ -1231,6 +1271,43 @@ mod u2_exact_native_kind_proof_tests {
             )
             .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn returned_try_unwrapped_identifier_uses_slot_fact_before_stale_span_result() {
+        let ident_span = Span::new(10, 11);
+        let mut compiler = BytecodeCompiler::new();
+        compiler.locals = vec![HashMap::new()];
+        compiler.locals[0].insert("v".to_string(), 0);
+        compiler.current_function_local_concrete_facts.insert(
+            0,
+            BindingConcreteFact {
+                concrete_type: ConcreteType::I64,
+                source: BindingConcreteFactSource::StructuralInitializer,
+            },
+        );
+        compiler.resolved_expr_types.insert(
+            ident_span,
+            Type::Concrete(TypeAnnotation::Generic {
+                name: TypePath::simple("Result"),
+                args: vec![
+                    TypeAnnotation::Basic("int".to_string()),
+                    TypeAnnotation::Void,
+                ],
+            }),
+        );
+        compiler.program.instructions.push(Instruction::new(
+            OpCode::LoadLocalI64,
+            Some(Operand::Local(0)),
+        ));
+
+        let expr = Expr::Identifier("v".to_string(), ident_span);
+        assert_eq!(
+            compiler
+                .exact_scalar_return_kind_for_expr("test_try_unwrapped_return", Some(&expr))
+                .unwrap(),
+            Some(StorageHint::Int64)
         );
     }
 }
