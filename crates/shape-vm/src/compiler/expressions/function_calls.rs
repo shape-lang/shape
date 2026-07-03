@@ -6162,6 +6162,10 @@ impl BytecodeCompiler {
         self.local_binding_spans = saved_local_binding_spans;
         compile_result?;
 
+        self.program
+            .monomorphized_method_call_sites
+            .insert((call_site_span, self.current_function), specialized_idx);
+
         Ok(Some(specialized_idx))
     }
 
@@ -6927,6 +6931,9 @@ impl BytecodeCompiler {
         specialized_def.type_params = Some(Vec::new());
 
         if let Some(idx) = self.find_function(&specialized_def.name) {
+            self.program
+                .monomorphized_method_call_sites
+                .insert((call_site_span, self.current_function), idx);
             return Ok(Some(idx));
         }
 
