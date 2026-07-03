@@ -1639,15 +1639,7 @@ impl BytecodeCompiler {
         self.const_specializations
             .insert(specialization_key.clone(), specialized_idx);
 
-        let compile_result = if specialized_def.declaring_module_path.is_some() {
-            // Imported namespace-call specializations are consumer-side clones:
-            // the exporting module already compiled definition annotations.
-            let mut body_def = specialized_def.clone();
-            body_def.annotations.clear();
-            self.compile_function(&body_def)
-        } else {
-            self.compile_function(&specialized_def)
-        };
+        let compile_result = self.compile_function(&specialized_def);
 
         if let Err(err) = compile_result {
             self.specialization_const_bindings.remove(&specialized_name);
