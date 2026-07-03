@@ -4544,7 +4544,7 @@ impl BytecodeCompiler {
             if let Some(type_name) = &info.type_name {
                 // Strip generic params: "Vec<int>" → "Vec"
                 let base = type_name.split('<').next().unwrap_or(type_name);
-                return Some(base.to_string());
+                return Some(Self::extend_receiver_symbol_name(base).to_string());
             }
         }
 
@@ -4558,6 +4558,23 @@ impl BytecodeCompiler {
             },
             shape_ast::ast::Expr::Array(..) => Some("Vec".to_string()),
             _ => None,
+        }
+    }
+
+    fn extend_receiver_symbol_name(type_name: &str) -> &str {
+        // The type tracker stores builtin scalar aliases in script form
+        // (`string`, `bool`, ...), while extend functions are registered from
+        // source TypeName syntax (`String.echo`, `Bool.foo`). Normalize before
+        // static UFCS lookup so proven receivers do not fall through to runtime
+        // method dispatch.
+        match type_name {
+            "string" => "String",
+            "bool" => "Bool",
+            "int" => "Int",
+            "number" => "Number",
+            "decimal" => "Decimal",
+            "Array" => "Vec",
+            other => other,
         }
     }
 
