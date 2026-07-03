@@ -1,7 +1,7 @@
 //! Helper methods for bytecode compilation
 
 use super::BorrowMode;
-use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
+use crate::bytecode::{BuiltinFunction, Constant, Instruction, NumericWidth, OpCode, Operand};
 use crate::type_tracking::{
     FrameReturnWrapper, NumericType, StorageHint, TypeTracker, VariableTypeInfo,
 };
@@ -2398,22 +2398,11 @@ impl BytecodeCompiler {
             | OpCode::MulI32
             | OpCode::DivI32
             | OpCode::ModI32
-            // Compact-typed (sub-i64 width-parameterised) arithmetic — post-
-            // Wave-E+5.5 the `compact_int_*` family in
-            // `executor/arithmetic/mod.rs:651` pops native i64 inputs and
-            // pushes raw native i64 bits onto the kinded VM stack via
-            // `push_kinded(bits, NativeKind::Int64)`, matching the
-            // surrounding typed transport. `CmpTyped` returns a -1/0/1
-            // ordinal as native i64 (NOT a bool — see compact_int_cmp). The
-            // compact-int width truncation happens before push; the deleted
-            // `synthesize_value_word_from_raw` decoder (ADR-006 §2.7.7) is
-            // gone — kind declaration on the parallel-kind track at push
-            // time replaces its sub-i64 sign-extend path.
-            | OpCode::AddTyped
-            | OpCode::SubTyped
-            | OpCode::MulTyped
-            | OpCode::DivTyped
-            | OpCode::ModTyped
+            // Compact comparison returns a -1/0/1 ordinal as native i64
+            // (NOT a bool — see compact_int_cmp). Width-typed arithmetic
+            // producers are split below and classified from their
+            // `Operand::Width` so return proof sees the declared arithmetic
+            // width instead of collapsing to Int64.
             | OpCode::CmpTyped
             // CastWidth pops native i64, truncates per the declared width,
             // and pushes native i64 bits — mirrors the producer side of the
@@ -2427,6 +2416,12 @@ impl BytecodeCompiler {
             OpCode::LoadLocalU16 | OpCode::LoadModuleBindingU16 => Some(StorageHint::UInt16),
             OpCode::LoadLocalI8 | OpCode::LoadModuleBindingI8 => Some(StorageHint::Int8),
             OpCode::LoadLocalU8 | OpCode::LoadModuleBindingU8 => Some(StorageHint::UInt8),
+
+            OpCode::AddTyped
+            | OpCode::SubTyped
+            | OpCode::MulTyped
+            | OpCode::DivTyped
+            | OpCode::ModTyped => self.compact_typed_arithmetic_native_kind(instr),
 
             // ===== Raw f64 producers =====
             OpCode::AddNumber
@@ -2772,6 +2767,35 @@ impl BytecodeCompiler {
             }
             Constant::Bool(_) => Some(StorageHint::Bool),
             _ => None,
+        }
+    }
+
+    /// Resolve the compile-time producer kind for compact typed arithmetic.
+    ///
+    /// The bytecode producer already carries the declared arithmetic width in
+    /// `Operand::Width`; the strict return proof must use that width rather
+    /// than collapsing every `AddTyped`/`SubTyped`/... producer to `Int64`.
+    /// `CmpTyped` is intentionally excluded by the caller because it returns
+    /// an i64 ordinal, not a width-typed arithmetic value.
+    fn compact_typed_arithmetic_native_kind(&self, instr: &Instruction) -> Option<StorageHint> {
+        let Some(Operand::Width(width)) = instr.operand else {
+            return None;
+        };
+        Some(Self::storage_hint_for_numeric_width(width))
+    }
+
+    fn storage_hint_for_numeric_width(width: NumericWidth) -> StorageHint {
+        match width {
+            NumericWidth::I8 => StorageHint::Int8,
+            NumericWidth::I16 => StorageHint::Int16,
+            NumericWidth::I32 => StorageHint::Int32,
+            NumericWidth::I64 => StorageHint::Int64,
+            NumericWidth::U8 => StorageHint::UInt8,
+            NumericWidth::U16 => StorageHint::UInt16,
+            NumericWidth::U32 => StorageHint::UInt32,
+            NumericWidth::U64 => StorageHint::UInt64,
+            NumericWidth::F32 => StorageHint::Float32,
+            NumericWidth::F64 => StorageHint::Float64,
         }
     }
 
@@ -6488,10 +6512,38 @@ impl BytecodeCompiler {
 #[cfg(test)]
 mod tests {
     use super::super::BytecodeCompiler;
+    use crate::bytecode::{Instruction, NumericWidth, OpCode, Operand};
     use crate::compiler::ParamPassMode;
-    use crate::type_tracking::BindingStorageClass;
+    use crate::type_tracking::{BindingStorageClass, StorageHint};
     use shape_ast::ast::{Expr, Span, TypeAnnotation};
     use shape_runtime::type_schema::FieldType;
+
+    #[test]
+    fn compact_typed_arithmetic_walkback_preserves_width() {
+        let cases = [
+            (NumericWidth::I8, StorageHint::Int8),
+            (NumericWidth::I16, StorageHint::Int16),
+            (NumericWidth::I32, StorageHint::Int32),
+            (NumericWidth::I64, StorageHint::Int64),
+            (NumericWidth::U8, StorageHint::UInt8),
+            (NumericWidth::U16, StorageHint::UInt16),
+            (NumericWidth::U32, StorageHint::UInt32),
+            (NumericWidth::U64, StorageHint::UInt64),
+        ];
+
+        for (width, expected) in cases {
+            let mut compiler = BytecodeCompiler::new();
+            compiler.program.instructions.push(Instruction::new(
+                OpCode::AddTyped,
+                Some(Operand::Width(width)),
+            ));
+            assert_eq!(
+                compiler.last_emitted_native_kind(),
+                Some(expected),
+                "{width:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_type_annotation_to_field_type_array_recursive() {
