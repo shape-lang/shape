@@ -270,16 +270,18 @@ impl TypeInferenceEngine {
         self_ann: &TypeAnnotation,
         receiver_type_params: &[TypeParam],
     ) -> FunctionDef {
-        let mut params = Vec::with_capacity(method.params.len() + 1);
-        params.push(FunctionParameter {
-            pattern: DestructurePattern::Identifier("self".to_string(), Span::DUMMY),
-            is_const: false,
-            is_reference: false,
-            is_mut_reference: false,
-            is_out: false,
-            type_annotation: Some(self_ann.clone()),
-            default_value: None,
-        });
+        let mut params = Vec::with_capacity(method.params.len() + 2);
+        for receiver_name in ["self", "this"] {
+            params.push(FunctionParameter {
+                pattern: DestructurePattern::Identifier(receiver_name.to_string(), Span::DUMMY),
+                is_const: false,
+                is_reference: false,
+                is_mut_reference: false,
+                is_out: false,
+                type_annotation: Some(self_ann.clone()),
+                default_value: None,
+            });
+        }
         params.extend(method.params.clone());
 
         let mut type_params = receiver_type_params.to_vec();
