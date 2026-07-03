@@ -229,6 +229,41 @@ impl BytecodeCompiler {
         }
     }
 
+    fn typed_array_kind_from_array_type_info(
+        &self,
+        type_info: Option<&VariableTypeInfo>,
+    ) -> Option<crate::compiler::v2_typed_emission::TypedArrayKind> {
+        let elem_name = Self::array_element_type_name_from_info(type_info?)?;
+        let annotation = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(elem_name)));
+        self.resolve_typed_array_kind_from_annotation(&annotation)
+    }
+
+    fn emit_destructure_array_element_load(
+        &mut self,
+        value_local: u16,
+        index: usize,
+        typed_array_kind: Option<crate::compiler::v2_typed_emission::TypedArrayKind>,
+    ) {
+        self.emit(Instruction::new(
+            OpCode::LoadLocal,
+            Some(Operand::Local(value_local)),
+        ));
+        let idx_const = if typed_array_kind.is_some() {
+            self.program.add_constant(Constant::Int(index as i64))
+        } else {
+            self.program.add_constant(Constant::Number(index as f64))
+        };
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(idx_const)),
+        ));
+        if let Some(kind) = typed_array_kind {
+            self.emit(Instruction::simple(kind.get_opcode()));
+        } else {
+            self.emit(Instruction::simple(OpCode::GetProp));
+        }
+    }
+
     fn seed_array_element_context_for_pattern(
         &mut self,
         pattern: &shape_ast::ast::DestructurePattern,
@@ -497,6 +532,11 @@ impl BytecodeCompiler {
                     "Cannot destructure non-array value as array",
                 )?;
 
+                let typed_array_kind =
+                    self.typed_array_kind_from_array_type_info(self.last_expr_type_info.as_ref());
+                if let Some(kind) = typed_array_kind {
+                    self.v2_typed_array_locals.insert(value_local, kind);
+                }
                 let element_type_name = self
                     .last_expr_type_info
                     .as_ref()
@@ -522,16 +562,7 @@ impl BytecodeCompiler {
                         break;
                     }
 
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(value_local)),
-                    ));
-                    let idx_const = self.program.add_constant(Constant::Number(index as f64));
-                    self.emit(Instruction::new(
-                        OpCode::PushConst,
-                        Some(Operand::Const(idx_const)),
-                    ));
-                    self.emit(Instruction::simple(OpCode::GetProp));
+                    self.emit_destructure_array_element_load(value_local, index, typed_array_kind);
                     self.seed_array_element_context_for_pattern(pat, element_type_name.as_deref());
                     self.compile_destructure_pattern(pat)?;
                 }
@@ -749,6 +780,11 @@ impl BytecodeCompiler {
                     "Cannot destructure non-array value as array",
                 )?;
 
+                let typed_array_kind =
+                    self.typed_array_kind_from_array_type_info(self.last_expr_type_info.as_ref());
+                if let Some(kind) = typed_array_kind {
+                    self.v2_typed_array_locals.insert(value_local, kind);
+                }
                 let element_type_name = self
                     .last_expr_type_info
                     .as_ref()
@@ -774,16 +810,7 @@ impl BytecodeCompiler {
                         break;
                     }
 
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(value_local)),
-                    ));
-                    let idx_const = self.program.add_constant(Constant::Number(index as f64));
-                    self.emit(Instruction::new(
-                        OpCode::PushConst,
-                        Some(Operand::Const(idx_const)),
-                    ));
-                    self.emit(Instruction::simple(OpCode::GetProp));
+                    self.emit_destructure_array_element_load(value_local, index, typed_array_kind);
                     self.seed_array_element_context_for_pattern(pat, element_type_name.as_deref());
                     self.compile_destructure_pattern_global(pat)?;
                 }
@@ -979,6 +1006,11 @@ impl BytecodeCompiler {
                     "Cannot destructure non-array value as array",
                 )?;
 
+                let typed_array_kind =
+                    self.typed_array_kind_from_array_type_info(self.last_expr_type_info.as_ref());
+                if let Some(kind) = typed_array_kind {
+                    self.v2_typed_array_locals.insert(value_local, kind);
+                }
                 let element_type_name = self
                     .last_expr_type_info
                     .as_ref()
@@ -1004,16 +1036,7 @@ impl BytecodeCompiler {
                         break;
                     }
 
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(value_local)),
-                    ));
-                    let idx_const = self.program.add_constant(Constant::Number(index as f64));
-                    self.emit(Instruction::new(
-                        OpCode::PushConst,
-                        Some(Operand::Const(idx_const)),
-                    ));
-                    self.emit(Instruction::simple(OpCode::GetProp));
+                    self.emit_destructure_array_element_load(value_local, index, typed_array_kind);
                     self.seed_array_element_context_for_pattern(pat, element_type_name.as_deref());
                     self.compile_destructure_assignment(pat)?;
                 }
