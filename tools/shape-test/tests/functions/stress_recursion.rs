@@ -376,7 +376,7 @@ fn test_function_negative_return() {
     .expect_number(-42.0);
 }
 
-/// Verifies function returns none explicitly. W14.2-G6 e2e-functions
+/// Verifies function returns `None` explicitly. W14.2-G6 e2e-functions
 /// R5b-2-bool-null-sentinel-cluster CLOSE: the W14.2-G6
 /// SURFACE-G6-NONE-OUTPUT-ADAPTER pin previously asserted
 /// `expect_bool(false)` documenting the consumer-side bug where the
@@ -398,11 +398,11 @@ fn test_function_returns_none_explicitly() {
 }
 
 /// R5b-2-bool-null-sentinel-cluster regression test (ADR-006 §2.7 +
-/// §2.7.5 + §2.7.7/Q9, 2026-05-19): top-level `None` literal renders
-/// as `WireValue::Null` not `{"Bool": false}`. Pre-disposition
+/// §2.7.5 + §2.7.7/Q9, 2026-05-19): top-level `None` literal projects
+/// as Shape `None` at the test boundary, not `{"Bool": false}`. Pre-disposition
 /// SURFACE-G6-NONE-OUTPUT-ADAPTER reproducer.
 #[test]
-fn test_top_level_none_literal_renders_as_null() {
+fn test_top_level_none_literal_returns_none() {
     ShapeTest::new(r#"None"#).expect_none();
 }
 

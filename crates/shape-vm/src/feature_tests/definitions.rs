@@ -39,9 +39,9 @@ pub const FEATURE_TESTS: &[FeatureTest] = &[
         requires_data: false,
     },
     FeatureTest {
-        name: "null_literal",
+        name: "none_literal",
         covers: &["none_literal", "literal"],
-        code: "function test() { return null; }",
+        code: "function test() { return None; }",
         function: "test",
         category: FeatureCategory::Literal,
         requires_data: false,
@@ -237,7 +237,7 @@ pub const FEATURE_TESTS: &[FeatureTest] = &[
     FeatureTest {
         name: "null_coalesce",
         covers: &["null_coalesce_expr"],
-        code: "function test() { let x = null; return x ?? 5; }",
+        code: "function test() { let x = None; return x ?? 5; }",
         function: "test",
         category: FeatureCategory::Operator,
         requires_data: false,
@@ -514,7 +514,7 @@ pub const FEATURE_TESTS: &[FeatureTest] = &[
     FeatureTest {
         name: "optional_property_access",
         covers: &["optional_property_access"],
-        code: "function test() { let x = null; return x?.a; }",
+        code: "function test() { let x = None; return x?.a; }",
         function: "test",
         category: FeatureCategory::Collection,
         requires_data: false,

@@ -148,7 +148,7 @@ function test() {
         covers: &["optional_type", "type_annotation"],
         code: r#"
 function test() {
-    let x: number? = null;
+    let x: number? = None;
     return x ?? 42;
 }
 "#,
