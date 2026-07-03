@@ -6515,30 +6515,42 @@ mod tests {
     use crate::bytecode::{Instruction, NumericWidth, OpCode, Operand};
     use crate::compiler::ParamPassMode;
     use crate::type_tracking::{BindingStorageClass, StorageHint};
-    use shape_ast::ast::{Expr, Span, TypeAnnotation};
+    use shape_ast::IntWidth;
+    use shape_ast::ast::{BinaryOp, Expr, Literal, Span, TypeAnnotation};
     use shape_runtime::type_schema::FieldType;
 
     #[test]
     fn compact_typed_arithmetic_walkback_preserves_width() {
         let cases = [
-            (NumericWidth::I8, StorageHint::Int8),
-            (NumericWidth::I16, StorageHint::Int16),
-            (NumericWidth::I32, StorageHint::Int32),
-            (NumericWidth::I64, StorageHint::Int64),
-            (NumericWidth::U8, StorageHint::UInt8),
-            (NumericWidth::U16, StorageHint::UInt16),
-            (NumericWidth::U32, StorageHint::UInt32),
-            (NumericWidth::U64, StorageHint::UInt64),
+            (NumericWidth::I8, IntWidth::I8, StorageHint::Int8),
+            (NumericWidth::I16, IntWidth::I16, StorageHint::Int16),
+            (NumericWidth::I32, IntWidth::I32, StorageHint::Int32),
+            (NumericWidth::U8, IntWidth::U8, StorageHint::UInt8),
+            (NumericWidth::U16, IntWidth::U16, StorageHint::UInt16),
+            (NumericWidth::U32, IntWidth::U32, StorageHint::UInt32),
+            (NumericWidth::U64, IntWidth::U64, StorageHint::UInt64),
         ];
 
-        for (width, expected) in cases {
+        for (width, int_width, expected) in cases {
+            let span = Span::new(30, 31);
             let mut compiler = BytecodeCompiler::new();
             compiler.program.instructions.push(Instruction::new(
                 OpCode::AddTyped,
                 Some(Operand::Width(width)),
             ));
+            let expr = Expr::BinaryOp {
+                left: Box::new(Expr::Literal(Literal::TypedInt(1, int_width), span)),
+                op: BinaryOp::Add,
+                right: Box::new(Expr::Literal(Literal::TypedInt(2, int_width), span)),
+                span,
+            };
             assert_eq!(
-                compiler.last_emitted_native_kind(),
+                compiler
+                    .exact_scalar_return_kind_for_expr(
+                        "test_compact_typed_arithmetic_return",
+                        Some(&expr),
+                    )
+                    .unwrap(),
                 Some(expected),
                 "{width:?}"
             );
