@@ -87,7 +87,7 @@ fn none_not_equal_to_value() {
 }
 
 #[test]
-fn none_null_coalesce() {
+fn none_coalesce() {
     ShapeTest::new(
         r#"
         let x = None

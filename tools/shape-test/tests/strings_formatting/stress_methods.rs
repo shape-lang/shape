@@ -795,7 +795,7 @@ test()"#,
     .expect_string("o");
 }
 
-/// Verifies charAt out of bounds returns null.
+/// Verifies charAt out of bounds returns None.
 #[test]
 fn test_char_at_out_of_bounds() {
     ShapeTest::new(

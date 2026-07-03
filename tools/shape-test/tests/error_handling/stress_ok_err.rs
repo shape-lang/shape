@@ -449,27 +449,27 @@ fn err_with_string_concat() {
 // SECTION 37: Ok/Err identity checks
 // =============================================================================
 
-/// Ok is not none.
+/// Ok is not None.
 #[test]
 fn ok_is_not_none() {
     ShapeTest::new("Ok(1) != None").expect_bool(true);
 }
 
-/// Err is not none.
+/// Err is not None.
 #[test]
 fn err_is_not_none() {
     ShapeTest::new(r#"Err("fail") != None"#).expect_bool(true);
 }
 
-/// Some is not none.
+/// Some is not None.
 #[test]
 fn some_is_not_none() {
     ShapeTest::new("Some(1) != None").expect_bool(true);
 }
 
-/// Null is none.
+/// None is None.
 #[test]
-fn null_is_none() {
+fn none_is_none() {
     ShapeTest::new("None == None").expect_bool(true);
 }
 

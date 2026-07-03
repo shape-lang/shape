@@ -147,7 +147,7 @@ fn test_early_return_in_loop() {
     .expect_number(5.0);
 }
 
-/// Verifies void function returns unit or none. R5b-2-bool-null-sentinel-cluster
+/// Verifies void function returns unit or None. R5b-2-bool-null-sentinel-cluster
 /// CLOSE: the W14.2-G6 SURFACE-G6-LET-ONLY-BODY pin previously asserted
 /// `expect_bool(false)` documenting the producer-side bug where the
 /// bytecode compiler's implicit-return path emitted `(0u64,
@@ -156,7 +156,7 @@ fn test_early_return_in_loop() {
 /// Per ADR-006 §2.7 + §2.7.5 + §2.7.7/Q9 (2026-05-19) `PushNull` now
 /// pushes `NativeKind::Null` and `slot_to_wire` projects Null to
 /// `WireValue::Null` directly. Test updated to assert correct empirical
-/// behavior: `do_nothing()` returns None/null.
+/// behavior: `do_nothing()` returns Shape `None` (`WireValue::Null`).
 #[test]
 fn test_void_function_returns_unit_or_none() {
     ShapeTest::new(

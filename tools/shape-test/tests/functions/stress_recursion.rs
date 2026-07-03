@@ -385,7 +385,7 @@ fn test_function_negative_return() {
 /// §2.7.7/Q9 (2026-05-19) `Constant::Null` / `Constant::Unit` /
 /// `PushNull` now emit `NativeKind::Null` and `slot_to_wire` projects
 /// it to `WireValue::Null` directly. Test updated to assert correct
-/// empirical behavior: `get_none()` returns None/null.
+/// empirical behavior: `get_none()` returns Shape `None` (`WireValue::Null`).
 #[test]
 fn test_function_returns_none_explicitly() {
     ShapeTest::new(

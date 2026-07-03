@@ -495,15 +495,15 @@ fn result_err_is_not_ok() {
     ShapeTest::new(r#"Err("fail")"#).expect_run_ok();
 }
 
-/// Verifies option some is not none.
+/// Verifies option some is not None.
 #[test]
 fn option_some_is_not_none() {
     ShapeTest::new("Some(42)").expect_run_ok();
 }
 
-/// Verifies null is none literal.
+/// Verifies none is None literal.
 #[test]
-fn null_is_none_literal() {
+fn none_is_none_literal() {
     ShapeTest::new("None").expect_none();
 }
 

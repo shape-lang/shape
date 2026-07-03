@@ -1,7 +1,7 @@
 //! Stress tests for ordering operators (<, >, <=, >=).
 //!
 //! Migrated from shape-vm stress_03_comparison.rs — less-than, greater-than,
-//! less-or-equal, greater-or-equal, chained comparisons, null coalescing,
+//! less-or-equal, greater-or-equal, chained comparisons, coalescing,
 //! and comparison in control flow sections.
 
 use shape_test::shape_test::ShapeTest;
@@ -366,12 +366,12 @@ test()"#,
 }
 
 // ============================================================================
-// 19. Null coalescing (??)
+// 19. Coalescing (??)
 // ============================================================================
 
-/// Verifies null coalescing with None left.
+/// Verifies coalescing with None left.
 #[test]
-fn null_coalesce_null_left() {
+fn none_coalesce_none_left() {
     ShapeTest::new(
         "function test() {
             let x = None
@@ -381,9 +381,9 @@ fn null_coalesce_null_left() {
     .expect_number(42.0);
 }
 
-/// Verifies null coalescing with non-null left.
+/// Verifies coalescing with non-None left.
 #[test]
-fn null_coalesce_non_null_left() {
+fn none_coalesce_non_none_left() {
     ShapeTest::new(
         "function test() {
             let x = 10
@@ -393,9 +393,9 @@ fn null_coalesce_non_null_left() {
     .expect_number(10.0);
 }
 
-/// Verifies null coalescing with string fallback.
+/// Verifies coalescing with string fallback.
 #[test]
-fn null_coalesce_string() {
+fn none_coalesce_string() {
     ShapeTest::new(
         r#"function test() {
             let x = None
@@ -406,9 +406,9 @@ test()"#,
     .expect_string("default");
 }
 
-/// Verifies chained null coalescing.
+/// Verifies chained coalescing.
 #[test]
-fn null_coalesce_chain() {
+fn none_coalesce_chain() {
     ShapeTest::new(
         "function test() {
             let a = None
@@ -419,9 +419,9 @@ fn null_coalesce_chain() {
     .expect_number(99.0);
 }
 
-/// Verifies first non-null in coalescing chain.
+/// Verifies first non-None in coalescing chain.
 #[test]
-fn null_coalesce_first_non_null() {
+fn none_coalesce_first_non_none() {
     ShapeTest::new(
         "function test() {
             let a = None

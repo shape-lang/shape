@@ -1,5 +1,5 @@
 //! Stress tests for generic functions, generic structs, generic with struct,
-//! generic with array return, generic identity with null, and complex
+//! generic with array return, generic identity with None, and complex
 //! generic interactions.
 
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
@@ -325,9 +325,9 @@ fn generic_fn_with_array_return() {
     .expect_number(42.0);
 }
 
-/// Verifies generic identity with null.
+/// Verifies generic identity with None.
 #[test]
-fn generic_identity_with_null() {
+fn generic_identity_with_none() {
     ShapeTest::new(
         r#"
         fn id<T>(x: T) -> T { return x }

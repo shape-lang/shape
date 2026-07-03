@@ -45,7 +45,7 @@ fn t102_match_empty_array_no_match() {
 
 /// None matches None pattern.
 #[test]
-fn t103_match_null_against_none() {
+fn t103_match_none_against_none() {
     ShapeTest::new(
         r#"
         function test() {
@@ -63,7 +63,7 @@ fn t103_match_null_against_none() {
 
 /// Bare non-Option values cannot match Option constructor patterns.
 #[test]
-fn t104_match_non_null_against_some() {
+fn t104_match_non_option_against_some() {
     ShapeTest::new(
         r#"
         function test() {

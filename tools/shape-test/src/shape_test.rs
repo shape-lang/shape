@@ -1281,7 +1281,7 @@ impl ShapeTest {
         self
     }
 
-    /// Assert the result is None/null.
+    /// Assert the result is Shape `None`.
     pub fn expect_none(self) -> Self {
         let result = self.eval();
         assert!(
@@ -1293,7 +1293,7 @@ impl ShapeTest {
         let is_none = val.is_null()
             || val == serde_json::Value::String("Null".to_string())
             || val == serde_json::Value::String("None".to_string());
-        assert!(is_none, "Expected None/null, got: {:?}", val);
+        assert!(is_none, "Expected None, got: {:?}", val);
         self
     }
 

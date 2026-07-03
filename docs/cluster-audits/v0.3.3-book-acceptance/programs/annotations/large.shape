@@ -102,8 +102,8 @@ annotation memoize() {
 
   before(args, ctx) {
     // consult ctx.state cache map keyed by arg; if hit, short-circuit.
-    // (use ?? default form rather than `!= null`; the bare `null` keyword is
-    //  rejected by the parser on the RHS of `!=` at this release -- book-gap)
+    // (use ?? default form rather than a comparison; source `null` is rejected
+    //  by the parser at this release -- book-gap)
     let key = args[0]
     let cache = ctx.state
     let hit = cache[key] ?? -1

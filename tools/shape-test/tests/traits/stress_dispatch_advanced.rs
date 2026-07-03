@@ -180,7 +180,7 @@ fn trait_method_and_extend_method_both_callable() {
 
 /// Verifies trait method returning None.
 #[test]
-fn trait_method_returning_null() {
+fn trait_method_returning_none() {
     ShapeTest::new(
         r#"
         type Maybe { has_value: bool }

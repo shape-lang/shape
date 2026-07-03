@@ -1,7 +1,7 @@
 //! Stress tests for equality and inequality operators.
 //!
 //! Migrated from shape-vm stress_03_comparison.rs — equality (==), inequality (!=),
-//! null equality, cross-type, computed value, and string equality sections.
+//! none equality, cross-type, computed value, and string equality sections.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -148,36 +148,36 @@ fn eq_string_empty_vs_nonempty() {
 }
 
 // ============================================================================
-// 5. Equality (==) — null
+// 5. Equality (==) — none
 // ============================================================================
 
 /// Verifies None == None.
 #[test]
-fn eq_null_null() {
+fn eq_none_none() {
     ShapeTest::new("None == None").expect_bool(true);
 }
 
 /// Verifies None != 0 (no implicit coercion).
 #[test]
-fn eq_null_vs_int() {
+fn eq_none_vs_int() {
     ShapeTest::new("None == 0").expect_bool(false);
 }
 
 /// Verifies None != false (strict typing).
 #[test]
-fn eq_null_vs_false() {
+fn eq_none_vs_false() {
     ShapeTest::new("None == false").expect_bool(false);
 }
 
 /// Verifies None != "".
 #[test]
-fn eq_null_vs_empty_string() {
+fn eq_none_vs_empty_string() {
     ShapeTest::new(r#"None == """#).expect_bool(false);
 }
 
 /// Verifies 1 == None is false.
 #[test]
-fn eq_int_vs_null() {
+fn eq_int_vs_none() {
     ShapeTest::new("1 == None").expect_bool(false);
 }
 
@@ -235,19 +235,19 @@ fn neq_string_different() {
 
 /// Verifies None != None is false.
 #[test]
-fn neq_null_null() {
+fn neq_none_none() {
     ShapeTest::new("None != None").expect_bool(false);
 }
 
 /// Verifies None != 1 is true.
 #[test]
-fn neq_null_vs_int() {
+fn neq_none_vs_int() {
     ShapeTest::new("None != 1").expect_bool(true);
 }
 
 /// Verifies None != false is true.
 #[test]
-fn neq_null_vs_false() {
+fn neq_none_vs_false() {
     ShapeTest::new("None != false").expect_bool(true);
 }
 
@@ -517,30 +517,30 @@ fn neq_string_with_tab_vs_space() {
 }
 
 // ============================================================================
-// 37. Null propagation / null safety
+// 37. None propagation / none safety
 // ============================================================================
 
 /// Verifies None != 0 (explicit).
 #[test]
-fn null_not_equal_to_zero() {
+fn none_not_equal_to_zero() {
     ShapeTest::new("None != 0").expect_bool(true);
 }
 
 /// Verifies None != "" (explicit).
 #[test]
-fn null_not_equal_to_empty_string() {
+fn none_not_equal_to_empty_string() {
     ShapeTest::new(r#"None != """#).expect_bool(true);
 }
 
 /// Verifies None != false (explicit).
 #[test]
-fn null_not_equal_to_false_explicit() {
+fn none_not_equal_to_false_explicit() {
     ShapeTest::new("None != false").expect_bool(true);
 }
 
 /// Verifies None == None (explicit).
 #[test]
-fn null_equal_to_null_explicit() {
+fn none_equal_to_none_explicit() {
     ShapeTest::new("None == None").expect_bool(true);
 }
 

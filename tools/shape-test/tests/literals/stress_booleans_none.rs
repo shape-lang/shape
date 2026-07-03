@@ -1,4 +1,4 @@
-//! Stress tests for boolean and none literals.
+//! Stress tests for boolean and None literals.
 //!
 //! Migrated from shape-vm stress_01_primitives.rs — boolean, none, truthiness,
 //! string, and related literal sections.
@@ -178,19 +178,19 @@ test()"#,
 }
 
 // =============================================================================
-// SECTION 5: None / Null
+// SECTION 5: None / None
 // =============================================================================
 
-/// Verifies None literal returns none.
+/// Verifies None literal returns None.
 #[test]
-fn test_null_literal() {
+fn test_none_literal() {
     ShapeTest::new("let x = None\nx").expect_none();
 }
 
 /// Strict Shape requires a bool operand: `!<Option>` is rejected (no truthiness
 /// coercion — user ruling 2026-06-01). Rebaselined from `expect_bool(true)`.
 #[test]
-fn test_null_is_not_truthy() {
+fn test_none_is_not_truthy() {
     ShapeTest::new("fn test() -> bool { !None }\ntest()")
         .expect_run_err_contains("is not compatible with bool");
 }
@@ -367,15 +367,15 @@ test()"#,
     .expect_bool(false);
 }
 
-/// Verifies null equality None == None.
+/// Verifies none equality None == None.
 #[test]
-fn test_null_equality() {
+fn test_none_equality() {
     ShapeTest::new("fn test() -> bool { None == None }\ntest()").expect_bool(true);
 }
 
 /// Verifies None != 0 (no implicit coercion).
 #[test]
-fn test_null_not_equal_to_zero() {
+fn test_none_not_equal_to_zero() {
     ShapeTest::new("fn test() -> bool { None != 0 }\ntest()").expect_bool(true);
 }
 

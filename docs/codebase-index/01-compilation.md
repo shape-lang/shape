@@ -186,7 +186,7 @@ Not found — possibly: there is no AST→source unparser in this scope. `Displa
 **Role**: Hindley-Milner-style engine with three modes: `Infer`, `Check(T)` (hard), `Synth(T)` (soft hint, used to push closure param types).
 **Key rules / invariants**:
 - Closure parameter types in method calls (`arr.map(|x| ...)`) are inferred bidirectionally: the engine looks up the receiver's `GenericMethodSignature`, extracts the expected closure params, and passes them as `Synth` hints.
-- `if x != null { ... }` narrows `T?` to `T` in the then-branch via `extract_narrowings`/`extract_inverse_narrowings`; the narrowed scheme is pushed for the branch only.
+- `if x != None { ... }` narrows `T?` to `T` in the then-branch via `extract_narrowings`/`extract_inverse_narrowings`; the narrowed scheme is pushed for the branch only.
 - `int` and `number` do NOT unify (CLAUDE.md "Type System Rules").
 
 **Related**: `Unifier`, `ConstraintSolver`, `Type / SemanticType`, `Type::Variable + TypeVar`.
@@ -207,7 +207,7 @@ Not found — possibly: there is no AST→source unparser in this scope. `Displa
 ### BuiltinTypes
 
 **Path**: `crates/shape-runtime/src/type_system/types/builtins.rs:11`.
-**Role**: Constructor module returning canonical `Type` values for primitives (`number`, `int`, `string`, `bool`, `void`, `null`, `array`).
+**Role**: Constructor module returning canonical `Type` values for primitives (`number`, `int`, `string`, `bool`, `void`, internal `TypeAnnotation::Null`, `array`).
 **Key rules / invariants**:
 - `canonical_numeric_runtime_name` defines the alias mapping: `number/float/f64 → f64`, `int/integer/i64 → i64`, `byte → u8`, `char → i8`.
 - `BuiltinTypes::any()` returns a fresh `Type::Variable` (no `Any` type).
@@ -592,4 +592,3 @@ Not found — possibly: there is no AST→source unparser in this scope. `Displa
 **Related**: `AnnotationDef AST + handler types`, `Comptime evaluator`.
 
 ---
-

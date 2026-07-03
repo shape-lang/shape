@@ -1,6 +1,6 @@
 let r = comptime { implements("int", "Display") }
-if r == null {
-  print("is-null")
+if r == None {
+  print("is-none")
 } else {
-  print("not-null")
+  print("not-none")
 }

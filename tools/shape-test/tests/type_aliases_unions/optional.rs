@@ -1,4 +1,4 @@
-//! Optional types: None keyword, null coalescing, optional field syntax.
+//! Optional types: None keyword, coalescing, optional field syntax.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -40,11 +40,11 @@ fn non_none_inequality() {
 }
 
 // =========================================================================
-// Null coalescing (??)
+// Coalescing (??)
 // =========================================================================
 
 #[test]
-fn null_coalesce_returns_fallback() {
+fn none_coalesce_returns_fallback() {
     ShapeTest::new(
         r#"
         let x = None
@@ -56,7 +56,7 @@ fn null_coalesce_returns_fallback() {
 }
 
 #[test]
-fn null_coalesce_keeps_value() {
+fn none_coalesce_keeps_value() {
     ShapeTest::new(
         r#"
         let x = 42

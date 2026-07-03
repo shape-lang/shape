@@ -432,7 +432,7 @@ fn book_shape_examples_use_current_syntax() {
             }
             if has_null_token(&line) {
                 errors.push(format!(
-                    "{}:{} uses null token (use Option/Result flow)",
+                    "{}:{} uses null token (use None, Option, or Result flow)",
                     file.display(),
                     line_no + 1
                 ));
@@ -489,7 +489,7 @@ fn book_shape_examples_use_current_syntax() {
             }
             if has_null_token(&line) {
                 errors.push(format!(
-                    "{}:{} uses null token (use Option/Result flow)",
+                    "{}:{} uses null token (use None, Option, or Result flow)",
                     file.display(),
                     line_no + 1
                 ));

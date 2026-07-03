@@ -1,5 +1,5 @@
 let x = 5
-if x == null {
+if x == None {
   print("a")
 } else {
   print("b")

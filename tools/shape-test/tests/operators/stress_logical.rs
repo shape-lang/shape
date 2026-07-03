@@ -428,9 +428,9 @@ fn not_one() {
     ShapeTest::new("!1").expect_run_err_contains("is not compatible with bool");
 }
 
-/// Verifies !None = true (null is falsy).
+/// Verifies !None = true (None is falsy).
 #[test]
-fn not_null() {
+fn not_none() {
     ShapeTest::new("!None").expect_bool(true);
 }
 

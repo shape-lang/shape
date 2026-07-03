@@ -1,4 +1,4 @@
-//! Stress tests for basic let bindings: int, number, bool, string, null,
+//! Stress tests for basic let bindings: int, number, bool, string, none,
 //! type-annotated lets, width-typed locals, const bindings, expressions,
 //! function parameters, module-level bindings, and large local counts.
 
@@ -59,7 +59,7 @@ fn test_let_bind_empty_string() {
 
 /// Verifies let binding of None.
 #[test]
-fn test_let_bind_null() {
+fn test_let_bind_none() {
     ShapeTest::new("let x = None\nx").expect_none();
 }
 
