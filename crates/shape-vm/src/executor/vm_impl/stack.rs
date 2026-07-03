@@ -1424,6 +1424,117 @@ mod kinded_stack_tests {
         assert_eq!(weak.strong_count(), 0, "truncate dropped the share");
     }
 
+    /// Targeted Miri proof-boundary probe: the VM stack's Miri-only
+    /// provenance sidecar must carry legacy `Arc<String>` pointer provenance
+    /// through read, pop, and truncate paths. This is evidence for this
+    /// sidecar path only, not a full VM UB proof.
+    #[cfg(miri)]
+    #[test]
+    fn miri_stack_provenance_string_read_pop_and_truncate() {
+        let mut vm = make_vm();
+
+        let arc = Arc::new("miri stack string".to_string());
+        let weak = Arc::downgrade(&arc);
+        let ptr = Arc::into_raw(arc);
+
+        vm.push_kinded_with_miri_provenance(
+            ptr as u64,
+            NativeKind::String,
+            MiriSlotProvenance::String(ptr),
+        )
+        .unwrap();
+        assert_eq!(weak.strong_count(), 1, "stack owns the initial share");
+
+        let owned = vm.read_owned_kinded(vm.sp - 1);
+        assert_eq!(weak.strong_count(), 2, "read_owned retained via sidecar");
+        assert_eq!(owned.as_str(), Some("miri stack string"));
+        drop(owned);
+        assert_eq!(weak.strong_count(), 1, "owned read drop released its share");
+
+        let (bits, kind, provenance) = vm.pop_kinded_with_miri_provenance().unwrap();
+        assert_eq!(bits, ptr as u64);
+        assert_eq!(kind, NativeKind::String);
+        drop_with_kind_and_miri_provenance(bits, kind, provenance);
+        assert_eq!(weak.strong_count(), 0, "pop + drop retired the stack share");
+
+        let arc = Arc::new("miri truncate string".to_string());
+        let weak = Arc::downgrade(&arc);
+        let ptr = Arc::into_raw(arc);
+        vm.push_kinded_with_miri_provenance(
+            ptr as u64,
+            NativeKind::String,
+            MiriSlotProvenance::String(ptr),
+        )
+        .unwrap();
+        vm.truncate_stack(0);
+        assert_eq!(weak.strong_count(), 0, "truncate used the sidecar to drop");
+    }
+
+    /// Targeted Miri proof-boundary probe: the VM stack's Miri-only
+    /// provenance sidecar must carry v2-raw `TypedObjectStorage` provenance
+    /// through owning reads and pop/drop. This avoids integer-to-pointer
+    /// reconstruction while exercising the HeapHeader refcount path only.
+    #[cfg(miri)]
+    #[test]
+    fn miri_stack_provenance_typed_object_read_and_pop() {
+        use shape_value::v2::heap_element::HeapElement;
+        use shape_value::v2::refcount::{v2_get_refcount, v2_retain};
+
+        let mut vm = make_vm();
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+        let ptr = TypedObjectStorage::_new(
+            91,
+            vec![ValueSlot::from_int(7)].into_boxed_slice(),
+            0,
+            kinds,
+        );
+        let header = unsafe { &(*ptr).header as *const _ };
+
+        unsafe { v2_retain(header) };
+        assert_eq!(
+            unsafe { v2_get_refcount(header) },
+            2,
+            "test guard plus stack-owned share"
+        );
+
+        vm.push_kinded_with_miri_provenance(
+            ptr as u64,
+            NativeKind::Ptr(HeapKind::TypedObject),
+            MiriSlotProvenance::TypedObject(ptr),
+        )
+        .unwrap();
+
+        let owned = vm.read_owned_kinded(vm.sp - 1);
+        assert_eq!(
+            unsafe { v2_get_refcount(header) },
+            3,
+            "read_owned retained the typed object via sidecar"
+        );
+        let storage = owned
+            .as_typed_object_storage()
+            .expect("sidecar preserves typed-object pointer provenance");
+        assert_eq!(storage.schema_id, 91);
+        assert_eq!(storage.slots()[0].as_i64(), 7);
+        drop(owned);
+        assert_eq!(
+            unsafe { v2_get_refcount(header) },
+            2,
+            "owned typed-object drop released its share"
+        );
+
+        let (bits, kind, provenance) = vm.pop_kinded_with_miri_provenance().unwrap();
+        assert_eq!(bits, ptr as u64);
+        assert_eq!(kind, NativeKind::Ptr(HeapKind::TypedObject));
+        drop_with_kind_and_miri_provenance(bits, kind, provenance);
+        assert_eq!(
+            unsafe { v2_get_refcount(header) },
+            1,
+            "pop + drop retired only the stack share"
+        );
+
+        unsafe { TypedObjectStorage::release_elem(ptr) };
+    }
+
     /// Inline scalars: clone/drop are no-ops on the bits.
     #[test]
     fn inline_scalars_no_refcount_dispatch() {

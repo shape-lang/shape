@@ -230,10 +230,10 @@ impl BytecodeCompiler {
         // Check for RowView property access - emit typed column opcode
         if let Expr::Identifier(name, _) = object {
             if let Some(col_id) = self.try_resolve_row_view_column(name, property) {
+                // Prove the schema field type before emitting any typed column load.
+                let opcode = self.row_view_field_opcode(name, property)?;
                 // Compile the object (pushes RowView onto stack)
                 self.compile_expr(object)?;
-                // Emit typed column load based on field type
-                let opcode = self.row_view_field_opcode(name, property);
                 self.emit(Instruction::new(
                     opcode,
                     Some(Operand::ColumnAccess { col_id }),

@@ -82,6 +82,7 @@ or errors instead of panicking across the non-unwinding ABI boundary.
 | `shape-vm --lib result_option_carrier` | default Miri / Stacked Borrows; `-Zmiri-tree-borrows`; `-Zmiri-strict-provenance` |
 | `shape-vm --lib get_prop_typed_object_int_field_reads_via_raw` | default Miri / Stacked Borrows; `-Zmiri-tree-borrows` |
 | `shape-vm --lib get_prop_typed_object_string_field_reads_via_raw` | default Miri / Stacked Borrows; `-Zmiri-tree-borrows` |
+| `shape-vm --lib miri_stack_provenance` | default Miri / Stacked Borrows; `-Zmiri-tree-borrows`; `-Zmiri-strict-provenance` |
 
 Passing this gate is evidence for only those filters and modes. It is not a
 full UB-free proof for the VM, runtime, JIT, FFI, snapshots, arbitrary Shape
@@ -101,6 +102,31 @@ systemd-run --user --wait --collect --pipe -p MemoryMax=16G -p MemorySwapMax=0 -
 Both modes passed with `1 passed; 0 failed; 2467 filtered out`. This is targeted
 evidence for that string-field raw-read path only, not a proof that every typed
 object string consumer, heap carrier, VM path, or ignored test is UB-free.
+
+## W91C Miri Expansion
+
+W91C adds the `shape-vm --lib miri_stack_provenance` filter to the gate. The
+filter contains two `cfg(miri)` stack-sidecar probes:
+
+- `miri_stack_provenance_string_read_pop_and_truncate` covers legacy
+  `Arc<String>` pointer provenance through `push_kinded_with_miri_provenance`,
+  `read_owned_kinded`, `pop_kinded_with_miri_provenance`, and
+  `truncate_stack`.
+- `miri_stack_provenance_typed_object_read_and_pop` covers v2-raw
+  `TypedObjectStorage` provenance through the same owning-read and pop/drop
+  boundary, including HeapHeader refcount retain/release.
+
+The gate runs this filter under default Miri / Stacked Borrows, Tree Borrows,
+and strict provenance. Passing it is targeted evidence for the VM stack Miri
+sidecar paths above only. It is not a full UB-free proof for stack overwrites,
+full VM execution, snapshots, JIT/FFI boundaries, all heap carriers, or ignored
+tests.
+
+W91C did not add a stack-overwrite probe for a fresh heap pointer:
+`stack_write_kinded(idx, bits, kind)` has no Miri provenance-bearing incoming
+write API. A future overwrite probe should first add or route through an API
+that transfers the incoming `MiriSlotProvenance`; otherwise the new stack slot
+would intentionally carry `None` provenance and exercise the wrong contract.
 
 ## Checker
 

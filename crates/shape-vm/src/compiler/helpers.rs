@@ -5275,18 +5275,19 @@ impl BytecodeCompiler {
     /// Determine the appropriate LoadCol opcode for a RowView field.
     ///
     /// Looks up the field's FieldType and maps it to the corresponding opcode.
-    /// Falls back to LoadColF64 if the type can't be determined.
-    pub(super) fn row_view_field_opcode(&self, var_name: &str, field_name: &str) -> OpCode {
+    /// Returns a compile-time error when the schema proof is absent or the
+    /// field type has no typed column-load opcode.
+    pub(super) fn row_view_field_opcode(&self, var_name: &str, field_name: &str) -> Result<OpCode> {
         use shape_runtime::type_schema::FieldType;
 
         let type_name = if let Some(local_idx) = self.resolve_local(var_name) {
             self.type_tracker
                 .get_local_type(local_idx)
-                .and_then(|info| info.type_name.clone())
+                .and_then(|info| info.is_row_view().then(|| info.type_name.clone()).flatten())
         } else if let Some(&binding_idx) = self.module_bindings.get(var_name) {
             self.type_tracker
                 .get_binding_type(binding_idx)
-                .and_then(|info| info.type_name.clone())
+                .and_then(|info| info.is_row_view().then(|| info.type_name.clone()).flatten())
         } else {
             None
         };
@@ -5294,17 +5295,45 @@ impl BytecodeCompiler {
         if let Some(type_name) = type_name {
             if let Some(schema) = self.type_tracker.schema_registry().get(&type_name) {
                 if let Some(field) = schema.get_field(field_name) {
-                    return match field.field_type {
+                    return Ok(match &field.field_type {
                         FieldType::F64 => OpCode::LoadColF64,
                         FieldType::I64 | FieldType::Timestamp => OpCode::LoadColI64,
                         FieldType::Bool => OpCode::LoadColBool,
                         FieldType::String => OpCode::LoadColStr,
-                        _ => OpCode::LoadColF64, // default
-                    };
+                        unsupported => {
+                            return Err(ShapeError::SemanticError {
+                                message: format!(
+                                    "Field '{}' on Row<{}> has unsupported column load type '{}'",
+                                    field_name, type_name, unsupported
+                                ),
+                                location: None,
+                            });
+                        }
+                    });
                 }
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "Field '{}' does not exist on Row<{}>",
+                        field_name, type_name
+                    ),
+                    location: None,
+                });
             }
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Cannot prove RowView field '{}' because schema '{}' is not registered",
+                    field_name, type_name
+                ),
+                location: None,
+            });
         }
-        OpCode::LoadColF64 // default
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "Cannot prove RowView field '{}' because '{}' has no RowView schema type",
+                field_name, var_name
+            ),
+            location: None,
+        })
     }
 
     // U4-4: `resolve_row_view_field_numeric_type` is DELETED — it projected a
@@ -6514,10 +6543,10 @@ mod tests {
     use super::super::BytecodeCompiler;
     use crate::bytecode::{Instruction, NumericWidth, OpCode, Operand};
     use crate::compiler::ParamPassMode;
-    use crate::type_tracking::{BindingStorageClass, StorageHint};
+    use crate::type_tracking::{BindingStorageClass, StorageHint, VariableTypeInfo};
     use shape_ast::IntWidth;
     use shape_ast::ast::{BinaryOp, Expr, Literal, Span, TypeAnnotation};
-    use shape_runtime::type_schema::FieldType;
+    use shape_runtime::type_schema::{FieldType, TypeSchemaBuilder};
 
     #[test]
     fn compact_typed_arithmetic_walkback_preserves_width() {
@@ -6608,6 +6637,77 @@ mod tests {
         };
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
         assert_eq!(ft, FieldType::Object("MyContainer".to_string()));
+    }
+
+    #[test]
+    fn row_view_field_opcode_maps_supported_schema_types() {
+        let mut compiler = BytecodeCompiler::new();
+        let schema_id = TypeSchemaBuilder::new("Candle")
+            .f64_field("open")
+            .i64_field("volume")
+            .timestamp_field("ts")
+            .bool_field("active")
+            .string_field("symbol")
+            .register(compiler.type_tracker.schema_registry_mut());
+        let slot = compiler.declare_local("row").unwrap();
+        compiler
+            .type_tracker
+            .set_local_type(slot, VariableTypeInfo::row_view(schema_id, "Candle".into()));
+
+        assert_eq!(
+            compiler.row_view_field_opcode("row", "open").unwrap(),
+            OpCode::LoadColF64
+        );
+        assert_eq!(
+            compiler.row_view_field_opcode("row", "volume").unwrap(),
+            OpCode::LoadColI64
+        );
+        assert_eq!(
+            compiler.row_view_field_opcode("row", "ts").unwrap(),
+            OpCode::LoadColI64
+        );
+        assert_eq!(
+            compiler.row_view_field_opcode("row", "active").unwrap(),
+            OpCode::LoadColBool
+        );
+        assert_eq!(
+            compiler.row_view_field_opcode("row", "symbol").unwrap(),
+            OpCode::LoadColStr
+        );
+    }
+
+    #[test]
+    fn row_view_field_opcode_rejects_unsupported_schema_type() {
+        let mut compiler = BytecodeCompiler::new();
+        let schema_id = TypeSchemaBuilder::new("Trade")
+            .decimal_field("amount")
+            .register(compiler.type_tracker.schema_registry_mut());
+        let slot = compiler.declare_local("row").unwrap();
+        compiler
+            .type_tracker
+            .set_local_type(slot, VariableTypeInfo::row_view(schema_id, "Trade".into()));
+
+        let err = compiler.row_view_field_opcode("row", "amount").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("amount"), "{message}");
+        assert!(message.contains("Row<Trade>"), "{message}");
+        assert!(message.contains("decimal"), "{message}");
+    }
+
+    #[test]
+    fn row_view_field_opcode_rejects_missing_schema_proof() {
+        let mut compiler = BytecodeCompiler::new();
+        let slot = compiler.declare_local("row").unwrap();
+        compiler.type_tracker.set_local_type(
+            slot,
+            VariableTypeInfo::row_view(999_999, "MissingSchema".into()),
+        );
+
+        let err = compiler.row_view_field_opcode("row", "value").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("value"), "{message}");
+        assert!(message.contains("MissingSchema"), "{message}");
+        assert!(message.contains("not registered"), "{message}");
     }
 
     #[test]
