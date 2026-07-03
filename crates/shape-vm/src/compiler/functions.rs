@@ -873,7 +873,18 @@ impl BytecodeCompiler {
         );
         let callee_summaries =
             self.build_callee_summaries(Some(&effective_def.name), &mir_lowering.all_local_names);
-        let mut mir_analysis = crate::mir::solver::analyze(&mir_lowering.mir, &callee_summaries);
+        let borrow_analysis_options = crate::mir::solver::BorrowAnalysisOptions {
+            allow_return_slot_local_escape_promotion: effective_def
+                .return_type
+                .as_ref()
+                .map(|ann| matches!(ann, shape_ast::ast::TypeAnnotation::Borrow { .. }))
+                .unwrap_or(false),
+        };
+        let mut mir_analysis = crate::mir::solver::analyze_with_options(
+            &mir_lowering.mir,
+            &callee_summaries,
+            borrow_analysis_options,
+        );
         mir_analysis.mutability_errors =
             crate::mir::lowering::compute_mutability_errors(&mir_lowering);
         crate::mir::repair::attach_repairs(&mut mir_analysis, &mir_lowering.mir);
@@ -4380,7 +4391,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Phase-2c MIR reference-escape enforcement is not emitted for this local-return shape under current strict lowering"]
     fn test_compile_function_records_mir_reference_escape() {
         let program = shape_ast::parser::parse_program(
             r#"

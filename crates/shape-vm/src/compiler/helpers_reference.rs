@@ -801,6 +801,7 @@ impl BytecodeCompiler {
         &self,
         params: &[shape_ast::ast::FunctionParameter],
         body: &[Statement],
+        return_type: Option<&shape_ast::ast::TypeAnnotation>,
         span: shape_ast::ast::Span,
     ) -> Option<FunctionReturnReferenceSummary> {
         let mut effective_params = params.to_vec();
@@ -825,7 +826,12 @@ impl BytecodeCompiler {
         }
 
         let callee_summaries = self.build_callee_summaries(None, &lowering.all_local_names);
-        crate::mir::solver::analyze(&lowering.mir, &callee_summaries)
+        let options = crate::mir::solver::BorrowAnalysisOptions {
+            allow_return_slot_local_escape_promotion: return_type
+                .map(|ann| matches!(ann, shape_ast::ast::TypeAnnotation::Borrow { .. }))
+                .unwrap_or(false),
+        };
+        crate::mir::solver::analyze_with_options(&lowering.mir, &callee_summaries, options)
             .return_reference_summary
             .map(Into::into)
     }
@@ -836,8 +842,17 @@ impl BytecodeCompiler {
     ) -> Option<FunctionReturnReferenceSummary> {
         match expr {
             shape_ast::ast::Expr::FunctionExpr {
-                params, body, span, ..
-            } => self.callable_return_reference_summary_from_function_expr(params, body, *span),
+                params,
+                body,
+                return_type,
+                span,
+                ..
+            } => self.callable_return_reference_summary_from_function_expr(
+                params,
+                body,
+                return_type.as_ref(),
+                *span,
+            ),
             shape_ast::ast::Expr::Identifier(name, _)
             | shape_ast::ast::Expr::PatternRef(name, _) => {
                 self.function_return_reference_summary_for_name(name)

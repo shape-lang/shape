@@ -245,6 +245,29 @@ The source-level count delta after W95C is:
 | `shape-jit` before W95C | 3 | 0 | 21 |
 | `shape-jit` after W95C | 0 | 0 | 21 |
 
+## W95A Addendum: MIR Local Reference Return Enforcement
+
+Date: 2026-07-03
+Branch: `strict-flip-w95a-mir-reference-escape`
+
+W95A removes one `shape-vm` `active_feature_gap` ignore after implementing
+static MIR enforcement for unannotated local-reference returns. The MIR borrow
+solver now admits ReturnSlot reference-escape promotion only when the compiler
+supplies a declared borrow-return contract (`-> &T` / `-> &mut T`); otherwise
+a local-rooted reference flowing through aliases into SlotId(0) records B0003
+`ReferenceEscape`. ModuleBindingStore promotion remains unchanged.
+
+| Test | Before | After | Disposition |
+|---|---|---|---|
+| `crates/shape-vm/src/compiler/functions.rs::test_compile_function_records_mir_reference_escape` | `active_feature_gap` | active / verified | Unannotated `let r = &x; let alias = r; return alias` is rejected through MIR borrow analysis with B0003, and the analysis records `BorrowErrorKind::ReferenceEscape`. Redrive tightened promotion emission so rejected param-rooted ReturnSlot escapes leave no storage-planning promotion trigger. |
+
+The source-level count delta after W95A is:
+
+| Crate | Active gap | Stale expectation | Deleted v1 path |
+|---|---:|---:|---:|
+| `shape-vm` before W95A | 12 | 0 | 5 |
+| `shape-vm` after W95A | 11 | 0 | 5 |
+
 ## Active Gap Inventory
 
 These rows are precise missing-feature or implementation-gap issues. They
@@ -253,7 +276,6 @@ focused cargo test lane.
 
 | Crate | Test | Gate | Decision label | Missing feature |
 |---|---|---|---|---|
-| `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_compile_function_records_mir_reference_escape` | default | missing language feature | MIR reference-escape enforcement for local-return shapes. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/extend_blocks.rs::test_extend_array_basic` | `deep-tests` | missing language feature | Typed receiver-specific method resolution for generic Vec extensions. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/extend_blocks.rs::test_extend_multiple_types` | `deep-tests` | missing language feature | Multi-extend resolver preserving String method registration when mixed with Number and Vec extensions. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/module_deep_tests.rs::test_module_exec_nested_module_function_resolution` | `deep-tests` | missing language feature | Nested qualified module-call return-kind inference. |

@@ -1589,15 +1589,12 @@ mod tests {
         );
     }
 
-    // FlipLive (ADR-006 §2.7.30): a lowered `let x = 1; let r = &x; let alias =
-    // r; return alias` is the ReturnSlot floor case — `x` is a genuine
-    // promotable LOCAL. The lowering remains visible to the solver (the loan
-    // flows through the aliases into the return slot), but the parallel B0003
-    // reject is now SUPPRESSED and the escape is PROMOTED. Asserts NO
-    // `ReferenceEscape` error AND that the promotion is derived (the solver
-    // still SEES the returned-ref alias — that is what this test locks).
+    // A lowered `let x = 1; let r = &x; let alias = r; return alias` must stay
+    // visible to the solver as a ReturnSlot escape. Without an explicit
+    // borrow-return contract, default analysis emits B0003 and derives no
+    // promotion for the alias.
     #[test]
-    fn test_lowered_returned_ref_alias_promotes_not_rejects() {
+    fn test_lowered_returned_ref_alias_rejects_without_borrow_return_contract() {
         let body = vec![
             Statement::VariableDecl(
                 ast::VariableDecl {
@@ -1641,18 +1638,16 @@ mod tests {
         let mir = lower_function("test", &[], &body, span());
         let analysis = solver::analyze(&mir, &Default::default());
         assert!(
-            !analysis
+            analysis
                 .errors
                 .iter()
                 .any(|error| error.kind == BorrowErrorKind::ReferenceEscape),
-            "FlipLive: a returned LOCAL-ref alias must NOT emit B0003 \
-             ReferenceEscape (it is promoted), got {:?}",
+            "unannotated returned LOCAL-ref alias must emit B0003 ReferenceEscape, got {:?}",
             analysis.errors
         );
-        assert_eq!(
-            analysis.reference_escape_promotions.len(),
-            1,
-            "expected exactly one ReturnSlot promotion for the returned local-ref alias, got {:?}",
+        assert!(
+            analysis.reference_escape_promotions.is_empty(),
+            "unannotated returned LOCAL-ref alias must not promote, got {:?}",
             analysis.reference_escape_promotions
         );
     }
