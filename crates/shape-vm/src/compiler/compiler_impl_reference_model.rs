@@ -963,6 +963,7 @@ impl BytecodeCompiler {
             } else {
                 module.name.clone()
             };
+            let local_functions = Self::module_local_function_names(&module.items);
 
             for nested in &module.items {
                 if matches!(nested, shape_ast::ast::Item::Import(..)) {
@@ -975,7 +976,11 @@ impl BytecodeCompiler {
                         out,
                     )?;
                 } else {
-                    out.push(self.qualify_module_item(nested, &module_path)?);
+                    out.push(self.qualify_module_item_with_local_function_calls(
+                        nested,
+                        &module_path,
+                        &local_functions,
+                    )?);
                 }
             }
         }

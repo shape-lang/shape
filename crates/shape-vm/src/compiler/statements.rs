@@ -5784,8 +5784,13 @@ impl BytecodeCompiler {
         }
 
         let mut qualified_items = Vec::with_capacity(module_items.len());
+        let local_functions = Self::module_local_function_names(&module_items);
         for inner in &module_items {
-            qualified_items.push(self.qualify_module_item(inner, &module_path)?);
+            qualified_items.push(self.qualify_module_item_with_local_function_calls(
+                inner,
+                &module_path,
+                &local_functions,
+            )?);
         }
 
         for qualified in &qualified_items {

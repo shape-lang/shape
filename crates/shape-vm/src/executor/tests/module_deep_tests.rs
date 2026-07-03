@@ -68,7 +68,6 @@ fn test_module_exec_nested_module_access() {
 }
 
 #[test]
-#[ignore = "Phase-2c module return-kind inference: nested qualified module calls still resolve to unknown in arithmetic"]
 fn test_module_exec_nested_module_function_resolution() {
     let code = r#"
         mod outer {
@@ -162,7 +161,6 @@ fn test_module_exec_module_function_with_closure() {
 }
 
 #[test]
-#[ignore = "Phase-2c module recursion: unqualified recursive calls inside modules do not yet resolve to the module function"]
 fn test_module_exec_module_function_recursion() {
     let code = r#"
         mod fib {
@@ -219,7 +217,6 @@ fn test_module_exec_two_modules_calling_each_other_functions() {
 }
 
 #[test]
-#[ignore = "Phase-2c module match lowering currently returns the first numeric arm shape for this module-scoped helper"]
 fn test_module_exec_module_with_match_expression() {
     let code = r#"
         mod evaluator {

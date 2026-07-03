@@ -2333,6 +2333,39 @@ impl BytecodeCompiler {
                 return Ok(return_ty);
             }
         }
+        if let Expr::QualifiedFunctionCall {
+            namespace,
+            function,
+            ..
+        } = expr
+        {
+            let local_qualified = format!("{}::{}", namespace, function);
+            let mut candidates = Vec::with_capacity(2);
+            if let Some(canonical) = self.resolve_canonical_module_path(namespace) {
+                candidates.push(format!("{}::{}", canonical, function));
+            }
+            candidates.push(local_qualified);
+
+            for call_name in candidates {
+                if let Some(def) = self.function_defs.get(&call_name) {
+                    let is_generic = def.type_params.as_ref().is_some_and(|tp| !tp.is_empty());
+                    if !is_generic && let Some(ret) = def.return_type.as_ref() {
+                        if let TypeAnnotation::Borrow { inner, .. } = ret {
+                            return Ok(Type::Concrete((**inner).clone()));
+                        }
+                        return Ok(Type::Concrete(ret.clone()));
+                    }
+                }
+                if let Some(ct) = self
+                    .type_tracker
+                    .get_function_return_concrete_type(&call_name)
+                    && let Some(ann) =
+                        crate::compiler::expressions::closures::concrete_type_to_type_annotation(ct)
+                {
+                    return Ok(Type::Concrete(ann));
+                }
+            }
+        }
 
         // D-β string-join receiver-kind fix (v0.3 KC #6(d), 2026-05-22):
         // `.toString()` / `.to_string()` always returns `string` (universal
