@@ -1201,20 +1201,40 @@ impl VirtualMachine {
     /// share transferred in by the caller (ADR-006 §2.7.7).
     #[inline(always)]
     pub(crate) fn stack_write_kinded(&mut self, idx: usize, bits: u64, kind: NativeKind) {
-        let old_bits = self.stack[idx];
-        let old_kind = self.kinds[idx];
         #[cfg(miri)]
         {
-            let old_provenance = miri_take_stack_provenance(self, idx);
-            drop_with_kind_and_miri_provenance(old_bits, old_kind, old_provenance);
-            miri_set_stack_provenance(self, idx, MiriSlotProvenance::None);
+            self.stack_write_kinded_with_miri_provenance(idx, bits, kind, MiriSlotProvenance::None);
         }
         #[cfg(not(miri))]
         {
+            let old_bits = self.stack[idx];
+            let old_kind = self.kinds[idx];
             drop_with_kind(old_bits, old_kind);
+            self.stack[idx] = bits;
+            self.kinds[idx] = kind;
         }
+    }
+
+    /// Miri-only overwrite variant that transfers explicit incoming pointer
+    /// provenance with the fresh slot share. This preserves the production
+    /// `(u64, NativeKind)` stack ABI while giving targeted Miri probes a
+    /// provenance-bearing overwrite contract to exercise.
+    #[cfg(miri)]
+    #[inline(always)]
+    pub(crate) fn stack_write_kinded_with_miri_provenance(
+        &mut self,
+        idx: usize,
+        bits: u64,
+        kind: NativeKind,
+        provenance: MiriSlotProvenance,
+    ) {
+        let old_bits = self.stack[idx];
+        let old_kind = self.kinds[idx];
+        let old_provenance = miri_take_stack_provenance(self, idx);
+        drop_with_kind_and_miri_provenance(old_bits, old_kind, old_provenance);
         self.stack[idx] = bits;
         self.kinds[idx] = kind;
+        miri_set_stack_provenance(self, idx, provenance);
     }
 
     /// Take ownership of the slot at `idx`, replacing it with the
@@ -1468,6 +1488,68 @@ mod kinded_stack_tests {
         .unwrap();
         vm.truncate_stack(0);
         assert_eq!(weak.strong_count(), 0, "truncate used the sidecar to drop");
+    }
+
+    /// Targeted Miri proof-boundary probe: a stack overwrite can transfer
+    /// explicit incoming `Arc<String>` provenance, drop the overwritten
+    /// occupant through its old provenance, and later drop the fresh slot
+    /// without integer-to-pointer reconstruction.
+    #[cfg(miri)]
+    #[test]
+    fn miri_stack_provenance_string_overwrite_and_drop() {
+        let mut vm = make_vm();
+
+        let old_arc = Arc::new("miri old stack string".to_string());
+        let old_weak = Arc::downgrade(&old_arc);
+        let old_ptr = Arc::into_raw(old_arc);
+        vm.push_kinded_with_miri_provenance(
+            old_ptr as u64,
+            NativeKind::String,
+            MiriSlotProvenance::String(old_ptr),
+        )
+        .unwrap();
+        assert_eq!(old_weak.strong_count(), 1, "stack owns the old slot share");
+
+        let new_arc = Arc::new("miri fresh stack string".to_string());
+        let new_weak = Arc::downgrade(&new_arc);
+        let new_ptr = Arc::into_raw(new_arc);
+        vm.stack_write_kinded_with_miri_provenance(
+            0,
+            new_ptr as u64,
+            NativeKind::String,
+            MiriSlotProvenance::String(new_ptr),
+        );
+        assert_eq!(
+            old_weak.strong_count(),
+            0,
+            "overwrite dropped the old slot through its provenance"
+        );
+        assert_eq!(
+            new_weak.strong_count(),
+            1,
+            "stack owns the fresh slot share"
+        );
+
+        let owned = vm.read_owned_kinded(0);
+        assert_eq!(
+            new_weak.strong_count(),
+            2,
+            "read_owned retained the fresh slot via overwrite provenance"
+        );
+        assert_eq!(owned.as_str(), Some("miri fresh stack string"));
+        drop(owned);
+        assert_eq!(
+            new_weak.strong_count(),
+            1,
+            "owned fresh-string read drop released its share"
+        );
+
+        vm.truncate_stack(0);
+        assert_eq!(
+            new_weak.strong_count(),
+            0,
+            "truncate dropped the overwritten-in fresh slot"
+        );
     }
 
     /// Targeted Miri proof-boundary probe: the VM stack's Miri-only

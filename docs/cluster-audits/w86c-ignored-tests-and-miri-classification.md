@@ -125,11 +125,31 @@ sidecar paths above only. It is not a full UB-free proof for stack overwrites,
 full VM execution, snapshots, JIT/FFI boundaries, all heap carriers, or ignored
 tests.
 
-W91C did not add a stack-overwrite probe for a fresh heap pointer:
+At W91C close, it did not add a stack-overwrite probe for a fresh heap pointer:
 `stack_write_kinded(idx, bits, kind)` has no Miri provenance-bearing incoming
 write API. A future overwrite probe should first add or route through an API
 that transfers the incoming `MiriSlotProvenance`; otherwise the new stack slot
 would intentionally carry `None` provenance and exercise the wrong contract.
+
+## W92A Miri Stack-Overwrite Expansion
+
+W92A resolves the W91C-documented stack-overwrite sidecar gap by adding a
+Miri-only `stack_write_kinded_with_miri_provenance(...)` overwrite API. The
+regular `stack_write_kinded(idx, bits, kind)` ABI remains unchanged; under Miri
+it routes through the new helper with `MiriSlotProvenance::None` rather than
+inferring provenance from raw bits.
+
+The `shape-vm --lib miri_stack_provenance` filter now also includes
+`miri_stack_provenance_string_overwrite_and_drop`. That probe overwrites an
+existing `Arc<String>` stack slot with a fresh `Arc<String>` pointer while
+passing explicit incoming provenance, checks that the old slot is dropped
+through its old provenance, then reads and truncates the fresh slot through the
+transferred sidecar.
+
+Passing the expanded filter remains targeted evidence for the stack sidecar
+paths above only. It is not a full UB-free proof for the VM, arbitrary stack
+overwrite call sites, JIT/FFI boundaries, snapshots, all heap carriers, or
+ignored tests.
 
 ## Checker
 
