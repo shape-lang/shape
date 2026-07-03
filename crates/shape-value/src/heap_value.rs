@@ -5758,6 +5758,84 @@ mod typed_object_storage_drop {
         }
     }
 
+    /// Miri-only nested TypedObject field sidecar probe.
+    ///
+    /// This isolates the highest-value unproven field-provenance boundary
+    /// after the stack-sidecar work: a `TypedObjectStorage` field whose
+    /// payload is another v2-raw `TypedObjectStorage`. It covers
+    /// `_new_with_miri_field_provenance` -> `clone_field_kinded` ->
+    /// `KindedSlot::Clone` / `Drop` for `Ptr(HeapKind::TypedObject)`, plus
+    /// outer `drop_fields` releasing the original field share through the
+    /// stored sidecar.
+    #[cfg(miri)]
+    #[test]
+    fn miri_typed_object_nested_field_clone_and_drop() {
+        use crate::v2::heap_element::HeapElement;
+        use crate::v2::refcount::{v2_get_refcount, v2_retain};
+
+        unsafe {
+            let inner_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+            let inner_ptr = TypedObjectStorage::_new(
+                200,
+                vec![ValueSlot::from_int(7)].into_boxed_slice(),
+                0,
+                inner_kinds,
+            );
+            v2_retain(&(*inner_ptr).header);
+            assert_eq!(
+                v2_get_refcount(&(*inner_ptr).header),
+                2,
+                "inner has one field-owned share plus one witness share"
+            );
+
+            let outer_kinds: Arc<[NativeKind]> =
+                Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject)]);
+            let outer_ptr = TypedObjectStorage::_new_with_miri_field_provenance(
+                201,
+                vec![ValueSlot::from_typed_object_raw(inner_ptr)].into_boxed_slice(),
+                0b1,
+                outer_kinds,
+                vec![MiriSlotProvenance::TypedObject(inner_ptr)].into_boxed_slice(),
+            );
+
+            let cloned = {
+                let outer_ref = &*outer_ptr;
+                outer_ref
+                    .clone_field_kinded(0)
+                    .expect("nested typed-object field should clone")
+            };
+            assert_eq!(cloned.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+            assert_eq!(
+                cloned
+                    .as_typed_object_storage()
+                    .expect("clone keeps typed-object provenance")
+                    .schema_id,
+                200
+            );
+            assert_eq!(
+                v2_get_refcount(&(*inner_ptr).header),
+                3,
+                "clone_field_kinded retained the nested typed-object share"
+            );
+
+            drop(cloned);
+            assert_eq!(
+                v2_get_refcount(&(*inner_ptr).header),
+                2,
+                "dropping the cloned slot releases its retained share"
+            );
+
+            TypedObjectStorage::release_elem(outer_ptr);
+            assert_eq!(
+                v2_get_refcount(&(*inner_ptr).header),
+                1,
+                "dropping outer storage releases the original field share"
+            );
+
+            TypedObjectStorage::release_elem(inner_ptr);
+        }
+    }
+
     // ── Wave 2 Agent D1 v2-raw HeapHeader-equipped shape change tests ──────────
 
     #[test]

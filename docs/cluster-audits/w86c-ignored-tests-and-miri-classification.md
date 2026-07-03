@@ -101,6 +101,7 @@ or errors instead of panicking across the non-unwinding ABI boundary.
 | Probe | Modes |
 |---|---|
 | `shape-value --lib provenance` | default Miri / Stacked Borrows; `-Zmiri-tree-borrows` |
+| `shape-value --lib miri_typed_object_nested_field_clone_and_drop` | default Miri / Stacked Borrows; `-Zmiri-tree-borrows`; `-Zmiri-strict-provenance` |
 | `shape-vm --lib result_option_carrier` | default Miri / Stacked Borrows; `-Zmiri-tree-borrows`; `-Zmiri-strict-provenance` |
 | `shape-vm --lib get_prop_typed_object_int_field_reads_via_raw` | default Miri / Stacked Borrows; `-Zmiri-tree-borrows` |
 | `shape-vm --lib get_prop_typed_object_string_field_reads_via_raw` | default Miri / Stacked Borrows; `-Zmiri-tree-borrows` |
@@ -108,8 +109,8 @@ or errors instead of panicking across the non-unwinding ABI boundary.
 
 Passing this gate is evidence for only those filters and modes. It is not a
 full UB-free proof for the VM, runtime, JIT, FFI, snapshots, arbitrary Shape
-program execution, all heap carriers, all raw pointer consumers, or ignored
-tests.
+program execution, all heap carriers, all typed-object field producers, all
+raw pointer consumers, or ignored tests.
 
 ## W87A Miri Expansion
 
@@ -169,6 +170,24 @@ Passing the expanded filter remains targeted evidence for the stack sidecar
 paths above only. It is not a full UB-free proof for the VM, arbitrary stack
 overwrite call sites, JIT/FFI boundaries, snapshots, all heap carriers, or
 ignored tests.
+
+## W93D Miri Nested TypedObject Field Expansion
+
+W93D adds a Miri-only shape-value probe named
+`miri_typed_object_nested_field_clone_and_drop` and runs it under default
+Miri / Stacked Borrows, Tree Borrows, and strict provenance.
+
+The probe constructs an outer v2-raw `TypedObjectStorage` whose field owns a
+nested v2-raw `TypedObjectStorage` pointer. The test supplies explicit
+`MiriSlotProvenance::TypedObject` field sidecar data, then exercises
+`clone_field_kinded`, `KindedSlot::Clone` / `Drop` for
+`Ptr(HeapKind::TypedObject)`, and finally outer `drop_fields` releasing the
+original nested field share.
+
+Passing this probe is targeted evidence for that nested typed-object field
+sidecar path only. It does not prove every typed-object field producer,
+TypedArray field carrier, TraitObject carrier, HashMap object payload,
+snapshot/wire restore path, or VM/JIT/FFI boundary is UB-free.
 
 ## Checker
 

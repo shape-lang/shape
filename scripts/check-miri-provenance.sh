@@ -57,6 +57,11 @@ Miri provenance gate coverage:
   - shape-value --lib provenance
       default Miri / Stacked Borrows
       MIRIFLAGS=-Zmiri-tree-borrows
+  - shape-value --lib miri_typed_object_nested_field_clone_and_drop
+      nested TypedObject field sidecar clone/drop probe
+      default Miri / Stacked Borrows
+      MIRIFLAGS=-Zmiri-tree-borrows
+      MIRIFLAGS=-Zmiri-strict-provenance
   - shape-vm --lib result_option_carrier
       default Miri / Stacked Borrows
       MIRIFLAGS=-Zmiri-tree-borrows
@@ -75,8 +80,8 @@ Miri provenance gate coverage:
 
 Boundary: passing this gate is evidence for the probes above only. It is not a
 full UB proof for the VM, runtime, JIT, FFI, snapshots, or arbitrary Shape
-program execution, all stack overwrite sites, and it does not classify or
-execute ignored tests.
+program execution, all stack overwrite sites, all typed-object field kinds or
+field producers, and it does not classify or execute ignored tests.
 EOF
   echo
   echo "Resource settings:"
@@ -115,6 +120,13 @@ run_miri "shape-value provenance anchors, Stacked Borrows" "" \
   shape-value provenance
 run_miri "shape-value provenance anchors, Tree Borrows" "-Zmiri-tree-borrows" \
   shape-value provenance
+
+run_miri "shape-value nested TypedObject field sidecar, Stacked Borrows" "" \
+  shape-value miri_typed_object_nested_field_clone_and_drop
+run_miri "shape-value nested TypedObject field sidecar, Tree Borrows" "-Zmiri-tree-borrows" \
+  shape-value miri_typed_object_nested_field_clone_and_drop
+run_miri "shape-value nested TypedObject field sidecar, Strict Provenance" "-Zmiri-strict-provenance" \
+  shape-value miri_typed_object_nested_field_clone_and_drop
 
 run_miri "shape-vm Result/Option carrier, Stacked Borrows" "" \
   shape-vm result_option_carrier
