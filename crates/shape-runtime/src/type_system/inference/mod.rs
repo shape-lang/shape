@@ -24,6 +24,7 @@
 //! - `bidirectional` -- `CheckMode` and the `check_expr` entry point
 //! - `expressions` -- expression-level inference (literals, calls, closures,
 //!   match, if/else, binary/unary ops)
+//! - `extend_methods` -- extend-block method table registration and body checks
 //! - `hoisting` -- optimistic pre-pass that collects property assignments
 //!   to widen object types before the main inference walk
 //! - `items` -- top-level item inference (functions, types, impls, extends)
@@ -34,6 +35,7 @@
 mod access;
 mod bidirectional;
 mod expressions;
+mod extend_methods;
 mod hoisting;
 mod items;
 mod operators;

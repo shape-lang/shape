@@ -7,6 +7,7 @@
 //! - `self` binding correctness
 //! - UFCS (Uniform Function Call Syntax) dispatch
 
+use crate::bytecode::{OpCode, Operand};
 use crate::compiler::BytecodeCompiler;
 use crate::executor::VirtualMachine;
 use crate::executor::tests::test_utils::KindedSlotTestExt;
@@ -169,7 +170,6 @@ fn test_extend_string_basic() {
 }
 
 #[test]
-#[ignore = "Phase-2c generic Vec extension: self[index] element type remains unknown without a typed receiver-specific method"]
 fn test_extend_array_basic() {
     // Test extending Vec type
     let source = r#"
@@ -336,6 +336,70 @@ fn test_extend_chained_method_calls() {
 }
 
 #[test]
+fn test_extend_chained_method_calls_compile_static_direct_calls() {
+    let source = r#"
+        extend Number {
+            method add(n: number) -> number {
+                return self + n
+            }
+
+            method multiply(n: number) -> number {
+                return self * n
+            }
+        }
+
+        (5.0).add(3.0).multiply(2.0)
+    "#;
+
+    let program = parse_program(source).expect("source should parse");
+    let mut compiler = BytecodeCompiler::new();
+    compiler.set_source(source);
+    let bytecode = compiler.compile(&program).expect("compile should succeed");
+
+    let direct_call_names = bytecode
+        .instructions
+        .iter()
+        .filter_map(|instr| match (instr.opcode, instr.operand.as_ref()) {
+            (OpCode::Call, Some(Operand::Function(function_id))) => bytecode
+                .functions
+                .get(function_id.0 as usize)
+                .map(|func| func.name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        direct_call_names
+            .iter()
+            .any(|name| name.contains("Number_add")),
+        "expected a static direct call to Number.add, got {direct_call_names:?}"
+    );
+    assert!(
+        direct_call_names
+            .iter()
+            .any(|name| name.contains("Number_multiply")),
+        "expected a static direct call to Number.multiply, got {direct_call_names:?}"
+    );
+
+    let has_runtime_multiply = bytecode.instructions.iter().any(|instr| {
+        matches!(
+            (instr.opcode, instr.operand.as_ref()),
+            (
+                OpCode::CallMethod,
+                Some(Operand::TypedMethodCall { string_id, .. })
+            ) if bytecode
+                .strings
+                .get(*string_id as usize)
+                .is_some_and(|name| name == "multiply")
+        )
+    });
+    assert!(
+        !has_runtime_multiply,
+        "multiply must resolve statically, not through runtime CallMethod"
+    );
+}
+
+#[test]
 fn test_extend_method_with_default_param() {
     // Test that extended methods can use default parameters
     let source = r#"
@@ -371,7 +435,6 @@ fn test_extend_method_with_default_param() {
 }
 
 #[test]
-#[ignore = "Phase-2c multi-extend resolver: String method registration is lost when mixed with Number and Vec extensions"]
 fn test_extend_multiple_types() {
     // Test that we can extend multiple types in the same program
     let source = r#"
