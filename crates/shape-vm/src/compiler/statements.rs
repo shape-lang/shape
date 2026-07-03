@@ -2644,6 +2644,19 @@ impl BytecodeCompiler {
                 };
                 (type_params, Some(receiver_ann))
             }
+            shape_ast::ast::TypeName::Simple(name)
+                if matches!(name.as_str(), "Number" | "number") =>
+            {
+                let type_params = vec![shape_ast::ast::TypeParam::Type {
+                    name: "N".to_string(),
+                    span: Span::DUMMY,
+                    doc_comment: None,
+                    default_type: None,
+                    trait_bounds: Vec::new(),
+                }];
+                let receiver_ann = shape_ast::ast::TypeAnnotation::Basic("N".to_string());
+                (type_params, Some(receiver_ann))
+            }
             _ => (Vec::new(), Some(Self::type_name_to_annotation(target_type))),
         }
     }

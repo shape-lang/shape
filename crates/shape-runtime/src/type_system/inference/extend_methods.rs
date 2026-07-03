@@ -148,7 +148,8 @@ impl TypeInferenceEngine {
     ) -> TypeResult<()> {
         let type_name = Self::type_name_str(&extend.type_name);
         let should_infer_body = self.struct_type_defs.contains_key(type_name.as_str())
-            || Self::bare_single_param_collection_extend(&extend.type_name).is_some();
+            || Self::bare_single_param_collection_extend(&extend.type_name).is_some()
+            || Self::scalar_extend_receiver_annotation(&extend.type_name).is_some();
         if !should_infer_body {
             return Ok(());
         }
@@ -318,6 +319,9 @@ impl TypeInferenceEngine {
                 args: vec![TypeAnnotation::Basic("T".to_string())],
             };
         }
+        if let Some(ann) = Self::scalar_extend_receiver_annotation(type_name) {
+            return ann;
+        }
         Self::type_name_to_annotation_for_impl(type_name)
     }
 
@@ -333,6 +337,8 @@ impl TypeInferenceEngine {
     fn implicit_extend_receiver_type_params(type_name: &TypeName) -> Vec<String> {
         if Self::bare_single_param_collection_extend(type_name).is_some() {
             vec!["T".to_string()]
+        } else if Self::number_family_extend(type_name) {
+            vec!["N".to_string()]
         } else {
             vec![]
         }
@@ -349,6 +355,21 @@ impl TypeInferenceEngine {
                 trait_bounds: Vec::new(),
             })
             .collect()
+    }
+
+    fn scalar_extend_receiver_annotation(type_name: &TypeName) -> Option<TypeAnnotation> {
+        let TypeName::Simple(name) = type_name else {
+            return None;
+        };
+        if Self::number_family_extend(type_name) {
+            return Some(TypeAnnotation::Basic("N".to_string()));
+        }
+        BuiltinTypes::canonical_script_alias(name.as_str())
+            .map(|alias| TypeAnnotation::Basic(alias.to_string()))
+    }
+
+    fn number_family_extend(type_name: &TypeName) -> bool {
+        matches!(type_name, TypeName::Simple(name) if matches!(name.as_str(), "Number" | "number"))
     }
 
     fn refresh_extend_method_return_from_body(
