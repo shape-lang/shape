@@ -1045,6 +1045,7 @@ fn check_expr_for_side_effects(expr: &Expr, source: &str, diagnostics: &mut Vec<
         Expr::FunctionCall {
             name,
             span,
+            const_args,
             args,
             named_args,
         } => {
@@ -1067,6 +1068,9 @@ fn check_expr_for_side_effects(expr: &Expr, source: &str, diagnostics: &mut Vec<
                 });
             }
             // Recurse into args
+            for arg in const_args {
+                check_expr_for_side_effects(arg, source, diagnostics);
+            }
             for arg in args {
                 check_expr_for_side_effects(arg, source, diagnostics);
             }
@@ -1145,8 +1149,14 @@ fn visit_expr_for_comptime(expr: &Expr, source: &str, diagnostics: &mut Vec<Diag
             check_stmts_for_side_effects(stmts, span, source, diagnostics);
         }
         Expr::FunctionCall {
-            args, named_args, ..
+            const_args,
+            args,
+            named_args,
+            ..
         } => {
+            for arg in const_args {
+                visit_expr_for_comptime(arg, source, diagnostics);
+            }
             for arg in args {
                 visit_expr_for_comptime(arg, source, diagnostics);
             }
@@ -1267,6 +1277,7 @@ fn check_expr_comptime_only(
         Expr::FunctionCall {
             name,
             span,
+            const_args,
             args,
             named_args,
         } => {
@@ -1290,6 +1301,9 @@ fn check_expr_comptime_only(
                     tags: None,
                     data: None,
                 });
+            }
+            for arg in const_args {
+                check_expr_comptime_only(arg, in_comptime, source, diagnostics);
             }
             for arg in args {
                 check_expr_comptime_only(arg, in_comptime, source, diagnostics);
