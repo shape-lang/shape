@@ -268,6 +268,51 @@ The source-level count delta after W95A is:
 | `shape-vm` before W95A | 12 | 0 | 5 |
 | `shape-vm` after W95A | 11 | 0 | 5 |
 
+## W95B Addendum: Extend Resolution Gap Closure
+
+Date: 2026-07-03
+Branch: `strict-flip-w95b-extend-resolution`
+
+W95B removes two `shape-vm` `active_feature_gap` ignores after implementing
+static extend-block proofs for bare `Vec` receiver specialization, mixed
+builtin receiver registrations, and chained Number extend calls without
+runtime `CallMethod("multiply")` fallback.
+
+| Test | Before | After | Disposition |
+|---|---|---|---|
+| `crates/shape-vm/src/executor/tests/extend_blocks.rs::test_extend_array_basic` | `active_feature_gap` | active / verified | Bare `extend Vec` methods specialize against the call-site receiver element type. |
+| `crates/shape-vm/src/executor/tests/extend_blocks.rs::test_extend_multiple_types` | `active_feature_gap` | active / verified | Builtin receiver extension registration preserves Number, String, and Vec methods in the same program. |
+
+The source-level count delta after W95B is:
+
+| Crate | Active gap | Stale expectation | Deleted v1 path |
+|---|---:|---:|---:|
+| `shape-vm` after W95A | 11 | 0 | 5 |
+| `shape-vm` after W95B | 9 | 0 | 5 |
+
+## W96C Addendum: Imported Comptime Gap Closure
+
+Date: 2026-07-03
+Branch: `strict-flip-w96c-imported-comptime`
+
+W96C removes three default-gated imported-module `active_feature_gap` ignores.
+Imported const-specialized clones now keep annotations intact so comptime
+`set return (expr)` handlers run on the call-site clone, and post-comptime
+return metadata is synchronized to the structural side table.
+
+| Test | Before | After | Disposition |
+|---|---|---|---|
+| `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_comptime_set_return_expr_via_module_export` | `active_feature_gap` | active / verified | Imported const specialization compiles with the module-export-backed `set return (expr)` annotation intact. |
+| `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_comptime_handler_can_call_comptime_helper_fn` | `active_feature_gap` | active / verified | Imported annotation handlers can call comptime helper functions during const-specialized compilation. |
+| `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_typed_callable_field_propagates_table_schema_for_filter_chain` | `active_feature_gap` | active / verified | Imported `set return` schema metadata propagates `Table<T>` into the downstream filter closure. |
+
+The source-level count delta after W96C is:
+
+| Crate | Active gap | Stale expectation | Deleted v1 path |
+|---|---:|---:|---:|
+| `shape-vm` after W95B | 9 | 0 | 5 |
+| `shape-vm` after W96C | 6 | 0 | 5 |
+
 ## Active Gap Inventory
 
 These rows are precise missing-feature or implementation-gap issues. They
@@ -276,17 +321,12 @@ focused cargo test lane.
 
 | Crate | Test | Gate | Decision label | Missing feature |
 |---|---|---|---|---|
-| `shape-vm` | `crates/shape-vm/src/executor/tests/extend_blocks.rs::test_extend_array_basic` | `deep-tests` | missing language feature | Typed receiver-specific method resolution for generic Vec extensions. |
-| `shape-vm` | `crates/shape-vm/src/executor/tests/extend_blocks.rs::test_extend_multiple_types` | `deep-tests` | missing language feature | Multi-extend resolver preserving String method registration when mixed with Number and Vec extensions. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/module_deep_tests.rs::test_module_exec_nested_module_function_resolution` | `deep-tests` | missing language feature | Nested qualified module-call return-kind inference. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/module_deep_tests.rs::test_module_exec_module_function_recursion` | `deep-tests` | missing language feature | Unqualified recursive calls inside modules resolving to the module function. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/module_deep_tests.rs::test_module_exec_module_with_match_expression` | `deep-tests` | missing language feature | Module-scoped match lowering preserving per-arm numeric shape. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/operator_overload.rs::test_r5_3b_datetime_arithmetic_retargets_to_call_method` | `deep-tests` | missing language feature | DateTime/Duration type-alias agreement under strict kind solving. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/operator_overload.rs::test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics` | `deep-tests` | missing language feature | Matrix/vector arithmetic static retargeting before strict Numeric trait solving for Mat operands. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/operator_overload.rs::test_r5_4e_mat_add_runtime_returns_correct_values` | `deep-tests` | missing language feature | Matrix runtime carrier retarget so `Mat+Mat` returns a nested-indexable matrix carrier. |
-| `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_comptime_set_return_expr_via_module_export` | default | missing language feature | Const-specialization for imported module functions. |
-| `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_comptime_handler_can_call_comptime_helper_fn` | default | missing language feature | Const-specialization for imported module functions. |
-| `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_typed_callable_field_propagates_table_schema_for_filter_chain` | default | missing language feature | Imported-module annotation `set return` schema propagation across the comptime boundary. |
 
 ## Stale Expectation Inventory
 

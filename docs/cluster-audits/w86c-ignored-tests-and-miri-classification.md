@@ -56,6 +56,12 @@ multiple builtin receiver families, and chained Number extend calls. The source
 checker now accepts 108 `shape-vm` ignores and 9 `shape-vm` active feature
 gaps.
 
+W96C follow-up: three imported-module comptime active gaps were unignored after
+imported const-specialized clones kept annotations intact and post-comptime
+`return_type` metadata synchronized into the structural return side table. The
+source checker now accepts 105 `shape-vm` ignores and 6 `shape-vm` active
+feature gaps.
+
 The process-aborting `extern "C"` SURFACE tests stay ignored until their
 underlying todo bodies are replaced by non-aborting result paths.
 
@@ -65,14 +71,14 @@ The supervisor-observed broad lib-test gates currently report:
 
 | Crate | Reported ignored in `--lib` gate | Source `#[ignore]` attrs scanned here | Source-only gated attrs |
 |---|---:|---:|---:|
-| `shape-vm` | 56 | 108 | 53 behind `deep-tests` |
+| `shape-vm` | 56 | 105 | 53 behind `deep-tests` |
 | `shape-jit` | 23 | 24 | 1 behind `cfg(any())` |
 
 This worker did not rerun cargo or nextest. The new checker is intentionally
 source-only and cheap; it guards the source ignore count and reason taxonomy
 without requiring a cargo test listing.
 
-For `shape-vm`, the 108 source attributes do not mechanically reduce to the
+For `shape-vm`, the 105 source attributes do not mechanically reduce to the
 reported 56 ignored lib tests from source-level module gates alone. Resolving
 that exact active-harness projection requires a cargo test listing, which this
 slice intentionally did not run. The enforceable invariant added here is the
@@ -82,8 +88,8 @@ baseline.
 W92 supervisor verification additionally ran the deep-test VM gate after the
 W92B/C/D closures: `shape-vm --lib --features deep-tests --no-fail-fast`
 passed 2794/0/113 ignored in `run-p39810-i196101.service`. W94B, W94A, and
-W95A/W95B then removed five source ignores; the next deep-test inventory should
-report 108 VM source ignores if no other ignored tests change.
+W95A/W95B/W96C then removed eight source ignores; the next deep-test inventory
+should report 105 VM source ignores if no other ignored tests change.
 
 ## Cause Taxonomy
 
@@ -96,9 +102,9 @@ source-level baseline:
 | `deleted_v1_path` | 5 | 21 | Tests still describe removed carriers or paths such as BytecodeToIR, JitArray, deleted NaN-box roundtrips, deleted native-pointer helpers, deleted TypedArrayData enum paths, v1 VMArray aliasing, or retired Tier 1 whole-function JIT. |
 | `process_aborting_extern_c_todo` | 0 | 3 | `extern "C"` functions currently hit `todo!()`/SURFACE bodies; attempting `#[should_panic]` would abort the test process. |
 | `stale_semantic_expectation` | 0 | 0 | No accepted stale expectations remain; future rows are new drift. |
-| `active_feature_gap` | 9 | 0 | Real feature gaps or known bugs: generic/method resolution, matrix/vector retargeting, and imported-module const-specialization/schema propagation. |
+| `active_feature_gap` | 6 | 0 | Real feature gaps or known bugs: module execution, temporal aliases, and matrix/vector retargeting. |
 | `diagnostic_only` | 1 | 0 | A local debug-only opcode tracing test. |
-| Total | 108 | 24 | Source inventory, not a cargo-run proof. |
+| Total | 105 | 24 | Source inventory, not a cargo-run proof. |
 
 The source-only gated subset is also classified:
 

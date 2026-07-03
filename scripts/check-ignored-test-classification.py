@@ -28,7 +28,7 @@ CRATE_ROOTS = {
 EXPECTED_COUNTS = {
     "shape-vm": {
         "phase_2c_surface": 93,
-        "active_feature_gap": 9,
+        "active_feature_gap": 6,
         "stale_semantic_expectation": 0,
         "deleted_v1_path": 5,
         "diagnostic_only": 1,
