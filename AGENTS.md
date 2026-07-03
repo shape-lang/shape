@@ -19,6 +19,15 @@ workspace tests, reduced/full suite reruns) are supervisor-only and normally use
 cgroup the hard stop and prevents the N-worktrees x cargo-fanout linker storm
 that OOMed the host during W64.
 
+## Maintainability policy
+
+Files should stay below 500 lines by default. Files above 800 lines require a
+specific written reason and should not grow during ordinary waves; extract a
+focused helper/module instead of adding bulk. Narrow edits to pre-existing large
+legacy files are allowed only when the patch is localized and the closeout notes
+name the file-size debt. `AGENTS.md` is a temporary registry exception until
+closed historical rows are archived out of the active roster.
+
 ## Why this exists
 
 Two-or-more agents working in parallel on `bulldozer-strictly-typed` can
