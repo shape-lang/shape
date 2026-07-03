@@ -366,6 +366,7 @@ mod identifiers;
 mod literals;
 mod matrix_ops;
 mod misc;
+mod number_extend_specialization;
 mod numeric_ops;
 mod patterns;
 mod property_access;

@@ -20,6 +20,9 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use super::super::{BuiltinNameResolution, BytecodeCompiler, ModuleBuiltinFunction};
+use super::number_extend_specialization::{
+    number_receiver_generic_substitutions, substitute_type_params_in_annotation,
+};
 
 fn type_annotation_from_concrete_type(ct: &ConcreteType) -> Option<shape_ast::ast::TypeAnnotation> {
     crate::compiler::expressions::closures::concrete_type_to_type_annotation(ct)
@@ -4934,9 +4937,28 @@ impl BytecodeCompiler {
                 // If it succeeds, the UFCS branch below will re-run it and
                 // hit the cache; if it fails, we know to skip the UFCS
                 // branch entirely.
-                let mono_idx =
-                    self.try_monomorphize_method_call(&func_name, receiver, args, call_site_span);
-                if mono_idx.is_none() { Some(idx) } else { None }
+                let static_idx = self
+                    .try_specialize_concrete_user_method_call(
+                        &func_name,
+                        receiver,
+                        args,
+                        call_site_span,
+                    )
+                    .ok()
+                    .flatten()
+                    .or_else(|| {
+                        self.try_monomorphize_method_call(
+                            &func_name,
+                            receiver,
+                            args,
+                            call_site_span,
+                        )
+                    });
+                if static_idx.is_none() {
+                    Some(idx)
+                } else {
+                    None
+                }
             });
         if let Some(func_idx) = extend_func_idx
             .or(free_func_idx)
@@ -6803,19 +6825,26 @@ impl BytecodeCompiler {
         let Some(original_def) = self.function_defs.get(func_name).cloned() else {
             return Ok(None);
         };
-        if original_def
-            .type_params
-            .as_ref()
-            .is_some_and(|tps| !tps.is_empty())
-        {
-            return Ok(None);
-        }
         if original_def.params.len() != args.len() + 1 {
             return Ok(None);
         }
 
         let Some(receiver_ct) = concrete_type_for_expr(self, receiver) else {
             return Ok(None);
+        };
+        let generic_substitutions = if original_def
+            .type_params
+            .as_ref()
+            .is_some_and(|tps| !tps.is_empty())
+        {
+            let Some(substitutions) =
+                number_receiver_generic_substitutions(func_name, &original_def, &receiver_ct)
+            else {
+                return Ok(None);
+            };
+            substitutions
+        } else {
+            HashMap::new()
         };
         let mut call_arg_cts = Vec::with_capacity(args.len() + 1);
         call_arg_cts.push(receiver_ct);
@@ -6828,6 +6857,26 @@ impl BytecodeCompiler {
 
         let mut specialized_def = original_def.clone();
         let mut changed = false;
+        if !generic_substitutions.is_empty() {
+            for param in &mut specialized_def.params {
+                if let Some(ann) = param.type_annotation.as_mut() {
+                    let substituted =
+                        substitute_type_params_in_annotation(ann, &generic_substitutions);
+                    if substituted != *ann {
+                        *ann = substituted;
+                        changed = true;
+                    }
+                }
+            }
+            if let Some(return_ann) = specialized_def.return_type.as_mut() {
+                let substituted =
+                    substitute_type_params_in_annotation(return_ann, &generic_substitutions);
+                if substituted != *return_ann {
+                    *return_ann = substituted;
+                    changed = true;
+                }
+            }
+        }
         for (param, ct) in specialized_def.params.iter_mut().zip(call_arg_cts.iter()) {
             if param.type_annotation.is_none() {
                 let Some(ann) = type_annotation_from_concrete_type(ct) else {
