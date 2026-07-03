@@ -30,6 +30,11 @@ W92D follow-up: `test_nested_generic_call` was unignored after being rewritten
 to current native PHF `flatten()` dispatch semantics. The source checker now
 accepts 113 `shape-vm` ignores and 14 `shape-vm` active feature gaps.
 
+W94C follow-up: the two `shape-jit` captured-cell active gaps were unignored
+after local storage width was split from semantic inner value kind for
+OwnedMutable, Shared capture, and SharedCow cell-pointer slots. The three
+remaining `shape-jit` active gaps are the kernel-mode v2 migration stubs.
+
 The process-aborting `extern "C"` SURFACE tests stay ignored until their
 underlying todo bodies are replaced by non-aborting result paths.
 
@@ -40,7 +45,7 @@ The supervisor-observed broad lib-test gates currently report:
 | Crate | Reported ignored in `--lib` gate | Source `#[ignore]` attrs scanned here | Source-only gated attrs |
 |---|---:|---:|---:|
 | `shape-vm` | 57 | 113 | 57 behind `deep-tests` |
-| `shape-jit` | 26 | 29 | 2 behind `deep-tests`, 1 behind `cfg(any())` |
+| `shape-jit` | 26 | 27 | 1 behind `cfg(any())` |
 
 This worker did not rerun cargo or nextest. The new checker is intentionally
 source-only and cheap; it guards the source ignore count and reason taxonomy
@@ -70,16 +75,16 @@ source-level baseline:
 | `deleted_v1_path` | 5 | 21 | Tests still describe removed carriers or paths such as BytecodeToIR, JitArray, deleted NaN-box roundtrips, deleted native-pointer helpers, deleted TypedArrayData enum paths, v1 VMArray aliasing, or retired Tier 1 whole-function JIT. |
 | `process_aborting_extern_c_todo` | 0 | 3 | `extern "C"` functions currently hit `todo!()`/SURFACE bodies; attempting `#[should_panic]` would abort the test process. |
 | `stale_semantic_expectation` | 0 | 0 | No accepted stale expectations remain; future rows are new drift. |
-| `active_feature_gap` | 14 | 5 | Real feature gaps or known bugs: generic/method resolution, matrix/vector retargeting, const-specialization, turbofish grammar, MIR reference escape, JIT kernel stubs, and JIT closure-cell bugs. |
+| `active_feature_gap` | 14 | 3 | Real feature gaps or known bugs: generic/method resolution, matrix/vector retargeting, const-specialization, turbofish grammar, MIR reference escape, and JIT kernel stubs. |
 | `diagnostic_only` | 1 | 0 | A local debug-only opcode tracing test. |
-| Total | 113 | 29 | Source inventory, not a cargo-run proof. |
+| Total | 113 | 27 | Source inventory, not a cargo-run proof. |
 
 The source-only gated subset is also classified:
 
 | Crate | Gated category contribution |
 |---|---|
 | `shape-vm` | 45 `phase_2c_surface`, 10 `active_feature_gap`, 2 `deleted_v1_path` behind `deep-tests`. |
-| `shape-jit` | 2 `active_feature_gap` behind `deep-tests`; 1 `deleted_v1_path` behind `cfg(any())`. |
+| `shape-jit` | 1 `deleted_v1_path` behind `cfg(any())`. |
 
 ## Process-Aborting Ignores
 

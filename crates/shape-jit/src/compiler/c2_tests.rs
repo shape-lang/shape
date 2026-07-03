@@ -121,19 +121,6 @@ fn c2_owned_mut_f64_round_trip() {
 }
 
 #[test]
-#[ignore = "pre-existing JIT bug surfaced by C.2 sub-32 capture path: \
-            for an OwnedMutable Bool capture the closure body's param \
-            slot has slot_kind=Bool (cl=I8) — `register_owned_mutable_capture_slots` \
-            patches it to the cell's interior kind so binop dispatch works. \
-            But `declare_locals` then declares the var as I8, and the \
-            param-store path (`compiler/program.rs:439-471`) `ireduce(I8, \
-            param_val)` narrows the I64 cell pointer to its low 8 bits — \
-            destroying the pointer. Same root cause as the F64 SharedCow \
-            bug above: `declare_locals` and the param-store narrowing \
-            need to special-case OwnedMutable / Shared capture slots to \
-            keep the var as I64 (cell-pointer width) regardless of the \
-            interior slot_kind. Tracked as a follow-up; the per-FieldKind \
-            FFI wiring on this commit is correct."]
 fn c2_owned_mut_bool_round_trip() {
     // Sub-32 path: cell holds `Box<bool>`. The FFI returns I32
     // (widened); `normalize_cell_read` narrows to I8 (Bool slot
@@ -205,15 +192,6 @@ fn c2_shared_i64_two_closures() {
 }
 
 #[test]
-#[ignore = "pre-existing JIT bug: SharedCow F64 outer slot's Cranelift \
-            variable is declared F64 by `declare_locals` (slot_kind=Float64) \
-            but holds an `*const SharedCell` (I64) installed by \
-            `initialize_shared_local_slots` — type mismatch trips Cranelift's \
-            verifier on `def_var`. Surfaced first by C.2's smoke tests; \
-            unrelated to the per-FieldKind FFI work. Tracked as a follow-up \
-            (declare_locals must special-case shared_local_slots to declare \
-            the var as I64 regardless of slot kind, since the var holds the \
-            cell pointer not the value)."]
 fn c2_shared_f64_round_trip() {
     // Shared Float64 cell — two closures, lock-gated load/store at
     // the SharedCell payload offset.

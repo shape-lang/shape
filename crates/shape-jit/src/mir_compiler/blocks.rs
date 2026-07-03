@@ -27,21 +27,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     /// Declare Cranelift variables for each MIR local slot.
     ///
-    /// Variables are declared with their native Cranelift type per NativeKind:
+    /// Variables are declared with their native Cranelift storage type:
     /// - Float64 → F64
     /// - Int32/UInt32 → I32
     /// - Bool/Int8/UInt8 → I8
     /// - Unknown/Dynamic/Int64/String/etc → I64 (dynamic)
+    /// - Captured-cell carrier slots → I64 cell-pointer bits, regardless
+    ///   of the slot's semantic inner kind.
     ///
     /// Variables are declared but NOT initialized here — initialization
     /// happens in initialize_locals() after switching to the entry block.
     pub(crate) fn declare_locals(&mut self) {
         for slot_idx in 0..self.mir.num_locals {
             let slot_id = shape_vm::mir::types::SlotId(slot_idx);
-            // None falls through to I64 (uniform NaN-boxed slot width)
-            // — same Cranelift width as the legacy `_ => I64` arm.
-            let kind = slot_types::slot_kind_for_local(&self.slot_kinds, slot_idx)
-                .unwrap_or(shape_vm::type_tracking::NativeKind::Int64);
+            let kind = self.local_storage_kind(slot_id);
             let cl_type = slot_types::cranelift_type_for_slot(kind);
 
             let var = Variable::new(self.next_var);
@@ -56,17 +55,33 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     pub(crate) fn initialize_locals(&mut self) {
         for slot_idx in 0..self.mir.num_locals {
             let slot_id = shape_vm::mir::types::SlotId(slot_idx);
-            // None → I64 default, same as `declare_locals` above. The
-            // `default_value_for_kind` helper produces the matching
-            // zero/null for whatever Cranelift width the slot got.
-            let kind = slot_types::slot_kind_for_local(&self.slot_kinds, slot_idx)
-                .unwrap_or(shape_vm::type_tracking::NativeKind::Int64);
+            let kind = self.local_storage_kind(slot_id);
 
             if let Some(&var) = self.locals.get(&slot_id) {
                 let init_val = self.default_value_for_kind(kind);
                 self.builder.def_var(var, init_val);
             }
         }
+    }
+
+    /// Physical Cranelift storage kind for a MIR local slot.
+    ///
+    /// `slot_kinds` records the value kind produced by `read_place` and
+    /// consumed by arithmetic/compare dispatch. Captured-cell slots are the
+    /// exception: their variable physically stores an OwnedMutable/Shared
+    /// cell pointer for the frame lifetime, while reads and writes project
+    /// through that pointer using the side-table's inner kind. Declaring or
+    /// initializing those slots at the inner width truncates or type-mismatches
+    /// the pointer before the cell lowering can run.
+    pub(crate) fn local_storage_kind(&self, slot_id: shape_vm::mir::types::SlotId) -> NativeKind {
+        if self.owned_mutable_capture_slots.contains_key(&slot_id)
+            || self.shared_capture_slots.contains_key(&slot_id)
+            || self.shared_local_slots.contains(&slot_id)
+        {
+            return NativeKind::Int64;
+        }
+
+        slot_types::slot_kind_for_local(&self.slot_kinds, slot_id.0).unwrap_or(NativeKind::Int64)
     }
 
     /// Produce the default (zero/null) value for a given NativeKind.

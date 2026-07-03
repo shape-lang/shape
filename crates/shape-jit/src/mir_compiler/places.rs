@@ -969,6 +969,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         SHARED_CELL_VALUE_OFFSET,
                     );
                     self.emit_shared_unlock(cell_ptr);
+                    let value = match super::types::slot_kind_for_local(&self.slot_kinds, slot.0) {
+                        Some(kind) => self.ensure_kind(value, kind),
+                        None => value,
+                    };
                     return Ok(value);
                 }
                 // Session 1 Commit 3: outer-scope Shared local slot.
@@ -998,6 +1002,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         SHARED_CELL_VALUE_OFFSET,
                     );
                     self.emit_shared_unlock(cell_ptr);
+                    let value = match super::types::slot_kind_for_local(&self.slot_kinds, slot.0) {
+                        Some(kind) => self.ensure_kind(value, kind),
+                        None => value,
+                    };
                     return Ok(value);
                 }
                 Ok(self.builder.use_var(*var))

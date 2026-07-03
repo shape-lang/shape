@@ -142,6 +142,41 @@ Supervisor verification: focused W92B/W92C/W92D cgroups passed, `shape-runtime
 --features deep-tests --no-fail-fast` passed 2794/0/113 ignored
 (`run-p39810-i196101.service`).
 
+## W94C Addendum: JIT Captured-Cell Width Gap Closure
+
+Date: 2026-07-03
+Branch: `strict-flip-w94c-jit-active-gaps`
+
+W94C removes the two JIT closure-cell `active_feature_gap` ignores after a
+source-level root-cause fix. `MirToIR::slot_kinds` still records the semantic
+inner value kind used by `read_place` and arithmetic dispatch, but captured-cell
+carrier slots now declare/default/store their Cranelift locals at `I64`
+pointer width when the physical slot stores an `OwnedMutable`, closure-body
+`Shared`, or outer `SharedCow` cell pointer. Lock-gated Shared reads still load
+the legacy I64 payload bits, then coerce those bits back to the slot's semantic
+kind before arithmetic consumes them. This prevents Bool captures from
+truncating the cell pointer to `I8`, F64 shared locals from defining an `I64`
+cell pointer into an `F64` local, and F64 Shared reads from missing the native
+F64 binop path.
+
+The three kernel-mode rows remain ignored active gaps. Both kernel builders are
+intentional v2 surfaces: `build_kernel_ir` returns
+`"Simulation kernel compilation requires v2 runtime migration"` and
+`build_correlated_kernel_ir` returns
+`"Correlated kernel compilation requires v2 runtime migration"`.
+
+| Test | Before | After | Disposition |
+|---|---|---|---|
+| `crates/shape-jit/src/compiler/c2_tests.rs::c2_owned_mut_bool_round_trip` | `active_feature_gap` | active / pending supervisor verification | Captured-cell locals and entry param stores use cell-pointer storage width while preserving Bool inner-kind semantics for reads/writes. |
+| `crates/shape-jit/src/compiler/c2_tests.rs::c2_shared_f64_round_trip` | `active_feature_gap` | active / pending supervisor verification | Outer `SharedCow` locals and closure-body `Shared` capture params use cell-pointer storage width while preserving F64 inner-kind semantics. |
+
+The source-level count delta after W94C is:
+
+| Crate | Active gap | Stale expectation | Deleted v1 path |
+|---|---:|---:|---:|
+| `shape-jit` before W94C | 5 | 0 | 21 |
+| `shape-jit` after W94C | 3 | 0 | 21 |
+
 ## Active Gap Inventory
 
 These rows are precise missing-feature or implementation-gap issues. They
@@ -164,8 +199,6 @@ focused cargo test lane.
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_comptime_set_return_expr_via_module_export` | default | missing language feature | Const-specialization for imported module functions. |
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_comptime_handler_can_call_comptime_helper_fn` | default | missing language feature | Const-specialization for imported module functions. |
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_typed_callable_field_propagates_table_schema_for_filter_chain` | default | missing language feature | Imported-module annotation `set return` schema propagation across the comptime boundary. |
-| `shape-jit` | `crates/shape-jit/src/compiler/c2_tests.rs::c2_owned_mut_bool_round_trip` | `deep-tests` | missing language feature | JIT capture-local declaration/param-store must preserve cell-pointer width for OwnedMutable captures. |
-| `shape-jit` | `crates/shape-jit/src/compiler/c2_tests.rs::c2_shared_f64_round_trip` | `deep-tests` | missing language feature | JIT shared-local declaration must preserve `*const SharedCell` pointer width. |
 | `shape-jit` | `crates/shape-jit/src/core.rs::test_simulation_kernel_compilation` | default | missing language feature | `build_kernel_ir` v2 runtime migration. |
 | `shape-jit` | `crates/shape-jit/src/core.rs::test_kernel_mode_throughput` | default | missing language feature | `build_kernel_ir` v2 runtime migration. |
 | `shape-jit` | `crates/shape-jit/src/core.rs::test_correlated_kernel_compilation` | default | missing language feature | `build_correlated_kernel_ir` v2 runtime migration. |

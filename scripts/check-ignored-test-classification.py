@@ -35,7 +35,7 @@ EXPECTED_COUNTS = {
     },
     "shape-jit": {
         "deleted_v1_path": 21,
-        "active_feature_gap": 5,
+        "active_feature_gap": 3,
         "process_aborting_extern_c_todo": 3,
         "stale_semantic_expectation": 0,
     },
@@ -46,7 +46,6 @@ EXPECTED_SOURCE_ONLY_STATUS = {
         "deep-tests": 57,
     },
     "shape-jit": {
-        "deep-tests": 2,
         "cfg-any": 1,
     },
 }
