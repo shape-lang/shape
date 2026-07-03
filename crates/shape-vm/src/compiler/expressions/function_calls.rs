@@ -1337,12 +1337,14 @@ impl BytecodeCompiler {
                 .type_tracker
                 .schema_registry()
                 .get(name.as_str())
-                .map(|schema| VariableTypeInfo::known(schema.id, name.clone())),
+                .map(|schema| VariableTypeInfo::known(schema.id, name.clone()))
+                .or_else(|| Self::builtin_scalar_type_info(name)),
             shape_ast::ast::TypeAnnotation::Reference(name) => self
                 .type_tracker
                 .schema_registry()
                 .get(name.as_str())
-                .map(|schema| VariableTypeInfo::known(schema.id, name.to_string())),
+                .map(|schema| VariableTypeInfo::known(schema.id, name.to_string()))
+                .or_else(|| Self::builtin_scalar_type_info(name)),
             // PB2-fix #8 (`let r = inner()` where `inner -> Result<T>`):
             // stamp the binding with the baked wrapper-type-name string so
             // `propagate_assignment_type_to_slot` records it on the slot.
@@ -1360,6 +1362,11 @@ impl BytecodeCompiler {
             }
             _ => None,
         }
+    }
+
+    fn builtin_scalar_type_info(name: &str) -> Option<VariableTypeInfo> {
+        shape_runtime::type_system::BuiltinTypes::canonical_script_alias(name)
+            .map(|canonical| VariableTypeInfo::named(canonical.to_string()))
     }
 
     fn type_info_from_inferred_type(&mut self, inferred: &Type) -> Option<VariableTypeInfo> {

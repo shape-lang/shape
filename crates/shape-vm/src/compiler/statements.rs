@@ -2435,8 +2435,7 @@ impl BytecodeCompiler {
         // bindings by name, so positional order matters only for the
         // `mono_key`'s stable ordering — extend-first matches the
         // user-visible declaration order `Vec<T>.map<U>`.
-        let mut merged_type_params: Vec<shape_ast::ast::TypeParam> =
-            implicit_extend_type_params;
+        let mut merged_type_params: Vec<shape_ast::ast::TypeParam> = implicit_extend_type_params;
         for tp in explicit_extend_type_params {
             let name = tp.name();
             if !merged_type_params.iter().any(|m| m.name() == name) {
@@ -2628,9 +2627,7 @@ impl BytecodeCompiler {
         Option<shape_ast::ast::TypeAnnotation>,
     ) {
         match target_type {
-            shape_ast::ast::TypeName::Simple(name)
-                if matches!(name.as_str(), "Array" | "Vec") =>
-            {
+            shape_ast::ast::TypeName::Simple(name) if matches!(name.as_str(), "Array" | "Vec") => {
                 let type_params = vec![shape_ast::ast::TypeParam::Type {
                     name: "T".to_string(),
                     span: Span::DUMMY,

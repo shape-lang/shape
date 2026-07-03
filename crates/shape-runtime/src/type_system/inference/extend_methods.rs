@@ -464,11 +464,7 @@ impl TypeInferenceEngine {
                 params: params
                     .iter()
                     .map(|param| {
-                        Self::type_to_extend_type_param_expr(
-                            param,
-                            receiver_params,
-                            method_params,
-                        )
+                        Self::type_to_extend_type_param_expr(param, receiver_params, method_params)
                     })
                     .collect::<Option<Vec<_>>>()?,
                 returns: Box::new(Self::type_to_extend_type_param_expr(
