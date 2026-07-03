@@ -62,6 +62,13 @@ imported const-specialized clones kept annotations intact and post-comptime
 source checker now accepts 105 `shape-vm` ignores and 6 `shape-vm` active
 feature gaps.
 
+W96A/W96B follow-up: the final six `shape-vm` active gaps were unignored after
+module-local call qualification, module execution return-kind propagation,
+DateTime/Duration retargeting, Matrix add/sub carrier retargeting, and Vec
+numeric operator retargeting were statically proven by focused deep-test lanes.
+The source checker now accepts 99 `shape-vm` ignores and zero `shape-vm`
+active feature gaps.
+
 The process-aborting `extern "C"` SURFACE tests stay ignored until their
 underlying todo bodies are replaced by non-aborting result paths.
 
@@ -71,7 +78,7 @@ The supervisor-observed broad lib-test gates currently report:
 
 | Crate | Reported ignored in `--lib` gate | Source `#[ignore]` attrs scanned here | Source-only gated attrs |
 |---|---:|---:|---:|
-| `shape-vm` | 56 | 105 | 53 behind `deep-tests` |
+| `shape-vm` | 56 | 99 | 47 behind `deep-tests` |
 | `shape-jit` | 23 | 24 | 1 behind `cfg(any())` |
 
 This worker did not rerun cargo or nextest. The new checker is intentionally
@@ -87,9 +94,10 @@ baseline.
 
 W92 supervisor verification additionally ran the deep-test VM gate after the
 W92B/C/D closures: `shape-vm --lib --features deep-tests --no-fail-fast`
-passed 2794/0/113 ignored in `run-p39810-i196101.service`. W94B, W94A, and
-W95A/W95B/W96C then removed eight source ignores; the next deep-test inventory
-should report 105 VM source ignores if no other ignored tests change.
+passed 2794/0/113 ignored in `run-p39810-i196101.service`. W94B, W94A,
+W95A/W95B/W96C, and W96A/W96B then removed fourteen source ignores; the next
+deep-test inventory should report 99 VM source ignores if no other ignored
+tests change.
 
 ## Cause Taxonomy
 
@@ -102,15 +110,15 @@ source-level baseline:
 | `deleted_v1_path` | 5 | 21 | Tests still describe removed carriers or paths such as BytecodeToIR, JitArray, deleted NaN-box roundtrips, deleted native-pointer helpers, deleted TypedArrayData enum paths, v1 VMArray aliasing, or retired Tier 1 whole-function JIT. |
 | `process_aborting_extern_c_todo` | 0 | 3 | `extern "C"` functions currently hit `todo!()`/SURFACE bodies; attempting `#[should_panic]` would abort the test process. |
 | `stale_semantic_expectation` | 0 | 0 | No accepted stale expectations remain; future rows are new drift. |
-| `active_feature_gap` | 6 | 0 | Real feature gaps or known bugs: module execution, temporal aliases, and matrix/vector retargeting. |
+| `active_feature_gap` | 0 | 0 | No accepted active feature-gap ignores remain; future rows are new drift unless separately justified and tracked. |
 | `diagnostic_only` | 1 | 0 | A local debug-only opcode tracing test. |
-| Total | 105 | 24 | Source inventory, not a cargo-run proof. |
+| Total | 99 | 24 | Source inventory, not a cargo-run proof. |
 
 The source-only gated subset is also classified:
 
 | Crate | Gated category contribution |
 |---|---|
-| `shape-vm` | 45 `phase_2c_surface`, 6 `active_feature_gap`, 2 `deleted_v1_path` behind `deep-tests`. |
+| `shape-vm` | 45 `phase_2c_surface`, 2 `deleted_v1_path` behind `deep-tests`. |
 | `shape-jit` | 1 `deleted_v1_path` behind `cfg(any())`. |
 
 ## Process-Aborting Ignores

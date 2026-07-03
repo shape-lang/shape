@@ -313,20 +313,31 @@ The source-level count delta after W96C is:
 | `shape-vm` after W95B | 9 | 0 | 5 |
 | `shape-vm` after W96C | 6 | 0 | 5 |
 
+W96A/W96B follow-up: the final six `shape-vm` active gaps were implemented and
+unignored after focused supervisor verification:
+
+| Test | Before | After | Disposition |
+|---|---|---|---|
+| `crates/shape-vm/src/executor/tests/module_deep_tests.rs::test_module_exec_nested_module_function_resolution` | `active_feature_gap` | active / verified | Qualified nested module calls now project structural return kinds without runtime inference. |
+| `crates/shape-vm/src/executor/tests/module_deep_tests.rs::test_module_exec_module_function_recursion` | `active_feature_gap` | active / verified | Module-local bare recursive calls are statically qualified unless shadowed. |
+| `crates/shape-vm/src/executor/tests/module_deep_tests.rs::test_module_exec_module_with_match_expression` | `active_feature_gap` | active / verified | Module-local match lowering preserves statically inferred return shape. |
+| `crates/shape-vm/src/executor/tests/operator_overload.rs::test_r5_3b_datetime_arithmetic_retargets_to_call_method` | `active_feature_gap` | active / verified | DateTime/Duration aliases now agree before strict operator retargeting. |
+| `crates/shape-vm/src/executor/tests/operator_overload.rs::test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics` | `active_feature_gap` | active / verified | Matrix/vector arithmetic retargets through compile-time type proof. |
+| `crates/shape-vm/src/executor/tests/operator_overload.rs::test_r5_4e_mat_add_runtime_returns_correct_values` | `active_feature_gap` | active / verified | `Mat+Mat` returns the schema-backed matrix carrier expected by nested indexing. |
+
+The source-level count delta after W96A/W96B is:
+
+| Crate | Active gap | Stale expectation | Deleted v1 path |
+|---|---:|---:|---:|
+| `shape-vm` after W96C | 6 | 0 | 5 |
+| `shape-vm` after W96A/W96B | 0 | 0 | 5 |
+
 ## Active Gap Inventory
 
-These rows are precise missing-feature or implementation-gap issues. They
-should not be unignored without implementing the named feature and running a
-focused cargo test lane.
-
-| Crate | Test | Gate | Decision label | Missing feature |
-|---|---|---|---|---|
-| `shape-vm` | `crates/shape-vm/src/executor/tests/module_deep_tests.rs::test_module_exec_nested_module_function_resolution` | `deep-tests` | missing language feature | Nested qualified module-call return-kind inference. |
-| `shape-vm` | `crates/shape-vm/src/executor/tests/module_deep_tests.rs::test_module_exec_module_function_recursion` | `deep-tests` | missing language feature | Unqualified recursive calls inside modules resolving to the module function. |
-| `shape-vm` | `crates/shape-vm/src/executor/tests/module_deep_tests.rs::test_module_exec_module_with_match_expression` | `deep-tests` | missing language feature | Module-scoped match lowering preserving per-arm numeric shape. |
-| `shape-vm` | `crates/shape-vm/src/executor/tests/operator_overload.rs::test_r5_3b_datetime_arithmetic_retargets_to_call_method` | `deep-tests` | missing language feature | DateTime/Duration type-alias agreement under strict kind solving. |
-| `shape-vm` | `crates/shape-vm/src/executor/tests/operator_overload.rs::test_r5_4e_matrix_vec_arithmetic_retargets_to_intrinsics` | `deep-tests` | missing language feature | Matrix/vector arithmetic static retargeting before strict Numeric trait solving for Mat operands. |
-| `shape-vm` | `crates/shape-vm/src/executor/tests/operator_overload.rs::test_r5_4e_mat_add_runtime_returns_correct_values` | `deep-tests` | missing language feature | Matrix runtime carrier retarget so `Mat+Mat` returns a nested-indexable matrix carrier. |
+No current `active_feature_gap` ignores remain after W96A/W96B. Future active
+gap rows should be treated as new drift and should not be ignored without a
+precise missing feature, a supervisor-owned focused cargo lane, and an updated
+classification entry.
 
 ## Stale Expectation Inventory
 
