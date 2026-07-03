@@ -84,7 +84,9 @@ fn is_known_negative(path: &std::path::Path) -> bool {
 #[test]
 fn corpus_inventory_matches_audit_5_3_expected_layout() {
     // This part runs without the release binary — verifies the corpus
-    // shape on disk (audit §3 inventory: 50 hand-seeded + 3 negative).
+    // shape on disk. W13 audit §3 started at 50 hand-seeded + 3 negative;
+    // later corpus expansions are counted here explicitly so inventory drift
+    // does not masquerade as a semantic/convergence failure.
     let root = corpus_root();
     assert!(root.is_dir(), "corpus root missing: {}", root.display());
 
@@ -103,7 +105,12 @@ fn corpus_inventory_matches_audit_5_3_expected_layout() {
         // index access + vtable method dispatch).
         ("collections", 15),
         ("closures", 7),
-        ("patterns", 8),
+        // W88C Result/Option differential seeds (2026-07): m09_result_err,
+        // m10_option_question, m11_result_question, and
+        // m12_result_context_bangbang expand the positive patterns corpus.
+        // This is an expected inventory-only count change, not a hidden
+        // negative-corpus or convergence-semantics change.
+        ("patterns", 12),
         ("async", 5),
         ("generics", 8),
         ("fallthrough", 2),
@@ -128,7 +135,9 @@ fn corpus_inventory_matches_audit_5_3_expected_layout() {
     // 1 (c14_bare_accumulator) → 54.
     // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05): total
     // grows by 1 (c15_array_trait_object) → 55.
-    assert_eq!(total, 55, "audit §3 requires 55 hand-seeded total");
+    // W88C Result/Option differential seeds add 4 patterns entries
+    // (m09_result_err through m12_result_context_bangbang) → 59.
+    assert_eq!(total, 59, "current corpus inventory requires 59 hand-seeded total");
 
     // Audit §4.1 baseline negative-corpus inventory: a10 + c09 + c10 = 3
     // entries. W13.3 corpus surfaced 2 NEW divergence classes during the

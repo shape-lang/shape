@@ -13,7 +13,8 @@
 //! - `record_finding` — write divergence record to a findings directory.
 //! - `mutation::mutate_seed` — bounded AST-aware mutation engine (audit §4.2).
 //! - `minimizer::minimize_failure` — statement-removal bisect (audit §5.1).
-//! - 50-seed hand-seeded corpus at `tests/corpus/<domain>/` (audit §3).
+//! - 59-seed hand-seeded corpus at `tests/corpus/<domain>/` (audit §3 plus
+//!   later corpus-expansion seeds).
 //!
 //! W13.4 wires the nightly GitHub Actions job per audit §6.2.
 

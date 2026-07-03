@@ -30,13 +30,15 @@ Exit codes:
 
 ## Adding corpus seeds (W13.3 territory)
 
-W13.3 lands the per-domain corpus at `tools/shape-fuzz/corpus/<domain>/*.shape`
-following the 50-seed inventory in the W13 audit §3 (arithmetic 10 +
-collections 10 + closures 7 + patterns 8 + async 5 + generics 8 +
-fallthrough 2). Until then, the only seed in this crate is the smoke
-self-test at `tests/smoke-self-test/s1.shape` (the same program as
-`tests/smokes/s1.shape` at the repo root, see `tests/smokes/README.md`),
-exercised by `cargo test -p shape-fuzz`.
+W13.3 landed the per-domain corpus at `tools/shape-fuzz/corpus/<domain>/*.shape`
+following the 50-seed inventory in the W13 audit §3. The current checked-in
+inventory is 59 seeds: arithmetic 10 + collections 15 + closures 7 +
+patterns 12 + async 5 + generics 8 + fallthrough 2. The patterns count
+includes the four W88C Result/Option differential seeds (`m09`-`m12`); this is
+an expected corpus expansion, not a negative-corpus or convergence-semantics
+change. The smoke self-test remains at `tests/smoke-self-test/s1.shape` (the
+same program as `tests/smokes/s1.shape` at the repo root, see
+`tests/smokes/README.md`), exercised by `cargo test -p shape-fuzz`.
 
 When W13.3 lands corpus seeds, each `(g)`-class entry runs end-to-end and
 must classify `Convergent`; each `(n)`-class entry is named after its
