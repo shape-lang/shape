@@ -704,7 +704,7 @@ impl TypeInferenceEngine {
                 // Enter conditional context for field evolution tracking
                 self.env.enter_conditional();
                 self.env.push_scope();
-                // Push narrowed types for then-branch (e.g. x != null → x: T)
+                // Push narrowed types for then-branch (e.g. x != None -> x: T)
                 for (var_name, narrowed_type) in &narrowings {
                     self.env
                         .define(var_name, TypeScheme::mono(narrowed_type.clone()));
@@ -818,44 +818,44 @@ impl TypeInferenceEngine {
     }
 
     /// Extract narrowing info from a condition expression.
-    /// For `x != null`, returns `[(x, T)]` where the original type of x is `T?`.
+    /// For `x != None`, returns `[(x, T)]` where the original type of x is `T?`.
     fn extract_narrowings(&mut self, condition: &Expr) -> Vec<(String, Type)> {
         match condition {
-            // x != null  or  x != undefined  →  narrow x from T? to T
+            // x != None -> narrow x from T? to T
             Expr::BinaryOp {
                 left,
                 op: BinaryOp::NotEqual,
                 right,
                 ..
             } => {
-                if Self::is_null_literal(right) {
+                if Self::is_none_literal(right) {
                     self.try_null_narrowing(left)
-                } else if Self::is_null_literal(left) {
+                } else if Self::is_none_literal(left) {
                     self.try_null_narrowing(right)
                 } else {
                     vec![]
                 }
             }
-            // x == null  →  no narrowing in then-branch (narrowing in else-branch)
+            // x == None -> no narrowing in then-branch (narrowing in else-branch)
             _ => vec![],
         }
     }
 
     /// Extract inverse narrowings for else-branch.
-    /// For `x == null`, returns `[(x, T)]` (else means x is not null).
-    /// For `x != null`, no narrowing in else-branch.
+    /// For `x == None`, returns `[(x, T)]` (else means x is not None).
+    /// For `x != None`, no narrowing in else-branch.
     fn extract_inverse_narrowings(&mut self, condition: &Expr) -> Vec<(String, Type)> {
         match condition {
-            // x == null  →  in the else-branch, x is not null → narrow T? to T
+            // x == None -> in the else-branch, x is not None -> narrow T? to T
             Expr::BinaryOp {
                 left,
                 op: BinaryOp::Equal,
                 right,
                 ..
             } => {
-                if Self::is_null_literal(right) {
+                if Self::is_none_literal(right) {
                     self.try_null_narrowing(left)
-                } else if Self::is_null_literal(left) {
+                } else if Self::is_none_literal(left) {
                     self.try_null_narrowing(right)
                 } else {
                     vec![]
@@ -865,13 +865,9 @@ impl TypeInferenceEngine {
         }
     }
 
-    /// Check if an expression is a null/none literal.
-    fn is_null_literal(expr: &Expr) -> bool {
-        match expr {
-            Expr::Literal(Literal::None, _) => true,
-            Expr::Identifier(name, _) => name == "null" || name == "undefined" || name == "none",
-            _ => false,
-        }
+    /// Check if an expression is the source-language absence literal.
+    fn is_none_literal(expr: &Expr) -> bool {
+        matches!(expr, Expr::Literal(Literal::None, _))
     }
 
     /// Try to narrow a variable from T? to T.
@@ -906,6 +902,71 @@ impl TypeInferenceEngine {
                 None
             }
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::type_system::{Type, TypeInferenceEngine, TypeScheme};
+    use shape_ast::ast::{BinaryOp, Expr, Literal, Span, TypeAnnotation};
+
+    fn option_int() -> Type {
+        Type::Concrete(TypeAnnotation::Generic {
+            name: "Option".into(),
+            args: vec![TypeAnnotation::Basic("int".to_string())],
+        })
+    }
+
+    fn ident(name: &str) -> Expr {
+        Expr::Identifier(name.to_string(), Span::DUMMY)
+    }
+
+    fn none_lit() -> Expr {
+        Expr::Literal(Literal::None, Span::DUMMY)
+    }
+
+    fn condition(left: Expr, op: BinaryOp, right: Expr) -> Expr {
+        Expr::BinaryOp {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+            span: Span::DUMMY,
+        }
+    }
+
+    fn engine_with_optional_x() -> TypeInferenceEngine {
+        let mut engine = TypeInferenceEngine::new();
+        engine.env.define("x", TypeScheme::mono(option_int()));
+        engine
+    }
+
+    #[test]
+    fn none_literal_drives_optional_narrowing() {
+        let mut engine = engine_with_optional_x();
+        let narrowings =
+            engine.extract_narrowings(&condition(ident("x"), BinaryOp::NotEqual, none_lit()));
+
+        assert_eq!(
+            narrowings,
+            vec![(
+                "x".to_string(),
+                Type::Concrete(TypeAnnotation::Basic("int".to_string()))
+            )]
+        );
+    }
+
+    #[test]
+    fn null_named_identifiers_do_not_drive_optional_narrowing() {
+        for alias in ["null", "undefined", "none"] {
+            let mut engine = engine_with_optional_x();
+            let narrowings =
+                engine.extract_narrowings(&condition(ident("x"), BinaryOp::NotEqual, ident(alias)));
+
+            assert!(
+                narrowings.is_empty(),
+                "identifier `{alias}` must not be normalized to the source-language None literal"
+            );
         }
     }
 }

@@ -558,6 +558,18 @@ fn test_null_literal_is_rejected() {
     );
 }
 
+#[test]
+fn test_null_type_annotation_is_rejected() {
+    let input = r#"let a: null = None;"#;
+    let err = parse_program(input).expect_err("null type annotation must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("null") || msg.contains("Syntax error"),
+        "unexpected parse error for null type annotation: {}",
+        msg
+    );
+}
+
 // =========================================================================
 // context_expr
 // =========================================================================

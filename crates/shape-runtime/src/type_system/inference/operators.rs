@@ -189,18 +189,18 @@ impl TypeInferenceEngine {
         }
     }
 
-    /// Is this type a bare null sentinel — the `None` literal or an explicit
-    /// `null`/`Null` annotation?
+    /// Is this type a bare absence sentinel: the `None` literal's unresolved
+    /// Option type or an internal `TypeAnnotation::Null` carrier.
     ///
     /// The `None` literal infers as `Option<var>` (an Option whose element is a
     /// still-unresolved type variable, see `infer_literal`). A concrete
     /// `Option<int>` is NOT a sentinel — its element type is known and equality
     /// against it should still type-check normally. Used by the `==`/`!=` arm to
-    /// allow `None == x` (null-presence checks) without forcing same-type
+    /// allow `None == x` (absence checks) without forcing same-type
     /// unification, while keeping `1 == "x"` a rejection.
     fn is_null_sentinel(ty: &Type) -> bool {
         match ty {
-            // Explicit `null`/`None` annotation.
+            // Internal null sentinel carrier; source `null` is not parseable.
             Type::Concrete(TypeAnnotation::Null) => true,
             // `None` literal → `Option<var>`; only an unresolved element counts.
             Type::Generic { base, args }
@@ -804,11 +804,11 @@ impl TypeInferenceEngine {
             }
 
             BinaryOp::Equal | BinaryOp::NotEqual => {
-                // `null`/`None` is comparable to a value of any type — `None == 0`,
-                // `x == None`, etc. are legitimate null-presence checks that must
+                // `None` is comparable to a value of any type — `None == 0`,
+                // `x == None`, etc. are legitimate absence checks that must
                 // not force same-type unification. When exactly one operand is a
                 // bare null sentinel (the `None` literal infers as `Option<var>`,
-                // or an explicit `Null` annotation), skip the `left ~ right`
+                // or an internal `TypeAnnotation::Null` carrier), skip the `left ~ right`
                 // constraint and yield bool directly.
                 //
                 // This is narrow on purpose: it does NOT relax equality between
@@ -1253,7 +1253,8 @@ mod tests {
                  ({l:?} == {r:?})"
             );
         }
-        // Explicit `Null` annotation is also a sentinel.
+        // The internal TypeAnnotation::Null carrier is also a sentinel. It is
+        // not source `null` syntax.
         let mut engine = TypeInferenceEngine::new();
         let before = engine.constraints.len();
         engine
