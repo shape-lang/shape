@@ -12,73 +12,24 @@
 //! [`crate::compiler::monomorphization::cache::BytecodeCompiler::ensure_monomorphic_function_with_consts`]
 //! entry point on the cache.
 //!
-//! ### Grammar gap
+//! ### Remaining call-site grammar gap
 //!
-//! As of Phase 5, **the Shape grammar does NOT support const generic
-//! parameters**. The audit results:
+//! Const generic declarations now have parser and AST support:
+//! `shape.pest::type_param_name` accepts `const_type_param`, and
+//! `TypeParam::Const` carries the declared name, type, and optional default
+//! expression. The default-value route is wired through
+//! `ensure_monomorphic_function_with_consts`.
 //!
-//!   - `shape.pest`'s `type_param_name` rule (line 172) only allows
-//!     `ident ~ (":" ~ trait_bound_list)? ~ ("=" ~ type_annotation)?`. There
-//!     is no `const` keyword form.
-//!   - `shape.pest`'s `generic_type` rule (line 903) only allows
-//!     `type_annotation` arguments inside `<...>`. There is no expression
-//!     argument form, so `repeat<3>(1.0)` does not parse — `3` is not a
-//!     `type_annotation`.
-//!   - `TypeParam` in `shape-ast/src/ast/types.rs:189` is a struct with
-//!     `name`, `default_type`, and `trait_bounds` fields. There is no
-//!     discriminator that would let the AST distinguish a type-kind generic
-//!     from a const-kind generic.
+//! The remaining gap is explicit call-site syntax such as `repeat::<3>(1.0)`:
 //!
-//! ### What would need to change in the grammar / AST
-//!
-//! Three things need to land before const generics work end-to-end:
-//!
-//!   1. **`shape.pest` — `type_param_name`**: extend to allow
-//!      `"const" ~ ident ~ ":" ~ type_annotation` as an alternative form.
-//!      Roughly:
-//!      ```pest
-//!      type_param_name = {
-//!          "const" ~ ident ~ ":" ~ type_annotation
-//!          | ident ~ (":" ~ trait_bound_list)? ~ ("=" ~ type_annotation)?
-//!      }
-//!      ```
-//!   2. **`shape.pest` — `generic_type`**: extend to allow either a
-//!      `type_annotation` OR a `const_generic_arg` (a comptime-evaluable
-//!      expression) per slot. The simplest path is a new alternative rule:
-//!      ```pest
-//!      generic_arg = { type_annotation | const_generic_arg }
-//!      const_generic_arg = { literal | "(" ~ expression ~ ")" }
-//!      generic_type = {
-//!          qualified_ident ~ "<" ~ generic_arg ~ ("," ~ generic_arg)* ~ ">"
-//!      }
-//!      ```
-//!   3. **`TypeParam` enum** in `shape-ast/src/ast/types.rs`: convert from
-//!      a struct into an enum, or add an `is_const: bool` + `const_type:
-//!      Option<TypeAnnotation>` pair. The enum form is cleaner because
-//!      const-kind params have no `trait_bounds` / `default_type` semantics:
-//!      ```text
-//!      pub enum TypeParam {
-//!          Type {
-//!              name: String,
-//!              default_type: Option<TypeAnnotation>,
-//!              trait_bounds: Vec<TypePath>,
-//!              ...
-//!          },
-//!          Const {
-//!              name: String,
-//!              type_ann: TypeAnnotation,  // e.g. `int`, `bool`
-//!              ...
-//!          },
-//!      }
-//!      ```
-//!      Every consumer of `TypeParam.name` (~30 sites in shape-vm,
-//!      shape-runtime, LSP) would need to update its match arms — see the
-//!      "Exhaustive Match Rule" in `CLAUDE.md` for the typical drill.
-//!
-//! Until these land, the const-generic path in this module is exercised by
-//! unit tests only — there is no parser surface to drive it from real Shape
-//! source. The cache, mono_key, and substitution scaffolding are nonetheless
-//! complete and ready to wire up the moment the grammar adds the syntax.
+//!   - `shape.pest::postfix_expr` only accepts `function_call` (`(...)`) after
+//!     a callee expression. There is no `::<...>` postfix rule.
+//!   - `shape_ast::ast::Expr::FunctionCall` stores `name`, `args`, and
+//!     `named_args`, but has no AST carrier for explicit type or const
+//!     arguments.
+//!   - `try_monomorphize_free_function_call` therefore can only bind const
+//!     params through defaults; it has no parsed const argument values to feed
+//!     to `ensure_monomorphic_function_with_consts`.
 //!
 //! ## Original Phase 2.1 docs (type-only path)
 //!
@@ -4777,27 +4728,21 @@ mod tests {
         assert_eq!(res.mono_key, "identity::bool");
     }
 
-    /// **PLACEHOLDER** for the future end-to-end const generics test once
-    /// the grammar supports `<const N: int>`. Tracks the work needed to wire
-    /// the new syntax into the existing scaffolding.
+    /// **PLACEHOLDER** for the future explicit call-site const generics test.
+    /// Declaration/default const generics are already parsed and wired through
+    /// the cache path. What is still missing is a `::<...>` call-site AST
+    /// carrier plus compiler extraction into `ensure_monomorphic_function_with_consts`.
     ///
     /// TODO(grammar-const-generics):
-    /// 1. Extend `shape.pest`'s `type_param_name` rule to allow
-    ///    `"const" ~ ident ~ ":" ~ type_annotation`.
-    /// 2. Convert `TypeParam` (in `shape-ast/src/ast/types.rs`) from a struct
-    ///    into an enum with `Type { ... }` and `Const { name, type_ann, ... }`
-    ///    variants — OR add an `is_const: bool` field plus a `const_type`
-    ///    type annotation.
-    /// 3. Extend `generic_type` in `shape.pest` to allow expression args at
-    ///    the call site (`repeat<3>(1.0)`), or — easier — a separate
-    ///    `const_generic_arg` rule.
-    /// 4. Wire `try_monomorphize_call_site` in
-    ///    `expressions/function_calls.rs` to also extract const arg values
-    ///    via `eval_const_expr_to_nanboxed` and call
-    ///    `ensure_monomorphic_function_with_consts` on this module.
-    /// 5. Replace the `__const_<i>` placeholder names in
-    ///    `cache::ensure_monomorphic_function_with_consts` with the real
-    ///    declared const-param names.
+    /// 1. Add a call-site turbofish rule after an identifier / qualified
+    ///    identifier in `postfix_expr`, separate from type-position
+    ///    `generic_type`.
+    /// 2. Add an AST carrier for explicit const args on `FunctionCall` /
+    ///    `QualifiedFunctionCall`.
+    /// 3. Wire `try_monomorphize_free_function_call` in
+    ///    `expressions/function_calls.rs` to extract literal const arg values
+    ///    via `comptime_const_value_from_literal_expr` and call
+    ///    `ensure_monomorphic_function_with_consts`.
     // ---- B.3: literal-to-ComptimeConstValue helpers ---------------------
 
     #[test]
@@ -4904,10 +4849,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "blocked on turbofish `::<N>` call-site grammar — default-value route \
-                is covered end-to-end by `b5_*` tests in cache.rs"]
+    #[ignore = "active_feature_gap: explicit const-generic call-site turbofish `::<N>` \
+                has no parser/AST carrier on FunctionCall; default-value route is \
+                covered end-to-end by `b5_*` tests in cache.rs"]
     fn const_generic_repeat_n_3_end_to_end() {
-        // Turbofish-specific test body, once the grammar adds `fn_name::<3>(...)`:
+        // Turbofish-specific test body, once the grammar adds `fn_name::<3>(...)`
+        // and `Expr::FunctionCall` carries parsed const args:
         //
         //   let source = r#"
         //       fn repeat<const N: int>(x: number) -> Array<number> { ... }
@@ -4923,13 +4870,13 @@ mod tests {
         // drive monomorphization through `ensure_monomorphic_function`.
         //
         // What remains for a turbofish-style end-to-end test:
-        //   1. Extend `generic_type` in `shape.pest` (or a new
-        //      `call_site_turbofish` rule) to allow `::<3>` after an ident.
-        //   2. Wire `try_monomorphize_call_site` in
-        //      `expressions/function_calls.rs` to also extract const arg
-        //      values via `comptime_const_value_from_literal_expr` and call
-        //      `ensure_monomorphic_function_with_consts`.
-        //   3. Replace this placeholder with a real assertion.
+        //   1. Add a `call_site_turbofish`-style postfix rule to allow
+        //      `::<3>` after an identifier / qualified identifier.
+        //   2. Add an AST carrier for the parsed const args.
+        //   3. Wire `try_monomorphize_free_function_call` to extract const
+        //      arg values via `comptime_const_value_from_literal_expr` and
+        //      call `ensure_monomorphic_function_with_consts`.
+        //   4. Replace this placeholder with a real assertion.
         unreachable!("placeholder for turbofish-supported const generics");
     }
 

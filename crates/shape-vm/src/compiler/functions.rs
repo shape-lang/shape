@@ -3721,7 +3721,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "active feature gap: extern-C out-param caller-visible arity rejects omitted out arguments"]
     fn test_out_param_extern_c_compiles() {
         let code = r#"
             extern C fn duckdb_open(path: string, out out_db: ptr) -> i32 from "duckdb";
@@ -3737,7 +3736,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "active feature gap: extern-C out-param caller-visible arity rejects omitted out arguments"]
     fn test_out_param_void_return_single_out() {
         let code = r#"
             extern C fn duckdb_close(out db_p: ptr) -> void from "duckdb";
@@ -3801,7 +3799,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "active feature gap: internal intrinsic diagnostic ordering runs strict type solving before scope-gating"]
     fn test_intrinsic_builtin_blocked_from_user_code() {
         // Verify that __intrinsic_* and __json_* builtins are gated from user code.
         // Note: __into_*/__try_into_* are NOT gated (compiler-generated for type assertions).

@@ -131,7 +131,7 @@ impl TypeInferenceEngine {
     }
 
     fn predeclare_foreign_function(&mut self, def: &ForeignFunctionDef) -> TypeResult<()> {
-        let param_types: Vec<Type> = def
+        let raw_param_types: Vec<Type> = def
             .params
             .iter()
             .map(|p| match p.type_annotation.as_ref() {
@@ -140,15 +140,70 @@ impl TypeInferenceEngine {
             })
             .collect();
 
-        let return_type = match def.return_type.as_ref() {
+        let raw_return_type = match def.return_type.as_ref() {
             Some(ann) => self.resolve_type_annotation(ann),
             None => self.fresh_type_var(),
+        };
+
+        let has_out_params = def.is_native_abi() && def.params.iter().any(|p| p.is_out);
+        let param_types = if has_out_params {
+            def.params
+                .iter()
+                .zip(raw_param_types.iter())
+                .filter_map(|(param, ty)| (!param.is_out).then_some(ty.clone()))
+                .collect()
+        } else {
+            raw_param_types.clone()
+        };
+        let return_type = if has_out_params {
+            self.foreign_out_param_visible_return_type(def, &raw_param_types, raw_return_type)
+        } else {
+            raw_return_type
         };
 
         let func_type = BuiltinTypes::function(param_types, return_type);
         let scheme = TypeScheme::mono(func_type);
         self.env.define(&def.name, scheme);
         Ok(())
+    }
+
+    fn foreign_out_param_visible_return_type(
+        &self,
+        def: &ForeignFunctionDef,
+        raw_param_types: &[Type],
+        raw_return_type: Type,
+    ) -> Type {
+        let out_types: Vec<Type> = def
+            .params
+            .iter()
+            .zip(raw_param_types.iter())
+            .filter_map(|(param, ty)| param.is_out.then_some(ty.clone()))
+            .collect();
+        if out_types.is_empty() {
+            return raw_return_type;
+        }
+
+        let is_void_return = def.return_type.as_ref().is_some_and(|ann| {
+            matches!(ann, TypeAnnotation::Basic(name) if name == "void")
+                || matches!(ann, TypeAnnotation::Void)
+        });
+        if is_void_return && out_types.len() == 1 {
+            return out_types[0].clone();
+        }
+
+        let mut tuple_elems = Vec::new();
+        if !is_void_return {
+            tuple_elems.push(
+                raw_return_type
+                    .to_annotation()
+                    .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
+            );
+        }
+        tuple_elems.extend(out_types.into_iter().map(|ty| {
+            ty.to_annotation()
+                .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string()))
+        }));
+        Type::Concrete(TypeAnnotation::Tuple(tuple_elems))
     }
 
     /// Predeclare a signature-only callable (`pub builtin fn` form). This is the
@@ -3211,11 +3266,28 @@ impl TypeInferenceEngine {
                 }
             }
             DestructurePattern::Array(patterns) => {
-                let elem_ty = Self::decl_array_element_type(&fallback_type);
-                for pattern in patterns {
-                    match (pattern, elem_ty.as_ref()) {
-                        (DestructurePattern::Rest(inner), Some(elem)) => {
+                let tuple_items = match fallback_type.canonicalize() {
+                    Type::Concrete(TypeAnnotation::Tuple(items)) => Some(items),
+                    _ => None,
+                };
+                let elem_ty = if tuple_items.is_some() {
+                    None
+                } else {
+                    Self::decl_array_element_type(&fallback_type)
+                };
+                for (index, pattern) in patterns.iter().enumerate() {
+                    match (pattern, tuple_items.as_ref(), elem_ty.as_ref()) {
+                        (_, Some(items), _) if index < items.len() => {
+                            self.bind_decl_pattern(
+                                pattern,
+                                self.resolve_type_annotation(&items[index]),
+                            );
+                        }
+                        (DestructurePattern::Rest(inner), _, Some(elem)) => {
                             self.bind_decl_pattern(inner, BuiltinTypes::array(elem.clone()));
+                        }
+                        (_, _, Some(elem)) => {
+                            self.bind_decl_pattern(pattern, elem.clone());
                         }
                         _ => {
                             let fallback = elem_ty.clone().unwrap_or_else(|| self.fresh_type_var());

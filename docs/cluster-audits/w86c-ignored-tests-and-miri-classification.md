@@ -15,7 +15,20 @@ rows as deleted v1 paths.
 
 W91B follow-up: the remaining four `stale_semantic_expectation` ignores were
 redriven with real focused execution and reclassified as `active_feature_gap`.
-They remain ignored; the checker now accepts zero stale expectations.
+The checker now accepts zero stale expectations.
+
+W92B follow-up: three `shape-vm` active gaps in `compiler/functions.rs` were
+implemented statically and unignored: native-ABI `out` parameter caller-visible
+arity/return typing, and direct internal-intrinsic scope diagnostics before
+strict type solving.
+
+W92C follow-up: two module-qualified type active gaps were unignored after
+static module-qualified trait-method lowering and let-annotation identity were
+proven by source-level tests.
+
+W92D follow-up: `test_nested_generic_call` was unignored after being rewritten
+to current native PHF `flatten()` dispatch semantics. The source checker now
+accepts 113 `shape-vm` ignores and 14 `shape-vm` active feature gaps.
 
 The process-aborting `extern "C"` SURFACE tests stay ignored until their
 underlying todo bodies are replaced by non-aborting result paths.
@@ -26,19 +39,25 @@ The supervisor-observed broad lib-test gates currently report:
 
 | Crate | Reported ignored in `--lib` gate | Source `#[ignore]` attrs scanned here | Source-only gated attrs |
 |---|---:|---:|---:|
-| `shape-vm` | 57 | 119 | 62 behind `deep-tests` |
+| `shape-vm` | 57 | 113 | 57 behind `deep-tests` |
 | `shape-jit` | 26 | 29 | 2 behind `deep-tests`, 1 behind `cfg(any())` |
 
 This worker did not rerun cargo or nextest. The new checker is intentionally
 source-only and cheap; it guards the source ignore count and reason taxonomy
 without requiring a cargo test listing.
 
-For `shape-vm`, the 119 source attributes do not mechanically reduce to the
+For `shape-vm`, the 113 source attributes do not mechanically reduce to the
 reported 57 ignored lib tests from source-level module gates alone. Resolving
 that exact active-harness projection requires a cargo test listing, which this
 slice intentionally did not run. The enforceable invariant added here is the
 source-level taxonomy; the 57/26 counts remain the supervisor-observed lib gate
 baseline.
+
+W92 supervisor verification additionally ran the deep-test VM gate after the
+W92B/C/D closures: `shape-vm --lib --features deep-tests --no-fail-fast`
+passed 2794/0/113 ignored in `run-p39810-i196101.service`. That deep-test
+ignored count matches the source inventory above; the default lib ignored count
+remains separately documented from the W91 default gate.
 
 ## Cause Taxonomy
 
@@ -51,15 +70,15 @@ source-level baseline:
 | `deleted_v1_path` | 5 | 21 | Tests still describe removed carriers or paths such as BytecodeToIR, JitArray, deleted NaN-box roundtrips, deleted native-pointer helpers, deleted TypedArrayData enum paths, v1 VMArray aliasing, or retired Tier 1 whole-function JIT. |
 | `process_aborting_extern_c_todo` | 0 | 3 | `extern "C"` functions currently hit `todo!()`/SURFACE bodies; attempting `#[should_panic]` would abort the test process. |
 | `stale_semantic_expectation` | 0 | 0 | No accepted stale expectations remain; future rows are new drift. |
-| `active_feature_gap` | 20 | 5 | Real feature gaps or known bugs: generic/module/method resolution, extern-C out-param caller-visible arity, internal-intrinsic diagnostic ordering, matrix/vector retargeting, const-specialization, turbofish grammar, MIR reference escape, JIT kernel stubs, and JIT closure-cell bugs. |
+| `active_feature_gap` | 14 | 5 | Real feature gaps or known bugs: generic/method resolution, matrix/vector retargeting, const-specialization, turbofish grammar, MIR reference escape, JIT kernel stubs, and JIT closure-cell bugs. |
 | `diagnostic_only` | 1 | 0 | A local debug-only opcode tracing test. |
-| Total | 119 | 29 | Source inventory, not a cargo-run proof. |
+| Total | 113 | 29 | Source inventory, not a cargo-run proof. |
 
 The source-only gated subset is also classified:
 
 | Crate | Gated category contribution |
 |---|---|
-| `shape-vm` | 45 `phase_2c_surface`, 15 `active_feature_gap`, 2 `deleted_v1_path` behind `deep-tests`. |
+| `shape-vm` | 45 `phase_2c_surface`, 10 `active_feature_gap`, 2 `deleted_v1_path` behind `deep-tests`. |
 | `shape-jit` | 2 `active_feature_gap` behind `deep-tests`; 1 `deleted_v1_path` behind `cfg(any())`. |
 
 ## Process-Aborting Ignores
@@ -163,6 +182,6 @@ The checker fails when:
 
 - a new source-level `#[ignore]` appears without matching the taxonomy;
 - a known ignored-test count moves between cause buckets;
-- a new ignored test has no reason string, except the two explicitly allowed
-  legacy cases (`test_nested_generic_call` and `debug_decimal_opcodes`);
+- a new ignored test has no reason string, except the one explicitly allowed
+  diagnostic-only legacy case (`debug_decimal_opcodes`);
 - the source-only gated baseline drifts.

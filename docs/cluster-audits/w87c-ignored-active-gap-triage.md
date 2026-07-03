@@ -74,6 +74,74 @@ The source-level count delta after W91B is:
 | `shape-vm` after W88D | 16 | 4 | 5 |
 | `shape-vm` after W91B | 20 | 0 | 5 |
 
+## W92B Addendum: Extern Out-Param and Intrinsic Gap Closure
+
+Date: 2026-07-03
+Branch: `strict-flip-w92b-extern-intrinsic-active-gaps`
+
+W92B removed three `active_feature_gap` ignores after implementing static,
+compile-time fixes in the compiler/type-analysis path. No native ABI runtime
+bodies or JIT FFI were changed.
+
+| Test | Before | After | Disposition |
+|---|---|---|---|
+| `crates/shape-vm/src/compiler/functions.rs::test_out_param_extern_c_compiles` | `active_feature_gap` | active / passing | Type analysis now predeclares native-ABI `out` params with caller-visible non-`out` arity and the existing bytecode stub return shape (`run-p35738-i191407.service`). |
+| `crates/shape-vm/src/compiler/functions.rs::test_out_param_void_return_single_out` | `active_feature_gap` | active / passing | Single native-ABI `out` plus `void` return now predeclares the direct out-value return shape (`run-p36283-i192099.service`). |
+| `crates/shape-vm/src/compiler/functions.rs::test_intrinsic_builtin_blocked_from_user_code` | `active_feature_gap` | active / passing | Direct `__intrinsic_*` / `__json_*` builtin calls in ordinary user code are rejected before strict type solving, preserving the existing internal-intrinsic scope diagnostic (`run-p36564-i192388.service`). |
+
+## W92C Addendum: Module-Qualified Type Gap Closure
+
+Date: 2026-07-03
+Branch: `strict-flip-w92c-module-qualified-type-gaps`
+
+W92C removed the two remaining module-qualified type `active_feature_gap`
+ignores in `module_qualified_type_tests.rs`. Static source audit found W88D's
+module-qualified struct-literal inference, inline-module analysis prepending,
+and static UFCS lowering already cover these residual rows; W92C adds a
+compile-shape proof for the trait-method call target so the dynamic
+`CallMethod("greet")` fallback cannot silently return.
+
+| Test | Before | After | Decision label |
+|---|---|---|---|
+| `crates/shape-vm/src/lib_tests_parts/module_qualified_type_tests.rs::test_module_impl_trait` | `active_feature_gap` | active | implemented static module-qualified trait-method receiver proof |
+| `crates/shape-vm/src/lib_tests_parts/module_qualified_type_tests.rs::test_module_type_in_let_binding_annotation` | `active_feature_gap` | active | module-qualified let annotation uses strict solver nominal identity |
+
+## W92D Addendum: Monomorphization Active Gap Redrive
+
+Date: 2026-07-03
+Branch: `strict-flip-w92d-monomorphization-active-gaps`
+
+W92D removed one `active_feature_gap` ignore after source audit showed the
+test expectation had drifted from current strict dispatch. Nested-array
+`flatten()` is now a native PHF `CallMethod` implementation with
+receiver-derived result type propagation; it is not a generic stdlib
+monomorphization and should not populate `MonomorphizationCache`.
+
+The const-generic row remains ignored as an active gap, but its classification
+is narrowed to the exact missing surface: explicit call-site turbofish
+`::<N>` has no `postfix_expr` rule and no `Expr::FunctionCall` AST carrier for
+parsed const args. Const generic declarations, default expressions, cache keys,
+and const-aware substitution are already covered by existing parser/cache tests.
+
+| Test | Before | After | Disposition |
+|---|---|---|---|
+| `crates/shape-vm/src/compiler/monomorphization/integration_tests.rs::test_nested_generic_call` | `active_feature_gap` | active / current semantics | Rewritten to assert native PHF `flatten()` compiles, does not create a generic specialization key, and evaluates to `10`. |
+| `crates/shape-vm/src/compiler/monomorphization/type_resolution.rs::const_generic_repeat_n_3_end_to_end` | `active_feature_gap` | `active_feature_gap` | Still blocked on explicit `::<N>` call-site parser/AST carrier and compiler extraction into `ensure_monomorphic_function_with_consts`; ignore reason updated with this evidence. |
+
+The cumulative supervisor source-level count delta after W92B + W92C + W92D is:
+
+| Crate | Active gap | Stale expectation | Deleted v1 path |
+|---|---:|---:|---:|
+| `shape-vm` after W91B | 20 | 0 | 5 |
+| `shape-vm` after W92B | 17 | 0 | 5 |
+| `shape-vm` after W92B + W92C | 15 | 0 | 5 |
+| `shape-vm` after W92B + W92C + W92D | 14 | 0 | 5 |
+
+Supervisor verification: focused W92B/W92C/W92D cgroups passed, `shape-runtime
+--lib` passed 1230/0 (`run-p38136-i194121.service`), and `shape-vm --lib
+--features deep-tests --no-fail-fast` passed 2794/0/113 ignored
+(`run-p39810-i196101.service`).
+
 ## Active Gap Inventory
 
 These rows are precise missing-feature or implementation-gap issues. They
@@ -84,11 +152,7 @@ focused cargo test lane.
 |---|---|---|---|---|
 | `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_block_expr_destructured_binding_still_runs` | default | missing language feature | v2 typed-array element handling for destructuring `let [a, b] = [1, 2]`. |
 | `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_compile_function_records_mir_reference_escape` | default | missing language feature | MIR reference-escape enforcement for local-return shapes. |
-| `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_out_param_extern_c_compiles` | `deep-tests` | missing language feature | Extern-C out-param sugar caller-visible arity/stub alignment for omitted `out` arguments. |
-| `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_out_param_void_return_single_out` | `deep-tests` | missing language feature | Extern-C single-out/void sugar caller-visible arity/stub alignment for omitted `out` arguments. |
-| `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_intrinsic_builtin_blocked_from_user_code` | `deep-tests` | missing diagnostic feature | Direct internal-intrinsic names should surface scope-gating diagnostics before strict argument type solving. |
-| `shape-vm` | `crates/shape-vm/src/compiler/monomorphization/integration_tests.rs::test_nested_generic_call` | default | missing language feature | Flatten monomorphization-cache population for nested generic calls. |
-| `shape-vm` | `crates/shape-vm/src/compiler/monomorphization/type_resolution.rs::const_generic_repeat_n_3_end_to_end` | default | missing language feature | Call-site turbofish grammar for const generics (`::<N>`). |
+| `shape-vm` | `crates/shape-vm/src/compiler/monomorphization/type_resolution.rs::const_generic_repeat_n_3_end_to_end` | default | missing language feature | Explicit call-site turbofish parser/AST carrier for const args (`::<N>`) plus compiler extraction into `ensure_monomorphic_function_with_consts`; declaration/default route already exists. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/extend_blocks.rs::test_extend_array_basic` | `deep-tests` | missing language feature | Typed receiver-specific method resolution for generic Vec extensions. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/extend_blocks.rs::test_extend_multiple_types` | `deep-tests` | missing language feature | Multi-extend resolver preserving String method registration when mixed with Number and Vec extensions. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/module_deep_tests.rs::test_module_exec_nested_module_function_resolution` | `deep-tests` | missing language feature | Nested qualified module-call return-kind inference. |
@@ -100,8 +164,6 @@ focused cargo test lane.
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_comptime_set_return_expr_via_module_export` | default | missing language feature | Const-specialization for imported module functions. |
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_comptime_handler_can_call_comptime_helper_fn` | default | missing language feature | Const-specialization for imported module functions. |
 | `shape-vm` | `crates/shape-vm/src/lib_tests_parts/extension_integration_tests.rs::test_imported_module_typed_callable_field_propagates_table_schema_for_filter_chain` | default | missing language feature | Imported-module annotation `set return` schema propagation across the comptime boundary. |
-| `shape-vm` | `crates/shape-vm/src/lib_tests_parts/module_qualified_type_tests.rs::test_module_impl_trait` | default | missing language feature | Qualified type trait-method resolution without treating the module as the receiver. |
-| `shape-vm` | `crates/shape-vm/src/lib_tests_parts/module_qualified_type_tests.rs::test_module_type_in_let_binding_annotation` | default | missing language feature | Module-qualified type annotations agreeing with strict solver module/type identity. |
 | `shape-jit` | `crates/shape-jit/src/compiler/c2_tests.rs::c2_owned_mut_bool_round_trip` | `deep-tests` | missing language feature | JIT capture-local declaration/param-store must preserve cell-pointer width for OwnedMutable captures. |
 | `shape-jit` | `crates/shape-jit/src/compiler/c2_tests.rs::c2_shared_f64_round_trip` | `deep-tests` | missing language feature | JIT shared-local declaration must preserve `*const SharedCell` pointer width. |
 | `shape-jit` | `crates/shape-jit/src/core.rs::test_simulation_kernel_compilation` | default | missing language feature | `build_kernel_ir` v2 runtime migration. |

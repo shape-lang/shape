@@ -23,8 +23,9 @@
 //! - `Phase C bytecode-inspection tests` (count `CallValue` opcodes in
 //!   the specialized body) survive unchanged — they only inspect bytecode
 //!   shape, never carrier values.
-//! - `test_nested_generic_call` remains `#[ignore]`'d (pre-existing
-//!   flatten monomorphization-cache population gap unrelated to phase-2c).
+//! - `test_nested_generic_call` is a current-semantics proof: nested-array
+//!   `flatten()` dispatches through the native PHF `CallMethod` path, not the
+//!   generic specialization cache, while preserving the flattened element type.
 
 // ---------------------------------------------------------------------------
 // Meta-test: confirm the monomorphization module is reachable.
@@ -244,10 +245,10 @@ mod e2e_tests {
         assert_eq!(unique.len(), map_specializations.len());
     }
 
-    /// `nested.flatten()` for `[[int]]` — pre-existing flatten
-    /// specialization-cache population gap (unrelated to phase-2c).
+    /// `nested.flatten()` for `[[int]]` uses the native PHF `CallMethod`
+    /// implementation, preserves the flattened `Array<int>` result type, and
+    /// does not populate the generic specialization cache.
     #[test]
-    #[ignore]
     fn test_nested_generic_call() {
         let source = r#"
             let nested = [[1, 2], [3, 4]]
@@ -257,8 +258,8 @@ mod e2e_tests {
         let bytecode = compile_with_prelude(source).expect("compile failed");
         let cache_keys = &bytecode.monomorphization_keys;
         assert!(
-            cache_keys.iter().any(|k| k.contains("flatten")),
-            "expected a flatten specialization in cache, got: {:?}",
+            !cache_keys.iter().any(|k| k.contains("flatten")),
+            "native PHF flatten should not create a generic specialization cache key, got: {:?}",
             cache_keys
         );
 

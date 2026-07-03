@@ -1894,6 +1894,33 @@ impl BytecodeCompiler {
         None
     }
 
+    fn reject_user_internal_intrinsic_calls(&self, program: &Program) -> Result<()> {
+        if self.allow_internal_builtins {
+            return Ok(());
+        }
+
+        let Some((name, span)) = first_matching_direct_function_call(program, &|name| {
+            (name.starts_with("__intrinsic_") || name.starts_with("__json_"))
+                && matches!(
+                    self.classify_builtin_function(name),
+                    Some(BuiltinNameResolution::InternalOnly {
+                        scope: ResolutionScope::InternalIntrinsic,
+                        ..
+                    })
+                )
+        }) else {
+            return Ok(());
+        };
+
+        let Some(resolution) = self.classify_builtin_function(&name) else {
+            return Ok(());
+        };
+        Err(ShapeError::SemanticError {
+            message: self.internal_intrinsic_error_message(&name, resolution),
+            location: Some(self.span_to_source_location(span)),
+        })
+    }
+
     /// Compile a program to bytecode
     pub fn compile(mut self, program: &Program) -> Result<BytecodeProgram> {
         // First: desugar the program (converts FromQuery to method chains, etc.)
@@ -1919,6 +1946,8 @@ impl BytecodeCompiler {
         // everywhere at once. Unknown / duplicate named args surface as a clean
         // compile error here. See `shape_ast::transform::named_args_rebind`.
         shape_ast::transform::rebind_named_args(&mut program)?;
+
+        self.reject_user_internal_intrinsic_calls(&program)?;
 
         // Wave 1a PART A: bidirectional inference for let-bound closures.
         // A `let f = |a, b| a + b` compiles the closure body EAGERLY at the
@@ -3143,6 +3172,61 @@ impl BytecodeCompiler {
 
         Ok((bytecode, export_map))
     }
+}
+
+fn first_matching_direct_function_call<F>(
+    program: &Program,
+    predicate: &F,
+) -> Option<(String, shape_ast::ast::Span)>
+where
+    F: Fn(&str) -> bool,
+{
+    use shape_ast::ast::{Expr, Item, Span, Statement};
+    use shape_runtime::visitor::{Visitor, walk_item};
+
+    struct Finder<'a, F> {
+        predicate: &'a F,
+        found: Option<(String, Span)>,
+    }
+
+    impl<F> Visitor for Finder<'_, F>
+    where
+        F: Fn(&str) -> bool,
+    {
+        fn visit_item(&mut self, _item: &Item) -> bool {
+            self.found.is_none()
+        }
+
+        fn visit_stmt(&mut self, _stmt: &Statement) -> bool {
+            self.found.is_none()
+        }
+
+        fn visit_expr(&mut self, _expr: &Expr) -> bool {
+            self.found.is_none()
+        }
+
+        fn visit_expr_function_call(&mut self, expr: &Expr, span: Span) -> bool {
+            if let Expr::FunctionCall { name, .. } = expr {
+                if (self.predicate)(name) {
+                    self.found = Some((name.clone(), span));
+                    return false;
+                }
+            }
+            self.found.is_none()
+        }
+    }
+
+    let mut finder = Finder {
+        predicate,
+        found: None,
+    };
+    for item in &program.items {
+        walk_item(&mut finder, item);
+        if finder.found.is_some() {
+            break;
+        }
+    }
+    finder.found
 }
 
 /// v0.3.3 comptime JIT-divergence surface-and-stop (ADR-006 §2.7.14).

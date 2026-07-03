@@ -322,7 +322,6 @@ mod module_qualified_type_tests {
     }
 
     #[test]
-    #[ignore = "Phase-2c module trait method resolution: qualified type methods are currently resolved as module receivers"]
     fn test_module_impl_trait() {
         let result = eval(
             r#"
@@ -337,6 +336,27 @@ mod module_qualified_type_tests {
         "#,
         );
         assert_eq!(result.as_str().expect("Expected String"), "hi");
+    }
+
+    #[test]
+    fn test_module_impl_trait_emits_static_qualified_call() {
+        let source = r#"
+            mod m {
+                trait Greet { method greet() -> string }
+                type P { name: string }
+                impl Greet for P {
+                    method greet() -> string { self.name }
+                }
+            }
+            m::P { name: "hi" }.greet()
+        "#;
+
+        let (static_call_targets, fallback_method_names) = compile_main_call_shape(source);
+        assert_eq!(static_call_targets, vec!["m::P::greet"]);
+        assert!(
+            !fallback_method_names.iter().any(|name| name == "greet"),
+            "module-qualified trait method call must not lower to CallMethod fallback"
+        );
     }
 
     // ===== Additional integration tests =====
@@ -459,7 +479,6 @@ mod module_qualified_type_tests {
     }
 
     #[test]
-    #[ignore = "Phase-2c module-qualified type annotations still conflict with strict solver module/type identity"]
     fn test_module_type_in_let_binding_annotation() {
         // Qualified type annotation in let binding
         let result = eval(

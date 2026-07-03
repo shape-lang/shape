@@ -28,7 +28,7 @@ CRATE_ROOTS = {
 EXPECTED_COUNTS = {
     "shape-vm": {
         "phase_2c_surface": 93,
-        "active_feature_gap": 20,
+        "active_feature_gap": 14,
         "stale_semantic_expectation": 0,
         "deleted_v1_path": 5,
         "diagnostic_only": 1,
@@ -43,7 +43,7 @@ EXPECTED_COUNTS = {
 
 EXPECTED_SOURCE_ONLY_STATUS = {
     "shape-vm": {
-        "deep-tests": 62,
+        "deep-tests": 57,
     },
     "shape-jit": {
         "deep-tests": 2,
@@ -73,7 +73,6 @@ DEEP_TEST_FILES = {
 
 ALLOWED_UNREASONED = {
     "debug_decimal_opcodes",
-    "test_nested_generic_call",
 }
 
 DEEP_TEST_RANGE_CACHE: dict[Path, list[tuple[int, int]]] = {}
@@ -303,9 +302,6 @@ def classify(entry: dict[str, object]) -> str:
         )
     ):
         return "phase_2c_surface"
-
-    if reason == "(no reason)" and name == "test_nested_generic_call":
-        return "active_feature_gap"
 
     raise ValueError("unknown ignore classification")
 
