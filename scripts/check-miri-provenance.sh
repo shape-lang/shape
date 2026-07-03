@@ -63,6 +63,8 @@ Miri provenance gate coverage:
       MIRIFLAGS=-Zmiri-tree-borrows
       MIRIFLAGS=-Zmiri-strict-provenance
   - shape-vm --lib result_option_carrier
+      schema-backed Result/Option scalar/string payload tests plus
+      cfg(miri) typed-object payload clone/drop provenance probe
       default Miri / Stacked Borrows
       MIRIFLAGS=-Zmiri-tree-borrows
       MIRIFLAGS=-Zmiri-strict-provenance
@@ -128,9 +130,9 @@ run_miri "shape-value nested TypedObject field sidecar, Tree Borrows" "-Zmiri-tr
 run_miri "shape-value nested TypedObject field sidecar, Strict Provenance" "-Zmiri-strict-provenance" \
   shape-value miri_typed_object_nested_field_clone_and_drop
 
-run_miri "shape-vm Result/Option carrier, Stacked Borrows" "" \
+run_miri "shape-vm Result/Option carrier incl. typed-object payload, Stacked Borrows" "" \
   shape-vm result_option_carrier
-run_miri "shape-vm Result/Option carrier, Tree Borrows" "-Zmiri-tree-borrows" \
+run_miri "shape-vm Result/Option carrier incl. typed-object payload, Tree Borrows" "-Zmiri-tree-borrows" \
   shape-vm result_option_carrier
 
 run_miri "shape-vm typed-object get_prop raw read, Stacked Borrows" "" \
@@ -150,7 +152,7 @@ run_miri "shape-vm stack Miri provenance sidecar read/pop/truncate/overwrite, Tr
 run_miri "shape-vm stack Miri provenance sidecar read/pop/truncate/overwrite, Strict Provenance" "-Zmiri-strict-provenance" \
   shape-vm miri_stack_provenance
 
-run_miri "shape-vm Result/Option carrier, Strict Provenance" "-Zmiri-strict-provenance" \
+run_miri "shape-vm Result/Option carrier incl. typed-object payload, Strict Provenance" "-Zmiri-strict-provenance" \
   shape-vm result_option_carrier
 
 echo

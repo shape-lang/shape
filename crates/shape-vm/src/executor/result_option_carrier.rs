@@ -323,6 +323,77 @@ mod tests {
         assert_eq!(Arc::strong_count(&text), before);
     }
 
+    #[cfg(miri)]
+    #[test]
+    fn miri_result_option_typed_object_payload_clone_and_drop() {
+        use shape_value::v2::heap_element::HeapElement;
+        use shape_value::v2::refcount::{v2_get_refcount, v2_retain};
+
+        let schemas = schemas();
+
+        unsafe {
+            let payload_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+            let payload_ptr = TypedObjectStorage::_new(
+                704,
+                vec![ValueSlot::from_int(99)].into_boxed_slice(),
+                0,
+                payload_kinds,
+            );
+            v2_retain(&(*payload_ptr).header);
+            assert_eq!(
+                v2_get_refcount(&(*payload_ptr).header),
+                2,
+                "payload has one carrier-owned share plus one witness share"
+            );
+
+            let option = build_some(&schemas, KindedSlot::from_typed_object_raw(payload_ptr));
+            {
+                let option_storage = storage(&option);
+                assert_eq!(option_storage.schema_id, schemas.option as u64);
+                assert_eq!(
+                    option_storage.field_kinds[OPTION_PAYLOAD],
+                    NativeKind::Ptr(HeapKind::TypedObject)
+                );
+                assert_eq!((option_storage.heap_mask >> OPTION_PAYLOAD) & 1, 1);
+            }
+
+            let payload = {
+                let option_view = read_option(&schemas, &option).unwrap().unwrap();
+                assert!(option_view.is_some());
+                option_view.clone_payload().unwrap()
+            };
+            assert_eq!(payload.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+            assert_eq!(
+                payload
+                    .as_typed_object_storage()
+                    .expect("payload clone keeps typed-object provenance")
+                    .schema_id,
+                704
+            );
+            assert_eq!(
+                v2_get_refcount(&(*payload_ptr).header),
+                3,
+                "clone_payload retained the typed-object payload share"
+            );
+
+            drop(payload);
+            assert_eq!(
+                v2_get_refcount(&(*payload_ptr).header),
+                2,
+                "dropping the cloned payload releases its retained share"
+            );
+
+            drop(option);
+            assert_eq!(
+                v2_get_refcount(&(*payload_ptr).header),
+                1,
+                "dropping the Option carrier releases the original payload share"
+            );
+
+            TypedObjectStorage::release_elem(payload_ptr);
+        }
+    }
+
     #[test]
     fn none_carrier_has_no_payload_heap_mask() {
         let schemas = schemas();
