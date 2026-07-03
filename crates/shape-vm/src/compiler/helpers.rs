@@ -2378,23 +2378,11 @@ impl BytecodeCompiler {
             | OpCode::BitShlInt
             | OpCode::BitShrInt
             | OpCode::BitNotInt
-            // Typed local / module-binding load (Wave E+3) — push raw i64.
+            // Typed i64 local / module-binding loads. Narrow and unsigned
+            // typed loads are split below so return proof sees their exact
+            // producer kind instead of collapsing to Int64.
             | OpCode::LoadLocalI64
-            | OpCode::LoadLocalU64
-            | OpCode::LoadLocalI32
-            | OpCode::LoadLocalU32
-            | OpCode::LoadLocalI16
-            | OpCode::LoadLocalU16
-            | OpCode::LoadLocalI8
-            | OpCode::LoadLocalU8
             | OpCode::LoadModuleBindingI64
-            | OpCode::LoadModuleBindingU64
-            | OpCode::LoadModuleBindingI32
-            | OpCode::LoadModuleBindingU32
-            | OpCode::LoadModuleBindingI16
-            | OpCode::LoadModuleBindingU16
-            | OpCode::LoadModuleBindingI8
-            | OpCode::LoadModuleBindingU8
             // Typed array length / map length / string length helpers all
             // push raw i64 (see arithmetic mod tests for these).
             | OpCode::ArrayLenTyped
@@ -2402,11 +2390,9 @@ impl BytecodeCompiler {
             | OpCode::StringLenTyped
             // v2 sized-integer (i32) arithmetic — post-Wave-E+5 the
             // `exec_v2_sized_int` handler pushes raw native i64 bits
-            // (sign-extended from i32 result) onto the kinded VM stack
-            // via `push_kinded(bits, NativeKind::Int64)`, matching the
-            // surrounding typed transport for `LoadLocalI32` /
-            // `PushConst` / `AddInt`. Mirrors the `AddInt`/`SubInt`/…
-            // family above for the i32 variants.
+            // (sign-extended from i32 result) onto the kinded VM stack via
+            // `push_kinded(bits, NativeKind::Int64)`. Mirrors the
+            // `AddInt`/`SubInt`/… family above for the i32 variants.
             | OpCode::AddI32
             | OpCode::SubI32
             | OpCode::MulI32
@@ -2433,6 +2419,14 @@ impl BytecodeCompiler {
             // and pushes native i64 bits — mirrors the producer side of the
             // compact-int family.
             | OpCode::CastWidth => Some(StorageHint::Int64),
+
+            OpCode::LoadLocalU64 | OpCode::LoadModuleBindingU64 => Some(StorageHint::UInt64),
+            OpCode::LoadLocalI32 | OpCode::LoadModuleBindingI32 => Some(StorageHint::Int32),
+            OpCode::LoadLocalU32 | OpCode::LoadModuleBindingU32 => Some(StorageHint::UInt32),
+            OpCode::LoadLocalI16 | OpCode::LoadModuleBindingI16 => Some(StorageHint::Int16),
+            OpCode::LoadLocalU16 | OpCode::LoadModuleBindingU16 => Some(StorageHint::UInt16),
+            OpCode::LoadLocalI8 | OpCode::LoadModuleBindingI8 => Some(StorageHint::Int8),
+            OpCode::LoadLocalU8 | OpCode::LoadModuleBindingU8 => Some(StorageHint::UInt8),
 
             // ===== Raw f64 producers =====
             OpCode::AddNumber
@@ -2720,14 +2714,14 @@ impl BytecodeCompiler {
             }
             let instr = &self.program.instructions[pos];
             let kind = match instr.opcode {
-                OpCode::ReturnValueI64
-                | OpCode::ReturnValueU64
-                | OpCode::ReturnValueI32
-                | OpCode::ReturnValueU32
-                | OpCode::ReturnValueI16
-                | OpCode::ReturnValueU16
-                | OpCode::ReturnValueI8
-                | OpCode::ReturnValueU8 => Some(StorageHint::Int64),
+                OpCode::ReturnValueI64 => Some(StorageHint::Int64),
+                OpCode::ReturnValueU64 => Some(StorageHint::UInt64),
+                OpCode::ReturnValueI32 => Some(StorageHint::Int32),
+                OpCode::ReturnValueU32 => Some(StorageHint::UInt32),
+                OpCode::ReturnValueI16 => Some(StorageHint::Int16),
+                OpCode::ReturnValueU16 => Some(StorageHint::UInt16),
+                OpCode::ReturnValueI8 => Some(StorageHint::Int8),
+                OpCode::ReturnValueU8 => Some(StorageHint::UInt8),
                 OpCode::ReturnValueF64 => Some(StorageHint::Float64),
                 OpCode::ReturnValueBool => Some(StorageHint::Bool),
                 // Legacy / pointer / generic typed-return — disqualify.
@@ -2810,14 +2804,11 @@ impl BytecodeCompiler {
         };
         // Post-§2.7.5.1: `get_module_binding_storage_hint` returns
         // `Option<StorageHint>` ("not yet proven" carried in the Option).
-        // Match through `Some(..)` and forward only the proven primitive
-        // kinds; `None` (or any non-primitive proven kind) falls through.
-        match self.type_tracker.get_module_binding_storage_hint(*idx) {
-            Some(kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)) => {
-                Some(kind)
-            }
-            _ => None,
-        }
+        // Forward only hints with a typed field-kind carrier; `None` (or any
+        // non-carriered proven kind) falls through.
+        self.type_tracker
+            .get_module_binding_storage_hint(*idx)
+            .filter(|kind| storage_hint_to_field_kind(*kind).is_some())
     }
 
     fn load_local_trusted_native_kind(&self, instr: &Instruction) -> Option<StorageHint> {
@@ -2831,13 +2822,11 @@ impl BytecodeCompiler {
         //
         // Post-§2.7.5.1: `get_local_storage_hint` returns
         // `Option<StorageHint>` ("not yet proven" lives in the Option).
-        // The `Some(...)` arm gates on a proven primitive; `None` (or any
-        // non-primitive) falls through to the recovery path below.
+        // The `Some(...)` arm gates on a proven typed field-kind carrier;
+        // `None` (or any non-carriered proven kind) falls through to the
+        // recovery path below.
         let hint = self.type_tracker.get_local_storage_hint(*idx);
-        if matches!(
-            hint,
-            Some(StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)
-        ) {
+        if hint.is_some_and(|kind| storage_hint_to_field_kind(kind).is_some()) {
             return hint;
         }
         // Fallback: when this `LoadLocalTrusted` was emitted inside a
@@ -2854,19 +2843,16 @@ impl BytecodeCompiler {
         //
         // U4-4: the parallel `last_expr_numeric_type` register fallback is
         // DELETED — it was redundant with the `last_expr_type_info`
-        // storage-hint below (both recover the same proven primitive kind),
-        // and it was the SB-7 second source of truth. The `Int64 / Float64 /
-        // Bool` recovery is preserved by `last_expr_type_info.storage_hint`.
+        // storage-hint below (both recover the same proven scalar kind), and
+        // it was the SB-7 second source of truth. Exact scalar recovery is
+        // preserved by `last_expr_type_info.storage_hint`.
         if let Some(info) = &self.last_expr_type_info {
             // `info.storage_hint: Option<StorageHint>` post-§2.7.5.1 —
-            // match through `Some(..)` and forward only the proven
-            // primitive kinds.
-            return match info.storage_hint {
-                Some(kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)) => {
-                    Some(kind)
-                }
-                _ => None,
-            };
+            // match through `Some(..)` and forward only typed field-kind
+            // carriers.
+            return info
+                .storage_hint
+                .filter(|kind| storage_hint_to_field_kind(*kind).is_some());
         }
         None
     }
@@ -2910,13 +2896,10 @@ impl BytecodeCompiler {
         };
         // Post-§2.7.5.1: `get_module_binding_storage_hint` returns
         // `Option<StorageHint>`. Match through `Some(..)` and forward
-        // only the proven primitive kinds.
-        match self.type_tracker.get_module_binding_storage_hint(*idx) {
-            Some(kind @ (StorageHint::Int64 | StorageHint::Float64 | StorageHint::Bool)) => {
-                Some(kind)
-            }
-            _ => None,
-        }
+        // only typed field-kind carriers.
+        self.type_tracker
+            .get_module_binding_storage_hint(*idx)
+            .filter(|kind| storage_hint_to_field_kind(*kind).is_some())
     }
 
     /// Wave E+5-cleanup task #92: resolve the raw-native kind of a

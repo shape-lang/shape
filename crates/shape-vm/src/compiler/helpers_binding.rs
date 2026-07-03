@@ -1310,4 +1310,73 @@ mod u2_exact_native_kind_proof_tests {
             Some(StorageHint::Int64)
         );
     }
+
+    #[test]
+    fn returned_narrow_identifier_uses_exact_typed_load_kind() {
+        let cases = [
+            (
+                OpCode::LoadLocalI8,
+                ConcreteType::I8,
+                StorageHint::Int8,
+                "test_return_i8",
+            ),
+            (
+                OpCode::LoadLocalI16,
+                ConcreteType::I16,
+                StorageHint::Int16,
+                "test_return_i16",
+            ),
+            (
+                OpCode::LoadLocalI32,
+                ConcreteType::I32,
+                StorageHint::Int32,
+                "test_return_i32",
+            ),
+            (
+                OpCode::LoadLocalU8,
+                ConcreteType::U8,
+                StorageHint::UInt8,
+                "test_return_u8",
+            ),
+            (
+                OpCode::LoadLocalU16,
+                ConcreteType::U16,
+                StorageHint::UInt16,
+                "test_return_u16",
+            ),
+            (
+                OpCode::LoadLocalU32,
+                ConcreteType::U32,
+                StorageHint::UInt32,
+                "test_return_u32",
+            ),
+        ];
+
+        for (opcode, concrete_type, expected_hint, site) in cases {
+            let ident_span = Span::new(20, 21);
+            let mut compiler = BytecodeCompiler::new();
+            compiler.locals = vec![HashMap::new()];
+            compiler.locals[0].insert("v".to_string(), 0);
+            compiler.current_function_local_concrete_facts.insert(
+                0,
+                BindingConcreteFact {
+                    concrete_type,
+                    source: BindingConcreteFactSource::DeclaredAnnotation,
+                },
+            );
+            compiler
+                .program
+                .instructions
+                .push(Instruction::new(opcode, Some(Operand::Local(0))));
+
+            let expr = Expr::Identifier("v".to_string(), ident_span);
+            assert_eq!(
+                compiler
+                    .exact_scalar_return_kind_for_expr(site, Some(&expr))
+                    .unwrap(),
+                Some(expected_hint),
+                "{site}"
+            );
+        }
+    }
 }
