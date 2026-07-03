@@ -154,11 +154,42 @@ pub fn parse_postfix_expr(pair: Pair<Rule>) -> Result<Expr> {
                 };
                 i += 1;
             }
+            Rule::call_const_args => {
+                if i + 1 >= postfix_ops.len() || postfix_ops[i + 1].as_rule() != Rule::function_call
+                {
+                    return Err(ShapeError::ParseError {
+                        message: "expected function call after const generic arguments".to_string(),
+                        location: Some(pair_location(postfix)),
+                    });
+                }
+
+                let const_args = super::call_const_args::parse_call_const_args(postfix.clone())?;
+                let (args, named_args) =
+                    super::functions::parse_arg_list(postfix_ops[i + 1].clone())?;
+                let full_span = Span::new(expr.span().start, pair_span(&postfix_ops[i + 1]).end);
+                if let Expr::Identifier(name, _) = expr {
+                    expr = Expr::FunctionCall {
+                        name,
+                        const_args,
+                        args,
+                        named_args,
+                        span: full_span,
+                    };
+                } else {
+                    return Err(ShapeError::ParseError {
+                        message: "const generic arguments are only supported on function calls"
+                            .to_string(),
+                        location: Some(pair_location(postfix)),
+                    });
+                }
+                i += 2;
+            }
             Rule::function_call => {
                 let (args, named_args) = super::functions::parse_arg_list(postfix.clone())?;
                 if let Expr::Identifier(name, _) = expr {
                     expr = Expr::FunctionCall {
                         name,
+                        const_args: Vec::new(),
                         args,
                         named_args,
                         span: pair_span(postfix),
@@ -369,15 +400,26 @@ fn parse_qualified_function_call_expr(pair: Pair<Rule>) -> Result<Expr> {
     })?;
     let (namespace, function) = parse_enum_variant_path(path_pair)?;
 
-    let call_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
+    let next_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
         message: "expected argument list after qualified call target".to_string(),
-        location: Some(pair_loc),
+        location: Some(pair_loc.clone()),
     })?;
+    let (const_args, call_pair) = if next_pair.as_rule() == Rule::call_const_args {
+        let const_args = super::call_const_args::parse_call_const_args(next_pair)?;
+        let call_pair = inner.next().ok_or_else(|| ShapeError::ParseError {
+            message: "expected argument list after qualified const generic call target".to_string(),
+            location: Some(pair_loc),
+        })?;
+        (const_args, call_pair)
+    } else {
+        (Vec::new(), next_pair)
+    };
     let (args, named_args) = super::functions::parse_arg_list(call_pair)?;
 
     Ok(Expr::QualifiedFunctionCall {
         namespace,
         function,
+        const_args,
         args,
         named_args,
         span,
@@ -398,6 +440,7 @@ fn parse_some_expr(pair: Pair<Rule>) -> Result<Expr> {
     let inner_expr = parse_expression(inner)?;
     Ok(Expr::FunctionCall {
         name: "Some".to_string(),
+        const_args: Vec::new(),
         args: vec![inner_expr],
         named_args: vec![],
         span,

@@ -30,9 +30,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{
-    Expr, Item, Literal, ObjectEntry, Statement, TypeAnnotation,
-};
+use crate::ast::{Expr, Item, Literal, ObjectEntry, Statement, TypeAnnotation};
 
 /// f64 exact-integer lossless range `[-2^53, 2^53]`.
 fn fits_f64_lossless(v: i128) -> bool {
@@ -282,10 +280,14 @@ fn widen_expr(expr: &mut Expr, ctx: &SigCtx) {
     match expr {
         Expr::FunctionCall {
             name,
+            const_args,
             args,
             named_args,
             ..
         } => {
+            for arg in const_args {
+                widen_expr(arg, ctx);
+            }
             if let Some((params, _)) = ctx.fns.get(name) {
                 for (i, arg) in args.iter_mut().enumerate() {
                     if let Some(Some(ann)) = params.get(i) {

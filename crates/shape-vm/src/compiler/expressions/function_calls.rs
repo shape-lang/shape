@@ -2,6 +2,7 @@
 
 use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
 use crate::compiler::monomorphization::cache::ClosureDefPeek;
+use crate::compiler::monomorphization::call_site_consts;
 use crate::compiler::monomorphization::type_resolution::{
     concrete_type_for_expr, extract_arg_concrete_types, resolve_call_site_type_args,
     resolve_call_site_type_args_from_expected_return, resolve_call_site_type_args_with_closures,
@@ -635,6 +636,24 @@ pub(crate) fn eval_const_expr_to_nanboxed(expr: &Expr) -> Option<ConstFoldValue>
 }
 
 impl BytecodeCompiler {
+    fn reject_const_args_for_non_generic_call(
+        &self,
+        callee_name: &str,
+        const_args: &[Expr],
+        span: Span,
+    ) -> Result<()> {
+        if const_args.is_empty() {
+            return Ok(());
+        }
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "'{}' does not declare const generic parameters",
+                callee_name
+            ),
+            location: Some(self.span_to_source_location(span)),
+        })
+    }
+
     fn field_type_to_static_hof_concrete_type(
         &self,
         ft: &shape_runtime::type_schema::FieldType,
@@ -990,6 +1009,7 @@ impl BytecodeCompiler {
         }
         let call_expr = Expr::FunctionCall {
             name: name.to_string(),
+            const_args: Vec::new(),
             args: args.to_vec(),
             named_args: Vec::new(),
             span,
@@ -1104,6 +1124,7 @@ impl BytecodeCompiler {
             &builtin_decl.source_module_path,
             span,
             &builtin_decl.export_name,
+            &[],
             args,
         )
     }
@@ -1631,6 +1652,7 @@ impl BytecodeCompiler {
     pub(super) fn compile_expr_function_call(
         &mut self,
         name: &str,
+        const_args: &[Expr],
         args: &[Expr],
         span: Span,
     ) -> Result<()> {
@@ -1704,6 +1726,7 @@ impl BytecodeCompiler {
             || self.mutable_closure_captures.contains_key(name)
             || self.resolve_scoped_module_binding_name(name).is_some()
         {
+            self.reject_const_args_for_non_generic_call(name, const_args, span)?;
             // R8 W9 B1 W17-marshal-return JIT surface-and-stop flag
             // (2026-05-25). Direct call to an imported stdlib function —
             // the callee resolves via `resolve_scoped_module_binding_name`
@@ -2250,7 +2273,7 @@ impl BytecodeCompiler {
             // up so the user sees a precise diagnostic instead of a
             // recursion / stack-overflow at runtime.
             if let Some(specialized_idx) =
-                self.try_monomorphize_free_function_call(&call_name, args, span)?
+                self.try_monomorphize_free_function_call(&call_name, const_args, args, span)?
             {
                 call_func_idx = specialized_idx;
                 call_name = self.program.functions[call_func_idx].name.clone();
@@ -2563,6 +2586,8 @@ impl BytecodeCompiler {
             return Ok(());
         }
 
+        self.reject_const_args_for_non_generic_call(name, const_args, span)?;
+
         if let Some(builtin_decl) = self.resolve_scoped_module_builtin_function(name)
             && !(self.allow_internal_builtins
                 && Self::is_internal_intrinsic_name(&builtin_decl.export_name))
@@ -2679,6 +2704,7 @@ impl BytecodeCompiler {
                     &imported.module_path,
                     span,
                     &imported.original_name,
+                    &[],
                     args,
                 );
             }
@@ -3045,6 +3071,7 @@ impl BytecodeCompiler {
         &mut self,
         namespace: &str,
         function: &str,
+        const_args: &[Expr],
         args: &[Expr],
         span: Span,
     ) -> Result<bool> {
@@ -3087,6 +3114,8 @@ impl BytecodeCompiler {
         let Some(builtin) = builtin else {
             return Ok(false);
         };
+        let callee_name = format!("{}::{}", namespace, function);
+        self.reject_const_args_for_non_generic_call(&callee_name, const_args, span)?;
 
         for arg in args {
             self.compile_expr_as_value_or_placeholder(arg)?;
@@ -3120,22 +3149,24 @@ impl BytecodeCompiler {
         &mut self,
         namespace: &str,
         function: &str,
+        const_args: &[Expr],
         args: &[Expr],
         span: Span,
     ) -> Result<()> {
         let scoped_name = format!("{}::{}", namespace, function);
         if let Some(builtin_decl) = self.module_builtin_functions.get(&scoped_name).cloned() {
+            self.reject_const_args_for_non_generic_call(&scoped_name, const_args, span)?;
             return self.compile_module_builtin_function_call(&builtin_decl, args, span);
         }
         if self.find_function(&scoped_name).is_some() {
-            return self.compile_expr_function_call(&scoped_name, args, span);
+            return self.compile_expr_function_call(&scoped_name, const_args, args, span);
         }
 
         if self.is_module_namespace_name(namespace) {
-            return self.compile_module_namespace_call(namespace, span, function, args);
+            return self.compile_module_namespace_call(namespace, span, function, const_args, args);
         }
 
-        if self.compile_type_namespace_builtin_call(namespace, function, args, span)? {
+        if self.compile_type_namespace_builtin_call(namespace, function, const_args, args, span)? {
             return Ok(());
         }
 
@@ -4483,6 +4514,7 @@ impl BytecodeCompiler {
             if self.compile_type_namespace_builtin_call(
                 namespace_name,
                 method,
+                &[],
                 args,
                 *namespace_span,
             )? {
@@ -4495,7 +4527,7 @@ impl BytecodeCompiler {
         if let Expr::Identifier(namespace, _) = receiver {
             let scoped_name = format!("{}::{}", namespace, method);
             if self.find_function(&scoped_name).is_some() {
-                return self.compile_expr_function_call(&scoped_name, args, receiver.span());
+                return self.compile_expr_function_call(&scoped_name, &[], args, receiver.span());
             }
         }
 
@@ -5543,6 +5575,7 @@ impl BytecodeCompiler {
         namespace_name: &str,
         namespace_span: Span,
         method: &str,
+        const_args: &[Expr],
         args: &[Expr],
     ) -> Result<()> {
         self.compile_module_namespace_call_on_binding(
@@ -5550,6 +5583,7 @@ impl BytecodeCompiler {
             namespace_name,
             namespace_span,
             method,
+            const_args,
             args,
         )
     }
@@ -5560,6 +5594,7 @@ impl BytecodeCompiler {
         namespace_name: &str,
         namespace_span: Span,
         method: &str,
+        const_args: &[Expr],
         args: &[Expr],
     ) -> Result<()> {
         // Detect json.parse(text, TypeName) → rewrite to json.__parse_typed(text, schema_id).
@@ -5583,6 +5618,7 @@ impl BytecodeCompiler {
                         namespace_name,
                         namespace_span,
                         "__parse_typed",
+                        &[],
                         &rewritten_args,
                     );
                 }
@@ -5616,14 +5652,23 @@ impl BytecodeCompiler {
             if self.find_function(&canonical_scoped_name).is_some() {
                 return self.compile_expr_function_call(
                     &canonical_scoped_name,
+                    const_args,
                     args,
                     namespace_span,
                 );
             }
             if self.find_function(&local_scoped_name).is_some() {
-                return self.compile_expr_function_call(&local_scoped_name, args, namespace_span);
+                return self.compile_expr_function_call(
+                    &local_scoped_name,
+                    const_args,
+                    args,
+                    namespace_span,
+                );
             }
         }
+
+        let callee_name = format!("{}::{}", namespace_name, method);
+        self.reject_const_args_for_non_generic_call(&callee_name, const_args, namespace_span)?;
 
         if self.is_native_module_export(namespace_name, method)
             && !self.is_native_module_export_available(namespace_name, method)
@@ -5746,6 +5791,7 @@ impl BytecodeCompiler {
         let namespace_call_expr = Expr::QualifiedFunctionCall {
             namespace: namespace_name.to_string(),
             function: method.to_string(),
+            const_args: Vec::new(),
             args: args.to_vec(),
             named_args: vec![],
             span: namespace_span,
@@ -5926,28 +5972,59 @@ impl BytecodeCompiler {
     pub(crate) fn try_monomorphize_free_function_call(
         &mut self,
         func_name: &str,
+        explicit_const_args: &[Expr],
         args: &[Expr],
         call_site_span: Span,
     ) -> Result<Option<usize>> {
-        // 1. Only generic, non-const type-param functions participate.
-        let type_params: Vec<String> = {
+        let to_shape_error =
+            |err: call_site_consts::CallSiteConstArgError| ShapeError::SemanticError {
+                message: err.message,
+                location: Some(self.span_to_source_location(err.span)),
+            };
+
+        // 1. Generic functions participate when they have type params
+        // inferred from value arguments, explicit const-generic call-site
+        // args, or both.
+        let (type_params, const_param_count): (Vec<String>, usize) = {
             let Some(def) = self.function_defs.get(func_name) else {
                 return Ok(None);
             };
             let Some(tps) = def.type_params.as_ref() else {
+                if !explicit_const_args.is_empty() {
+                    return Err(to_shape_error(call_site_consts::no_const_params_error(
+                        func_name,
+                        call_site_span,
+                    )));
+                }
                 return Ok(None);
             };
             if tps.is_empty() {
+                if !explicit_const_args.is_empty() {
+                    return Err(to_shape_error(call_site_consts::no_const_params_error(
+                        func_name,
+                        call_site_span,
+                    )));
+                }
                 return Ok(None);
             }
-            tps.iter()
-                .filter(|tp| !tp.is_const())
-                .map(|tp| tp.name().to_string())
-                .collect()
+            (
+                tps.iter()
+                    .filter(|tp| !tp.is_const())
+                    .map(|tp| tp.name().to_string())
+                    .collect(),
+                tps.iter().filter(|tp| tp.is_const()).count(),
+            )
         };
-        if type_params.is_empty() {
+        if type_params.is_empty() && explicit_const_args.is_empty() {
             return Ok(None);
         }
+        let const_args = call_site_consts::resolve_explicit_const_args(
+            func_name,
+            const_param_count,
+            explicit_const_args,
+            call_site_span,
+        )
+        .map_err(to_shape_error)?;
 
         // 2. Per-arg concrete types (None for anything the resolver can't
         //    identify — calls, member accesses, etc.).
@@ -5955,7 +6032,13 @@ impl BytecodeCompiler {
 
         // 3. Unify call-site arg types against the declared param annotations
         //    to bind each type param to a concrete type.
-        let resolution = if let Some(resolution) =
+        let resolution = if type_params.is_empty() {
+            crate::compiler::monomorphization::type_resolution::TypeArgResolution::with_consts(
+                func_name,
+                Vec::new(),
+                const_args.clone(),
+            )
+        } else if let Some(resolution) =
             crate::compiler::monomorphization::type_resolution::resolve_call_site_type_args_from_exprs(
                 self,
                 func_name,
@@ -5985,7 +6068,7 @@ impl BytecodeCompiler {
         //    fall back to the unspecialized (empty) template and let the
         //    caller diagnose — it's never correct to emit a specialized
         //    call with missing bindings.
-        if resolution.type_args.is_empty() {
+        if !type_params.is_empty() && resolution.type_args.is_empty() {
             return Ok(None);
         }
         if resolution.type_args.len() != type_params.len() {
@@ -6013,8 +6096,15 @@ impl BytecodeCompiler {
         //    template.
         let caller_function = self.current_function;
         let saved_expected_call_return_type = self.pending_expected_call_return_type.take();
-        let specialization_result =
-            self.ensure_monomorphic_function(func_name, &resolution.type_args);
+        let specialization_result = if explicit_const_args.is_empty() {
+            self.ensure_monomorphic_function(func_name, &resolution.type_args)
+        } else {
+            self.ensure_monomorphic_function_with_consts(
+                func_name,
+                &resolution.type_args,
+                &const_args,
+            )
+        };
         self.pending_expected_call_return_type = saved_expected_call_return_type;
         match specialization_result {
             Ok(specialized_idx) => {

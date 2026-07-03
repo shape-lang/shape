@@ -101,6 +101,7 @@ impl BytecodeCompiler {
         let call = Expr::QualifiedFunctionCall {
             namespace: "__comptime__".to_string(),
             function: method.to_string(),
+            const_args: Vec::new(),
             args,
             named_args: Vec::new(),
             span,
@@ -2963,8 +2964,10 @@ impl BytecodeCompiler {
         let body = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "Ok".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::FunctionCall {
                     name: from_fn_name.to_string(),
+                    const_args: Vec::new(),
                     args: vec![Expr::Identifier("value".to_string(), span)],
                     named_args: Vec::new(),
                     span,

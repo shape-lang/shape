@@ -1535,6 +1535,7 @@ impl BytecodeCompiler {
             }
             Expr::FunctionCall {
                 name,
+                const_args,
                 args,
                 named_args,
                 span,
@@ -1542,15 +1543,17 @@ impl BytecodeCompiler {
             } => {
                 let rebound = self.resolve_named_function_args(name, args, named_args, *span)?;
                 let args: &[Expr] = rebound.as_deref().unwrap_or(args);
-                self.compile_expr_function_call(name, args, *span)
+                self.compile_expr_function_call(name, const_args, args, *span)
             }
             Expr::QualifiedFunctionCall {
                 namespace,
                 function,
+                const_args,
                 args,
                 span,
                 ..
-            } => self.compile_expr_qualified_function_call(namespace, function, args, *span),
+            } => self
+                .compile_expr_qualified_function_call(namespace, function, const_args, args, *span),
             Expr::MethodCall {
                 receiver,
                 method,
@@ -1684,6 +1687,7 @@ impl BytecodeCompiler {
             // Function calls
             Expr::FunctionCall {
                 name,
+                const_args,
                 args,
                 named_args,
                 span,
@@ -1692,15 +1696,16 @@ impl BytecodeCompiler {
                 let rebound =
                     self.resolve_named_function_args(name, args, named_args, *span)?;
                 let args: &[Expr] = rebound.as_deref().unwrap_or(args);
-                self.compile_expr_function_call(name, args, *span)
+                self.compile_expr_function_call(name, const_args, args, *span)
             }
             Expr::QualifiedFunctionCall {
                 namespace,
                 function,
+                const_args,
                 args,
                 span,
                 ..
-            } => self.compile_expr_qualified_function_call(namespace, function, args, *span),
+            } => self.compile_expr_qualified_function_call(namespace, function, const_args, args, *span),
             Expr::MethodCall {
                 receiver,
                 method,

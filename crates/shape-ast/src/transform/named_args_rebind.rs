@@ -29,9 +29,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{
-    Expr, ForInit, Item, ObjectEntry, Program, QueryClause, Statement,
-};
+use crate::ast::{Expr, ForInit, Item, ObjectEntry, Program, QueryClause, Statement};
 use crate::error::{Result, ShapeError};
 
 /// One parameter's name and (optional) default expression.
@@ -333,10 +331,12 @@ fn expr(e: &mut Expr, sigs: &Signatures, err: &mut Option<ShapeError>) {
     match e {
         Expr::FunctionCall {
             name,
+            const_args,
             args,
             named_args,
             ..
         } => {
+            exprs(const_args, sigs, err);
             exprs(args, sigs, err);
             for (_, v) in named_args.iter_mut() {
                 expr(v, sigs, err);
@@ -344,8 +344,12 @@ fn expr(e: &mut Expr, sigs: &Signatures, err: &mut Option<ShapeError>) {
             rebind_call(name, args, named_args, sigs, err);
         }
         Expr::QualifiedFunctionCall {
-            args, named_args, ..
+            const_args,
+            args,
+            named_args,
+            ..
         } => {
+            exprs(const_args, sigs, err);
             exprs(args, sigs, err);
             for (_, v) in named_args.iter_mut() {
                 expr(v, sigs, err);
@@ -438,9 +442,7 @@ fn expr(e: &mut Expr, sigs: &Signatures, err: &mut Option<ShapeError>) {
                             expr(value, sigs, err);
                         }
                     }
-                    crate::ast::BlockItem::Assignment(assign) => {
-                        expr(&mut assign.value, sigs, err)
-                    }
+                    crate::ast::BlockItem::Assignment(assign) => expr(&mut assign.value, sigs, err),
                     crate::ast::BlockItem::Statement(stmt) => statement(stmt, sigs, err),
                     crate::ast::BlockItem::Expression(e) => expr(e, sigs, err),
                 }
@@ -600,7 +602,10 @@ mod tests {
         let mut program = parse_program(src).expect("parse");
         rebind_named_args(&mut program)?;
         for item in &program.items {
-            if let Some(Expr::FunctionCall { args, named_args, .. }) = top_call(item) {
+            if let Some(Expr::FunctionCall {
+                args, named_args, ..
+            }) = top_call(item)
+            {
                 assert!(named_args.is_empty(), "named_args must be drained");
                 return Ok(args.clone());
             }
@@ -662,7 +667,9 @@ mod tests {
 
     #[test]
     fn duplicate_positional_and_named_errors() {
-        assert!(rebound_call_args("fn bv(w: int, h: int) -> int { w }\nbv(2, w: 5, h: 3)").is_err());
+        assert!(
+            rebound_call_args("fn bv(w: int, h: int) -> int { w }\nbv(2, w: 5, h: 3)").is_err()
+        );
     }
 
     #[test]

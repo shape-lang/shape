@@ -213,8 +213,14 @@ fn desugar_expr(expr: &mut Expr) {
         }
         Expr::UnaryOp { operand, .. } => desugar_expr(operand),
         Expr::FunctionCall {
-            args, named_args, ..
+            const_args,
+            args,
+            named_args,
+            ..
         } => {
+            for arg in const_args {
+                desugar_expr(arg);
+            }
             for arg in args {
                 desugar_expr(arg);
             }
@@ -223,8 +229,14 @@ fn desugar_expr(expr: &mut Expr) {
             }
         }
         Expr::QualifiedFunctionCall {
-            args, named_args, ..
+            const_args,
+            args,
+            named_args,
+            ..
         } => {
+            for arg in const_args {
+                desugar_expr(arg);
+            }
             for arg in args {
                 desugar_expr(arg);
             }

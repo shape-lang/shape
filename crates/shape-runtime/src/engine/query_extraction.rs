@@ -105,7 +105,12 @@ impl super::ShapeEngine {
         queries: &mut Vec<crate::data::DataQuery>,
     ) -> Result<()> {
         match expr {
-            Expr::FunctionCall { args, .. } => {
+            Expr::FunctionCall {
+                const_args, args, ..
+            } => {
+                for arg in const_args {
+                    self.extract_from_expr(arg, queries)?;
+                }
                 for arg in args {
                     self.extract_from_expr(arg, queries)?;
                 }

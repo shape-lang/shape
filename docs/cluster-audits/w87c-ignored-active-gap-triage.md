@@ -117,16 +117,9 @@ test expectation had drifted from current strict dispatch. Nested-array
 receiver-derived result type propagation; it is not a generic stdlib
 monomorphization and should not populate `MonomorphizationCache`.
 
-The const-generic row remains ignored as an active gap, but its classification
-is narrowed to the exact missing surface: explicit call-site turbofish
-`::<N>` has no `postfix_expr` rule and no `Expr::FunctionCall` AST carrier for
-parsed const args. Const generic declarations, default expressions, cache keys,
-and const-aware substitution are already covered by existing parser/cache tests.
-
 | Test | Before | After | Disposition |
 |---|---|---|---|
 | `crates/shape-vm/src/compiler/monomorphization/integration_tests.rs::test_nested_generic_call` | `active_feature_gap` | active / current semantics | Rewritten to assert native PHF `flatten()` compiles, does not create a generic specialization key, and evaluates to `10`. |
-| `crates/shape-vm/src/compiler/monomorphization/type_resolution.rs::const_generic_repeat_n_3_end_to_end` | `active_feature_gap` | `active_feature_gap` | Still blocked on explicit `::<N>` call-site parser/AST carrier and compiler extraction into `ensure_monomorphic_function_with_consts`; ignore reason updated with this evidence. |
 
 The cumulative supervisor source-level count delta after W92B + W92C + W92D is:
 
@@ -137,10 +130,56 @@ The cumulative supervisor source-level count delta after W92B + W92C + W92D is:
 | `shape-vm` after W92B + W92C | 15 | 0 | 5 |
 | `shape-vm` after W92B + W92C + W92D | 14 | 0 | 5 |
 
-Supervisor verification: focused W92B/W92C/W92D cgroups passed, `shape-runtime
---lib` passed 1230/0 (`run-p38136-i194121.service`), and `shape-vm --lib
---features deep-tests --no-fail-fast` passed 2794/0/113 ignored
-(`run-p39810-i196101.service`).
+## W94B Addendum: Typed-Array Destructure Gap Closure
+
+Date: 2026-07-03
+Branch: `strict-flip-w94b-vm-module-matrix-destructure-gaps`
+
+W94B removes `test_block_expr_destructured_binding_still_runs` after
+destructuring typed-array literals through the structural typed-array lowering
+path. Earlier W94B partial edits to unrelated binary/operator paths were
+rejected and not merged.
+
+| Test | Before | After | Disposition |
+|---|---|---|---|
+| `crates/shape-vm/src/compiler/functions.rs::test_block_expr_destructured_binding_still_runs` | `active_feature_gap` | active / verified | v2 typed-array destructuring lowers `let [a, b] = [1, 2]` without reverting to deleted carriers. |
+
+Supervisor verification: `shape-vm --lib --features deep-tests
+test_block_expr_destructured_binding_still_runs` passed 1/0 in
+`run-p209422-i665530.service`.
+
+The source-level count delta after W94B is:
+
+| Crate | Active gap | Stale expectation | Deleted v1 path |
+|---|---:|---:|---:|
+| `shape-vm` after W92B + W92C + W92D | 14 | 0 | 5 |
+| `shape-vm` after W94B | 13 | 0 | 5 |
+
+## W94A Addendum: Const-Generic Call-Site Gap Closure
+
+Date: 2026-07-03
+Branch: `strict-flip-w94a-vm-const-imported-module-gaps`
+
+W94A removes the default-gated const-generic turbofish active gap by adding a
+parser/AST carrier for explicit call-site const args and routing literal const
+args through the existing static monomorphization path. Negative source tests
+pin invalid paths: const args on non-const functions and non-literal const args
+reject during compilation rather than falling through to runtime.
+
+| Test | Before | After | Disposition |
+|---|---|---|---|
+| `crates/shape-vm/src/compiler/monomorphization/type_resolution.rs::const_generic_repeat_n_3_end_to_end` | `active_feature_gap` | active / verified | `repeat::<3>(1)` parses by grammar design and specializes to `repeat::int_3`; invalid const-arg paths reject statically. |
+
+The source-level count delta after W94A is:
+
+| Crate | Active gap | Stale expectation | Deleted v1 path |
+|---|---:|---:|---:|
+| `shape-vm` after W94B | 13 | 0 | 5 |
+| `shape-vm` after W94A | 12 | 0 | 5 |
+
+Supervisor verification: the three W94A focused tests passed 3/0 in
+`run-p214502-i671813.service`, and `shape-ast --lib` passed 512/0 in
+`run-p216544-i673931.service`.
 
 ## W94C Addendum: JIT Captured-Cell Width Gap Closure
 
@@ -167,8 +206,8 @@ intentional v2 surfaces: `build_kernel_ir` returns
 
 | Test | Before | After | Disposition |
 |---|---|---|---|
-| `crates/shape-jit/src/compiler/c2_tests.rs::c2_owned_mut_bool_round_trip` | `active_feature_gap` | active / pending supervisor verification | Captured-cell locals and entry param stores use cell-pointer storage width while preserving Bool inner-kind semantics for reads/writes. |
-| `crates/shape-jit/src/compiler/c2_tests.rs::c2_shared_f64_round_trip` | `active_feature_gap` | active / pending supervisor verification | Outer `SharedCow` locals and closure-body `Shared` capture params use cell-pointer storage width while preserving F64 inner-kind semantics. |
+| `crates/shape-jit/src/compiler/c2_tests.rs::c2_owned_mut_bool_round_trip` | `active_feature_gap` | active / verified | Captured-cell locals and entry param stores use cell-pointer storage width while preserving Bool inner-kind semantics for reads/writes. |
+| `crates/shape-jit/src/compiler/c2_tests.rs::c2_shared_f64_round_trip` | `active_feature_gap` | active / verified | Outer `SharedCow` locals and closure-body `Shared` capture params use cell-pointer storage width while preserving F64 inner-kind semantics. |
 
 The source-level count delta after W94C is:
 
@@ -185,9 +224,7 @@ focused cargo test lane.
 
 | Crate | Test | Gate | Decision label | Missing feature |
 |---|---|---|---|---|
-| `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_block_expr_destructured_binding_still_runs` | default | missing language feature | v2 typed-array element handling for destructuring `let [a, b] = [1, 2]`. |
 | `shape-vm` | `crates/shape-vm/src/compiler/functions.rs::test_compile_function_records_mir_reference_escape` | default | missing language feature | MIR reference-escape enforcement for local-return shapes. |
-| `shape-vm` | `crates/shape-vm/src/compiler/monomorphization/type_resolution.rs::const_generic_repeat_n_3_end_to_end` | default | missing language feature | Explicit call-site turbofish parser/AST carrier for const args (`::<N>`) plus compiler extraction into `ensure_monomorphic_function_with_consts`; declaration/default route already exists. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/extend_blocks.rs::test_extend_array_basic` | `deep-tests` | missing language feature | Typed receiver-specific method resolution for generic Vec extensions. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/extend_blocks.rs::test_extend_multiple_types` | `deep-tests` | missing language feature | Multi-extend resolver preserving String method registration when mixed with Number and Vec extensions. |
 | `shape-vm` | `crates/shape-vm/src/executor/tests/module_deep_tests.rs::test_module_exec_nested_module_function_resolution` | `deep-tests` | missing language feature | Nested qualified module-call return-kind inference. |

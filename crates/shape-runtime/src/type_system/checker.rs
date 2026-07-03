@@ -348,12 +348,22 @@ impl TypeChecker {
                     self.check_expr(else_branch);
                 }
             }
-            Expr::FunctionCall { args, .. } => {
+            Expr::FunctionCall {
+                const_args, args, ..
+            } => {
+                for arg in const_args {
+                    self.check_expr(arg);
+                }
                 for arg in args {
                     self.check_expr(arg);
                 }
             }
-            Expr::QualifiedFunctionCall { args, .. } => {
+            Expr::QualifiedFunctionCall {
+                const_args, args, ..
+            } => {
+                for arg in const_args {
+                    self.check_expr(arg);
+                }
                 for arg in args {
                     self.check_expr(arg);
                 }

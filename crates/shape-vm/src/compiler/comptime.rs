@@ -133,6 +133,7 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
             let body_expr = Expr::QualifiedFunctionCall {
                 namespace: "__comptime__".to_string(),
                 function: (*target_method).to_string(),
+                const_args: Vec::new(),
                 args,
                 named_args: Vec::new(),
                 span: Span::DUMMY,
@@ -404,6 +405,7 @@ pub(crate) fn execute_comptime_with_context(
     items.push(Item::Expression(
         Expr::FunctionCall {
             name: func_name,
+            const_args: Vec::new(),
             args: Vec::new(),
             named_args: Vec::new(),
             span: Span::DUMMY,
@@ -929,6 +931,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     items.push(Item::Expression(
         Expr::FunctionCall {
             name: func_name,
+            const_args: Vec::new(),
             args: call_args,
             named_args: Vec::new(),
             span: Span::DUMMY,
@@ -1569,6 +1572,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "build_config".to_string(),
+                const_args: Vec::new(),
                 args: Vec::new(),
                 named_args: Vec::new(),
                 span: Span::DUMMY,
@@ -1629,6 +1633,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "build_config".to_string(),
+                const_args: Vec::new(),
                 args: Vec::new(),
                 named_args: Vec::new(),
                 span: Span::DUMMY,
@@ -1709,6 +1714,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "implements".to_string(),
+                const_args: Vec::new(),
                 args: vec![
                     Expr::Literal(Literal::String("int".to_string()), Span::DUMMY),
                     Expr::Literal(Literal::String("Add".to_string()), Span::DUMMY),
@@ -1732,6 +1738,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "implements".to_string(),
+                const_args: Vec::new(),
                 args: vec![
                     Expr::Literal(Literal::String("Dog".to_string()), Span::DUMMY),
                     Expr::Literal(Literal::String("Speak".to_string()), Span::DUMMY),
@@ -1763,6 +1770,7 @@ mod tests {
         let stmts = vec![Statement::Expression(
             Expr::FunctionCall {
                 name: "warning".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Literal(
                     Literal::String("W17 test warning".to_string()),
                     Span::DUMMY,
@@ -1796,6 +1804,7 @@ mod tests {
         let stmts = vec![Statement::Expression(
             Expr::FunctionCall {
                 name: "error".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Literal(
                     Literal::String("W17 test error".to_string()),
                     Span::DUMMY,
@@ -1977,6 +1986,7 @@ mod tests {
             Some(Expr::PropertyAccess {
                 object: Box::new(Expr::FunctionCall {
                     name: "type_info".to_string(),
+                    const_args: Vec::new(),
                     args: vec![Expr::Literal(
                         Literal::String("Point".to_string()),
                         Span::DUMMY,
@@ -2014,6 +2024,7 @@ mod tests {
             Some(Expr::PropertyAccess {
                 object: Box::new(Expr::FunctionCall {
                     name: "type_info".to_string(),
+                    const_args: Vec::new(),
                     args: vec![Expr::Literal(
                         Literal::String("Point".to_string()),
                         Span::DUMMY,
@@ -2052,6 +2063,7 @@ mod tests {
                     type_annotation: None,
                     value: Some(Expr::FunctionCall {
                         name: "type_info".to_string(),
+                        const_args: Vec::new(),
                         args: vec![Expr::Literal(
                             Literal::String("Point".to_string()),
                             Span::DUMMY,
@@ -2100,6 +2112,7 @@ mod tests {
                     type_annotation: None,
                     value: Some(Expr::FunctionCall {
                         name: "build_config".to_string(),
+                        const_args: Vec::new(),
                         args: Vec::new(),
                         named_args: Vec::new(),
                         span: Span::DUMMY,
@@ -2111,6 +2124,7 @@ mod tests {
             Statement::Return(
                 Some(Expr::FunctionCall {
                     name: "type_info".to_string(),
+                    const_args: Vec::new(),
                     args: vec![Expr::Literal(
                         Literal::String("Point".to_string()),
                         Span::DUMMY,
@@ -2147,6 +2161,7 @@ mod tests {
                     value: Some(Expr::PropertyAccess {
                         object: Box::new(Expr::FunctionCall {
                             name: "build_config".to_string(),
+                            const_args: Vec::new(),
                             args: Vec::new(),
                             named_args: Vec::new(),
                             span: Span::DUMMY,
@@ -2163,6 +2178,7 @@ mod tests {
                 Some(Expr::PropertyAccess {
                     object: Box::new(Expr::FunctionCall {
                         name: "type_info".to_string(),
+                        const_args: Vec::new(),
                         args: vec![Expr::Literal(
                             Literal::String("Point".to_string()),
                             Span::DUMMY,
@@ -2201,6 +2217,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "type_info".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Literal(
                     Literal::String("Array<int>".to_string()),
                     Span::DUMMY,
@@ -2226,6 +2243,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "type_info".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Literal(
                     Literal::String("Option<Point>".to_string()),
                     Span::DUMMY,
@@ -2253,6 +2271,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "type_info".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Literal(
                     Literal::String("Result<int, string>".to_string()),
                     Span::DUMMY,
@@ -2280,6 +2299,7 @@ mod tests {
             Some(Expr::PropertyAccess {
                 object: Box::new(Expr::FunctionCall {
                     name: "type_info".to_string(),
+                    const_args: Vec::new(),
                     args: vec![Expr::Literal(
                         Literal::String("HashMap<string, int>".to_string()),
                         Span::DUMMY,
@@ -2313,6 +2333,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "type_info".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Literal(
                     Literal::String("Color".to_string()),
                     Span::DUMMY,
@@ -2341,6 +2362,7 @@ mod tests {
             Some(Expr::PropertyAccess {
                 object: Box::new(Expr::FunctionCall {
                     name: "type_info".to_string(),
+                    const_args: Vec::new(),
                     args: vec![Expr::Literal(
                         Literal::String("Color".to_string()),
                         Span::DUMMY,
@@ -2377,6 +2399,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "type_info".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Literal(
                     Literal::String("UndefinedXYZ".to_string()),
                     Span::DUMMY,
@@ -2407,6 +2430,7 @@ mod tests {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "type_info".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::Identifier("UndefinedXYZ".to_string(), Span::DUMMY)],
                 named_args: Vec::new(),
                 span: Span::DUMMY,
@@ -2900,6 +2924,7 @@ mod tests_deferred {
         let stmts = vec![Statement::Return(
             Some(Expr::FunctionCall {
                 name: "build_config".to_string(),
+                const_args: Vec::new(),
                 args: Vec::new(),
                 named_args: Vec::new(),
                 span: Span::DUMMY,
@@ -2940,8 +2965,10 @@ mod tests_deferred {
         let stmts = vec![Statement::Expression(
             Expr::FunctionCall {
                 name: "print".to_string(),
+                const_args: Vec::new(),
                 args: vec![Expr::FunctionCall {
                     name: "build_config".to_string(),
+                    const_args: Vec::new(),
                     args: Vec::new(),
                     named_args: Vec::new(),
                     span: Span::DUMMY,

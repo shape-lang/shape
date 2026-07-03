@@ -27,8 +27,16 @@ static module-qualified trait-method lowering and let-annotation identity were
 proven by source-level tests.
 
 W92D follow-up: `test_nested_generic_call` was unignored after being rewritten
-to current native PHF `flatten()` dispatch semantics. The source checker now
-accepts 113 `shape-vm` ignores and 14 `shape-vm` active feature gaps.
+to current native PHF `flatten()` dispatch semantics.
+
+W94B follow-up: `test_block_expr_destructured_binding_still_runs` was
+unignored after v2 typed-array destructuring lowered through the structural
+typed-array path.
+
+W94A follow-up: `const_generic_repeat_n_3_end_to_end` was unignored after
+adding explicit call-site const generic parsing and static literal
+specialization. The source checker now accepts 111 `shape-vm` ignores and 12
+`shape-vm` active feature gaps.
 
 W94C follow-up: the two `shape-jit` captured-cell active gaps were unignored
 after local storage width was split from semantic inner value kind for
@@ -44,25 +52,25 @@ The supervisor-observed broad lib-test gates currently report:
 
 | Crate | Reported ignored in `--lib` gate | Source `#[ignore]` attrs scanned here | Source-only gated attrs |
 |---|---:|---:|---:|
-| `shape-vm` | 57 | 113 | 57 behind `deep-tests` |
+| `shape-vm` | 56 | 111 | 56 behind `deep-tests` |
 | `shape-jit` | 26 | 27 | 1 behind `cfg(any())` |
 
 This worker did not rerun cargo or nextest. The new checker is intentionally
 source-only and cheap; it guards the source ignore count and reason taxonomy
 without requiring a cargo test listing.
 
-For `shape-vm`, the 113 source attributes do not mechanically reduce to the
-reported 57 ignored lib tests from source-level module gates alone. Resolving
+For `shape-vm`, the 111 source attributes do not mechanically reduce to the
+reported 56 ignored lib tests from source-level module gates alone. Resolving
 that exact active-harness projection requires a cargo test listing, which this
 slice intentionally did not run. The enforceable invariant added here is the
-source-level taxonomy; the 57/26 counts remain the supervisor-observed lib gate
+source-level taxonomy; the 56/26 counts remain the supervisor-observed lib gate
 baseline.
 
 W92 supervisor verification additionally ran the deep-test VM gate after the
 W92B/C/D closures: `shape-vm --lib --features deep-tests --no-fail-fast`
-passed 2794/0/113 ignored in `run-p39810-i196101.service`. That deep-test
-ignored count matches the source inventory above; the default lib ignored count
-remains separately documented from the W91 default gate.
+passed 2794/0/113 ignored in `run-p39810-i196101.service`. W94B and W94A then
+removed two source ignores; the next deep-test inventory should report 111 VM
+source ignores if no other ignored tests change.
 
 ## Cause Taxonomy
 
@@ -75,15 +83,15 @@ source-level baseline:
 | `deleted_v1_path` | 5 | 21 | Tests still describe removed carriers or paths such as BytecodeToIR, JitArray, deleted NaN-box roundtrips, deleted native-pointer helpers, deleted TypedArrayData enum paths, v1 VMArray aliasing, or retired Tier 1 whole-function JIT. |
 | `process_aborting_extern_c_todo` | 0 | 3 | `extern "C"` functions currently hit `todo!()`/SURFACE bodies; attempting `#[should_panic]` would abort the test process. |
 | `stale_semantic_expectation` | 0 | 0 | No accepted stale expectations remain; future rows are new drift. |
-| `active_feature_gap` | 14 | 3 | Real feature gaps or known bugs: generic/method resolution, matrix/vector retargeting, const-specialization, turbofish grammar, MIR reference escape, and JIT kernel stubs. |
+| `active_feature_gap` | 12 | 3 | Real feature gaps or known bugs: generic/method resolution, matrix/vector retargeting, imported-module const-specialization/schema propagation, MIR reference escape, and JIT kernel stubs. |
 | `diagnostic_only` | 1 | 0 | A local debug-only opcode tracing test. |
-| Total | 113 | 27 | Source inventory, not a cargo-run proof. |
+| Total | 111 | 27 | Source inventory, not a cargo-run proof. |
 
 The source-only gated subset is also classified:
 
 | Crate | Gated category contribution |
 |---|---|
-| `shape-vm` | 45 `phase_2c_surface`, 10 `active_feature_gap`, 2 `deleted_v1_path` behind `deep-tests`. |
+| `shape-vm` | 45 `phase_2c_surface`, 9 `active_feature_gap`, 2 `deleted_v1_path` behind `deep-tests`. |
 | `shape-jit` | 1 `deleted_v1_path` behind `cfg(any())`. |
 
 ## Process-Aborting Ignores

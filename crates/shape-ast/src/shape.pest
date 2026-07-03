@@ -1016,6 +1016,7 @@ postfix_expr = {
         property_access
         | optional_property_access
         | index_access
+        | call_const_args
         | function_call
         | type_assertion_suffix
         | using_impl_suffix
@@ -1073,6 +1074,9 @@ using_impl_suffix = { "using" ~ ident }
 property_access = { "." ~ (ident | keyword) }
 optional_property_access = { "?." ~ (ident | keyword) }
 index_access = { "[" ~ index_expr ~ "]" }
+call_const_args = { "::" ~ "<" ~ call_const_arg_list? ~ ">" }
+call_const_arg_list = { call_const_arg ~ ("," ~ call_const_arg)* ~ ","? }
+call_const_arg = { unary_expr }
 function_call = { "(" ~ arg_list? ~ ")" }
 
 index_expr = {
@@ -1161,9 +1165,10 @@ join_branch = {
 struct_literal = { ident ~ "{" ~ object_fields? ~ "}" }
 
 // Enum constructor: Enum::Variant, Enum::Variant(...), Enum::Variant { ... }
-qualified_function_call_expr = { enum_variant_path ~ function_call }
+qualified_function_call_expr = { enum_variant_path ~ call_const_args? ~ function_call }
 enum_constructor_expr = { enum_variant_path ~ (enum_tuple_payload | enum_struct_payload)? }
-enum_variant_path = { ident ~ ("::" ~ variant_ident)+ }
+enum_variant_path = { ident ~ (qualified_path_separator ~ variant_ident)+ }
+qualified_path_separator = { !"::<" ~ "::" }
 enum_tuple_payload = { "(" ~ arg_list? ~ ")" }
 enum_struct_payload = { "{" ~ object_fields? ~ "}" }
 
@@ -1257,7 +1262,7 @@ pattern_constructor = {
     pattern_qualified_constructor
     | pattern_unqualified_constructor
 }
-pattern_qualified_constructor = { ident ~ ("::" ~ variant_ident)+ ~ pattern_constructor_payload? }
+pattern_qualified_constructor = { ident ~ (qualified_path_separator ~ variant_ident)+ ~ pattern_constructor_payload? }
 // Constructor with payload (any name), or a known keyword without payload
 pattern_unqualified_constructor = {
     pattern_constructor_name ~ pattern_constructor_payload

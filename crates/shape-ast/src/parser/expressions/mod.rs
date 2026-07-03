@@ -4,6 +4,7 @@
 //! The actual implementation is split across multiple files for better organization.
 
 pub mod binary_ops;
+pub mod call_const_args;
 pub mod comprehensions;
 pub mod control_flow;
 pub mod data_refs;

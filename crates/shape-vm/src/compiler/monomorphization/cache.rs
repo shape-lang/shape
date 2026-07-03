@@ -857,9 +857,9 @@ impl BytecodeCompiler {
 /// B.3 — resolve a callee's const generic parameters from their declared
 /// default expressions.
 ///
-/// The grammar does not yet accept call-site turbofish (`::<4>`) for binding
-/// const generic args, so the only source we have for a const value today is
-/// the optional `default` on each `TypeParam::Const`. The rule:
+/// This entry point is the default-only route. Explicit call-site const
+/// arguments are resolved before dispatching to
+/// `ensure_monomorphic_function_with_consts`.
 ///
 ///   - `TypeParam::Const { default: Some(literal_expr), .. }` → bind that value.
 ///   - `TypeParam::Const { default: None, .. }`              → compile error.
@@ -882,7 +882,7 @@ fn resolve_const_defaults_or_error(
                 let Some(default_expr) = default else {
                     return Err(ShapeError::SemanticError {
                         message: format!(
-                            "const generic arg must be a compile-time constant: '{}' declares const generic parameter '{}' with no default value, and call-site const argument syntax is not yet supported",
+                            "const generic arg must be a compile-time constant: '{}' declares const generic parameter '{}' with no default value, and no explicit call-site const argument reached this default-only entry point",
                             base_fn_name, name
                         ),
                         location: None,
@@ -1422,8 +1422,8 @@ mod tests {
 
     #[test]
     fn b3_missing_const_default_errors_with_specific_message() {
-        // `identity_n<const N: int>` (no default) must error at the type-only
-        // entry point since there's no call-site turbofish syntax yet.
+        // `identity_n<const N: int>` (no default) must error at the default-only
+        // entry point when no explicit call-site const arg has been supplied.
         let mut compiler = BytecodeCompiler::new();
         let def = b3_identity_n_def(vec![const_param("N", None)]);
         compiler.function_defs.insert("identity_n".into(), def);
@@ -1471,11 +1471,8 @@ mod tests {
 
     // =====================================================================
     // B.5 — Track B close-out: end-to-end coverage for const generics via
-    // the default-value grammar route.
-    //
-    // Turbofish call-site syntax (`fn_name::<3>(...)`) is a separate grammar
-    // extension outside Track B's scope; the `const_generic_repeat_n_3_end_to_end`
-    // placeholder in `type_resolution.rs` tracks that follow-up work.
+    // the default-value grammar route. Explicit call-site const argument
+    // coverage lives with the call-site type-resolution tests.
     //
     // These tests drive the full pipeline parser → AST → cache key →
     // substituted body, using real Shape source text through

@@ -83,6 +83,12 @@ pub enum Expr {
     /// Function calls: sma(20), rsi(14), momentum(period: 10, threshold: 0.01)
     FunctionCall {
         name: String,
+        /// Explicit call-site const-generic arguments from `f::<3>(...)`.
+        ///
+        /// These are parsed as expressions so the compiler can reject
+        /// non-literal values at the static monomorphization boundary instead
+        /// of inventing runtime lookup semantics.
+        const_args: Vec<Expr>,
         args: Vec<Expr>,
         named_args: Vec<(String, Expr)>,
         span: Span,
@@ -91,6 +97,8 @@ pub enum Expr {
     QualifiedFunctionCall {
         namespace: String,
         function: String,
+        /// Explicit call-site const-generic arguments from `m::f::<3>(...)`.
+        const_args: Vec<Expr>,
         args: Vec<Expr>,
         named_args: Vec<(String, Expr)>,
         span: Span,

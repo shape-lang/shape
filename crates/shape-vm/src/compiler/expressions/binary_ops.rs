@@ -1274,10 +1274,11 @@ impl BytecodeCompiler {
             Expr::QualifiedFunctionCall {
                 namespace,
                 function,
+                const_args,
                 args,
                 named_args,
                 ..
-            } if args.is_empty() && named_args.is_empty() => {
+            } if const_args.is_empty() && args.is_empty() && named_args.is_empty() => {
                 let resolved = self.equality_enum_schema_name_if_known(namespace)?;
                 let schema = self.type_tracker.schema_registry().get(resolved.as_str())?;
                 schema
@@ -1744,6 +1745,7 @@ impl BytecodeCompiler {
                 match right {
                     Expr::FunctionCall {
                         name,
+                        const_args,
                         args,
                         named_args,
                         span,
@@ -1753,6 +1755,7 @@ impl BytecodeCompiler {
                         new_args.extend(args.iter().cloned());
                         let new_call = Expr::FunctionCall {
                             name: name.clone(),
+                            const_args: const_args.clone(),
                             args: new_args,
                             named_args: named_args.clone(),
                             span: *span,
@@ -1784,6 +1787,7 @@ impl BytecodeCompiler {
                         // a |> f -> f(a)
                         let new_call = Expr::FunctionCall {
                             name: name.clone(),
+                            const_args: Vec::new(),
                             args: vec![left.clone()],
                             named_args: vec![],
                             span: *span,

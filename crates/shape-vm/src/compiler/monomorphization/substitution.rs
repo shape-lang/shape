@@ -831,11 +831,16 @@ fn substitute_const_in_expr(expr: &Expr, const_subs: &HashMap<String, ComptimeCo
 
         Expr::FunctionCall {
             name,
+            const_args,
             args,
             named_args,
             span,
         } => Expr::FunctionCall {
             name: name.clone(),
+            const_args: const_args
+                .iter()
+                .map(|a| substitute_const_in_expr(a, const_subs))
+                .collect(),
             args: args
                 .iter()
                 .map(|a| substitute_const_in_expr(a, const_subs))
@@ -850,12 +855,17 @@ fn substitute_const_in_expr(expr: &Expr, const_subs: &HashMap<String, ComptimeCo
         Expr::QualifiedFunctionCall {
             namespace,
             function,
+            const_args,
             args,
             named_args,
             span,
         } => Expr::QualifiedFunctionCall {
             namespace: namespace.clone(),
             function: function.clone(),
+            const_args: const_args
+                .iter()
+                .map(|a| substitute_const_in_expr(a, const_subs))
+                .collect(),
             args: args
                 .iter()
                 .map(|a| substitute_const_in_expr(a, const_subs))
@@ -1719,11 +1729,16 @@ fn substitute_expr(expr: &Expr, subs: &HashMap<String, ConcreteType>) -> Expr {
 
         Expr::FunctionCall {
             name,
+            const_args,
             args,
             named_args,
             span,
         } => Expr::FunctionCall {
             name: name.clone(),
+            const_args: const_args
+                .iter()
+                .map(|a| substitute_expr(a, subs))
+                .collect(),
             args: args.iter().map(|a| substitute_expr(a, subs)).collect(),
             named_args: named_args
                 .iter()
@@ -1735,12 +1750,17 @@ fn substitute_expr(expr: &Expr, subs: &HashMap<String, ConcreteType>) -> Expr {
         Expr::QualifiedFunctionCall {
             namespace,
             function,
+            const_args,
             args,
             named_args,
             span,
         } => Expr::QualifiedFunctionCall {
             namespace: namespace.clone(),
             function: function.clone(),
+            const_args: const_args
+                .iter()
+                .map(|a| substitute_expr(a, subs))
+                .collect(),
             args: args.iter().map(|a| substitute_expr(a, subs)).collect(),
             named_args: named_args
                 .iter()
@@ -2694,11 +2714,13 @@ fn inline_closure_calls_in_expr(
         },
         Expr::FunctionCall {
             name,
+            const_args,
             args,
             named_args,
             span,
         } => Expr::FunctionCall {
             name: name.clone(),
+            const_args: const_args.iter().map(rec).collect(),
             args: args.iter().map(rec).collect(),
             named_args: named_args
                 .iter()
@@ -3546,6 +3568,7 @@ mod tests {
             body: vec![Statement::Return(
                 Some(Expr::FunctionCall {
                     name: "f".into(),
+                    const_args: Vec::new(),
                     args: vec![Expr::Identifier("item".into(), Span::default())],
                     named_args: vec![],
                     span: Span::default(),
@@ -3677,6 +3700,7 @@ mod tests {
             body: vec![Statement::Return(
                 Some(Expr::FunctionCall {
                     name: "println".into(), // not the closure param
+                    const_args: Vec::new(),
                     args: vec![Expr::Literal(
                         shape_ast::ast::Literal::String("hi".into()),
                         Span::default(),

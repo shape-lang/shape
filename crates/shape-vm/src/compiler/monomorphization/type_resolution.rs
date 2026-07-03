@@ -12,7 +12,7 @@
 //! [`crate::compiler::monomorphization::cache::BytecodeCompiler::ensure_monomorphic_function_with_consts`]
 //! entry point on the cache.
 //!
-//! ### Remaining call-site grammar gap
+//! ### Explicit call-site const generics
 //!
 //! Const generic declarations now have parser and AST support:
 //! `shape.pest::type_param_name` accepts `const_type_param`, and
@@ -20,16 +20,12 @@
 //! expression. The default-value route is wired through
 //! `ensure_monomorphic_function_with_consts`.
 //!
-//! The remaining gap is explicit call-site syntax such as `repeat::<3>(1.0)`:
-//!
-//!   - `shape.pest::postfix_expr` only accepts `function_call` (`(...)`) after
-//!     a callee expression. There is no `::<...>` postfix rule.
-//!   - `shape_ast::ast::Expr::FunctionCall` stores `name`, `args`, and
-//!     `named_args`, but has no AST carrier for explicit type or const
-//!     arguments.
-//!   - `try_monomorphize_free_function_call` therefore can only bind const
-//!     params through defaults; it has no parsed const argument values to feed
-//!     to `ensure_monomorphic_function_with_consts`.
+//! Explicit literal call-site syntax such as `repeat::<3>(1.0)` is also wired
+//! through `Expr::FunctionCall::const_args` /
+//! `Expr::QualifiedFunctionCall::const_args` and
+//! `try_monomorphize_free_function_call`. Non-literal call-site const args
+//! reject at compile time; they never route through runtime lookup or inferred
+//! defaults.
 //!
 //! ## Original Phase 2.1 docs (type-only path)
 //!
@@ -247,12 +243,16 @@ fn hash_expr(e: &Expr, h: &mut impl Hasher) {
         }
         Expr::FunctionCall {
             name,
+            const_args,
             args,
             named_args,
             ..
         } => {
             4u8.hash(h);
             name.hash(h);
+            for a in const_args {
+                hash_expr(a, h);
+            }
             for a in args {
                 hash_expr(a, h);
             }
@@ -1522,14 +1522,16 @@ fn is_zero_arg_call_expr(arg: &Expr) -> bool {
     matches!(
         arg,
         Expr::FunctionCall {
+            const_args,
             args,
             named_args,
             ..
         } | Expr::QualifiedFunctionCall {
+            const_args,
             args,
             named_args,
             ..
-        } if args.is_empty() && named_args.is_empty()
+        } if const_args.is_empty() && args.is_empty() && named_args.is_empty()
     )
 }
 
@@ -4728,21 +4730,6 @@ mod tests {
         assert_eq!(res.mono_key, "identity::bool");
     }
 
-    /// **PLACEHOLDER** for the future explicit call-site const generics test.
-    /// Declaration/default const generics are already parsed and wired through
-    /// the cache path. What is still missing is a `::<...>` call-site AST
-    /// carrier plus compiler extraction into `ensure_monomorphic_function_with_consts`.
-    ///
-    /// TODO(grammar-const-generics):
-    /// 1. Add a call-site turbofish rule after an identifier / qualified
-    ///    identifier in `postfix_expr`, separate from type-position
-    ///    `generic_type`.
-    /// 2. Add an AST carrier for explicit const args on `FunctionCall` /
-    ///    `QualifiedFunctionCall`.
-    /// 3. Wire `try_monomorphize_free_function_call` in
-    ///    `expressions/function_calls.rs` to extract literal const arg values
-    ///    via `comptime_const_value_from_literal_expr` and call
-    ///    `ensure_monomorphic_function_with_consts`.
     // ---- B.3: literal-to-ComptimeConstValue helpers ---------------------
 
     #[test]
@@ -4849,35 +4836,63 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "active_feature_gap: explicit const-generic call-site turbofish `::<N>` \
-                has no parser/AST carrier on FunctionCall; default-value route is \
-                covered end-to-end by `b5_*` tests in cache.rs"]
     fn const_generic_repeat_n_3_end_to_end() {
-        // Turbofish-specific test body, once the grammar adds `fn_name::<3>(...)`
-        // and `Expr::FunctionCall` carries parsed const args:
-        //
-        //   let source = r#"
-        //       fn repeat<const N: int>(x: number) -> Array<number> { ... }
-        //       repeat::<3>(1.0)
-        //   "#;
-        //   let (compiler, _) = compile_and_inspect(source);
-        //   assert!(compiler.monomorphization_cache.lookup("repeat::int_3").is_some());
-        //
-        // B.5 status (Track B close-out): the default-value route
-        // (`fn f<const N: int = 4>(...)`) is covered end-to-end by
-        // `b5_const_generic_*` tests in `cache.rs` — they parse real Shape
-        // source, register the FunctionDef via `register_function`, and
-        // drive monomorphization through `ensure_monomorphic_function`.
-        //
-        // What remains for a turbofish-style end-to-end test:
-        //   1. Add a `call_site_turbofish`-style postfix rule to allow
-        //      `::<3>` after an identifier / qualified identifier.
-        //   2. Add an AST carrier for the parsed const args.
-        //   3. Wire `try_monomorphize_free_function_call` to extract const
-        //      arg values via `comptime_const_value_from_literal_expr` and
-        //      call `ensure_monomorphic_function_with_consts`.
-        //   4. Replace this placeholder with a real assertion.
-        unreachable!("placeholder for turbofish-supported const generics");
+        let source = r#"
+            fn repeat<const N: int>(x: int) -> int { N }
+            repeat::<3>(1)
+        "#;
+        let program = shape_ast::parser::parse_program(source).expect("parse");
+        let compiler = BytecodeCompiler::new();
+        let bytecode = compiler
+            .compile(&program)
+            .expect("const-generic turbofish call should compile");
+        assert!(
+            bytecode
+                .monomorphization_keys
+                .iter()
+                .any(|key| key == "repeat::int_3"),
+            "expected repeat::int_3 specialization, got {:?}",
+            bytecode.monomorphization_keys
+        );
+    }
+
+    #[test]
+    fn const_generic_call_site_on_non_const_function_rejects_statically() {
+        let source = r#"
+            fn plain(x: int) -> int { x }
+            plain::<3>(1)
+        "#;
+        let program = shape_ast::parser::parse_program(source)
+            .expect("const-arg syntax should parse before semantic rejection");
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("non-const function must reject explicit const args");
+        let rendered = format!("{:?}", err);
+        assert!(
+            rendered.contains("does not declare const generic parameters"),
+            "expected static non-const-generic rejection, got {}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn const_generic_call_site_non_literal_arg_rejects_statically() {
+        let source = r#"
+            fn repeat<const N: int>(x: int) -> int { N }
+            let n = 3
+            repeat::<n>(1)
+        "#;
+        let program = shape_ast::parser::parse_program(source)
+            .expect("identifier const arg should parse before semantic rejection");
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("non-literal const arg must reject before runtime");
+        let rendered = format!("{:?}", err);
+        assert!(
+            rendered.contains("call-site const arguments currently support literals only"),
+            "expected static non-literal const-arg rejection, got {}",
+            rendered
+        );
     }
 
     // ── v0.3 ε-4 — generic-function-chain regression suite ───────────────
